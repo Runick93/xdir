@@ -1,8 +1,9 @@
-<!-- Ícono de xdir (referencia visual). El .ico lo genera scripts/make-icon.ps1 con la misma geometría. -->
+<!-- Ícono de xdir (referencia visual). El .ico lo genera scripts/make-icon.ps1 con la misma geometría.
+     Cuatro paneles con las esquinas exteriores cortadas en diagonal: el espacio negativo forma una X. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <path d="M16 52 a28 28 0 0 1 28-28 H113 a12 12 0 0 1 9 4 L144 54 H212 a28 28 0 0 1 28 28 V204 a28 28 0 0 1-28 28 H44 a28 28 0 0 1-28-28 Z" fill="#1B1C1E"/>
-  <rect x="36" y="77" width="88" height="65" rx="12" fill="#5BC0FF"/>
-  <rect x="134" y="77" width="88" height="65" rx="12" fill="#5E6976"/>
-  <rect x="36" y="151" width="88" height="65" rx="12" fill="#5E6976"/>
-  <rect x="134" y="151" width="88" height="65" rx="12" fill="#5E6976"/>
+  <path d="M16 52 a16 16 0 0 1 16-16 H88 a10 10 0 0 1 8 4 L114 60 H224 a16 16 0 0 1 16 16 V204 a16 16 0 0 1-16 16 H32 a16 16 0 0 1-16-16 Z" fill="#1C1D20"/>
+  <polygon points="50,80 94,80 125,109 125,139 87,139 50,103" fill="#55C5FD"/>
+  <polygon points="206,80 162,80 131,109 131,139 169,139 206,103" fill="#76848F"/>
+  <polygon points="50,204 94,204 125,175 125,145 87,145 50,181" fill="#76848F"/>
+  <polygon points="206,204 162,204 131,175 131,145 169,145 206,181" fill="#76848F"/>
 </svg>

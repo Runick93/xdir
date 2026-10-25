@@ -1,4 +1,5 @@
-# Genera assets\xdir.ico: carpeta oscura con 4 paneles, el activo en celeste (ver assets\xdir.svg).
+# Genera assets\xdir.ico: carpeta oscura con 4 paneles cuyas esquinas exteriores cortadas forman una X
+# en el espacio negativo; el panel activo en celeste (ver assets\xdir.svg).
 # Uso: pwsh scripts\make-icon.ps1 [-Preview]   (-Preview deja también los PNG en assets\icon-png\)
 # El .ico queda versionado; solo hace falta correrlo si cambia el diseño.
 param([switch]$Preview)
@@ -6,22 +7,15 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 $root = Split-Path -Parent $PSScriptRoot
 
-$folder = [Drawing.Color]::FromArgb(0x1B, 0x1C, 0x1E)
-$active = [Drawing.Color]::FromArgb(0x5B, 0xC0, 0xFF)
-$pane   = [Drawing.Color]::FromArgb(0x5E, 0x69, 0x76)
+$folder = [Drawing.Color]::FromArgb(0x1C, 0x1D, 0x20)
+$active = [Drawing.Color]::FromArgb(0x55, 0xC5, 0xFD)
+$pane   = [Drawing.Color]::FromArgb(0x76, 0x84, 0x8F)
 $sizes  = 16, 20, 24, 32, 40, 48, 64, 256
 
-function RoundRect([float]$x, [float]$y, [float]$w, [float]$h, [float]$r) {
-    $p = New-Object Drawing.Drawing2D.GraphicsPath
-    $d = [Math]::Min(2 * $r, [Math]::Min($w, $h))
-    if ($d -le 0) { $p.AddRectangle((New-Object Drawing.RectangleF $x, $y, $w, $h)); return $p }
-    $p.AddArc($x, $y, $d, $d, 180, 90)
-    $p.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
-    $p.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90)
-    $p.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
-    $p.CloseFigure()
-    $p
-}
+# Panel de arriba a la izquierda en la grilla de 256: rectángulo 50..125 x 80..139 con dos esquinas
+# cortadas (arriba hacia el centro y abajo hacia afuera). Los otros tres son espejos respecto del
+# centro de la separación (x = 128, y = 142).
+$paneTL = @(50, 80), @(94, 80), @(125, 109), @(125, 139), @(87, 139), @(50, 103)
 
 function Render([int]$n) {
     $s = $n / 256.0
@@ -31,13 +25,14 @@ function Render([int]$n) {
     $g.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
     $g.Clear([Drawing.Color]::Transparent)
 
-    # Carpeta: pestaña arriba a la izquierda con bajada en diagonal, y el cuerpo.
-    # Coordenadas en una grilla de 256; en tamaños chicos se ajustan a píxeles enteros.
+    # En tamaños chicos los bordes se ajustan a píxeles enteros para que no queden borrosos.
     $small = $n -le 32
     function P([float]$v) { if ($small) { [Math]::Round($v * $s) } else { $v * $s } }
-    $l = P 16; $r = P 240; $t = P 24; $b = P 232; $bodyTop = P 54
-    $rad = [Math]::Max(1.5, 28 * $s)
-    $tabEnd = P 113; $slopeEnd = P 144
+
+    # Carpeta: pestaña arriba a la izquierda con bajada en diagonal, y el cuerpo.
+    $l = P 16; $r = P 240; $t = P 36; $b = P 220; $bodyTop = P 60
+    $rad = [Math]::Max(1.5, 16 * $s)
+    $tabEnd = P 92; $slopeEnd = P 114
     $path = New-Object Drawing.Drawing2D.GraphicsPath
     $path.AddArc($l, $t, 2 * $rad, 2 * $rad, 180, 90)
     $path.AddLine($l + $rad, $t, $tabEnd, $t)
@@ -48,19 +43,25 @@ function Render([int]$n) {
     $path.CloseFigure()
     $g.FillPath((New-Object Drawing.SolidBrush $folder), $path)
 
-    # Paneles 2x2. En tamaños chicos: bordes enteros y al menos 1 px de separación.
-    $xs = (P 36), (P 124), (P 134), (P 222)
-    $ys = (P 77), (P 142), (P 151), (P 216)
-    if ($small) {
-        if ($xs[2] - $xs[1] -lt 1) { $xs[2] = $xs[1] + 1 }
-        if ($ys[2] - $ys[1] -lt 1) { $ys[2] = $ys[1] + 1 }
+    # Paneles: el de arriba a la izquierda y sus espejos. En tamaños chicos la separación
+    # (6 de 256) sería de menos de un píxel: los bordes interiores se fijan con al menos 1 px.
+    $gap = [Math]::Max(1, [Math]::Round(6 * $s))
+    $inX = [Math]::Round(128 * $s - $gap / 2); $inY = [Math]::Round(142 * $s - $gap / 2)
+    function Inner([float]$v, [float]$center, [float]$edge) {
+        if (-not $small) { return P $v }
+        if ($v -eq $center - 3) { return $edge }
+        if ($v -eq $center + 3) { return $edge + $gap }
+        P $v
     }
-    $pr = if ($n -le 20) { 0.6 } else { 12 * $s }
-    foreach ($i in 0, 1) {
-        foreach ($j in 0, 1) {
-            $x0 = $xs[2 * $j]; $x1 = $xs[2 * $j + 1]; $y0 = $ys[2 * $i]; $y1 = $ys[2 * $i + 1]
-            $c = if ($i -eq 0 -and $j -eq 0) { $active } else { $pane }
-            $g.FillPath((New-Object Drawing.SolidBrush $c), (RoundRect $x0 $y0 ($x1 - $x0) ($y1 - $y0) $pr))
+    foreach ($mx in $false, $true) {
+        foreach ($my in $false, $true) {
+            $pts = foreach ($p in $paneTL) {
+                $x = if ($mx) { 256 - $p[0] } else { $p[0] }
+                $y = if ($my) { 284 - $p[1] } else { $p[1] }
+                New-Object Drawing.PointF (Inner $x 128 $inX), (Inner $y 142 $inY)
+            }
+            $c = if (-not $mx -and -not $my) { $active } else { $pane }
+            $g.FillPolygon((New-Object Drawing.SolidBrush $c), [Drawing.PointF[]]$pts)
         }
     }
     $g.Dispose()

@@ -1,0 +1,3 @@
+# Runtime de C incluido en el .exe: el binario solo depende de DLL del sistema.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,2 +1,81 @@
 # xdir
-Explorador de archivos
+
+Explorador de archivos multipanel para Windows, nativo y sin frameworks: Rust + Win32 + Direct2D.
+Requerimientos y hitos en [docs/requerimientos.md](docs/requerimientos.md).
+
+## Compilar
+
+Requiere Rust (`rustup`) y Visual Studio Build Tools con el Windows SDK.
+
+```bat
+scripts\build.cmd                  :: cargo build --release
+scripts\build.cmd run --release    :: compilar y ejecutar
+```
+
+El script carga el entorno de Build Tools: la instalación de Visual Studio Community de esta
+máquina no trae las librerías de escritorio x64 (`libcmt.lib`).
+
+El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
+
+## Uso
+
+`xdir.exe [carpeta]` abre en esa carpeta (por defecto, la del usuario).
+
+| Atajo | Acción |
+|---|---|
+| Enter / doble clic | Abrir carpeta o archivo |
+| Backspace, Alt+↑ | Subir |
+| Alt+← / Alt+→, botones laterales del mouse | Atrás / adelante |
+| Ctrl+L, F4, Alt+D, clic en la barra | Escribir una ruta (con autocompletado; acepta `%VARIABLES%`) |
+| F5 | Recargar |
+| Ctrl+H | Mostrar u ocultar archivos ocultos |
+| Ctrl+A / Ctrl+I | Seleccionar todo / invertir selección |
+| Flechas, Re Pág, Av Pág, Inicio, Fin | Moverse (con Shift extiende la selección, con Ctrl solo mueve el foco) |
+| Letras | Saltar al primer nombre que empieza así |
+| Clic en un encabezado | Ordenar por esa columna (otro clic invierte) |
+| Tab / Shift+Tab, Alt+1..4 | Panel siguiente / anterior / panel N |
+| Ctrl+1..5, botones abajo a la derecha | Layout: 1, 2 lado a lado, 2 apilados, 3, 4 paneles |
+| Ctrl+T, botón + | Pestaña nueva en la misma carpeta |
+| Ctrl+W, clic medio en la pestaña | Cerrar pestaña |
+| Ctrl+Shift+T | Reabrir la última pestaña cerrada |
+| Ctrl+Tab / Ctrl+Shift+Tab | Pestaña siguiente / anterior |
+| Clic medio en una carpeta | Abrirla en una pestaña nueva, en segundo plano |
+| Arrastrar un divisor (doble clic lo centra) | Cambiar el tamaño de los paneles |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copiar / cortar / pegar (compatible con el Explorador) |
+| Ctrl+Shift+C | Copiar las rutas como texto |
+| Supr / Shift+Supr | Enviar a la papelera / eliminar definitivamente |
+| F2 | Renombrar en línea |
+| Ctrl+Shift+N | Carpeta nueva (se abre para renombrar) |
+| Ctrl+Z | Deshacer (renombrar, copiar, mover, papelera, carpeta nueva) |
+| Alt+Enter | Propiedades |
+| Clic derecho, tecla de menú, Shift+F10 | Menú contextual del Shell, con sus extensiones |
+| Arrastrar archivos | Mover (misma unidad) o copiar (otra unidad); Ctrl copia, Shift mueve |
+| Ctrl+D, estrella de la barra de dirección | Agregar o quitar la carpeta de favoritos |
+| Ctrl+Shift+B | Mostrar u ocultar la barra de favoritos |
+| Clic / clic medio en un favorito | Abrir en el panel / en pestaña nueva |
+| Botón `>_` de la barra de dirección | Abrir PowerShell o CMD en la carpeta del panel |
+
+**Barra de favoritos:** debajo de la navegación de cada panel, como en Chrome. Los favoritos
+pueden ir sueltos o en carpetas de favoritos (anidables, se despliegan como menú). Se agregan
+con la estrella, con Ctrl+D o arrastrando carpetas a la barra; se reordenan arrastrándolos, y
+soltándolos en el centro de una carpeta de favoritos van adentro. Con clic derecho: renombrar,
+eliminar, sacar de la carpeta, nueva carpeta. Se guardan en `favoritos.txt`, junto a la sesión,
+en un formato editable a mano (`nombre = ruta`; las carpetas terminan en `:` y su contenido va
+indentado con dos espacios).
+
+Las operaciones usan `IFileOperation`, así que el progreso, los conflictos y las confirmaciones
+son los del Explorador. Pegar y soltar funcionan con archivos de disco; los elementos virtuales
+(contenido de un ZIP, de un teléfono) todavía no.
+
+La carpeta se actualiza sola cuando cambia en disco. Al cerrar se guarda la sesión (layout,
+divisores, pestañas de cada panel y posición de la ventana) en `%APPDATA%\xdir\sesion.toml`;
+si junto al `.exe` hay un archivo `xdir.portable`, se guarda ahí (modo portable).
+
+## Medir el arranque
+
+```bat
+target\release\xdir.exe C:\alguna\carpeta --probe arranque.txt
+```
+
+Abre la ventana, espera al primer frame con la carpeta ya leída, escribe los tiempos de cada fase
+en `arranque.txt` y cierra.

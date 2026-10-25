@@ -1,0 +1,283 @@
+//! Sesión: layout, divisores, paneles con sus pestañas y posición de la ventana.
+//!
+//! Se guarda en un subconjunto chico de TOML, escrito y leído a mano para no sumar
+//! dependencias: `clave = valor`, tablas `[[panel]]`, strings, números, booleanos y listas en
+//! una línea. Va en `%APPDATA%\xdir\`, o junto al .exe si existe `xdir.portable` (modo portable).
+
+use std::path::PathBuf;
+
+use crate::fs::Location;
+use crate::theme::{Accent, DEFAULT_ACCENT};
+
+const FILE_NAME: &str = "sesion.toml";
+const COMPUTER: &str = "Este equipo";
+/// Carpetas virtuales: "shell:<nombre de análisis>|<nombre visible>".
+const SHELL_PREFIX: &str = "shell:";
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PaneState {
+    pub tabs: Vec<Location>,
+    pub active: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    /// Posición y tamaño de la ventana restaurada, en píxeles.
+    pub window: Option<[i32; 4]>,
+    pub maximized: bool,
+    pub layout: usize,
+    pub split_x: f32,
+    pub split_y: f32,
+    pub active_pane: usize,
+    pub show_hidden: bool,
+    pub show_favorites: bool,
+    pub accent: Accent,
+    /// Modo fijado por el usuario; None sigue a Windows.
+    pub dark_mode: Option<bool>,
+    pub panes: Vec<PaneState>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            window: None,
+            maximized: false,
+            layout: 4,
+            split_x: 0.5,
+            split_y: 0.5,
+            active_pane: 0,
+            show_hidden: false,
+            show_favorites: true,
+            accent: DEFAULT_ACCENT,
+            dark_mode: None,
+            panes: Vec::new(),
+        }
+    }
+}
+
+/// Carpeta de configuración: junto al .exe en modo portable, si no `%APPDATA%\xdir`.
+pub fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        if dir.join("xdir.portable").exists() {
+            return Some(dir);
+        }
+    }
+    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("xdir"))
+}
+
+pub fn load() -> Option<Session> {
+    let text = std::fs::read_to_string(config_dir()?.join(FILE_NAME)).ok()?;
+    Some(parse(&text))
+}
+
+pub fn save(s: &Session) -> std::io::Result<()> {
+    let dir = config_dir().ok_or(std::io::ErrorKind::NotFound)?;
+    std::fs::create_dir_all(&dir)?;
+    // Escritura atómica: si se corta a la mitad, la sesión anterior queda intacta.
+    let tmp = dir.join(format!("{FILE_NAME}.tmp"));
+    std::fs::write(&tmp, write(s))?;
+    std::fs::rename(&tmp, dir.join(FILE_NAME))
+}
+
+fn write(s: &Session) -> String {
+    let mut out = String::from("# Sesión de xdir: se reescribe al cerrar.\n");
+    if let Some([x, y, w, h]) = s.window {
+        out += &format!("ventana = [{x}, {y}, {w}, {h}]\n");
+    }
+    out += &format!("maximizada = {}\n", s.maximized);
+    out += &format!("layout = {}\n", s.layout);
+    out += &format!("division_x = {:.4}\n", s.split_x);
+    out += &format!("division_y = {:.4}\n", s.split_y);
+    out += &format!("panel_activo = {}\n", s.active_pane);
+    out += &format!("ocultos = {}\n", s.show_hidden);
+    out += &format!("barra_favoritos = {}\n", s.show_favorites);
+    out += &match s.accent {
+        Accent::System => "acento = \"sistema\"\n".to_string(),
+        Accent::Rgb(c) => format!("acento = \"#{c:06X}\"\n"),
+    };
+    out += match s.dark_mode {
+        None => "modo = \"sistema\"\n",
+        Some(true) => "modo = \"oscuro\"\n",
+        Some(false) => "modo = \"claro\"\n",
+    };
+    for pane in &s.panes {
+        out += "\n[[panel]]\n";
+        out += &format!("pestana_activa = {}\n", pane.active);
+        let tabs: Vec<String> = pane.tabs.iter().map(|t| quote(&location_str(t))).collect();
+        out += &format!("pestanas = [{}]\n", tabs.join(", "));
+    }
+    out
+}
+
+fn parse(text: &str) -> Session {
+    let mut s = Session::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "[[panel]]" {
+            s.panes.push(PaneState::default());
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let (key, value) = (key.trim(), value.trim());
+        let int = || value.parse::<i64>().ok();
+        let float = || value.parse::<f32>().ok();
+        let boolean = || value.parse::<bool>().ok();
+        match (key, s.panes.last_mut()) {
+            ("pestana_activa", Some(p)) => p.active = int().unwrap_or(0).max(0) as usize,
+            ("pestanas", Some(p)) => {
+                p.tabs = parse_list(value).iter().map(|v| location_from(v)).collect();
+            }
+            ("ventana", None) => {
+                let nums: Vec<i32> = parse_list(value).iter().filter_map(|v| v.parse().ok()).collect();
+                if let [x, y, w, h] = nums[..] {
+                    s.window = Some([x, y, w, h]);
+                }
+            }
+            ("maximizada", None) => s.maximized = boolean().unwrap_or(false),
+            ("layout", None) => s.layout = int().unwrap_or(4).clamp(0, 4) as usize,
+            ("division_x", None) => s.split_x = float().unwrap_or(0.5),
+            ("division_y", None) => s.split_y = float().unwrap_or(0.5),
+            ("panel_activo", None) => s.active_pane = int().unwrap_or(0).max(0) as usize,
+            ("ocultos", None) => s.show_hidden = boolean().unwrap_or(false),
+            ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
+            ("modo", None) => {
+                s.dark_mode = match value.trim_matches('"') {
+                    "oscuro" => Some(true),
+                    "claro" => Some(false),
+                    _ => None,
+                };
+            }
+            ("acento", None) => {
+                let v = value.trim_matches('"');
+                s.accent = match v.strip_prefix('#').and_then(|h| u32::from_str_radix(h, 16).ok()) {
+                    Some(c) if v.len() == 7 => Accent::Rgb(c),
+                    _ if v == "sistema" => Accent::System,
+                    _ => DEFAULT_ACCENT,
+                };
+            }
+            _ => {}
+        }
+    }
+    s.panes.retain(|p| !p.tabs.is_empty());
+    s
+}
+
+pub fn location_str(l: &Location) -> String {
+    match l {
+        Location::Computer => COMPUTER.to_string(),
+        Location::Path(p) => p.to_string_lossy().into_owned(),
+        Location::Shell { parsing, name, .. } => format!("{SHELL_PREFIX}{parsing}|{name}"),
+    }
+}
+
+pub fn location_from(s: &str) -> Location {
+    if s == COMPUTER {
+        return Location::Computer;
+    }
+    if let Some((parsing, name)) = s.strip_prefix(SHELL_PREFIX).and_then(|r| r.rsplit_once('|')) {
+        return Location::Shell { parsing: parsing.to_string(), name: name.to_string(), parent: None };
+    }
+    Location::Path(PathBuf::from(s))
+}
+
+fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Lista de una línea: `["a", "b"]` o `[1, 2]`. Devuelve los elementos sin comillas.
+fn parse_list(value: &str) -> Vec<String> {
+    let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
+    let mut items = Vec::new();
+    let mut chars = inner.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace() || *c == ',').is_some() {}
+        match chars.peek() {
+            None => break,
+            Some('"') => {
+                chars.next();
+                let mut s = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match chars.next() {
+                            Some('\\') => s.push('\\'),
+                            Some('"') => s.push('"'),
+                            Some(other) => {
+                                s.push('\\');
+                                s.push(other);
+                            }
+                            None => break,
+                        },
+                        c => s.push(c),
+                    }
+                }
+                items.push(s);
+            }
+            Some(_) => {
+                let mut s = String::new();
+                while let Some(c) = chars.next_if(|c| *c != ',') {
+                    s.push(c);
+                }
+                items.push(s.trim().to_string());
+            }
+        }
+    }
+    items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip() {
+        let s = Session {
+            window: Some([10, 20, 1200, 800]),
+            maximized: true,
+            layout: 3,
+            split_x: 0.3,
+            split_y: 0.7,
+            active_pane: 2,
+            show_hidden: true,
+            show_favorites: false,
+            accent: Accent::Rgb(0xA371F7),
+            dark_mode: Some(false),
+            panes: vec![
+                PaneState {
+                    tabs: vec![
+                        Location::Path(r#"C:\Users\x "raro""#.into()),
+                        Location::Computer,
+                        Location::Shell {
+                            parsing: "::{645FF040-5081-101B-9F08-00AA002F954E}".into(),
+                            name: "Papelera de reciclaje".into(),
+                            parent: None,
+                        },
+                    ],
+                    active: 1,
+                },
+                PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into())], active: 0 },
+            ],
+        };
+        assert_eq!(parse(&write(&s)), s);
+    }
+
+    #[test]
+    fn tolerates_garbage() {
+        let s = parse("esto no es toml\nlayout = 99\n[[panel]]\npestanas = []\n");
+        assert_eq!(s.layout, 4);
+        assert!(s.panes.is_empty());
+    }
+}

@@ -1,0 +1,20 @@
+# Salida de compilación
+/target/
+
+# Documentación y material no fuente
+/docs/
+
+# Editores e IDE
+.vscode/
+.idea/
+*.swp
+
+# Sistema
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Archivos locales de la app (config/sesión en modo portable)
+*.toml.bak
+/config.toml
+/session.toml

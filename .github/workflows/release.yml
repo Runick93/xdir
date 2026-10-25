@@ -1,0 +1,60 @@
+# Compila xdir y genera el zip portable y el instalador. Se lanza a mano desde Actions → "Run workflow".
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publicar:
+        description: "Crear además un borrador de release en GitHub (tag v<versión>)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable (MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Empaquetar
+        id: pack
+        shell: pwsh
+        run: |
+          scripts\package.ps1 -Exe target\x86_64-pc-windows-msvc\release\xdir.exe -OutDir dist
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xdir-${{ steps.pack.outputs.version }}
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
+          if-no-files-found: error
+
+      - name: Borrador de release
+        if: inputs.publicar
+        # bash expande los comodines; pwsh no lo hace para comandos externos.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ steps.pack.outputs.version }}" dist/*.zip dist/*-setup.exe --draft --title "xdir ${{ steps.pack.outputs.version }}" --target "${{ github.sha }}" --generate-notes

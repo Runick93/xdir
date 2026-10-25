@@ -1,0 +1,8 @@
+<!-- Ícono de xdir (referencia visual). El .ico lo genera scripts/make-icon.ps1 con la misma geometría. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <path d="M16 52 a28 28 0 0 1 28-28 H113 a12 12 0 0 1 9 4 L144 54 H212 a28 28 0 0 1 28 28 V204 a28 28 0 0 1-28 28 H44 a28 28 0 0 1-28-28 Z" fill="#1B1C1E"/>
+  <rect x="36" y="77" width="88" height="65" rx="12" fill="#5BC0FF"/>
+  <rect x="134" y="77" width="88" height="65" rx="12" fill="#5E6976"/>
+  <rect x="36" y="151" width="88" height="65" rx="12" fill="#5E6976"/>
+  <rect x="134" y="151" width="88" height="65" rx="12" fill="#5E6976"/>
+</svg>

@@ -18,3 +18,9 @@ desktop.ini
 *.toml.bak
 /config.toml
 /session.toml
+
+# Paquetes generados por scripts/package.ps1
+/dist/
+
+# Vistas previas de scripts/make-icon.ps1 -Preview
+/assets/icon-png/

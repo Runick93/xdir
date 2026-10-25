@@ -1,0 +1,3 @@
+// Recursos de xdir.exe. Lo compila build.rs con rc.exe.
+// El ID 1 lo usa main.rs para el ícono de la ventana; el Explorador toma el primero del exe.
+1 ICON "xdir.ico"

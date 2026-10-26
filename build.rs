@@ -7,6 +7,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=assets/xdir.rc");
     println!("cargo:rerun-if-changed=assets/xdir.ico");
+    println!("cargo:rerun-if-changed=assets/xdir.manifest");
 
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("xdir.res");
     let status = Command::new(rc_exe())

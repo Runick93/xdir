@@ -57,6 +57,9 @@ const TAB_MIN_W: f32 = 90.0;
 const TAB_MAX_W: f32 = 220.0;
 const CHEVRON_W: f32 = 18.0;
 const MAXIMIZE_W: f32 = 32.0;
+const FILTER_W: f32 = 28.0;
+pub const FILTER_H: f32 = 32.0;
+const FILTER_COUNT_W: f32 = 110.0;
 /// Pestañas cerradas que se pueden reabrir con Ctrl+Shift+T.
 const CLOSED_MAX: usize = 20;
 
@@ -93,6 +96,12 @@ pub enum PaneHit {
     Star,
     /// Botón de consola de la barra de dirección.
     Terminal,
+    /// Botón de filtro (embudo) de la barra de dirección.
+    FilterButton,
+    /// Fila del filtro rápido: clic para editarlo.
+    FilterBar,
+    /// Cruz de la fila del filtro: lo quita.
+    FilterClose,
     /// Favorito de la barra (índice en la raíz).
     Fav(usize),
     /// Botón "»" con los favoritos que no entran.
@@ -100,6 +109,16 @@ pub enum PaneHit {
     /// Parte vacía de la barra de favoritos.
     FavBar,
     List,
+}
+
+/// Lo que muestra la fila del filtro rápido.
+pub struct FilterView<'a> {
+    pub text: &'a str,
+    /// Elementos que pasan el filtro y los que habría sin él.
+    pub shown: usize,
+    pub total: usize,
+    /// Hay un control de edición encima del texto.
+    pub editing: bool,
 }
 
 /// Dónde caería algo que se suelta sobre la barra de favoritos.
@@ -124,6 +143,10 @@ pub struct Pane {
     crumbs: Vec<(Rect, Location)>,
     star: Rect,
     terminal: Rect,
+    filter_button: Rect,
+    /// Fila del filtro (vacía si no se muestra) y su cruz.
+    pub filter_bar: Rect,
+    filter_close: Rect,
     /// Favoritos visibles de la raíz: (área, índice).
     favs: Vec<(Rect, usize)>,
     /// Botón de desborde y el primer favorito que no entró.
@@ -149,6 +172,9 @@ impl Pane {
             crumbs: Vec::new(),
             star: zero,
             terminal: zero,
+            filter_button: zero,
+            filter_bar: zero,
+            filter_close: zero,
             favs: Vec::new(),
             fav_overflow: None,
             favbar: zero,
@@ -303,6 +329,15 @@ impl Pane {
         if contains(&self.terminal, x, y) {
             return PaneHit::Terminal;
         }
+        if contains(&self.filter_button, x, y) {
+            return PaneHit::FilterButton;
+        }
+        if contains(&self.filter_close, x, y) {
+            return PaneHit::FilterClose;
+        }
+        if contains(&self.filter_bar, x, y) {
+            return PaneHit::FilterBar;
+        }
         if contains(&self.star, x, y) {
             return PaneHit::Star;
         }
@@ -373,6 +408,7 @@ impl Pane {
         favs: Option<(&Favorites, Option<FavDrop>)>,
         terminal_open: bool,
         maximized: Option<bool>,
+        filter: Option<FilterView>,
     ) {
         self.rect = area;
         let th = p.theme;
@@ -417,6 +453,7 @@ impl Pane {
         p.round_fill(addr, 6.0, th.surface_alt);
         self.star = rect(0.0, 0.0, 0.0, 0.0);
         self.terminal = rect(0.0, 0.0, 0.0, 0.0);
+        self.filter_button = rect(0.0, 0.0, 0.0, 0.0);
         if editing {
             p.round_stroke(addr, 6.0, th.accent);
             self.crumbs.clear();
@@ -424,8 +461,19 @@ impl Pane {
             let border = if hover == PaneHit::Address { th.text_dim } else { th.border };
             p.round_stroke(addr, 6.0, border);
             let star_w = if favs.is_some() { STAR_W } else { 0.0 };
-            let crumbs_area = rect(addr.left, addr.top, addr.right - star_w - TERM_W - 4.0, addr.bottom);
+            let crumbs_area = rect(addr.left, addr.top, addr.right - star_w - TERM_W - FILTER_W - 4.0, addr.bottom);
             self.draw_crumbs(p, crumbs_area, hover);
+
+            // Embudo: abre el filtro rápido; de acento si hay uno aplicado.
+            let fb = rect(crumbs_area.right + 2.0, addr.top + 3.0, crumbs_area.right + 2.0 + FILTER_W - 2.0, addr.bottom - 3.0);
+            let filtering = filter.as_ref().is_some_and(|f| !f.text.is_empty());
+            if filtering {
+                p.round_fill(fb, 4.0, alpha(th.accent, 0.22));
+            } else if hover == PaneHit::FilterButton {
+                p.round_fill(fb, 4.0, th.hover);
+            }
+            p.text(&p.fonts.glyphs_small, "\u{E71C}", fb, if filtering { th.accent } else { th.text_dim });
+            self.filter_button = fb;
 
             // Botón de consola: abre PowerShell o CMD en la carpeta (solo carpetas de disco).
             let term = rect(addr.right - star_w - TERM_W - 2.0, addr.top + 3.0, addr.right - star_w - 2.0, addr.bottom - 3.0);
@@ -468,6 +516,15 @@ impl Pane {
             self.favbar = bar;
             self.draw_favs(p, bar, f, hover, drop);
             top = bar.bottom;
+        }
+
+        // Fila del filtro rápido, mientras se edita o hay uno aplicado.
+        self.filter_bar = rect(0.0, 0.0, 0.0, 0.0);
+        self.filter_close = rect(0.0, 0.0, 0.0, 0.0);
+        if let Some(f) = &filter {
+            let row = rect(area.left, top, area.right, top + FILTER_H);
+            self.draw_filter(p, row, f, hover);
+            top = row.bottom;
         }
 
         // Lista, un poco adentro del borde para no tapar las esquinas redondeadas.
@@ -541,6 +598,39 @@ impl Pane {
         }
         p.text(&p.fonts.glyphs_small, "\u{E710}", nt, th.text_dim);
         self.new_tab = nt;
+    }
+
+    /// Área de texto de la fila del filtro: ahí va el control de edición. Si la fila todavía no
+    /// se dibujó (se acaba de abrir), es donde va a aparecer: arriba de la lista.
+    pub fn filter_text_rect(&self) -> Rect {
+        let row = if self.filter_bar.bottom > self.filter_bar.top {
+            self.filter_bar
+        } else {
+            rect(self.rect.left, self.list.top, self.rect.right, self.list.top + FILTER_H)
+        };
+        // Campo con 8 de margen; a la derecha la cruz (24) y el contador.
+        rect(row.left + 38.0, row.top + 5.0, row.right - 8.0 - 26.0 - FILTER_COUNT_W, row.bottom - 5.0)
+    }
+
+    fn draw_filter(&mut self, p: &Painter, row: Rect, f: &FilterView, hover: PaneHit) {
+        let th = p.theme;
+        let field = rect(row.left + 8.0, row.top + 3.0, row.right - 8.0, row.bottom - 3.0);
+        p.round_fill(field, 6.0, th.surface_alt);
+        p.round_stroke(field, 6.0, if f.editing { th.accent } else { th.border });
+        p.text(&p.fonts.glyphs_small, "\u{E71C}", rect(field.left + 4.0, field.top, field.left + 22.0, field.bottom), th.accent);
+        self.filter_bar = row;
+        self.filter_close = rect(field.right - 24.0, field.top + 2.0, field.right - 2.0, field.bottom - 2.0);
+        let text = self.filter_text_rect();
+        if !f.editing {
+            p.text(&p.fonts.ui, f.text, rect(text.left, field.top, text.right, field.bottom), th.text);
+        }
+        let count = format!("{} de {}", f.shown, f.total);
+        let count_r = rect(text.right + 6.0, field.top, self.filter_close.left - 4.0, field.bottom);
+        p.text(&p.fonts.ui_right, &count, count_r, th.text_dim);
+        if hover == PaneHit::FilterClose {
+            p.round_fill(self.filter_close, 4.0, alpha(th.text, 0.12));
+        }
+        p.text(&p.fonts.glyphs_small, "\u{E711}", self.filter_close, th.text_dim);
     }
 
     /// Botón de maximizar (`Some(false)`) o restaurar (`Some(true)`) en el extremo derecho de la

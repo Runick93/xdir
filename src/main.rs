@@ -42,7 +42,7 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     VIRTUAL_KEY, VK_BACK, VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_F2,
     VK_F4, VK_F5, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
@@ -59,7 +59,7 @@ use favorites::{Fav, FavPath, Favorites};
 use fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use list::Action;
-use pane::{Button, FavDrop, Pane, PaneHit};
+use pane::{Button, FavDrop, FilterView, Pane, PaneHit};
 use render::{Renderer, contains};
 use session::{PaneState, Session};
 use tab::Tab;
@@ -77,6 +77,10 @@ const WM_APP_EDIT_DONE: u32 = WM_APP + 10;
 const WM_APP_RENAME_DONE: u32 = WM_APP + 11;
 /// Terminó el renombrado de un favorito. `wparam` = 1 si hay que aplicarlo.
 const WM_APP_FAVEDIT_DONE: u32 = WM_APP + 12;
+/// Terminó la edición del filtro rápido. `wparam` = 1 si se conserva, 0 si se quita (Escape).
+const WM_APP_FILTER_DONE: u32 = WM_APP + 13;
+/// Notificación de un control de edición: el texto cambió.
+const EN_CHANGE_CODE: usize = 0x0300;
 
 /// Qué muestra un menú desplegable de favoritos.
 enum FavMenuSource {
@@ -232,6 +236,8 @@ struct App {
     fav_menu: Option<FavMenu>,
     /// Renombrado de un favorito en curso.
     fav_edit: Option<(HWND, FavPath)>,
+    /// Control de edición del filtro rápido abierto y su panel.
+    filter_edit: Option<(HWND, usize)>,
     /// El último clic derecho fue sobre la barra de favoritos: (panel, favorito).
     fav_ctx: Option<(usize, Option<FavPath>)>,
     accent: Accent,
@@ -332,6 +338,7 @@ fn main() -> Result<()> {
             tab_drop: None,
             fav_menu: None,
             fav_edit: None,
+            filter_edit: None,
             fav_ctx: None,
             accent: session.accent,
             dark_mode: session.dark_mode,
@@ -439,11 +446,13 @@ impl App {
                     let height = ((lparam.0 >> 16) & 0xFFFF) as u32;
                     self.renderer.resize(width, height, self.dpi);
                     self.end_edit(false);
+                    self.end_filter(true);
                     LRESULT(0)
                 }
                 WM_DPICHANGED => {
                     self.dpi = (wparam.0 & 0xFFFF) as u32;
                     self.end_edit(false);
+                    self.end_filter(true);
                     self.renderer.set_dpi(self.dpi);
                     self.update_edit_resources();
                     let r = &*(lparam.0 as *const RECT);
@@ -534,6 +543,21 @@ impl App {
                 }
                 WM_APP_FAVEDIT_DONE => {
                     self.end_fav_edit(wparam.0 == 1);
+                    LRESULT(0)
+                }
+                WM_APP_FILTER_DONE => {
+                    self.end_filter(wparam.0 == 1);
+                    LRESULT(0)
+                }
+                // El filtro se aplica con cada tecla.
+                WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == EN_CHANGE_CODE => {
+                    if let Some((edit, pane)) = self.filter_edit {
+                        if lparam.0 == edit.0 as isize {
+                            let text = window_text(edit);
+                            self.panes[pane].tab_mut().list.set_filter(&text);
+                            self.redraw();
+                        }
+                    }
                     LRESULT(0)
                 }
                 WM_MENURBUTTONUP if self.fav_menu.is_some() => {
@@ -991,6 +1015,8 @@ impl App {
                         self.new_tab(i, loc, true);
                     }
                     PaneHit::Maximize => self.toggle_maximize(i),
+                    PaneHit::FilterButton | PaneHit::FilterBar => self.begin_filter(i),
+                    PaneHit::FilterClose => self.clear_filter(i),
                     PaneHit::TabStrip if double => self.toggle_maximize(i),
                     PaneHit::TabStrip => {}
                     PaneHit::Button(b) => {
@@ -1183,6 +1209,8 @@ impl App {
         match vk {
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
+            VK_ESCAPE if !self.panes[active].tab().list.filter().is_empty() => self.clear_filter(active),
+            VIRTUAL_KEY(0x46) if ctrl => self.begin_filter(active), // Ctrl+F
             VK_TAB if ctrl => {
                 self.panes[active].cycle_tab(!shift);
                 self.sync_visibility();
@@ -1803,7 +1831,7 @@ impl App {
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         unsafe {
             let Ok(edit) = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+                WS_EX_LAYERED,
                 w!("EDIT"),
                 PCWSTR(wide.as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
@@ -1818,6 +1846,8 @@ impl App {
             ) else {
                 return;
             };
+            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
+            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
             SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_FAVEDIT_DONE as usize);
             SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
@@ -1930,7 +1960,7 @@ impl App {
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         unsafe {
             let Ok(edit) = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+                WS_EX_LAYERED,
                 w!("EDIT"),
                 PCWSTR(wide.as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
@@ -1945,6 +1975,8 @@ impl App {
             ) else {
                 return;
             };
+            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
+            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
             SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_RENAME_DONE as usize);
             SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(stem_len as isize)));
@@ -1990,7 +2022,7 @@ impl App {
         let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         unsafe {
             let Ok(edit) = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+                WS_EX_LAYERED,
                 w!("EDIT"),
                 PCWSTR(wide.as_ptr()),
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
@@ -2005,6 +2037,8 @@ impl App {
             ) else {
                 return;
             };
+            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
+            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
             SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_EDIT_DONE as usize);
             // Autocompletado de rutas del propio Shell.
@@ -2029,6 +2063,78 @@ impl App {
             self.go_to_text(pane, &text);
         }
         self.redraw();
+    }
+
+    /// Abre el filtro rápido del panel (o le devuelve el foco si ya está abierto).
+    fn begin_filter(&mut self, pane: usize) {
+        if let Some((edit, p)) = self.filter_edit {
+            if p == pane {
+                unsafe {
+                    let _ = SetFocus(Some(edit));
+                }
+                return;
+            }
+            self.end_filter(true);
+        }
+        self.end_edit(false);
+        self.set_active(pane);
+        let r = self.panes[pane].filter_text_rect();
+        let k = self.dpi as f32 / 96.0;
+        let h = 20.0 * k;
+        let (x, w) = (r.left * k, (r.right - r.left) * k);
+        let y = (r.top + r.bottom) / 2.0 * k - h / 2.0;
+        let wide: Vec<u16> = self.panes[pane].tab().list.filter().encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let Ok(edit) = CreateWindowExW(
+                WS_EX_LAYERED,
+                w!("EDIT"),
+                PCWSTR(wide.as_ptr()),
+                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                x as i32,
+                y as i32,
+                w as i32,
+                h as i32,
+                Some(self.hwnd),
+                None,
+                None,
+                None,
+            ) else {
+                return;
+            };
+            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
+            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
+            SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_FILTER_DONE as usize);
+            SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+            let _ = SetFocus(Some(edit));
+            self.filter_edit = Some((edit, pane));
+        }
+        self.redraw();
+    }
+
+    /// Cierra el control del filtro. `keep`: Enter o perder el foco lo dejan aplicado; Escape lo quita.
+    fn end_filter(&mut self, keep: bool) {
+        let Some((edit, pane)) = self.filter_edit.take() else { return };
+        unsafe {
+            let _ = DestroyWindow(edit);
+            if GetFocus().is_invalid() {
+                let _ = SetFocus(Some(self.hwnd));
+            }
+        }
+        if !keep {
+            self.panes[pane].tab_mut().list.set_filter("");
+        }
+        self.redraw();
+    }
+
+    /// Quita el filtro del panel (cruz de la fila o Escape sobre la lista).
+    fn clear_filter(&mut self, pane: usize) {
+        if self.filter_edit.is_some_and(|(_, p)| p == pane) {
+            self.end_filter(false);
+        } else {
+            self.panes[pane].tab_mut().list.set_filter("");
+            self.redraw();
+        }
     }
 
     /// Navega a lo que se escribió en la barra de dirección.
@@ -2140,6 +2246,7 @@ impl App {
         let (picker_open, accent) = (self.picker_open, self.accent);
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
+        let filter_pane = self.filter_edit.map(|(_, p)| p);
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, |p, w, h| {
             let area = ui::panes_area(w, h);
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
@@ -2154,7 +2261,17 @@ impl App {
                     _ => PaneHit::None,
                 };
                 let favs = show_favorites.then(|| (favorites, fav_drop.filter(|(j, _)| *j == i).map(|(_, d)| d)));
-                panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i));
+                // La fila del filtro se ve mientras se edita o si hay uno aplicado.
+                let list = &panes[i].tab().list;
+                let editing_filter = filter_pane == Some(i);
+                let filter_text = list.filter().to_string();
+                let filter = (editing_filter || !filter_text.is_empty()).then(|| FilterView {
+                    text: &filter_text,
+                    shown: list.count(),
+                    total: list.unfiltered_count(),
+                    editing: editing_filter,
+                });
+                panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), filter);
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
                     panes[i].draw_tab_drop(p, at);
                 }
@@ -2281,6 +2398,13 @@ fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, keys: MODIFIERKEYS_FLA
     } else {
         DROPEFFECT_NONE
     }
+}
+
+/// Texto de un control de edición.
+fn window_text(hwnd: HWND) -> String {
+    let mut buf = vec![0u16; 32 * 1024];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    String::from_utf16_lossy(&buf[..len.max(0) as usize])
 }
 
 fn key_down(vk: VIRTUAL_KEY) -> bool {

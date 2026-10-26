@@ -71,6 +71,40 @@ pub struct FileList {
     press: Option<(f32, f32)>,
     /// Carpeta resaltada como destino mientras se arrastra algo encima (índice en `entries`).
     pub drop_target: Option<usize>,
+    /// Filtro rápido tal como se escribió (vacío: sin filtro) y sus partes ya en minúsculas.
+    filter: String,
+    filter_parts: Vec<String>,
+}
+
+/// ¿El nombre (en minúsculas) pasa el filtro? Cada parte separada por `;` es un patrón: con `*`
+/// o `?` se compara el nombre entero como comodín; si no, alcanza con que lo contenga.
+fn filter_matches(parts: &[String], name: &str) -> bool {
+    parts.is_empty()
+        || parts.iter().any(|p| if p.contains(['*', '?']) { wildcard(p, name) } else { name.contains(p.as_str()) })
+}
+
+/// Comodines de Windows: `*` cualquier secuencia, `?` un carácter. Sin recursión: vuelve al
+/// último `*` cuando algo no coincide.
+fn wildcard(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut i, mut j) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while j < t.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == t[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some((i, j));
+            i += 1;
+        } else if let Some((si, sj)) = star {
+            i = si + 1;
+            j = sj + 1;
+            star = Some((si, sj + 1));
+        } else {
+            return false;
+        }
+    }
+    p[i..].iter().all(|&c| c == '*')
 }
 
 impl Default for FileList {
@@ -94,6 +128,8 @@ impl Default for FileList {
             pending_select: None,
             press: None,
             drop_target: None,
+            filter: String::new(),
+            filter_parts: Vec::new(),
         }
     }
 }
@@ -113,7 +149,36 @@ fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
 }
 
 impl FileList {
-    /// Vacía la lista (navegación a otra carpeta).
+    /// ¿Se ve el elemento con la configuración actual (ocultos y filtro)?
+    fn shows(&self, e: &Entry) -> bool {
+        (self.show_hidden || !e.is_hidden()) && filter_matches(&self.filter_parts, &e.sort_key)
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Aplica el filtro rápido al instante, conservando el foco si el elemento sigue a la vista.
+    pub fn set_filter(&mut self, text: &str) {
+        if text == self.filter {
+            return;
+        }
+        self.filter = text.to_string();
+        self.filter_parts = text.split(';').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+        let focus = self.focused_index();
+        self.rebuild(focus);
+        self.scroll = 0.0;
+        if let Some(f) = self.focus {
+            self.ensure_visible(f);
+        }
+    }
+
+    /// Elementos que se verían sin el filtro (para mostrar "N de M").
+    pub fn unfiltered_count(&self) -> usize {
+        self.entries.iter().filter(|e| self.show_hidden || !e.is_hidden()).count()
+    }
+
+    /// Vacía la lista (navegación a otra carpeta). El filtro no pasa a la carpeta nueva.
     pub fn clear(&mut self) {
         *self = Self { sort: self.sort, descending: self.descending, show_hidden: self.show_hidden, ..Default::default() };
     }
@@ -126,11 +191,8 @@ impl FileList {
         self.selected.extend(std::iter::repeat_n(false, batch.len()));
         self.entries.extend(batch);
 
-        let show_hidden = self.show_hidden;
+        let mut new: Vec<u32> = (start..self.entries.len() as u32).filter(|&i| self.shows(&self.entries[i as usize])).collect();
         let entries = &self.entries;
-        let mut new: Vec<u32> = (start..entries.len() as u32)
-            .filter(|&i| show_hidden || !entries[i as usize].is_hidden())
-            .collect();
         let (sort, desc) = (self.sort, self.descending);
         let cmp = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], sort, desc);
         new.sort_unstable_by(cmp);
@@ -250,19 +312,13 @@ impl FileList {
         self.focus.and_then(|p| self.visible.get(p)).map(|&i| i as usize)
     }
 
-    /// Filtra ocultos, ordena y reubica el foco en `focus_entry`.
+    /// Filtra ocultos y filtro rápido, ordena y reubica el foco en `focus_entry`.
     fn rebuild(&mut self, focus_entry: Option<usize>) {
-        let show_hidden = self.show_hidden;
-        self.visible = (0..self.entries.len() as u32)
-            .filter(|&i| show_hidden || !self.entries[i as usize].is_hidden())
-            .collect();
-        // Los ocultos que quedan fuera se deseleccionan para no operar sobre lo que no se ve.
-        if !show_hidden {
-            for (e, s) in self.entries.iter().zip(self.selected.iter_mut()) {
-                if e.is_hidden() {
-                    *s = false;
-                }
-            }
+        let shown: Vec<bool> = self.entries.iter().map(|e| self.shows(e)).collect();
+        self.visible = (0..self.entries.len() as u32).filter(|&i| shown[i as usize]).collect();
+        // Lo que queda fuera se deselecciona para no operar sobre lo que no se ve.
+        for (s, &v) in self.selected.iter_mut().zip(&shown) {
+            *s &= v;
         }
 
         let (entries, sort, desc) = (&self.entries, self.sort, self.descending);
@@ -732,5 +788,32 @@ impl FileList {
             let c = if self.thumb_drag.is_some() { alpha(th.scrollbar, th.scrollbar.a * 1.6) } else { th.scrollbar };
             p.round_fill(thumb, 3.0, c);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{filter_matches, wildcard};
+
+    #[test]
+    fn wildcards() {
+        assert!(wildcard("*.pdf", "informe.pdf"));
+        assert!(!wildcard("*.pdf", "informe.pdf.bak"));
+        assert!(wildcard("img?.png", "img2.png"));
+        assert!(!wildcard("img?.png", "img10.png"));
+        assert!(wildcard("*2026*", "foto 2026-10.jpg"));
+        assert!(wildcard("*", ""));
+        assert!(wildcard("a*b*c", "aXbYbZc"));
+        assert!(!wildcard("a*b*c", "aXbYbZ"));
+    }
+
+    #[test]
+    fn filter_parts() {
+        let parts = |s: &str| s.split(';').map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty()).collect::<Vec<_>>();
+        assert!(filter_matches(&parts(""), "lo que sea"));
+        assert!(filter_matches(&parts("Inform"), "informe final.docx"));
+        assert!(filter_matches(&parts("*.jpg; *.png"), "foto.png"));
+        assert!(!filter_matches(&parts("*.jpg;*.png"), "foto.gif"));
+        assert!(filter_matches(&parts("año"), "resumen del año.txt"));
     }
 }

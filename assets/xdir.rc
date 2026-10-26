@@ -1,3 +1,6 @@
 // Recursos de xdir.exe. Lo compila build.rs con rc.exe.
 // El ID 1 lo usa main.rs para el ícono de la ventana; el Explorador toma el primero del exe.
 1 ICON "xdir.ico"
+
+// Manifiesto (RT_MANIFEST = 24, ID 1 para el exe): compatibilidad con Windows 10/11.
+1 24 "xdir.manifest"

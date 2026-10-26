@@ -6,3 +6,4 @@
 *.ico binary
 *.png binary
 *.rc text eol=crlf
+*.manifest text eol=crlf

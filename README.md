@@ -32,6 +32,7 @@ El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 | Ctrl+A / Ctrl+I | Seleccionar todo / invertir selección |
 | Flechas, Re Pág, Av Pág, Inicio, Fin | Moverse (con Shift extiende la selección, con Ctrl solo mueve el foco) |
 | Letras | Saltar al primer nombre que empieza así |
+| Ctrl+F, embudo de la barra de dirección | Filtro rápido: texto (contiene), comodines `*` `?` (`*.pdf`), varios separados por `;`. Enter lo deja aplicado, Esc lo quita. Se limpia al cambiar de carpeta |
 | Clic en un encabezado | Ordenar por esa columna (otro clic invierte) |
 | Tab / Shift+Tab, Alt+1..4 | Panel siguiente / anterior / panel N |
 | Ctrl+1..5, botones abajo a la derecha | Layout: 1, 2 lado a lado, 2 apilados, 3, 4 paneles |

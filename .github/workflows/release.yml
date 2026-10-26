@@ -51,4 +51,10 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v${{ steps.pack.outputs.version }}" dist/*.zip dist/*-setup.exe --title "xdir ${{ steps.pack.outputs.version }}" --target "${{ github.sha }}" --generate-notes
+        run: |
+          tag="v${{ steps.pack.outputs.version }}"
+          # Si ya hay un release con esta versión se reemplaza (y su tag pasa a este commit).
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release delete "$tag" --yes --cleanup-tag
+          fi
+          gh release create "$tag" dist/*.zip dist/*-setup.exe --title "xdir ${{ steps.pack.outputs.version }}" --target "${{ github.sha }}" --generate-notes

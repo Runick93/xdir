@@ -242,6 +242,19 @@ impl Pane {
         self.active = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
     }
 
+    /// Reemplaza todas las pestañas (al abrir un grupo). Las que había van a las cerradas.
+    pub fn replace_tabs(&mut self, tabs: Vec<Tab>, active: usize) {
+        if tabs.is_empty() {
+            return;
+        }
+        for old in std::mem::replace(&mut self.tabs, tabs) {
+            self.closed.push(old.location);
+        }
+        let excess = self.closed.len().saturating_sub(CLOSED_MAX);
+        self.closed.drain(..excess);
+        self.active = active.min(self.tabs.len() - 1);
+    }
+
     /// Saca una pestaña para llevarla a otro panel (no va al historial de cerradas). El panel
     /// puede quedar vacío: quien llama tiene que agregarle una.
     pub fn take_tab(&mut self, i: usize) -> Tab {

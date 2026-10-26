@@ -85,7 +85,7 @@ fn filter_matches(parts: &[String], name: &str) -> bool {
 
 /// Comodines de Windows: `*` cualquier secuencia, `?` un carácter. Sin recursión: vuelve al
 /// último `*` cuando algo no coincide.
-fn wildcard(pattern: &str, text: &str) -> bool {
+pub fn wildcard(pattern: &str, text: &str) -> bool {
     let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
     let (mut i, mut j) = (0, 0);
     let mut star: Option<(usize, usize)> = None;
@@ -758,7 +758,9 @@ impl FileList {
                     p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
                 }
 
-                let color = if e.is_hidden() { th.text_dim } else { th.text };
+                // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
+                let color = crate::config::color_for(p.file_colors, &e.sort_key, e.is_dir, e.attrs)
+                    .unwrap_or(if e.is_hidden() { th.text_dim } else { th.text });
                 for &(col, left, right) in &cols {
                     let cell = rect(left + PAD, y, right - PAD, y + ROW_H);
                     match col {

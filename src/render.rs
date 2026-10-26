@@ -52,6 +52,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{BOOL, HSTRING, Interface, PCWSTR, Result, w};
 
+use crate::config::ColorRule;
 use crate::icons;
 use crate::theme::Theme;
 
@@ -169,7 +170,15 @@ impl Renderer {
     }
 
     /// Dibuja un frame: `paint` recibe el pintor y el tamaño del área en DIPs.
-    pub fn draw(&mut self, hwnd: HWND, dpi: u32, theme: &Theme, paint: impl FnOnce(&Painter, f32, f32)) -> Result<()> {
+    /// `file_colors`: reglas de color por tipo de archivo de `config.toml`.
+    pub fn draw(
+        &mut self,
+        hwnd: HWND,
+        dpi: u32,
+        theme: &Theme,
+        file_colors: &[ColorRule],
+        paint: impl FnOnce(&Painter, f32, f32),
+    ) -> Result<()> {
         self.ensure_target(hwnd, dpi)?;
         let t = self.target.as_ref().unwrap();
         let ctx = &t.gpu.ctx;
@@ -178,6 +187,7 @@ impl Renderer {
             factory: &self.d2d,
             brush: &t.brush,
             theme,
+            file_colors,
             fonts: &self.fonts,
             dwrite: &self.dwrite,
             icons: &self.icons,
@@ -224,6 +234,7 @@ pub struct Painter<'a> {
     brush: &'a ID2D1SolidColorBrush,
     pub theme: &'a Theme,
     pub fonts: &'a Fonts,
+    pub file_colors: &'a [ColorRule],
     dwrite: &'a IDWriteFactory,
     icons: &'a RefCell<Icons>,
 }

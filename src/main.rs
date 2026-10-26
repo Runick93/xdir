@@ -2,11 +2,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod config;
 mod console;
 mod drop;
 mod favorites;
 mod format;
 mod fs;
+mod groups;
 mod icons;
 mod jump;
 mod list;
@@ -18,6 +20,7 @@ mod session;
 mod shell;
 mod tab;
 mod theme;
+mod toml;
 mod ui;
 
 use std::collections::HashMap;
@@ -56,9 +59,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use commands::Command;
+use config::Config;
 use console::Console;
+use groups::{Group, Groups};
 use jump::History;
-use palette::{Palette, PaletteMode, Target};
+use palette::{Palette, PaletteMode, Sources, Target};
 use drop::{DragEvent, DragKind, WM_APP_DRAG};
 use favorites::{Fav, FavPath, Favorites};
 use fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
@@ -170,6 +175,8 @@ enum Hit {
     Layout(Layout),
     /// Rueda dentada de la barra de estado.
     Gear,
+    /// Botón de grupos guardados de la barra de estado.
+    Groups,
     Picker(ui::PickerHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
@@ -239,6 +246,9 @@ struct App {
     favorites: Favorites,
     /// Carpetas visitadas, para el salto rápido.
     history: History,
+    /// Atajos y colores de `config.toml`.
+    config: Config,
+    groups: Groups,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, HWND)>,
     show_favorites: bool,
@@ -311,6 +321,8 @@ fn main() -> Result<()> {
         let (ops_tx, ops_rx) = channel();
         // `--probe` mide un arranque limpio: sin historial.
         let history = if probe.is_none() { History::load() } else { History::default() };
+        let config = if probe.is_none() { Config::load() } else { Config::default() };
+        let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
         let mut app = App {
             hwnd: HWND::default(),
             dpi: 96,
@@ -344,11 +356,13 @@ fn main() -> Result<()> {
             undo: Vec::new(),
             rename: None,
             pending_rename: None,
-            notice: None,
+            notice: config_errors,
             drop_target: None,
             transparent: false,
             favorites: Favorites::load(),
             history,
+            config,
+            groups: Groups::load(),
             palette: None,
             show_favorites: session.show_favorites,
             fav_drop: None,
@@ -600,6 +614,9 @@ impl App {
                         self.favorites = fresh;
                         self.redraw();
                     }
+                    if self.probe.is_none() {
+                        self.reload_config();
+                    }
                     LRESULT(0)
                 }
                 WM_APP_RENAME_DONE => {
@@ -660,7 +677,7 @@ impl App {
                 }
                 WM_SYSKEYDOWN => {
                     // Alt+flechas como en el Explorador; el resto (Alt+F4, Alt+Espacio) sigue de largo.
-                    match commands::from_key(VIRTUAL_KEY(wparam.0 as u16), false, false, true) {
+                    match self.config.keymap.lookup(VIRTUAL_KEY(wparam.0 as u16), key_down(VK_CONTROL), key_down(VK_SHIFT), true) {
                         Some(c) => self.run_command(c),
                         None => return DefWindowProcW(self.hwnd, msg, wparam, lparam),
                     }
@@ -971,6 +988,9 @@ impl App {
         if contains(&ui::gear_rect(w, h), x, y) {
             return Hit::Gear;
         }
+        if contains(&ui::groups_rect(w, h), x, y) {
+            return Hit::Groups;
+        }
         let area = ui::panes_area(w, h);
         if self.maximized.is_none() {
             for (s, r) in ui::splitter_rects(self.layout, area, self.splits) {
@@ -1026,6 +1046,7 @@ impl App {
                 }
             }
             Hit::TermMenu(None) | Hit::Palette(_) => {}
+            Hit::Groups => self.show_groups_menu(),
             Hit::Gear => {
                 self.picker_open = !self.picker_open;
                 self.redraw();
@@ -1262,7 +1283,7 @@ impl App {
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
             VK_ESCAPE if !self.panes[active].tab().list.filter().is_empty() => self.clear_filter(active),
-            _ => match commands::from_key(vk, ctrl, shift, false) {
+            _ => match self.config.keymap.lookup(vk, ctrl, shift, false) {
                 Some(c) => self.run_command(c),
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
                     Some(action) => {
@@ -1365,8 +1386,129 @@ impl App {
             Command::PowerShell => self.open_console(active, Console::PowerShell),
             Command::Cmd => self.open_console(active, Console::Cmd),
             Command::ToggleDarkMode => self.set_dark_mode(!self.theme.dark),
+            Command::SaveGroup => self.open_palette(PaletteMode::GroupName),
+            Command::OpenConfig => {
+                if let Some(path) = config::file_path() {
+                    if !path.exists() {
+                        self.config = Config::load();
+                    }
+                    open_in_editor(hwnd, &path);
+                }
+            }
         }
         self.redraw();
+    }
+
+    /// Abre un grupo guardado: su layout, divisores y las pestañas de cada panel. Las pestañas
+    /// que había quedan entre las cerradas (Ctrl+Shift+T las recupera).
+    fn apply_group(&mut self, index: usize) {
+        let Some(g) = self.groups.items.get(index).cloned() else { return };
+        self.end_edit(false);
+        self.end_filter(true);
+        self.maximized = None;
+        self.layout = Layout::from_index(g.layout).unwrap_or(Layout::Four);
+        self.splits = Splits { x: g.split_x, y: g.split_y };
+        for (i, state) in g.panes.iter().enumerate().take(PANES) {
+            if state.tabs.is_empty() {
+                continue;
+            }
+            let tabs: Vec<Tab> = state.tabs.iter().cloned().map(|l| self.make_tab(l)).collect();
+            self.panes[i].replace_tabs(tabs, state.active);
+        }
+        self.active = 0;
+        self.notice = Some(format!("Grupo «{}»", g.name));
+        self.sync_visibility();
+        self.redraw();
+    }
+
+    /// Guarda los paneles y carpetas actuales como grupo (reemplaza uno con el mismo nombre).
+    fn save_group(&mut self, name: &str) {
+        let s = self.session();
+        self.groups.put(Group { name: name.to_string(), layout: s.layout, split_x: s.split_x, split_y: s.split_y, panes: s.panes });
+        self.notice = Some(match self.groups.save() {
+            Ok(()) => format!("Grupo «{name}» guardado"),
+            Err(e) => format!("No se pudo guardar el grupo: {e}"),
+        });
+        self.redraw();
+    }
+
+    /// Menú del botón de grupos: abrir uno, guardar el actual, eliminar o editar el archivo.
+    fn show_groups_menu(&mut self) {
+        const SAVE: usize = 1;
+        const EDIT: usize = 2;
+        const OPEN: usize = 1000;
+        const DELETE: usize = 2000;
+        let (w, h) = self.client_dips();
+        let r = ui::groups_rect(w, h);
+        let k = self.dpi as f32 / 96.0;
+        let mut pt = POINT { x: (r.left * k) as i32, y: (r.top * k) as i32 };
+        let cmd = unsafe {
+            let Ok(hmenu) = CreatePopupMenu() else { return };
+            let add = |menu: HMENU, id: usize, text: &str| {
+                let wide: Vec<u16> = text.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
+                let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(wide.as_ptr()));
+            };
+            for (i, g) in self.groups.items.iter().enumerate() {
+                add(hmenu, OPEN + i, &g.name);
+            }
+            if self.groups.items.is_empty() {
+                let wide: Vec<u16> = "Todavía no hay grupos".encode_utf16().chain(Some(0)).collect();
+                let _ = AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, PCWSTR(wide.as_ptr()));
+            }
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            add(hmenu, SAVE, "Guardar paneles y carpetas como grupo…");
+            if !self.groups.items.is_empty() {
+                if let Ok(sub) = CreatePopupMenu() {
+                    for (i, g) in self.groups.items.iter().enumerate() {
+                        add(sub, DELETE + i, &g.name);
+                    }
+                    let wide: Vec<u16> = "Eliminar".encode_utf16().chain(Some(0)).collect();
+                    let _ = AppendMenuW(hmenu, MF_POPUP, sub.0 as usize, PCWSTR(wide.as_ptr()));
+                }
+                add(hmenu, EDIT, "Editar grupos.toml");
+            }
+            let _ = ClientToScreen(self.hwnd, &mut pt);
+            // Hacia arriba desde el botón: la barra de estado está abajo de todo.
+            let flags = TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN;
+            let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd, None).0 as usize;
+            let _ = DestroyMenu(hmenu);
+            cmd
+        };
+        match cmd {
+            SAVE => self.open_palette(PaletteMode::GroupName),
+            EDIT => {
+                if let Some(dir) = session::config_dir() {
+                    open_in_editor(self.hwnd, &dir.join("grupos.toml"));
+                }
+            }
+            c if c >= DELETE => {
+                let i = c - DELETE;
+                if let Some(g) = self.groups.items.get(i) {
+                    self.notice = Some(format!("Grupo «{}» eliminado", g.name));
+                    self.groups.remove(i);
+                    let _ = self.groups.save();
+                }
+            }
+            c if c >= OPEN => self.apply_group(c - OPEN),
+            _ => {}
+        }
+        self.redraw();
+    }
+
+    /// Vuelve a leer `config.toml` y `grupos.toml` si cambiaron (se editan con la app abierta).
+    fn reload_config(&mut self) {
+        if self.config.changed_on_disk() {
+            self.config = Config::load();
+            self.notice = Some(match self.config.errors.first() {
+                Some(e) => format!("config.toml, {e}"),
+                None => "Configuración aplicada".to_string(),
+            });
+            self.redraw();
+        }
+        let groups = Groups::load();
+        if groups != self.groups {
+            self.groups = groups;
+        }
     }
 
     fn on_button(&mut self, pane: usize, b: Button) {
@@ -2149,7 +2291,7 @@ impl App {
         self.picker_open = false;
         self.term_menu = None;
         let (w, _) = self.client_dips();
-        let items = palette::search(mode, "", &self.history, &self.favorites, expand_env);
+        let items = palette::search(mode, "", &Sources { history: &self.history, favorites: &self.favorites, groups: &self.groups, keymap: &self.config.keymap }, expand_env);
         let pal = Palette::new(mode, items);
         let r = pal.input_rect(w);
         let k = self.dpi as f32 / 96.0;
@@ -2186,7 +2328,7 @@ impl App {
     fn refresh_palette(&mut self) {
         let Some((pal, edit)) = &mut self.palette else { return };
         let query = window_text(*edit);
-        pal.set_items(palette::search(pal.mode, &query, &self.history, &self.favorites, expand_env));
+        pal.set_items(palette::search(pal.mode, &query, &Sources { history: &self.history, favorites: &self.favorites, groups: &self.groups, keymap: &self.config.keymap }, expand_env));
         self.redraw();
     }
 
@@ -2237,6 +2379,8 @@ impl App {
         self.close_palette();
         match item.target {
             Target::Command(c) => self.run_command(c),
+            Target::Group(i) => self.apply_group(i),
+            Target::SaveGroup(name) => self.save_group(&name),
             Target::Folder(loc) => {
                 if let Location::Path(p) = &loc {
                     if !p.is_dir() {
@@ -2443,7 +2587,7 @@ impl App {
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
-        let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, |p, w, h| {
+        let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, &self.config.colors, |p, w, h| {
             let area = ui::panes_area(w, h);
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
@@ -2487,7 +2631,7 @@ impl App {
                 Hit::Layout(l) => Some(l),
                 _ => None,
             };
-            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear);
+            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups);
             if let Some(pane) = term_menu {
                 let term_hover = match hover {
                     Hit::TermMenu(c) => c,
@@ -2622,6 +2766,21 @@ fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, keys: MODIFIERKEYS_FLA
         DROPEFFECT_COPY
     } else {
         DROPEFFECT_NONE
+    }
+}
+
+/// Abre un archivo de configuración con el programa asociado; si `.toml` no tiene ninguno, con el
+/// Bloc de notas.
+fn open_in_editor(hwnd: HWND, path: &std::path::Path) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let r = ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        // Menor o igual a 32 es un error (p. ej. SE_ERR_NOASSOC: la extensión no tiene programa).
+        if r.0 as isize <= 32 {
+            let arg: Vec<u16> = format!("\"{}\"", path.display()).encode_utf16().chain(Some(0)).collect();
+            let _ = ShellExecuteW(Some(hwnd), w!("open"), w!("notepad.exe"), PCWSTR(arg.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
+        }
     }
 }
 

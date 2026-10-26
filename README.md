@@ -81,6 +81,37 @@ cuenta) se anota en `historial.txt`, junto a la sesión, con la cantidad de visi
 la última. Ctrl+P ordena por esas dos cosas: lo usado seguido y hace poco aparece primero. Las
 carpetas que ya no existen salen del historial al intentar abrirlas.
 
+## Configuración
+
+`config.toml`, junto a la sesión (`%APPDATA%\xdir\` o junto al exe en modo portable), se crea la
+primera vez como plantilla comentada con todo lo que se puede cambiar. xdir no lo reescribe nunca:
+lo vuelve a leer cuando cambia, al volver a la ventana, así que los cambios se aplican sin
+reiniciar. Si algo está mal escrito, la barra de estado avisa en qué línea. Se abre desde la
+paleta: "Abrir la configuración".
+
+```toml
+[atajos]
+pestana_nueva = "Ctrl+K"            # reemplaza Ctrl+T
+escribir_ruta = ["Ctrl+L", "F6"]    # varios atajos
+este_equipo   = "Ctrl+E"            # acciones sin atajo de fábrica también
+deshacer      = ""                  # sin atajo
+
+[colores]
+"*.pdf"                    = "#E5534B"
+"*.jpg;*.jpeg;*.png"       = "#57AB5A"
+"node_modules"             = "#768390"   # nombre exacto
+"@oculto"                  = "#768390"   # por atributo: @carpeta, @oculto, @sistema,
+                                         # @solo_lectura, @comprimido, @cifrado
+```
+
+Los colores pintan el nombre en la lista; gana la primera regla que coincide. Para rutas, las
+comillas simples evitan escapar las barras: `'C:\carpeta'`.
+
+**Grupos guardados:** el botón "Grupos" de la barra de estado guarda el layout, los divisores y
+las pestañas de cada panel con un nombre, y los vuelve a abrir con un clic (también desde Ctrl+P
+o la paleta, escribiendo el nombre). Al abrir un grupo, las pestañas que había quedan entre las
+cerradas (Ctrl+Shift+T). Se guardan en `grupos.toml`, que también se puede editar a mano.
+
 ## Medir el arranque
 
 ```bat

@@ -5,9 +5,10 @@
 
 use std::path::PathBuf;
 
-use crate::commands::{self, Command};
+use crate::commands::{self, Command, Keymap};
 use crate::favorites::{Fav, Favorites};
 use crate::fs::Location;
+use crate::groups::Groups;
 use crate::jump::{self, History};
 use crate::render::{Painter, Rect, contains, rect};
 use crate::theme::alpha;
@@ -26,12 +27,18 @@ pub enum PaletteMode {
     Folders,
     /// Acciones, y después carpetas.
     All,
+    /// Nombre para guardar los paneles como grupo (o un grupo existente para reemplazar).
+    GroupName,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
     Command(Command),
     Folder(Location),
+    /// Abrir el grupo guardado N.
+    Group(usize),
+    /// Guardar los paneles actuales con ese nombre.
+    SaveGroup(String),
 }
 
 #[derive(Clone, Debug)]
@@ -39,8 +46,16 @@ pub struct Item {
     pub target: Target,
     pub title: String,
     pub detail: String,
-    pub keys: &'static str,
+    pub keys: String,
     glyph: &'static str,
+}
+
+/// De dónde salen los resultados.
+pub struct Sources<'a> {
+    pub history: &'a History,
+    pub favorites: &'a Favorites,
+    pub groups: &'a Groups,
+    pub keymap: &'a Keymap,
 }
 
 pub struct Palette {
@@ -92,18 +107,57 @@ fn typed_path(query: &str, expand: impl Fn(&str) -> String) -> Option<PathBuf> {
     p.is_dir().then(|| crate::fs::true_case(&p))
 }
 
+/// Grupos guardados que coinciden con lo escrito, para abrir (o, al guardar, reemplazar).
+fn group_items(groups: &Groups, folded: &[String], replace: bool) -> Vec<Item> {
+    groups
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| {
+            let name = fold(&g.name);
+            folded.iter().all(|w| name.contains(w.as_str()))
+        })
+        .map(|(i, g)| {
+            let shown = g.panes.iter().take(crate::ui::Layout::from_index(g.layout).map(|l| l.panes()).unwrap_or(4));
+            let folders: Vec<String> = shown.filter_map(|p| p.tabs.get(p.active)).map(|l| l.title()).collect();
+            Item {
+                title: if replace { format!("Reemplazar «{}»", g.name) } else { g.name.clone() },
+                detail: format!("Grupo · {}", folders.join(", ")),
+                target: if replace { Target::SaveGroup(g.name.clone()) } else { Target::Group(i) },
+                keys: String::new(),
+                glyph: "\u{E8A9}",
+            }
+        })
+        .collect()
+}
+
 /// Resultados para lo escrito.
-pub fn search(mode: PaletteMode, query: &str, history: &History, favs: &Favorites, expand: impl Fn(&str) -> String) -> Vec<Item> {
+pub fn search(mode: PaletteMode, query: &str, src: &Sources, expand: impl Fn(&str) -> String) -> Vec<Item> {
     let words = jump::query_words(query);
     let folded: Vec<String> = words.iter().map(|w| fold(w)).collect();
     let mut out = Vec::new();
+
+    if mode == PaletteMode::GroupName {
+        let name = query.trim();
+        if !name.is_empty() && !src.groups.items.iter().any(|g| g.name.eq_ignore_ascii_case(name)) {
+            out.push(Item {
+                title: format!("Guardar como «{name}»"),
+                detail: String::new(),
+                target: Target::SaveGroup(name.to_string()),
+                keys: String::new(),
+                glyph: "\u{E74E}",
+            });
+        }
+        out.extend(group_items(src.groups, &folded, true));
+        return out;
+    }
 
     if let Some(p) = typed_path(query, expand) {
         out.push(Item {
             title: format!("Ir a {}", p.display()),
             detail: String::new(),
             target: Target::Folder(Location::Path(p)),
-            keys: "",
+            keys: String::new(),
             glyph: "\u{E8AD}",
         });
     }
@@ -112,7 +166,8 @@ pub fn search(mode: PaletteMode, query: &str, history: &History, favs: &Favorite
         let mut cmds: Vec<(f64, usize)> = commands::ALL
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.command != Command::JumpTo || folded.is_empty())
+            // Abrir la paleta desde la paleta no hace nada; "ir a carpeta" solo sin buscar.
+            .filter(|(_, s)| s.command != Command::Palette && (s.command != Command::JumpTo || folded.is_empty()))
             .filter_map(|(i, s)| {
                 let name = fold(s.name);
                 if !folded.iter().all(|w| name.contains(w.as_str())) {
@@ -130,14 +185,18 @@ pub fn search(mode: PaletteMode, query: &str, history: &History, favs: &Favorite
                 target: Target::Command(s.command),
                 title: s.name.to_string(),
                 detail: String::new(),
-                keys: s.keys,
+                keys: src.keymap.label(s.command),
                 glyph: "\u{E756}",
             });
         }
     }
 
+    // Grupos guardados, antes que las carpetas sueltas.
+    out.extend(group_items(src.groups, &folded, false));
+
     // Carpetas: historial por frecencia y favoritos (con un piso de puntaje, para que aparezcan
     // aunque no se hayan visitado), sin repetir.
+    let (history, favs) = (src.history, src.favorites);
     let now = jump::now();
     let mut folders: Vec<(f64, Item)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -157,7 +216,7 @@ pub fn search(mode: PaletteMode, query: &str, history: &History, favs: &Favorite
             _ => "Favorito".into(),
         };
         seen.push(key.trim_end_matches('\\').to_string());
-        folders.push((score, Item { title: name, detail, target: Target::Folder(loc), keys: "", glyph: "\u{E735}" }));
+        folders.push((score, Item { title: name, detail, target: Target::Folder(loc), keys: String::new(), glyph: "\u{E735}" }));
     }
     for v in &history.visits {
         let lower = v.path.to_string_lossy().to_lowercase();
@@ -168,7 +227,7 @@ pub fn search(mode: PaletteMode, query: &str, history: &History, favs: &Favorite
         let loc = Location::Path(v.path.clone());
         folders.push((
             jump::frecency(v, now) * mult,
-            Item { title: loc.title(), detail: v.path.display().to_string(), target: Target::Folder(loc), keys: "", glyph: "\u{E8B7}" },
+            Item { title: loc.title(), detail: v.path.display().to_string(), target: Target::Folder(loc), keys: String::new(), glyph: "\u{E8B7}" },
         ));
     }
     if folded.is_empty() || "este equipo".contains(folded.join(" ").as_str()) {
@@ -176,7 +235,7 @@ pub fn search(mode: PaletteMode, query: &str, history: &History, favs: &Favorite
             title: "Este equipo".into(),
             detail: String::new(),
             target: Target::Folder(Location::Computer),
-            keys: "",
+            keys: String::new(),
             glyph: "\u{E7F8}",
         }));
     }
@@ -261,12 +320,17 @@ impl Palette {
         let field = rect(panel.left + 8.0, panel.top + 8.0, panel.right - 8.0, panel.top + INPUT_H - 6.0);
         p.round_fill(field, 6.0, th.surface_alt);
         p.round_stroke(field, 6.0, th.border);
-        let glyph = if self.mode == PaletteMode::All { "\u{E756}" } else { "\u{E721}" };
+        let glyph = match self.mode {
+            PaletteMode::All => "{E756}",
+            PaletteMode::Folders => "{E721}",
+            PaletteMode::GroupName => "{E74E}",
+        };
         p.text(&p.fonts.glyphs_small, glyph, rect(field.left + 6.0, field.top, field.left + 30.0, field.bottom), th.accent);
 
         if self.items.is_empty() {
             let r = self.row_rect(w, 0);
-            p.text(&p.fonts.ui, "Sin resultados", rect(r.left + 40.0, r.top, r.right, r.bottom), th.text_dim);
+            let empty = if self.mode == PaletteMode::GroupName { "Escribí un nombre para el grupo" } else { "Sin resultados" };
+            p.text(&p.fonts.ui, empty, rect(r.left + 40.0, r.top, r.right, r.bottom), th.text_dim);
         }
         for (i, item) in self.items.iter().enumerate().skip(self.scroll).take(MAX_ROWS) {
             let r = self.row_rect(w, i - self.scroll);
@@ -288,7 +352,7 @@ impl Palette {
                 p.text(&p.fonts.ui, &item.detail, rect(split, r.top, text_r, r.bottom), th.text_dim);
             }
             if !item.keys.is_empty() {
-                p.text(&p.fonts.ui_right, item.keys, rect(text_r, r.top, r.right - 10.0, r.bottom), th.text_dim);
+                p.text(&p.fonts.ui_right, &item.keys, rect(text_r, r.top, r.right - 10.0, r.bottom), th.text_dim);
             }
         }
 
@@ -297,6 +361,7 @@ impl Palette {
         let hint = match self.mode {
             PaletteMode::Folders => "↑↓ elegir · Enter abrir · Ctrl+Enter en pestaña nueva · Ctrl+Shift+P comandos",
             PaletteMode::All => "↑↓ elegir · Enter ejecutar · Ctrl+Enter carpetas en pestaña nueva · Esc cerrar",
+            PaletteMode::GroupName => "Nombre del grupo nuevo, o elegí uno para reemplazarlo · Enter guardar · Esc cancelar",
         };
         p.text(&p.fonts.ui, hint, foot, th.text_dim);
         if self.items.len() > MAX_ROWS {
@@ -328,21 +393,58 @@ mod tests {
             h.record(std::path::Path::new(r"C:\proyectos\nuevo"), now);
         }
         let favs = Favorites { items: vec![Fav::Link { name: "Informes".into(), location: Location::Path(r"D:\informes".into()) }] };
-        let all = search(PaletteMode::Folders, "", &h, &favs, |s| s.to_string());
+        let (groups, keymap) = (Groups::default(), Keymap::default());
+        let src = Sources { history: &h, favorites: &favs, groups: &groups, keymap: &keymap };
+        let all = search(PaletteMode::Folders, "", &src, |s| s.to_string());
         // Un favorito nunca visitado queda por encima de una carpeta vista una vez hace mucho.
         assert_eq!(names(&all)[..3], ["nuevo", "Informes", "viejo"].map(String::from));
-        let q = search(PaletteMode::Folders, "info", &h, &favs, |s| s.to_string());
+        let q = search(PaletteMode::Folders, "info", &src, |s| s.to_string());
         assert_eq!(names(&q), ["Informes"]);
-        let q = search(PaletteMode::Folders, "proy vie", &h, &favs, |s| s.to_string());
+        let q = search(PaletteMode::Folders, "proy vie", &src, |s| s.to_string());
         assert_eq!(names(&q), ["viejo"]);
     }
 
     #[test]
     fn commands_in_all_mode() {
-        let h = History::default();
-        let favs = Favorites { items: Vec::new() };
-        let q = search(PaletteMode::All, "pestana nueva", &h, &favs, |s| s.to_string());
+        let (h, favs, groups) = (History::default(), Favorites { items: Vec::new() }, Groups::default());
+        let mut keymap = Keymap::default();
+        keymap.set(Command::NewTab, &[commands::parse_combo("Ctrl+K").unwrap()]);
+        let src = Sources { history: &h, favorites: &favs, groups: &groups, keymap: &keymap };
+        let q = search(PaletteMode::All, "pestana nueva", &src, |s| s.to_string());
         assert_eq!(q.first().map(|i| i.target.clone()), Some(Target::Command(Command::NewTab)));
-        assert!(search(PaletteMode::Folders, "pestana", &h, &favs, |s| s.to_string()).is_empty());
+        // El atajo que se muestra es el configurado.
+        assert_eq!(q[0].keys, "Ctrl+K");
+        assert!(search(PaletteMode::Folders, "pestana", &src, |s| s.to_string()).is_empty());
+    }
+
+    #[test]
+    fn groups_open_and_save() {
+        use crate::groups::Group;
+        use crate::session::PaneState;
+        let (h, favs, keymap) = (History::default(), Favorites { items: Vec::new() }, Keymap::default());
+        let mut groups = Groups::default();
+        groups.put(Group {
+            name: "Trabajo".into(),
+            layout: 1,
+            split_x: 0.5,
+            split_y: 0.5,
+            panes: vec![
+                PaneState { tabs: vec![Location::Path(r"C:\dev".into())], active: 0 },
+                PaneState { tabs: vec![Location::Computer], active: 0 },
+                PaneState { tabs: vec![Location::Path(r"C:\oculto".into())], active: 0 },
+            ],
+        });
+        let src = Sources { history: &h, favorites: &favs, groups: &groups, keymap: &keymap };
+        let q = search(PaletteMode::Folders, "trab", &src, |s| s.to_string());
+        assert_eq!(q[0].target, Target::Group(0));
+        // El detalle muestra solo los paneles que se ven en ese layout (2 lado a lado).
+        assert_eq!(q[0].detail, "Grupo · dev, Este equipo");
+        let save = search(PaletteMode::GroupName, "Fotos", &src, |s| s.to_string());
+        assert_eq!(save.iter().map(|i| i.target.clone()).collect::<Vec<_>>(), [Target::SaveGroup("Fotos".into())]);
+        let replace = search(PaletteMode::GroupName, "", &src, |s| s.to_string());
+        assert_eq!(names(&replace), ["Reemplazar «Trabajo»"]);
+        // Con el nombre exacto de uno existente no se ofrece "guardar como": se reemplaza ese.
+        let same = search(PaletteMode::GroupName, "trabajo", &src, |s| s.to_string());
+        assert_eq!(same.iter().map(|i| i.target.clone()).collect::<Vec<_>>(), [Target::SaveGroup("Trabajo".into())]);
     }
 }

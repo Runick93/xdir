@@ -35,6 +35,7 @@ El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 | Clic en un encabezado | Ordenar por esa columna (otro clic invierte) |
 | Tab / Shift+Tab, Alt+1..4 | Panel siguiente / anterior / panel N |
 | Ctrl+1..5, botones abajo a la derecha | Layout: 1, 2 lado a lado, 2 apilados, 3, 4 paneles |
+| Ctrl+M, botón a la derecha de las pestañas, doble clic en la tira de pestañas | Maximizar el panel activo o volver al layout (cambiar de panel también lo restaura) |
 | Ctrl+T, botón + | Pestaña nueva en la misma carpeta |
 | Ctrl+W, clic medio en la pestaña | Cerrar pestaña |
 | Ctrl+Shift+T | Reabrir la última pestaña cerrada |

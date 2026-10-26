@@ -103,6 +103,14 @@ pub fn pane_rects(layout: Layout, area: Rect, s: Splits) -> Vec<Rect> {
     }
 }
 
+/// Paneles a la vista con su rectángulo: todos los del layout, o solo el maximizado ocupando el área.
+pub fn visible_rects(layout: Layout, maximized: Option<usize>, area: Rect, s: Splits) -> Vec<(usize, Rect)> {
+    match maximized {
+        Some(i) => vec![(i, area)],
+        None => pane_rects(layout, area, s).into_iter().enumerate().collect(),
+    }
+}
+
 /// Áreas sensibles de los divisores del layout.
 pub fn splitter_rects(layout: Layout, area: Rect, s: Splits) -> Vec<(Splitter, Rect)> {
     let (l, t, r, b) = (area.left, area.top, area.right, area.bottom);

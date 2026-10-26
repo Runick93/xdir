@@ -184,6 +184,8 @@ struct App {
     panes: Vec<Pane>,
     layout: Layout,
     splits: Splits,
+    /// Panel maximizado temporalmente (ocupa toda el área); no se guarda en la sesión.
+    maximized: Option<usize>,
     /// Panel activo: recibe el teclado.
     active: usize,
     show_hidden: bool,
@@ -294,6 +296,7 @@ fn main() -> Result<()> {
             panes: Vec::new(),
             layout: Layout::from_index(session.layout).unwrap_or(Layout::Four),
             splits: Splits { x: session.split_x, y: session.split_y },
+            maximized: None,
             active: 0,
             show_hidden: session.show_hidden,
             next_tab_id: 1,
@@ -809,13 +812,36 @@ impl App {
     fn set_active(&mut self, pane: usize) {
         if pane < self.layout.panes() && pane != self.active {
             self.end_edit(false);
+            // Ir a otro panel restaura el layout si había uno maximizado.
+            self.maximized = None;
             self.active = pane;
             self.redraw();
         }
     }
 
+    /// Maximiza el panel (ocupa toda el área) o, si ya lo está, vuelve al layout.
+    fn toggle_maximize(&mut self, pane: usize) {
+        if self.layout.panes() < 2 || pane >= self.layout.panes() {
+            return;
+        }
+        self.end_edit(false);
+        self.term_menu = None;
+        self.maximized = if self.maximized == Some(pane) { None } else { Some(pane) };
+        self.active = pane;
+        self.redraw();
+    }
+
+    /// Índices de los paneles dibujados: todos los del layout o solo el maximizado.
+    fn shown_panes(&self) -> Vec<usize> {
+        match self.maximized {
+            Some(i) => vec![i],
+            None => (0..self.layout.panes()).collect(),
+        }
+    }
+
     fn set_layout(&mut self, layout: Layout) {
         self.end_edit(false);
+        self.maximized = None;
         self.layout = layout;
         self.active = self.active.min(layout.panes() - 1);
         self.sync_visibility();
@@ -873,15 +899,17 @@ impl App {
             return Hit::Gear;
         }
         let area = ui::panes_area(w, h);
-        for (s, r) in ui::splitter_rects(self.layout, area, self.splits) {
-            if contains(&r, x, y) {
-                return Hit::Splitter(s);
+        if self.maximized.is_none() {
+            for (s, r) in ui::splitter_rects(self.layout, area, self.splits) {
+                if contains(&r, x, y) {
+                    return Hit::Splitter(s);
+                }
             }
         }
         if let Some(l) = ui::layout_at(w, h, x, y) {
             return Hit::Layout(l);
         }
-        for i in 0..self.layout.panes() {
+        for i in self.shown_panes() {
             match self.panes[i].hit(x, y) {
                 PaneHit::None => {}
                 h => return Hit::Pane(i, h),
@@ -940,6 +968,9 @@ impl App {
                         let loc = self.panes[i].tab().location.clone();
                         self.new_tab(i, loc, true);
                     }
+                    PaneHit::Maximize => self.toggle_maximize(i),
+                    PaneHit::TabStrip if double => self.toggle_maximize(i),
+                    PaneHit::TabStrip => {}
                     PaneHit::Button(b) => {
                         unsafe { SetCapture(self.hwnd) };
                         self.drag = Drag::Button(i, b);
@@ -1126,6 +1157,7 @@ impl App {
                 let loc = self.panes[active].tab().location.clone();
                 self.new_tab(active, loc, true);
             }
+            VIRTUAL_KEY(0x4D) if ctrl => self.toggle_maximize(active), // Ctrl+M
             VIRTUAL_KEY(0x57) if ctrl => {
                 // Ctrl+W: cerrar pestaña.
                 let i = self.panes[active].active;
@@ -2050,14 +2082,16 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
-        let (panes, layout, splits, active) = (&mut self.panes, self.layout, self.splits, self.active);
+        let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
         let (hover, drag, edit_pane) = (self.hover, self.drag, self.edit.map(|(_, p)| p));
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
         let term_menu = self.term_menu;
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, |p, w, h| {
             let area = ui::panes_area(w, h);
-            for (i, r) in ui::pane_rects(layout, area, splits).into_iter().enumerate() {
+            // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
+            let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
+            for (i, r) in ui::visible_rects(layout, maximized, area, splits) {
                 let ph = match hover {
                     Hit::Pane(j, ph) if j == i => ph,
                     _ => PaneHit::None,
@@ -2067,13 +2101,13 @@ impl App {
                     _ => PaneHit::None,
                 };
                 let favs = show_favorites.then(|| (favorites, fav_drop.filter(|(j, _)| *j == i).map(|(_, d)| d)));
-                panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i));
+                panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i));
             }
             let hot = match (drag, hover) {
                 (Drag::Splitter(s), _) | (_, Hit::Splitter(s)) => Some(s),
                 _ => None,
             };
-            if let Some(s) = hot {
+            if let Some(s) = hot.filter(|_| maximized.is_none()) {
                 for (which, r) in ui::splitter_rects(layout, area, splits) {
                     if which == s {
                         ui::draw_splitter(p, r);
@@ -2105,9 +2139,8 @@ impl App {
         }
         // Superposiciones de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
-        let visible = self.layout.panes();
-        for pane in &mut self.panes[..visible] {
-            pane.tab_mut().request_overlays(hwnd, &tx);
+        for i in self.shown_panes() {
+            self.panes[i].tab_mut().request_overlays(hwnd, &tx);
         }
 
         if self.first_frame_ms.is_none() {

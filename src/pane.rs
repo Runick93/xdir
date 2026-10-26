@@ -56,6 +56,7 @@ const BTN: f32 = 30.0;
 const TAB_MIN_W: f32 = 90.0;
 const TAB_MAX_W: f32 = 220.0;
 const CHEVRON_W: f32 = 18.0;
+const MAXIMIZE_W: f32 = 32.0;
 /// Pestañas cerradas que se pueden reabrir con Ctrl+Shift+T.
 const CLOSED_MAX: usize = 20;
 
@@ -81,6 +82,10 @@ pub enum PaneHit {
     Tab(usize),
     TabClose(usize),
     NewTab,
+    /// Botón de maximizar / restaurar el panel, a la derecha de las pestañas.
+    Maximize,
+    /// Parte vacía de la tira de pestañas (doble clic maximiza).
+    TabStrip,
     Button(Button),
     Crumb(usize),
     Address,
@@ -113,6 +118,7 @@ pub struct Pane {
     pub rect: Rect,
     tab_rects: Vec<(Rect, Rect)>,
     new_tab: Rect,
+    maximize: Rect,
     buttons: Vec<(Button, Rect)>,
     pub address: Rect,
     crumbs: Vec<(Rect, Location)>,
@@ -137,6 +143,7 @@ impl Pane {
             rect: zero,
             tab_rects: Vec::new(),
             new_tab: zero,
+            maximize: zero,
             buttons: Vec::new(),
             address: zero,
             crumbs: Vec::new(),
@@ -235,6 +242,12 @@ impl Pane {
         if contains(&self.new_tab, x, y) {
             return PaneHit::NewTab;
         }
+        if contains(&self.maximize, x, y) {
+            return PaneHit::Maximize;
+        }
+        if y < self.rect.top + TABSTRIP_H {
+            return PaneHit::TabStrip;
+        }
         for (b, r) in &self.buttons {
             if contains(r, x, y) {
                 return PaneHit::Button(*b);
@@ -317,16 +330,19 @@ impl Pane {
         editing: bool,
         favs: Option<(&Favorites, Option<FavDrop>)>,
         terminal_open: bool,
+        maximized: Option<bool>,
     ) {
         self.rect = area;
         let th = p.theme;
         // Cuerpo del panel (debajo de las pestañas) y pestaña activa forman una sola pieza: un
         // contorno continuo que sube por la pestaña y vuelve a bajar, sin uniones.
         let body = rect(area.left, area.top + TABSTRIP_H, area.right, area.bottom);
-        let layout = self.layout_tabs(area);
+        let reserved = if maximized.is_some() { MAXIMIZE_W } else { 0.0 };
+        let layout = self.layout_tabs(area, reserved);
         let outline = outline(body, layout.get(self.active).copied(), self.active == 0);
         p.rounded_path(&outline, true, Some(th.surface), None);
         self.draw_tabs(p, area, &layout, hover);
+        self.draw_maximize(p, area, maximized, hover);
 
         let nav = rect(area.left, area.top + TABSTRIP_H, area.right, area.top + TABSTRIP_H + NAVBAR_H);
 
@@ -423,15 +439,17 @@ impl Pane {
 
     /// Posición de cada pestaña visible. La primera arranca justo en el borde izquierdo del
     /// panel (su lado izquierdo es recto, continuación del borde).
-    fn layout_tabs(&self, area: Rect) -> Vec<Rect> {
+    /// `reserved`: ancho que queda libre a la derecha (botón de maximizar).
+    fn layout_tabs(&self, area: Rect, reserved: f32) -> Vec<Rect> {
         let n = self.tabs.len() as f32;
-        let avail = area.right - area.left - 40.0;
+        let right = area.right - 40.0 - reserved;
+        let avail = right - area.left;
         let width = (avail / n).clamp(TAB_MIN_W, TAB_MAX_W);
         let (top, bottom) = (area.top + 3.0, area.top + TABSTRIP_H);
         let mut x = area.left;
         let mut out = Vec::new();
         for _ in &self.tabs {
-            let r = rect(x, top, (x + width).min(area.right - 40.0), bottom);
+            let r = rect(x, top, (x + width).min(right), bottom);
             if r.right - r.left < 30.0 {
                 break;
             }
@@ -481,6 +499,25 @@ impl Pane {
         }
         p.text(&p.fonts.glyphs_small, "\u{E710}", nt, th.text_dim);
         self.new_tab = nt;
+    }
+
+    /// Botón de maximizar (`Some(false)`) o restaurar (`Some(true)`) en el extremo derecho de la
+    /// tira de pestañas; `None` si el layout tiene un solo panel.
+    fn draw_maximize(&mut self, p: &Painter, area: Rect, maximized: Option<bool>, hover: PaneHit) {
+        let th = p.theme;
+        self.maximize = rect(0.0, 0.0, 0.0, 0.0);
+        let Some(on) = maximized else { return };
+        let (top, bottom) = (area.top + 3.0, area.top + TABSTRIP_H);
+        let r = rect(area.right - MAXIMIZE_W, top + 3.0, area.right - 4.0, bottom - 4.0);
+        if on {
+            p.round_fill(r, 6.0, alpha(th.accent, 0.22));
+        } else if hover == PaneHit::Maximize {
+            p.round_fill(r, 6.0, th.hover);
+        }
+        // Segoe: pantalla completa / volver a ventana.
+        let (glyph, color) = if on { ("\u{E73F}", th.accent) } else { ("\u{E740}", th.text_dim) };
+        p.text(&p.fonts.glyphs_small, glyph, r, color);
+        self.maximize = r;
     }
 
     fn draw_favs(&mut self, p: &Painter, bar: Rect, f: &Favorites, hover: PaneHit, drop: Option<FavDrop>) {

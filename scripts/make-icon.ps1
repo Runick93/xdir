@@ -11,6 +11,9 @@ $folder = [Drawing.Color]::FromArgb(0x18, 0x1A, 0x1C)
 $active = [Drawing.Color]::FromArgb(0x5A, 0xCA, 0xFD)
 $pane   = [Drawing.Color]::FromArgb(0xDC, 0xE3, 0xEC)
 $sizes  = 16, 20, 24, 32, 40, 48, 64, 256
+# La carpeta ocupa 224 x 180 de los 256 de la grilla; se agranda un poco, centrada, para que en la
+# barra de tareas no se vea más chica que los íconos que llenan el cuadro.
+$zoom = 1.08
 
 # Panel de arriba a la izquierda en la grilla de 256: rectángulo 46..124 x 78..138 con dos esquinas
 # cortadas (arriba hacia el centro y abajo hacia afuera). Los otros tres son espejos respecto del
@@ -18,7 +21,7 @@ $sizes  = 16, 20, 24, 32, 40, 48, 64, 256
 $paneTL = @(46, 78), @(92, 78), @(124, 110), @(124, 138), @(84, 138), @(46, 100)
 
 function Render([int]$n) {
-    $s = $n / 256.0
+    $s = $n / 256.0 * $zoom
     $bmp = New-Object Drawing.Bitmap $n, $n, ([Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -27,7 +30,7 @@ function Render([int]$n) {
 
     # En tamaños chicos los bordes se ajustan a píxeles enteros para que no queden borrosos.
     $small = $n -le 32
-    function P([float]$v) { if ($small) { [Math]::Round($v * $s) } else { $v * $s } }
+    function P([float]$v) { $x = ($v - 128) * $s + $n / 2; if ($small) { [Math]::Round($x) } else { $x } }
 
     # Carpeta: pestaña arriba a la izquierda con bajada en diagonal, y el cuerpo. $d corre el contorno
     # hacia adentro; la diagonal de la pestaña (18 x 22 en la grilla) se desplaza sobre su normal, que
@@ -54,7 +57,7 @@ function Render([int]$n) {
     # Paneles: el de arriba a la izquierda y sus espejos. En tamaños chicos la separación
     # (8 x 6 de 256) sería de menos de un píxel: los bordes interiores se fijan con al menos 1 px.
     $gapX = [Math]::Max(1, [Math]::Round(8 * $s)); $gapY = [Math]::Max(1, [Math]::Round(6 * $s))
-    $inX = [Math]::Round(128 * $s - $gapX / 2); $inY = [Math]::Round(141 * $s - $gapY / 2)
+    $inX = [Math]::Round($n / 2 - $gapX / 2); $inY = [Math]::Round($n / 2 + 13 * $s - $gapY / 2)
     function Inner([float]$v, [float]$center, [float]$half, [float]$edge, [float]$gap) {
         if (-not $small) { return P $v }
         if ($v -eq $center - $half) { return $edge }

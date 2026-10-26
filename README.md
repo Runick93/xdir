@@ -113,14 +113,17 @@ carpetas que ya no existen salen del historial al intentar abrirlas.
 
 ### Árbol de carpetas (experimental)
 
-Un panel lateral con la carpeta del usuario y las unidades, que navega el panel activo. Está
-detrás de la feature `arbol`, apagada por defecto: sin ella no se compila nada del árbol.
+Un panel lateral con la carpeta del usuario y las unidades, que navega el panel activo. Arranca
+oculto: se muestra u oculta con el switch "Árbol de carpetas" de la rueda dentada, con
+Ctrl+Shift+E o con "árbol" en la paleta, y la elección se guarda en la sesión. Junto a él, el
+switch "Colores por tipo" apaga los colores por tipo de archivo sin tocar `[colores]`.
+
+Es una función experimental y se puede quitar del programa al compilar (no queda nada del árbol,
+ni el switch ni el atajo):
 
 ```bat
-scripts\build.cmd build --release --features arbol
+scriptsuild.cmd build --release --no-default-features
 ```
-
-Con esa compilación se muestra u oculta con Ctrl+Shift+E (o "árbol" en la paleta).
 
 ## Configuración
 

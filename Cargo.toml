@@ -16,8 +16,10 @@ panic = "abort"
 strip = true
 
 [features]
-# Árbol de carpetas lateral (F-3.5), experimental: apagado por defecto.
-# Para probarlo: scripts\build.cmd build --release --features arbol
+# Árbol de carpetas lateral (F-3.5), experimental: incluido por defecto pero oculto hasta que se
+# enciende (switch de la rueda dentada o Ctrl+Shift+E). Para quitarlo del programa:
+# scriptsuild.cmd build --release --no-default-features
+default = ["arbol"]
 arbol = []
 # Gancho de pruebas: deja manejar la ventana por WM_COPYDATA desde otro proceso (capturas y
 # pruebas automáticas sin mouse real). Nunca se compila en la versión normal.

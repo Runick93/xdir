@@ -188,6 +188,16 @@ pub enum Action {
     ColumnsChanged,
 }
 
+/// Selección con rectángulo: se arma arrastrando sobre un hueco de la lista.
+struct Band {
+    /// Dónde se apretó: x de la ventana e y del contenido (no se mueve con el scroll).
+    from: (f32, f32),
+    /// Dónde está el mouse, igual.
+    to: (f32, f32),
+    /// Con Ctrl, lo que ya estaba seleccionado (por índice de `entries`); si no, vacío.
+    base: Vec<bool>,
+}
+
 pub struct FileList {
     pub entries: Vec<Entry>,
     /// Índices de `entries` visibles, ya filtrados y ordenados.
@@ -228,6 +238,7 @@ pub struct FileList {
     /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
     pub folder: Option<std::path::PathBuf>,
     header_drag: Option<HeaderDrag>,
+    band: Option<Band>,
 }
 
 /// ¿El nombre (en minúsculas) pasa el filtro? Cada parte separada por `;` es un patrón: con `*`
@@ -289,6 +300,7 @@ impl Default for FileList {
             view: View::Details,
             folder: None,
             header_drag: None,
+            band: None,
         }
     }
 }
@@ -831,6 +843,62 @@ impl FileList {
 
     // ---------- selección ----------
 
+    /// Punto del mouse para el rectángulo: x de la ventana (sin salirse de la lista) e y del
+    /// contenido, para que siga pegado a los elementos aunque se mueva el scroll.
+    fn band_point(&self, x: f32, y: f32) -> (f32, f32) {
+        let rows = self.rows_area();
+        let x = x.clamp(rows.left, rows.right - SCROLLBAR_W);
+        (x, y.clamp(rows.top, rows.bottom) - rows.top + self.scroll)
+    }
+
+    /// El mouse se movió con el rectángulo armándose: scroll si se sale por arriba o por abajo,
+    /// y la selección pasa a ser lo que toca el rectángulo.
+    fn move_band(&mut self, x: f32, y: f32) {
+        let rows = self.rows_area();
+        let beyond = if y < rows.top { y - rows.top } else if y > rows.bottom { y - rows.bottom } else { 0.0 };
+        if beyond != 0.0 {
+            self.scroll_target += beyond.clamp(-60.0, 60.0) * 0.5;
+            self.clamp_scroll();
+            // El rectángulo sigue al scroll sin animar.
+            self.snap_scroll();
+        }
+        let at = self.band_point(x, y);
+        if let Some(b) = &mut self.band {
+            b.to = at;
+        }
+        self.apply_band();
+    }
+
+    /// Selección = lo que había (con Ctrl) más los elementos que toca el rectángulo.
+    fn apply_band(&mut self) {
+        let Some(b) = &self.band else { return };
+        let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
+        let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
+        let mut sel = b.base.clone();
+        let (lh, per, pad) = (self.line_h(), self.per_line(), self.top_pad());
+        let first_line = ((y0 - pad) / lh).floor().max(0.0) as usize;
+        let last_line = ((y1 - pad) / lh).floor().max(0.0) as usize;
+        let first = (first_line * per).min(self.visible.len());
+        let last = ((last_line + 1) * per).min(self.visible.len());
+        let mut hit = None;
+        for pos in first..last {
+            let r = self.item_rect(pos);
+            let line_top = pad + (pos / per) as f32 * lh;
+            // Detalles: la fila ocupa todo el ancho; en las cuadrículas también cuenta la x.
+            let across = !self.view.is_grid() || (r.left < x1 && r.right > x0);
+            if across && line_top < y1 && line_top + lh > y0 {
+                sel[self.visible[pos] as usize] = true;
+                hit = Some(pos);
+            }
+        }
+        self.selected = sel;
+        if let Some(pos) = hit {
+            self.auto_focus = false;
+            self.focus = Some(pos);
+            self.anchor = Some(pos);
+        }
+    }
+
     fn select_only(&mut self, pos: usize) {
         self.auto_focus = false;
         self.selected.iter_mut().for_each(|s| *s = false);
@@ -1057,8 +1125,14 @@ impl FileList {
                 }
                 self.press = Some((x, y));
             }
-            None if contains(&self.rows_area(), x, y) && !ctrl => {
-                self.selected.iter_mut().for_each(|s| *s = false);
+            None if contains(&self.rows_area(), x, y) => {
+                // Un hueco: empieza el rectángulo (con Ctrl suma a lo que había).
+                let base = if ctrl { self.selected.clone() } else { vec![false; self.selected.len()] };
+                if !ctrl {
+                    self.selected.iter_mut().for_each(|s| *s = false);
+                }
+                let at = self.band_point(x, y);
+                self.band = Some(Band { from: at, to: at, base });
             }
             None => return (Action::None, false),
         }
@@ -1068,6 +1142,9 @@ impl FileList {
     pub fn on_mouse_up(&mut self) -> Action {
         self.thumb_drag = None;
         self.press = None;
+        if self.band.take().is_some() {
+            return Action::Redraw;
+        }
         match self.header_drag.take() {
             Some(HeaderDrag::Press { index, moved: false, .. }) => {
                 if let Some(c) = self.columns.get(index) {
@@ -1124,6 +1201,10 @@ impl FileList {
                 return Action::Redraw;
             }
             None => {}
+        }
+        if self.band.is_some() {
+            self.move_band(x, y);
+            return Action::Redraw;
         }
         // Unos píxeles de movimiento con el botón apretado sobre un elemento: arrastre.
         if let Some((px, py)) = self.press {
@@ -1267,6 +1348,16 @@ impl FileList {
                             p.text(&p.fonts.ui_right, &s, cell, th.text_secondary);
                         }
                     }
+                }
+            }
+
+            if let Some(b) = &self.band {
+                let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
+                let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
+                let r = rect(x0, y0 + rows.top - self.scroll, x1, y1 + rows.top - self.scroll);
+                if r.right - r.left > 1.0 || r.bottom - r.top > 1.0 {
+                    p.fill(r, alpha(th.accent, 0.16));
+                    p.round_stroke(r, 0.0, alpha(th.accent, 0.8));
                 }
             }
         });
@@ -1422,7 +1513,35 @@ mod column_tests {
         empty.append(vec![entry("a.txt")]);
         let below = empty.rows_area().bottom - 10.0;
         empty.on_mouse_down(x, below, false, false);
-        assert_eq!(empty.on_mouse_move(x + 30.0, below), Action::None);
+        // (arma un rectángulo de selección, no un arrastre de archivos)
+        assert_ne!(empty.on_mouse_move(x + 30.0, below), Action::BeginDrag);
+    }
+
+    /// Arrastrar sobre el hueco debajo de los elementos selecciona los que toca el rectángulo.
+    #[test]
+    fn rubber_band_selects_rows_it_touches() {
+        let mut l = list(800.0);
+        l.append((0..10).map(|i| entry(&format!("f{i}"))).collect());
+        let (r1, r4) = (l.item_rect(1), l.item_rect(4));
+        let rows = l.rows_area();
+        // Del hueco de abajo hacia arriba, hasta la mitad de la fila 4.
+        let (x, below) = (rows.left + 100.0, rows.bottom - 4.0);
+        assert!(l.pos_at(x, below).is_none(), "el hueco tiene que estar libre");
+        l.on_mouse_down(x, below, false, false);
+        l.on_mouse_move(x, (r4.top + r4.bottom) / 2.0);
+        // Con 10 filas y la ventana de pruebas, se tocan las filas 4 a la última visible.
+        let touched: Vec<usize> = l.selected_positions();
+        assert!(touched.contains(&4) && !touched.contains(&3), "{touched:?}");
+        assert_eq!(l.on_mouse_up(), Action::Redraw);
+        // Sin Ctrl un clic nuevo en el hueco borra la selección; con Ctrl la conserva y suma.
+        l.on_mouse_down(x, below, true, false);
+        l.on_mouse_move(x, (r1.top + r1.bottom) / 2.0);
+        let with_ctrl = l.selected_positions();
+        assert!(with_ctrl.contains(&1) && with_ctrl.contains(&4), "{with_ctrl:?}");
+        l.on_mouse_up();
+        l.on_mouse_down(x, below, false, false);
+        l.on_mouse_up();
+        assert!(l.selected_positions().is_empty());
     }
 
     #[test]

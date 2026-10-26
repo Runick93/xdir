@@ -1130,6 +1130,15 @@ impl App {
             }
             "picker" => self.picker_open = true,
             "go" => self.go_to_text(na, b),
+            // band <panel> <x0> <y0> <x1> <y1>: arrastre con rectángulo (en DIPs de la ventana).
+            "band" => {
+                let n: Vec<f32> = text.split_whitespace().skip(2).filter_map(|v| v.parse().ok()).collect();
+                if let [x0, y0, x1, y1] = n[..] {
+                    let list = &mut self.panes[na].tab_mut().list;
+                    list.on_mouse_down(x0, y0, false, false);
+                    list.on_mouse_move(x1, y1);
+                }
+            }
             "term" => self.term_menu = Some(na),
             "tabdrop" => self.tab_drop = Some((na, nb)),
             "droptarget" => self.panes[na].tab_mut().list.drop_target = Some(nb),

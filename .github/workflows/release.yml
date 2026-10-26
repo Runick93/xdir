@@ -3,11 +3,6 @@ name: Release
 
 on:
   workflow_dispatch:
-    inputs:
-      publicar:
-        description: "Crear además un borrador de release en GitHub (tag v<versión>)"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -51,10 +46,9 @@ jobs:
             dist/*-setup.exe
           if-no-files-found: error
 
-      - name: Borrador de release
-        if: inputs.publicar
+      - name: Publicar release
         # bash expande los comodines; pwsh no lo hace para comandos externos.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v${{ steps.pack.outputs.version }}" dist/*.zip dist/*-setup.exe --draft --title "xdir ${{ steps.pack.outputs.version }}" --target "${{ github.sha }}" --generate-notes
+        run: gh release create "v${{ steps.pack.outputs.version }}" dist/*.zip dist/*-setup.exe --title "xdir ${{ steps.pack.outputs.version }}" --target "${{ github.sha }}" --generate-notes

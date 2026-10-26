@@ -17,6 +17,13 @@ máquina no trae las librerías de escritorio x64 (`libcmt.lib`).
 
 El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 
+## Publicar una release
+
+En GitHub, ejecuta **Actions → Release → Run workflow**. El runner compila, genera el ZIP
+portable y el instalador, y los publica como adjuntos de una release en **Releases**. También
+quedan disponibles como artifact de esa ejecución. Para publicar una versión nueva, incrementa
+`version` en `Cargo.toml` antes de ejecutar el workflow; cada versión usa el tag `v<versión>`.
+
 ## Uso
 
 `xdir.exe [carpeta]` abre esa carpeta en una pestaña nueva. La primera vez, los cuatro paneles arrancan en "Este equipo"; después se restaura la sesión anterior.

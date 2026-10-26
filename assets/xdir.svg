@@ -1,9 +1,10 @@
 <!-- Ícono de xdir (referencia visual). El .ico lo genera scripts/make-icon.ps1 con la misma geometría.
-     Cuatro paneles con las esquinas exteriores cortadas en diagonal: el espacio negativo forma una X. -->
+     Carpeta oscura con borde celeste; cuatro paneles con las esquinas exteriores cortadas en diagonal:
+     el espacio negativo forma una X. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <path d="M16 52 a16 16 0 0 1 16-16 H88 a10 10 0 0 1 8 4 L114 60 H224 a16 16 0 0 1 16 16 V204 a16 16 0 0 1-16 16 H32 a16 16 0 0 1-16-16 Z" fill="#1C1D20"/>
-  <polygon points="50,80 94,80 125,109 125,139 87,139 50,103" fill="#55C5FD"/>
-  <polygon points="206,80 162,80 131,109 131,139 169,139 206,103" fill="#76848F"/>
-  <polygon points="50,204 94,204 125,175 125,145 87,145 50,181" fill="#76848F"/>
-  <polygon points="206,204 162,204 131,175 131,145 169,145 206,181" fill="#76848F"/>
+  <path d="M17.75 52 a14.25 14.25 0 0 1 14.25-14.25 H88 a10 10 0 0 1 8 4 L114 61.75 H224 a14.25 14.25 0 0 1 14.25 14.25 V204 a14.25 14.25 0 0 1-14.25 14.25 H32 a14.25 14.25 0 0 1-14.25-14.25 Z" fill="#1F2023" stroke="#5BC9FB" stroke-width="3.5"/>
+  <polygon points="50,80 94,80 125,109 125,139 87,139 50,103" fill="#5BC9FB"/>
+  <polygon points="206,80 162,80 131,109 131,139 169,139 206,103" fill="#8391A0"/>
+  <polygon points="50,204 94,204 125,175 125,145 87,145 50,181" fill="#8391A0"/>
+  <polygon points="206,204 162,204 131,175 131,145 169,145 206,181" fill="#8391A0"/>
 </svg>

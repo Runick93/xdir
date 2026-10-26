@@ -1,5 +1,5 @@
-# Genera assets\xdir.ico: carpeta oscura con 4 paneles cuyas esquinas exteriores cortadas forman una X
-# en el espacio negativo; el panel activo en celeste (ver assets\xdir.svg).
+# Genera assets\xdir.ico: carpeta oscura con borde celeste y 4 paneles cuyas esquinas exteriores cortadas
+# forman una X en el espacio negativo; el panel activo en celeste (ver assets\xdir.svg).
 # Uso: pwsh scripts\make-icon.ps1 [-Preview]   (-Preview deja también los PNG en assets\icon-png\)
 # El .ico queda versionado; solo hace falta correrlo si cambia el diseño.
 param([switch]$Preview)
@@ -7,9 +7,9 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 $root = Split-Path -Parent $PSScriptRoot
 
-$folder = [Drawing.Color]::FromArgb(0x1C, 0x1D, 0x20)
-$active = [Drawing.Color]::FromArgb(0x55, 0xC5, 0xFD)
-$pane   = [Drawing.Color]::FromArgb(0x76, 0x84, 0x8F)
+$folder = [Drawing.Color]::FromArgb(0x1F, 0x20, 0x23)
+$active = [Drawing.Color]::FromArgb(0x5B, 0xC9, 0xFB)
+$pane   = [Drawing.Color]::FromArgb(0x83, 0x91, 0xA0)
 $sizes  = 16, 20, 24, 32, 40, 48, 64, 256
 
 # Panel de arriba a la izquierda en la grilla de 256: rectángulo 50..125 x 80..139 con dos esquinas
@@ -29,19 +29,27 @@ function Render([int]$n) {
     $small = $n -le 32
     function P([float]$v) { if ($small) { [Math]::Round($v * $s) } else { $v * $s } }
 
-    # Carpeta: pestaña arriba a la izquierda con bajada en diagonal, y el cuerpo.
-    $l = P 16; $r = P 240; $t = P 36; $b = P 220; $bodyTop = P 60
-    $rad = [Math]::Max(1.5, 16 * $s)
-    $tabEnd = P 92; $slopeEnd = P 114
-    $path = New-Object Drawing.Drawing2D.GraphicsPath
-    $path.AddArc($l, $t, 2 * $rad, 2 * $rad, 180, 90)
-    $path.AddLine($l + $rad, $t, $tabEnd, $t)
-    $path.AddLine($tabEnd, $t, $slopeEnd, $bodyTop)
-    $path.AddArc($r - 2 * $rad, $bodyTop, 2 * $rad, 2 * $rad, 270, 90)
-    $path.AddArc($r - 2 * $rad, $b - 2 * $rad, 2 * $rad, 2 * $rad, 0, 90)
-    $path.AddArc($l, $b - 2 * $rad, 2 * $rad, 2 * $rad, 90, 90)
-    $path.CloseFigure()
-    $g.FillPath((New-Object Drawing.SolidBrush $folder), $path)
+    # Carpeta: pestaña arriba a la izquierda con bajada en diagonal, y el cuerpo. $d corre el contorno
+    # hacia adentro; la diagonal de la pestaña (22 x 24 en la grilla) se desplaza sobre su normal, que
+    # en horizontal equivale a 0.44 * $d hacia la izquierda.
+    function FolderPath([float]$d) {
+        $l = (P 16) + $d; $r = (P 240) - $d; $t = (P 36) + $d; $b = (P 220) - $d; $bodyTop = (P 60) + $d
+        $rad = [Math]::Max(1, [Math]::Max(1.5, 16 * $s) - $d)
+        $tabEnd = (P 92) - 0.44 * $d; $slopeEnd = (P 114) - 0.44 * $d
+        $path = New-Object Drawing.Drawing2D.GraphicsPath
+        $path.AddArc($l, $t, 2 * $rad, 2 * $rad, 180, 90)
+        $path.AddLine($l + $rad, $t, $tabEnd, $t)
+        $path.AddLine($tabEnd, $t, $slopeEnd, $bodyTop)
+        $path.AddArc($r - 2 * $rad, $bodyTop, 2 * $rad, 2 * $rad, 270, 90)
+        $path.AddArc($r - 2 * $rad, $b - 2 * $rad, 2 * $rad, 2 * $rad, 0, 90)
+        $path.AddArc($l, $b - 2 * $rad, 2 * $rad, 2 * $rad, 90, 90)
+        $path.CloseFigure()
+        $path
+    }
+    # Se pinta entera en celeste y encima, achicada el ancho del borde (3.5 de 256, al menos 1 px), en oscuro.
+    $border = if ($small) { [Math]::Max(1, [Math]::Round(3.5 * $s)) } else { 3.5 * $s }
+    $g.FillPath((New-Object Drawing.SolidBrush $active), (FolderPath 0))
+    $g.FillPath((New-Object Drawing.SolidBrush $folder), (FolderPath $border))
 
     # Paneles: el de arriba a la izquierda y sus espejos. En tamaños chicos la separación
     # (6 de 256) sería de menos de un píxel: los bordes interiores se fijan con al menos 1 px.

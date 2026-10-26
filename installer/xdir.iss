@@ -1,5 +1,5 @@
 ; Instalador de xdir (Inno Setup 6).
-; Uso: ISCC.exe /DAppVersion=0.1.2 /DSourceExe=..\target\release\xdir.exe /DOutputDir=..\dist installer\xdir.iss
+; Uso: ISCC.exe /DAppVersion=0.1.3 /DSourceExe=..\target\release\xdir.exe /DOutputDir=..\dist installer\xdir.iss
 ; Lo invoca scripts\package.ps1; las rutas relativas son respecto de este archivo.
 
 #ifndef AppVersion

@@ -368,19 +368,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Primera vez: 4 paneles con carpetas habituales del usuario.
+/// Primera vez: 4 paneles en "Este equipo".
 fn default_session() -> Session {
-    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
-    let place = |sub: &str| match &home {
-        Some(h) if h.join(sub).is_dir() => Location::Path(h.join(sub)),
-        Some(h) => Location::Path(h.clone()),
-        None => Location::Computer,
-    };
-    let home_loc = home.clone().map(Location::Path).unwrap_or(Location::Computer);
-    let panes = [home_loc, place("Downloads"), place("Documents"), Location::Computer]
-        .into_iter()
-        .map(|l| PaneState { tabs: vec![l], active: 0 })
-        .collect();
+    let panes = (0..PANES).map(|_| PaneState { tabs: vec![Location::Computer], active: 0 }).collect();
     Session { panes, ..Default::default() }
 }
 

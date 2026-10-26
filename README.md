@@ -19,7 +19,7 @@ El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 
 ## Uso
 
-`xdir.exe [carpeta]` abre en esa carpeta (por defecto, la del usuario).
+`xdir.exe [carpeta]` abre esa carpeta en una pestaña nueva. La primera vez, los cuatro paneles arrancan en "Este equipo"; después se restaura la sesión anterior.
 
 | Atajo | Acción |
 |---|---|

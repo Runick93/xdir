@@ -21,9 +21,11 @@ AppPublisher=Runick
 DefaultDirName={autopf}\xdir
 DefaultGroupName=xdir
 DisableProgramGroupPage=yes
-; Sin admin instala para el usuario actual; con admin se puede elegir para todos.
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+; Esquema clásico: el exe en Program Files para todos los usuarios (pide admin) y la configuración
+; de cada usuario en %APPDATA%\xdir, que la crea la app y la desinstalación borra (ver [UninstallDelete]).
+PrivilegesRequired=admin
+; Borrar {userappdata} en una instalación con admin es intencional.
+UsedUserAreasWarning=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Windows 10 1809.
@@ -34,6 +36,8 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\xdir.exe
+; Nombre en "Aplicaciones instaladas" (sin la versión, que va en su propia columna).
+UninstallDisplayName=xdir
 SetupIconFile=..\assets\xdir.ico
 CloseApplications=yes
 
@@ -42,7 +46,7 @@ Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -51,5 +55,38 @@ Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{autoprograms}\xdir"; Filename: "{app}\xdir.exe"
 Name: "{autodesktop}\xdir"; Filename: "{app}\xdir.exe"; Tasks: desktopicon
 
+[UninstallDelete]
+; Inno solo borra las carpetas que creó; esto cubre una carpeta que ya existía al instalar.
+Type: dirifempty; Name: "{app}"
+; Desinstalar no deja nada: también la sesión y los favoritos del usuario que desinstala.
+Type: filesandordirs; Name: "{userappdata}\xdir"
+
 [Run]
-Filename: "{app}\xdir.exe"; Description: "{cm:LaunchProgram,xdir}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\xdir.exe"; Description: "{cm:LaunchProgram,xdir}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+
+[Code]
+const
+  WM_CLOSE = $0010;
+
+// Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en src/main.rs) para que
+// el desinstalador pueda borrar el exe. WM_CLOSE deja que la app guarde la sesión; si a los 5 s
+// sigue abierta, se la termina.
+procedure CloseXdir();
+var
+  Tries, Code: Integer;
+begin
+  Tries := 0;
+  while (FindWindowByClassName('xdir.main') <> 0) and (Tries < 50) do begin
+    PostMessage(FindWindowByClassName('xdir.main'), WM_CLOSE, 0, 0);
+    Sleep(100);
+    Tries := Tries + 1;
+  end;
+  if FindWindowByClassName('xdir.main') <> 0 then
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM xdir.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  CloseXdir();
+  Result := True;
+end;

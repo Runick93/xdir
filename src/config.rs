@@ -99,6 +99,13 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Self {
+        let mut c = Self::parse_rules(text);
+        // Las reglas propias van primero (gana la primera que coincide); las de fábrica, al final.
+        c.colors.extend(Self::parse_rules(DEFAULT_COLORS).colors);
+        c
+    }
+
+    fn parse_rules(text: &str) -> Self {
         let doc = toml::parse(text);
         let mut c = Self::default();
         c.errors.extend(doc.errors.iter().map(|(l, e)| format!("línea {l}: {e}")));
@@ -209,6 +216,21 @@ fn parse_color(s: &str) -> Option<D2D1_COLOR_F> {
     })
 }
 
+/// Colores por tipo de archivo de fábrica, detrás de los de `[colores]`. El switch "Colores por
+/// tipo" de la rueda dentada los apaga junto con los propios.
+const DEFAULT_COLORS: &str = r##"[colores]
+"*.pdf" = "#E5534B"
+"*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.webp;*.svg;*.ico;*.heic" = "#57AB5A"
+"*.zip;*.7z;*.rar;*.tar;*.gz;*.iso" = "#C69026"
+"*.exe;*.msi;*.bat;*.cmd;*.ps1;*.com" = "#B083F0"
+"*.mp3;*.wav;*.flac;*.ogg;*.m4a;*.mp4;*.mkv;*.avi;*.mov" = "#39C5CF"
+"*.doc;*.docx;*.odt;*.rtf" = "#4F8CE8"
+"*.xls;*.xlsx;*.csv;*.ods" = "#3FA45F"
+"*.ppt;*.pptx;*.odp" = "#E8833A"
+"*.rs;*.py;*.js;*.ts;*.c;*.cpp;*.h;*.cs;*.java;*.go;*.json;*.toml;*.html;*.css" = "#8FB4E8"
+"@oculto" = "#768390"
+"##;
+
 /// Plantilla de la primera vez: todos los atajos de fábrica, comentados, y ejemplos de colores.
 pub fn template() -> String {
     let mut out = String::from(
@@ -237,7 +259,8 @@ pub fn template() -> String {
             # Color del nombre según el tipo de archivo: patrón = \"#RRGGBB\". Gana la primera regla\n\
             # que coincide. Patrones con * y ?, varios separados por ';'. Con @ se elige por\n\
             # atributo: @carpeta, @oculto, @sistema, @solo_lectura, @comprimido, @cifrado.\n\
-            # Ejemplos:\n\
+            # Ya vienen colores de fábrica (PDF, imágenes, comprimidos, ejecutables, audio y video,\n\
+            # Office, código); lo que pongas acá tiene prioridad. Ejemplos:\n\
             # \"*.pdf\"                      = \"#E5534B\"\n\
             # \"*.jpg;*.jpeg;*.png;*.gif\"   = \"#57AB5A\"\n\
             # \"*.zip;*.7z;*.rar\"           = \"#C69026\"\n\
@@ -261,7 +284,8 @@ mod tests {
     fn template_parses_clean_and_keeps_defaults() {
         let c = Config::parse(&template());
         assert!(c.errors.is_empty(), "{:?}", c.errors);
-        assert!(c.colors.is_empty());
+        // Sin reglas propias quedan solo las de fábrica.
+        assert_eq!(c.colors.len(), Config::parse_rules(DEFAULT_COLORS).colors.len());
         assert_eq!(c.keymap.label(commands::Command::NewTab), "Ctrl+T");
         // Sacar los '#' de las líneas de atajos tiene que dar exactamente lo mismo.
         let uncommented: String = template()
@@ -275,7 +299,7 @@ mod tests {
             .join("\n");
         let c2 = Config::parse(&uncommented);
         assert!(c2.errors.is_empty(), "{:?}", c2.errors);
-        assert_eq!(c2.colors.len(), 5);
+        assert_eq!(c2.colors.len(), 5 + Config::parse_rules(DEFAULT_COLORS).colors.len());
         for s in commands::ALL {
             assert_eq!(c2.keymap.label(s.command), c.keymap.label(s.command), "{}", s.id);
         }
@@ -299,9 +323,12 @@ mod tests {
              [colores]\n\"*.PDF; *.ps\" = \"#FF0000\"\n'@oculto' = \"#00FF00\"\n'@raro' = \"#000000\"\n\"*.x\" = \"rojo\"\n[otra]\n",
         );
         assert_eq!(c.keymap.lookup(VIRTUAL_KEY(b'K' as u16), true, false, false), Some(commands::Command::NewTab));
-        assert_eq!(c.colors.len(), 2);
+        let own = 2;
+        assert_eq!(c.colors.len(), own + Config::parse_rules(DEFAULT_COLORS).colors.len());
         assert_eq!(c.colors[0].matches, ColorMatch::Names(vec!["*.pdf".into(), "*.ps".into()]));
         assert_eq!(c.colors[1].matches, ColorMatch::Attr(Attr::Hidden));
+        // Un color propio gana sobre el de fábrica del mismo tipo.
+        assert_eq!(color_for(&c.colors, "a.pdf", false, 0).map(|c| c.r), Some(1.0));
         let lines: Vec<&str> = c.errors.iter().map(|e| e.split(':').next().unwrap()).collect();
         assert_eq!(lines, ["línea 3", "línea 4", "línea 8", "línea 9", "línea 10"], "{:?}", c.errors);
     }

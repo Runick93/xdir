@@ -20,7 +20,10 @@ mod session;
 mod shell;
 mod tab;
 mod theme;
+mod thumbs;
 mod toml;
+#[cfg(feature = "arbol")]
+mod tree;
 mod ui;
 
 use std::collections::HashMap;
@@ -68,7 +71,7 @@ use drop::{DragEvent, DragKind, WM_APP_DRAG};
 use favorites::{Fav, FavPath, Favorites};
 use fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
-use list::Action;
+use list::{Action, ColumnSpec};
 use pane::{Button, FavDrop, FilterView, Pane, PaneHit};
 use render::{Renderer, contains};
 use session::{PaneState, Session};
@@ -251,6 +254,9 @@ struct App {
     groups: Groups,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, HWND)>,
+    /// Árbol de carpetas lateral (experimental).
+    #[cfg(feature = "arbol")]
+    tree: tree::Tree,
     show_favorites: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
@@ -263,6 +269,10 @@ struct App {
     filter_edit: Option<(HWND, usize)>,
     /// El último clic derecho fue sobre la barra de favoritos: (panel, favorito).
     fav_ctx: Option<(usize, Option<FavPath>)>,
+    /// Clic derecho en el encabezado de la lista de ese panel: menú de columnas.
+    header_ctx: Option<usize>,
+    /// Columnas de las listas (las mismas en todas).
+    columns: Vec<ColumnSpec>,
     accent: Accent,
     /// Modo fijado con el switch; None sigue al modo de Windows.
     dark_mode: Option<bool>,
@@ -364,6 +374,8 @@ fn main() -> Result<()> {
             config,
             groups: Groups::load(),
             palette: None,
+            #[cfg(feature = "arbol")]
+            tree: tree::Tree::new(),
             show_favorites: session.show_favorites,
             fav_drop: None,
             tab_drop: None,
@@ -371,6 +383,8 @@ fn main() -> Result<()> {
             fav_edit: None,
             filter_edit: None,
             fav_ctx: None,
+            header_ctx: None,
+            columns: session.columns.clone(),
             accent: session.accent,
             dark_mode: session.dark_mode,
             picker_open: false,
@@ -528,9 +542,15 @@ impl App {
                             _ => None,
                         },
                     };
+                    // Borde de un encabezado de columna: cambiar el ancho.
+                    let column_edge = match (self.drag, self.hit(x, y)) {
+                        (Drag::List(i), _) | (_, Hit::Pane(i, PaneHit::List)) => self.panes[i].tab().list.wants_resize_cursor(x, y),
+                        _ => false,
+                    };
                     let cursor = match splitter {
                         Some(Splitter::Vertical) => IDC_SIZEWE,
                         Some(Splitter::Horizontal) => IDC_SIZENS,
+                        None if column_edge => IDC_SIZEWE,
                         None => IDC_ARROW,
                     };
                     if let Ok(c) = LoadCursorW(None, cursor) {
@@ -599,6 +619,12 @@ impl App {
                     }
                     LRESULT(0)
                 }
+                #[cfg(feature = "arbol")]
+                tree::WM_APP_TREE => {
+                    self.tree.on_loaded();
+                    self.redraw();
+                    LRESULT(0)
+                }
                 WM_APP_PALETTE_KEY => {
                     self.on_palette_key(VIRTUAL_KEY(wparam.0 as u16), lparam.0 == 1);
                     LRESULT(0)
@@ -645,7 +671,12 @@ impl App {
                     let (x, y) = self.mouse_pos(lparam);
                     let _ = SetFocus(Some(self.hwnd));
                     self.fav_ctx = None;
+                    self.header_ctx = None;
                     match self.hit(x, y) {
+                        Hit::Pane(i, PaneHit::List) if self.panes[i].tab().list.in_header(x, y) => {
+                            self.set_active(i);
+                            self.header_ctx = Some(i);
+                        }
                         Hit::Pane(i, PaneHit::List) => {
                             self.set_active(i);
                             self.panes[i].tab_mut().list.on_right_down(x, y);
@@ -658,6 +689,11 @@ impl App {
                     LRESULT(0)
                 }
                 WM_CONTEXTMENU => {
+                    if let Some(pane) = self.header_ctx.take().filter(|_| lparam.0 != -1) {
+                        let pt = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+                        self.show_columns_menu(pane, pt);
+                        return LRESULT(0);
+                    }
                     match self.fav_ctx.take() {
                         Some((pane, path)) if lparam.0 != -1 => {
                             if let Some(act) = self.fav_context_menu(path.as_ref(), false) {
@@ -737,6 +773,17 @@ impl App {
                         Hit::Pane(i, _) => i,
                         _ => self.active,
                     };
+                    #[cfg(feature = "arbol")]
+                    if self.tree.contains(x, y) {
+                        self.tree.on_wheel(delta * wheel_lines());
+                        self.redraw();
+                        return LRESULT(0);
+                    }
+                    // Ctrl+rueda: tamaño de la vista, como en el Explorador.
+                    if key_down(VK_CONTROL) {
+                        self.cycle_view(pane, delta > 0.0);
+                        return LRESULT(0);
+                    }
                     let action = self.panes[pane].tab_mut().list.on_wheel(delta * wheel_lines());
                     self.apply(pane, action);
                     LRESULT(0)
@@ -789,7 +836,101 @@ impl App {
     fn make_tab(&mut self, location: Location) -> Tab {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        Tab::new(id, location, self.show_hidden)
+        let mut tab = Tab::new(id, location, self.show_hidden);
+        tab.list.columns = self.columns.clone();
+        tab
+    }
+
+    /// Ancho que ocupa el árbol de carpetas a la izquierda (0 si no está o no se compiló).
+    fn tree_width(&self) -> f32 {
+        #[cfg(feature = "arbol")]
+        if self.tree.visible {
+            return tree::WIDTH + ui::GAP;
+        }
+        0.0
+    }
+
+    /// Clic en el árbol: expandir/contraer o abrir la carpeta en el panel activo. Devuelve si
+    /// el clic era del árbol.
+    #[cfg(feature = "arbol")]
+    fn on_tree_click(&mut self, x: f32, y: f32) -> bool {
+        if !self.tree.contains(x, y) {
+            return false;
+        }
+        match self.tree.hit(x, y) {
+            tree::TreeHit::Toggle(id) => self.tree.toggle(self.hwnd, id, self.show_hidden),
+            tree::TreeHit::Open(loc) => {
+                let (hwnd, tx) = (self.hwnd, self.tx.clone());
+                self.tab_mut().navigate(hwnd, &tx, loc);
+            }
+            tree::TreeHit::Nothing => {}
+        }
+        self.redraw();
+        true
+    }
+
+    /// Vista de un panel: se aplica a todas sus pestañas (y la toman las nuevas).
+    fn set_view(&mut self, pane: usize, view: list::View) {
+        for tab in &mut self.panes[pane].tabs {
+            tab.list.set_view(view);
+        }
+        self.notice = Some(format!("Vista: {}", view.name().to_lowercase()));
+        self.redraw();
+    }
+
+    /// Ctrl+rueda: vista siguiente (más grande) o anterior sobre el panel.
+    fn cycle_view(&mut self, pane: usize, bigger: bool) {
+        let i = self.panes[pane].tab().list.view.index();
+        let j = if bigger { (i + 1).min(list::VIEWS.len() - 1) } else { i.saturating_sub(1) };
+        if i != j {
+            self.set_view(pane, list::VIEWS[j].0);
+        }
+    }
+
+    /// Las columnas son las mismas en todas las listas (y se guardan en la sesión).
+    fn set_columns(&mut self, columns: Vec<ColumnSpec>) {
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            tab.list.columns = columns.clone();
+        }
+        self.columns = columns;
+        self.redraw();
+    }
+
+    /// Menú del clic derecho en el encabezado: mostrar u ocultar columnas.
+    fn show_columns_menu(&mut self, pane: usize, screen: POINT) {
+        const RESET: usize = 100;
+        let current = self.panes[pane].tab().list.columns.clone();
+        let cmd = unsafe {
+            let Ok(hmenu) = CreatePopupMenu() else { return };
+            for (i, &(col, title, _, _)) in list::COLUMNS.iter().enumerate() {
+                let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+                let mut flags = MF_STRING;
+                if current.iter().any(|c| c.col == col) {
+                    flags |= MF_CHECKED;
+                }
+                // El nombre no se puede ocultar.
+                if col == list::Column::Name {
+                    flags |= MF_GRAYED;
+                }
+                let _ = AppendMenuW(hmenu, flags, i + 1, PCWSTR(wide.as_ptr()));
+            }
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            let wide: Vec<u16> = "Columnas de fábrica".encode_utf16().chain(Some(0)).collect();
+            let _ = AppendMenuW(hmenu, MF_STRING, RESET, PCWSTR(wide.as_ptr()));
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, screen.x, screen.y, self.hwnd, None).0 as usize;
+            let _ = DestroyMenu(hmenu);
+            cmd
+        };
+        match cmd {
+            RESET => self.set_columns(list::default_columns()),
+            i if (1..=list::COLUMNS.len()).contains(&i) => {
+                let list = &mut self.panes[pane].tab_mut().list;
+                list.toggle_column(list::COLUMNS[i - 1].0);
+                let cols = list.columns.clone();
+                self.set_columns(cols);
+            }
+            _ => {}
+        }
     }
 
     fn restore_panes(&mut self, s: &Session, start_path: Option<PathBuf>) {
@@ -797,7 +938,15 @@ impl App {
         for i in 0..PANES {
             let state = s.panes.get(i).or(fallback.panes.get(i)).cloned().unwrap_or_default();
             let locations = if state.tabs.is_empty() { vec![Location::Computer] } else { state.tabs };
-            let tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
+            let view = s.views.get(i).copied().unwrap_or(list::View::Details);
+            let tabs: Vec<Tab> = locations
+                .into_iter()
+                .map(|l| {
+                    let mut t = self.make_tab(l);
+                    t.list.view = view;
+                    t
+                })
+                .collect();
             self.panes.push(Pane::new(tabs, state.active));
         }
         self.active = s.active_pane.min(self.layout.panes() - 1);
@@ -818,6 +967,8 @@ impl App {
             show_favorites: self.show_favorites,
             accent: self.accent,
             dark_mode: self.dark_mode,
+            columns: self.columns.clone(),
+            views: self.panes.iter().map(|p| p.tab().list.view).collect(),
             panes: self
                 .panes
                 .iter()
@@ -915,7 +1066,8 @@ impl App {
     }
 
     fn new_tab(&mut self, pane: usize, location: Location, activate: bool) {
-        let tab = self.make_tab(location);
+        let mut tab = self.make_tab(location);
+        tab.list.view = self.panes[pane].tab().list.view;
         self.panes[pane].add_tab(tab, activate);
         self.sync_visibility();
         self.redraw();
@@ -991,7 +1143,7 @@ impl App {
         if contains(&ui::groups_rect(w, h), x, y) {
             return Hit::Groups;
         }
-        let area = ui::panes_area(w, h);
+        let area = ui::panes_area(w, h, self.tree_width());
         if self.maximized.is_none() {
             for (s, r) in ui::splitter_rects(self.layout, area, self.splits) {
                 if contains(&r, x, y) {
@@ -1028,6 +1180,10 @@ impl App {
                 }
                 _ => self.close_palette(),
             }
+            return;
+        }
+        #[cfg(feature = "arbol")]
+        if self.on_tree_click(x, y) {
             return;
         }
         // Un clic fuera del panel de colores lo cierra (y sigue su curso).
@@ -1197,7 +1353,7 @@ impl App {
         match self.drag {
             Drag::Splitter(s) => {
                 let (w, h) = self.client_dips();
-                self.splits.set(s, ui::split_value(s, ui::panes_area(w, h), x, y));
+                self.splits.set(s, ui::split_value(s, ui::panes_area(w, h, self.tree_width()), x, y));
                 redraw = true;
             }
             Drag::Tab { pane, index, start_x, start_y, moved } => {
@@ -1247,6 +1403,10 @@ impl App {
 
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
+        #[cfg(feature = "arbol")]
+        {
+            redraw |= self.tree.on_mouse_move(x, y);
+        }
         if let Some((pal, _)) = &mut self.palette {
             let h = match hover {
                 Hit::Palette(Some(i)) => Some(i),
@@ -1387,6 +1547,22 @@ impl App {
             Command::Cmd => self.open_console(active, Console::Cmd),
             Command::ToggleDarkMode => self.set_dark_mode(!self.theme.dark),
             Command::SaveGroup => self.open_palette(PaletteMode::GroupName),
+            Command::View(i) => {
+                if let Some(&(view, ..)) = list::VIEWS.get(i as usize) {
+                    self.set_view(active, view);
+                }
+            }
+            Command::SortBy(i) => {
+                if let Some(&(col, ..)) = list::COLUMNS.get(i as usize) {
+                    self.tab_mut().list.set_sort(col);
+                }
+            }
+            Command::ToggleTree => {
+                #[cfg(feature = "arbol")]
+                {
+                    self.tree.visible = !self.tree.visible;
+                }
+            }
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {
@@ -1533,6 +1709,10 @@ impl App {
             Action::BeginDrag => {
                 self.start_drag(pane);
                 return;
+            }
+            Action::ColumnsChanged => {
+                let cols = self.panes[pane].tab().list.columns.clone();
+                self.set_columns(cols);
             }
         }
         self.redraw();
@@ -2579,6 +2759,11 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        let tree_w = self.tree_width();
+        #[cfg(feature = "arbol")]
+        let current_folder = self.panes[self.active].tab().location.target();
+        #[cfg(feature = "arbol")]
+        let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
         let (hover, drag, edit_pane) = (self.hover, self.drag, self.edit.map(|(_, p)| p));
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
@@ -2588,7 +2773,12 @@ impl App {
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, &self.config.colors, |p, w, h| {
-            let area = ui::panes_area(w, h);
+            let area = ui::panes_area(w, h, tree_w);
+            #[cfg(feature = "arbol")]
+            if tree.visible {
+                let r = render::rect(ui::GAP, area.top, ui::GAP + tree::WIDTH, area.bottom);
+                tree.draw(p, r, current_folder.as_deref());
+            }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
             for (i, r) in ui::visible_rects(layout, maximized, area, splits) {

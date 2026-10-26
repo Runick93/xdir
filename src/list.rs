@@ -1,5 +1,6 @@
-//! Lista de archivos en vista de detalles, virtualizada: solo se dibujan las filas visibles,
-//! así que el costo por frame no depende de cuántos archivos tenga la carpeta.
+//! Lista de archivos, virtualizada: solo se dibuja lo que está a la vista, así que el costo por
+//! frame no depende de cuántos archivos tenga la carpeta. En detalles (filas con columnas) o en
+//! cuadrícula de íconos y miniaturas.
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
@@ -9,6 +10,8 @@ use crate::format;
 use crate::fs::Entry;
 use crate::render::{Painter, Rect, contains, rect};
 use crate::theme::alpha;
+use crate::thumbs;
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 pub const ROW_H: f32 = 24.0;
 pub const HEADER_H: f32 = 30.0;
@@ -21,16 +24,143 @@ const PAD: f32 = 10.0;
 pub enum Column {
     Name,
     Modified,
+    Created,
     Type,
+    Extension,
     Size,
+    Attributes,
 }
 
-/// Columnas a la derecha del nombre, de derecha a izquierda: (columna, título, ancho).
-const RIGHT_COLUMNS: [(Column, &str, f32); 3] = [
-    (Column::Size, "Tamaño", 96.0),
-    (Column::Type, "Tipo", 160.0),
-    (Column::Modified, "Fecha de modificación", 160.0),
+/// Todas las columnas: (columna, título, identificador para la sesión, ancho inicial).
+pub const COLUMNS: [(Column, &str, &str, f32); 7] = [
+    (Column::Name, "Nombre", "nombre", 0.0),
+    (Column::Modified, "Fecha de modificación", "modificado", 160.0),
+    (Column::Created, "Fecha de creación", "creado", 160.0),
+    (Column::Type, "Tipo", "tipo", 160.0),
+    (Column::Extension, "Extensión", "extension", 80.0),
+    (Column::Size, "Tamaño", "tamano", 96.0),
+    (Column::Attributes, "Atributos", "atributos", 80.0),
 ];
+
+impl Column {
+    pub fn title(self) -> &'static str {
+        COLUMNS.iter().find(|c| c.0 == self).unwrap().1
+    }
+
+    pub fn id(self) -> &'static str {
+        COLUMNS.iter().find(|c| c.0 == self).unwrap().2
+    }
+
+    pub fn from_id(id: &str) -> Option<Column> {
+        COLUMNS.iter().find(|c| c.2 == id).map(|c| c.0)
+    }
+
+    fn default_width(self) -> f32 {
+        COLUMNS.iter().find(|c| c.0 == self).unwrap().3
+    }
+
+    /// Texto alineado a la derecha (números).
+    fn right_aligned(self) -> bool {
+        self == Column::Size
+    }
+}
+
+/// Columna a la vista con su ancho. El nombre no tiene ancho propio: ocupa lo que sobra.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ColumnSpec {
+    pub col: Column,
+    pub width: f32,
+}
+
+/// Columnas de fábrica, de izquierda a derecha.
+pub fn default_columns() -> Vec<ColumnSpec> {
+    [Column::Name, Column::Modified, Column::Type, Column::Size]
+        .into_iter()
+        .map(|col| ColumnSpec { col, width: col.default_width() })
+        .collect()
+}
+
+/// Cómo se muestran los elementos: filas con columnas, o una cuadrícula de íconos/miniaturas.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Details,
+    Icons,
+    LargeIcons,
+    Thumbnails,
+}
+
+/// (vista, nombre, identificador para la sesión, lado del ícono en DIPs).
+pub const VIEWS: [(View, &str, &str, f32); 4] = [
+    (View::Details, "Detalles", "detalles", 16.0),
+    (View::Icons, "Íconos medianos", "iconos", 48.0),
+    (View::LargeIcons, "Íconos grandes", "iconos_grandes", 96.0),
+    (View::Thumbnails, "Miniaturas", "miniaturas", 160.0),
+];
+
+impl View {
+    pub fn index(self) -> usize {
+        VIEWS.iter().position(|v| v.0 == self).unwrap()
+    }
+
+    pub fn id(self) -> &'static str {
+        VIEWS[self.index()].2
+    }
+
+    pub fn from_id(id: &str) -> Option<View> {
+        VIEWS.iter().find(|v| v.2 == id).map(|v| v.0)
+    }
+
+    pub fn name(self) -> &'static str {
+        VIEWS[self.index()].1
+    }
+
+    fn icon(self) -> f32 {
+        VIEWS[self.index()].3
+    }
+
+    pub fn is_grid(self) -> bool {
+        self != View::Details
+    }
+}
+
+/// Alto del nombre debajo de una miniatura (dos líneas) y márgenes de la cuadrícula.
+const LABEL_H: f32 = 34.0;
+const GRID_PAD: f32 = 8.0;
+
+const MIN_COL_W: f32 = 48.0;
+/// Distancia al borde de un encabezado que cuenta como "agarrar el borde" para cambiar el ancho.
+const EDGE_GRAB: f32 = 5.0;
+
+/// Arrastre en el encabezado.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum HeaderDrag {
+    /// Cambiando el ancho de la columna `index` (en `columns`). `invert`: el borde agarrado es el
+    /// izquierdo (a la derecha del nombre), así que mover a la izquierda la agranda.
+    Resize { index: usize, start_x: f32, start_w: f32, invert: bool },
+    /// Botón apretado sobre un encabezado: clic (ordenar) o, si se mueve, reordenar.
+    Press { index: usize, start_x: f32, moved: bool },
+}
+
+/// Atributos como letras, al estilo del Explorador: R (solo lectura), H (oculto), S (sistema),
+/// A (archivo), C (comprimido), E (cifrado).
+fn attr_letters(attrs: u32) -> String {
+    [(0x1, 'R'), (0x2, 'H'), (0x4, 'S'), (0x20, 'A'), (0x800, 'C'), (0x4000, 'E')]
+        .iter()
+        .filter(|(bit, _)| attrs & bit != 0)
+        .map(|(_, c)| *c)
+        .collect()
+}
+
+/// Extensión en minúsculas (sin punto); vacía para carpetas.
+fn extension_of(e: &Entry) -> &str {
+    if e.is_dir {
+        return "";
+    }
+    match e.sort_key.rfind('.') {
+        Some(i) if i > 0 => &e.sort_key[i + 1..],
+        _ => "",
+    }
+}
 
 /// Lo que la lista le pide al panel después de un evento.
 #[derive(PartialEq, Debug)]
@@ -41,6 +171,8 @@ pub enum Action {
     Open(usize),
     /// Empezar a arrastrar la selección.
     BeginDrag,
+    /// Cambiaron las columnas (orden, ancho): la app las pasa a las demás listas.
+    ColumnsChanged,
 }
 
 pub struct FileList {
@@ -74,6 +206,12 @@ pub struct FileList {
     /// Filtro rápido tal como se escribió (vacío: sin filtro) y sus partes ya en minúsculas.
     filter: String,
     filter_parts: Vec<String>,
+    /// Columnas a la vista, de izquierda a derecha.
+    pub columns: Vec<ColumnSpec>,
+    pub view: View,
+    /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
+    pub folder: Option<std::path::PathBuf>,
+    header_drag: Option<HeaderDrag>,
 }
 
 /// ¿El nombre (en minúsculas) pasa el filtro? Cada parte separada por `;` es un patrón: con `*`
@@ -130,6 +268,10 @@ impl Default for FileList {
             drop_target: None,
             filter: String::new(),
             filter_parts: Vec::new(),
+            columns: default_columns(),
+            view: View::Details,
+            folder: None,
+            header_drag: None,
         }
     }
 }
@@ -140,8 +282,11 @@ fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
         let ord = match sort {
             Column::Name => Ordering::Equal,
             Column::Modified => a.modified.cmp(&b.modified),
+            Column::Created => a.created.cmp(&b.created),
             Column::Type => format::caseless_cmp(&a.type_name, &b.type_name),
+            Column::Extension => extension_of(a).cmp(extension_of(b)),
             Column::Size => a.size.cmp(&b.size),
+            Column::Attributes => attr_letters(a.attrs).cmp(&attr_letters(b.attrs)),
         }
         .then_with(|| format::natural_cmp(&a.sort_key, &b.sort_key));
         if desc { ord.reverse() } else { ord }
@@ -180,7 +325,8 @@ impl FileList {
 
     /// Vacía la lista (navegación a otra carpeta). El filtro no pasa a la carpeta nueva.
     pub fn clear(&mut self) {
-        *self = Self { sort: self.sort, descending: self.descending, show_hidden: self.show_hidden, ..Default::default() };
+        let (columns, view) = (std::mem::take(&mut self.columns), self.view);
+        *self = Self { sort: self.sort, descending: self.descending, show_hidden: self.show_hidden, columns, view, ..Default::default() };
     }
 
     /// Agrega un lote durante la carga progresiva. Solo se ordena el lote nuevo y se mezcla
@@ -243,8 +389,7 @@ impl FileList {
         if self.visible.is_empty() || self.view_h() <= 0.0 {
             return Vec::new();
         }
-        let first = (self.scroll / ROW_H).floor() as usize;
-        let last = (first + (self.view_h() / ROW_H).ceil() as usize + 1).min(self.visible.len());
+        let (first, last) = self.visible_range();
         let mut out = Vec::new();
         for pos in first..last {
             let idx = self.visible[pos] as usize;
@@ -342,20 +487,99 @@ impl FileList {
 
     // ---------- geometría ----------
 
+    // En detalles cada "línea" es una fila; en las cuadrículas, una fila de celdas. Todo lo que
+    // ubica elementos pasa por `line_h`, `per_line` e `item_rect`.
+
+    fn header_h(&self) -> f32 {
+        if self.view.is_grid() { 0.0 } else { HEADER_H }
+    }
+
     fn rows_area(&self) -> Rect {
-        rect(self.area.left, self.area.top + HEADER_H, self.area.right, self.area.bottom)
+        rect(self.area.left, self.area.top + self.header_h(), self.area.right, self.area.bottom)
     }
 
     fn view_h(&self) -> f32 {
-        (self.area.bottom - self.area.top - HEADER_H).max(0.0)
+        (self.area.bottom - self.area.top - self.header_h()).max(0.0)
+    }
+
+    /// Alto de una línea.
+    fn line_h(&self) -> f32 {
+        if self.view.is_grid() { self.view.icon() + LABEL_H + 14.0 } else { ROW_H }
+    }
+
+    /// Ancho de una celda de la cuadrícula.
+    fn cell_w(&self) -> f32 {
+        (self.view.icon() + 40.0).max(96.0)
+    }
+
+    /// Elementos por línea.
+    fn per_line(&self) -> usize {
+        if !self.view.is_grid() {
+            return 1;
+        }
+        let usable = self.area.right - self.area.left - SCROLLBAR_W - GRID_PAD * 2.0;
+        ((usable / self.cell_w()).floor() as usize).max(1)
+    }
+
+    /// Margen de arriba del contenido (la cuadrícula no arranca pegada al borde).
+    fn top_pad(&self) -> f32 {
+        if self.view.is_grid() { GRID_PAD } else { 0.0 }
     }
 
     fn content_h(&self) -> f32 {
-        self.visible.len() as f32 * ROW_H
+        let lines = self.visible.len().div_ceil(self.per_line());
+        lines as f32 * self.line_h() + self.top_pad() * 2.0
     }
 
+    /// Elementos que entran en una página (Re Pág / Av Pág).
     fn page_rows(&self) -> usize {
-        ((self.view_h() / ROW_H).floor() as usize).max(1)
+        ((self.view_h() / self.line_h()).floor() as usize).max(1) * self.per_line()
+    }
+
+    /// Posiciones (en `visible`) a la vista: [primera, última).
+    fn visible_range(&self) -> (usize, usize) {
+        let (lh, per) = (self.line_h(), self.per_line());
+        let first_line = ((self.scroll - self.top_pad()).max(0.0) / lh).floor() as usize;
+        let lines = (self.view_h() / lh).ceil() as usize + 1;
+        ((first_line * per).min(self.visible.len()), ((first_line + lines) * per).min(self.visible.len()))
+    }
+
+    /// Rectángulo de un elemento (fila en detalles, celda en las cuadrículas).
+    fn item_rect(&self, pos: usize) -> Rect {
+        let rows = self.rows_area();
+        if !self.view.is_grid() {
+            let y = rows.top + pos as f32 * ROW_H - self.scroll;
+            return rect(rows.left, y, rows.right - SCROLLBAR_W, y + ROW_H);
+        }
+        let per = self.per_line();
+        let (line, col) = (pos / per, pos % per);
+        // Las celdas se reparten el ancho sobrante, para no dejar un hueco a la derecha.
+        let usable = rows.right - rows.left - SCROLLBAR_W - GRID_PAD * 2.0;
+        let w = (usable / per as f32).max(self.cell_w());
+        let x = rows.left + GRID_PAD + col as f32 * w;
+        let y = rows.top + self.top_pad() + line as f32 * self.line_h() - self.scroll;
+        rect(x, y, x + w, y + self.line_h())
+    }
+
+    /// Elemento bajo el punto (posición en `visible`).
+    fn pos_at(&self, x: f32, y: f32) -> Option<usize> {
+        let rows = self.rows_area();
+        if y < rows.top || y >= rows.bottom || x >= rows.right - SCROLLBAR_W {
+            return None;
+        }
+        if !self.view.is_grid() {
+            return self.row_at(y);
+        }
+        let per = self.per_line();
+        let usable = rows.right - rows.left - SCROLLBAR_W - GRID_PAD * 2.0;
+        let w = (usable / per as f32).max(self.cell_w());
+        let col = ((x - rows.left - GRID_PAD) / w).floor();
+        let line = ((y - rows.top - self.top_pad() + self.scroll) / self.line_h()).floor();
+        if col < 0.0 || line < 0.0 || col as usize >= per {
+            return None;
+        }
+        let pos = line as usize * per + col as usize;
+        (pos < self.visible.len()).then_some(pos)
     }
 
     fn clamp_scroll(&mut self) {
@@ -364,31 +588,109 @@ impl FileList {
     }
 
     fn ensure_visible(&mut self, pos: usize) {
-        let top = pos as f32 * ROW_H;
+        let lh = self.line_h();
+        let top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
         if top < self.scroll {
-            self.scroll = top;
-        } else if top + ROW_H > self.scroll + self.view_h() {
-            self.scroll = top + ROW_H - self.view_h();
+            self.scroll = (top - self.top_pad()).max(0.0);
+        } else if top + lh > self.scroll + self.view_h() {
+            self.scroll = top + lh - self.view_h() + self.top_pad();
         }
         self.clamp_scroll();
     }
 
-    /// Columnas que entran en el ancho disponible: (columna, izquierda, derecha).
-    fn columns(&self) -> Vec<(Column, f32, f32)> {
-        let right_edge = self.area.right - SCROLLBAR_W;
-        let mut out = Vec::new();
-        let mut right = right_edge;
-        for (col, _, width) in RIGHT_COLUMNS {
-            let left = right - width;
-            if left < self.area.left + NAME_MIN {
-                break;
-            }
-            out.push((col, left, right));
-            right = left;
+    /// Cambia la vista conservando el elemento con foco a la vista.
+    pub fn set_view(&mut self, view: View) {
+        self.view = view;
+        self.header_drag = None;
+        self.hover = None;
+        self.scroll = 0.0;
+        if let Some(f) = self.focus {
+            self.ensure_visible(f);
         }
-        out.push((Column::Name, self.area.left, right));
-        out.reverse();
+    }
+
+    /// Columnas que entran en el ancho disponible, de izquierda a derecha: (columna, izquierda,
+    /// derecha). El nombre ocupa lo que dejan las demás (al menos `NAME_MIN`); si no alcanza, se
+    /// dejan de mostrar las del final.
+    fn columns(&self) -> Vec<(Column, f32, f32)> {
+        self.layout_columns().into_iter().map(|(_, c, l, r)| (c, l, r)).collect()
+    }
+
+    /// Igual que `columns`, con el índice de cada una en `self.columns`.
+    fn layout_columns(&self) -> Vec<(usize, Column, f32, f32)> {
+        let avail = self.area.right - SCROLLBAR_W - self.area.left;
+        let room = (avail - NAME_MIN).max(0.0);
+        // Si no entran, todas se angostan en proporción (hasta MIN_COL_W); recién si así tampoco
+        // alcanza, se dejan de mostrar las del final.
+        let widths = |n: usize| -> Vec<f32> {
+            let fixed: f32 = self.columns.iter().take(n).filter(|c| c.col != Column::Name).map(|c| c.width).sum();
+            let k = if fixed > room && fixed > 0.0 { room / fixed } else { 1.0 };
+            self.columns.iter().take(n).map(|c| if c.col == Column::Name { 0.0 } else { (c.width * k).max(MIN_COL_W) }).collect()
+        };
+        let mut shown = self.columns.len();
+        while shown > 1 && widths(shown).iter().sum::<f32>() > room && self.columns[shown - 1].col != Column::Name {
+            shown -= 1;
+        }
+        let w = widths(shown);
+        let name_w = (avail - w.iter().sum::<f32>()).max(NAME_MIN.min(avail));
+        let mut x = self.area.left;
+        let mut out = Vec::with_capacity(shown);
+        for (i, c) in self.columns.iter().take(shown).enumerate() {
+            let cw = if c.col == Column::Name { name_w } else { w[i] };
+            out.push((i, c.col, x, x + cw));
+            x += cw;
+        }
         out
+    }
+
+    /// ¿El punto está en el encabezado de la lista?
+    pub fn in_header(&self, x: f32, y: f32) -> bool {
+        !self.view.is_grid() && y >= self.area.top && y < self.area.top + HEADER_H && x >= self.area.left && x < self.area.right
+    }
+
+    /// Borde de encabezado bajo el mouse, para cambiar un ancho: (índice, izquierdo).
+    /// El borde entre el nombre y la columna de su derecha cambia esa columna.
+    fn edge_at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
+        if !self.in_header(x, y) {
+            return None;
+        }
+        let cols = self.layout_columns();
+        for (k, &(i, col, _, right)) in cols.iter().enumerate() {
+            if (x - right).abs() > EDGE_GRAB {
+                continue;
+            }
+            if col != Column::Name {
+                return Some((i, false));
+            }
+            if let Some(&(j, _, _, _)) = cols.get(k + 1) {
+                return Some((j, true));
+            }
+        }
+        None
+    }
+
+    /// El mouse está sobre un borde de encabezado (cursor de cambiar ancho).
+    pub fn wants_resize_cursor(&self, x: f32, y: f32) -> bool {
+        matches!(self.header_drag, Some(HeaderDrag::Resize { .. })) || self.edge_at(x, y).is_some()
+    }
+
+    /// Muestra u oculta una columna (el nombre no se puede ocultar). Una columna nueva va al final.
+    pub fn toggle_column(&mut self, col: Column) {
+        if col == Column::Name {
+            return;
+        }
+        match self.columns.iter().position(|c| c.col == col) {
+            Some(i) => {
+                self.columns.remove(i);
+                if self.sort == col {
+                    self.sort = Column::Name;
+                    self.descending = false;
+                    let focus = self.focused_index();
+                    self.rebuild(focus);
+                }
+            }
+            None => self.columns.push(ColumnSpec { col, width: col.default_width() }),
+        }
     }
 
     /// Elemento (índice en `entries`) bajo el punto, si hay uno.
@@ -396,7 +698,7 @@ impl FileList {
         if !contains(&self.rows_area(), x, y) {
             return None;
         }
-        self.row_at(y).map(|pos| self.visible[pos] as usize)
+        self.pos_at(x, y).map(|pos| self.visible[pos] as usize)
     }
 
     fn row_at(&self, y: f32) -> Option<usize> {
@@ -481,9 +783,16 @@ impl FileList {
         let page = self.page_rows();
         // Sin selección, la primera flecha selecciona la fila con foco en vez de saltearla.
         let step = usize::from(self.selected.iter().any(|&s| s));
+        // En la cuadrícula arriba/abajo saltan una fila de celdas y izquierda/derecha, una celda.
+        let per = self.per_line();
+        let grid = self.view.is_grid();
         let target = match VIRTUAL_KEY(vk) {
-            VK_UP => cur.saturating_sub(step),
-            VK_DOWN => (cur + step).min(n - 1),
+            VK_UP => cur.saturating_sub(step * per),
+            VK_DOWN if cur + step * per < n => cur + step * per,
+            // Abajo desde la última fila incompleta: el último elemento.
+            VK_DOWN => n - 1,
+            VK_LEFT if grid => cur.saturating_sub(step),
+            VK_RIGHT if grid => (cur + step).min(n - 1),
             VK_PRIOR => cur.saturating_sub(page),
             VK_NEXT => (cur + page).min(n - 1),
             VK_HOME => 0,
@@ -568,21 +877,29 @@ impl FileList {
     pub fn name_rect(&mut self, idx: usize) -> Option<Rect> {
         let pos = self.visible.iter().position(|&v| v as usize == idx)?;
         self.ensure_visible(pos);
+        if self.view.is_grid() {
+            // Debajo de la miniatura, una línea.
+            let cell = self.item_rect(pos);
+            let y = cell.top + 6.0 + self.view.icon() + 4.0;
+            return Some(rect(cell.left + 4.0, y, cell.right - 4.0, y + 22.0));
+        }
         let (_, left, right) = self.columns().into_iter().find(|c| c.0 == Column::Name)?;
-        let y = self.rows_area().top + pos as f32 * ROW_H - self.scroll;
-        Some(rect(left + PAD + ICON + 4.0, y + 1.0, right - PAD, y + ROW_H - 1.0))
+        let row = self.item_rect(pos);
+        Some(rect(left + PAD + ICON + 4.0, row.top + 1.0, right - PAD, row.bottom - 1.0))
     }
 
-    /// Posición en pantalla (DIPs) de la fila con foco, para el menú contextual por teclado.
+    /// Posición en pantalla (DIPs) del elemento con foco, para el menú contextual por teclado.
     pub fn focus_point(&self) -> Option<(f32, f32)> {
-        let pos = self.focus?;
-        let y = self.rows_area().top + pos as f32 * ROW_H - self.scroll + ROW_H;
-        Some((self.area.left + 40.0, y.clamp(self.area.top, self.area.bottom)))
+        let r = self.item_rect(self.focus?);
+        let x = if self.view.is_grid() { (r.left + r.right) / 2.0 } else { self.area.left + 40.0 };
+        Some((x, r.bottom.clamp(self.area.top, self.area.bottom)))
     }
 
     pub fn on_wheel(&mut self, rows: f32) -> Action {
         let before = self.scroll;
-        self.scroll -= rows * ROW_H;
+        // En la cuadrícula, una muesca de la rueda mueve media celda por "línea" de la rueda.
+        let step = if self.view.is_grid() { self.line_h() / 3.0 } else { ROW_H };
+        self.scroll -= rows * step;
         self.clamp_scroll();
         self.update_hover_after_scroll();
         if self.scroll != before { Action::Redraw } else { Action::None }
@@ -590,12 +907,15 @@ impl FileList {
 
     /// Botón izquierdo. Devuelve si hay que capturar el mouse (arrastre de la barra).
     pub fn on_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, shift: bool) -> (Action, bool) {
-        if y >= self.area.top && y < self.area.top + HEADER_H {
-            for (col, left, right) in self.columns() {
-                if x >= left && x < right {
-                    self.set_sort(col);
-                    return (Action::Redraw, false);
-                }
+        if self.in_header(x, y) {
+            // Borde: cambiar el ancho. Encabezado: ordenar al soltar, o reordenar si se arrastra.
+            if let Some((index, invert)) = self.edge_at(x, y) {
+                self.header_drag = Some(HeaderDrag::Resize { index, start_x: x, start_w: self.columns[index].width, invert });
+                return (Action::None, true);
+            }
+            if let Some(&(index, ..)) = self.layout_columns().iter().find(|(_, _, l, r)| x >= *l && x < *r) {
+                self.header_drag = Some(HeaderDrag::Press { index, start_x: x, moved: false });
+                return (Action::None, true);
             }
             return (Action::None, false);
         }
@@ -606,13 +926,13 @@ impl FileList {
                     return (Action::Redraw, true);
                 }
                 // Clic en el riel: avanza una página hacia ese lado.
-                let page = self.page_rows() as f32 * ROW_H;
+                let page = (self.view_h() / self.line_h()).floor().max(1.0) * self.line_h();
                 self.scroll += if y < thumb.top { -page } else { page };
                 self.clamp_scroll();
                 return (Action::Redraw, false);
             }
         }
-        match self.row_at(y) {
+        match self.pos_at(x, y) {
             Some(pos) if ctrl => self.toggle(pos),
             Some(pos) if shift => self.select_range(pos, false),
             Some(pos) => {
@@ -637,6 +957,16 @@ impl FileList {
     pub fn on_mouse_up(&mut self) -> Action {
         self.thumb_drag = None;
         self.press = None;
+        match self.header_drag.take() {
+            Some(HeaderDrag::Press { index, moved: false, .. }) => {
+                if let Some(c) = self.columns.get(index) {
+                    self.set_sort(c.col);
+                }
+                return Action::Redraw;
+            }
+            Some(_) => return Action::ColumnsChanged,
+            None => {}
+        }
         if let Some(pos) = self.pending_select.take() {
             self.select_only(pos);
             return Action::Redraw;
@@ -648,7 +978,7 @@ impl FileList {
         if self.scrollbar().is_some_and(|(track, _)| contains(&track, x, y)) {
             return Action::None;
         }
-        match self.row_at(y) {
+        match self.pos_at(x, y) {
             Some(pos) => {
                 self.select_only(pos);
                 Action::Open(self.visible[pos] as usize)
@@ -658,6 +988,32 @@ impl FileList {
     }
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) -> Action {
+        match self.header_drag {
+            Some(HeaderDrag::Resize { index, start_x, start_w, invert }) => {
+                let delta = if invert { start_x - x } else { x - start_x };
+                // Sin quitarle al nombre su mínimo.
+                let others: f32 = self.columns.iter().enumerate().filter(|(i, c)| *i != index && c.col != Column::Name).map(|(_, c)| c.width).sum();
+                let max = (self.area.right - SCROLLBAR_W - self.area.left - NAME_MIN - others).max(MIN_COL_W);
+                self.columns[index].width = (start_w + delta).clamp(MIN_COL_W, max);
+                return Action::Redraw;
+            }
+            Some(HeaderDrag::Press { index, start_x, moved }) => {
+                if !moved && (x - start_x).abs() < 6.0 {
+                    return Action::None;
+                }
+                // Reordenar en vivo: la columna va a la posición de la que está bajo el mouse.
+                let target = self.layout_columns().iter().find(|(_, _, l, r)| x >= *l && x < *r).map(|(i, ..)| *i);
+                let mut index = index;
+                if let Some(to) = target.filter(|&t| t != index) {
+                    let c = self.columns.remove(index);
+                    self.columns.insert(to, c);
+                    index = to;
+                }
+                self.header_drag = Some(HeaderDrag::Press { index, start_x, moved: true });
+                return Action::Redraw;
+            }
+            None => {}
+        }
         // Unos píxeles de movimiento con el botón apretado sobre un elemento: arrastre.
         if let Some((px, py)) = self.press {
             if (x - px).abs() > 4.0 || (y - py).abs() > 4.0 {
@@ -676,7 +1032,7 @@ impl FileList {
                 return Action::Redraw;
             }
         }
-        let hover = if contains(&self.rows_area(), x, y) { self.row_at(y) } else { None };
+        let hover = if contains(&self.rows_area(), x, y) { self.pos_at(x, y) } else { None };
         if hover != self.hover {
             self.hover = hover;
             return Action::Redraw;
@@ -702,25 +1058,31 @@ impl FileList {
 
         p.fill(area, th.surface);
 
-        // Encabezado.
+        // Encabezado (solo en detalles).
         let header = rect(area.left, area.top, area.right, area.top + HEADER_H);
-        p.fill(header, th.surface_alt);
-        p.fill(rect(header.left, header.bottom - 1.0, header.right, header.bottom), th.border);
-        for &(col, left, right) in &cols {
-            let title = match col {
-                Column::Name => "Nombre",
-                _ => RIGHT_COLUMNS.iter().find(|c| c.0 == col).unwrap().1,
-            };
-            let format = if col == Column::Size { &p.fonts.ui_right } else { &p.fonts.ui_bold };
+        // La columna que se está arrastrando para reordenar, resaltada.
+        let dragging = match self.header_drag {
+            Some(HeaderDrag::Press { index, moved: true, .. }) => self.columns.get(index).map(|c| c.col),
+            _ => None,
+        };
+        if !self.view.is_grid() {
+            p.fill(header, th.surface_alt);
+            p.fill(rect(header.left, header.bottom - 1.0, header.right, header.bottom), th.border);
+        }
+        for &(col, left, right) in cols.iter().filter(|_| !self.view.is_grid()) {
+            if dragging == Some(col) {
+                p.fill(rect(left, header.top, right, header.bottom - 1.0), alpha(th.accent, 0.18));
+            }
+            let format = if col.right_aligned() { &p.fonts.ui_right } else { &p.fonts.ui_bold };
             let text_r = rect(left + PAD, header.top, right - PAD, header.bottom);
-            p.text(format, title, text_r, th.text_dim);
+            p.text(format, col.title(), text_r, th.text_dim);
             if col == self.sort {
                 // Chevron arriba/abajo de Segoe Fluent Icons.
                 let glyph = if self.descending { "\u{E70D}" } else { "\u{E70E}" };
-                let gx = if col == Column::Size { left + 2.0 } else { right - 22.0 };
+                let gx = if col.right_aligned() { left + 2.0 } else { right - 22.0 };
                 p.text(&p.fonts.glyphs, glyph, rect(gx, header.top, gx + 20.0, header.bottom), th.text_dim);
             }
-            if col != Column::Name {
+            if left > area.left {
                 p.fill(rect(left, header.top + 7.0, left + 1.0, header.bottom - 7.0), th.border);
             }
         }
@@ -730,17 +1092,20 @@ impl FileList {
             return;
         }
 
-        let first = (self.scroll / ROW_H).floor() as usize;
-        let count = (self.view_h() / ROW_H).ceil() as usize + 1;
-        let last = (first + count).min(self.visible.len());
-        let text_right = rows.right - SCROLLBAR_W;
+        let (first, last) = self.visible_range();
+        let grid = self.view.is_grid();
 
         p.clip(rows, || {
             for pos in first..last {
                 let idx = self.visible[pos] as usize;
                 let e = &self.entries[idx];
-                let y = rows.top + pos as f32 * ROW_H - self.scroll;
-                let row = rect(rows.left + 4.0, y + 1.0, text_right, y + ROW_H - 1.0);
+                let item = self.item_rect(pos);
+                let y = item.top;
+                let row = if grid {
+                    rect(item.left + 3.0, item.top + 3.0, item.right - 3.0, item.bottom - 3.0)
+                } else {
+                    rect(item.left + 4.0, y + 1.0, item.right, y + ROW_H - 1.0)
+                };
 
                 if self.drop_target == Some(idx) {
                     p.round_fill(row, 4.0, th.selection);
@@ -761,6 +1126,10 @@ impl FileList {
                 // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
                 let color = crate::config::color_for(p.file_colors, &e.sort_key, e.is_dir, e.attrs)
                     .unwrap_or(if e.is_hidden() { th.text_dim } else { th.text });
+                if grid {
+                    self.draw_cell(p, e, row, color);
+                    continue;
+                }
                 for &(col, left, right) in &cols {
                     let cell = rect(left + PAD, y, right - PAD, y + ROW_H);
                     match col {
@@ -771,7 +1140,10 @@ impl FileList {
                             p.text(&p.fonts.ui, &e.display, text, color);
                         }
                         Column::Modified => p.text(&p.fonts.ui, &format::date(e.modified), cell, th.text_secondary),
+                        Column::Created => p.text(&p.fonts.ui, &format::date(e.created), cell, th.text_secondary),
                         Column::Type => p.text(&p.fonts.ui, &e.type_name, cell, th.text_secondary),
+                        Column::Extension => p.text(&p.fonts.ui, extension_of(e), cell, th.text_secondary),
+                        Column::Attributes => p.text(&p.fonts.ui, &attr_letters(e.attrs), cell, th.text_secondary),
                         Column::Size => {
                             let s = match (e.is_dir, e.modified) {
                                 // Unidades (sin fecha): capacidad total.
@@ -790,6 +1162,145 @@ impl FileList {
             let c = if self.thumb_drag.is_some() { alpha(th.scrollbar, th.scrollbar.a * 1.6) } else { th.scrollbar };
             p.round_fill(thumb, 3.0, c);
         }
+    }
+
+    /// Celda de la cuadrícula: miniatura (o ícono grande) arriba y el nombre en hasta dos líneas.
+    fn draw_cell(&self, p: &Painter, e: &Entry, cell: Rect, color: D2D1_COLOR_F) {
+        let size = self.view.icon();
+        let cx = (cell.left + cell.right) / 2.0;
+        let image = rect(cx - size / 2.0, cell.top + 6.0, cx + size / 2.0, cell.top + 6.0 + size);
+        let source = match (&e.pidl, &e.full, &self.folder) {
+            (Some(pidl), _, _) => Some(thumbs::Source::Pidl(pidl.clone())),
+            (_, Some(full), _) => Some(thumbs::Source::Path(full.into())),
+            (_, _, Some(folder)) => Some(thumbs::Source::Path(folder.join(&e.name))),
+            _ => None,
+        };
+        let drawn = source.is_some_and(|s| p.thumbnail(&(s, p.thumb_px(size)), image));
+        if !drawn {
+            // Mientras llega la miniatura: el ícono chico, centrado.
+            let small = 32.0_f32.min(size);
+            let (ix, iy) = (cx - small / 2.0, (image.top + image.bottom) / 2.0 - small / 2.0);
+            p.shell_icon(e.icon, e.overlay, ix, iy, small);
+        }
+        let label = rect(cell.left + 4.0, image.bottom + 4.0, cell.right - 4.0, cell.bottom - 2.0);
+        p.text(&p.fonts.label, &e.display, label, color);
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    fn list(width: f32) -> FileList {
+        let mut l = FileList::default();
+        l.area = rect(0.0, 0.0, width, 400.0);
+        l
+    }
+
+    #[test]
+    fn name_takes_the_rest_and_columns_drop_when_narrow() {
+        let l = list(800.0);
+        let cols = l.columns();
+        assert_eq!(cols.iter().map(|c| c.0).collect::<Vec<_>>(), [Column::Name, Column::Modified, Column::Type, Column::Size]);
+        let name_w = cols[0].2 - cols[0].1;
+        assert_eq!(name_w, 800.0 - SCROLLBAR_W - 160.0 - 160.0 - 96.0);
+        // Angosta: primero se angostan todas; las del final dejan de verse si ni así entran.
+        let narrow = list(NAME_MIN + SCROLLBAR_W + 170.0);
+        assert_eq!(narrow.columns().iter().map(|c| c.0).collect::<Vec<_>>(), [Column::Name, Column::Modified, Column::Type]);
+    }
+
+    #[test]
+    fn header_drag_resizes_and_reorders() {
+        let mut l = list(800.0);
+        let cols = l.columns();
+        // Borde entre Nombre y Modificado: agrandar Modificado moviendo a la izquierda.
+        let edge = cols[0].2;
+        assert_eq!(l.edge_at(edge, 10.0), Some((1, true)));
+        l.on_mouse_down(edge, 10.0, false, false);
+        l.on_mouse_move(edge - 40.0, 10.0);
+        assert_eq!(l.on_mouse_up(), Action::ColumnsChanged);
+        assert_eq!(l.columns[1].width, 200.0);
+        // Arrastrar "Tamaño" sobre "Tipo": cambia el orden.
+        let cols = l.columns();
+        let (size_mid, type_mid) = ((cols[3].1 + cols[3].2) / 2.0, (cols[2].1 + cols[2].2) / 2.0);
+        l.on_mouse_down(size_mid, 10.0, false, false);
+        l.on_mouse_move(type_mid, 10.0);
+        assert_eq!(l.on_mouse_up(), Action::ColumnsChanged);
+        assert_eq!(l.columns.iter().map(|c| c.col).collect::<Vec<_>>(), [Column::Name, Column::Modified, Column::Size, Column::Type]);
+        // Clic sin mover: ordena.
+        let cols = l.columns();
+        l.on_mouse_down((cols[2].1 + cols[2].2) / 2.0, 10.0, false, false);
+        assert_eq!(l.on_mouse_up(), Action::Redraw);
+        assert_eq!(l.sort, Column::Size);
+    }
+
+    fn entry(name: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            full: None,
+            group: 0,
+            pidl: None,
+            display: name.into(),
+            sort_key: name.to_lowercase(),
+            is_dir: false,
+            size: 0,
+            modified: 0,
+            created: 0,
+            attrs: 0,
+            type_name: std::sync::Arc::from("Archivo"),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+        }
+    }
+
+    #[test]
+    fn grid_geometry_and_keys() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
+        let mut l = list(800.0);
+        l.append((0..25).map(|i| entry(&format!("f{i:02}"))).collect());
+        l.set_view(View::LargeIcons);
+        let per = l.per_line();
+        assert!(per > 1, "en 800 DIPs entra más de una celda por fila");
+        assert!(!l.in_header(10.0, 10.0), "la cuadrícula no tiene encabezado");
+        // El centro de cada celda a la vista devuelve esa celda.
+        let (first, last) = l.visible_range();
+        for pos in first..last {
+            let r = l.item_rect(pos);
+            if r.bottom <= l.rows_area().bottom {
+                assert_eq!(l.pos_at((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0), Some(pos));
+            }
+        }
+        // Flechas: derecha +1, abajo +una fila, izquierda/arriba vuelven.
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus, Some(1));
+        l.on_key(VK_DOWN.0, false, false);
+        assert_eq!(l.focus, Some(1 + per));
+        l.on_key(VK_UP.0, false, false);
+        l.on_key(VK_LEFT.0, false, false);
+        assert_eq!(l.focus, Some(0));
+        // Abajo desde la última fila incompleta va al último elemento.
+        l.select_index(l.visible[24] as usize);
+        l.on_key(VK_DOWN.0, false, false);
+        assert_eq!(l.focus, Some(24));
+        // En detalles, izquierda/derecha no son de la lista.
+        l.set_view(View::Details);
+        assert_eq!(l.on_key(VK_RIGHT.0, false, false), None);
+    }
+
+    #[test]
+    fn toggle_columns() {
+        let mut l = list(800.0);
+        l.toggle_column(Column::Attributes);
+        assert_eq!(l.columns.last().map(|c| c.col), Some(Column::Attributes));
+        l.set_sort(Column::Type);
+        l.toggle_column(Column::Type);
+        assert!(!l.columns.iter().any(|c| c.col == Column::Type));
+        assert_eq!(l.sort, Column::Name, "ocultar la columna de orden vuelve a ordenar por nombre");
+        l.toggle_column(Column::Name);
+        assert!(l.columns.iter().any(|c| c.col == Column::Name));
+        assert_eq!(attr_letters(0x1 | 0x2 | 0x20), "RHA");
     }
 }
 

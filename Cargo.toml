@@ -14,3 +14,8 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[features]
+# Árbol de carpetas lateral (F-3.5), experimental: apagado por defecto.
+# Para probarlo: scripts\build.cmd build --release --features arbol
+arbol = []

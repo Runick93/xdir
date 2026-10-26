@@ -30,10 +30,10 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
     DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+    DWRITE_WORD_WRAPPING_EMERGENCY_BREAK, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
     IDWriteTextFormat,
 };
 use windows::Win32::Graphics::DirectComposition::{
@@ -54,6 +54,7 @@ use windows::core::{BOOL, HSTRING, Interface, PCWSTR, Result, w};
 
 use crate::config::ColorRule;
 use crate::icons;
+use crate::thumbs;
 use crate::theme::Theme;
 
 pub type Rect = D2D_RECT_F;
@@ -80,6 +81,8 @@ pub struct Fonts {
     /// Íconos de interfaz (Segoe Fluent Icons en Windows 11, MDL2 Assets en Windows 10).
     pub glyphs: IDWriteTextFormat,
     pub glyphs_small: IDWriteTextFormat,
+    /// Nombre debajo de una miniatura: centrado, arriba, partido en varias líneas y con "…" si no entra.
+    pub label: IDWriteTextFormat,
 }
 
 struct Gpu {
@@ -225,6 +228,7 @@ impl Renderer {
         self.target = None;
         // Los bitmaps de íconos pertenecen al dispositivo perdido.
         self.icons.borrow_mut().bitmaps.clear();
+        self.icons.borrow_mut().thumbs.clear();
     }
 }
 
@@ -385,6 +389,32 @@ impl Painter<'_> {
         };
     }
 
+    /// Miniatura centrada en `r`, sin deformar (las imágenes no son cuadradas) y sin agrandarla
+    /// más que su tamaño en píxeles. Devuelve false si todavía no está (se dibuja otra cosa).
+    pub fn thumbnail(&self, key: &thumbs::Key, r: Rect) -> bool {
+        let Some(bitmap) = self.icons.borrow_mut().thumb(self.ctx, key) else { return false };
+        let size = unsafe { bitmap.GetPixelSize() };
+        let (bw, bh) = (size.width as f32, size.height as f32);
+        if bw <= 0.0 || bh <= 0.0 {
+            return false;
+        }
+        // Las miniaturas vienen en píxeles; el área está en DIPs.
+        let dpi_k = self.icons.borrow().dpi_k;
+        let k = ((r.right - r.left) / bw).min((r.bottom - r.top) / bh).min(1.0 / dpi_k.max(0.01));
+        let (w, h) = (bw * k, bh * k);
+        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        let dest = rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
+        unsafe {
+            self.ctx.DrawBitmap(&bitmap, Some(&dest), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+        }
+        true
+    }
+
+    /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
+    pub fn thumb_px(&self, dips: f32) -> u32 {
+        (dips * self.icons.borrow().dpi_k).round() as u32
+    }
+
     pub fn clip<R>(&self, r: Rect, f: impl FnOnce() -> R) -> R {
         unsafe {
             self.ctx.PushAxisAlignedClip(&r, windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED);
@@ -407,6 +437,7 @@ impl Fonts {
             ui_bold: make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
             glyphs: make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 14.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
             glyphs_small: make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 10.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+            label: label_format(dwrite, family)?,
         })
     }
 }
@@ -421,6 +452,16 @@ fn has_font(dwrite: &IDWriteFactory, name: &str) -> bool {
         let (mut index, mut exists) = (0u32, BOOL(0));
         collection.FindFamilyName(&HSTRING::from(name), &mut index, &mut exists).is_ok() && exists.as_bool()
     }
+}
+
+fn label_format(dwrite: &IDWriteFactory, family: PCWSTR) -> Result<IDWriteTextFormat> {
+    let f = text_format(dwrite, family, DWRITE_FONT_WEIGHT_NORMAL, 12.0, DWRITE_TEXT_ALIGNMENT_CENTER)?;
+    unsafe {
+        f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+        // Corta por palabras y, si una palabra sola no entra, en cualquier letra.
+        f.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
+    }
+    Ok(f)
 }
 
 fn text_format(
@@ -471,13 +512,36 @@ struct Icons {
     kind: icons::ListKind,
     hwnd: HWND,
     bitmaps: HashMap<(i32, u8), Option<ID2D1Bitmap1>>,
+    /// Píxeles por DIP del monitor (las miniaturas se piden en píxeles).
+    dpi_k: f32,
+    /// Miniaturas ya convertidas (o que no se pudieron obtener).
+    thumbs: HashMap<thumbs::Key, Option<ID2D1Bitmap1>>,
 }
+
+/// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
+const MAX_THUMBS: usize = 1500;
 
 impl Icons {
     fn new(dpi: u32) -> Self {
         let kind = icons::list_for_dpi(dpi);
         icons::prewarm(kind);
-        Self { kind, hwnd: HWND::default(), bitmaps: HashMap::new() }
+        Self { kind, hwnd: HWND::default(), bitmaps: HashMap::new(), dpi_k: dpi as f32 / 96.0, thumbs: HashMap::new() }
+    }
+
+    /// Miniatura del elemento; si no está, la encarga y devuelve None.
+    fn thumb(&mut self, ctx: &ID2D1DeviceContext, key: &thumbs::Key) -> Option<ID2D1Bitmap1> {
+        for (k, px) in thumbs::take_done() {
+            let bitmap = px.and_then(|px| bitmap_from(ctx, &px));
+            self.thumbs.insert(k, bitmap);
+        }
+        if let Some(hit) = self.thumbs.get(key) {
+            return hit.clone();
+        }
+        if self.thumbs.len() > MAX_THUMBS {
+            self.thumbs.clear();
+        }
+        thumbs::request(self.hwnd, key.clone());
+        None
     }
 
     fn get(&mut self, ctx: &ID2D1DeviceContext, index: i32, overlay: u8) -> Option<ID2D1Bitmap1> {
@@ -486,22 +550,24 @@ impl Icons {
         }
         // Todavía no está: se dibuja sin ícono y se reintenta cuando avise el hilo.
         let pixels = icons::get(self.hwnd, self.kind, index, overlay)?;
-        let bitmap = pixels.and_then(|px| unsafe {
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-                ..Default::default()
-            };
-            let size = D2D_SIZE_U { width: px.width, height: px.height };
-            ctx.CreateBitmap(size, Some(px.data.as_ptr() as *const c_void), px.width * 4, &props).ok()
-        });
+        let bitmap = pixels.and_then(|px| bitmap_from(ctx, &px));
         self.bitmaps.insert((index, overlay), bitmap.clone());
         bitmap
+    }
+}
+
+/// Píxeles BGRA premultiplicados → bitmap de Direct2D.
+fn bitmap_from(ctx: &ID2D1DeviceContext, px: &icons::Pixels) -> Option<ID2D1Bitmap1> {
+    unsafe {
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            ..Default::default()
+        };
+        let size = D2D_SIZE_U { width: px.width, height: px.height };
+        ctx.CreateBitmap(size, Some(px.data.as_ptr() as *const c_void), px.width * 4, &props).ok()
     }
 }
 

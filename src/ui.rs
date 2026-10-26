@@ -79,9 +79,10 @@ impl Splits {
     }
 }
 
-/// Área de los paneles (sin márgenes ni barra de estado).
-pub fn panes_area(w: f32, h: f32) -> Rect {
-    rect(GAP, GAP / 2.0, w - GAP, h - STATUSBAR_H)
+/// Área de los paneles (sin márgenes ni barra de estado). `left`: ancho que ocupa algo a la
+/// izquierda (el árbol de carpetas, si está).
+pub fn panes_area(w: f32, h: f32, left: f32) -> Rect {
+    rect(GAP + left, GAP / 2.0, w - GAP, h - STATUSBAR_H)
 }
 
 /// Rectángulos de cada panel visible, en orden.

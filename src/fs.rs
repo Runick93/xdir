@@ -155,6 +155,8 @@ pub struct Entry {
     pub size: u64,
     /// FILETIME en UTC; 0 si no aplica.
     pub modified: u64,
+    /// Fecha de creación (FILETIME en UTC); 0 si no aplica.
+    pub created: u64,
     pub attrs: u32,
     pub type_name: Arc<str>,
     /// Índice en la lista de imágenes del sistema.
@@ -304,6 +306,7 @@ fn list_dir(out: &mut Batcher, path: &Path) {
             is_dir,
             size: if is_dir { 0 } else { meta.file_size() },
             modified: meta.last_write_time(),
+            created: meta.creation_time(),
             attrs,
             type_name,
             icon,
@@ -367,6 +370,7 @@ fn list_computer(out: &mut Batcher) {
             is_dir: true,
             size: 0,
             modified: 0,
+            created: 0,
             attrs: FILE_ATTRIBUTE_DIRECTORY.0,
             type_name: Arc::from(from_wide(&info.szTypeName)),
             icon: info.iIcon,
@@ -497,6 +501,7 @@ fn shell_entry(item: &IShellItem, group: u8) -> Option<Entry> {
         is_dir,
         size,
         modified,
+        created: 0,
         attrs,
         type_name: Arc::from(type_name),
         icon,
@@ -555,6 +560,7 @@ fn list_drives(out: &mut Batcher) {
             is_dir: true,
             size: total,
             modified: 0,
+            created: 0,
             attrs: FILE_ATTRIBUTE_DIRECTORY.0,
             type_name,
             icon,

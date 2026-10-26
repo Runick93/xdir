@@ -256,6 +256,30 @@ unsafe fn icon_pixels(icon: HICON) -> Option<Pixels> {
     }
 }
 
+/// Píxeles BGRA premultiplicados de un bitmap de 32 bits (miniaturas del Shell). Si no trae
+/// canal alfa (todo en 0), se toma como opaco.
+pub unsafe fn bitmap_pixels(bitmap: HBITMAP) -> Option<Pixels> {
+    unsafe {
+        let mut bm = BITMAP::default();
+        if GetObjectW(bitmap.into(), size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut c_void)) == 0 {
+            return None;
+        }
+        let (w, h) = (bm.bmWidth as u32, bm.bmHeight.unsigned_abs());
+        let mut data = read_bits(bitmap, w, h)?;
+        if data.chunks_exact(4).all(|p| p[3] == 0) {
+            data.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+        } else {
+            for p in data.chunks_exact_mut(4) {
+                let a = p[3] as u32;
+                for c in &mut p[..3] {
+                    *c = (*c as u32 * a / 255) as u8;
+                }
+            }
+        }
+        Some(Pixels { width: w, height: h, data })
+    }
+}
+
 unsafe fn read_bits(bitmap: HBITMAP, w: u32, h: u32) -> Option<Vec<u8>> {
     let mut bi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {

@@ -211,7 +211,7 @@ pub fn template() -> String {
          # Si una tecla ya la usaba otra acción, pasa a la nueva.\n",
     );
     let width = commands::ALL.iter().map(|s| s.id.len()).max().unwrap_or(0);
-    for s in commands::ALL {
+    for s in commands::ALL.iter().filter(|s| commands::available(s.command)) {
         let keys: Vec<String> = s.default_keys.iter().map(|k| toml::quote(k)).collect();
         let value = match keys.len() {
             0 => "\"\"".to_string(),

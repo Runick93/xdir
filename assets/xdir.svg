@@ -2,9 +2,11 @@
      Carpeta oscura con borde celeste; cuatro paneles con las esquinas exteriores cortadas en diagonal:
      el espacio negativo forma una X. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <path d="M17.75 52 a14.25 14.25 0 0 1 14.25-14.25 H88 a10 10 0 0 1 8 4 L114 61.75 H224 a14.25 14.25 0 0 1 14.25 14.25 V204 a14.25 14.25 0 0 1-14.25 14.25 H32 a14.25 14.25 0 0 1-14.25-14.25 Z" fill="#1F2023" stroke="#5BC9FB" stroke-width="3.5"/>
-  <polygon points="50,80 94,80 125,109 125,139 87,139 50,103" fill="#5BC9FB"/>
-  <polygon points="206,80 162,80 131,109 131,139 169,139 206,103" fill="#8391A0"/>
-  <polygon points="50,204 94,204 125,175 125,145 87,145 50,181" fill="#8391A0"/>
-  <polygon points="206,204 162,204 131,175 131,145 169,145 206,181" fill="#8391A0"/>
+  <path d="M18.375 56 a15.625 15.625 0 0 1 15.625-15.625 H93 L110.9 62.375 H222 a15.625 15.625 0 0 1 15.625 15.625 V200 a15.625 15.625 0 0 1-15.625 15.625 H34 a15.625 15.625 0 0 1-15.625-15.625 Z" fill="#181A1C" stroke="#5ACAFD" stroke-width="4.75" stroke-linejoin="round"/>
+  <g stroke-width="6" stroke-linejoin="round">
+    <polygon points="49,81 91,81 121,111 121,135 85,135 49,99" fill="#5ACAFD" stroke="#5ACAFD"/>
+    <polygon points="207,81 165,81 135,111 135,135 171,135 207,99" fill="#DCE3EC" stroke="#DCE3EC"/>
+    <polygon points="49,201 91,201 121,171 121,147 85,147 49,183" fill="#DCE3EC" stroke="#DCE3EC"/>
+    <polygon points="207,201 165,201 135,171 135,147 171,147 207,183" fill="#DCE3EC" stroke="#DCE3EC"/>
+  </g>
 </svg>

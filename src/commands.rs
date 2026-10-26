@@ -50,6 +50,17 @@ pub enum Command {
     ToggleDarkMode,
     SaveGroup,
     OpenConfig,
+    /// Vista N (índice de `list::VIEWS`).
+    View(u8),
+    /// Ordenar por la columna N (índice de `list::COLUMNS`); repetirlo invierte el orden.
+    SortBy(u8),
+    /// Árbol de carpetas lateral: solo existe compilando con la feature `arbol`.
+    ToggleTree,
+}
+
+/// ¿La acción existe en esta compilación? (las experimentales dependen de una feature).
+pub fn available(c: Command) -> bool {
+    c != Command::ToggleTree || cfg!(feature = "arbol")
 }
 
 /// Una acción: identificador para `config.toml`, nombre para la paleta y atajos de fábrica.
@@ -112,6 +123,17 @@ pub const ALL: &[Spec] = &[
     spec(Command::ToggleDarkMode, "modo_oscuro", "Cambiar entre modo claro y oscuro", &[]),
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),
     spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
+    spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),
+    spec(Command::View(1), "vista_iconos", "Vista: íconos medianos", &["Ctrl+Shift+2"]),
+    spec(Command::View(2), "vista_iconos_grandes", "Vista: íconos grandes", &["Ctrl+Shift+3"]),
+    spec(Command::View(3), "vista_miniaturas", "Vista: miniaturas", &["Ctrl+Shift+4"]),
+    spec(Command::SortBy(0), "ordenar_nombre", "Ordenar por nombre", &[]),
+    spec(Command::SortBy(1), "ordenar_modificado", "Ordenar por fecha de modificación", &[]),
+    spec(Command::SortBy(2), "ordenar_creado", "Ordenar por fecha de creación", &[]),
+    spec(Command::SortBy(3), "ordenar_tipo", "Ordenar por tipo", &[]),
+    spec(Command::SortBy(4), "ordenar_extension", "Ordenar por extensión", &[]),
+    spec(Command::SortBy(5), "ordenar_tamano", "Ordenar por tamaño", &[]),
+    spec(Command::ToggleTree, "arbol", "Mostrar u ocultar el árbol de carpetas (experimental)", &["Ctrl+Shift+E"]),
 ];
 
 /// Tecla con modificadores.
@@ -199,6 +221,7 @@ impl Default for Keymap {
     fn default() -> Self {
         let bindings = ALL
             .iter()
+            .filter(|s| available(s.command))
             .flat_map(|s| s.default_keys.iter().map(move |k| (parse_combo(k).expect("atajo de fábrica válido"), s.command)))
             .collect();
         Self { bindings }
@@ -254,7 +277,7 @@ mod tests {
     fn defaults_are_consistent() {
         let km = Keymap::default();
         let mut seen = std::collections::HashSet::new();
-        for s in ALL {
+        for s in ALL.iter().filter(|s| available(s.command)) {
             for k in s.default_keys {
                 let c = parse_combo(k).unwrap();
                 assert!(seen.insert(c), "atajo repetido: {k}");
@@ -263,6 +286,16 @@ mod tests {
         }
         let ids: std::collections::HashSet<_> = ALL.iter().map(|s| s.id).collect();
         assert_eq!(ids.len(), ALL.len(), "identificadores repetidos");
+    }
+
+    /// El árbol solo existe con la feature `arbol`: sin ella, ni su atajo queda tomado.
+    #[test]
+    fn experimental_tree_depends_on_feature() {
+        let km = Keymap::default();
+        let e = parse_combo("Ctrl+Shift+E").unwrap();
+        let bound = km.lookup(VIRTUAL_KEY(e.vk), e.ctrl, e.shift, e.alt);
+        assert_eq!(available(Command::ToggleTree), cfg!(feature = "arbol"));
+        assert_eq!(bound, cfg!(feature = "arbol").then_some(Command::ToggleTree));
     }
 
     #[test]

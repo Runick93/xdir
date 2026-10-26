@@ -167,7 +167,7 @@ pub fn search(mode: PaletteMode, query: &str, src: &Sources, expand: impl Fn(&st
             .iter()
             .enumerate()
             // Abrir la paleta desde la paleta no hace nada; "ir a carpeta" solo sin buscar.
-            .filter(|(_, s)| s.command != Command::Palette && (s.command != Command::JumpTo || folded.is_empty()))
+            .filter(|(_, s)| commands::available(s.command) && s.command != Command::Palette && (s.command != Command::JumpTo || folded.is_empty()))
             .filter_map(|(i, s)| {
                 let name = fold(s.name);
                 if !folded.iter().all(|w| name.contains(w.as_str())) {

@@ -542,7 +542,13 @@ impl Pane {
 
         // Lista, un poco adentro del borde para no tapar las esquinas redondeadas.
         self.list = rect(area.left + 1.0, top, area.right - 1.0, area.bottom - PANE_RADIUS * 0.75);
-        self.tabs[self.active].list.draw(p, self.list, active_pane);
+        // La lista necesita su carpeta para pedir las miniaturas por ruta.
+        let tab = &mut self.tabs[self.active];
+        tab.list.folder = match &tab.location {
+            Location::Path(p) => Some(p.clone()),
+            _ => None,
+        };
+        tab.list.draw(p, self.list, active_pane);
 
         // Contorno encima de todo; de acento si es el panel activo.
         let stroke = if active_pane { (th.accent, 1.5) } else { (th.border, 1.0) };

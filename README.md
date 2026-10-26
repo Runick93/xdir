@@ -35,7 +35,8 @@ El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 | Flechas, Re Pág, Av Pág, Inicio, Fin | Moverse (con Shift extiende la selección, con Ctrl solo mueve el foco) |
 | Letras | Saltar al primer nombre que empieza así |
 | Ctrl+F, embudo de la barra de dirección | Filtro rápido: texto (contiene), comodines `*` `?` (`*.pdf`), varios separados por `;`. Enter lo deja aplicado, Esc lo quita. Se limpia al cambiar de carpeta |
-| Clic en un encabezado | Ordenar por esa columna (otro clic invierte) |
+| Clic en un encabezado | Ordenar por esa columna (otro clic invierte); arrastrarlo lo reordena, arrastrar su borde cambia el ancho, clic derecho elige columnas |
+| Ctrl+Shift+1..4, Ctrl+rueda | Vista: detalles, íconos medianos, íconos grandes, miniaturas |
 | Tab / Shift+Tab, Alt+1..4 | Panel siguiente / anterior / panel N |
 | Ctrl+1..5, botones abajo a la derecha | Layout: 1, 2 lado a lado, 2 apilados, 3, 4 paneles |
 | Ctrl+M, botón a la derecha de las pestañas, doble clic en la tira de pestañas | Maximizar el panel activo o volver al layout (cambiar de panel también lo restaura) |
@@ -80,6 +81,27 @@ si junto al `.exe` hay un archivo `xdir.portable`, se guarda ahí (modo portable
 cuenta) se anota en `historial.txt`, junto a la sesión, con la cantidad de visitas y la fecha de
 la última. Ctrl+P ordena por esas dos cosas: lo usado seguido y hace poco aparece primero. Las
 carpetas que ya no existen salen del historial al intentar abrirlas.
+
+## Vistas y columnas
+
+- **Vistas:** detalles, íconos medianos, íconos grandes y miniaturas (Ctrl+Shift+1..4, Ctrl+rueda o
+  la paleta). Cada panel recuerda la suya. Las miniaturas son las del Shell (imágenes, videos,
+  PDF) y se piden solo para lo que está a la vista, en un hilo aparte.
+- **Columnas:** clic derecho en el encabezado para mostrar u ocultar (fecha de creación,
+  extensión, atributos…). Arrastrar un encabezado las reordena; arrastrar su borde cambia el
+  ancho; un clic ordena. Valen para todas las pestañas y se guardan en la sesión. En las vistas
+  de cuadrícula se ordena desde la paleta ("Ordenar por…").
+
+### Árbol de carpetas (experimental)
+
+Un panel lateral con la carpeta del usuario y las unidades, que navega el panel activo. Está
+detrás de la feature `arbol`, apagada por defecto: sin ella no se compila nada del árbol.
+
+```bat
+scripts\build.cmd build --release --features arbol
+```
+
+Con esa compilación se muestra u oculta con Ctrl+Shift+E (o "árbol" en la paleta).
 
 ## Configuración
 

@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use crate::fs::Location;
+use crate::list::{Column, ColumnSpec, View, default_columns};
 use crate::theme::{Accent, DEFAULT_ACCENT};
 
 const FILE_NAME: &str = "sesion.toml";
@@ -35,6 +36,10 @@ pub struct Session {
     /// Modo fijado por el usuario; None sigue a Windows.
     pub dark_mode: Option<bool>,
     pub panes: Vec<PaneState>,
+    /// Columnas de las listas, de izquierda a derecha.
+    pub columns: Vec<ColumnSpec>,
+    /// Vista de cada panel (detalles, íconos, miniaturas), en el orden de `panes`.
+    pub views: Vec<View>,
 }
 
 impl Default for Session {
@@ -51,6 +56,8 @@ impl Default for Session {
             accent: DEFAULT_ACCENT,
             dark_mode: None,
             panes: Vec::new(),
+            columns: default_columns(),
+            views: Vec::new(),
         }
     }
 }
@@ -100,6 +107,15 @@ fn write(s: &Session) -> String {
         Some(true) => "modo = \"oscuro\"\n",
         Some(false) => "modo = \"claro\"\n",
     };
+    // "nombre", "modificado:160", ...: el nombre no tiene ancho (ocupa lo que sobra).
+    let cols: Vec<String> = s
+        .columns
+        .iter()
+        .map(|c| if c.col == Column::Name { quote(c.col.id()) } else { quote(&format!("{}:{}", c.col.id(), c.width.round())) })
+        .collect();
+    out += &format!("columnas = [{}]\n", cols.join(", "));
+    let views: Vec<String> = s.views.iter().map(|v| quote(v.id())).collect();
+    out += &format!("vistas = [{}]\n", views.join(", "));
     for pane in &s.panes {
         out += "\n[[panel]]\n";
         out += &format!("pestana_activa = {}\n", pane.active);
@@ -137,6 +153,25 @@ fn parse(text: &str) -> Session {
                 }
             }
             ("maximizada", None) => s.maximized = boolean().unwrap_or(false),
+            ("vistas", None) => {
+                s.views = parse_list(value).iter().map(|v| View::from_id(v).unwrap_or(View::Details)).collect();
+            }
+            ("columnas", None) => {
+                let mut cols: Vec<ColumnSpec> = parse_list(value)
+                    .iter()
+                    .filter_map(|item| {
+                        let (id, width) = item.split_once(':').unwrap_or((item, ""));
+                        let col = Column::from_id(id.trim())?;
+                        let width = width.trim().parse::<f32>().unwrap_or(0.0).max(48.0);
+                        Some(ColumnSpec { col, width })
+                    })
+                    .collect();
+                cols.dedup_by_key(|c| c.col);
+                // Sin el nombre la lista no sirve: se vuelve a las de fábrica.
+                if cols.iter().any(|c| c.col == Column::Name) {
+                    s.columns = cols;
+                }
+            }
             ("layout", None) => s.layout = int().unwrap_or(4).clamp(0, 4) as usize,
             ("division_x", None) => s.split_x = float().unwrap_or(0.5),
             ("division_y", None) => s.split_y = float().unwrap_or(0.5),
@@ -270,8 +305,16 @@ mod tests {
                 },
                 PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into())], active: 0 },
             ],
+            columns: vec![
+                ColumnSpec { col: Column::Size, width: 90.0 },
+                ColumnSpec { col: Column::Name, width: 48.0 },
+                ColumnSpec { col: Column::Created, width: 150.0 },
+            ],
+            views: vec![View::Thumbnails, View::Details, View::Icons],
         };
         assert_eq!(parse(&write(&s)), s);
+        // Sin la columna del nombre, las de fábrica.
+        assert_eq!(parse("columnas = [\"tamano:90\"]\n").columns, default_columns());
     }
 
     #[test]

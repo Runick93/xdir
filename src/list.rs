@@ -239,6 +239,9 @@ pub struct FileList {
     pub folder: Option<std::path::PathBuf>,
     header_drag: Option<HeaderDrag>,
     band: Option<Band>,
+    /// Apretado sobre una fila, pero pasado el nombre (otras columnas): un clic selecciona la fila
+    /// y un arrastre arma el rectángulo (solo el nombre arrastra el archivo). Punto y Ctrl.
+    press_band: Option<(f32, f32, bool)>,
     /// Detalles: hasta dónde llega el ícono y el nombre de cada fila dibujada (x de la ventana),
     /// desde la posición `name_ends_first`. Lo de más a la derecha, en la misma columna, es hueco.
     name_ends: Vec<f32>,
@@ -305,6 +308,7 @@ impl Default for FileList {
             folder: None,
             header_drag: None,
             band: None,
+            press_band: None,
             name_ends: Vec::new(),
             name_ends_first: 0,
         }
@@ -850,6 +854,14 @@ impl FileList {
 
     // ---------- selección ----------
 
+    /// ¿El punto está pasado el ícono y el nombre de esa fila (en cualquier columna)?
+    fn past_name(&self, pos: usize, x: f32) -> bool {
+        if self.view.is_grid() {
+            return false;
+        }
+        pos.checked_sub(self.name_ends_first).and_then(|i| self.name_ends.get(i)).is_some_and(|&end| x > end)
+    }
+
     /// ¿El punto está en la columna del nombre pero a la derecha de donde termina el texto?
     fn in_name_blank(&self, pos: usize, x: f32) -> bool {
         if self.view.is_grid() {
@@ -1142,7 +1154,11 @@ impl FileList {
                 } else {
                     self.select_only(pos);
                 }
-                self.press = Some((x, y));
+                if self.past_name(pos, x) {
+                    self.press_band = Some((x, y, ctrl));
+                } else {
+                    self.press = Some((x, y));
+                }
             }
             None if contains(&self.rows_area(), x, y) => {
                 // Un hueco: empieza el rectángulo (con Ctrl suma a lo que había).
@@ -1161,6 +1177,7 @@ impl FileList {
     pub fn on_mouse_up(&mut self) -> Action {
         self.thumb_drag = None;
         self.press = None;
+        self.press_band = None;
         if self.band.take().is_some() {
             return Action::Redraw;
         }
@@ -1220,6 +1237,18 @@ impl FileList {
                 return Action::Redraw;
             }
             None => {}
+        }
+        if let Some((px, py, ctrl)) = self.press_band {
+            if (x - px).abs() > 4.0 || (y - py).abs() > 4.0 {
+                // Un arrastre desde otra columna: rectángulo, no arrastre de archivos.
+                self.press_band = None;
+                self.pending_select = None;
+                let base = if ctrl { self.selected.clone() } else { vec![false; self.selected.len()] };
+                let at = self.band_point(px, py);
+                self.band = Some(Band { from: at, to: at, base });
+            } else {
+                return Action::None;
+            }
         }
         if self.band.is_some() {
             self.move_band(x, y);
@@ -1561,6 +1590,15 @@ mod column_tests {
         l.on_mouse_down(x, y, false, false);
         assert_ne!(l.on_mouse_move(x + 10.0, y + ROW_H * 2.0), Action::BeginDrag);
         assert_eq!(l.selected_positions(), vec![2, 3, 4]);
+        l.on_mouse_up();
+        // Pasado el nombre, en otra columna: un clic selecciona la fila; un arrastre, rectángulo.
+        let date_x = l.layout_columns().iter().find(|c| c.1 == Column::Modified).map(|c| c.2 + 10.0).unwrap();
+        let y0 = (l.item_rect(0).top + l.item_rect(0).bottom) / 2.0;
+        l.on_mouse_down(date_x, y0, false, false);
+        assert_eq!(l.selected_positions(), vec![0]);
+        assert_ne!(l.on_mouse_move(date_x + 2.0, y0), Action::BeginDrag);
+        assert_ne!(l.on_mouse_move(date_x + 8.0, y0 + ROW_H * 2.0), Action::BeginDrag);
+        assert_eq!(l.selected_positions(), vec![0, 1, 2]);
     }
 
     /// Arrastrar sobre el hueco debajo de los elementos selecciona los que toca el rectángulo.

@@ -1135,8 +1135,9 @@ impl App {
                 let n: Vec<f32> = text.split_whitespace().skip(2).filter_map(|v| v.parse().ok()).collect();
                 if let [x0, y0, x1, y1] = n[..] {
                     let list = &mut self.panes[na].tab_mut().list;
-                    list.on_mouse_down(x0, y0, false, false);
-                    list.on_mouse_move(x1, y1);
+                    let down = list.on_mouse_down(x0, y0, false, false);
+                    let moved = list.on_mouse_move(x1, y1);
+                    self.notice = Some(format!("down={down:?} move={moved:?}"));
                 }
             }
             "term" => self.term_menu = Some(na),

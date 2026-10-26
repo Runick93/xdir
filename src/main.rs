@@ -273,6 +273,8 @@ struct App {
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
     show_favorites: bool,
+    /// Colores por tipo de archivo encendidos (switch de la rueda dentada).
+    file_colors: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
     /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
@@ -397,6 +399,7 @@ fn main() -> Result<()> {
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(),
             show_favorites: session.show_favorites,
+            file_colors: session.file_colors,
             fav_drop: None,
             tab_drop: None,
             fav_menu: None,
@@ -412,6 +415,10 @@ fn main() -> Result<()> {
             custom_colors: [COLORREF(0x00FFFFFF); 16],
         };
         app.restore_panes(&session, start_path);
+        #[cfg(feature = "arbol")]
+        {
+            app.tree.visible = session.show_tree;
+        }
         let app = Box::into_raw(Box::new(app));
 
         // La ventana se crea oculta para aplicar tema y tamaño antes de mostrarla (sin flash blanco).
@@ -646,6 +653,16 @@ impl App {
                     self.tree.on_loaded();
                     self.redraw();
                     LRESULT(0)
+                }
+                // Solo con `--features pruebas`: otro proceso maneja la app por texto (capturas y
+                // pruebas automáticas sin mouse ni teclado reales).
+                #[cfg(feature = "pruebas")]
+                WM_COPYDATA => {
+                    let cds = &*(lparam.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT);
+                    let wide = std::slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2);
+                    let text = String::from_utf16_lossy(wide);
+                    self.test_hook(text.trim_end_matches('\0'));
+                    LRESULT(1)
                 }
                 WM_APP_PALETTE_KEY => {
                     self.on_palette_key(VIRTUAL_KEY(wparam.0 as u16), lparam.0 == 1);
@@ -1002,6 +1019,8 @@ impl App {
             active_pane: self.active,
             show_hidden: self.show_hidden,
             show_favorites: self.show_favorites,
+            file_colors: self.file_colors,
+            show_tree: self.tree_width() > 0.0,
             accent: self.accent,
             dark_mode: self.dark_mode,
             columns: self.columns.clone(),
@@ -1092,6 +1111,34 @@ impl App {
             Some(i) => vec![i],
             None => (0..self.layout.panes()).collect(),
         }
+    }
+
+    /// Comandos de prueba (feature `pruebas`): `cmd <id>` ejecuta una acción de `commands::ALL`;
+    /// `picker`, `term <panel>`, `tabdrop <panel> <pos>`, `droptarget <panel> <pos>`,
+    /// `select <panel> <pos>`, `active <panel>` y `notice <texto>` dejan la interfaz en un estado
+    /// que se quiere mostrar.
+    #[cfg(feature = "pruebas")]
+    fn test_hook(&mut self, text: &str) {
+        let mut it = text.splitn(3, ' ');
+        let (verb, a, b) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+        let (na, nb) = (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(0));
+        match verb {
+            "cmd" => {
+                if let Some(s) = commands::ALL.iter().find(|s| s.id == a) {
+                    self.run_command(s.command);
+                }
+            }
+            "picker" => self.picker_open = true,
+            "term" => self.term_menu = Some(na),
+            "tabdrop" => self.tab_drop = Some((na, nb)),
+            "droptarget" => self.panes[na].tab_mut().list.drop_target = Some(nb),
+            "select" => self.panes[na].tab_mut().list.select_pos(nb),
+            "active" => self.set_active(na),
+            "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
+            "close" => self.close_palette(),
+            _ => {}
+        }
+        self.redraw();
     }
 
     /// Animaciones: la opción de `config.toml` y la preferencia de Windows tienen que permitirlas.
@@ -1291,6 +1338,11 @@ impl App {
             Hit::Picker(ui::PickerHit::System) => self.set_accent(Accent::System),
             Hit::Picker(ui::PickerHit::Custom) => self.choose_custom_color(),
             Hit::Picker(ui::PickerHit::DarkMode) => self.set_dark_mode(!self.theme.dark),
+            Hit::Picker(ui::PickerHit::FileColors) => {
+                self.file_colors = !self.file_colors;
+                self.redraw();
+            }
+            Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::Panel) => {}
             Hit::Splitter(s) if double => {
                 self.begin_layout_anim();
@@ -2886,11 +2938,12 @@ impl App {
         let (hover, drag, edit_pane) = (self.hover, self.drag, self.edit.map(|(_, p)| p));
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
+        let (file_colors, tree_on) = (self.file_colors, tree_w > 0.0);
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
-        let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, &self.config.colors, |p, w, h| {
+        let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, if self.file_colors { &self.config.colors } else { &[] }, |p, w, h| {
             let area = ui::panes_area(w, h, tree_w);
             #[cfg(feature = "arbol")]
             if tree.visible {
@@ -2952,7 +3005,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, accent, picker_hover);
+                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, tree_on);
             }
             if let Some(pal) = palette {
                 pal.draw(p, w);

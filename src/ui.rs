@@ -218,6 +218,10 @@ pub enum PickerHit {
     Custom,
     /// Switch de modo oscuro.
     DarkMode,
+    /// Switch de los colores por tipo de archivo.
+    FileColors,
+    /// Switch del árbol de carpetas (solo con la feature `arbol`).
+    Tree,
     /// Dentro del panel pero sobre nada.
     Panel,
 }
@@ -229,12 +233,17 @@ const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
 const PICKER_SEP_H: f32 = 13.0;
 
+/// Switches del panel: modo oscuro, colores por tipo y, si se compiló, el árbol de carpetas.
+fn switch_rows() -> usize {
+    2 + usize::from(cfg!(feature = "arbol"))
+}
+
 /// Panel flotante sobre la rueda dentada.
 pub fn picker_rect(w: f32, h: f32) -> Rect {
     let rows = (PRESETS.len() / PICKER_COLS) as f32;
     let width = PICKER_CELL * PICKER_COLS as f32 + PICKER_PAD * 2.0;
-    // Colores, dos botones, un separador y la fila del modo oscuro.
-    let height = PICKER_TITLE_H + PICKER_CELL * rows + 8.0 + PICKER_BTN_H * 2.0 + PICKER_SEP_H + PICKER_BTN_H + PICKER_PAD;
+    // Colores, dos botones, un separador y las filas de switches.
+    let height = PICKER_TITLE_H + PICKER_CELL * rows + 8.0 + PICKER_BTN_H * 2.0 + PICKER_SEP_H + PICKER_BTN_H * switch_rows() as f32 + PICKER_PAD;
     let right = w - GAP * 2.0;
     let bottom = h - STATUSBAR_H - 4.0;
     rect(right - width, bottom - height, right, bottom)
@@ -255,7 +264,14 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     out.push((PickerHit::System, rect(l, y, r, y + PICKER_BTN_H)));
     out.push((PickerHit::Custom, rect(l, y + PICKER_BTN_H, r, y + PICKER_BTN_H * 2.0)));
     let y = y + PICKER_BTN_H * 2.0 + PICKER_SEP_H;
-    out.push((PickerHit::DarkMode, rect(l, y, r, y + PICKER_BTN_H)));
+    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors];
+    if cfg!(feature = "arbol") {
+        kinds.push(PickerHit::Tree);
+    }
+    for (i, kind) in kinds.into_iter().enumerate() {
+        let top = y + PICKER_BTN_H * i as f32;
+        out.push((kind, rect(l, top, r, top + PICKER_BTN_H)));
+    }
     out
 }
 
@@ -266,7 +282,7 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
     Some(picker_items(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(k, _)| k).unwrap_or(PickerHit::Panel))
 }
 
-pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>) {
+pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, tree: bool) {
     let th = p.theme;
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
@@ -314,17 +330,23 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                     p.text(&p.fonts.glyphs_small, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
                 }
             }
-            PickerHit::DarkMode => {
+            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::Tree => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
-                // Separador sobre la fila.
-                let sy = r.top - PICKER_SEP_H / 2.0;
-                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
-                p.text(&p.fonts.glyphs, "\u{E708}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
-                p.text(&p.fonts.ui, "Modo oscuro", rect(r.left + 34.0, r.top, r.right - 56.0, r.bottom), th.text);
+                let (glyph, label, on) = match kind {
+                    PickerHit::DarkMode => ("\u{E708}", "Modo oscuro", th.dark),
+                    PickerHit::FileColors => ("\u{E790}", "Colores por tipo", file_colors),
+                    _ => ("\u{E8B7}", "Árbol de carpetas", tree),
+                };
+                if kind == PickerHit::DarkMode {
+                    // Separador sobre la primera fila de switches.
+                    let sy = r.top - PICKER_SEP_H / 2.0;
+                    p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
+                }
+                p.text(&p.fonts.glyphs, glyph, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
+                p.text(&p.fonts.ui, label, rect(r.left + 34.0, r.top, r.right - 56.0, r.bottom), th.text);
                 // Switch: pastilla de acento con la perilla a la derecha cuando está encendido.
-                let on = th.dark;
                 let cy = (r.top + r.bottom) / 2.0;
                 let track = rect(r.right - 50.0, cy - 10.0, r.right - 10.0, cy + 10.0);
                 if on {

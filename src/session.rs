@@ -35,6 +35,10 @@ pub struct Session {
     pub accent: Accent,
     /// Modo fijado por el usuario; None sigue a Windows.
     pub dark_mode: Option<bool>,
+    /// Colores por tipo de archivo (reglas de `config.toml`) encendidos.
+    pub file_colors: bool,
+    /// Árbol de carpetas lateral visible (solo con la feature `arbol`).
+    pub show_tree: bool,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha.
     pub columns: Vec<ColumnSpec>,
@@ -55,6 +59,8 @@ impl Default for Session {
             show_favorites: true,
             accent: DEFAULT_ACCENT,
             dark_mode: None,
+            file_colors: true,
+            show_tree: false,
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -98,6 +104,10 @@ fn write(s: &Session) -> String {
     out += &format!("panel_activo = {}\n", s.active_pane);
     out += &format!("ocultos = {}\n", s.show_hidden);
     out += &format!("barra_favoritos = {}\n", s.show_favorites);
+    out += &format!("colores_por_tipo = {}
+", s.file_colors);
+    out += &format!("arbol = {}
+", s.show_tree);
     out += &match s.accent {
         Accent::System => "acento = \"sistema\"\n".to_string(),
         Accent::Rgb(c) => format!("acento = \"#{c:06X}\"\n"),
@@ -177,6 +187,8 @@ fn parse(text: &str) -> Session {
             ("division_y", None) => s.split_y = float().unwrap_or(0.5),
             ("panel_activo", None) => s.active_pane = int().unwrap_or(0).max(0) as usize,
             ("ocultos", None) => s.show_hidden = boolean().unwrap_or(false),
+            ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(true),
+            ("arbol", None) => s.show_tree = boolean().unwrap_or(false),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
             ("modo", None) => {
                 s.dark_mode = match value.trim_matches('"') {
@@ -290,6 +302,8 @@ mod tests {
             show_favorites: false,
             accent: Accent::Rgb(0xA371F7),
             dark_mode: Some(false),
+            file_colors: false,
+            show_tree: true,
             panes: vec![
                 PaneState {
                     tabs: vec![

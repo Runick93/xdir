@@ -33,6 +33,13 @@ impl Value {
         }
     }
 
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     pub fn as_float(&self) -> Option<f64> {
         match self {
             Value::Float(f) => Some(*f),

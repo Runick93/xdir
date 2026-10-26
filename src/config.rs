@@ -52,6 +52,9 @@ pub struct Config {
     pub keymap: Keymap,
     /// En orden: gana la primera regla que coincide.
     pub colors: Vec<ColorRule>,
+    /// `[opciones] animaciones`: forzar las animaciones sutiles (scroll suave, transición de layout)
+    /// o apagarlas. Sin la opción, se sigue la preferencia de Windows.
+    pub animations: Option<bool>,
     /// Problemas al leer el archivo, para avisar en la barra de estado.
     pub errors: Vec<String>,
     /// Fecha del archivo leído, para saber si cambió.
@@ -60,7 +63,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), errors: Vec::new(), modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, errors: Vec::new(), modified: None }
     }
 }
 
@@ -155,6 +158,15 @@ impl Config {
                         c.colors.push(ColorRule { matches, color });
                     }
                 }
+                "opciones" => {
+                    for e in &section.entries {
+                        match (e.key.as_str(), e.value.as_bool()) {
+                            ("animaciones", Some(on)) => c.animations = Some(on),
+                            ("animaciones", None) => c.errors.push(format!("línea {}: animaciones va como true o false", e.line)),
+                            (other, _) => c.errors.push(format!("línea {}: opción desconocida «{other}»", e.line)),
+                        }
+                    }
+                }
                 name => c.errors.push(format!("línea {}: sección desconocida «{name}»", section.line.max(1))),
             }
         }
@@ -230,7 +242,13 @@ pub fn template() -> String {
             # \"*.jpg;*.jpeg;*.png;*.gif\"   = \"#57AB5A\"\n\
             # \"*.zip;*.7z;*.rar\"           = \"#C69026\"\n\
             # \"*.exe;*.msi;*.bat;*.cmd\"    = \"#B083F0\"\n\
-            # \"@oculto\"                    = \"#768390\"\n";
+            # \"@oculto\"                    = \"#768390\"\n\
+            \n\
+            [opciones]\n\
+            # Animaciones sutiles (scroll suave y transición al cambiar de layout). Sin esta opción\n\
+            # se sigue a Windows (Accesibilidad → Efectos visuales → Mostrar animaciones);\n\
+            # true o false lo fuerza.\n\
+            # animaciones = true\n";
     out
 }
 
@@ -261,6 +279,17 @@ mod tests {
         for s in commands::ALL {
             assert_eq!(c2.keymap.label(s.command), c.keymap.label(s.command), "{}", s.id);
         }
+    }
+
+    #[test]
+    fn animations_option() {
+        assert_eq!(Config::parse("").animations, None, "sin la opción se sigue a Windows");
+        let off = Config::parse("[opciones]\nanimaciones = false\n");
+        assert!(off.animations == Some(false) && off.errors.is_empty());
+        assert_eq!(Config::parse("[opciones]\nanimaciones = true\n").animations, Some(true));
+        let bad = Config::parse("[opciones]\nanimaciones = \"no\"\nzoom = 2\n");
+        assert_eq!(bad.animations, None);
+        assert_eq!(bad.errors.len(), 2, "{:?}", bad.errors);
     }
 
     #[test]

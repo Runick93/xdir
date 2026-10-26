@@ -1,6 +1,7 @@
 // En release no se abre consola; en debug sí, para ver logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod anim;
 mod commands;
 mod config;
 mod console;
@@ -25,6 +26,7 @@ mod toml;
 #[cfg(feature = "arbol")]
 mod tree;
 mod ui;
+mod uia;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -199,6 +201,12 @@ enum Drag {
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
 }
 
+/// Transición de layout: desde dónde parte cada panel y cuándo empezó.
+struct LayoutAnim {
+    from: [Option<render::Rect>; PANES],
+    start: Instant,
+}
+
 struct App {
     hwnd: HWND,
     dpi: u32,
@@ -209,6 +217,13 @@ struct App {
     splits: Splits,
     /// Panel maximizado temporalmente (ocupa toda el área); no se guarda en la sesión.
     maximized: Option<usize>,
+    /// Rectángulos con que se dibujó cada panel el último frame, y la transición de layout en curso.
+    displayed: [Option<render::Rect>; PANES],
+    layout_anim: Option<LayoutAnim>,
+    /// Cuándo fue el último frame de una animación (None: no hay ninguna en curso).
+    last_frame: Option<Instant>,
+    /// Último elemento con foco que se avisó a los lectores de pantalla: (panel, posición).
+    uia_focus: Option<(usize, Option<usize>)>,
     /// Panel activo: recibe el teclado.
     active: usize,
     show_hidden: bool,
@@ -333,6 +348,7 @@ fn main() -> Result<()> {
         let history = if probe.is_none() { History::load() } else { History::default() };
         let config = if probe.is_none() { Config::load() } else { Config::default() };
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
+        anim::set_enabled(config.animations.unwrap_or_else(anim::system_allows));
         let mut app = App {
             hwnd: HWND::default(),
             dpi: 96,
@@ -342,6 +358,10 @@ fn main() -> Result<()> {
             layout: Layout::from_index(session.layout).unwrap_or(Layout::Four),
             splits: Splits { x: session.split_x, y: session.split_y },
             maximized: None,
+            displayed: [None; PANES],
+            layout_anim: None,
+            last_frame: None,
+            uia_focus: None,
             active: 0,
             show_hidden: session.show_hidden,
             next_tab_id: 1,
@@ -521,6 +541,8 @@ impl App {
                     LRESULT(0)
                 }
                 WM_SETTINGCHANGE => {
+                    // "Mostrar animaciones en Windows" (Accesibilidad → Efectos visuales).
+                    self.apply_animation_setting();
                     // Windows avisa así cuando el usuario cambia entre modo claro y oscuro.
                     let area = PCWSTR(lparam.0 as *const u16);
                     if !area.is_null() && area.to_string().is_ok_and(|s| s == "ImmersiveColorSet") {
@@ -635,6 +657,8 @@ impl App {
                 }
                 // Al volver a la ventana se releen los favoritos (por si se editó el archivo).
                 WM_ACTIVATEAPP if wparam.0 != 0 => {
+                    // Al volver a la ventana, el lector tiene que leer de nuevo el elemento con foco.
+                    self.uia_focus = None;
                     let fresh = Favorites::load();
                     if fresh != self.favorites {
                         self.favorites = fresh;
@@ -811,7 +835,20 @@ impl App {
                     let _ = DestroyWindow(self.hwnd);
                     LRESULT(0)
                 }
+                // Un lector de pantalla pregunta por la raíz de UI Automation (ver uia.rs).
+                WM_GETOBJECT if lparam.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId => {
+                    let provider = uia::root_provider(self);
+                    windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(self.hwnd, wparam, lparam, &provider)
+                }
                 WM_DESTROY => {
+                    // Se desconectan los lectores: los proveedores que les quedan dejan de responder.
+                    uia::shutdown();
+                    let _ = windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(
+                        self.hwnd,
+                        WPARAM(0),
+                        LPARAM(0),
+                        None::<&windows::Win32::UI::Accessibility::IRawElementProviderSimple>,
+                    );
                     let _ = RevokeDragDrop(self.hwnd);
                     let _ = DeleteObject(self.edit_font.into());
                     let _ = DeleteObject(self.edit_brush.into());
@@ -1043,6 +1080,7 @@ impl App {
         }
         self.end_edit(false);
         self.term_menu = None;
+        self.begin_layout_anim();
         self.maximized = if self.maximized == Some(pane) { None } else { Some(pane) };
         self.active = pane;
         self.redraw();
@@ -1056,8 +1094,50 @@ impl App {
         }
     }
 
+    /// Animaciones: la opción de `config.toml` y la preferencia de Windows tienen que permitirlas.
+    fn apply_animation_setting(&mut self) {
+        anim::set_enabled(self.config.animations.unwrap_or_else(anim::system_allows));
+        if !anim::enabled() {
+            self.layout_anim = None;
+        }
+    }
+
+    /// Empieza una transición desde lo que se está viendo. Se llama ANTES de cambiar layout,
+    /// divisores o maximizado: el estado cambia al instante y solo se dibuja de a poco.
+    fn begin_layout_anim(&mut self) {
+        if anim::enabled() && self.displayed.iter().any(Option::is_some) {
+            self.layout_anim = Some(LayoutAnim { from: self.displayed, start: Instant::now() });
+        }
+    }
+
+    /// Rectángulos de los paneles para este frame: los de destino o, en plena transición, los
+    /// intermedios. Devuelve también si la transición sigue en curso.
+    fn animated_rects(&mut self, target: Vec<(usize, render::Rect)>) -> (Vec<(usize, render::Rect)>, bool) {
+        let progress = self.layout_anim.as_ref().map(|a| a.start.elapsed().as_secs_f32() * 1000.0 / anim::LAYOUT_MS);
+        let (rects, running) = match (&self.layout_anim, progress) {
+            (Some(a), Some(t)) if t < 1.0 => {
+                let e = anim::ease_out(t);
+                // Un panel que no estaba "aparece" desde un poco más chico.
+                let rects = target.iter().map(|&(i, r)| (i, anim::lerp_rect(a.from[i].unwrap_or_else(|| anim::grow_from(r)), r, e))).collect();
+                (rects, true)
+            }
+            _ => {
+                self.layout_anim = None;
+                (target, false)
+            }
+        };
+        self.displayed = [None; PANES];
+        for &(i, r) in &rects {
+            self.displayed[i] = Some(r);
+        }
+        (rects, running)
+    }
+
     fn set_layout(&mut self, layout: Layout) {
         self.end_edit(false);
+        if layout != self.layout || self.maximized.is_some() {
+            self.begin_layout_anim();
+        }
         self.maximized = None;
         self.layout = layout;
         self.active = self.active.min(layout.panes() - 1);
@@ -1213,6 +1293,7 @@ impl App {
             Hit::Picker(ui::PickerHit::DarkMode) => self.set_dark_mode(!self.theme.dark),
             Hit::Picker(ui::PickerHit::Panel) => {}
             Hit::Splitter(s) if double => {
+                self.begin_layout_anim();
                 self.splits.set(s, 0.5);
                 self.redraw();
             }
@@ -1389,7 +1470,16 @@ impl App {
                     }
                 }
             }
-            Drag::List(i) => redraw |= self.panes[i].tab_mut().list.on_mouse_move(x, y) != Action::None,
+            Drag::List(i) => {
+                let action = self.panes[i].tab_mut().list.on_mouse_move(x, y);
+                // Unos píxeles con el botón apretado sobre un elemento: arrastrar los seleccionados
+                // (a otro panel, al Explorador o a otra aplicación).
+                if action == Action::BeginDrag {
+                    self.apply(i, action);
+                    return;
+                }
+                redraw |= action != Action::None;
+            }
             Drag::Fav { pane, index, start_x, moved } => {
                 if moved || (x - start_x).abs() > 5.0 {
                     self.drag = Drag::Fav { pane, index, start_x, moved: true };
@@ -1560,6 +1650,7 @@ impl App {
             Command::ToggleTree => {
                 #[cfg(feature = "arbol")]
                 {
+                    self.begin_layout_anim();
                     self.tree.visible = !self.tree.visible;
                 }
             }
@@ -1581,6 +1672,7 @@ impl App {
         let Some(g) = self.groups.items.get(index).cloned() else { return };
         self.end_edit(false);
         self.end_filter(true);
+        self.begin_layout_anim();
         self.maximized = None;
         self.layout = Layout::from_index(g.layout).unwrap_or(Layout::Four);
         self.splits = Splits { x: g.split_x, y: g.split_y };
@@ -1675,6 +1767,7 @@ impl App {
     fn reload_config(&mut self) {
         if self.config.changed_on_disk() {
             self.config = Config::load();
+            self.apply_animation_setting();
             self.notice = Some(match self.config.errors.first() {
                 Some(e) => format!("config.toml, {e}"),
                 None => "Configuración aplicada".to_string(),
@@ -1846,12 +1939,26 @@ impl App {
 
     fn start_drag(&mut self, pane: usize) {
         let items = self.selection_items(pane);
-        let Ok(obj) = shell::data_object(&items) else { return };
-        unsafe {
+        if items.is_empty() {
+            return;
+        }
+        let obj = match shell::data_object(&items) {
+            Ok(o) => o,
+            Err(e) => {
+                self.notice = Some(format!("No se pudo arrastrar: {e}"));
+                self.redraw();
+                return;
+            }
+        };
+        let result = unsafe {
             let _ = ReleaseCapture();
             self.drag = Drag::None;
             // Bucle modal: mientras dura, los eventos de soltar llegan por `WM_APP_DRAG`.
-            let _ = SHDoDragDrop(Some(self.hwnd), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
+            SHDoDragDrop(Some(self.hwnd), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)
+        };
+        // Cancelar con Esc no es un error; que Windows no pueda arrastrar, sí: se avisa.
+        if let Err(e) = result {
+            self.notice = Some(format!("No se pudo arrastrar: {e}"));
         }
         self.redraw();
     }
@@ -2762,6 +2869,17 @@ impl App {
         let tree_w = self.tree_width();
         #[cfg(feature = "arbol")]
         let current_folder = self.panes[self.active].tab().location.target();
+        // Animaciones: rectángulos de este frame (transición de layout) y scroll suave de las
+        // listas a la vista. Mientras algo siga en curso se pide otro frame más abajo.
+        let (cw, ch) = self.client_dips();
+        let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w), self.splits);
+        let (rects, mut animating) = self.animated_rects(target);
+        let now = Instant::now();
+        let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
+        for i in self.shown_panes() {
+            animating |= self.panes[i].tab_mut().list.tick(dt);
+        }
+        self.last_frame = animating.then_some(now);
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
@@ -2781,7 +2899,7 @@ impl App {
             }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
-            for (i, r) in ui::visible_rects(layout, maximized, area, splits) {
+            for &(i, r) in &rects {
                 let ph = match hover {
                     Hit::Pane(j, ph) if j == i => ph,
                     _ => PaneHit::None,
@@ -2843,6 +2961,10 @@ impl App {
         if result.is_err() {
             return;
         }
+        if animating {
+            self.redraw();
+        }
+        uia::notify_focus(self);
         // Superposiciones de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for i in self.shown_panes() {
@@ -3060,3 +3182,4 @@ mod tests {
         assert_eq!(effect(&[r"C:\a\x.txt"], r"C:\b", none, DROPEFFECT_COPY), DROPEFFECT_COPY);
     }
 }
+

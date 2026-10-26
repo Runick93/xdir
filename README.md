@@ -89,6 +89,18 @@ cuenta) se anota en `historial.txt`, junto a la sesión, con la cantidad de visi
 la última. Ctrl+P ordena por esas dos cosas: lo usado seguido y hace poco aparece primero. Las
 carpetas que ya no existen salen del historial al intentar abrirlas.
 
+## Animaciones y accesibilidad
+
+- **Animaciones sutiles:** el scroll de la lista llega suave a su destino y los paneles se
+  desplazan al cambiar de layout, maximizar o centrar un divisor. Nunca demoran nada: el estado
+  cambia al instante (los clics y las teclas ya actúan sobre el destino) y solo se dibuja de a
+  poco, unos 160 ms. Siguen la preferencia de Windows (Accesibilidad → Efectos visuales →
+  Mostrar animaciones); `[opciones] animaciones = true` o `false` en `config.toml` la fuerza.
+- **Lectores de pantalla (UI Automation):** Narrator, NVDA y JAWS ven la ventana como paneles
+  con su ruta y su lista de archivos; cada elemento tiene nombre, tipo (carpeta o archivo),
+  tamaño y fecha, se puede seleccionar y abrir, y al moverse con las flechas se anuncia el
+  elemento con foco. La barra de estado también se lee. Todo se maneja con el teclado (NF-8).
+
 ## Vistas y columnas
 
 - **Vistas:** detalles, íconos medianos, íconos grandes y miniaturas (Ctrl+Shift+1..4, Ctrl+rueda o

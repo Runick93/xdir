@@ -80,6 +80,19 @@ pub fn default_columns() -> Vec<ColumnSpec> {
         .collect()
 }
 
+/// Un elemento de la lista visto desde afuera (lectores de pantalla).
+pub struct ItemInfo {
+    pub name: String,
+    /// Tipo, tamaño y fecha en una frase.
+    pub help: String,
+    pub is_dir: bool,
+    pub selected: bool,
+    /// En DIPs, relativo a la ventana.
+    pub rect: Rect,
+    /// Fuera del área visible (scrolleado).
+    pub offscreen: bool,
+}
+
 /// Cómo se muestran los elementos: filas con columnas, o una cuadrícula de íconos/miniaturas.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -186,7 +199,10 @@ pub struct FileList {
     /// El foco lo puso la lista (primera fila), no el usuario: durante la carga se queda arriba.
     auto_focus: bool,
     anchor: Option<usize>,
+    /// Scroll que se dibuja; `scroll_target` es adonde va (ver `tick`, F-8.4). Los clics y teclas
+    /// actúan sobre el destino, no sobre lo que falta recorrer.
     scroll: f32,
+    scroll_target: f32,
     pub sort: Column,
     pub descending: bool,
     pub show_hidden: bool,
@@ -255,6 +271,7 @@ impl Default for FileList {
             auto_focus: true,
             anchor: None,
             scroll: 0.0,
+            scroll_target: 0.0,
             sort: Column::Name,
             descending: false,
             show_hidden: false,
@@ -313,8 +330,10 @@ impl FileList {
         let focus = self.focused_index();
         self.rebuild(focus);
         self.scroll = 0.0;
+        self.scroll_target = 0.0;
         if let Some(f) = self.focus {
             self.ensure_visible(f);
+            self.snap_scroll();
         }
     }
 
@@ -415,7 +434,9 @@ impl FileList {
         let Some(idx) = self.entries.iter().position(|e| &e.name == name) else { return false };
         let Some(pos) = self.visible.iter().position(|&v| v as usize == idx) else { return false };
         self.select_only(pos);
+        // Al terminar de cargar una carpeta no se anima: ya está donde tiene que estar.
         self.ensure_visible(pos);
+        self.snap_scroll();
         true
     }
 
@@ -439,6 +460,69 @@ impl FileList {
         if let Some(f) = self.focus {
             self.ensure_visible(f);
         }
+    }
+
+    // ---------- accesibilidad (UI Automation, ver uia.rs) ----------
+
+    /// Posición con foco (en los elementos a la vista).
+    pub fn focus_pos(&self) -> Option<usize> {
+        self.focus
+    }
+
+    /// Lo que un lector de pantalla necesita saber del elemento en la posición `pos`.
+    pub fn item_info(&self, pos: usize) -> Option<ItemInfo> {
+        let idx = *self.visible.get(pos)? as usize;
+        let e = &self.entries[idx];
+        let mut help = vec![e.type_name.to_string()];
+        if !e.is_dir {
+            help.push(format::size_kb(e.size));
+        }
+        if e.modified != 0 {
+            help.push(format!("modificado {}", format::date(e.modified)));
+        }
+        let rect = self.item_rect(pos);
+        let rows = self.rows_area();
+        Some(ItemInfo {
+            name: e.display.clone(),
+            help: help.join(", "),
+            is_dir: e.is_dir,
+            selected: self.selected[idx],
+            rect,
+            offscreen: rect.bottom <= rows.top || rect.top >= rows.bottom,
+        })
+    }
+
+    /// Selecciona solo ese elemento y lo trae a la vista (patrón de selección de UI Automation).
+    pub fn select_pos(&mut self, pos: usize) {
+        if pos < self.visible.len() {
+            self.select_only(pos);
+            self.ensure_visible(pos);
+        }
+    }
+
+    /// Agrega (o saca) el elemento de la selección sin tocar el resto.
+    pub fn set_selected_pos(&mut self, pos: usize, on: bool) {
+        if let Some(&idx) = self.visible.get(pos) {
+            self.auto_focus = false;
+            self.selected[idx as usize] = on;
+            self.focus = Some(pos);
+            self.anchor = Some(pos);
+        }
+    }
+
+    /// Posiciones seleccionadas, en orden.
+    pub fn selected_positions(&self) -> Vec<usize> {
+        self.visible.iter().enumerate().filter(|(_, idx)| self.selected[**idx as usize]).map(|(pos, _)| pos).collect()
+    }
+
+    /// Elemento (posición) bajo un punto de la ventana, en DIPs.
+    pub fn pos_at_point(&self, x: f32, y: f32) -> Option<usize> {
+        self.pos_at(x, y)
+    }
+
+    /// Índice en `entries` del elemento de esa posición (para abrirlo).
+    pub fn entry_of_pos(&self, pos: usize) -> Option<usize> {
+        self.visible.get(pos).map(|&i| i as usize)
     }
 
     pub fn count(&self) -> usize {
@@ -585,17 +669,36 @@ impl FileList {
     fn clamp_scroll(&mut self) {
         let max = (self.content_h() - self.view_h()).max(0.0);
         self.scroll = self.scroll.clamp(0.0, max);
+        self.scroll_target = self.scroll_target.clamp(0.0, max);
     }
 
+    /// Lleva el scroll dibujado al destino sin animar.
+    fn snap_scroll(&mut self) {
+        self.scroll = self.scroll_target;
+    }
+
+    /// Lleva el elemento a la vista (el destino del scroll; se llega suave, ver `tick`).
     fn ensure_visible(&mut self, pos: usize) {
         let lh = self.line_h();
         let top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
-        if top < self.scroll {
-            self.scroll = (top - self.top_pad()).max(0.0);
-        } else if top + lh > self.scroll + self.view_h() {
-            self.scroll = top + lh - self.view_h() + self.top_pad();
+        if top < self.scroll_target {
+            self.scroll_target = (top - self.top_pad()).max(0.0);
+        } else if top + lh > self.scroll_target + self.view_h() {
+            self.scroll_target = top + lh - self.view_h() + self.top_pad();
         }
         self.clamp_scroll();
+        if !crate::anim::enabled() {
+            self.snap_scroll();
+        }
+    }
+
+    /// Avanza el scroll suave `dt` segundos. Devuelve si todavía le falta (hay que pedir otro frame).
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if self.scroll == self.scroll_target {
+            return false;
+        }
+        self.scroll = if crate::anim::enabled() { crate::anim::smooth(self.scroll, self.scroll_target, dt) } else { self.scroll_target };
+        self.scroll != self.scroll_target
     }
 
     /// Cambia la vista conservando el elemento con foco a la vista.
@@ -604,8 +707,10 @@ impl FileList {
         self.header_drag = None;
         self.hover = None;
         self.scroll = 0.0;
+        self.scroll_target = 0.0;
         if let Some(f) = self.focus {
             self.ensure_visible(f);
+            self.snap_scroll();
         }
     }
 
@@ -896,13 +1001,16 @@ impl FileList {
     }
 
     pub fn on_wheel(&mut self, rows: f32) -> Action {
-        let before = self.scroll;
+        let before = self.scroll_target;
         // En la cuadrícula, una muesca de la rueda mueve media celda por "línea" de la rueda.
         let step = if self.view.is_grid() { self.line_h() / 3.0 } else { ROW_H };
-        self.scroll -= rows * step;
+        self.scroll_target -= rows * step;
         self.clamp_scroll();
+        if !crate::anim::enabled() {
+            self.snap_scroll();
+        }
         self.update_hover_after_scroll();
-        if self.scroll != before { Action::Redraw } else { Action::None }
+        if self.scroll_target != before { Action::Redraw } else { Action::None }
     }
 
     /// Botón izquierdo. Devuelve si hay que capturar el mouse (arrastre de la barra).
@@ -927,8 +1035,11 @@ impl FileList {
                 }
                 // Clic en el riel: avanza una página hacia ese lado.
                 let page = (self.view_h() / self.line_h()).floor().max(1.0) * self.line_h();
-                self.scroll += if y < thumb.top { -page } else { page };
+                self.scroll_target += if y < thumb.top { -page } else { page };
                 self.clamp_scroll();
+                if !crate::anim::enabled() {
+                    self.snap_scroll();
+                }
                 return (Action::Redraw, false);
             }
         }
@@ -1028,7 +1139,9 @@ impl FileList {
                 let thumb_h = thumb.bottom - thumb.top;
                 let travel = (track.bottom - track.top - thumb_h).max(1.0);
                 let frac = ((y - grab - track.top) / travel).clamp(0.0, 1.0);
+                // Arrastrar el pulgar sigue al mouse sin demora.
                 self.scroll = frac * (self.content_h() - self.view_h());
+                self.scroll_target = self.scroll;
                 return Action::Redraw;
             }
         }
@@ -1287,6 +1400,52 @@ mod column_tests {
         // En detalles, izquierda/derecha no son de la lista.
         l.set_view(View::Details);
         assert_eq!(l.on_key(VK_RIGHT.0, false, false), None);
+    }
+
+    /// Apretar sobre un archivo y mover unos píxeles pide empezar a arrastrar (y la app tiene que
+    /// atenderlo: su `on_mouse_move` lo descartaba y el arrastre nunca arrancaba).
+    #[test]
+    fn press_and_move_begins_a_drag() {
+        let mut l = list(800.0);
+        l.append(vec![entry("a.txt"), entry("b.txt")]);
+        let row = l.item_rect(0);
+        let (x, y) = (row.left + 60.0, (row.top + row.bottom) / 2.0);
+        let (action, capture) = l.on_mouse_down(x, y, false, false);
+        assert_eq!((action, capture), (Action::Redraw, true));
+        // Un temblor de 2 px no es un arrastre.
+        assert_eq!(l.on_mouse_move(x + 2.0, y), Action::None);
+        assert_eq!(l.on_mouse_move(x + 12.0, y + 3.0), Action::BeginDrag);
+        // Una vez iniciado, no se repite (un Redraw por el resaltado bajo el mouse no es un arrastre).
+        assert_ne!(l.on_mouse_move(x + 40.0, y), Action::BeginDrag);
+        // Apretar en un lugar vacío (debajo de los elementos) no arrastra nada.
+        let mut empty = list(800.0);
+        empty.append(vec![entry("a.txt")]);
+        let below = empty.rows_area().bottom - 10.0;
+        empty.on_mouse_down(x, below, false, false);
+        assert_eq!(empty.on_mouse_move(x + 30.0, below), Action::None);
+    }
+
+    #[test]
+    fn smooth_scroll_targets_first_draws_later() {
+        let mut l = list(800.0);
+        l.append((0..200).map(|i| entry(&format!("f{i:03}"))).collect());
+        assert_eq!(l.on_wheel(-3.0), Action::Redraw);
+        // La lógica ya está en el destino (3 filas), lo dibujado todavía no llegó.
+        assert_eq!(l.scroll_target, 3.0 * ROW_H);
+        assert!(l.scroll < l.scroll_target);
+        let mut frames = 0;
+        while l.tick(1.0 / 60.0) {
+            assert!(l.scroll <= l.scroll_target, "sin pasarse");
+            frames += 1;
+            assert!(frames < 60);
+        }
+        assert_eq!(l.scroll, l.scroll_target);
+        // Llevar un elemento lejano a la vista también es un destino, no un salto.
+        l.select_index(l.visible[150] as usize);
+        assert!(l.scroll_target > l.scroll);
+        // Cambiar de vista o de filtro sí es instantáneo.
+        l.set_view(View::Icons);
+        assert_eq!(l.scroll, l.scroll_target);
     }
 
     #[test]

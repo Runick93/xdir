@@ -170,7 +170,7 @@ enum Drag {
     None,
     List(usize),
     Splitter(Splitter),
-    Tab { pane: usize, index: usize, start_x: f32, moved: bool },
+    Tab { pane: usize, index: usize, start_x: f32, start_y: f32, moved: bool },
     Button(usize, Button),
     /// Un favorito de la barra: clic al soltar sin mover, si no reordenar.
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
@@ -227,6 +227,8 @@ struct App {
     show_favorites: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
+    /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
+    tab_drop: Option<(usize, usize)>,
     fav_menu: Option<FavMenu>,
     /// Renombrado de un favorito en curso.
     fav_edit: Option<(HWND, FavPath)>,
@@ -327,6 +329,7 @@ fn main() -> Result<()> {
             favorites: Favorites::load(),
             show_favorites: session.show_favorites,
             fav_drop: None,
+            tab_drop: None,
             fav_menu: None,
             fav_edit: None,
             fav_ctx: None,
@@ -865,6 +868,25 @@ impl App {
         }
     }
 
+    /// Lleva la pestaña `index` del panel `from` a la posición `at` del panel `to`, con su
+    /// historial y su selección. Si era la única del panel de origen, ahí se abre "Este equipo".
+    fn move_tab_to_pane(&mut self, from: usize, index: usize, to: usize, at: usize) {
+        if from == to || index >= self.panes[from].tabs.len() {
+            return;
+        }
+        self.end_edit(false);
+        self.term_menu = None;
+        let tab = self.panes[from].take_tab(index);
+        if self.panes[from].tabs.is_empty() {
+            let fresh = self.make_tab(Location::Computer);
+            self.panes[from].insert_tab(0, fresh);
+        }
+        self.panes[to].insert_tab(at, tab);
+        self.active = to;
+        self.sync_visibility();
+        self.redraw();
+    }
+
     fn select_tab(&mut self, pane: usize, index: usize) {
         self.panes[pane].select_tab(index);
         self.sync_visibility();
@@ -961,7 +983,7 @@ impl App {
                     PaneHit::Tab(j) => {
                         self.select_tab(i, j);
                         unsafe { SetCapture(self.hwnd) };
-                        self.drag = Drag::Tab { pane: i, index: j, start_x: x, moved: false };
+                        self.drag = Drag::Tab { pane: i, index: j, start_x: x, start_y: y, moved: false };
                     }
                     PaneHit::TabClose(j) => self.close_tab(i, j),
                     PaneHit::NewTab => {
@@ -1021,8 +1043,14 @@ impl App {
         unsafe {
             let _ = ReleaseCapture();
         }
+        let tab_drop = self.tab_drop.take();
         match drag {
             Drag::Button(i, b) if self.hit(x, y) == Hit::Pane(i, PaneHit::Button(b)) => self.on_button(i, b),
+            Drag::Tab { pane, index, .. } => {
+                if let Some((to, at)) = tab_drop {
+                    self.move_tab_to_pane(pane, index, to, at);
+                }
+            }
             Drag::Fav { pane, index, moved: false, .. } => self.activate_fav(pane, &[index], key_down(VK_CONTROL)),
             Drag::Fav { index, .. } => {
                 // Soltado sobre otra carpeta de favoritos: va adentro; si no, se reordena.
@@ -1082,12 +1110,36 @@ impl App {
                 self.splits.set(s, ui::split_value(s, ui::panes_area(w, h), x, y));
                 redraw = true;
             }
-            Drag::Tab { pane, index, start_x, moved } => {
-                if moved || (x - start_x).abs() > 6.0 {
-                    if let Some(to) = self.panes[pane].tab_index_at(x) {
-                        self.panes[pane].move_tab(index, to);
-                        self.drag = Drag::Tab { pane, index: to, start_x, moved: true };
+            Drag::Tab { pane, index, start_x, start_y, moved } => {
+                if moved || (x - start_x).abs() > 6.0 || (y - start_y).abs() > 6.0 {
+                    // Sobre otro panel: se marca dónde caería; sobre el propio, se reordena; sobre
+                    // un divisor o la barra de estado, nada.
+                    let hit = self.hit(x, y);
+                    let target = match hit {
+                        Hit::Pane(j, ph) if j != pane => {
+                            let at = match ph {
+                                PaneHit::Tab(_) | PaneHit::TabClose(_) | PaneHit::NewTab | PaneHit::TabStrip | PaneHit::Maximize => {
+                                    self.panes[j].insert_index_at(x)
+                                }
+                                _ => self.panes[j].tabs.len(),
+                            };
+                            Some((j, at))
+                        }
+                        _ => None,
+                    };
+                    if target != self.tab_drop {
+                        self.tab_drop = target;
                         redraw = true;
+                    }
+                    if matches!(hit, Hit::Pane(j, _) if j == pane) {
+                        if let Some(to) = self.panes[pane].tab_index_at(x) {
+                            self.panes[pane].move_tab(index, to);
+                            self.drag = Drag::Tab { pane, index: to, start_x, start_y, moved: true };
+                            redraw = true;
+                        }
+                    }
+                    if let Drag::Tab { moved, .. } = &mut self.drag {
+                        *moved = true;
                     }
                 }
             }
@@ -2087,6 +2139,7 @@ impl App {
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
         let term_menu = self.term_menu;
+        let tab_drop = self.tab_drop;
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, |p, w, h| {
             let area = ui::panes_area(w, h);
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
@@ -2102,6 +2155,9 @@ impl App {
                 };
                 let favs = show_favorites.then(|| (favorites, fav_drop.filter(|(j, _)| *j == i).map(|(_, d)| d)));
                 panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i));
+                if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
+                    panes[i].draw_tab_drop(p, at);
+                }
             }
             let hot = match (drag, hover) {
                 (Drag::Splitter(s), _) | (_, Hit::Splitter(s)) => Some(s),

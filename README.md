@@ -40,6 +40,7 @@ El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 | Ctrl+W, clic medio en la pestaña | Cerrar pestaña |
 | Ctrl+Shift+T | Reabrir la última pestaña cerrada |
 | Ctrl+Tab / Ctrl+Shift+Tab | Pestaña siguiente / anterior |
+| Arrastrar una pestaña | Reordenarla en su panel, o soltarla en otro panel para llevarla ahí (con su historial) |
 | Clic medio en una carpeta | Abrirla en una pestaña nueva, en segundo plano |
 | Arrastrar un divisor (doble clic lo centra) | Cambiar el tamaño de los paneles |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copiar / cortar / pegar (compatible con el Explorador) |

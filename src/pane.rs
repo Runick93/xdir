@@ -216,6 +216,48 @@ impl Pane {
         self.active = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
     }
 
+    /// Saca una pestaña para llevarla a otro panel (no va al historial de cerradas). El panel
+    /// puede quedar vacío: quien llama tiene que agregarle una.
+    pub fn take_tab(&mut self, i: usize) -> Tab {
+        let tab = self.tabs.remove(i);
+        if self.active > i || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        tab
+    }
+
+    /// Inserta una pestaña traída de otro panel en la posición `at` y la activa.
+    pub fn insert_tab(&mut self, at: usize, tab: Tab) {
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = at;
+    }
+
+    /// Posición donde entraría una pestaña soltada en `x` sobre la tira: antes de la primera
+    /// pestaña cuyo centro queda a la derecha.
+    pub fn insert_index_at(&self, x: f32) -> usize {
+        self.tab_rects
+            .iter()
+            .position(|(r, _)| x < (r.left + r.right) / 2.0)
+            .unwrap_or(self.tabs.len())
+    }
+
+    /// Marca de destino al arrastrar una pestaña desde otro panel: contorno de acento y una
+    /// barra en la tira donde caería.
+    pub fn draw_tab_drop(&self, p: &Painter, at: usize) {
+        let th = p.theme;
+        let body = rect(self.rect.left, self.rect.top + TABSTRIP_H, self.rect.right, self.rect.bottom);
+        p.round_fill(body, PANE_RADIUS, alpha(th.accent, 0.06));
+        p.round_stroke_w(body, PANE_RADIUS, th.accent, 2.0);
+        let x = match (self.tab_rects.get(at), self.tab_rects.last()) {
+            (Some((r, _)), _) => r.left + if at == 0 { 2.0 } else { TAB_SLANT / 2.0 },
+            (None, Some((r, _))) => r.right - TAB_SLANT / 2.0,
+            (None, None) => self.rect.left + 2.0,
+        };
+        let (top, bottom) = (self.rect.top + 6.0, self.rect.top + TABSTRIP_H - 4.0);
+        p.round_fill(rect(x - 1.5, top, x + 1.5, bottom), 1.5, th.accent);
+    }
+
     /// Pestaña bajo la coordenada x (para arrastrar y soltar dentro de la tira).
     pub fn tab_index_at(&self, x: f32) -> Option<usize> {
         let last = self.tab_rects.len().checked_sub(1)?;

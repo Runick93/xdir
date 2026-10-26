@@ -26,6 +26,8 @@ El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 | Enter / doble clic | Abrir carpeta o archivo |
 | Backspace, Alt+↑ | Subir |
 | Alt+← / Alt+→, botones laterales del mouse | Atrás / adelante |
+| Ctrl+P | Salto rápido: ir a una carpeta escribiendo parte de su ruta (historial por frecuencia y recencia, favoritos o una ruta completa). Ctrl+Enter la abre en pestaña nueva |
+| Ctrl+Shift+P | Paleta de comandos: buscar y ejecutar cualquier acción; también busca favoritos y carpetas recientes |
 | Ctrl+L, F4, Alt+D, clic en la barra | Escribir una ruta (con autocompletado; acepta `%VARIABLES%`) |
 | F5 | Recargar |
 | Ctrl+H | Mostrar u ocultar archivos ocultos |
@@ -73,6 +75,11 @@ son los del Explorador. Pegar y soltar funcionan con archivos de disco; los elem
 La carpeta se actualiza sola cuando cambia en disco. Al cerrar se guarda la sesión (layout,
 divisores, pestañas de cada panel y posición de la ventana) en `%APPDATA%\xdir\sesion.toml`;
 si junto al `.exe` hay un archivo `xdir.portable`, se guarda ahí (modo portable).
+
+**Salto rápido:** cada carpeta que se abre (navegando, atrás, adelante o subiendo; recargar no
+cuenta) se anota en `historial.txt`, junto a la sesión, con la cantidad de visitas y la fecha de
+la última. Ctrl+P ordena por esas dos cosas: lo usado seguido y hace poco aparece primero. Las
+carpetas que ya no existen salen del historial al intentar abrirlas.
 
 ## Medir el arranque
 

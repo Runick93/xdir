@@ -20,7 +20,8 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_SYSTEM, FILE_FLAGS_AND_ATTRIBUTES, FILE_NOTIFY_CHANGE_ATTRIBUTES,
     FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
     FILE_NOTIFY_CHANGE_SIZE, FindCloseChangeNotification, FindFirstChangeNotificationW,
-    FindNextChangeNotification, GetDiskFreeSpaceExW, GetLogicalDrives, GetLongPathNameW,
+    FindClose, FindFirstFileW, FindNextChangeNotification, GetDiskFreeSpaceExW, GetLogicalDrives, GetLongPathNameW,
+    WIN32_FIND_DATAW,
 };
 use windows::Win32::Storage::EnhancedStorage::{PKEY_Capacity, PKEY_DateModified, PKEY_ItemNameDisplay, PKEY_Size};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
@@ -655,6 +656,38 @@ pub fn long_path(path: &Path) -> PathBuf {
     PathBuf::from(OsString::from_wide(&buf[..n]))
 }
 
+/// Ruta escrita a mano con las mayúsculas reales del disco ("c:\program files" → "C:\Program
+/// Files"): cada tramo se busca con FindFirstFileW. La unidad va en mayúscula; las rutas de red
+/// (`\\servidor\recurso`) conservan esa parte como se escribió. Si algo falla, queda como estaba.
+pub fn true_case(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => out.push(format!("{}:", (d as char).to_ascii_uppercase())),
+                _ => out.push(p.as_os_str()),
+            },
+            Component::RootDir => out.push("\\"),
+            Component::Normal(name) => {
+                let probe = out.join(name);
+                let wide = wide_path(&probe);
+                let mut data = WIN32_FIND_DATAW::default();
+                match unsafe { FindFirstFileW(PCWSTR(wide.as_ptr()), &mut data) } {
+                    Ok(h) => {
+                        let _ = unsafe { FindClose(h) };
+                        let len = data.cFileName.iter().position(|&ch| ch == 0).unwrap_or(data.cFileName.len());
+                        out.push(OsString::from_wide(&data.cFileName[..len]));
+                    }
+                    Err(_) => out.push(name),
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Misma ruta en Windows: sin distinguir mayúsculas ni separador final.
 pub fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
@@ -757,5 +790,23 @@ impl Drop for Watcher {
         unsafe {
             let _ = CloseHandle(stop);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::true_case;
+    use std::path::Path;
+
+    #[test]
+    fn true_case_fixes_typed_paths() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let typed = windir.to_lowercase() + r"\SYSTEM32";
+        let fixed = true_case(Path::new(&typed));
+        assert_eq!(fixed.to_string_lossy().to_lowercase(), typed.to_lowercase());
+        assert!(fixed.to_string_lossy().ends_with(r"\System32"), "{}", fixed.display());
+        assert!(fixed.to_string_lossy().starts_with(|c: char| c.is_ascii_uppercase()));
+        // Lo que no existe queda como se escribió.
+        assert_eq!(true_case(Path::new(r"C:\no\EXISTE")), Path::new(r"C:\no\EXISTE"));
     }
 }

@@ -1,15 +1,18 @@
 // En release no se abre consola; en debug sí, para ver logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod console;
 mod drop;
 mod favorites;
 mod format;
 mod fs;
 mod icons;
+mod jump;
 mod list;
 mod ops;
 mod pane;
+mod palette;
 mod render;
 mod session;
 mod shell;
@@ -43,8 +46,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VIRTUAL_KEY, VK_BACK, VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_F2,
-    VK_F4, VK_F5, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
+    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     DefSubclassProc, SHACF_AUTOSUGGEST_FORCE_ON, SHACF_FILESYS_DIRS, SHAutoComplete, SHDoDragDrop,
@@ -53,7 +55,10 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
+use commands::Command;
 use console::Console;
+use jump::History;
+use palette::{Palette, PaletteMode, Target};
 use drop::{DragEvent, DragKind, WM_APP_DRAG};
 use favorites::{Fav, FavPath, Favorites};
 use fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
@@ -81,6 +86,8 @@ const WM_APP_FAVEDIT_DONE: u32 = WM_APP + 12;
 const WM_APP_FILTER_DONE: u32 = WM_APP + 13;
 /// Notificación de un control de edición: el texto cambió.
 const EN_CHANGE_CODE: usize = 0x0300;
+/// Tecla de la paleta: `wparam` = tecla virtual (0: perdió el foco), `lparam` = 1 si con Ctrl.
+const WM_APP_PALETTE_KEY: u32 = WM_APP + 14;
 
 /// Qué muestra un menú desplegable de favoritos.
 enum FavMenuSource {
@@ -166,6 +173,8 @@ enum Hit {
     Picker(ui::PickerHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
+    /// Paleta abierta: un resultado, o el panel sin nada debajo.
+    Palette(Option<usize>),
 }
 
 /// Lo que se está arrastrando con el botón izquierdo.
@@ -228,6 +237,10 @@ struct App {
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
     transparent: bool,
     favorites: Favorites,
+    /// Carpetas visitadas, para el salto rápido.
+    history: History,
+    /// Salto rápido o paleta de comandos abierta, con su control de edición.
+    palette: Option<(Palette, HWND)>,
     show_favorites: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
@@ -296,6 +309,8 @@ fn main() -> Result<()> {
         marks.push(("fabricas d2d/dwrite", ms_since(started)));
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
+        // `--probe` mide un arranque limpio: sin historial.
+        let history = if probe.is_none() { History::load() } else { History::default() };
         let mut app = App {
             hwnd: HWND::default(),
             dpi: 96,
@@ -333,6 +348,8 @@ fn main() -> Result<()> {
             drop_target: None,
             transparent: false,
             favorites: Favorites::load(),
+            history,
+            palette: None,
             show_favorites: session.show_favorites,
             fav_drop: None,
             tab_drop: None,
@@ -447,12 +464,14 @@ impl App {
                     self.renderer.resize(width, height, self.dpi);
                     self.end_edit(false);
                     self.end_filter(true);
+                    self.close_palette();
                     LRESULT(0)
                 }
                 WM_DPICHANGED => {
                     self.dpi = (wparam.0 & 0xFFFF) as u32;
                     self.end_edit(false);
                     self.end_filter(true);
+                    self.close_palette();
                     self.renderer.set_dpi(self.dpi);
                     self.update_edit_resources();
                     let r = &*(lparam.0 as *const RECT);
@@ -511,6 +530,9 @@ impl App {
                     while let Ok(event) = self.rx.try_recv() {
                         if let Some(tab) = self.tab_by_id(event.panel) {
                             changed |= tab.on_load(event);
+                            if let Some(path) = tab.visited.take() {
+                                self.history.record(&path, jump::now());
+                            }
                         }
                     }
                     self.ui_load_ms += ms_since(t0);
@@ -549,7 +571,7 @@ impl App {
                     self.end_filter(wparam.0 == 1);
                     LRESULT(0)
                 }
-                // El filtro se aplica con cada tecla.
+                // El filtro y la paleta se actualizan con cada tecla.
                 WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == EN_CHANGE_CODE => {
                     if let Some((edit, pane)) = self.filter_edit {
                         if lparam.0 == edit.0 as isize {
@@ -558,6 +580,13 @@ impl App {
                             self.redraw();
                         }
                     }
+                    if self.palette.as_ref().is_some_and(|(_, e)| lparam.0 == e.0 as isize) {
+                        self.refresh_palette();
+                    }
+                    LRESULT(0)
+                }
+                WM_APP_PALETTE_KEY => {
+                    self.on_palette_key(VIRTUAL_KEY(wparam.0 as u16), lparam.0 == 1);
                     LRESULT(0)
                 }
                 WM_MENURBUTTONUP if self.fav_menu.is_some() => {
@@ -631,25 +660,10 @@ impl App {
                 }
                 WM_SYSKEYDOWN => {
                     // Alt+flechas como en el Explorador; el resto (Alt+F4, Alt+Espacio) sigue de largo.
-                    let (hwnd, tx) = (self.hwnd, self.tx.clone());
-                    match VIRTUAL_KEY(wparam.0 as u16) {
-                        VK_LEFT => self.tab_mut().go_back(hwnd, &tx),
-                        VK_RIGHT => self.tab_mut().go_forward(hwnd, &tx),
-                        VK_UP => self.tab_mut().go_up(hwnd, &tx),
-                        VIRTUAL_KEY(0x44) => self.begin_edit(self.active), // Alt+D
-                        VK_RETURN => {
-                            // Alt+Enter: propiedades de la selección (o de la carpeta).
-                            let items = self.selection_items(self.active);
-                            match (&items[..], &self.panes[self.active].tab().location) {
-                                ([], Location::Path(p)) => shell::properties(hwnd, &[p.clone().into()]),
-                                _ => shell::properties(hwnd, &items),
-                            }
-                        }
-                        // Alt+1..4: ir al panel N.
-                        VIRTUAL_KEY(k @ 0x31..=0x34) => self.set_active((k - 0x31) as usize),
-                        _ => return DefWindowProcW(self.hwnd, msg, wparam, lparam),
+                    match commands::from_key(VIRTUAL_KEY(wparam.0 as u16), false, false, true) {
+                        Some(c) => self.run_command(c),
+                        None => return DefWindowProcW(self.hwnd, msg, wparam, lparam),
                     }
-                    self.redraw();
                     LRESULT(0)
                 }
                 WM_CHAR => {
@@ -696,6 +710,13 @@ impl App {
                     let (x, y) = self.cursor_pos();
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
                     let pane = match self.hit(x, y) {
+                        Hit::Palette(_) => {
+                            if let Some((pal, _)) = &mut self.palette {
+                                pal.on_wheel(delta.round() as i32 * 3);
+                                self.redraw();
+                            }
+                            return LRESULT(0);
+                        }
                         Hit::Pane(i, _) => i,
                         _ => self.active,
                     };
@@ -721,6 +742,7 @@ impl App {
                 WM_CLOSE => {
                     if self.probe.is_none() {
                         let _ = session::save(&self.session());
+                        let _ = self.history.save();
                     }
                     let _ = DestroyWindow(self.hwnd);
                     LRESULT(0)
@@ -930,7 +952,12 @@ impl App {
 
     fn hit(&self, x: f32, y: f32) -> Hit {
         let (w, h) = self.client_dips();
-        // Los menús flotantes van encima de todo.
+        // La paleta va encima de todo, y después los menús flotantes.
+        if let Some((pal, _)) = &self.palette {
+            if let Some(i) = pal.item_at(w, x, y) {
+                return Hit::Palette(i);
+            }
+        }
         if let Some(pane) = self.term_menu {
             if let Some(c) = ui::terminal_menu_at(self.panes[pane].terminal_rect(), w, x, y) {
                 return Hit::TermMenu(c);
@@ -967,6 +994,22 @@ impl App {
     fn on_left_down(&mut self, x: f32, y: f32, double: bool) {
         let hit = self.hit(x, y);
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        // Con la paleta abierta: un resultado se abre, el resto del panel no hace nada y fuera
+        // de ella se cierra (sin que el clic llegue a lo de abajo).
+        if self.palette.is_some() {
+            match hit {
+                Hit::Palette(Some(i)) => self.activate_palette(i, key_down(VK_CONTROL)),
+                Hit::Palette(None) => {
+                    if let Some((_, edit)) = &self.palette {
+                        unsafe {
+                            let _ = SetFocus(Some(*edit));
+                        }
+                    }
+                }
+                _ => self.close_palette(),
+            }
+            return;
+        }
         // Un clic fuera del panel de colores lo cierra (y sigue su curso).
         if self.picker_open && !matches!(hit, Hit::Picker(_) | Hit::Gear) {
             self.picker_open = false;
@@ -982,7 +1025,7 @@ impl App {
                     self.open_console(pane, c);
                 }
             }
-            Hit::TermMenu(None) => {}
+            Hit::TermMenu(None) | Hit::Palette(_) => {}
             Hit::Gear => {
                 self.picker_open = !self.picker_open;
                 self.redraw();
@@ -1183,6 +1226,16 @@ impl App {
 
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
+        if let Some((pal, _)) = &mut self.palette {
+            let h = match hover {
+                Hit::Palette(Some(i)) => Some(i),
+                _ => None,
+            };
+            if pal.hover != h {
+                pal.hover = h;
+                redraw = true;
+            }
+        }
         // La fila resaltada solo en el panel bajo el mouse.
         for (i, pane) in self.panes.iter_mut().enumerate() {
             if self.drag == Drag::List(i) {
@@ -1204,47 +1257,70 @@ impl App {
     /// Atajos de la ventana. Devuelve si la tecla se usó.
     fn on_key(&mut self, vk: VIRTUAL_KEY) -> bool {
         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
-        let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
         match vk {
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
             VK_ESCAPE if !self.panes[active].tab().list.filter().is_empty() => self.clear_filter(active),
-            VIRTUAL_KEY(0x46) if ctrl => self.begin_filter(active), // Ctrl+F
-            VK_TAB if ctrl => {
-                self.panes[active].cycle_tab(!shift);
-                self.sync_visibility();
+            _ => match commands::from_key(vk, ctrl, shift, false) {
+                Some(c) => self.run_command(c),
+                None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
+                    Some(action) => {
+                        self.apply(active, action);
+                        return true;
+                    }
+                    None => return false,
+                },
+            },
+        }
+        self.redraw();
+        true
+    }
+
+    /// Ejecuta una acción sobre el panel activo (atajo de teclado o paleta de comandos).
+    fn run_command(&mut self, c: Command) {
+        let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        let active = self.active;
+        match c {
+            Command::JumpTo => self.open_palette(PaletteMode::Folders),
+            Command::Palette => self.open_palette(PaletteMode::All),
+            Command::NewTab => {
+                let loc = self.panes[active].tab().location.clone();
+                self.new_tab(active, loc, true);
             }
-            // Tab / Shift+Tab: siguiente / anterior panel visible.
-            VK_TAB => {
-                let n = self.layout.panes();
-                self.set_active(if shift { (active + n - 1) % n } else { (active + 1) % n });
+            Command::CloseTab => {
+                let i = self.panes[active].active;
+                self.close_tab(active, i);
             }
-            VK_BACK => self.tab_mut().go_up(hwnd, &tx),
-            VK_BROWSER_BACK => self.tab_mut().go_back(hwnd, &tx),
-            VK_BROWSER_FORWARD => self.tab_mut().go_forward(hwnd, &tx),
-            VK_F5 => self.tab_mut().reload(hwnd, &tx, false),
-            VK_F4 => self.begin_edit(active),
-            VIRTUAL_KEY(0x4C) if ctrl => self.begin_edit(active), // Ctrl+L
-            VIRTUAL_KEY(0x54) if ctrl && shift => {
-                // Ctrl+Shift+T: reabrir la última pestaña cerrada del panel.
+            Command::ReopenTab => {
                 if let Some(loc) = self.panes[active].pop_closed() {
                     self.new_tab(active, loc, true);
                 }
             }
-            VIRTUAL_KEY(0x54) if ctrl => {
-                // Ctrl+T: pestaña nueva en la misma carpeta.
-                let loc = self.panes[active].tab().location.clone();
-                self.new_tab(active, loc, true);
+            Command::NextTab | Command::PrevTab => {
+                self.panes[active].cycle_tab(c == Command::NextTab);
+                self.sync_visibility();
             }
-            VIRTUAL_KEY(0x4D) if ctrl => self.toggle_maximize(active), // Ctrl+M
-            VIRTUAL_KEY(0x57) if ctrl => {
-                // Ctrl+W: cerrar pestaña.
-                let i = self.panes[active].active;
-                self.close_tab(active, i);
+            Command::NextPane | Command::PrevPane => {
+                let n = self.layout.panes();
+                self.set_active(if c == Command::PrevPane { (active + n - 1) % n } else { (active + 1) % n });
             }
-            VIRTUAL_KEY(0x48) if ctrl => {
-                // Ctrl+H: mostrar u ocultar ocultos en todas las pestañas.
+            Command::FocusPane(i) => self.set_active(i as usize),
+            Command::Layout(i) => {
+                if let Some(l) = Layout::from_index(i as usize) {
+                    self.set_layout(l);
+                }
+            }
+            Command::Maximize => self.toggle_maximize(active),
+            Command::Back => self.tab_mut().go_back(hwnd, &tx),
+            Command::Forward => self.tab_mut().go_forward(hwnd, &tx),
+            Command::Up => self.tab_mut().go_up(hwnd, &tx),
+            Command::Refresh => self.tab_mut().reload(hwnd, &tx, false),
+            Command::EditAddress => self.begin_edit(active),
+            Command::Filter => self.begin_filter(active),
+            Command::GoComputer => self.tab_mut().navigate(hwnd, &tx, Location::Computer),
+            Command::ToggleHidden => {
+                // En todas las pestañas a la vez.
                 self.show_hidden = !self.show_hidden;
                 for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
                     if tab.list.show_hidden != self.show_hidden {
@@ -1252,53 +1328,45 @@ impl App {
                     }
                 }
             }
-            VIRTUAL_KEY(0x43) if ctrl && shift => {
-                // Ctrl+Shift+C: copiar las rutas como texto.
+            Command::SelectAll => self.tab_mut().list.select_all(),
+            Command::InvertSelection => self.tab_mut().list.invert_selection(),
+            Command::Copy => self.copy_selection(false),
+            Command::Cut => self.copy_selection(true),
+            Command::Paste => self.paste(),
+            Command::CopyPaths => {
                 let text: Vec<String> = self.selection(active).iter().map(|p| format!("\"{}\"", p.display())).collect();
                 if !text.is_empty() {
                     let _ = shell::copy_text(hwnd, &text.join("\r\n"));
                 }
             }
-            VIRTUAL_KEY(0x43) if ctrl => self.copy_selection(false), // Ctrl+C
-            VIRTUAL_KEY(0x58) if ctrl => self.copy_selection(true), // Ctrl+X
-            VIRTUAL_KEY(0x56) if ctrl => self.paste(), // Ctrl+V
-            VIRTUAL_KEY(0x5A) if ctrl => {
-                // Ctrl+Z: deshacer la última operación.
+            Command::Undo => {
                 if let Some(undo) = self.undo.pop() {
                     ops::spawn(hwnd, self.ops_tx.clone(), Op::Undo(undo));
                 }
             }
-            VIRTUAL_KEY(0x4E) if ctrl && shift => {
-                // Ctrl+Shift+N: carpeta nueva.
+            Command::NewFolder => {
                 if let Some(parent) = self.panes[active].tab().location.target() {
                     ops::spawn(hwnd, self.ops_tx.clone(), Op::NewFolder { parent });
                 }
             }
-            VK_DELETE => self.delete_selection(!shift),
-            VIRTUAL_KEY(0x44) if ctrl => self.toggle_favorite(active), // Ctrl+D
-            VIRTUAL_KEY(0x42) if ctrl && shift => {
-                // Ctrl+Shift+B: mostrar u ocultar la barra de favoritos, como en Chrome.
-                self.show_favorites = !self.show_favorites;
-            }
-            VK_F2 => self.begin_rename(active),
-            VIRTUAL_KEY(0x41) if ctrl => self.tab_mut().list.select_all(), // Ctrl+A
-            VIRTUAL_KEY(0x49) if ctrl => self.tab_mut().list.invert_selection(), // Ctrl+I
-            // Ctrl+1..5: layouts.
-            VIRTUAL_KEY(k @ 0x31..=0x35) if ctrl => {
-                if let Some(l) = Layout::from_index((k - 0x31) as usize) {
-                    self.set_layout(l);
+            Command::Recycle => self.delete_selection(true),
+            Command::Delete => self.delete_selection(false),
+            Command::Rename => self.begin_rename(active),
+            Command::Properties => {
+                // De la selección, o de la carpeta si no hay nada seleccionado.
+                let items = self.selection_items(active);
+                match (&items[..], &self.panes[active].tab().location) {
+                    ([], Location::Path(p)) => shell::properties(hwnd, &[p.clone().into()]),
+                    _ => shell::properties(hwnd, &items),
                 }
             }
-            _ => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
-                Some(action) => {
-                    self.apply(active, action);
-                    return true;
-                }
-                None => return false,
-            },
+            Command::ToggleFavorite => self.toggle_favorite(active),
+            Command::ToggleFavBar => self.show_favorites = !self.show_favorites,
+            Command::PowerShell => self.open_console(active, Console::PowerShell),
+            Command::Cmd => self.open_console(active, Console::Cmd),
+            Command::ToggleDarkMode => self.set_dark_mode(!self.theme.dark),
         }
         self.redraw();
-        true
     }
 
     fn on_button(&mut self, pane: usize, b: Button) {
@@ -2065,6 +2133,132 @@ impl App {
         self.redraw();
     }
 
+    /// Abre el salto rápido o la paleta. Si ya está abierta, cambia de modo conservando lo escrito.
+    fn open_palette(&mut self, mode: PaletteMode) {
+        if let Some((pal, edit)) = &mut self.palette {
+            pal.mode = mode;
+            let edit = *edit;
+            self.refresh_palette();
+            unsafe {
+                let _ = SetFocus(Some(edit));
+            }
+            return;
+        }
+        self.end_edit(false);
+        self.end_filter(true);
+        self.picker_open = false;
+        self.term_menu = None;
+        let (w, _) = self.client_dips();
+        let items = palette::search(mode, "", &self.history, &self.favorites, expand_env);
+        let pal = Palette::new(mode, items);
+        let r = pal.input_rect(w);
+        let k = self.dpi as f32 / 96.0;
+        let h = 20.0 * k;
+        let (x, width) = (r.left * k, (r.right - r.left) * k);
+        let y = (r.top + r.bottom) / 2.0 * k - h / 2.0;
+        unsafe {
+            let Ok(edit) = CreateWindowExW(
+                WS_EX_LAYERED,
+                w!("EDIT"),
+                w!(""),
+                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                x as i32,
+                y as i32,
+                width as i32,
+                h as i32,
+                Some(self.hwnd),
+                None,
+                None,
+                None,
+            ) else {
+                return;
+            };
+            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
+            SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
+            let _ = SetWindowSubclass(edit, Some(palette_proc), 2, 0);
+            let _ = SetFocus(Some(edit));
+            self.palette = Some((pal, edit));
+        }
+        self.redraw();
+    }
+
+    /// Vuelve a buscar con lo escrito (cambió el texto o el modo).
+    fn refresh_palette(&mut self) {
+        let Some((pal, edit)) = &mut self.palette else { return };
+        let query = window_text(*edit);
+        pal.set_items(palette::search(pal.mode, &query, &self.history, &self.favorites, expand_env));
+        self.redraw();
+    }
+
+    fn on_palette_key(&mut self, vk: VIRTUAL_KEY, ctrl: bool) {
+        let Some((pal, edit)) = &mut self.palette else { return };
+        match vk {
+            VK_UP => pal.move_by(-1),
+            VK_DOWN => pal.move_by(1),
+            VK_PRIOR => pal.move_by(-(palette::MAX_ROWS as i32)),
+            VK_NEXT => pal.move_by(palette::MAX_ROWS as i32),
+            VK_RETURN => {
+                let i = pal.selected;
+                self.activate_palette(i, ctrl);
+                return;
+            }
+            // Ctrl+P / Ctrl+Shift+P dentro de la paleta: cambiar de modo.
+            VIRTUAL_KEY(0x50) => {
+                let mode = if key_down(VK_SHIFT) { PaletteMode::All } else { PaletteMode::Folders };
+                self.open_palette(mode);
+                return;
+            }
+            VK_ESCAPE => self.close_palette(),
+            // Perdió el foco: se cierra, salvo que el foco haya vuelto (clic dentro del panel).
+            _ => {
+                let edit = *edit;
+                if unsafe { GetFocus() } != edit {
+                    self.close_palette();
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    fn close_palette(&mut self) {
+        let Some((_, edit)) = self.palette.take() else { return };
+        unsafe {
+            let _ = DestroyWindow(edit);
+            if GetFocus().is_invalid() {
+                let _ = SetFocus(Some(self.hwnd));
+            }
+        }
+        self.redraw();
+    }
+
+    /// Abre un resultado: ejecuta la acción o va a la carpeta (con Ctrl, en una pestaña nueva).
+    fn activate_palette(&mut self, index: usize, ctrl: bool) {
+        let Some(item) = self.palette.as_ref().and_then(|(p, _)| p.items.get(index).cloned()) else { return };
+        self.close_palette();
+        match item.target {
+            Target::Command(c) => self.run_command(c),
+            Target::Folder(loc) => {
+                if let Location::Path(p) = &loc {
+                    if !p.is_dir() {
+                        // Ya no existe: sale del historial.
+                        self.history.forget(p);
+                        self.notice = Some(format!("No existe: {}", p.display()));
+                        self.redraw();
+                        return;
+                    }
+                }
+                let active = self.active;
+                if ctrl {
+                    self.new_tab(active, loc, true);
+                } else {
+                    let (hwnd, tx) = (self.hwnd, self.tx.clone());
+                    self.tab_mut().navigate(hwnd, &tx, loc);
+                }
+            }
+        }
+        self.redraw();
+    }
+
     /// Abre el filtro rápido del panel (o le devuelve el foco si ya está abierto).
     fn begin_filter(&mut self, pane: usize) {
         if let Some((edit, p)) = self.filter_edit {
@@ -2167,7 +2361,8 @@ impl App {
             path.push("\\");
         }
         if path.is_dir() {
-            tab.navigate(hwnd, &tx, Location::Path(path));
+            // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).
+            tab.navigate(hwnd, &tx, Location::Path(fs::true_case(&path)));
         } else if path.is_file() {
             // Un archivo: se abre su carpeta con el archivo enfocado.
             if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
@@ -2247,6 +2442,7 @@ impl App {
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
+        let palette = self.palette.as_ref().map(|(p, _)| p);
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, |p, w, h| {
             let area = ui::panes_area(w, h);
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
@@ -2305,6 +2501,9 @@ impl App {
                     _ => None,
                 };
                 ui::draw_picker(p, w, h, accent, picker_hover);
+            }
+            if let Some(pal) = palette {
+                pal.draw(p, w);
             }
         });
         if result.is_err() {
@@ -2370,6 +2569,32 @@ unsafe extern "system" fn edit_proc(
                 let commit = done_msg as u32 != WM_APP_EDIT_DONE;
                 let _ = PostMessageW(Some(parent), done_msg as u32, WPARAM(commit as usize), LPARAM(0));
             }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// Subclase del control de edición de la paleta: las flechas, Re Pág / Av Pág, Enter, Escape y
+/// Ctrl+P van a la ventana (que mueve la selección o abre el resultado); al perder el foco, avisa.
+unsafe extern "system" fn palette_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    unsafe {
+        let parent = GetParent(hwnd).unwrap_or_default();
+        let ctrl = key_down(VK_CONTROL);
+        let post = |vk: usize| {
+            let _ = PostMessageW(Some(parent), WM_APP_PALETTE_KEY, WPARAM(vk), LPARAM(ctrl as isize));
+        };
+        match msg {
+            WM_KEYDOWN => {
+                let vk = VIRTUAL_KEY(wparam.0 as u16);
+                if matches!(vk, VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN | VK_ESCAPE) || (ctrl && vk == VIRTUAL_KEY(0x50)) {
+                    post(wparam.0);
+                    return LRESULT(0);
+                }
+            }
+            // Evita el "ding" de Enter/Escape (y el carácter de Ctrl+P) en un edit de una línea.
+            WM_CHAR if wparam.0 == '\r' as usize || wparam.0 == 0x1B || wparam.0 == 0x10 => return LRESULT(0),
+            WM_KILLFOCUS => post(0),
             _ => {}
         }
         DefSubclassProc(hwnd, msg, wparam, lparam)

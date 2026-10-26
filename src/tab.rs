@@ -33,6 +33,10 @@ pub struct Tab {
     watcher: Option<Watcher>,
     /// Solo las pestañas a la vista vigilan su carpeta (un hilo por pestaña no escala).
     visible: bool,
+    /// La carga en curso es una visita (navegar, atrás, adelante, subir), no una recarga.
+    counts_as_visit: bool,
+    /// Carpeta que se terminó de abrir como visita: la app la anota en el historial.
+    pub visited: Option<PathBuf>,
 }
 
 impl Tab {
@@ -84,6 +88,8 @@ impl Tab {
             focus_after_load: None,
             watcher: None,
             visible: false,
+            counts_as_visit: false,
+            visited: None,
         }
     }
 
@@ -115,6 +121,7 @@ impl Tab {
         }
         self.forward.clear();
         self.start(hwnd, tx);
+        self.counts_as_visit = true;
     }
 
     pub fn go_back(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
@@ -123,6 +130,7 @@ impl Tab {
             self.focus_after_load = child_name(&self.location, &from);
             self.forward.push(from);
             self.start(hwnd, tx);
+            self.counts_as_visit = true;
         }
     }
 
@@ -131,6 +139,7 @@ impl Tab {
             let from = std::mem::replace(&mut self.location, next);
             self.back.push(from);
             self.start(hwnd, tx);
+            self.counts_as_visit = true;
         }
     }
 
@@ -162,6 +171,8 @@ impl Tab {
     fn start(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.nav_id += 1;
+        // Quien navega la vuelve a marcar como visita después; una recarga no cuenta.
+        self.counts_as_visit = false;
         self.list.clear();
         self.loading = true;
         self.error = None;
@@ -201,6 +212,10 @@ impl Tab {
                     }
                 } else if let Err(e) = result {
                     self.error = Some(e);
+                } else if std::mem::take(&mut self.counts_as_visit) {
+                    if let Location::Path(p) = &self.location {
+                        self.visited = Some(p.clone());
+                    }
                 }
                 if let Some(name) = self.focus_after_load.take() {
                     self.list.focus_name(&name);

@@ -239,6 +239,9 @@ pub struct FileList {
     pub folder: Option<std::path::PathBuf>,
     header_drag: Option<HeaderDrag>,
     band: Option<Band>,
+    /// Se dibuja el marcador de foco. Un clic en un hueco limpia la selección y lo oculta, para
+    /// que la fila que tenía el foco no parezca seguir seleccionada; teclas y clics sobre filas lo traen.
+    focus_visible: bool,
     /// Apretado sobre una fila, pero pasado el nombre (otras columnas): un clic selecciona la fila
     /// y un arrastre arma el rectángulo (solo el nombre arrastra el archivo). Punto y Ctrl.
     press_band: Option<(f32, f32, bool)>,
@@ -308,6 +311,7 @@ impl Default for FileList {
             folder: None,
             header_drag: None,
             band: None,
+            focus_visible: true,
             press_band: None,
             name_ends: Vec::new(),
             name_ends_first: 0,
@@ -922,6 +926,7 @@ impl FileList {
         self.selected = sel;
         if let Some(pos) = hit {
             self.auto_focus = false;
+            self.focus_visible = true;
             self.focus = Some(pos);
             self.anchor = Some(pos);
         }
@@ -929,6 +934,7 @@ impl FileList {
 
     fn select_only(&mut self, pos: usize) {
         self.auto_focus = false;
+        self.focus_visible = true;
         self.selected.iter_mut().for_each(|s| *s = false);
         if let Some(&idx) = self.visible.get(pos) {
             self.selected[idx as usize] = true;
@@ -939,6 +945,7 @@ impl FileList {
 
     fn select_range(&mut self, to: usize, keep_others: bool) {
         self.auto_focus = false;
+        self.focus_visible = true;
         if !keep_others {
             self.selected.iter_mut().for_each(|s| *s = false);
         }
@@ -952,6 +959,7 @@ impl FileList {
 
     fn toggle(&mut self, pos: usize) {
         self.auto_focus = false;
+        self.focus_visible = true;
         if let Some(&idx) = self.visible.get(pos) {
             self.selected[idx as usize] = !self.selected[idx as usize];
         }
@@ -980,6 +988,7 @@ impl FileList {
         if n == 0 {
             return None;
         }
+        self.focus_visible = true;
         let cur = self.focus.unwrap_or(0);
         let page = self.page_rows();
         // Sin selección, la primera flecha selecciona la fila con foco en vez de saltearla.
@@ -1165,6 +1174,7 @@ impl FileList {
                 let base = if ctrl { self.selected.clone() } else { vec![false; self.selected.len()] };
                 if !ctrl {
                     self.selected.iter_mut().for_each(|s| *s = false);
+                    self.focus_visible = false;
                 }
                 let at = self.band_point(x, y);
                 self.band = Some(Band { from: at, to: at, base });
@@ -1243,6 +1253,7 @@ impl FileList {
                 // Un arrastre desde otra columna: rectángulo, no arrastre de archivos.
                 self.press_band = None;
                 self.pending_select = None;
+                self.focus_visible = ctrl;
                 let base = if ctrl { self.selected.clone() } else { vec![false; self.selected.len()] };
                 let at = self.band_point(px, py);
                 self.band = Some(Band { from: at, to: at, base });
@@ -1356,13 +1367,13 @@ impl FileList {
                 } else if self.selected[idx] {
                     let c = if active { th.selection } else { alpha(th.text_dim, 0.18) };
                     p.round_fill(row, 4.0, c);
-                } else if active && self.focus == Some(pos) {
+                } else if active && self.focus_visible && self.focus == Some(pos) {
                     // Foco sin selección: fondo tenue del acento, además del borde.
                     p.round_fill(row, 4.0, th.focus_fill);
                 } else if self.hover == Some(pos) {
                     p.round_fill(row, 4.0, th.hover);
                 }
-                if active && self.focus == Some(pos) {
+                if active && self.focus_visible && self.focus == Some(pos) {
                     p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
                 }
 
@@ -1599,6 +1610,15 @@ mod column_tests {
         assert_ne!(l.on_mouse_move(date_x + 2.0, y0), Action::BeginDrag);
         assert_ne!(l.on_mouse_move(date_x + 8.0, y0 + ROW_H * 2.0), Action::BeginDrag);
         assert_eq!(l.selected_positions(), vec![0, 1, 2]);
+        l.on_mouse_up();
+        // Con todo seleccionado, un clic en un hueco deselecciona todo y no deja foco a la vista.
+        l.select_all();
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert!(l.selected_positions().is_empty());
+        assert!(!l.focus_visible, "no debe parecer seleccionada la fila que tenía el foco");
+        l.on_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN.0, false, false);
+        assert!(l.focus_visible);
     }
 
     /// Arrastrar sobre el hueco debajo de los elementos selecciona los que toca el rectángulo.

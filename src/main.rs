@@ -1129,6 +1129,7 @@ impl App {
                 }
             }
             "picker" => self.picker_open = true,
+            "go" => self.go_to_text(na, b),
             "term" => self.term_menu = Some(na),
             "tabdrop" => self.tab_drop = Some((na, nb)),
             "droptarget" => self.panes[na].tab_mut().list.drop_target = Some(nb),
@@ -2842,6 +2843,15 @@ impl App {
         // "C:" solo es "la carpeta actual de C:"; se interpreta como la raíz.
         if path.as_os_str().len() == 2 && path.to_string_lossy().ends_with(':') {
             path.push("\\");
+        }
+        // Un recurso de red que pide usuario y contraseña (o que no se verifica): se muestra el
+        // diálogo de Windows. Si igual no se puede ver, se navega y la barra de estado dice por qué.
+        if fs::is_unc(&path) && !path.exists() {
+            fs::connect_share(hwnd, &path);
+            if !path.exists() {
+                tab.navigate(hwnd, &tx, Location::Path(path));
+                return;
+            }
         }
         if path.is_dir() {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).

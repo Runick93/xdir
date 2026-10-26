@@ -38,7 +38,7 @@ use windows::Win32::UI::Shell::{
     SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
-use windows::core::{GUID, HSTRING, Interface, PCWSTR};
+use windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR};
 
 /// Hay mensajes nuevos en el canal de carga. `wparam` = panel.
 pub const WM_APP_LOAD: u32 = WM_APP + 1;
@@ -692,6 +692,30 @@ pub fn true_case(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// ¿Es una ruta de red (`\\servidor\recurso\...`)? Los prefijos `\\?\` y `\\.\` no cuentan.
+pub fn is_unc(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.starts_with(r"\\") && !s.starts_with(r"\\?\") && !s.starts_with(r"\\.\")
+}
+
+/// Conecta con el recurso de red de `path` (`\\servidor\recurso`) mostrando el diálogo de
+/// credenciales de Windows si hace falta, como el Explorador. Devuelve si quedó conectado.
+pub fn connect_share(owner: HWND, path: &Path) -> bool {
+    use windows::Win32::NetworkManagement::WNet::{CONNECT_INTERACTIVE, CONNECT_PROMPT, NETRESOURCEW, RESOURCETYPE_DISK, WNetUseConnectionW};
+    let s = path.to_string_lossy();
+    // Solo `\\servidor\recurso`: lo que sigue es una carpeta dentro del recurso.
+    let mut parts = s.trim_start_matches('\\').split('\\').filter(|p| !p.is_empty());
+    let (Some(server), Some(share)) = (parts.next(), parts.next()) else { return false };
+    let mut remote: Vec<u16> = format!(r"\\{server}\{share}").encode_utf16().chain(Some(0)).collect();
+    let res = NETRESOURCEW { dwType: RESOURCETYPE_DISK, lpRemoteName: PWSTR(remote.as_mut_ptr()), ..Default::default() };
+    let mut access = [0u16; 260];
+    let (mut len, mut result) = (access.len() as u32, 0u32);
+    let err = unsafe {
+        WNetUseConnectionW(Some(owner), &res, PCWSTR::null(), PCWSTR::null(), CONNECT_INTERACTIVE | CONNECT_PROMPT, Some(PWSTR(access.as_mut_ptr())), Some(&mut len), Some(&mut result))
+    };
+    err.0 == 0
 }
 
 /// Misma ruta en Windows: sin distinguir mayúsculas ni separador final.

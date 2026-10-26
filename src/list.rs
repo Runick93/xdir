@@ -239,6 +239,10 @@ pub struct FileList {
     pub folder: Option<std::path::PathBuf>,
     header_drag: Option<HeaderDrag>,
     band: Option<Band>,
+    /// Detalles: hasta dónde llega el ícono y el nombre de cada fila dibujada (x de la ventana),
+    /// desde la posición `name_ends_first`. Lo de más a la derecha, en la misma columna, es hueco.
+    name_ends: Vec<f32>,
+    name_ends_first: usize,
 }
 
 /// ¿El nombre (en minúsculas) pasa el filtro? Cada parte separada por `;` es un patrón: con `*`
@@ -301,6 +305,8 @@ impl Default for FileList {
             folder: None,
             header_drag: None,
             band: None,
+            name_ends: Vec::new(),
+            name_ends_first: 0,
         }
     }
 }
@@ -716,6 +722,7 @@ impl FileList {
     /// Cambia la vista conservando el elemento con foco a la vista.
     pub fn set_view(&mut self, view: View) {
         self.view = view;
+        self.name_ends.clear();
         self.header_drag = None;
         self.hover = None;
         self.scroll = 0.0;
@@ -842,6 +849,15 @@ impl FileList {
     }
 
     // ---------- selección ----------
+
+    /// ¿El punto está en la columna del nombre pero a la derecha de donde termina el texto?
+    fn in_name_blank(&self, pos: usize, x: f32) -> bool {
+        if self.view.is_grid() {
+            return false;
+        }
+        let Some(&end) = pos.checked_sub(self.name_ends_first).and_then(|i| self.name_ends.get(i)) else { return false };
+        self.layout_columns().iter().any(|&(_, col, _, right)| col == Column::Name && x > end && x < right)
+    }
 
     /// Punto del mouse para el rectángulo: x de la ventana (sin salirse de la lista) e y del
     /// contenido, para que siga pegado a los elementos aunque se mueva el scroll.
@@ -1111,7 +1127,10 @@ impl FileList {
                 return (Action::Redraw, false);
             }
         }
-        match self.pos_at(x, y) {
+        // En detalles, el hueco a la derecha del nombre cuenta como vacío: arma el rectángulo en
+        // vez de arrastrar el archivo (como en el Explorador).
+        let hit = self.pos_at(x, y).filter(|&pos| !self.in_name_blank(pos, x));
+        match hit {
             Some(pos) if ctrl => self.toggle(pos),
             Some(pos) if shift => self.select_range(pos, false),
             Some(pos) => {
@@ -1289,6 +1308,7 @@ impl FileList {
         let (first, last) = self.visible_range();
         let grid = self.view.is_grid();
 
+        let mut ends = Vec::with_capacity(last - first);
         p.clip(rows, || {
             for pos in first..last {
                 let idx = self.visible[pos] as usize;
@@ -1332,6 +1352,7 @@ impl FileList {
                             p.shell_icon(e.icon, e.overlay, cell.left, iy, ICON);
                             let text = rect(cell.left + ICON + 8.0, y, cell.right, y + ROW_H);
                             p.text(&p.fonts.ui, &e.display, text, color);
+                            ends.push(text.left + p.measure(&p.fonts.ui, &e.display) + 6.0);
                         }
                         Column::Modified => p.text(&p.fonts.ui, &format::date(e.modified), cell, th.text_secondary),
                         Column::Created => p.text(&p.fonts.ui, &format::date(e.created), cell, th.text_secondary),
@@ -1361,6 +1382,9 @@ impl FileList {
                 }
             }
         });
+
+        self.name_ends = ends;
+        self.name_ends_first = first;
 
         if let Some((_, thumb)) = self.scrollbar() {
             let c = if self.thumb_drag.is_some() { alpha(th.scrollbar, th.scrollbar.a * 1.6) } else { th.scrollbar };
@@ -1515,6 +1539,28 @@ mod column_tests {
         empty.on_mouse_down(x, below, false, false);
         // (arma un rectángulo de selección, no un arrastre de archivos)
         assert_ne!(empty.on_mouse_move(x + 30.0, below), Action::BeginDrag);
+    }
+
+    /// En detalles, el hueco a la derecha del nombre arma el rectángulo; el nombre arrastra el archivo.
+    #[test]
+    fn blank_right_of_the_name_starts_a_band_not_a_drag() {
+        let mut l = list(800.0);
+        l.append((0..6).map(|i| entry(&format!("f{i}"))).collect());
+        let name_right = l.layout_columns().iter().find(|c| c.1 == Column::Name).unwrap().3;
+        // Como si se hubiera dibujado: los nombres terminan 100 px después del borde izquierdo.
+        l.name_ends = vec![l.area.left + 100.0; 6];
+        l.name_ends_first = 0;
+        let row = l.item_rect(2);
+        let y = (row.top + row.bottom) / 2.0;
+        // Sobre el nombre: arrastra el archivo.
+        l.on_mouse_down(l.area.left + 60.0, y, false, false);
+        assert_eq!(l.on_mouse_move(l.area.left + 80.0, y + 8.0), Action::BeginDrag);
+        l.on_mouse_up();
+        // En el hueco de la misma columna: rectángulo (no BeginDrag) y selecciona filas.
+        let x = (l.area.left + 100.0 + name_right) / 2.0;
+        l.on_mouse_down(x, y, false, false);
+        assert_ne!(l.on_mouse_move(x + 10.0, y + ROW_H * 2.0), Action::BeginDrag);
+        assert_eq!(l.selected_positions(), vec![2, 3, 4]);
     }
 
     /// Arrastrar sobre el hueco debajo de los elementos selecciona los que toca el rectángulo.

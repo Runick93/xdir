@@ -267,6 +267,8 @@ struct App {
     /// Atajos y colores de `config.toml`.
     config: Config,
     groups: Groups,
+    /// Grupo de paneles cargado o guardado en esta ejecución: va en el título de la ventana.
+    group_name: Option<String>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, HWND)>,
     /// Árbol de carpetas lateral (experimental).
@@ -397,6 +399,7 @@ fn main() -> Result<()> {
             history,
             config,
             groups: Groups::load(),
+            group_name: None,
             palette: None,
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(),
@@ -1761,6 +1764,7 @@ impl App {
         }
         self.active = 0;
         self.notice = Some(format!("Grupo «{}»", g.name));
+        self.group_name = Some(g.name);
         self.sync_visibility();
         self.redraw();
     }
@@ -1769,6 +1773,7 @@ impl App {
     fn save_group(&mut self, name: &str) {
         let s = self.session();
         self.groups.put(Group { name: name.to_string(), layout: s.layout, split_x: s.split_x, split_y: s.split_y, panes: s.panes });
+        self.group_name = Some(name.to_string());
         self.notice = Some(match self.groups.save() {
             Ok(()) => format!("Grupo «{name}» guardado"),
             Err(e) => format!("No se pudo guardar el grupo: {e}"),
@@ -2996,7 +3001,10 @@ impl App {
     }
 
     fn paint(&mut self) {
-        let title = format!("{} — xdir", self.panes[self.active].tab().location.title());
+        let title = match &self.group_name {
+            Some(name) => format!("xdir - {name}"),
+            None => "xdir".to_string(),
+        };
         if title != self.title {
             let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
             unsafe {

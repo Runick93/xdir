@@ -297,6 +297,8 @@ struct App {
     picker_open: bool,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
+    /// Consola del menú de terminales sobre la que se hizo clic derecho.
+    term_ctx: Option<(usize, Console)>,
     /// Colores personalizados del selector de Windows, para que se recuerden entre usos.
     custom_colors: [COLORREF; 16],
 }
@@ -412,6 +414,7 @@ fn main() -> Result<()> {
             dark_mode: session.dark_mode,
             picker_open: false,
             term_menu: None,
+            term_ctx: None,
             custom_colors: [COLORREF(0x00FFFFFF); 16],
         };
         app.restore_panes(&session, start_path);
@@ -713,6 +716,7 @@ impl App {
                     let _ = SetFocus(Some(self.hwnd));
                     self.fav_ctx = None;
                     self.header_ctx = None;
+                    self.term_ctx = None;
                     match self.hit(x, y) {
                         Hit::Pane(i, PaneHit::List) if self.panes[i].tab().list.in_header(x, y) => {
                             self.set_active(i);
@@ -722,6 +726,11 @@ impl App {
                             self.set_active(i);
                             self.panes[i].tab_mut().list.on_right_down(x, y);
                             self.redraw();
+                        }
+                        Hit::TermMenu(Some(c)) => {
+                            if let Some(pane) = self.term_menu {
+                                self.term_ctx = Some((pane, c));
+                            }
                         }
                         Hit::Pane(i, PaneHit::Fav(j)) => self.fav_ctx = Some((i, Some(vec![j]))),
                         Hit::Pane(i, PaneHit::FavBar | PaneHit::FavOverflow) => self.fav_ctx = Some((i, None)),
@@ -733,6 +742,10 @@ impl App {
                     if let Some(pane) = self.header_ctx.take().filter(|_| lparam.0 != -1) {
                         let pt = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
                         self.show_columns_menu(pane, pt);
+                        return LRESULT(0);
+                    }
+                    if let Some((pane, console)) = self.term_ctx.take().filter(|_| lparam.0 != -1) {
+                        self.console_context_menu(pane, console);
                         return LRESULT(0);
                     }
                     match self.fav_ctx.take() {
@@ -2313,6 +2326,35 @@ impl App {
                 let _ = EndMenu();
             }
         }
+    }
+
+    /// Clic derecho en PowerShell o CMD del menú de terminales: abrirla como administrador o con
+    /// las credenciales de otro usuario.
+    fn console_context_menu(&mut self, pane: usize, console: Console) {
+        const ADMIN: usize = 1;
+        const OTHER: usize = 2;
+        let cmd = unsafe {
+            let Ok(hmenu) = CreatePopupMenu() else { return };
+            let _ = AppendMenuW(hmenu, MF_STRING, ADMIN, w!("Ejecutar como administrador"));
+            let _ = AppendMenuW(hmenu, MF_STRING, OTHER, w!("Ejecutar como otro usuario"));
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, self.hwnd, None).0;
+            let _ = DestroyMenu(hmenu);
+            cmd as usize
+        };
+        let verb = match cmd {
+            ADMIN => "runas",
+            OTHER => "runasuser",
+            _ => return,
+        };
+        self.term_menu = None;
+        if let Location::Path(dir) = self.panes[pane].tab().location.clone() {
+            if !console.open_as(self.hwnd, &dir, verb) {
+                self.notice = Some(format!("No se pudo abrir {}", console.label()));
+            }
+        }
+        self.redraw();
     }
 
     /// Menú contextual de la barra de favoritos (o de un favorito). Devuelve la acción elegida.

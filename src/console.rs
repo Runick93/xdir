@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR};
 
 use crate::fs::wide_path;
 
@@ -41,9 +41,16 @@ impl Console {
     /// Abre la consola con `dir` como carpeta de trabajo. Si la terminal predeterminada de
     /// Windows es Windows Terminal, se abre ahí.
     pub fn open(self, hwnd: HWND, dir: &Path) -> bool {
+        self.open_as(hwnd, dir, "open")
+    }
+
+    /// Igual, con un verbo del Shell: `runas` (administrador, pide confirmación de UAC) o
+    /// `runasuser` (pide usuario y contraseña de otra cuenta).
+    pub fn open_as(self, hwnd: HWND, dir: &Path, verb: &str) -> bool {
         let program = HSTRING::from(self.program().as_os_str());
+        let verb = HSTRING::from(verb);
         let dir = wide_path(dir);
-        let r = unsafe { ShellExecuteW(Some(hwnd), w!("open"), &program, PCWSTR::null(), PCWSTR(dir.as_ptr()), SW_SHOWNORMAL) };
+        let r = unsafe { ShellExecuteW(Some(hwnd), &verb, &program, PCWSTR::null(), PCWSTR(dir.as_ptr()), SW_SHOWNORMAL) };
         // ShellExecute devuelve un valor mayor que 32 si salió bien.
         r.0 as usize > 32
     }

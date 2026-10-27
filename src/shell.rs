@@ -28,7 +28,8 @@ use windows::Win32::UI::Shell::{
     SHGetKnownFolderItem, SHMultiFileProperties, SHOP_FILEPATH, SHObjectProperties, SHParseDisplayName,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
 };
 use windows::core::{Interface, PCSTR, PCWSTR, PSTR, Result, w};
 
@@ -258,9 +259,50 @@ pub fn handle_menu_message(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<L
 /// Verbos que resuelve la propia aplicación en vez del Shell.
 pub const OWN_VERBS: [&str; 5] = ["rename", "delete", "cut", "copy", "paste"];
 
+/// Entrada propia del menú del fondo (Ver, Ordenar por, Actualizar...): el Shell solo aporta las
+/// de las extensiones ("Nuevo", Git...), el resto lo pone la vista de carpeta del Explorador.
+pub enum Entry {
+    Item { id: u32, label: String, enabled: bool, checked: bool },
+    Sub(String, Vec<Entry>),
+    Sep,
+}
+
+/// Identificadores propios: por encima de los que el Shell recibe (1..=0x7FFF).
+const OWN_BASE: u32 = 0x8000;
+
+fn append_entries(hmenu: HMENU, entries: &[Entry]) {
+    for e in entries {
+        unsafe {
+            match e {
+                Entry::Sep => {
+                    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+                }
+                Entry::Item { id, label, enabled, checked } => {
+                    let mut flags = MF_STRING;
+                    if !enabled {
+                        flags |= MF_GRAYED;
+                    }
+                    if *checked {
+                        flags |= MF_CHECKED;
+                    }
+                    let text: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+                    let _ = AppendMenuW(hmenu, flags, (OWN_BASE + id) as usize, PCWSTR(text.as_ptr()));
+                }
+                Entry::Sub(label, children) => {
+                    let Ok(sub) = CreatePopupMenu() else { continue };
+                    append_entries(sub, children);
+                    let text: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+                    let _ = AppendMenuW(hmenu, MF_POPUP, sub.0 as usize, PCWSTR(text.as_ptr()));
+                }
+            }
+        }
+    }
+}
+
 /// Muestra el menú contextual del Shell. Sin `items`, es el menú del fondo de la carpeta.
 /// Con `intercept`, devuelve el verbo elegido si es uno de `OWN_VERBS` para que lo resuelva
-/// la aplicación; el resto (y todo, en carpetas virtuales) lo ejecuta el Shell.
+/// la aplicación; el resto (y todo, en carpetas virtuales) lo ejecuta el Shell. Las `own` van
+/// arriba y, si se elige una, devuelve `own:<id>`.
 pub fn context_menu(
     hwnd: HWND,
     folder: &Location,
@@ -268,6 +310,7 @@ pub fn context_menu(
     screen: POINT,
     extended: bool,
     intercept: bool,
+    own: &[Entry],
 ) -> Option<String> {
     let menu = build_menu(hwnd, folder, items).ok()?;
     unsafe {
@@ -276,7 +319,12 @@ pub fn context_menu(
         if extended {
             flags |= CMF_EXTENDEDVERBS;
         }
-        if menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, flags).is_err() {
+        append_entries(hmenu, own);
+        if !own.is_empty() {
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+        let first = own.len() as u32 + u32::from(!own.is_empty());
+        if menu.QueryContextMenu(hmenu, first, 1, 0x7FFF, flags).is_err() {
             let _ = DestroyMenu(hmenu);
             return None;
         }
@@ -285,7 +333,9 @@ pub fn context_menu(
         OPEN_MENU.with(|m| *m.borrow_mut() = None);
 
         let mut chosen = None;
-        if cmd > 0 {
+        if cmd >= OWN_BASE as i32 {
+            chosen = Some(format!("own:{}", cmd as u32 - OWN_BASE));
+        } else if cmd > 0 {
             let id = (cmd - 1) as usize;
             let verb = command_verb(&menu, id);
             if intercept && verb.as_deref().is_some_and(|v| OWN_VERBS.contains(&v)) {

@@ -2087,6 +2087,35 @@ impl App {
         }
     }
 
+    /// Entradas propias del menú del fondo de una carpeta; `cmds` recibe el comando de cada id.
+    fn background_entries(&self, pane: usize, cmds: &mut Vec<Command>) -> Vec<shell::Entry> {
+        use shell::Entry;
+        let list = &self.panes[pane].tab().list;
+        let mut item = |label: &str, command: Command, enabled: bool, checked: bool| {
+            cmds.push(command);
+            Entry::Item { id: cmds.len() as u32 - 1, label: label.to_string(), enabled, checked }
+        };
+        let views = list::VIEWS
+            .iter()
+            .enumerate()
+            .map(|(i, &(view, name, ..))| item(name, Command::View(i as u8), true, view == list.view))
+            .collect();
+        let sorts = list::COLUMNS
+            .iter()
+            .enumerate()
+            .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
+            .collect();
+        let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
+        vec![
+            Entry::Sub("Ver".into(), views),
+            Entry::Sub("Ordenar por".into(), sorts),
+            item("Actualizar", Command::Refresh, true, false),
+            Entry::Sep,
+            item("Pegar", Command::Paste, true, false),
+            undo,
+        ]
+    }
+
     fn on_context_menu(&mut self, lparam: LPARAM) {
         let pane = self.active;
         // lparam -1: tecla de menú o Shift+F10; se abre sobre la fila con foco.
@@ -2105,7 +2134,18 @@ impl App {
         let items = self.selection_items(pane);
         // En carpetas virtuales el Shell resuelve todo: conoce el contexto (p. ej. la Papelera).
         let intercept = !matches!(location, Location::Shell { .. });
-        let chosen = shell::context_menu(self.hwnd, &location, &items, screen, key_down(VK_SHIFT), intercept);
+        // El menú del fondo del Shell solo trae las extensiones: Ver, Ordenar, Actualizar, Pegar y
+        // Deshacer los pone la vista del Explorador, así que se agregan acá.
+        let mut cmds = Vec::new();
+        let own = if items.is_empty() && intercept { self.background_entries(pane, &mut cmds) } else { Vec::new() };
+        let chosen = shell::context_menu(self.hwnd, &location, &items, screen, key_down(VK_SHIFT), intercept, &own);
+        if let Some(cmd) = chosen.as_deref().and_then(|c| c.strip_prefix("own:")).and_then(|n| n.parse::<usize>().ok()) {
+            if let Some(&command) = cmds.get(cmd) {
+                self.run_command(command);
+            }
+            self.redraw();
+            return;
+        }
         match chosen.as_deref() {
             Some("rename") => self.begin_rename(pane),
             Some("delete") => self.delete_selection(!key_down(VK_SHIFT)),

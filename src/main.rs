@@ -26,6 +26,7 @@ mod thumbs;
 mod toml;
 #[cfg(feature = "arbol")]
 mod tree;
+mod typed;
 mod ui;
 mod uia;
 
@@ -58,7 +59,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, SHACF_AUTOSUGGEST_FORCE_ON, SHACF_FILESYS_DIRS, SHAutoComplete, SHDoDragDrop,
+    DefSubclassProc, SHDoDragDrop,
     SetWindowSubclass, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -99,6 +100,8 @@ const WM_APP_FILTER_DONE: u32 = WM_APP + 13;
 const EN_CHANGE_CODE: usize = 0x0300;
 /// Tecla de la paleta: `wparam` = tecla virtual (0: perdió el foco), `lparam` = 1 si con Ctrl.
 const WM_APP_PALETTE_KEY: u32 = WM_APP + 14;
+/// Flecha / Re Pág / Av Pág en la barra de dirección: recorren el desplegable de rutas.
+const WM_APP_SUGGEST_KEY: u32 = WM_APP + 15;
 
 /// Qué muestra un menú desplegable de favoritos.
 enum FavMenuSource {
@@ -190,6 +193,8 @@ enum Hit {
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.
     Palette(Option<usize>),
+    /// Desplegable de la barra de dirección: una ruta, o el panel sin nada debajo.
+    Suggest(Option<usize>),
 }
 
 /// Lo que se está arrastrando con el botón izquierdo.
@@ -235,6 +240,8 @@ struct App {
     rx: Receiver<fs::LoadEvent>,
     /// Control de edición nativo sobre la barra de dirección de un panel.
     edit: Option<(HWND, usize)>,
+    /// Desplegable de rutas de la barra de dirección (vive mientras `edit`).
+    suggest: Option<typed::Suggest>,
     edit_font: HFONT,
     edit_brush: HBRUSH,
     tracking_mouse: bool,
@@ -379,6 +386,7 @@ fn main() -> Result<()> {
             tx,
             rx,
             edit: None,
+            suggest: None,
             edit_font: HFONT::default(),
             edit_brush: HBRUSH::default(),
             tracking_mouse: false,
@@ -658,6 +666,15 @@ impl App {
                     if self.palette.as_ref().is_some_and(|(_, e)| lparam.0 == e.0 as isize) {
                         self.refresh_palette();
                     }
+                    if let Some((edit, _)) = self.edit {
+                        if lparam.0 == edit.0 as isize {
+                            let text = window_text(edit);
+                            if let Some(sg) = self.suggest.as_mut().filter(|sg| !sg.quiet) {
+                                sg.set_query(&text);
+                                self.redraw();
+                            }
+                        }
+                    }
                     LRESULT(0)
                 }
                 #[cfg(feature = "arbol")]
@@ -675,6 +692,10 @@ impl App {
                     let text = String::from_utf16_lossy(wide);
                     self.test_hook(text.trim_end_matches('\0'));
                     LRESULT(1)
+                }
+                WM_APP_SUGGEST_KEY => {
+                    self.on_suggest_key(VIRTUAL_KEY(wparam.0 as u16));
+                    LRESULT(0)
                 }
                 WM_APP_PALETTE_KEY => {
                     self.on_palette_key(VIRTUAL_KEY(wparam.0 as u16), lparam.0 == 1);
@@ -793,7 +814,10 @@ impl App {
                 }
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                     let (x, y) = self.mouse_pos(lparam);
-                    let _ = SetFocus(Some(self.hwnd));
+                    // El desplegable de la barra de dirección no le quita el foco a la caja.
+                    if !matches!(self.hit(x, y), Hit::Suggest(_)) {
+                        let _ = SetFocus(Some(self.hwnd));
+                    }
                     self.on_left_down(x, y, msg == WM_LBUTTONDBLCLK);
                     LRESULT(0)
                 }
@@ -829,6 +853,13 @@ impl App {
                         Hit::Palette(_) => {
                             if let Some((pal, _)) = &mut self.palette {
                                 pal.on_wheel(delta.round() as i32 * 3);
+                                self.redraw();
+                            }
+                            return LRESULT(0);
+                        }
+                        Hit::Suggest(_) => {
+                            if let Some(sg) = &mut self.suggest {
+                                sg.on_wheel(delta.round() as i32 * 3);
                                 self.redraw();
                             }
                             return LRESULT(0);
@@ -1291,6 +1322,11 @@ impl App {
                 return Hit::Palette(i);
             }
         }
+        if let Some(sg) = &self.suggest {
+            if let Some(i) = sg.item_at(x, y) {
+                return Hit::Suggest(i);
+            }
+        }
         if let Some(pane) = self.term_menu {
             if let Some(c) = ui::terminal_menu_at(self.panes[pane].terminal_rect(), w, x, y) {
                 return Hit::TermMenu(c);
@@ -1339,6 +1375,13 @@ impl App {
             self.redraw();
             return;
         }
+        // Desplegable de la barra de dirección: una ruta se abre; el resto del panel no hace nada.
+        if let Hit::Suggest(i) = hit {
+            if let Some(i) = i {
+                self.pick_suggestion(i);
+            }
+            return;
+        }
         // Con la paleta abierta: un resultado se abre, el resto del panel no hace nada y fuera
         // de ella se cierra (sin que el clic llegue a lo de abajo).
         if self.palette.is_some() {
@@ -1374,7 +1417,7 @@ impl App {
                     self.open_console(pane, c);
                 }
             }
-            Hit::TermMenu(None) | Hit::Palette(_) => {}
+            Hit::TermMenu(None) | Hit::Palette(_) | Hit::Suggest(_) => {}
             Hit::Groups => self.show_groups_menu(),
             Hit::Gear => {
                 self.picker_open = !self.picker_open;
@@ -1595,6 +1638,16 @@ impl App {
         #[cfg(feature = "arbol")]
         {
             redraw |= self.tree.on_mouse_move(x, y);
+        }
+        if let Some(sg) = &mut self.suggest {
+            let h = match hover {
+                Hit::Suggest(Some(i)) => Some(i),
+                _ => None,
+            };
+            if sg.hover != h {
+                sg.hover = h;
+                redraw = true;
+            }
         }
         if let Some((pal, _)) = &mut self.palette {
             let h = match hover {
@@ -2714,17 +2767,50 @@ impl App {
             let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
             SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
             let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_EDIT_DONE as usize);
-            // Autocompletado de rutas del propio Shell.
-            let _ = SHAutoComplete(edit, SHACF_FILESYS_DIRS | SHACF_AUTOSUGGEST_FORCE_ON);
             SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
             let _ = SetFocus(Some(edit));
             self.edit = Some((edit, pane));
         }
+        // Como el Explorador: al abrir, el historial de rutas escritas.
+        self.suggest = Some(typed::Suggest::new(r, ""));
         self.redraw();
+    }
+
+    /// Flechas y Re Pág / Av Pág sobre el desplegable: la barra muestra la ruta elegida.
+    fn on_suggest_key(&mut self, vk: VIRTUAL_KEY) {
+        let (Some((edit, _)), Some(sg)) = (self.edit, self.suggest.as_mut()) else { return };
+        let delta = match vk {
+            VK_UP => -1,
+            VK_DOWN => 1,
+            VK_PRIOR => -sg.page(),
+            _ => sg.page(),
+        };
+        if let Some(text) = sg.move_by(delta) {
+            // Cambiar el texto dispara EN_CHANGE: que no vuelva a buscar y pierda la elección.
+            sg.quiet = true;
+            let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            unsafe {
+                let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
+                SendMessageW(edit, EM_SETSEL, Some(WPARAM(text.encode_utf16().count())), Some(LPARAM(-1)));
+            }
+            sg.quiet = false;
+            self.redraw();
+        }
+    }
+
+    /// Clic en una ruta del desplegable: se navega a ella.
+    fn pick_suggestion(&mut self, index: usize) {
+        let (Some((edit, _)), Some(path)) = (self.edit, self.suggest.as_ref().and_then(|s| s.items.get(index).cloned())) else { return };
+        let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
+        }
+        self.end_edit(true);
     }
 
     fn end_edit(&mut self, commit: bool) {
         let Some((edit, pane)) = self.edit.take() else { return };
+        self.suggest = None;
         let mut buf = vec![0u16; 32 * 1024];
         let text = unsafe {
             let len = GetWindowTextW(edit, &mut buf);
@@ -2734,6 +2820,10 @@ impl App {
         };
         if commit {
             self.go_to_text(pane, &text);
+            let typed = text.trim().trim_matches('"');
+            if std::path::Path::new(typed).exists() {
+                typed::push(typed);
+            }
         }
         self.redraw();
     }
@@ -3080,6 +3170,7 @@ impl App {
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
+        let suggest = self.suggest.as_ref();
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, if self.file_colors { &self.config.colors } else { &[] }, |p, w, h| {
             let area = ui::panes_area(w, h, tree_w);
             #[cfg(feature = "arbol")]
@@ -3143,6 +3234,9 @@ impl App {
                     _ => None,
                 };
                 ui::draw_picker(p, w, h, accent, picker_hover, file_colors, tree_on);
+            }
+            if let Some(sg) = suggest {
+                sg.draw(p);
             }
             if let Some(pal) = palette {
                 pal.draw(p, w);
@@ -3210,6 +3304,13 @@ unsafe extern "system" fn edit_proc(
     unsafe {
         let parent = GetParent(hwnd).unwrap_or_default();
         match msg {
+            WM_KEYDOWN
+                if done_msg as u32 == WM_APP_EDIT_DONE
+                    && matches!(VIRTUAL_KEY(wparam.0 as u16), VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT) =>
+            {
+                let _ = PostMessageW(Some(parent), WM_APP_SUGGEST_KEY, wparam, LPARAM(0));
+                return LRESULT(0);
+            }
             WM_KEYDOWN if wparam.0 == VK_RETURN.0 as usize || wparam.0 == VK_ESCAPE.0 as usize => {
                 let commit = wparam.0 == VK_RETURN.0 as usize;
                 let _ = PostMessageW(Some(parent), done_msg as u32, WPARAM(commit as usize), LPARAM(0));

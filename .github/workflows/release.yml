@@ -1,8 +1,16 @@
 # Compila xdir y genera el zip portable y el instalador. Se lanza a mano desde Actions → "Run workflow".
+# Sube la versión (patch por defecto), la deja commiteada en la rama y publica el release.
+# Al publicar conserva solo los dos releases más recientes.
 name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      subir:
+        description: "Qué número de versión subir antes de compilar"
+        type: choice
+        options: [patch, minor, major, ninguno]
+        default: patch
 
 permissions:
   contents: write
@@ -12,6 +20,32 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Subir la versión
+        id: bump
+        shell: pwsh
+        run: |
+          $toml = Get-Content Cargo.toml -Raw
+          $m = [regex]::Match($toml, '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"')
+          if (-not $m.Success) { throw "No se encontró la versión en Cargo.toml" }
+          [int]$maj, [int]$min, [int]$pat = $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value
+          switch ('${{ inputs.subir }}') {
+            'patch' { $pat++ }
+            'minor' { $min++; $pat = 0 }
+            'major' { $maj++; $min = 0; $pat = 0 }
+          }
+          $new = "$maj.$min.$pat"
+          $changed = $new -ne "$($m.Groups[1].Value).$($m.Groups[2].Value).$($m.Groups[3].Value)"
+          if ($changed) {
+            $toml = [regex]::new('(?m)^version\s*=\s*"[^"]+"').Replace($toml, "version = `"$new`"", 1)
+            Set-Content Cargo.toml -Value $toml -NoNewline -Encoding utf8NoBOM
+            # Cargo.lock también lleva la versión de xdir y el build usa --locked.
+            $lock = Get-Content Cargo.lock -Raw
+            $lock = [regex]::new('(name = "xdir"\r?\nversion = )"[^"]+"').Replace($lock, "`$1`"$new`"", 1)
+            Set-Content Cargo.lock -Value $lock -NoNewline -Encoding utf8NoBOM
+          }
+          "changed=$($changed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Host "Versión: $new"
 
       - name: Rust estable (MSVC)
         run: |
@@ -46,6 +80,16 @@ jobs:
             dist/*-setup.exe
           if-no-files-found: error
 
+      - name: Guardar la versión en el repositorio
+        if: steps.bump.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Versión ${{ steps.pack.outputs.version }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+
       - name: Publicar release
         # bash expande los comodines; pwsh no lo hace para comandos externos.
         shell: bash
@@ -57,4 +101,9 @@ jobs:
           if gh release view "$tag" > /dev/null 2>&1; then
             gh release delete "$tag" --yes --cleanup-tag
           fi
-          gh release create "$tag" dist/*.zip dist/*-setup.exe --title "xdir ${{ steps.pack.outputs.version }}" --target "${{ github.sha }}" --generate-notes
+          gh release create "$tag" dist/*.zip dist/*-setup.exe --title "xdir ${{ steps.pack.outputs.version }}" --target "$(git rev-parse HEAD)" --generate-notes
+          # Solo quedan la versión nueva y la anterior: el resto de los releases se borra con su tag.
+          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].tagName' |
+            while read -r old; do
+              gh release delete "$old" --yes --cleanup-tag
+            done

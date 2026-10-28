@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use crate::fs::Location;
@@ -18,15 +19,64 @@ use crate::theme::alpha;
 /// Terminó de leerse una carpeta del árbol.
 pub const WM_APP_TREE: u32 = WM_APP + 20;
 
+/// Ancho inicial del panel; se puede cambiar arrastrando su borde derecho.
 pub const WIDTH: f32 = 240.0;
-const ROW_H: f32 = 24.0;
-const INDENT: f32 = 16.0;
+pub const MIN_W: f32 = 160.0;
+pub const MAX_W: f32 = 560.0;
+/// Grosor de las barras de desplazamiento y lugar que ocupan al pie / al costado.
+const BAR: f32 = 6.0;
+const BAR_ROOM: f32 = 12.0;
+const ROW_H: f32 = 32.0;
+const INDENT: f32 = 18.0;
+/// Margen a los costados de las filas.
+const SIDE: f32 = 8.0;
 /// Margen entre el borde de arriba y la primera fila.
 const TOP_PAD: f32 = 4.0;
 
+/// Qué es una fila, para su ícono y lo que abre.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Folder,
+    /// Carpeta del usuario, fijada arriba como en el Explorador.
+    Pinned,
+    Home,
+    Drive,
+    /// "Este equipo": no es una ruta.
+    Computer,
+    /// Línea que separa grupos.
+    Separator,
+}
+
+fn rgb(r: f32, g: f32, b: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r, g, b, a: 1.0 }
+}
+
+/// Ícono y color de una carpeta del usuario fijada (la posición es la de `fs::user_folder`).
+const PINNED: [(&str, &str, (f32, f32, f32)); 6] = [
+    ("Escritorio", "\u{E7F4}", (0.30, 0.65, 0.95)),
+    ("Descargas", "\u{E896}", (0.25, 0.78, 0.55)),
+    ("Documentos", "\u{E8A5}", (0.62, 0.70, 0.80)),
+    ("Imágenes", "\u{E91B}", (0.35, 0.60, 0.95)),
+    ("Música", "\u{E8D6}", (0.95, 0.45, 0.35)),
+    ("Vídeos", "\u{E714}", (0.70, 0.45, 0.90)),
+];
+
+/// Barra de desplazamiento del panel.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Bar {
+    /// Horizontal, para llegar a los nombres largos y a las carpetas muy anidadas.
+    H,
+    V,
+}
+
 struct Node {
+    /// Ancho del nombre (0: todavía sin medir).
+    text_w: f32,
+    kind: Kind,
     path: PathBuf,
     name: String,
+    /// Posición en `PINNED` si es una carpeta fijada.
+    pin: usize,
     depth: usize,
     /// None: sin leer todavía. Some(vacío): no tiene subcarpetas.
     children: Option<Vec<usize>>,
@@ -48,6 +98,18 @@ pub struct Tree {
     nodes: Vec<Node>,
     roots: Vec<usize>,
     scroll: f32,
+    /// Desplazamiento horizontal.
+    hscroll: f32,
+    /// Ancho del panel (cambiable).
+    pub width: f32,
+    /// Lo que ocupa el contenido y lo que se ve, del último cuadro.
+    content_w: f32,
+    view_w: f32,
+    view_h: f32,
+    htrack: Rect,
+    hthumb: Rect,
+    vtrack: Rect,
+    vthumb: Rect,
     hover: Option<usize>,
     area: Rect,
     tx: Sender<(usize, Vec<(String, PathBuf)>)>,
@@ -57,23 +119,66 @@ pub struct Tree {
 impl Tree {
     pub fn new() -> Self {
         let (tx, rx) = channel();
-        let mut t = Self { visible: false, nodes: Vec::new(), roots: Vec::new(), scroll: 0.0, hover: None, area: rect(0.0, 0.0, 0.0, 0.0), tx, rx };
+        let mut t = Self { visible: false, nodes: Vec::new(), roots: Vec::new(), scroll: 0.0,
+            hscroll: 0.0,
+            width: WIDTH,
+            content_w: 0.0,
+            view_w: WIDTH,
+            view_h: 0.0,
+            htrack: rect(0.0, 0.0, 0.0, 0.0),
+            hthumb: rect(0.0, 0.0, 0.0, 0.0),
+            vtrack: rect(0.0, 0.0, 0.0, 0.0),
+            vthumb: rect(0.0, 0.0, 0.0, 0.0),
+            hover: None,
+            area: rect(0.0, 0.0, 0.0, 0.0),
+            tx,
+            rx,
+        };
         if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
             let name = home.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            t.add_root(home, name);
+            t.add_root(Kind::Home, home, name, 0);
+            t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
         }
+        // Carpetas del usuario, fijadas.
+        let before = t.roots.len();
+        for (i, (name, ..)) in PINNED.iter().enumerate() {
+            if let Some(path) = crate::fs::user_folder(i) {
+                t.add_root(Kind::Pinned, path, (*name).to_string(), i);
+            }
+        }
+        if t.roots.len() > before {
+            t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
+        }
+        // "Este equipo", ya abierto, con sus unidades.
+        t.add_root(Kind::Computer, PathBuf::new(), "Este equipo".to_string(), 0);
+        let computer = t.roots[t.roots.len() - 1];
         let drives = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+        let mut ids = Vec::new();
         for i in 0..26u32 {
             if drives & (1 << i) != 0 {
                 let letter = (b'A' + i as u8) as char;
-                t.add_root(PathBuf::from(format!("{letter}:\\")), format!("{letter}:"));
+                let label = crate::fs::drive_label(&format!("{letter}:"));
+                t.nodes.push(Node {
+                    kind: Kind::Drive,
+                    path: PathBuf::from(format!("{letter}:\\")),
+                    name: label,
+                    pin: 0,
+                    depth: 1,
+                    children: None,
+                    expanded: false,
+                    loading: false,
+                    text_w: 0.0,
+                });
+                ids.push(t.nodes.len() - 1);
             }
         }
+        t.nodes[computer].children = Some(ids);
+        t.nodes[computer].expanded = true;
         t
     }
 
-    fn add_root(&mut self, path: PathBuf, name: String) {
-        self.nodes.push(Node { path, name, depth: 0, children: None, expanded: false, loading: false });
+    fn add_root(&mut self, kind: Kind, path: PathBuf, name: String, pin: usize) {
+        self.nodes.push(Node { kind, path, name, pin, depth: 0, children: None, expanded: false, loading: false, text_w: 0.0 });
         self.roots.push(self.nodes.len() - 1);
     }
 
@@ -98,6 +203,9 @@ impl Tree {
     /// Expande o contrae; la primera vez lee las subcarpetas en otro hilo.
     pub fn toggle(&mut self, hwnd: HWND, id: usize, show_hidden: bool) {
         let n = &mut self.nodes[id];
+        if n.kind == Kind::Separator {
+            return;
+        }
         n.expanded = !n.expanded;
         if n.expanded && n.children.is_none() && !n.loading {
             n.loading = true;
@@ -120,7 +228,7 @@ impl Tree {
             let depth = self.nodes[id].depth + 1;
             let mut ids = Vec::with_capacity(dirs.len());
             for (name, path) in dirs {
-                self.nodes.push(Node { path, name, depth, children: None, expanded: false, loading: false });
+                self.nodes.push(Node { kind: Kind::Folder, path, name, pin: 0, depth, children: None, expanded: false, loading: false, text_w: 0.0 });
                 ids.push(self.nodes.len() - 1);
             }
             let n = &mut self.nodes[id];
@@ -144,11 +252,12 @@ impl Tree {
         }
         let Some(id) = self.node_at(y) else { return TreeHit::Nothing };
         let n = &self.nodes[id];
-        let chevron_right = self.area.left + 6.0 + n.depth as f32 * INDENT + 16.0;
-        if x < chevron_right {
-            TreeHit::Toggle(id)
-        } else {
-            TreeHit::Open(Location::Path(n.path.clone()))
+        let chevron_right = self.area.left + SIDE + 2.0 + n.depth as f32 * INDENT + 18.0 - self.hscroll;
+        match n.kind {
+            Kind::Separator => TreeHit::Nothing,
+            _ if x < chevron_right => TreeHit::Toggle(id),
+            Kind::Computer => TreeHit::Open(Location::Computer),
+            _ => TreeHit::Open(Location::Path(n.path.clone())),
         }
     }
 
@@ -164,9 +273,65 @@ impl Tree {
     }
 
     pub fn on_wheel(&mut self, rows: f32) {
-        let content = self.rows().len() as f32 * ROW_H;
-        let max = (content - (self.area.bottom - self.area.top)).max(0.0);
-        self.scroll = (self.scroll - rows * ROW_H).clamp(0.0, max);
+        self.scroll = (self.scroll - rows * ROW_H).clamp(0.0, self.max_scroll());
+    }
+
+    /// Rueda con Mayús o rueda horizontal: mueve el contenido a los costados.
+    pub fn on_wheel_h(&mut self, rows: f32) {
+        self.hscroll = (self.hscroll - rows * ROW_H).clamp(0.0, self.max_hscroll());
+    }
+
+    fn max_scroll(&self) -> f32 {
+        (self.rows().len() as f32 * ROW_H + TOP_PAD - self.view_h).max(0.0)
+    }
+
+    fn max_hscroll(&self) -> f32 {
+        (self.content_w - self.view_w).max(0.0)
+    }
+
+    /// El borde derecho, donde se agarra para cambiar el ancho.
+    pub fn edge_at(&self, x: f32, y: f32) -> bool {
+        self.visible && y >= self.area.top && y <= self.area.bottom && x >= self.area.right - 3.0 && x <= self.area.right + crate::ui::GAP + 1.0
+    }
+
+    pub fn set_width(&mut self, w: f32) {
+        self.width = w.clamp(MIN_W, MAX_W);
+    }
+
+    /// Barra de desplazamiento bajo el mouse y a qué distancia del inicio de su pulgar se agarró.
+    pub fn bar_at(&self, x: f32, y: f32) -> Option<(Bar, f32)> {
+        let grow = |t: Rect| rect(t.left - 4.0, t.top - 4.0, t.right + 3.0, t.bottom + 3.0);
+        if self.visible && self.htrack.right > self.htrack.left && contains(&grow(self.htrack), x, y) {
+            let t = self.hthumb;
+            let grab = if x >= t.left && x <= t.right { x - t.left } else { (t.right - t.left) / 2.0 };
+            return Some((Bar::H, grab));
+        }
+        if self.visible && self.vtrack.bottom > self.vtrack.top && contains(&grow(self.vtrack), x, y) {
+            let t = self.vthumb;
+            let grab = if y >= t.top && y <= t.bottom { y - t.top } else { (t.bottom - t.top) / 2.0 };
+            return Some((Bar::V, grab));
+        }
+        None
+    }
+
+    /// Arrastrando el pulgar de una barra: el mouse está en (x, y).
+    pub fn drag_bar(&mut self, bar: Bar, grab: f32, x: f32, y: f32) {
+        match bar {
+            Bar::H => {
+                let span = (self.htrack.right - self.htrack.left) - (self.hthumb.right - self.hthumb.left);
+                if span > 0.0 {
+                    let frac = ((x - grab - self.htrack.left) / span).clamp(0.0, 1.0);
+                    self.hscroll = frac * self.max_hscroll();
+                }
+            }
+            Bar::V => {
+                let span = (self.vtrack.bottom - self.vtrack.top) - (self.vthumb.bottom - self.vthumb.top);
+                if span > 0.0 {
+                    let frac = ((y - grab - self.vtrack.top) / span).clamp(0.0, 1.0);
+                    self.scroll = frac * self.max_scroll();
+                }
+            }
+        }
     }
 
     /// `current`: carpeta del panel activo, resaltada si está a la vista.
@@ -174,36 +339,125 @@ impl Tree {
         self.area = area;
         let th = p.theme;
         p.round_fill(area, 8.0, th.surface);
-        p.round_stroke(area, 8.0, th.border);
         let rows = self.rows();
-        let max = (rows.len() as f32 * ROW_H - (area.bottom - area.top)).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, max);
-        p.clip(rect(area.left + 1.0, area.top + 1.0, area.right - 1.0, area.bottom - 1.0), || {
+        // Lo que ocupa cada fila de ancho (se mide una sola vez por nodo).
+        let mut content_w = 0.0f32;
+        for &id in &rows {
+            let n = &mut self.nodes[id];
+            if n.kind == Kind::Separator {
+                continue;
+            }
+            if n.text_w == 0.0 {
+                n.text_w = p.measure(&p.fonts.ui, &n.name);
+            }
+            let pin = if n.kind == Kind::Pinned { 26.0 } else { 0.0 };
+            content_w = content_w.max(SIDE + 2.0 + n.depth as f32 * INDENT + 48.0 + n.text_w + SIDE + 8.0 + pin);
+        }
+        // Qué barras hacen falta (una puede hacer necesaria la otra).
+        let total_h = rows.len() as f32 * ROW_H + TOP_PAD;
+        let (full_w, full_h) = (area.right - area.left, area.bottom - area.top);
+        let mut view_w = full_w;
+        let mut view_h = full_h;
+        let mut need_v = total_h > view_h;
+        if need_v {
+            view_w -= BAR_ROOM;
+        }
+        let need_h = content_w > view_w;
+        if need_h {
+            view_h -= BAR_ROOM;
+            if !need_v && total_h > view_h {
+                need_v = true;
+                view_w -= BAR_ROOM;
+            }
+        }
+        self.content_w = content_w;
+        self.view_w = view_w;
+        self.view_h = view_h;
+        self.scroll = self.scroll.clamp(0.0, (total_h - view_h).max(0.0));
+        self.hscroll = self.hscroll.clamp(0.0, (content_w - view_w).max(0.0));
+        let hs = self.hscroll;
+        let folder = rgb(1.0, 0.79, 0.28);
+        let body = rect(area.left + 1.0, area.top + 1.0, area.left + view_w - 1.0, area.top + view_h);
+        p.clip(body, || {
             for (i, &id) in rows.iter().enumerate() {
                 let y = area.top + TOP_PAD + i as f32 * ROW_H - self.scroll;
-                if y + ROW_H < area.top || y > area.bottom {
+                if y + ROW_H < area.top || y > area.top + view_h {
                     continue;
                 }
                 let n = &self.nodes[id];
-                let row = rect(area.left + 4.0, y, area.right - 4.0, y + ROW_H);
-                let is_current = current.is_some_and(|c| crate::fs::same_path(c, &n.path));
-                if is_current {
-                    p.round_fill(row, 4.0, alpha(th.accent, 0.22));
-                } else if self.hover == Some(id) {
-                    p.round_fill(row, 4.0, th.hover);
+                if n.kind == Kind::Separator {
+                    let mid = (y + ROW_H / 2.0).round();
+                    p.round_fill(rect(area.left + SIDE + 4.0, mid, area.left + view_w - SIDE - 4.0, mid + 1.0), 0.5, alpha(th.text, 0.14));
+                    continue;
                 }
-                let x = area.left + 6.0 + n.depth as f32 * INDENT;
+                let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
+                let is_current = n.kind != Kind::Computer && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
+                if is_current {
+                    p.round_fill(row, 5.0, alpha(th.text, 0.11));
+                } else if self.hover == Some(id) {
+                    p.round_fill(row, 5.0, alpha(th.text, 0.06));
+                }
+                let x = area.left + SIDE + 2.0 + n.depth as f32 * INDENT - hs;
                 // Chevron: derecha (contraído), abajo (expandido); nada si no tiene subcarpetas.
                 let has_children = n.children.as_ref().is_none_or(|c| !c.is_empty());
                 if has_children {
                     let glyph = if n.loading { "\u{E712}" } else if n.expanded { "\u{E70D}" } else { "\u{E76C}" };
                     p.text(&p.fonts.glyphs_small, glyph, rect(x, y, x + 16.0, y + ROW_H), th.text_dim);
                 }
-                let icon = if n.depth == 0 && n.path.parent().is_none() { "\u{EDA2}" } else { "\u{E8B7}" };
-                p.text(&p.fonts.glyphs_small, icon, rect(x + 16.0, y, x + 34.0, y + ROW_H), th.accent);
-                p.text(&p.fonts.ui, &n.name, rect(x + 38.0, y, area.right - 8.0, y + ROW_H), th.text);
+                let (icon, color) = match n.kind {
+                    Kind::Home => ("\u{E80F}", th.accent),
+                    Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
+                    Kind::Drive => ("\u{EDA2}", th.text_dim),
+                    Kind::Pinned => {
+                        let (_, glyph, (r, g, b)) = PINNED[n.pin];
+                        (glyph, rgb(r, g, b))
+                    }
+                    _ => ("\u{E8D5}", folder),
+                };
+                if n.kind == Kind::Pinned && n.pin == 0 {
+                    // Escritorio: pantalla azul con la barra de arriba más clara, como en Windows 11.
+                    let (cx, cy) = (x + 31.0, y + ROW_H / 2.0);
+                    p.round_fill(rect(cx - 8.5, cy - 7.0, cx + 8.5, cy + 7.0), 2.5, rgb(0.13, 0.45, 0.85));
+                    p.round_fill(rect(cx - 8.5, cy - 7.0, cx + 8.5, cy - 3.0), 2.5, rgb(0.45, 0.78, 1.0));
+                    p.round_fill(rect(cx - 8.5, cy - 5.0, cx + 8.5, cy - 3.0), 0.0, rgb(0.45, 0.78, 1.0));
+                } else {
+                    p.text(&p.fonts.glyphs, icon, rect(x + 20.0, y, x + 42.0, y + ROW_H), color);
+                }
+                p.text(&p.fonts.ui, &n.name, rect(x + 48.0, y, x + 48.0 + n.text_w + 12.0, y + ROW_H), th.text);
+                if n.kind == Kind::Pinned {
+                    // La chincheta queda fija al borde, no se desplaza con el nombre.
+                    let r = area.left + view_w - SIDE;
+                    p.text(&p.fonts.glyphs_small, "\u{E718}", rect(r - 24.0, y, r - 6.0, y + ROW_H), th.text_dim);
+                }
             }
         });
+
+        // Barras de desplazamiento.
+        self.htrack = rect(0.0, 0.0, 0.0, 0.0);
+        self.hthumb = rect(0.0, 0.0, 0.0, 0.0);
+        self.vtrack = rect(0.0, 0.0, 0.0, 0.0);
+        self.vthumb = rect(0.0, 0.0, 0.0, 0.0);
+        let thumb = alpha(th.text, 0.30);
+        if need_h {
+            let track = rect(area.left + 6.0, area.bottom - BAR - 4.0, area.left + view_w - 6.0, area.bottom - 4.0);
+            let len = ((track.right - track.left) * view_w / content_w).clamp(28.0, track.right - track.left);
+            let span = (track.right - track.left) - len;
+            let left = track.left + span * (self.hscroll / (content_w - view_w).max(1.0));
+            self.htrack = track;
+            self.hthumb = rect(left, track.top, left + len, track.bottom);
+            p.round_fill(track, BAR / 2.0, alpha(th.text, 0.06));
+            p.round_fill(self.hthumb, BAR / 2.0, thumb);
+        }
+        if need_v {
+            let track = rect(area.right - BAR - 4.0, area.top + 6.0, area.right - 4.0, area.top + view_h - 6.0);
+            let h = track.bottom - track.top;
+            let len = (h * view_h / total_h).clamp(28.0, h);
+            let top = track.top + (h - len) * (self.scroll / (total_h - view_h).max(1.0));
+            self.vtrack = track;
+            self.vthumb = rect(track.left, top, track.right, top + len);
+            p.round_fill(track, BAR / 2.0, alpha(th.text, 0.06));
+            p.round_fill(self.vthumb, BAR / 2.0, thumb);
+        }
     }
 }
 

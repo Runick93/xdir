@@ -6,6 +6,7 @@ use crate::fs::Location;
 use crate::render::{Painter, Rect, contains, rect};
 use crate::tab::Tab;
 use crate::theme::alpha;
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 pub const TABSTRIP_H: f32 = 34.0;
 pub const NAVBAR_H: f32 = 42.0;
@@ -93,6 +94,8 @@ pub enum PaneHit {
     TabStrip,
     Button(Button),
     Crumb(usize),
+    /// Flecha entre dos tramos de la barra de dirección: abre las subcarpetas del tramo anterior.
+    Chevron(usize),
     Address,
     /// Cruz de la barra de dirección en edición: borra lo escrito.
     AddressClear,
@@ -140,6 +143,20 @@ pub struct Pane {
     closed: Vec<Location>,
     pub rect: Rect,
     tab_rects: Vec<(Rect, Rect)>,
+    /// Lugar que le toca a cada pestaña (sin animar): con él se decide dónde cae una arrastrada.
+    tab_slots: Vec<Rect>,
+    /// Dónde se dibuja cada pestaña ahora (id, izquierda): se desliza hacia su lugar.
+    tab_x: Vec<(usize, f32)>,
+    /// Pestaña que se está arrastrando en este panel (índice, izquierda): sigue al mouse.
+    pub drag_tab: Option<(usize, f32)>,
+    /// Pestaña arrastrada que flota lejos de las tiras: su lugar queda vacío.
+    pub drag_hidden: Option<usize>,
+    /// Dónde está la pestaña arrastrada dentro de la tira en este cuadro (la flotante se acopla ahí).
+    pub drag_rect: Option<Rect>,
+    /// Segundos desde el cuadro anterior, para animar las pestañas.
+    pub frame_dt: f32,
+    /// Alguna pestaña todavía se está moviendo: hay que seguir dibujando.
+    pub tab_busy: bool,
     new_tab: Rect,
     maximize: Rect,
     buttons: Vec<(Button, Rect)>,
@@ -147,6 +164,10 @@ pub struct Pane {
     /// Cruz que borra el texto de la barra de dirección (vacía si no se está editando).
     address_clear: Rect,
     crumbs: Vec<(Rect, Location)>,
+    /// Flechas de la barra de dirección, cada una con la carpeta cuyas subcarpetas muestra.
+    chevrons: Vec<(Rect, Location)>,
+    /// Flecha con su menú abierto (se dibuja hacia abajo y resaltada).
+    pub open_chevron: Option<usize>,
     star: Rect,
     terminal: Rect,
     filter_button: Rect,
@@ -171,12 +192,21 @@ impl Pane {
             closed: Vec::new(),
             rect: zero,
             tab_rects: Vec::new(),
+            tab_slots: Vec::new(),
+            tab_x: Vec::new(),
+            drag_tab: None,
+            drag_hidden: None,
+            drag_rect: None,
+            frame_dt: 1.0 / 60.0,
+            tab_busy: false,
             new_tab: zero,
             maximize: zero,
             buttons: Vec::new(),
             address: zero,
             address_clear: zero,
             crumbs: Vec::new(),
+            chevrons: Vec::new(),
+            open_chevron: None,
             star: zero,
             terminal: zero,
             filter_button: zero,
@@ -282,10 +312,7 @@ impl Pane {
     /// Posición donde entraría una pestaña soltada en `x` sobre la tira: antes de la primera
     /// pestaña cuyo centro queda a la derecha.
     pub fn insert_index_at(&self, x: f32) -> usize {
-        self.tab_rects
-            .iter()
-            .position(|(r, _)| x < (r.left + r.right) / 2.0)
-            .unwrap_or(self.tabs.len())
+        self.tab_slots.iter().position(|r| x < (r.left + r.right) / 2.0).unwrap_or(self.tabs.len())
     }
 
     /// Marca de destino al arrastrar una pestaña desde otro panel: contorno de acento y una
@@ -295,9 +322,9 @@ impl Pane {
         let body = rect(self.rect.left, self.rect.top + TABSTRIP_H, self.rect.right, self.rect.bottom);
         p.round_fill(body, PANE_RADIUS, alpha(th.accent, 0.06));
         p.round_stroke_w(body, PANE_RADIUS, th.accent, 2.0);
-        let x = match (self.tab_rects.get(at), self.tab_rects.last()) {
-            (Some((r, _)), _) => r.left + TAB_SLANT / 2.0,
-            (None, Some((r, _))) => r.right - TAB_SLANT / 2.0,
+        let x = match (self.tab_slots.get(at), self.tab_slots.last()) {
+            (Some(r), _) => r.left + TAB_SLANT / 2.0,
+            (None, Some(r)) => r.right - TAB_SLANT / 2.0,
             (None, None) => self.rect.left + TAB_FIRST_INSET,
         };
         let (top, bottom) = (self.rect.top + 6.0, self.rect.top + TABSTRIP_H - 4.0);
@@ -306,13 +333,18 @@ impl Pane {
 
     /// Pestaña bajo la coordenada x (para arrastrar y soltar dentro de la tira).
     pub fn tab_index_at(&self, x: f32) -> Option<usize> {
-        let last = self.tab_rects.len().checked_sub(1)?;
-        Some(
-            self.tab_rects
-                .iter()
-                .position(|(r, _)| x < r.right)
-                .unwrap_or(last),
-        )
+        let last = self.tab_slots.len().checked_sub(1)?;
+        Some(self.tab_slots.iter().position(|r| x < r.right).unwrap_or(last))
+    }
+
+    /// Dónde está dibujada la pestaña `i` (izquierda y ancho), para agarrarla.
+    pub fn tab_grab(&self, i: usize, x: f32) -> f32 {
+        self.tab_rects.get(i).map_or(0.0, |(r, _)| (x - r.left).clamp(0.0, r.right - r.left))
+    }
+
+    /// Ancho de una pestaña.
+    pub fn tab_width(&self) -> f32 {
+        self.tab_slots.first().map_or(TAB_MIN_W, |r| r.right - r.left)
     }
 
     pub fn hit(&self, x: f32, y: f32) -> PaneHit {
@@ -344,6 +376,11 @@ impl Pane {
         for (i, (r, _)) in self.crumbs.iter().enumerate() {
             if contains(r, x, y) {
                 return PaneHit::Crumb(i);
+            }
+        }
+        for (i, (r, _)) in self.chevrons.iter().enumerate() {
+            if contains(r, x, y) {
+                return PaneHit::Chevron(i);
             }
         }
         if contains(&self.terminal, x, y) {
@@ -384,6 +421,11 @@ impl Pane {
             return PaneHit::List;
         }
         PaneHit::None
+    }
+
+    /// Flecha `i`: dónde está y de qué carpeta muestra las subcarpetas.
+    pub fn chevron(&self, i: usize) -> Option<(Rect, Location)> {
+        self.chevrons.get(i).cloned()
     }
 
     pub fn crumb(&self, i: usize) -> Option<Location> {
@@ -440,9 +482,12 @@ impl Pane {
         let body = rect(area.left, area.top + TABSTRIP_H, area.right, area.bottom);
         let reserved = if maximized.is_some() { MAXIMIZE_W } else { 0.0 };
         let layout = self.layout_tabs(area, reserved);
-        let outline = outline(body, layout.get(self.active).copied());
+        let shown = self.animate_tabs(&layout);
+        // Con la pestaña activa despegada, el contorno del panel queda liso.
+        let docked = shown.get(self.active).copied().filter(|_| self.drag_hidden != Some(self.active));
+        let outline = outline(body, docked);
         p.rounded_path(&outline, true, Some(th.surface), None);
-        self.draw_tabs(p, area, &layout, hover);
+        self.draw_tabs(p, area, &layout, &shown, hover);
         self.draw_maximize(p, area, maximized, hover);
 
         let nav = rect(area.left, area.top + TABSTRIP_H, area.right, area.top + TABSTRIP_H + NAVBAR_H);
@@ -595,14 +640,80 @@ impl Pane {
         out
     }
 
+    /// Dónde se dibuja cada pestaña en este cuadro: cada una se desliza hacia su lugar y la que se
+    /// arrastra sigue al mouse (sin salirse de la tira).
+    fn animate_tabs(&mut self, layout: &[Rect]) -> Vec<Rect> {
+        let ids: Vec<usize> = self.tabs.iter().map(|t| t.id).collect();
+        self.tab_slots = layout.to_vec();
+        self.tab_x.retain(|(id, _)| ids.contains(id));
+        let k = 1.0 - (-self.frame_dt.clamp(0.0, 0.05) * 22.0).exp();
+        let mut busy = false;
+        let mut out = Vec::with_capacity(layout.len());
+        for (i, &r) in layout.iter().enumerate() {
+            let w = r.right - r.left;
+            let id = ids[i];
+            let mut x = self.tab_x.iter().find(|(t, _)| *t == id).map_or(r.left, |&(_, x)| x);
+            match self.drag_tab.filter(|&(d, _)| d == i) {
+                Some((_, left)) => {
+                    let (min, max) = (layout[0].left, layout[layout.len() - 1].right - w);
+                    x = left.clamp(min, max.max(min));
+                }
+                None => {
+                    let d = r.left - x;
+                    if d.abs() < 0.5 {
+                        x = r.left;
+                    } else {
+                        x += d * k;
+                        busy = true;
+                    }
+                }
+            }
+            match self.tab_x.iter_mut().find(|(t, _)| *t == id) {
+                Some(e) => e.1 = x,
+                None => self.tab_x.push((id, x)),
+            }
+            out.push(rect(x, r.top, x + w, r.bottom));
+        }
+        self.tab_busy = busy;
+        self.drag_rect = self.drag_tab.and_then(|(d, _)| out.get(d).copied());
+        out
+    }
+
+    /// La pestaña que se arrastra, flotando sobre todo: con `detach` en 1 es una pieza suelta con
+    /// sombra; en 0 está acoplada a una tira y solo se ve su texto (la forma es la del panel).
+    pub fn draw_ghost(p: &Painter, r: Rect, title: &str, detach: f32) {
+        let th = p.theme;
+        if detach > 0.01 {
+            let shadow = |a: f32| D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a };
+            for (grow, a) in [(6.0, 0.05), (3.0, 0.08), (1.0, 0.10)] {
+                p.round_fill(rect(r.left - grow, r.top - grow + 4.0, r.right + grow, r.bottom + grow + 4.0), 8.0 + grow, shadow(a * detach));
+            }
+            let shape = tab_points(r, TAB_SLANT);
+            p.rounded_path(&shape, true, Some(alpha(th.surface_alt, detach)), Some((alpha(th.accent, detach), 1.5)));
+        }
+        p.text(&p.fonts.ui, title, rect(r.left + TAB_SLANT + 12.0, r.top, r.right - TAB_SLANT - 6.0, r.bottom), th.text);
+    }
+
     /// Dibuja las pestañas inactivas (la activa ya es parte del contorno del panel) y los textos.
-    fn draw_tabs(&mut self, p: &Painter, area: Rect, layout: &[Rect], hover: PaneHit) {
+    /// `layout`: los lugares fijos; `shown`: dónde se dibuja cada una ahora. La arrastrada va al final.
+    fn draw_tabs(&mut self, p: &Painter, area: Rect, layout: &[Rect], shown: &[Rect], hover: PaneHit) {
         let th = p.theme;
         self.tab_rects.clear();
-        for (i, &r) in layout.iter().enumerate() {
+        self.tab_rects.resize(shown.len(), (rect(0.0, 0.0, 0.0, 0.0), rect(0.0, 0.0, 0.0, 0.0)));
+        let dragged = self.drag_tab.map(|(d, _)| d).or(self.drag_hidden).filter(|&d| d < shown.len());
+        if let Some(d) = self.drag_hidden.filter(|&d| d < shown.len()) {
+            // Lugar vacío de la pestaña despegada: solo su silueta.
+            p.rounded_path(&tab_points(layout[d], TAB_SLANT), false, None, Some((alpha(th.border, 0.5), 1.0)));
+        }
+        for i in 0..shown.len() {
+            if Some(i) == dragged {
+                self.tab_rects[i] = (shown[i], rect(0.0, 0.0, 0.0, 0.0));
+                continue;
+            }
+            let r = shown[i];
             let tab = &self.tabs[i];
             let active = i == self.active;
-            let hovered = hover == PaneHit::Tab(i) || hover == PaneHit::TabClose(i);
+            let hovered = dragged.is_none() && (hover == PaneHit::Tab(i) || hover == PaneHit::TabClose(i));
             let left_slant = TAB_SLANT;
             if !active {
                 let shape = tab_points(r, left_slant);
@@ -624,7 +735,7 @@ impl Pane {
                 }
                 p.text(&p.fonts.glyphs_small, "\u{E711}", close, th.text_dim);
             }
-            self.tab_rects.push((r, if show_close { close } else { rect(0.0, 0.0, 0.0, 0.0) }));
+            self.tab_rects[i] = (r, if show_close { close } else { rect(0.0, 0.0, 0.0, 0.0) });
         }
 
         let x = layout.last().map(|r| r.right + 2.0).unwrap_or(area.left);
@@ -752,6 +863,7 @@ impl Pane {
     fn draw_crumbs(&mut self, p: &Painter, addr: Rect, hover: PaneHit) {
         let th = p.theme;
         self.crumbs.clear();
+        self.chevrons.clear();
         let all = self.tabs[self.active].location.crumbs();
         // El primer tramo ("Este equipo") lleva un ícono de monitor adelante.
         let widths: Vec<f32> = all
@@ -774,7 +886,8 @@ impl Pane {
         }
         for (i, (label, loc)) in all.iter().enumerate().skip(first) {
             if i > first || first > 0 {
-                p.text(&p.fonts.glyphs_small, "\u{E76C}", rect(x, addr.top, x + CHEVRON_W, addr.bottom), th.text_dim);
+                // La flecha que sigue al tramo anterior: sus subcarpetas.
+                self.draw_chevron(p, rect(x, addr.top + 4.0, x + CHEVRON_W, addr.bottom - 4.0), all[i - 1].1.clone(), hover);
                 x += CHEVRON_W;
             }
             let r = rect(x, addr.top + 4.0, (x + widths[i]).min(addr.right - 4.0), addr.bottom - 4.0);
@@ -796,5 +909,25 @@ impl Pane {
             self.crumbs.push((r, loc.clone()));
             x = r.right;
         }
+        // Flecha final: las subcarpetas de la carpeta actual.
+        if let Some((_, last)) = all.last() {
+            if x + CHEVRON_W <= addr.right - 4.0 {
+                self.draw_chevron(p, rect(x, addr.top + 4.0, x + CHEVRON_W, addr.bottom - 4.0), last.clone(), hover);
+            }
+        }
+    }
+
+    /// Flecha entre tramos: abre el menú de subcarpetas de `of`. Abierta, apunta hacia abajo.
+    fn draw_chevron(&mut self, p: &Painter, r: Rect, of: Location, hover: PaneHit) {
+        let th = p.theme;
+        let idx = self.chevrons.len();
+        let open = self.open_chevron == Some(idx);
+        let hot = open || hover == PaneHit::Chevron(idx);
+        if hot {
+            p.round_fill(r, 4.0, alpha(th.text, 0.16));
+        }
+        let glyph = if open { "\u{E70D}" } else { "\u{E76C}" };
+        p.text(&p.fonts.glyphs_small, glyph, r, if hot { th.text } else { th.text_dim });
+        self.chevrons.push((r, of));
     }
 }

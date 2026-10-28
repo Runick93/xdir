@@ -350,6 +350,19 @@ const USER_FOLDERS: [GUID; 6] =
 const SHELL_PLACES: [&str; 2] = ["::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}", "::{645FF040-5081-101B-9F08-00AA002F954E}"];
 const THIS_PC: &str = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
 
+/// Ruta de la carpeta del usuario `i` (0..6: Escritorio, Descargas, Documentos, Imágenes, Música,
+/// Vídeos), si existe.
+pub fn user_folder(i: usize) -> Option<PathBuf> {
+    let id = USER_FOLDERS.get(i)?;
+    let p = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.ok()?;
+    let path = unsafe {
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s
+    };
+    path.map(PathBuf::from).filter(|p| p.is_dir())
+}
+
 /// "Este equipo": carpetas del usuario, unidades, dispositivos sin letra (teléfonos) y,
 /// al final, Red y Papelera. Cada grupo se ordena por separado.
 fn list_computer(out: &mut Batcher) {
@@ -649,12 +662,44 @@ fn shell_info(path: &Path, attrs: FILE_FLAGS_AND_ATTRIBUTES, flags: SHGFI_FLAGS)
     (ok != 0).then_some(info)
 }
 
+/// Subcarpetas de un lugar, para el menú de las flechas de la barra de dirección: las unidades de
+/// "Este equipo" o las carpetas de una carpeta (ocultas incluidas), por nombre. Vacío si no aplica.
+pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
+    const MAX: usize = 500;
+    match loc {
+        Location::Computer => {
+            let mask = unsafe { GetLogicalDrives() };
+            (0..26u8)
+                .filter(|i| mask & (1 << i) != 0)
+                .map(|i| {
+                    let letter = (b'A' + i) as char;
+                    (drive_label(&format!("{letter}:")), Location::Path(PathBuf::from(format!("{letter}:\\"))))
+                })
+                .collect()
+        }
+        Location::Path(dir) => {
+            let mut out: Vec<(String, Location)> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) || e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .map(|name| (name.clone(), Location::Path(dir.join(name))))
+                .collect();
+            out.sort_by_key(|(n, _)| n.to_lowercase());
+            out.truncate(MAX);
+            out
+        }
+        Location::Shell { .. } => Vec::new(),
+    }
+}
+
 static DRIVE_LABELS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 /// Nombre de una unidad local ("C:" → "Disco local (C:)"), cacheado: se pide en cada dibujo de la
 /// barra de dirección. Las que no son de disco fijo (red, CD, USB) quedan como "X:" porque
 /// preguntarles el nombre puede demorar segundos.
-fn drive_label(drive: &str) -> String {
+pub fn drive_label(drive: &str) -> String {
     let cache = DRIVE_LABELS.get_or_init(Default::default);
     if let Some(hit) = cache.lock().unwrap().get(drive) {
         return hit.clone();

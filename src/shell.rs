@@ -113,6 +113,28 @@ pub fn clipboard_files() -> Option<(Vec<PathBuf>, bool)> {
     Some((paths, cut))
 }
 
+/// Pega en la carpeta `dest` lo que el portapapeles ofrece como archivos virtuales (FileGroupDescriptor
+/// + FileContents) en vez de rutas de disco: lo que se copia por Escritorio remoto (RDP) o desde un
+/// zip, un teléfono, etc. Lo hace el verbo "pegar" de la propia carpeta, como el Explorador.
+/// Devuelve `false` si el portapapeles no tiene archivos de ese tipo.
+pub fn paste_virtual(hwnd: HWND, dest: &Location) -> Result<bool> {
+    unsafe {
+        let obj = OleGetClipboard()?;
+        let descriptor = FORMATETC {
+            cfFormat: RegisterClipboardFormatW(w!("FileGroupDescriptorW")) as u16,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        };
+        if obj.QueryGetData(&descriptor).is_err() {
+            return Ok(false);
+        }
+    }
+    invoke_verb(hwnd, dest, &[], "paste")?;
+    Ok(true)
+}
+
 pub fn clear_clipboard() {
     unsafe {
         let _ = OleSetClipboard(None);

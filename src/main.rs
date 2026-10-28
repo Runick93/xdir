@@ -203,10 +203,43 @@ enum Drag {
     None,
     List(usize),
     Splitter(Splitter),
-    Tab { pane: usize, index: usize, start_x: f32, start_y: f32, moved: bool },
+    /// `grab`: cuánto de la pestaña queda a la izquierda del mouse al agarrarla.
+    Tab { pane: usize, index: usize, start_x: f32, start_y: f32, moved: bool, grab: f32 },
+    /// Borde derecho del árbol de carpetas: cambiar su ancho.
+    #[cfg(feature = "arbol")]
+    TreeEdge,
+    /// Pulgar de una barra del árbol (y dónde se lo agarró).
+    #[cfg(feature = "arbol")]
+    TreeBar(tree::Bar, f32),
     Button(usize, Button),
     /// Un favorito de la barra: clic al soltar sin mover, si no reordenar.
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
+}
+
+/// Vista previa flotante de la pestaña que se arrastra: acompaña al mouse y se acopla a las tiras.
+struct Ghost {
+    title: String,
+    w: f32,
+    /// Posición dibujada (arriba a la izquierda) y hacia dónde va.
+    x: f32,
+    y: f32,
+    tx: f32,
+    ty: f32,
+    /// 1: suelta del todo; 0: acoplada a una tira.
+    detach: f32,
+    docked: bool,
+}
+
+impl Ghost {
+    fn step(&mut self, dt: f32) -> bool {
+        let k = 1.0 - (-dt * 38.0).exp();
+        let kd = 1.0 - (-dt * 18.0).exp();
+        self.x += (self.tx - self.x) * k;
+        self.y += (self.ty - self.y) * k;
+        let goal = if self.docked { 0.0 } else { 1.0 };
+        self.detach += (goal - self.detach) * kd;
+        (self.tx - self.x).abs() > 0.3 || (self.ty - self.y).abs() > 0.3 || (goal - self.detach).abs() > 0.01
+    }
 }
 
 /// Transición de layout: desde dónde parte cada panel y cuándo empezó.
@@ -291,6 +324,8 @@ struct App {
     fav_drop: Option<(usize, FavDrop)>,
     /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
     tab_drop: Option<(usize, usize)>,
+    /// Pestaña flotante mientras se arrastra una.
+    ghost: Option<Ghost>,
     fav_menu: Option<FavMenu>,
     /// Renombrado de un favorito en curso.
     fav_edit: Option<(HWND, FavPath)>,
@@ -420,6 +455,7 @@ fn main() -> Result<()> {
             file_colors: session.file_colors,
             fav_drop: None,
             tab_drop: None,
+            ghost: None,
             fav_menu: None,
             fav_edit: None,
             filter_edit: None,
@@ -608,10 +644,14 @@ impl App {
                         (Drag::List(i), _) | (_, Hit::Pane(i, PaneHit::List)) => self.panes[i].tab().list.wants_resize_cursor(x, y),
                         _ => false,
                     };
+                    #[cfg(feature = "arbol")]
+                    let tree_edge = matches!(self.drag, Drag::TreeEdge) || (matches!(self.drag, Drag::None) && self.tree.edge_at(x, y));
+                    #[cfg(not(feature = "arbol"))]
+                    let tree_edge = false;
                     let cursor = match splitter {
                         Some(Splitter::Vertical) => IDC_SIZEWE,
                         Some(Splitter::Horizontal) => IDC_SIZENS,
-                        None if column_edge => IDC_SIZEWE,
+                        None if column_edge || tree_edge => IDC_SIZEWE,
                         None => IDC_ARROW,
                     };
                     if let Ok(c) = LoadCursorW(None, cursor) {
@@ -881,7 +921,11 @@ impl App {
                     };
                     #[cfg(feature = "arbol")]
                     if self.tree.contains(x, y) {
-                        self.tree.on_wheel(delta * wheel_lines());
+                        if key_down(VK_SHIFT) {
+                            self.tree.on_wheel_h(delta * wheel_lines());
+                        } else {
+                            self.tree.on_wheel(delta * wheel_lines());
+                        }
                         self.redraw();
                         return LRESULT(0);
                     }
@@ -892,6 +936,18 @@ impl App {
                     }
                     let action = self.panes[pane].tab_mut().list.on_wheel(delta * wheel_lines());
                     self.apply(pane, action);
+                    LRESULT(0)
+                }
+                // Rueda horizontal (touchpad, mouse con inclinación): el árbol se mueve a los costados.
+                0x020E => {
+                    let (x, y) = self.cursor_pos();
+                    #[cfg(feature = "arbol")]
+                    if self.tree.contains(x, y) {
+                        let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
+                        self.tree.on_wheel_h(-delta * wheel_lines());
+                        self.redraw();
+                    }
+                    let _ = (x, y);
                     LRESULT(0)
                 }
                 WM_XBUTTONUP => {
@@ -964,7 +1020,7 @@ impl App {
     fn tree_width(&self) -> f32 {
         #[cfg(feature = "arbol")]
         if self.tree.visible {
-            return tree::WIDTH + ui::GAP;
+            return self.tree.width + ui::GAP;
         }
         0.0
     }
@@ -1416,6 +1472,21 @@ impl App {
             return;
         }
         #[cfg(feature = "arbol")]
+        {
+            if self.tree.edge_at(x, y) {
+                unsafe { SetCapture(self.hwnd) };
+                self.drag = Drag::TreeEdge;
+                return;
+            }
+            if let Some((bar, grab)) = self.tree.bar_at(x, y) {
+                unsafe { SetCapture(self.hwnd) };
+                self.drag = Drag::TreeBar(bar, grab);
+                self.tree.drag_bar(bar, grab, x, y);
+                self.redraw();
+                return;
+            }
+        }
+        #[cfg(feature = "arbol")]
         if self.on_tree_click(x, y) {
             return;
         }
@@ -1467,7 +1538,8 @@ impl App {
                     PaneHit::Tab(j) => {
                         self.select_tab(i, j);
                         unsafe { SetCapture(self.hwnd) };
-                        self.drag = Drag::Tab { pane: i, index: j, start_x: x, start_y: y, moved: false };
+                        let grab = self.panes[i].tab_grab(j, x);
+                        self.drag = Drag::Tab { pane: i, index: j, start_x: x, start_y: y, moved: false, grab };
                     }
                     PaneHit::TabClose(j) => self.close_tab(i, j),
                     PaneHit::NewTab => {
@@ -1490,6 +1562,7 @@ impl App {
                     }
                     PaneHit::Address => self.begin_edit(i),
                     PaneHit::AddressClear => self.clear_edit(),
+                    PaneHit::Chevron(k) => self.show_subfolder_menu(i, k),
                     PaneHit::Star => self.toggle_favorite(i),
                     PaneHit::Terminal => {
                         self.term_menu = if self.term_menu == Some(i) { None } else { Some(i) };
@@ -1536,6 +1609,11 @@ impl App {
             let _ = ReleaseCapture();
         }
         let tab_drop = self.tab_drop.take();
+        for p in &mut self.panes {
+            p.drag_tab = None;
+            p.drag_hidden = None;
+        }
+        self.ghost = None;
         match drag {
             Drag::Button(i, b) if self.hit(x, y) == Hit::Pane(i, PaneHit::Button(b)) => self.on_button(i, b),
             Drag::Tab { pane, index, .. } => {
@@ -1602,38 +1680,72 @@ impl App {
                 self.splits.set(s, ui::split_value(s, ui::panes_area(w, h, self.tree_width()), x, y));
                 redraw = true;
             }
-            Drag::Tab { pane, index, start_x, start_y, moved } => {
+            Drag::Tab { pane, index, start_x, start_y, moved, grab } => {
                 if moved || (x - start_x).abs() > 6.0 || (y - start_y).abs() > 6.0 {
-                    // Sobre otro panel: se marca dónde caería; sobre el propio, se reordena; sobre
-                    // un divisor o la barra de estado, nada.
-                    let hit = self.hit(x, y);
-                    let target = match hit {
-                        Hit::Pane(j, ph) if j != pane => {
-                            let at = match ph {
-                                PaneHit::Tab(_) | PaneHit::TabClose(_) | PaneHit::NewTab | PaneHit::TabStrip | PaneHit::Maximize => {
-                                    self.panes[j].insert_index_at(x)
-                                }
-                                _ => self.panes[j].tabs.len(),
-                            };
-                            Some((j, at))
-                        }
+                    let (mut pane, mut index) = (pane, index);
+                    let mut hit = self.hit(x, y);
+                    let in_strip = |h: Hit| match h {
+                        Hit::Pane(j, PaneHit::Tab(_) | PaneHit::TabClose(_) | PaneHit::NewTab | PaneHit::TabStrip | PaneHit::Maximize) => Some(j),
                         _ => None,
                     };
-                    if target != self.tab_drop {
-                        self.tab_drop = target;
-                        redraw = true;
+                    // Sobre la tira de otro panel la pestaña se integra ahí.
+                    if let Some(j) = in_strip(hit).filter(|&j| j != pane) {
+                        let at = self.panes[j].insert_index_at(x).min(self.panes[j].tabs.len());
+                        self.move_tab_to_pane(pane, index, j, at);
+                        (pane, index) = (j, at);
+                        hit = self.hit(x, y);
                     }
-                    if matches!(hit, Hit::Pane(j, _) if j == pane) {
-                        if let Some(to) = self.panes[pane].tab_index_at(x) {
+                    // Sobre el cuerpo de otro panel se marca dónde caería al soltar; sobre un
+                    // divisor o la barra de estado, nada.
+                    let target = match hit {
+                        Hit::Pane(j, _) if j != pane => Some((j, self.panes[j].tabs.len())),
+                        _ => None,
+                    };
+                    self.tab_drop = target;
+                    // Acoplada mientras el mouse está sobre la tira del panel de la pestaña; fuera de
+                    // las tiras se despega y flota.
+                    let docked = in_strip(hit) == Some(pane);
+                    let left = x - grab;
+                    for p in &mut self.panes {
+                        p.drag_tab = None;
+                        p.drag_hidden = None;
+                    }
+                    if docked {
+                        self.panes[pane].drag_tab = Some((index, left));
+                        let center = left + self.panes[pane].tab_width() / 2.0;
+                        if let Some(to) = self.panes[pane].tab_index_at(center) {
                             self.panes[pane].move_tab(index, to);
-                            self.drag = Drag::Tab { pane, index: to, start_x, start_y, moved: true };
-                            redraw = true;
+                            index = to;
+                            self.panes[pane].drag_tab = Some((index, left));
+                        }
+                    } else {
+                        self.panes[pane].drag_hidden = Some(index);
+                    }
+                    let (tx, ty) = match self.panes[pane].drag_rect.filter(|_| docked) {
+                        Some(r) => (r.left, r.top),
+                        None => (left, if docked { self.panes[pane].rect.top + 3.0 } else { y - 17.0 }),
+                    };
+                    let w = self.panes[pane].tab_width();
+                    match &mut self.ghost {
+                        Some(g) => (g.tx, g.ty, g.docked, g.w) = (tx, ty, docked, w),
+                        None => {
+                            let title = self.panes[pane].tabs[index].location.title();
+                            self.ghost = Some(Ghost { title, w, x: left, y: y - 17.0, tx, ty, detach: 1.0, docked });
                         }
                     }
-                    if let Drag::Tab { moved, .. } = &mut self.drag {
-                        *moved = true;
-                    }
+                    self.drag = Drag::Tab { pane, index, start_x, start_y, moved: true, grab };
+                    redraw = true;
                 }
+            }
+            #[cfg(feature = "arbol")]
+            Drag::TreeEdge => {
+                self.tree.set_width(x - ui::GAP);
+                redraw = true;
+            }
+            #[cfg(feature = "arbol")]
+            Drag::TreeBar(bar, grab) => {
+                self.tree.drag_bar(bar, grab, x, y);
+                redraw = true;
             }
             Drag::List(i) => {
                 let action = self.panes[i].tab_mut().list.on_mouse_move(x, y);
@@ -2042,7 +2154,15 @@ impl App {
 
     fn paste(&mut self) {
         let Some(dest) = self.panes[self.active].tab().location.target() else { return };
-        let Some((sources, cut)) = shell::clipboard_files() else { return };
+        let Some((sources, cut)) = shell::clipboard_files() else {
+            // Sin rutas de disco (copiado por RDP, desde un zip...): pega la carpeta destino.
+            match shell::paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
+                Ok(true) => self.reload_shell_tabs(),
+                Ok(false) => {}
+                Err(e) => self.notice = Some(format!("No se pudo pegar: {}", e.message())),
+            }
+            return;
+        };
         let op = if cut { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
         ops::spawn(self.hwnd, self.ops_tx.clone(), op);
         // Lo cortado se pega una sola vez, como en el Explorador.
@@ -2799,6 +2919,40 @@ impl App {
         self.redraw();
     }
 
+    /// Flecha de la barra de dirección: menú con las subcarpetas del tramo anterior (o las unidades,
+    /// si es "Este equipo"); elegir una navega a ella.
+    fn show_subfolder_menu(&mut self, pane: usize, k: usize) {
+        let Some((r, loc)) = self.panes[pane].chevron(k) else { return };
+        let items = fs::subfolders(&loc);
+        self.set_active(pane);
+        self.panes[pane].open_chevron = Some(k);
+        self.redraw();
+        let kk = self.dpi as f32 / 96.0;
+        let mut pt = POINT { x: (r.left * kk) as i32, y: (r.bottom * kk) as i32 + 2 };
+        let cmd = unsafe {
+            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(self.hwnd);
+            let Ok(hmenu) = CreatePopupMenu() else { return };
+            for (i, (name, _)) in items.iter().enumerate() {
+                let wide: Vec<u16> = name.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
+                let _ = AppendMenuW(hmenu, MF_STRING, i + 1, PCWSTR(wide.as_ptr()));
+            }
+            if items.is_empty() {
+                let wide: Vec<u16> = "Sin subcarpetas".encode_utf16().chain(Some(0)).collect();
+                let _ = AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, PCWSTR(wide.as_ptr()));
+            }
+            let _ = ClientToScreen(self.hwnd, &mut pt);
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd, None).0 as usize;
+            let _ = DestroyMenu(hmenu);
+            cmd
+        };
+        self.panes[pane].open_chevron = None;
+        if let Some((_, target)) = cmd.checked_sub(1).and_then(|i| items.get(i)) {
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            self.panes[pane].tab_mut().navigate(hwnd, &tx, target.clone());
+        }
+        self.redraw();
+    }
+
     /// Cruz de la barra de dirección: borra lo escrito y sigue editando (con el historial a la vista).
     fn clear_edit(&mut self) {
         let Some((edit, _)) = self.edit else { return };
@@ -3194,6 +3348,13 @@ impl App {
             animating |= self.panes[i].tab_mut().list.tick(dt);
         }
         self.last_frame = animating.then_some(now);
+        for p in &mut self.panes {
+            p.frame_dt = dt;
+        }
+        if let Some(g) = &mut self.ghost {
+            animating |= g.step(dt);
+        }
+        let ghost = self.ghost.as_ref().map(|g| (g.title.clone(), render::rect(g.x, g.y, g.x + g.w, g.y + pane::TABSTRIP_H - 3.0), g.detach));
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
@@ -3211,7 +3372,7 @@ impl App {
             let area = ui::panes_area(w, h, tree_w);
             #[cfg(feature = "arbol")]
             if tree.visible {
-                let r = render::rect(ui::GAP, area.top, ui::GAP + tree::WIDTH, area.bottom);
+                let r = render::rect(ui::GAP, area.top, ui::GAP + tree.width, area.bottom);
                 tree.draw(p, r, current_folder.as_deref());
             }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
@@ -3240,6 +3401,9 @@ impl App {
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
                     panes[i].draw_tab_drop(p, at);
                 }
+            }
+            if let Some((title, r, detach)) = &ghost {
+                pane::Pane::draw_ghost(p, *r, title, *detach);
             }
             let hot = match (drag, hover) {
                 (Drag::Splitter(s), _) | (_, Hit::Splitter(s)) => Some(s),
@@ -3287,6 +3451,11 @@ impl App {
         });
         if result.is_err() {
             return;
+        }
+        // Pestañas deslizándose hacia su lugar: otro cuadro.
+        if self.panes.iter().any(|p| p.tab_busy) {
+            animating = true;
+            self.last_frame = Some(now);
         }
         if animating {
             self.redraw();

@@ -22,13 +22,15 @@ pub fn logo_pixels() -> Option<Pixels> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AboutHit {
+    /// Buscar actualizaciones, o instalar la que hay.
+    Update,
     Report,
     /// Dentro del diálogo pero sobre nada.
     Panel,
 }
 
 const WIDTH: f32 = 400.0;
-const HEIGHT: f32 = 232.0;
+const HEIGHT: f32 = 272.0;
 const BANNER_H: f32 = 108.0;
 const BTN_H: f32 = 34.0;
 /// El logo es de letras blancas: va sobre una franja oscura aunque el tema sea claro.
@@ -44,14 +46,26 @@ fn report_button(w: f32, h: f32) -> Rect {
     rect(p.left + 16.0, p.bottom - 16.0 - BTN_H, p.right - 16.0, p.bottom - 16.0)
 }
 
+fn update_button(w: f32, h: f32) -> Rect {
+    let r = report_button(w, h);
+    rect(r.left, r.top - BTN_H - 4.0, r.right, r.bottom - BTN_H - 4.0)
+}
+
 pub fn at(w: f32, h: f32, x: f32, y: f32) -> Option<AboutHit> {
     if !contains(&panel(w, h), x, y) {
         return None;
     }
-    Some(if contains(&report_button(w, h), x, y) { AboutHit::Report } else { AboutHit::Panel })
+    Some(if contains(&report_button(w, h), x, y) {
+        AboutHit::Report
+    } else if contains(&update_button(w, h), x, y) {
+        AboutHit::Update
+    } else {
+        AboutHit::Panel
+    })
 }
 
-pub fn draw(p: &Painter, w: f32, h: f32, hover: Option<AboutHit>) {
+/// `update`: el texto del botón de actualizaciones y si hay una versión nueva (se resalta).
+pub fn draw(p: &Painter, w: f32, h: f32, hover: Option<AboutHit>, update: (&str, bool)) {
     let th = p.theme;
     // Velo sobre la ventana, para que el diálogo se lea como modal.
     p.fill(rect(0.0, 0.0, w, h), D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
@@ -71,6 +85,18 @@ pub fn draw(p: &Painter, w: f32, h: f32, hover: Option<AboutHit>) {
         line(pn.top + BANNER_H + 34.0, pn.top + BANNER_H + 58.0),
         th.text_dim,
     );
+
+    let r = update_button(w, h);
+    if hover == Some(AboutHit::Update) {
+        p.round_fill(r, 6.0, th.hover);
+    }
+    let (label, new) = update;
+    p.text(&p.fonts.glyphs, "\u{E895}", rect(r.left + 6.0, r.top, r.left + 32.0, r.bottom), if new { th.accent } else { th.text_dim });
+    if new {
+        // El último tramo del rastro: engranaje -> "Acerca de xdir" -> este botón.
+        p.circle(r.left + 29.0, r.top + 9.0, 4.0, th.accent);
+    }
+    p.text(if new { &p.fonts.ui_bold } else { &p.fonts.ui }, label, rect(r.left + 38.0, r.top, r.right - 8.0, r.bottom), if new { th.accent } else { th.text });
 
     let r = report_button(w, h);
     if hover == Some(AboutHit::Report) {

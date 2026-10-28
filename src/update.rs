@@ -2,9 +2,9 @@
 //! más nueva que esta, se avisa a la ventana con `WM_APP_UPDATE`. Sin conexión (o con cualquier
 //! error) no pasa nada.
 //!
-//! Solo si el usuario lo pide, y solo en una instalación con instalador, se baja el instalador de
-//! esa release a la carpeta temporal y se lo ejecuta en silencio (`WM_APP_UPDATE_READY` avisa que
-//! terminó la descarga). La versión portable y las compilaciones propias solo abren la página.
+//! Si el usuario lo pide, se baja la release y se reemplaza esta copia (`WM_APP_UPDATE_READY` avisa
+//! que terminó la descarga): en una instalación con instalador, se ejecuta el instalador en silencio;
+//! en una copia portable, se baja el zip y se cambia el exe por el nuevo cuando esta se cierra.
 //!
 //! Las consultas y la descarga las hace `curl.exe`, que viene con Windows 10 y 11, para no sumar
 //! una dependencia.
@@ -19,14 +19,22 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL, WM_APP};
 use windows::core::{PCWSTR, w};
 
-/// Hay una versión más nueva. `wparam` = la versión empaquetada (ver `pack`).
+/// Terminó una consulta. `wparam` = la última versión empaquetada (ver `pack`), o 0 si no se pudo
+/// consultar. Quien recibe compara con `is_newer`.
 pub const WM_APP_UPDATE: u32 = WM_APP + 21;
+
+/// Qué pasó con la última consulta, para el diálogo "Acerca de".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum State {
+    Idle,
+    Checking,
+    UpToDate,
+    Failed,
+}
 
 /// Terminó la descarga del instalador. `wparam` = 1 si salió bien, 0 si no.
 pub const WM_APP_UPDATE_READY: u32 = WM_APP + 22;
 
-/// Página de la última release, donde se baja el instalador.
-pub const RELEASES_URL: &str = "https://github.com/Runick93/xdir/releases/latest";
 const API_URL: &str = "https://api.github.com/repos/Runick93/xdir/releases/latest";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -51,39 +59,42 @@ fn pack((a, b, c): Version) -> usize {
     ((a as usize & 0xFFF) << 24) | ((b as usize & 0xFFF) << 12) | (c as usize & 0xFFF)
 }
 
-/// Versión empaquetada → "0.1.10".
-pub fn unpack(v: usize) -> String {
-    format!("{}.{}.{}", (v >> 24) & 0xFFF, (v >> 12) & 0xFFF, v & 0xFFF)
+fn unpack_version(v: usize) -> Version {
+    (((v >> 24) & 0xFFF) as u32, ((v >> 12) & 0xFFF) as u32, (v & 0xFFF) as u32)
 }
 
-/// Busca en segundo plano; avisa a `hwnd` solo si hay algo más nuevo que esta versión.
+/// Versión empaquetada → "0.1.10".
+pub fn unpack(v: usize) -> String {
+    let (a, b, c) = unpack_version(v);
+    format!("{a}.{b}.{c}")
+}
+
+/// ¿La versión empaquetada es más nueva que esta?
+pub fn is_newer(v: usize) -> bool {
+    parse_version(crate::about::VERSION).is_some_and(|current| unpack_version(v) > current)
+}
+
+/// Busca en segundo plano y avisa a `hwnd` con lo que encontró (0 si no pudo).
 pub fn check(hwnd: HWND) {
     let hwnd = hwnd.0 as usize;
     std::thread::spawn(move || {
-        let Ok(out) = Command::new("curl.exe")
+        let latest = Command::new("curl.exe")
             .args(["-s", "-m", "10", "-H", "User-Agent: xdir", "-H", "Accept: application/vnd.github+json", API_URL])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-        else {
-            return;
-        };
-        let body = String::from_utf8_lossy(&out.stdout);
-        let (Some(latest), Some(current)) = (tag_name(&body).and_then(parse_version), parse_version(crate::about::VERSION)) else {
-            return;
-        };
-        if latest > current {
-            unsafe {
-                let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE, WPARAM(pack(latest)), LPARAM(0));
-            }
+            .ok()
+            .and_then(|out| tag_name(&String::from_utf8_lossy(&out.stdout)).and_then(parse_version));
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE, WPARAM(latest.map_or(0, pack)), LPARAM(0));
         }
     });
 }
 
-/// ¿Se puede actualizar sola? Solo si esta copia la dejó el instalador (hay un desinstalador al
-/// lado del exe): una copia portable o una compilación propia no deben pisar la instalación.
-pub fn can_self_update() -> bool {
+/// ¿Es una copia instalada con el instalador? (hay un desinstalador al lado del exe). Si no, es
+/// portable o una compilación propia, y se actualiza reemplazando el exe.
+fn installed() -> bool {
     std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("unins000.exe").exists())).unwrap_or(false)
 }
 
@@ -91,26 +102,64 @@ fn setup_path(version: &str) -> PathBuf {
     std::env::temp_dir().join(format!("xdir-{version}-setup.exe"))
 }
 
-/// Baja el instalador de `version` a la carpeta temporal y avisa a `hwnd` con `WM_APP_UPDATE_READY`.
+/// Carpeta donde se descomprime el zip portable de `version`.
+fn portable_dir(version: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("xdir-{version}-portable"))
+}
+
+/// Baja `url` a `path` con curl.
+fn fetch(url: &str, path: &std::path::Path) -> bool {
+    Command::new("curl.exe")
+        .args(["-s", "-f", "-L", "-m", "300", "-H", "User-Agent: xdir", "-o"])
+        .arg(path)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Baja la versión `version` a la carpeta temporal (el instalador, o el zip portable ya
+/// descomprimido) y avisa a `hwnd` con `WM_APP_UPDATE_READY`.
 pub fn download(hwnd: HWND, version: String) {
     let hwnd = hwnd.0 as usize;
+    let installed = installed();
     std::thread::spawn(move || {
-        let path = setup_path(&version);
-        let url = format!("https://github.com/Runick93/xdir/releases/download/v{version}/xdir-{version}-setup.exe");
-        let _ = std::fs::remove_file(&path);
-        let ok = Command::new("curl.exe")
-            .args(["-s", "-f", "-L", "-m", "300", "-H", "User-Agent: xdir", "-o"])
-            .arg(&path)
-            .arg(&url)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .is_ok_and(|s| s.success())
-            && looks_like_installer(&path);
-        if !ok {
+        let base = format!("https://github.com/Runick93/xdir/releases/download/v{version}");
+        let ok = if installed {
+            let path = setup_path(&version);
             let _ = std::fs::remove_file(&path);
-        }
+            let ok = fetch(&format!("{base}/xdir-{version}-setup.exe"), &path) && looks_like_installer(&path);
+            if !ok {
+                let _ = std::fs::remove_file(&path);
+            }
+            ok
+        } else {
+            let zip = std::env::temp_dir().join(format!("xdir-{version}-portable.zip"));
+            let dir = portable_dir(&version);
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_file(&zip);
+            let ok = std::fs::create_dir_all(&dir).is_ok()
+                && fetch(&format!("{base}/xdir-{version}-portable.zip"), &zip)
+                && Command::new("tar.exe")
+                    .arg("-xf")
+                    .arg(&zip)
+                    .arg("-C")
+                    .arg(&dir)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status()
+                    .is_ok_and(|s| s.success())
+                && looks_like_installer(&dir.join("xdir.exe"));
+            let _ = std::fs::remove_file(&zip);
+            if !ok {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            ok
+        };
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE_READY, WPARAM(usize::from(ok)), LPARAM(0));
         }
@@ -125,29 +174,53 @@ fn looks_like_installer(path: &std::path::Path) -> bool {
     f.read_exact(&mut head).is_ok() && &head == b"MZ" && f.metadata().is_ok_and(|m| m.len() > 500_000)
 }
 
-/// Ejecuta el instalador bajado, en silencio y con permiso de administrador (el instalador lo
-/// pide; Windows muestra su aviso). `/RELAUNCH` hace que el instalador vuelva a abrir xdir al
-/// terminar. Devuelve `false` si no se pudo lanzar o si el usuario no dio el permiso: entonces xdir
-/// sigue abierto. Si devuelve `true`, quien llama tiene que cerrar la ventana enseguida para que
-/// el instalador pueda reemplazar el exe.
+/// Aplica lo bajado. Devuelve `false` si no se pudo (o si el usuario no dio el permiso): entonces
+/// xdir sigue abierto. Si devuelve `true`, quien llama tiene que cerrar la ventana enseguida.
+///
+/// - Instalada: ejecuta el instalador en silencio y con permiso de administrador (Windows muestra
+///   su aviso); `/RELAUNCH` hace que vuelva a abrir xdir al terminar.
+/// - Portable o compilación propia: un PowerShell oculto espera a que este proceso termine, reemplaza
+///   el exe por el nuevo y lo vuelve a abrir.
 pub fn launch_installer(hwnd: HWND, version: &str) -> bool {
-    let setup = setup_path(version);
-    if !setup.exists() {
-        return false;
+    if installed() {
+        let setup = setup_path(version);
+        if !setup.exists() {
+            return false;
+        }
+        let file: Vec<u16> = setup.as_os_str().encode_wide().chain(Some(0)).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                w!("runas"),
+                PCWSTR(file.as_ptr()),
+                w!("/SILENT /CLOSEAPPLICATIONS /NORESTART /RELAUNCH"),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // Por encima de 32 es que se lanzó.
+        return result.0 as isize > 32;
     }
-    let file: Vec<u16> = setup.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            Some(hwnd),
-            w!("runas"),
-            PCWSTR(file.as_ptr()),
-            w!("/SILENT /CLOSEAPPLICATIONS /NORESTART /RELAUNCH"),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // Por encima de 32 es que se lanzó.
-    result.0 as isize > 32
+    let new = portable_dir(version).join("xdir.exe");
+    let (Ok(exe), true) = (std::env::current_exe(), new.exists()) else { return false };
+    let quote = |p: &std::path::Path| p.to_string_lossy().replace('\'', "\'\'");
+    let script = format!(
+        "Wait-Process -Id {} -ErrorAction SilentlyContinue; \
+         for ($i = 0; $i -lt 30; $i++) {{ try {{ Copy-Item -LiteralPath '{}' -Destination '{}' -Force -ErrorAction Stop; break }} catch {{ Start-Sleep -Milliseconds 500 }} }}; \
+         Start-Process -FilePath '{}'",
+        std::process::id(),
+        quote(&new),
+        quote(&exe),
+        quote(&exe),
+    );
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .is_ok()
 }
 
 #[cfg(test)]

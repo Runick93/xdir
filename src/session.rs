@@ -39,8 +39,6 @@ pub struct Session {
     pub file_colors: bool,
     /// Árbol de carpetas lateral visible (solo con la feature `arbol`).
     pub show_tree: bool,
-    /// Avisar cuando hay una versión nueva (consulta a GitHub al abrir).
-    pub check_updates: bool,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha.
     pub columns: Vec<ColumnSpec>,
@@ -63,7 +61,6 @@ impl Default for Session {
             dark_mode: None,
             file_colors: true,
             show_tree: false,
-            check_updates: true,
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -111,7 +108,6 @@ fn write(s: &Session) -> String {
 ", s.file_colors);
     out += &format!("arbol = {}
 ", s.show_tree);
-    out += &format!("avisar_actualizaciones = {}\n", s.check_updates);
     out += &match s.accent {
         Accent::System => "acento = \"sistema\"\n".to_string(),
         Accent::Rgb(c) => format!("acento = \"#{c:06X}\"\n"),
@@ -193,7 +189,6 @@ fn parse(text: &str) -> Session {
             ("ocultos", None) => s.show_hidden = boolean().unwrap_or(false),
             ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(true),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(false),
-            ("avisar_actualizaciones", None) => s.check_updates = boolean().unwrap_or(true),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
             ("modo", None) => {
                 s.dark_mode = match value.trim_matches('"') {
@@ -309,7 +304,6 @@ mod tests {
             dark_mode: Some(false),
             file_colors: false,
             show_tree: true,
-            check_updates: false,
             panes: vec![
                 PaneState {
                     tabs: vec![

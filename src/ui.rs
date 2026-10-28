@@ -227,10 +227,6 @@ pub enum PickerHit {
     FileColors,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
     Tree,
-    /// Switch del aviso de versiones nuevas.
-    Updates,
-    /// Abre la página de la versión nueva.
-    Download,
     /// Abre el diálogo "Acerca de".
     About,
     /// Dentro del panel pero sobre nada.
@@ -244,26 +240,24 @@ const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
 const PICKER_SEP_H: f32 = 13.0;
 
-/// Switches del panel: modo oscuro, colores por tipo, el árbol de carpetas (si se compiló) y el
-/// aviso de versiones.
+/// Switches del panel: modo oscuro, colores por tipo y, si se compiló, el árbol de carpetas.
 fn switch_rows() -> usize {
-    3 + usize::from(cfg!(feature = "arbol"))
+    2 + usize::from(cfg!(feature = "arbol"))
 }
 
 /// Panel flotante sobre la rueda dentada.
-/// `update`: hay una versión nueva, y el panel suma la fila para bajarla.
-pub fn picker_rect(w: f32, h: f32, update: bool) -> Rect {
+pub fn picker_rect(w: f32, h: f32) -> Rect {
     let rows = (PRESETS.len() / PICKER_COLS) as f32;
     let width = PICKER_CELL * PICKER_COLS as f32 + PICKER_PAD * 2.0;
     // Colores, dos botones, un separador y las filas de switches.
-    let height = PICKER_TITLE_H + PICKER_CELL * rows + 8.0 + PICKER_BTN_H * 2.0 + PICKER_SEP_H + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H + PICKER_BTN_H * (1.0 + f32::from(update)) + PICKER_PAD;
+    let height = PICKER_TITLE_H + PICKER_CELL * rows + 8.0 + PICKER_BTN_H * 2.0 + PICKER_SEP_H + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H + PICKER_BTN_H + PICKER_PAD;
     let right = w - GAP * 2.0;
     let bottom = h - STATUSBAR_H - 4.0;
     rect(right - width, bottom - height, right, bottom)
 }
 
-fn picker_items(w: f32, h: f32, update: bool) -> Vec<(PickerHit, Rect)> {
-    let panel = picker_rect(w, h, update);
+fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
+    let panel = picker_rect(w, h);
     let mut out = Vec::new();
     for i in 0..PRESETS.len() {
         let (col, row) = ((i % PICKER_COLS) as f32, (i / PICKER_COLS) as f32);
@@ -281,31 +275,26 @@ fn picker_items(w: f32, h: f32, update: bool) -> Vec<(PickerHit, Rect)> {
     if cfg!(feature = "arbol") {
         kinds.push(PickerHit::Tree);
     }
-    kinds.push(PickerHit::Updates);
     for (i, kind) in kinds.into_iter().enumerate() {
         let top = y + PICKER_BTN_H * i as f32;
         out.push((kind, rect(l, top, r, top + PICKER_BTN_H)));
     }
-    let mut top = y + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H;
-    if update {
-        out.push((PickerHit::Download, rect(l, top, r, top + PICKER_BTN_H)));
-        top += PICKER_BTN_H;
-    }
+    let top = y + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H;
     out.push((PickerHit::About, rect(l, top, r, top + PICKER_BTN_H)));
     out
 }
 
-pub fn picker_at(w: f32, h: f32, update: bool, x: f32, y: f32) -> Option<PickerHit> {
-    if !contains(&picker_rect(w, h, update), x, y) {
+pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
+    if !contains(&picker_rect(w, h), x, y) {
         return None;
     }
-    Some(picker_items(w, h, update).into_iter().find(|(_, r)| contains(r, x, y)).map(|(k, _)| k).unwrap_or(PickerHit::Panel))
+    Some(picker_items(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(k, _)| k).unwrap_or(PickerHit::Panel))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, tree: bool, updates: bool, update_label: Option<&str>) {
+pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, tree: bool, update: bool) {
     let th = p.theme;
-    let panel = picker_rect(w, h, update_label.is_some());
+    let panel = picker_rect(w, h);
     // Sombra suave y panel.
     p.round_fill(rect(panel.left - 2.0, panel.top, panel.right + 2.0, panel.bottom + 4.0), 12.0, alpha(th.background, 0.5));
     p.round_fill(panel, 10.0, th.surface_alt);
@@ -314,7 +303,7 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
     p.text(&p.fonts.ui_bold, "Color de acento", title, th.text);
 
     let is_preset = PRESETS.iter().any(|(_, c)| current == Accent::Rgb(*c));
-    for (kind, r) in picker_items(w, h, update_label.is_some()) {
+    for (kind, r) in picker_items(w, h) {
         let hot = hover == Some(kind);
         match kind {
             PickerHit::Preset(i) => {
@@ -351,14 +340,13 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                     p.text(&p.fonts.glyphs_small, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
                 }
             }
-            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::Tree | PickerHit::Updates => {
+            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::Tree => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
                 let (glyph, label, on) = match kind {
                     PickerHit::DarkMode => ("\u{E708}", "Modo oscuro", th.dark),
                     PickerHit::FileColors => ("\u{E790}", "Colores por tipo", file_colors),
-                    PickerHit::Updates => ("\u{E895}", "Avisar de versiones", updates),
                     _ => ("\u{E8B7}", "Árbol de carpetas", tree),
                 };
                 if kind == PickerHit::DarkMode {
@@ -379,24 +367,17 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                 let (kx, kr) = if on { (track.right - 10.0, 6.0) } else { (track.left + 10.0, 5.0) };
                 p.circle(kx, cy, kr, if on { th.background } else { th.text_dim });
             }
-            PickerHit::Download => {
+            PickerHit::About => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
                 let sy = r.top - PICKER_SEP_H / 2.0;
                 p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
-                p.text(&p.fonts.glyphs, "\u{E896}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.accent);
-                p.text(&p.fonts.ui_bold, update_label.unwrap_or_default(), rect(r.left + 34.0, r.top, r.right - 8.0, r.bottom), th.accent);
-            }
-            PickerHit::About => {
-                if hot {
-                    p.round_fill(r, 6.0, th.hover);
-                }
-                if update_label.is_none() {
-                    let sy = r.top - PICKER_SEP_H / 2.0;
-                    p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
-                }
                 p.text(&p.fonts.glyphs, "\u{E946}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
+                if update {
+                    // Sigue el rastro del aviso: punto del engranaje -> este -> botón de "Acerca de".
+                    p.circle(r.left + 27.0, r.top + 9.0, 4.0, th.accent);
+                }
                 p.text(&p.fonts.ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
                 p.text(&p.fonts.ui_right, crate::about::VERSION, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
             }

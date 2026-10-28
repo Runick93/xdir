@@ -53,7 +53,7 @@ fn rgb(r: f32, g: f32, b: f32) -> D2D1_COLOR_F {
 
 /// Ícono y color de una carpeta del usuario fijada (la posición es la de `fs::user_folder`).
 const PINNED: [(&str, &str, (f32, f32, f32)); 6] = [
-    ("Escritorio", "\u{E7F4}", (0.30, 0.65, 0.95)),
+    ("Escritorio", "\u{E70A}", (0.30, 0.65, 0.95)),
     ("Descargas", "\u{E896}", (0.25, 0.78, 0.55)),
     ("Documentos", "\u{E8A5}", (0.62, 0.70, 0.80)),
     ("Imágenes", "\u{E91B}", (0.35, 0.60, 0.95)),
@@ -414,15 +414,7 @@ impl Tree {
                     }
                     _ => ("\u{E8D5}", folder),
                 };
-                if n.kind == Kind::Pinned && n.pin == 0 {
-                    // Escritorio: pantalla azul con la barra de arriba más clara, como en Windows 11.
-                    let (cx, cy) = (x + 31.0, y + ROW_H / 2.0);
-                    p.round_fill(rect(cx - 8.5, cy - 7.0, cx + 8.5, cy + 7.0), 2.5, rgb(0.13, 0.45, 0.85));
-                    p.round_fill(rect(cx - 8.5, cy - 7.0, cx + 8.5, cy - 3.0), 2.5, rgb(0.45, 0.78, 1.0));
-                    p.round_fill(rect(cx - 8.5, cy - 5.0, cx + 8.5, cy - 3.0), 0.0, rgb(0.45, 0.78, 1.0));
-                } else {
-                    p.text(&p.fonts.glyphs, icon, rect(x + 20.0, y, x + 42.0, y + ROW_H), color);
-                }
+                p.text(&p.fonts.glyphs, icon, rect(x + 20.0, y, x + 42.0, y + ROW_H), color);
                 p.text(&p.fonts.ui, &n.name, rect(x + 48.0, y, x + 48.0 + n.text_w + 12.0, y + ROW_H), th.text);
                 if n.kind == Kind::Pinned {
                     // La chincheta queda fija al borde, no se desplaza con el nombre.

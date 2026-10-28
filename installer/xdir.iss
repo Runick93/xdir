@@ -63,10 +63,23 @@ Type: filesandordirs; Name: "{userappdata}\xdir"
 
 [Run]
 Filename: "{app}\xdir.exe"; Description: "{cm:LaunchProgram,xdir}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; Actualización desde la propia app (setup /SILENT /RELAUNCH): vuelve a abrir xdir al terminar.
+Filename: "{app}\xdir.exe"; Flags: nowait runasoriginaluser; Check: Relaunch
 
 [Code]
 const
   WM_CLOSE = $0010;
+
+// ¿Se pasó /RELAUNCH? Lo usa la actualización automática de la app para que xdir se vuelva a abrir.
+function Relaunch(): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/RELAUNCH') = 0 then
+      Result := True;
+end;
 
 // Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en src/main.rs) para que
 // el desinstalador pueda borrar el exe. WM_CLOSE deja que la app guarde la sesión; si a los 5 s

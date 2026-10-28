@@ -27,6 +27,7 @@ mod toml;
 #[cfg(feature = "arbol")]
 mod tree;
 mod typed;
+mod update;
 mod ui;
 mod uia;
 
@@ -320,6 +321,11 @@ struct App {
     show_favorites: bool,
     /// Colores por tipo de archivo encendidos (switch de la rueda dentada).
     file_colors: bool,
+    /// Avisar de versiones nuevas, y la que se encontró (si es más nueva que esta).
+    check_updates: bool,
+    new_version: Option<String>,
+    /// Bajando el instalador de la versión nueva.
+    updating: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
     /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
@@ -453,6 +459,9 @@ fn main() -> Result<()> {
             tree: tree::Tree::new(),
             show_favorites: session.show_favorites,
             file_colors: session.file_colors,
+            check_updates: session.check_updates,
+            new_version: None,
+            updating: false,
             fav_drop: None,
             tab_drop: None,
             ghost: None,
@@ -509,6 +518,9 @@ fn main() -> Result<()> {
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         (*app).sync_visibility();
         (*app).drop_target = drop::register((*app).hwnd).ok();
+        if (*app).check_updates {
+            update::check((*app).hwnd);
+        }
         (*app).marks.push(("ventana creada", ms_since(started)));
         (*app).show();
 
@@ -658,6 +670,27 @@ impl App {
                         SetCursor(Some(c));
                     }
                     LRESULT(1)
+                }
+                update::WM_APP_UPDATE_READY => {
+                    self.updating = false;
+                    let version = self.new_version.clone().unwrap_or_default();
+                    if wparam.0 == 1 && update::launch_installer(self.hwnd, &version) {
+                        // El instalador reemplaza el exe: se cierra la ventana (guarda la sesión) y
+                        // el instalador vuelve a abrir xdir cuando termina (`/RELAUNCH`).
+                        let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    } else {
+                        self.notice = Some("No se pudo actualizar (¿se canceló el permiso de administrador?). Podés bajarla desde la página de descargas.".into());
+                        self.redraw();
+                    }
+                    LRESULT(0)
+                }
+                update::WM_APP_UPDATE => {
+                    // Si se apagó el aviso mientras se consultaba, se ignora.
+                    if self.check_updates {
+                        self.new_version = Some(update::unpack(wparam.0));
+                        self.redraw();
+                    }
+                    LRESULT(0)
                 }
                 WM_APP_LOAD => {
                     let t0 = Instant::now();
@@ -1146,6 +1179,7 @@ impl App {
             show_hidden: self.show_hidden,
             show_favorites: self.show_favorites,
             file_colors: self.file_colors,
+            check_updates: self.check_updates,
             show_tree: self.tree_width() > 0.0,
             accent: self.accent,
             dark_mode: self.dark_mode,
@@ -1406,7 +1440,7 @@ impl App {
             }
         }
         if self.picker_open {
-            if let Some(k) = ui::picker_at(w, h, x, y) {
+            if let Some(k) = ui::picker_at(w, h, self.new_version.is_some(), x, y) {
                 return Hit::Picker(k);
             }
         }
@@ -1520,6 +1554,32 @@ impl App {
                 self.redraw();
             }
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
+            Hit::Picker(ui::PickerHit::Updates) => {
+                self.check_updates = !self.check_updates;
+                if self.check_updates {
+                    update::check(self.hwnd);
+                } else {
+                    self.new_version = None;
+                }
+                self.redraw();
+            }
+            Hit::Picker(ui::PickerHit::Download) => {
+                match self.new_version.clone() {
+                    _ if self.updating => {}
+                    // Instalado con el instalador: lo baja y se actualiza sola.
+                    Some(version) if update::can_self_update() => {
+                        self.updating = true;
+                        self.notice = Some(format!("Bajando xdir {version}…"));
+                        update::download(self.hwnd, version);
+                    }
+                    // Portable o compilación propia: la página de descargas.
+                    _ => {
+                        open_url(self.hwnd, update::RELEASES_URL);
+                        self.picker_open = false;
+                    }
+                }
+                self.redraw();
+            }
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
             Hit::Picker(ui::PickerHit::Panel) => {}
             Hit::Splitter(s) if double => {
@@ -3363,6 +3423,16 @@ impl App {
         let (picker_open, accent) = (self.picker_open, self.accent);
         let about_open = self.about_open;
         let (file_colors, tree_on) = (self.file_colors, tree_w > 0.0);
+        let check_updates = self.check_updates;
+        let update_label = self.new_version.as_ref().map(|v| {
+            if self.updating {
+                format!("Bajando xdir {v}…")
+            } else if update::can_self_update() {
+                format!("Actualizar a xdir {v}")
+            } else {
+                format!("Descargar xdir {v}")
+            }
+        });
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
@@ -3420,7 +3490,7 @@ impl App {
                 Hit::Layout(l) => Some(l),
                 _ => None,
             };
-            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups);
+            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups, update_label.is_some());
             if let Some(pane) = term_menu {
                 let term_hover = match hover {
                     Hit::TermMenu(c) => c,
@@ -3433,7 +3503,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, tree_on);
+                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, tree_on, check_updates, update_label.as_deref());
             }
             if let Some(sg) = suggest {
                 sg.draw(p);

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Preguntas y charla
+    url: https://github.com/Runick93/xdir/discussions
+    about: Dudas de uso o ideas sueltas (si no ves Discussions, abre un issue de sugerencia).

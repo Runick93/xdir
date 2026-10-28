@@ -229,6 +229,7 @@ impl Renderer {
         // Los bitmaps de íconos pertenecen al dispositivo perdido.
         self.icons.borrow_mut().bitmaps.clear();
         self.icons.borrow_mut().thumbs.clear();
+        self.icons.borrow_mut().logo = None;
     }
 }
 
@@ -410,6 +411,25 @@ impl Painter<'_> {
         true
     }
 
+    /// Logo de Runick centrado en `r` sin deformarlo (ni agrandarlo más que su tamaño de origen).
+    pub fn logo(&self, r: Rect) {
+        let mut icons = self.icons.borrow_mut();
+        if icons.logo.is_none() {
+            icons.logo = crate::about::logo_pixels().and_then(|px| bitmap_from(self.ctx, &px));
+        }
+        let Some(bitmap) = icons.logo.clone() else { return };
+        drop(icons);
+        let size = unsafe { bitmap.GetPixelSize() };
+        let (bw, bh) = (size.width as f32, size.height as f32);
+        let k = ((r.right - r.left) / bw).min((r.bottom - r.top) / bh);
+        let (w, h) = (bw * k, bh * k);
+        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        let dest = rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
+        unsafe {
+            self.ctx.DrawBitmap(&bitmap, Some(&dest), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+        }
+    }
+
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
     pub fn thumb_px(&self, dips: f32) -> u32 {
         (dips * self.icons.borrow().dpi_k).round() as u32
@@ -516,6 +536,8 @@ struct Icons {
     dpi_k: f32,
     /// Miniaturas ya convertidas (o que no se pudieron obtener).
     thumbs: HashMap<thumbs::Key, Option<ID2D1Bitmap1>>,
+    /// Logo del diálogo "Acerca de", creado la primera vez que se muestra.
+    logo: Option<ID2D1Bitmap1>,
 }
 
 /// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
@@ -525,7 +547,7 @@ impl Icons {
     fn new(dpi: u32) -> Self {
         let kind = icons::list_for_dpi(dpi);
         icons::prewarm(kind);
-        Self { kind, hwnd: HWND::default(), bitmaps: HashMap::new(), dpi_k: dpi as f32 / 96.0, thumbs: HashMap::new() }
+        Self { kind, hwnd: HWND::default(), bitmaps: HashMap::new(), dpi_k: dpi as f32 / 96.0, thumbs: HashMap::new(), logo: None }
     }
 
     /// Miniatura del elemento; si no está, la encarga y devuelve None.

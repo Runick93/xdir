@@ -222,6 +222,8 @@ pub enum PickerHit {
     FileColors,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
     Tree,
+    /// Abre el diálogo "Acerca de".
+    About,
     /// Dentro del panel pero sobre nada.
     Panel,
 }
@@ -243,7 +245,7 @@ pub fn picker_rect(w: f32, h: f32) -> Rect {
     let rows = (PRESETS.len() / PICKER_COLS) as f32;
     let width = PICKER_CELL * PICKER_COLS as f32 + PICKER_PAD * 2.0;
     // Colores, dos botones, un separador y las filas de switches.
-    let height = PICKER_TITLE_H + PICKER_CELL * rows + 8.0 + PICKER_BTN_H * 2.0 + PICKER_SEP_H + PICKER_BTN_H * switch_rows() as f32 + PICKER_PAD;
+    let height = PICKER_TITLE_H + PICKER_CELL * rows + 8.0 + PICKER_BTN_H * 2.0 + PICKER_SEP_H + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H + PICKER_BTN_H + PICKER_PAD;
     let right = w - GAP * 2.0;
     let bottom = h - STATUSBAR_H - 4.0;
     rect(right - width, bottom - height, right, bottom)
@@ -272,6 +274,8 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
         let top = y + PICKER_BTN_H * i as f32;
         out.push((kind, rect(l, top, r, top + PICKER_BTN_H)));
     }
+    let top = y + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H;
+    out.push((PickerHit::About, rect(l, top, r, top + PICKER_BTN_H)));
     out
 }
 
@@ -356,6 +360,16 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                 }
                 let (kx, kr) = if on { (track.right - 10.0, 6.0) } else { (track.left + 10.0, 5.0) };
                 p.circle(kx, cy, kr, if on { th.background } else { th.text_dim });
+            }
+            PickerHit::About => {
+                if hot {
+                    p.round_fill(r, 6.0, th.hover);
+                }
+                let sy = r.top - PICKER_SEP_H / 2.0;
+                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
+                p.text(&p.fonts.glyphs, "\u{E946}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
+                p.text(&p.fonts.ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
+                p.text(&p.fonts.ui_right, crate::about::VERSION, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
             }
             PickerHit::Panel => {}
         }

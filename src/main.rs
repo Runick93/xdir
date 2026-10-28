@@ -1,6 +1,7 @@
 // En release no se abre consola; en debug sí, para ver logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod anim;
 mod commands;
 mod config;
@@ -183,6 +184,8 @@ enum Hit {
     /// Botón de grupos guardados de la barra de estado.
     Groups,
     Picker(ui::PickerHit),
+    /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
+    About(about::AboutHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.
@@ -297,6 +300,8 @@ struct App {
     dark_mode: Option<bool>,
     /// Panel de colores abierto (rueda dentada).
     picker_open: bool,
+    /// Diálogo "Acerca de" abierto.
+    about_open: bool,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -416,6 +421,7 @@ fn main() -> Result<()> {
             accent: session.accent,
             dark_mode: session.dark_mode,
             picker_open: false,
+            about_open: false,
             term_menu: None,
             term_ctx: None,
             custom_colors: [COLORREF(0x00FFFFFF); 16],
@@ -1275,6 +1281,10 @@ impl App {
 
     fn hit(&self, x: f32, y: f32) -> Hit {
         let (w, h) = self.client_dips();
+        // El diálogo "Acerca de" es modal: tapa todo lo demás.
+        if self.about_open {
+            return about::at(w, h, x, y).map_or(Hit::None, Hit::About);
+        }
         // La paleta va encima de todo, y después los menús flotantes.
         if let Some((pal, _)) = &self.palette {
             if let Some(i) = pal.item_at(w, x, y) {
@@ -1320,6 +1330,15 @@ impl App {
     fn on_left_down(&mut self, x: f32, y: f32, double: bool) {
         let hit = self.hit(x, y);
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        if self.about_open {
+            match hit {
+                Hit::About(about::AboutHit::Report) => open_url(self.hwnd, about::ISSUES_URL),
+                Hit::About(about::AboutHit::Panel) => {}
+                _ => self.about_open = false,
+            }
+            self.redraw();
+            return;
+        }
         // Con la paleta abierta: un resultado se abre, el resto del panel no hace nada y fuera
         // de ella se cierra (sin que el clic llegue a lo de abajo).
         if self.palette.is_some() {
@@ -1370,6 +1389,7 @@ impl App {
                 self.redraw();
             }
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
+            Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
             Hit::Picker(ui::PickerHit::Panel) => {}
             Hit::Splitter(s) if double => {
                 self.begin_layout_anim();
@@ -1439,7 +1459,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None => {}
+            Hit::None | Hit::About(_) => {}
         }
         self.redraw();
     }
@@ -1609,6 +1629,7 @@ impl App {
         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
         let active = self.active;
         match vk {
+            VK_ESCAPE if self.about_open => self.about_open = false,
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
             VK_ESCAPE if !self.panes[active].tab().list.filter().is_empty() => self.clear_filter(active),
@@ -1725,6 +1746,11 @@ impl App {
                 if let Some(&(col, ..)) = list::COLUMNS.get(i as usize) {
                     self.tab_mut().list.set_sort(col);
                 }
+            }
+            Command::About => {
+                self.picker_open = false;
+                self.term_menu = None;
+                self.about_open = true;
             }
             Command::ToggleTree => {
                 #[cfg(feature = "arbol")]
@@ -3048,6 +3074,7 @@ impl App {
         let (hover, drag, edit_pane) = (self.hover, self.drag, self.edit.map(|(_, p)| p));
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
+        let about_open = self.about_open;
         let (file_colors, tree_on) = (self.file_colors, tree_w > 0.0);
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
@@ -3119,6 +3146,13 @@ impl App {
             }
             if let Some(pal) = palette {
                 pal.draw(p, w);
+            }
+            if about_open {
+                let about_hover = match hover {
+                    Hit::About(k) => Some(k),
+                    _ => None,
+                };
+                about::draw(p, w, h, about_hover);
             }
         });
         if result.is_err() {
@@ -3241,6 +3275,14 @@ fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, keys: MODIFIERKEYS_FLA
         DROPEFFECT_COPY
     } else {
         DROPEFFECT_NONE
+    }
+}
+
+/// Abre un enlace en el navegador predeterminado.
+fn open_url(hwnd: HWND, url: &str) {
+    let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
     }
 }
 

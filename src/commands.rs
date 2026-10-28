@@ -50,6 +50,7 @@ pub enum Command {
     ToggleDarkMode,
     SaveGroup,
     OpenConfig,
+    About,
     /// Vista N (índice de `list::VIEWS`).
     View(u8),
     /// Ordenar por la columna N (índice de `list::COLUMNS`); repetirlo invierte el orden.
@@ -123,6 +124,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::ToggleDarkMode, "modo_oscuro", "Cambiar entre modo claro y oscuro", &[]),
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),
     spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
+    spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),
     spec(Command::View(1), "vista_iconos", "Vista: íconos medianos", &["Ctrl+Shift+2"]),
     spec(Command::View(2), "vista_iconos_grandes", "Vista: íconos grandes", &["Ctrl+Shift+3"]),

@@ -21,8 +21,14 @@ El ejecutable queda en `target\release\xdir.exe`: un solo archivo, sin runtimes.
 
 En GitHub, ejecuta **Actions → Release → Run workflow**. El runner compila, genera el ZIP
 portable y el instalador, y los publica como adjuntos de una release en **Releases**. También
-quedan disponibles como artifact de esa ejecución. Para publicar una versión nueva, incrementa
-`version` en `Cargo.toml` antes de ejecutar el workflow; cada versión usa el tag `v<versión>`.
+quedan disponibles como artifact de esa ejecución. El workflow pregunta qué número subir
+(`patch` por defecto: 0.1.6 → 0.1.7; también `minor`, `major` o `ninguno` para republicar la
+actual), actualiza `Cargo.toml` y `Cargo.lock`, deja el commit «Versión X» en la rama y publica
+con el tag `v<versión>`. Solo se conservan los dos releases más recientes.
+
+## Reportar errores y sugerencias
+
+Prueba la última versión desde [Releases](https://github.com/Runick93/xdir/releases) y, si algo falla o te falta, abre un [issue](https://github.com/Runick93/xdir/issues/new/choose): hay un formulario para errores y otro para sugerencias.
 
 ## Uso
 

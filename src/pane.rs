@@ -16,18 +16,24 @@ const TAB_SLANT: f32 = 10.0;
 /// Radio de las puntas de arriba de las pestañas y de su encuentro con el borde.
 const TAB_RADIUS: f32 = 6.0;
 const TAB_FOOT_RADIUS: f32 = 4.0;
+/// Separación entre el borde izquierdo del panel y el pie de la primera pestaña: deja lugar a la
+/// esquina del panel, para que su lado izquierdo sea simétrico al derecho.
+const TAB_FIRST_INSET: f32 = 10.0;
+/// Ancho reservado a la derecha de la barra de dirección en edición para la cruz que borra el texto.
+pub const ADDRESS_CLEAR_W: f32 = 26.0;
+/// Lugar del ícono de monitor delante de "Este equipo" en la barra de dirección.
+const THIS_PC_ICON_W: f32 = 22.0;
 
 /// Contorno de una pestaña sin base: (abajo izquierda, arriba izquierda, arriba derecha,
-/// abajo derecha). `left_slant` 0 = lado izquierdo recto (primera pestaña).
+/// abajo derecha). `left_slant`: inclinación del lado izquierdo.
 fn tab_points(r: Rect, left_slant: f32) -> Vec<(f32, f32, f32)> {
     let (l, t, rr, b) = (r.left + 0.5, r.top + 0.5, r.right - 0.5, r.bottom);
     vec![(l, b, 0.0), (l + left_slant, t, TAB_RADIUS), (rr - TAB_SLANT, t, TAB_RADIUS), (rr, b, 0.0)]
 }
 
 /// Contorno del panel como una sola figura: el cuerpo redondeado con la pestaña activa
-/// integrada en el borde de arriba. `first`: la pestaña activa es la primera, y su lado
-/// izquierdo es la continuación recta del borde del panel.
-fn outline(body: Rect, tab: Option<Rect>, first: bool) -> Vec<(f32, f32, f32)> {
+/// integrada en el borde de arriba.
+fn outline(body: Rect, tab: Option<Rect>) -> Vec<(f32, f32, f32)> {
     let h = 0.75; // medio trazo hacia adentro para que el borde quede nítido
     let (l, t, r, b) = (body.left + h, body.top + h, body.right - h, body.bottom - h);
     let Some(tab) = tab else {
@@ -35,13 +41,9 @@ fn outline(body: Rect, tab: Option<Rect>, first: bool) -> Vec<(f32, f32, f32)> {
     };
     let (tl, tr, tt) = (tab.left + h, tab.right - h, tab.top + h);
     let mut pts = vec![(l, b, PANE_RADIUS)];
-    if first {
-        pts.push((l, tt, TAB_RADIUS));
-    } else {
-        pts.push((l, t, PANE_RADIUS));
-        pts.push((tl, t, TAB_FOOT_RADIUS));
-        pts.push((tl + TAB_SLANT, tt, TAB_RADIUS));
-    }
+    pts.push((l, t, PANE_RADIUS));
+    pts.push((tl, t, TAB_FOOT_RADIUS));
+    pts.push((tl + TAB_SLANT, tt, TAB_RADIUS));
     pts.push((tr - TAB_SLANT, tt, TAB_RADIUS));
     pts.push((tr, t, TAB_FOOT_RADIUS));
     pts.push((r, t, PANE_RADIUS));
@@ -92,6 +94,8 @@ pub enum PaneHit {
     Button(Button),
     Crumb(usize),
     Address,
+    /// Cruz de la barra de dirección en edición: borra lo escrito.
+    AddressClear,
     /// Estrella de la barra de dirección: agregar o quitar de favoritos.
     Star,
     /// Botón de consola de la barra de dirección.
@@ -140,6 +144,8 @@ pub struct Pane {
     maximize: Rect,
     buttons: Vec<(Button, Rect)>,
     pub address: Rect,
+    /// Cruz que borra el texto de la barra de dirección (vacía si no se está editando).
+    address_clear: Rect,
     crumbs: Vec<(Rect, Location)>,
     star: Rect,
     terminal: Rect,
@@ -169,6 +175,7 @@ impl Pane {
             maximize: zero,
             buttons: Vec::new(),
             address: zero,
+            address_clear: zero,
             crumbs: Vec::new(),
             star: zero,
             terminal: zero,
@@ -289,9 +296,9 @@ impl Pane {
         p.round_fill(body, PANE_RADIUS, alpha(th.accent, 0.06));
         p.round_stroke_w(body, PANE_RADIUS, th.accent, 2.0);
         let x = match (self.tab_rects.get(at), self.tab_rects.last()) {
-            (Some((r, _)), _) => r.left + if at == 0 { 2.0 } else { TAB_SLANT / 2.0 },
+            (Some((r, _)), _) => r.left + TAB_SLANT / 2.0,
             (None, Some((r, _))) => r.right - TAB_SLANT / 2.0,
-            (None, None) => self.rect.left + 2.0,
+            (None, None) => self.rect.left + TAB_FIRST_INSET,
         };
         let (top, bottom) = (self.rect.top + 6.0, self.rect.top + TABSTRIP_H - 4.0);
         p.round_fill(rect(x - 1.5, top, x + 1.5, bottom), 1.5, th.accent);
@@ -353,6 +360,9 @@ impl Pane {
         }
         if contains(&self.star, x, y) {
             return PaneHit::Star;
+        }
+        if contains(&self.address_clear, x, y) {
+            return PaneHit::AddressClear;
         }
         if contains(&self.address, x, y) {
             return PaneHit::Address;
@@ -430,7 +440,7 @@ impl Pane {
         let body = rect(area.left, area.top + TABSTRIP_H, area.right, area.bottom);
         let reserved = if maximized.is_some() { MAXIMIZE_W } else { 0.0 };
         let layout = self.layout_tabs(area, reserved);
-        let outline = outline(body, layout.get(self.active).copied(), self.active == 0);
+        let outline = outline(body, layout.get(self.active).copied());
         p.rounded_path(&outline, true, Some(th.surface), None);
         self.draw_tabs(p, area, &layout, hover);
         self.draw_maximize(p, area, maximized, hover);
@@ -467,9 +477,17 @@ impl Pane {
         self.star = rect(0.0, 0.0, 0.0, 0.0);
         self.terminal = rect(0.0, 0.0, 0.0, 0.0);
         self.filter_button = rect(0.0, 0.0, 0.0, 0.0);
+        self.address_clear = rect(0.0, 0.0, 0.0, 0.0);
         if editing {
             p.round_stroke(addr, 6.0, th.accent);
             self.crumbs.clear();
+            // Cruz para borrar lo escrito, como en el Explorador.
+            let clear = rect(addr.right - ADDRESS_CLEAR_W - 4.0, addr.top + 4.0, addr.right - 4.0, addr.bottom - 4.0);
+            if hover == PaneHit::AddressClear {
+                p.round_fill(clear, 4.0, alpha(th.text, 0.12));
+            }
+            p.text(&p.fonts.glyphs_small, "\u{E711}", clear, th.text_dim);
+            self.address_clear = clear;
         } else {
             let border = if hover == PaneHit::Address { th.text_dim } else { th.border };
             p.round_stroke(addr, 6.0, border);
@@ -555,16 +573,16 @@ impl Pane {
         p.rounded_path(&outline, true, None, Some(stroke));
     }
 
-    /// Posición de cada pestaña visible. La primera arranca justo en el borde izquierdo del
-    /// panel (su lado izquierdo es recto, continuación del borde).
+    /// Posición de cada pestaña visible. La primera arranca un poco adentro del borde izquierdo
+    /// del panel, y su lado izquierdo es inclinado como el derecho.
     /// `reserved`: ancho que queda libre a la derecha (botón de maximizar).
     fn layout_tabs(&self, area: Rect, reserved: f32) -> Vec<Rect> {
         let n = self.tabs.len() as f32;
         let right = area.right - 40.0 - reserved;
-        let avail = right - area.left;
+        let avail = right - area.left - TAB_FIRST_INSET;
         let width = (avail / n).clamp(TAB_MIN_W, TAB_MAX_W);
         let (top, bottom) = (area.top + 3.0, area.top + TABSTRIP_H);
-        let mut x = area.left;
+        let mut x = area.left + TAB_FIRST_INSET;
         let mut out = Vec::new();
         for _ in &self.tabs {
             let r = rect(x, top, (x + width).min(right), bottom);
@@ -585,7 +603,7 @@ impl Pane {
             let tab = &self.tabs[i];
             let active = i == self.active;
             let hovered = hover == PaneHit::Tab(i) || hover == PaneHit::TabClose(i);
-            let left_slant = if i == 0 { 0.0 } else { TAB_SLANT };
+            let left_slant = TAB_SLANT;
             if !active {
                 let shape = tab_points(r, left_slant);
                 if hovered {
@@ -735,7 +753,12 @@ impl Pane {
         let th = p.theme;
         self.crumbs.clear();
         let all = self.tabs[self.active].location.crumbs();
-        let widths: Vec<f32> = all.iter().map(|(label, _)| p.measure(&p.fonts.ui, label) + 16.0).collect();
+        // El primer tramo ("Este equipo") lleva un ícono de monitor adelante.
+        let widths: Vec<f32> = all
+            .iter()
+            .enumerate()
+            .map(|(i, (label, _))| p.measure(&p.fonts.ui, label) + 16.0 + if i == 0 { THIS_PC_ICON_W } else { 0.0 })
+            .collect();
 
         // Si no entran, se descartan los primeros (los más lejanos).
         let avail = addr.right - addr.left - 16.0;
@@ -756,11 +779,20 @@ impl Pane {
             }
             let r = rect(x, addr.top + 4.0, (x + widths[i]).min(addr.right - 4.0), addr.bottom - 4.0);
             let idx = self.crumbs.len();
-            if hover == PaneHit::Crumb(idx) {
-                p.round_fill(r, 4.0, th.hover);
+            let hot = hover == PaneHit::Crumb(idx);
+            if hot {
+                // Más marcado que el resaltado de las filas: es un botón chico y hay que verlo.
+                p.round_fill(r, 4.0, alpha(th.text, 0.16));
             }
             let last = i + 1 == all.len();
-            p.text(&p.fonts.ui_center, label, r, if last { th.text } else { th.text_dim });
+            let color = if last || hot { th.text } else { th.text_dim };
+            if i == 0 {
+                let icon = rect(r.left + 4.0, r.top, r.left + 4.0 + THIS_PC_ICON_W, r.bottom);
+                p.text(&p.fonts.glyphs_small, "\u{E7F4}", icon, color);
+                p.text(&p.fonts.ui_center, label, rect(r.left + THIS_PC_ICON_W, r.top, r.right, r.bottom), color);
+            } else {
+                p.text(&p.fonts.ui_center, label, r, color);
+            }
             self.crumbs.push((r, loc.clone()));
             x = r.right;
         }

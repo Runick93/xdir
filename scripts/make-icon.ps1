@@ -1,4 +1,4 @@
-# Genera assets\xdir.ico: carpeta oscura con borde celeste y 4 paneles cuyas esquinas exteriores cortadas
+﻿# Genera assets\xdir.ico: carpeta oscura con borde celeste y 4 paneles cuyas esquinas exteriores cortadas
 # forman una X en el espacio negativo; el panel activo en celeste (ver assets\xdir.svg).
 # Uso: pwsh scripts\make-icon.ps1 [-Preview]   (-Preview deja también los PNG en assets\icon-png\)
 # El .ico queda versionado; solo hace falta correrlo si cambia el diseño.
@@ -11,14 +11,17 @@ $folder = [Drawing.Color]::FromArgb(0x18, 0x1A, 0x1C)
 $active = [Drawing.Color]::FromArgb(0x5A, 0xCA, 0xFD)
 $pane   = [Drawing.Color]::FromArgb(0xDC, 0xE3, 0xEC)
 $sizes  = 16, 20, 24, 32, 40, 48, 64, 256
-# La carpeta ocupa 224 x 180 de los 256 de la grilla; se agranda un poco, centrada, para que en la
+# La carpeta ocupa 224 x 180 de los 256 de la grilla; se agranda, centrada, hasta casi el ancho del cuadro como la carpeta de Windows, para que en la
 # barra de tareas no se vea más chica que los íconos que llenan el cuadro.
-$zoom = 1.08
+$zoom = 1.12
 
-# Panel de arriba a la izquierda en la grilla de 256: rectángulo 46..124 x 78..138 con dos esquinas
-# cortadas (arriba hacia el centro y abajo hacia afuera). Los otros tres son espejos respecto del
+# Brazo de arriba a la izquierda en la grilla de 256: una diagonal ancha de la esquina (49, 82) al centro,
+# con la punta de afuera recta (arriba y a la izquierda) y la de adentro cortada en horizontal y vertical. Los otros tres son espejos respecto del
 # centro de la separación (x = 128, y = 141): 8 de ancho entre columnas y 6 entre filas.
-$paneTL = @(46, 78), @(92, 78), @(124, 110), @(124, 138), @(84, 138), @(46, 100)
+$paneTL = @(49, 82), @(71, 82), @(124, 132), @(124, 138), @(104, 138), @(49, 92)
+# En 16 a 24 px los brazos finos se cierran sobre sí mismos (los bordes interiores se fijan a píxeles
+# enteros): ahí se usan brazos más gruesos, con las esquinas cortadas.
+$paneTLSmall = @(46, 78), @(92, 78), @(124, 110), @(124, 138), @(84, 138), @(46, 100)
 
 function Render([int]$n) {
     $s = $n / 256.0 * $zoom
@@ -82,7 +85,7 @@ function Render([int]$n) {
     }
     foreach ($mx in $false, $true) {
         foreach ($my in $false, $true) {
-            $pts = foreach ($p in $paneTL) {
+            $pts = foreach ($p in $(if ($n -le 24) { $paneTLSmall } else { $paneTL })) {
                 $x = if ($mx) { 256 - $p[0] } else { $p[0] }
                 $y = if ($my) { 282 - $p[1] } else { $p[1] }
                 New-Object Drawing.PointF (Inner $x 128 4 $inX $gapX), (Inner $y 141 3 $inY $gapY)

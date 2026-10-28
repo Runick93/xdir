@@ -147,9 +147,8 @@ const EDGE_GRAB: f32 = 5.0;
 /// Arrastre en el encabezado.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum HeaderDrag {
-    /// Cambiando el ancho de la columna `index` (en `columns`). `invert`: el borde agarrado es el
-    /// izquierdo (a la derecha del nombre), así que mover a la izquierda la agranda.
-    Resize { index: usize, start_x: f32, start_w: f32, invert: bool },
+    /// Cambiando el ancho de la columna `index` (en `columns`) desde su borde derecho.
+    Resize { index: usize, start_x: f32, start_w: f32 },
     /// Botón apretado sobre un encabezado: clic (ordenar) o, si se mueve, reordenar.
     Press { index: usize, start_x: f32, moved: bool },
 }
@@ -234,6 +233,10 @@ pub struct FileList {
     filter_parts: Vec<String>,
     /// Columnas a la vista, de izquierda a derecha.
     pub columns: Vec<ColumnSpec>,
+    /// Ancho del nombre una vez que se lo fijó (arrastre o doble clic en un borde del encabezado).
+    /// Hasta entonces el nombre ocupa lo que sobra; fijo, cada borde se mueve con su columna, como
+    /// en el Explorador, y lo que no se usa queda en blanco a la derecha.
+    name_width: Option<f32>,
     pub view: View,
     /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
     pub folder: Option<std::path::PathBuf>,
@@ -307,6 +310,7 @@ impl Default for FileList {
             filter: String::new(),
             filter_parts: Vec::new(),
             columns: default_columns(),
+            name_width: None,
             view: View::Details,
             folder: None,
             header_drag: None,
@@ -751,7 +755,9 @@ impl FileList {
     /// Igual que `columns`, con el índice de cada una en `self.columns`.
     fn layout_columns(&self) -> Vec<(usize, Column, f32, f32)> {
         let avail = self.area.right - SCROLLBAR_W - self.area.left;
-        let room = (avail - NAME_MIN).max(0.0);
+        // Con el nombre fijo, las demás columnas entran en lo que queda; si no, él toma lo que sobra.
+        let fixed_name = self.name_width.map(|w| w.clamp(MIN_COL_W, (avail - MIN_COL_W).max(MIN_COL_W)));
+        let room = (avail - fixed_name.unwrap_or(NAME_MIN)).max(0.0);
         // Si no entran, todas se angostan en proporción (hasta MIN_COL_W); recién si así tampoco
         // alcanza, se dejan de mostrar las del final.
         let widths = |n: usize| -> Vec<f32> {
@@ -764,7 +770,7 @@ impl FileList {
             shown -= 1;
         }
         let w = widths(shown);
-        let name_w = (avail - w.iter().sum::<f32>()).max(NAME_MIN.min(avail));
+        let name_w = fixed_name.unwrap_or_else(|| (avail - w.iter().sum::<f32>()).max(NAME_MIN.min(avail)));
         let mut x = self.area.left;
         let mut out = Vec::with_capacity(shown);
         for (i, c) in self.columns.iter().take(shown).enumerate() {
@@ -780,25 +786,93 @@ impl FileList {
         !self.view.is_grid() && y >= self.area.top && y < self.area.top + HEADER_H && x >= self.area.left && x < self.area.right
     }
 
-    /// Borde de encabezado bajo el mouse, para cambiar un ancho: (índice, izquierdo).
-    /// El borde entre el nombre y la columna de su derecha cambia esa columna.
-    fn edge_at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
+    /// Borde de encabezado bajo el mouse, para cambiar un ancho: índice (en `columns`) de la
+    /// columna a cuya derecha está. Vale también para el nombre.
+    fn edge_at(&self, x: f32, y: f32) -> Option<usize> {
         if !self.in_header(x, y) {
             return None;
         }
-        let cols = self.layout_columns();
-        for (k, &(i, col, _, right)) in cols.iter().enumerate() {
-            if (x - right).abs() > EDGE_GRAB {
-                continue;
-            }
-            if col != Column::Name {
-                return Some((i, false));
-            }
-            if let Some(&(j, _, _, _)) = cols.get(k + 1) {
-                return Some((j, true));
-            }
+        self.layout_columns().iter().find(|&&(_, _, _, right)| (x - right).abs() <= EDGE_GRAB).map(|&(i, ..)| i)
+    }
+
+    /// Ancho de la columna `index` tal como se ve.
+    fn width_of(&self, index: usize) -> f32 {
+        if self.columns[index].col == Column::Name {
+            self.layout_columns().iter().find(|c| c.0 == index).map_or(NAME_MIN, |c| c.3 - c.2)
+        } else {
+            self.columns[index].width
         }
-        None
+    }
+
+    /// El nombre vuelve a ocupar lo que sobra (columnas de fábrica).
+    pub fn reset_name_width(&mut self) {
+        self.name_width = None;
+    }
+
+    /// Fija el ancho del nombre con el que se ve ahora, para que los bordes dejen de depender de él.
+    fn pin_name(&mut self) {
+        if self.name_width.is_none() {
+            let name = self.columns.iter().position(|c| c.col == Column::Name);
+            self.name_width = name.map(|i| self.width_of(i));
+        }
+    }
+
+    fn set_width(&mut self, index: usize, w: f32) {
+        let w = w.clamp(MIN_COL_W, self.max_width(index));
+        if self.columns[index].col == Column::Name {
+            self.name_width = Some(w);
+        } else {
+            self.columns[index].width = w;
+        }
+    }
+
+    /// Lo más ancha que puede ser la columna `index`: hasta el borde derecho de la lista. Lo que
+    /// quede más allá deja de verse (no hay desplazamiento horizontal).
+    fn max_width(&self, index: usize) -> f32 {
+        let avail = self.area.right - SCROLLBAR_W - self.area.left;
+        let before: f32 = (0..index).map(|i| self.width_of(i)).sum();
+        (avail - before).max(MIN_COL_W)
+    }
+
+    /// Texto de una celda de una columna que no es el nombre (para medirla).
+    fn cell_text(col: Column, e: &Entry) -> String {
+        match col {
+            Column::Name => e.display.clone(),
+            Column::Modified => format::date(e.modified),
+            Column::Created => format::date(e.created),
+            Column::Type => e.type_name.to_string(),
+            Column::Extension => extension_of(e).to_string(),
+            Column::Attributes => attr_letters(e.attrs),
+            Column::Size => match (e.is_dir, e.modified) {
+                (true, 0) if e.size > 0 => format::size_short(e.size),
+                (true, _) => String::new(),
+                (false, _) => format::size_kb(e.size),
+            },
+        }
+    }
+
+    /// Doble clic en un borde del encabezado: la columna a su izquierda se ajusta a su contenido
+    /// más ancho (o a su título), como en el Explorador: el borde se mueve y las columnas de su
+    /// derecha lo siguen. `measure(texto, negrita)` da el ancho de un texto.
+    /// `None` si el punto no está sobre un borde.
+    pub fn fit_column_at(&mut self, x: f32, y: f32, measure: &dyn Fn(&str, bool) -> f32) -> Option<Action> {
+        let index = self.edge_at(x, y)?;
+        self.pin_name();
+        let col = self.columns[index].col;
+        // Solo se miden los textos más largos: medir cada fila de una carpeta enorme sería lento.
+        let mut texts: Vec<String> = self.visible.iter().map(|&v| Self::cell_text(col, &self.entries[v as usize])).collect();
+        texts.sort_unstable_by_key(|t| std::cmp::Reverse(t.chars().count()));
+        texts.dedup();
+        let widest = texts.iter().take(40).map(|t| measure(t, false)).fold(0.0, f32::max);
+        let width = if col == Column::Name {
+            PAD * 2.0 + ICON + 8.0 + widest + 6.0
+        } else {
+            let title = measure(col.title(), true) + if col == self.sort { 22.0 } else { 0.0 };
+            PAD * 2.0 + widest.max(title) + 4.0
+        };
+        self.set_width(index, width);
+        self.header_drag = None;
+        Some(Action::ColumnsChanged)
     }
 
     /// El mouse está sobre un borde de encabezado (cursor de cambiar ancho).
@@ -1122,8 +1196,9 @@ impl FileList {
     pub fn on_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, shift: bool) -> (Action, bool) {
         if self.in_header(x, y) {
             // Borde: cambiar el ancho. Encabezado: ordenar al soltar, o reordenar si se arrastra.
-            if let Some((index, invert)) = self.edge_at(x, y) {
-                self.header_drag = Some(HeaderDrag::Resize { index, start_x: x, start_w: self.columns[index].width, invert });
+            if let Some(index) = self.edge_at(x, y) {
+                self.pin_name();
+                self.header_drag = Some(HeaderDrag::Resize { index, start_x: x, start_w: self.width_of(index) });
                 return (Action::None, true);
             }
             if let Some(&(index, ..)) = self.layout_columns().iter().find(|(_, _, l, r)| x >= *l && x < *r) {
@@ -1223,12 +1298,8 @@ impl FileList {
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) -> Action {
         match self.header_drag {
-            Some(HeaderDrag::Resize { index, start_x, start_w, invert }) => {
-                let delta = if invert { start_x - x } else { x - start_x };
-                // Sin quitarle al nombre su mínimo.
-                let others: f32 = self.columns.iter().enumerate().filter(|(i, c)| *i != index && c.col != Column::Name).map(|(_, c)| c.width).sum();
-                let max = (self.area.right - SCROLLBAR_W - self.area.left - NAME_MIN - others).max(MIN_COL_W);
-                self.columns[index].width = (start_w + delta).clamp(MIN_COL_W, max);
+            Some(HeaderDrag::Resize { index, start_x, start_w }) => {
+                self.set_width(index, start_w + (x - start_x));
                 return Action::Redraw;
             }
             Some(HeaderDrag::Press { index, start_x, moved }) => {
@@ -1481,13 +1552,23 @@ mod column_tests {
     fn header_drag_resizes_and_reorders() {
         let mut l = list(800.0);
         let cols = l.columns();
-        // Borde entre Nombre y Modificado: agrandar Modificado moviendo a la izquierda.
+        // Borde entre Nombre y Modificado: achicar el nombre; Modificado y las que siguen se corren
+        // con el borde y a la derecha queda lugar en blanco.
         let edge = cols[0].2;
-        assert_eq!(l.edge_at(edge, 10.0), Some((1, true)));
+        assert_eq!(l.edge_at(edge, 10.0), Some(0));
         l.on_mouse_down(edge, 10.0, false, false);
         l.on_mouse_move(edge - 40.0, 10.0);
         assert_eq!(l.on_mouse_up(), Action::ColumnsChanged);
-        assert_eq!(l.columns[1].width, 200.0);
+        assert_eq!(l.name_width, Some(cols[0].2 - cols[0].1 - 40.0));
+        assert_eq!(l.columns[1].width, 160.0);
+        let moved = l.columns();
+        assert_eq!(moved[1].1, edge - 40.0);
+        // Ensanchar Modificado desde su borde derecho: su borde izquierdo no se mueve.
+        let (left, right) = (moved[1].1, moved[1].2);
+        l.on_mouse_down(right, 10.0, false, false);
+        l.on_mouse_move(right + 20.0, 10.0);
+        l.on_mouse_up();
+        assert_eq!((l.columns()[1].1, l.columns[1].width), (left, 180.0));
         // Arrastrar "Tamaño" sobre "Tipo": cambia el orden.
         let cols = l.columns();
         let (size_mid, type_mid) = ((cols[3].1 + cols[3].2) / 2.0, (cols[2].1 + cols[2].2) / 2.0);

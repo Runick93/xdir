@@ -122,6 +122,12 @@ impl Renderer {
         }
     }
 
+    /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
+    /// necesitar un cuadro en curso.
+    pub fn text_width(&self, s: &str, bold: bool) -> f32 {
+        measure(&self.dwrite, if bold { &self.fonts.ui_bold } else { &self.fonts.ui }, s)
+    }
+
     pub fn resize(&mut self, width: u32, height: u32, dpi: u32) {
         // Minimizada: no hay nada que redimensionar.
         if width == 0 || height == 0 {

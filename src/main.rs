@@ -344,7 +344,7 @@ fn main() -> Result<()> {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            // Ícono del exe (recurso 1, ver assets/xdir.rc): grande para Alt+Tab, chico para la barra de título.
+            // Ícono del exe (recurso 1, ver assets/xdir.rc): grande para Alt+Tab, chico para la barra de tareas.
             hIcon: app_icon(instance.into(), SM_CXICON),
             hIconSm: app_icon(instance.into(), SM_CXSMICON),
             lpszClassName: CLASS_NAME,
@@ -457,6 +457,18 @@ fn main() -> Result<()> {
             Some(instance.into()),
             Some(app as *const _),
         )?;
+
+        // Sin ícono en la barra de título (la barra de tareas y Alt+Tab siguen usando el de la clase).
+        let no_icon = windows::Win32::UI::Controls::WTA_OPTIONS {
+            dwFlags: windows::Win32::UI::Controls::WTNCA_NODRAWICON,
+            dwMask: windows::Win32::UI::Controls::WTNCA_NODRAWICON,
+        };
+        let _ = windows::Win32::UI::Controls::SetWindowThemeAttribute(
+            (*app).hwnd,
+            windows::Win32::UI::Controls::WTA_NONCLIENT,
+            &no_icon as *const _ as *const std::ffi::c_void,
+            size_of::<windows::Win32::UI::Controls::WTA_OPTIONS>() as u32,
+        );
 
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         (*app).sync_visibility();
@@ -815,7 +827,7 @@ impl App {
                 WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                     let (x, y) = self.mouse_pos(lparam);
                     // El desplegable de la barra de dirección no le quita el foco a la caja.
-                    if !matches!(self.hit(x, y), Hit::Suggest(_)) {
+                    if !matches!(self.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
                         let _ = SetFocus(Some(self.hwnd));
                     }
                     self.on_left_down(x, y, msg == WM_LBUTTONDBLCLK);
@@ -1029,7 +1041,12 @@ impl App {
             cmd
         };
         match cmd {
-            RESET => self.set_columns(list::default_columns()),
+            RESET => {
+                for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+                    tab.list.reset_name_width();
+                }
+                self.set_columns(list::default_columns());
+            }
             i if (1..=list::COLUMNS.len()).contains(&i) => {
                 let list = &mut self.panes[pane].tab_mut().list;
                 list.toggle_column(list::COLUMNS[i - 1].0);
@@ -1472,6 +1489,7 @@ impl App {
                         }
                     }
                     PaneHit::Address => self.begin_edit(i),
+                    PaneHit::AddressClear => self.clear_edit(),
                     PaneHit::Star => self.toggle_favorite(i),
                     PaneHit::Terminal => {
                         self.term_menu = if self.term_menu == Some(i) { None } else { Some(i) };
@@ -1487,7 +1505,12 @@ impl App {
                     }
                     PaneHit::FavBar => {}
                     PaneHit::List if double => {
-                        let action = self.panes[i].tab_mut().list.on_double_click(x, y);
+                        let renderer = &self.renderer;
+                        let fit = self.panes[i].tab_mut().list.fit_column_at(x, y, &|s, bold| renderer.text_width(s, bold));
+                        let action = match fit {
+                            Some(action) => action,
+                            None => self.panes[i].tab_mut().list.on_double_click(x, y),
+                        };
                         self.apply(i, action);
                     }
                     PaneHit::List => {
@@ -2742,7 +2765,7 @@ impl App {
         };
         let r = self.panes[pane].address;
         let k = self.dpi as f32 / 96.0;
-        let (x, w) = ((r.left + 10.0) * k, (r.right - r.left - 20.0) * k);
+        let (x, w) = ((r.left + 10.0) * k, (r.right - r.left - 20.0 - pane::ADDRESS_CLEAR_W) * k);
         let h = 20.0 * k;
         let y = (r.top + r.bottom) / 2.0 * k - h / 2.0;
         let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
@@ -2773,6 +2796,19 @@ impl App {
         }
         // Como el Explorador: al abrir, el historial de rutas escritas.
         self.suggest = Some(typed::Suggest::new(r, ""));
+        self.redraw();
+    }
+
+    /// Cruz de la barra de dirección: borra lo escrito y sigue editando (con el historial a la vista).
+    fn clear_edit(&mut self) {
+        let Some((edit, _)) = self.edit else { return };
+        unsafe {
+            let _ = SetWindowTextW(edit, w!(""));
+            let _ = SetFocus(Some(edit));
+        }
+        if let Some(sg) = &mut self.suggest {
+            sg.set_query("");
+        }
         self.redraw();
     }
 

@@ -20,7 +20,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_SYSTEM, FILE_FLAGS_AND_ATTRIBUTES, FILE_NOTIFY_CHANGE_ATTRIBUTES,
     FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
     FILE_NOTIFY_CHANGE_SIZE, FindCloseChangeNotification, FindFirstChangeNotificationW,
-    FindClose, FindFirstFileW, FindNextChangeNotification, GetDiskFreeSpaceExW, GetLogicalDrives, GetLongPathNameW,
+    FindClose, FindFirstFileW, FindNextChangeNotification, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetLongPathNameW,
     WIN32_FIND_DATAW,
 };
 use windows::Win32::Storage::EnhancedStorage::{PKEY_Capacity, PKEY_DateModified, PKEY_ItemNameDisplay, PKEY_Size};
@@ -98,7 +98,11 @@ impl Location {
                         out.last_mut().unwrap().1 = Location::Path(acc.clone());
                         continue;
                     }
-                    let label = comp.as_os_str().to_string_lossy().into_owned();
+                    let mut label = comp.as_os_str().to_string_lossy().into_owned();
+                    // Una unidad se muestra como en el Explorador: "Disco local (C:)".
+                    if matches!(comp, std::path::Component::Prefix(_)) && label.len() == 2 && label.ends_with(':') {
+                        label = drive_label(&label);
+                    }
                     out.push((label, Location::Path(acc.clone())));
                 }
             }
@@ -643,6 +647,29 @@ fn shell_info(path: &Path, attrs: FILE_FLAGS_AND_ATTRIBUTES, flags: SHGFI_FLAGS)
         )
     };
     (ok != 0).then_some(info)
+}
+
+static DRIVE_LABELS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+/// Nombre de una unidad local ("C:" → "Disco local (C:)"), cacheado: se pide en cada dibujo de la
+/// barra de dirección. Las que no son de disco fijo (red, CD, USB) quedan como "X:" porque
+/// preguntarles el nombre puede demorar segundos.
+fn drive_label(drive: &str) -> String {
+    let cache = DRIVE_LABELS.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().unwrap().get(drive) {
+        return hit.clone();
+    }
+    let root = format!("{drive}\\");
+    let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+    let fixed = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) } == 3; // DRIVE_FIXED
+    let label = fixed
+        .then(|| shell_info(Path::new(&root), FILE_FLAGS_AND_ATTRIBUTES(0), SHGFI_DISPLAYNAME))
+        .flatten()
+        .map(|info| from_wide(&info.szDisplayName))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| drive.to_string());
+    cache.lock().unwrap().insert(drive.to_string(), label.clone());
+    label
 }
 
 /// Forma larga de una ruta ("C:\Users\LEANDR~1" → "C:\Users\Leandro-Dev"). Si no existe o

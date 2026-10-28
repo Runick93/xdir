@@ -217,6 +217,15 @@ enum Drag {
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
 }
 
+/// Algo elegido en el menú del fondo ("Nuevo > Carpeta"...): si en los próximos segundos aparece un
+/// elemento que no estaba, se abre su nombre para escribirlo, como hace el Explorador.
+struct NewWatch {
+    pane: usize,
+    /// Nombres (en minúsculas) que había antes.
+    before: std::collections::HashSet<String>,
+    since: Instant,
+}
+
 /// Vista previa flotante de la pestaña que se arrastra: acompaña al mouse y se acopla a las tiras.
 struct Ghost {
     title: String,
@@ -299,6 +308,7 @@ struct App {
     rename: Option<Rename>,
     /// Carpeta recién creada sobre la que abrir el renombrado cuando aparezca en la lista.
     pending_rename: Option<PathBuf>,
+    new_watch: Option<NewWatch>,
     /// Mensaje para la barra de estado (errores de operaciones).
     notice: Option<String>,
     /// Se mantiene viva mientras exista la ventana.
@@ -448,6 +458,7 @@ fn main() -> Result<()> {
             undo: Vec::new(),
             rename: None,
             pending_rename: None,
+            new_watch: None,
             notice: config_errors,
             drop_target: None,
             transparent: false,
@@ -717,6 +728,7 @@ impl App {
                     self.ui_load_ms += ms_since(t0);
                     if changed {
                         self.try_pending_rename();
+                        self.try_new_watch();
                         self.redraw();
                     }
                     LRESULT(0)
@@ -2315,6 +2327,25 @@ impl App {
         }
     }
 
+    /// Tras elegir algo del menú del fondo: si apareció un elemento nuevo en la carpeta, lo selecciona
+    /// y abre su nombre para escribirlo ("Nuevo > Carpeta" lo crea el Shell con el nombre por defecto).
+    fn try_new_watch(&mut self) {
+        let Some(w) = &self.new_watch else { return };
+        if w.since.elapsed().as_secs() > 5 {
+            self.new_watch = None;
+            return;
+        }
+        let pane = w.pane;
+        let tab = self.panes[pane].tab_mut();
+        if tab.loading {
+            return;
+        }
+        let Some(idx) = tab.list.entries.iter().position(|e| !w.before.contains(&e.display.to_lowercase())) else { return };
+        tab.list.select_index(idx);
+        self.new_watch = None;
+        self.begin_rename(pane);
+    }
+
     /// Abre el renombrado sobre la carpeta recién creada cuando ya aparece en la lista.
     fn try_pending_rename(&mut self) {
         let Some(path) = self.pending_rename.clone() else { return };
@@ -2469,7 +2500,12 @@ impl App {
         // Deshacer los pone la vista del Explorador, así que se agregan acá.
         let mut cmds = Vec::new();
         let own = if items.is_empty() && intercept { self.background_entries(pane, &mut cmds) } else { Vec::new() };
+        let before: Option<std::collections::HashSet<String>> = (items.is_empty() && matches!(location, Location::Path(_)))
+            .then(|| self.panes[pane].tab().list.entries.iter().map(|e| e.display.to_lowercase()).collect());
         let chosen = shell::context_menu(self.hwnd, &location, &items, screen, key_down(VK_SHIFT), intercept, &own);
+        if let (Some("shell"), Some(before)) = (chosen.as_deref(), before) {
+            self.new_watch = Some(NewWatch { pane, before, since: Instant::now() });
+        }
         if let Some(cmd) = chosen.as_deref().and_then(|c| c.strip_prefix("own:")).and_then(|n| n.parse::<usize>().ok()) {
             if let Some(&command) = cmds.get(cmd) {
                 self.run_command(command);

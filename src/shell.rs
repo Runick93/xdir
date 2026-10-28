@@ -323,8 +323,8 @@ fn append_entries(hmenu: HMENU, entries: &[Entry]) {
 
 /// Muestra el menú contextual del Shell. Sin `items`, es el menú del fondo de la carpeta.
 /// Con `intercept`, devuelve el verbo elegido si es uno de `OWN_VERBS` para que lo resuelva
-/// la aplicación; el resto (y todo, en carpetas virtuales) lo ejecuta el Shell. Las `own` van
-/// arriba y, si se elige una, devuelve `own:<id>`.
+/// la aplicación; el resto (y todo, en carpetas virtuales) lo ejecuta el Shell y devuelve
+/// `"shell"`. Las `own` van arriba y, si se elige una, devuelve `own:<id>`.
 pub fn context_menu(
     hwnd: HWND,
     folder: &Location,
@@ -380,6 +380,7 @@ pub fn context_menu(
                     ..Default::default()
                 };
                 let _ = menu.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
+                chosen = Some("shell".to_string());
             }
         }
         let _ = DestroyMenu(hmenu);

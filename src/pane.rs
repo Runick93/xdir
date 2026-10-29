@@ -120,6 +120,7 @@ pub enum PaneHit {
     FavBar,
     /// Botón del pie del panel: pasa a la vista siguiente (como Ctrl+rueda).
     ViewButton,
+    NewFolderButton,
     List,
 }
 
@@ -185,6 +186,7 @@ pub struct Pane {
     fav_overflow: Option<(Rect, usize)>,
     pub favbar: Rect,
     view_button: Rect,
+    new_folder_button: Rect,
     pub list: Rect,
 }
 
@@ -222,6 +224,7 @@ impl Pane {
             fav_overflow: None,
             favbar: zero,
             view_button: zero,
+            new_folder_button: zero,
             list: zero,
         }
     }
@@ -424,6 +427,9 @@ impl Pane {
         if contains(&self.favbar, x, y) {
             return PaneHit::FavBar;
         }
+        if contains(&self.new_folder_button, x, y) {
+            return PaneHit::NewFolderButton;
+        }
         if contains(&self.view_button, x, y) {
             return PaneHit::ViewButton;
         }
@@ -615,6 +621,8 @@ impl Pane {
 
         // Lista, un poco adentro del borde para no tapar las esquinas redondeadas.
         self.list = rect(area.left + 1.0, top, area.right - 1.0, area.bottom - FOOTER_H);
+        // Línea gris que separa el final de la lista del pie con los botones.
+        p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
         // Botón del pie: cambia el tamaño de los íconos de este panel, vuelve a la primera vista al final.
         let vb = rect(area.right - PANE_RADIUS - VIEW_BTN_W, area.bottom - FOOTER_H + 2.0, area.right - PANE_RADIUS, area.bottom - 4.0);
         if hover == PaneHit::ViewButton {
@@ -623,6 +631,13 @@ impl Pane {
         }
         p.text(&p.fonts.glyphs_small, "\u{E8A9}", vb, th.text_dim);
         self.view_button = vb;
+        let nb = rect(vb.left - VIEW_BTN_W, vb.top, vb.left, vb.bottom);
+        if hover == PaneHit::NewFolderButton {
+            let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
+            p.round_fill(nb, 6.0, c);
+        }
+        p.text(&p.fonts.glyphs_small, "\u{E8F4}", nb, th.text_dim);
+        self.new_folder_button = nb;
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];
         tab.list.folder = match &tab.location {

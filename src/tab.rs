@@ -300,6 +300,16 @@ impl Tab {
             self.navigate(hwnd, tx, to);
             return;
         }
+        // Un .zip de disco se abre como carpeta dentro del mismo panel (lo lista el Shell).
+        if fs::is_zip(&path) && path.is_file() {
+            let to = Location::Shell {
+                parsing: path.to_string_lossy().into_owned(),
+                name: e.display.clone(),
+                parent: Some(Box::new(self.location.clone())),
+            };
+            self.navigate(hwnd, tx, to);
+            return;
+        }
         if !path.exists() {
             // Archivo virtual (en un teléfono, dentro de un ZIP): lo abre el Shell.
             crate::shell::open_item(hwnd, &self.entry_item(idx));

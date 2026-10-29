@@ -804,6 +804,11 @@ pub fn true_case(path: &Path) -> PathBuf {
     out
 }
 
+/// ¿Tiene extensión .zip?
+pub fn is_zip(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+}
+
 /// ¿Es una ruta de red (`\\servidor\recurso\...`)? Los prefijos `\\?\` y `\\.\` no cuentan.
 pub fn is_unc(path: &Path) -> bool {
     let s = path.to_string_lossy();

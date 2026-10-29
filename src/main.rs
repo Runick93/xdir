@@ -1694,6 +1694,7 @@ impl App {
                         let next = (self.panes[i].tab().list.view.index() + 1) % list::VIEWS.len();
                         self.set_view(i, list::VIEWS[next].0);
                     }
+                    PaneHit::NewFolderButton => self.run_command(Command::NewFolder),
                     PaneHit::FilterButton | PaneHit::FilterBar => self.begin_filter(i),
                     PaneHit::FilterClose => self.clear_filter(i),
                     PaneHit::TabStrip if double => self.toggle_maximize(i),
@@ -3665,6 +3666,11 @@ impl App {
         if path.is_dir() {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).
             tab.navigate(hwnd, &tx, Location::Path(fs::true_case(&path)));
+        } else if fs::is_zip(&path) && path.is_file() {
+            // Un .zip escrito en la barra: se entra como carpeta.
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let parent = path.parent().map(|p| Box::new(Location::Path(p.to_path_buf())));
+            tab.navigate(hwnd, &tx, Location::Shell { parsing: path.to_string_lossy().into_owned(), name, parent });
         } else if path.is_file() {
             // Un archivo: se abre su carpeta con el archivo enfocado.
             if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {

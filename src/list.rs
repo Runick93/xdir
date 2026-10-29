@@ -640,9 +640,11 @@ impl FileList {
         if self.view.is_grid() { GRID_PAD } else { 0.0 }
     }
 
+    /// Alto del contenido más dos líneas vacías al final, para poder hacer clic derecho en la
+    /// carpeta aunque la lista llene el panel.
     fn content_h(&self) -> f32 {
         let lines = self.visible.len().div_ceil(self.per_line());
-        lines as f32 * self.line_h() + self.top_pad() * 2.0
+        lines as f32 * self.line_h() + self.top_pad() * 2.0 + self.line_h() * 2.0
     }
 
     /// Elementos que entran en una página (Re Pág / Av Pág).

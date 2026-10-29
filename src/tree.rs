@@ -40,7 +40,10 @@ enum Kind {
     Folder,
     /// Carpeta del usuario, fijada arriba como en el Explorador.
     Pinned,
-    Home,
+    /// OneDrive.
+    Cloud,
+    /// Inicio y Galería: lugares del Shell sin subcarpetas en el árbol (posición en `PLACES`).
+    Place,
     Drive,
     /// "Este equipo": no es una ruta.
     Computer,
@@ -64,6 +67,14 @@ const PINNED: [(&str, &str, (f32, f32, f32)); 6] = [
     ("Música", "\u{E8D6}", (0.95, 0.45, 0.35)),
     ("Vídeos", "\u{E714}", (0.70, 0.45, 0.90)),
 ];
+
+/// Lugares fijos de arriba: nombre y nombre de análisis del Shell (Inicio, Galería).
+const PLACES: [(&str, &str); 2] = [
+    ("Inicio", "::{679F85CB-0220-4080-B29B-5540CC05AAB6}"),
+    ("Galería", "::{E88865EA-0E1C-4E20-9AA6-EDCD0212C87C}"),
+];
+/// Íconos de `PLACES`.
+const PLACE_ICONS: [(&str, (f32, f32, f32)); 2] = [("\u{E80F}", (0.95, 0.60, 0.30)), ("\u{E91B}", (0.35, 0.60, 0.95))];
 
 /// Barra de desplazamiento del panel.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -145,17 +156,29 @@ impl Tree {
             tx,
             rx,
         };
-        if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
-            let name = home.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            t.add_root(Kind::Home, home, name, 0);
-            t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
+        // Como el panel de navegación del Explorador: Inicio, Galería y OneDrive.
+        for (i, (name, parsing)) in PLACES.iter().enumerate() {
+            if crate::fs::shell_place_exists(parsing) {
+                t.add_root(Kind::Place, PathBuf::from(parsing), (*name).to_string(), i);
+                let id = t.nodes.len() - 1;
+                t.nodes[id].children = Some(Vec::new());
+            }
         }
-        // Carpetas del usuario, fijadas.
+        if let Some(cloud) = std::env::var_os("OneDrive").map(PathBuf::from).filter(|p| p.is_dir()) {
+            t.add_root(Kind::Cloud, cloud, "OneDrive".to_string(), 0);
+        }
+        t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
+        // Acceso rápido: carpetas del usuario y, después, las ancladas o frecuentes del Explorador.
         let before = t.roots.len();
+        let mut known = Vec::new();
         for (i, (name, ..)) in PINNED.iter().enumerate() {
             if let Some(path) = crate::fs::user_folder(i) {
+                known.push(path.clone());
                 t.add_root(Kind::Pinned, path, (*name).to_string(), i);
             }
+        }
+        for (name, path) in crate::fs::quick_access().into_iter().filter(|(_, p)| !known.iter().any(|k| crate::fs::same_path(k, p))).take(12) {
+            t.add_root(Kind::Folder, path, name, 0);
         }
         if t.roots.len() > before {
             t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
@@ -276,7 +299,7 @@ impl Tree {
             Kind::Separator => TreeHit::Nothing,
             _ if x < chevron_right => TreeHit::Toggle(id),
             Kind::Computer => TreeHit::Open(Location::Computer),
-            Kind::Network | Kind::Linux => {
+            Kind::Network | Kind::Linux | Kind::Place => {
                 TreeHit::Open(Location::Shell { parsing: n.path.to_string_lossy().into_owned(), name: n.name.clone(), parent: None })
             }
             _ => TreeHit::Open(Location::Path(n.path.clone())),
@@ -424,7 +447,7 @@ impl Tree {
                     continue;
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
-                let is_current = !matches!(n.kind, Kind::Computer | Kind::Network | Kind::Linux) && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
+                let is_current = !matches!(n.kind, Kind::Computer | Kind::Network | Kind::Linux | Kind::Place) && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
                 if is_current {
                     p.round_fill(row, 5.0, alpha(th.text, 0.11));
                 } else if self.hover == Some(id) {
@@ -438,7 +461,11 @@ impl Tree {
                     p.text(&p.fonts.glyphs_small, glyph, rect(x, y, x + 16.0, y + ROW_H), th.text_dim);
                 }
                 let (icon, color) = match n.kind {
-                    Kind::Home => ("\u{E80F}", th.accent),
+                    Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
+                    Kind::Place => {
+                        let (glyph, (r, g, b)) = PLACE_ICONS[n.pin];
+                        (glyph, rgb(r, g, b))
+                    }
                     Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
                     Kind::Drive => ("\u{EDA2}", th.text_dim),
                     Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),

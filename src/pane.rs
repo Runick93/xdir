@@ -11,6 +11,9 @@ use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 pub const TABSTRIP_H: f32 = 34.0;
 pub const NAVBAR_H: f32 = 42.0;
 pub const FAVBAR_H: f32 = 30.0;
+/// Franja al pie de cada panel, con el botón del tamaño de la vista a la derecha.
+const FOOTER_H: f32 = 26.0;
+const VIEW_BTN_W: f32 = 32.0;
 const PANE_RADIUS: f32 = 8.0;
 /// Inclinación de los lados de las pestañas.
 const TAB_SLANT: f32 = 10.0;
@@ -115,6 +118,8 @@ pub enum PaneHit {
     FavOverflow,
     /// Parte vacía de la barra de favoritos.
     FavBar,
+    /// Botón del pie del panel: pasa a la vista siguiente (como Ctrl+rueda).
+    ViewButton,
     List,
 }
 
@@ -179,6 +184,7 @@ pub struct Pane {
     /// Botón de desborde y el primer favorito que no entró.
     fav_overflow: Option<(Rect, usize)>,
     pub favbar: Rect,
+    view_button: Rect,
     pub list: Rect,
 }
 
@@ -215,6 +221,7 @@ impl Pane {
             favs: Vec::new(),
             fav_overflow: None,
             favbar: zero,
+            view_button: zero,
             list: zero,
         }
     }
@@ -417,6 +424,9 @@ impl Pane {
         if contains(&self.favbar, x, y) {
             return PaneHit::FavBar;
         }
+        if contains(&self.view_button, x, y) {
+            return PaneHit::ViewButton;
+        }
         if contains(&self.list, x, y) {
             return PaneHit::List;
         }
@@ -604,7 +614,15 @@ impl Pane {
         }
 
         // Lista, un poco adentro del borde para no tapar las esquinas redondeadas.
-        self.list = rect(area.left + 1.0, top, area.right - 1.0, area.bottom - PANE_RADIUS * 0.75);
+        self.list = rect(area.left + 1.0, top, area.right - 1.0, area.bottom - FOOTER_H);
+        // Botón del pie: cambia el tamaño de los íconos de este panel, vuelve a la primera vista al final.
+        let vb = rect(area.right - PANE_RADIUS - VIEW_BTN_W, area.bottom - FOOTER_H + 2.0, area.right - PANE_RADIUS, area.bottom - 4.0);
+        if hover == PaneHit::ViewButton {
+            let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
+            p.round_fill(vb, 6.0, c);
+        }
+        p.text(&p.fonts.glyphs_small, "\u{E8A9}", vb, th.text_dim);
+        self.view_button = vb;
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];
         tab.list.folder = match &tab.location {

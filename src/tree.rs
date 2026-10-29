@@ -43,6 +43,9 @@ enum Kind {
     Drive,
     /// "Este equipo": no es una ruta.
     Computer,
+    /// "Red" y "Linux": carpetas virtuales del Shell (el nombre de análisis va en `path`).
+    Network,
+    Linux,
     /// Línea que separa grupos.
     Separator,
 }
@@ -174,6 +177,11 @@ impl Tree {
         }
         t.nodes[computer].children = Some(ids);
         t.nodes[computer].expanded = true;
+        // Como en el Explorador: Red y, si hay WSL, Linux. Sus hijos se leen al expandir.
+        t.add_root(Kind::Network, PathBuf::from(crate::fs::NETWORK_PLACE), "Red".to_string(), 0);
+        if crate::fs::shell_place_exists(crate::fs::LINUX_PLACE) {
+            t.add_root(Kind::Linux, PathBuf::from(crate::fs::LINUX_PLACE), "Linux".to_string(), 0);
+        }
         t
     }
 
@@ -209,10 +217,10 @@ impl Tree {
         n.expanded = !n.expanded;
         if n.expanded && n.children.is_none() && !n.loading {
             n.loading = true;
-            let (tx, path) = (self.tx.clone(), n.path.clone());
+            let (tx, path, virt) = (self.tx.clone(), n.path.clone(), matches!(n.kind, Kind::Network | Kind::Linux));
             let hwnd = hwnd.0 as usize;
             std::thread::spawn(move || {
-                let dirs = subfolders(&path, show_hidden);
+                let dirs = if virt { crate::fs::shell_subfolders(&path.to_string_lossy()) } else { subfolders(&path, show_hidden) };
                 if tx.send((id, dirs)).is_ok() {
                     unsafe {
                         let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_TREE, WPARAM(0), LPARAM(0));
@@ -257,6 +265,9 @@ impl Tree {
             Kind::Separator => TreeHit::Nothing,
             _ if x < chevron_right => TreeHit::Toggle(id),
             Kind::Computer => TreeHit::Open(Location::Computer),
+            Kind::Network | Kind::Linux => {
+                TreeHit::Open(Location::Shell { parsing: n.path.to_string_lossy().into_owned(), name: n.name.clone(), parent: None })
+            }
             _ => TreeHit::Open(Location::Path(n.path.clone())),
         }
     }
@@ -350,8 +361,7 @@ impl Tree {
             if n.text_w == 0.0 {
                 n.text_w = p.measure(&p.fonts.ui, &n.name);
             }
-            let pin = if n.kind == Kind::Pinned { 26.0 } else { 0.0 };
-            content_w = content_w.max(SIDE + 2.0 + n.depth as f32 * INDENT + 48.0 + n.text_w + SIDE + 8.0 + pin);
+            content_w = content_w.max(SIDE + 2.0 + n.depth as f32 * INDENT + 48.0 + n.text_w + SIDE + 8.0);
         }
         // Qué barras hacen falta (una puede hacer necesaria la otra).
         let total_h = rows.len() as f32 * ROW_H + TOP_PAD;
@@ -391,7 +401,7 @@ impl Tree {
                     continue;
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
-                let is_current = n.kind != Kind::Computer && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
+                let is_current = !matches!(n.kind, Kind::Computer | Kind::Network | Kind::Linux) && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
                 if is_current {
                     p.round_fill(row, 5.0, alpha(th.text, 0.11));
                 } else if self.hover == Some(id) {
@@ -408,6 +418,8 @@ impl Tree {
                     Kind::Home => ("\u{E80F}", th.accent),
                     Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
                     Kind::Drive => ("\u{EDA2}", th.text_dim),
+                    Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),
+                    Kind::Linux => ("\u{E756}", th.text_dim),
                     Kind::Pinned => {
                         let (_, glyph, (r, g, b)) = PINNED[n.pin];
                         (glyph, rgb(r, g, b))
@@ -416,11 +428,6 @@ impl Tree {
                 };
                 p.text(&p.fonts.glyphs, icon, rect(x + 20.0, y, x + 42.0, y + ROW_H), color);
                 p.text(&p.fonts.ui, &n.name, rect(x + 48.0, y, x + 48.0 + n.text_w + 12.0, y + ROW_H), th.text);
-                if n.kind == Kind::Pinned {
-                    // La chincheta queda fija al borde, no se desplaza con el nombre.
-                    let r = area.left + view_w - SIDE;
-                    p.text(&p.fonts.glyphs_small, "\u{E718}", rect(r - 24.0, y, r - 6.0, y + ROW_H), th.text_dim);
-                }
             }
         });
 

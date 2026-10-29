@@ -78,7 +78,11 @@ impl Location {
             Location::Computer => "Este equipo".into(),
             Location::Path(p) => match p.file_name() {
                 Some(name) => name.to_string_lossy().into_owned(),
-                None => p.to_string_lossy().trim_end_matches('\\').to_string(),
+                None => {
+                    let root = p.to_string_lossy().trim_end_matches('\\').to_string();
+                    // Una unidad se titula como en el Explorador: "Disco local (C:)".
+                    if root.len() == 2 && root.ends_with(':') { drive_label(&root) } else { root }
+                }
             },
             Location::Shell { name, .. } => name.clone(),
         }
@@ -439,6 +443,40 @@ fn list_shell(out: &mut Batcher, parsing: &str) {
     });
     out.flush();
     out.send(LoadMsg::Listed(ok.map_err(|e| e.message().to_string())));
+}
+
+/// Carpeta virtual de Linux (WSL) del Explorador.
+pub const LINUX_PLACE: &str = "::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6}";
+/// Red del Explorador.
+pub const NETWORK_PLACE: &str = SHELL_PLACES[0];
+
+/// ¿Existe esa carpeta virtual en este equipo? (Linux solo está con WSL instalado.)
+pub fn shell_place_exists(parsing: &str) -> bool {
+    unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(parsing), None) }.is_ok()
+}
+
+/// Subcarpetas con ruta de disco de una carpeta virtual (computadoras de la Red, distribuciones de
+/// Linux), para el árbol lateral: (nombre, ruta). Ordenadas por nombre.
+pub fn shell_subfolders(parsing: &str) -> Vec<(String, PathBuf)> {
+    let Ok(item) = (unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(parsing), None) }) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let _ = for_each_child(&item, |child| {
+        // Las computadoras de la Red (\\tsclient) no tienen ruta de archivos, pero su nombre de análisis
+        // es la ruta UNC; de las distribuciones de Linux el nombre a mostrar trae el servidor entre paréntesis.
+        let unc = item_name(child, SIGDN_DESKTOPABSOLUTEPARSING).filter(|p| p.starts_with("\\\\"));
+        if let Some(path) = item_name(child, SIGDN_FILESYSPATH).or(unc) {
+            // El último tramo de la ruta (en `\\servidor\recurso` Path no lo ve como nombre de archivo).
+            let last = path.trim_end_matches('\\').rsplit('\\').next().filter(|n| !n.is_empty()).map(str::to_string);
+            if let Some(name) = last.or_else(|| item_name(child, SIGDN_NORMALDISPLAY)) {
+                out.push((name, PathBuf::from(path)));
+            }
+        }
+        true
+    });
+    out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
+    out
 }
 
 /// Recorre los hijos de un elemento del Shell mientras `f` devuelva true.

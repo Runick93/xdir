@@ -1620,6 +1620,10 @@ impl App {
                         self.new_tab(i, loc, true);
                     }
                     PaneHit::Maximize => self.toggle_maximize(i),
+                    PaneHit::ViewButton => {
+                        let next = (self.panes[i].tab().list.view.index() + 1) % list::VIEWS.len();
+                        self.set_view(i, list::VIEWS[next].0);
+                    }
                     PaneHit::FilterButton | PaneHit::FilterBar => self.begin_filter(i),
                     PaneHit::FilterClose => self.clear_filter(i),
                     PaneHit::TabStrip if double => self.toggle_maximize(i),

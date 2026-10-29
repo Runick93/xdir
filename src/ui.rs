@@ -86,8 +86,10 @@ pub fn panes_area(w: f32, h: f32, left: f32, top: f32) -> Rect {
 }
 
 /// Alto de la barra de pestañas de grupos (arriba de todo, solo si hay grupos guardados).
-pub const GROUPBAR_H: f32 = 32.0;
+pub const GROUPBAR_H: f32 = 40.0;
 const GROUP_TAB_W: f32 = 150.0;
+/// Separación entre pestañas de grupo.
+const GROUP_TAB_GAP: f32 = 6.0;
 const GROUP_TAB_MIN_W: f32 = 70.0;
 const GROUP_ADD_W: f32 = 28.0;
 
@@ -96,11 +98,11 @@ const GROUP_ADD_W: f32 = 28.0;
 pub fn group_tabs(w: f32, n: usize) -> (Vec<Rect>, Rect) {
     let avail = (w - GAP * 2.0 - GROUP_ADD_W - 4.0).max(GROUP_TAB_MIN_W);
     let tab_w = (avail / n.max(1) as f32).clamp(GROUP_TAB_MIN_W.min(avail), GROUP_TAB_W);
-    let (top, bottom) = (4.0, GROUPBAR_H - 2.0);
+    let (top, bottom) = (5.0, GROUPBAR_H - 3.0);
     let mut x = GAP;
     let tabs = (0..n)
         .map(|_| {
-            let r = rect(x, top, x + tab_w - 2.0, bottom);
+            let r = rect(x, top, x + tab_w - GROUP_TAB_GAP, bottom);
             x += tab_w;
             r
         })
@@ -135,14 +137,20 @@ pub fn draw_group_bar(p: &Painter, w: f32, names: &[(&str, bool)], active: Optio
     let th = p.theme;
     let (tabs, add) = group_tabs(w, names.len());
     for (i, (r, (name, temp))) in tabs.iter().zip(names).enumerate() {
+        // Píldora con borde fino; la activa lleva el contorno y un velo del color de acento.
+        p.round_fill(*r, 9.0, th.surface);
+        if hover == Some(GroupHit::Tab(i)) && active != Some(i) {
+            p.round_fill(*r, 9.0, th.hover);
+        }
         if active == Some(i) {
-            p.round_fill(*r, 6.0, alpha(th.accent, 0.25));
-        } else if hover == Some(GroupHit::Tab(i)) {
-            p.round_fill(*r, 6.0, th.hover);
+            p.round_fill(*r, 9.0, alpha(th.accent, 0.16));
+            p.round_stroke_w(*r, 9.0, th.accent, 1.5);
+        } else {
+            p.round_stroke(*r, 9.0, th.border);
         }
         let color = if active == Some(i) { th.text } else { th.text_dim };
-        let right = if *temp { r.right - 26.0 } else { r.right - 8.0 };
-        p.text(&p.fonts.ui, name, rect(r.left + 10.0, r.top, right, r.bottom), color);
+        let right = if *temp { r.right - 28.0 } else { r.right - 12.0 };
+        p.text(&p.fonts.ui, name, rect(r.left + 14.0, r.top, right, r.bottom), color);
         if *temp {
             let x = group_close_rect(*r);
             let hot = hover == Some(GroupHit::Close(i));

@@ -35,6 +35,8 @@ pub struct Tab {
     visible: bool,
     /// La carga en curso es una visita (navegar, atrás, adelante, subir), no una recarga.
     counts_as_visit: bool,
+    /// Navegación en la que ya se pidieron credenciales de red (para no insistir).
+    auth_nav: u64,
     /// Carpeta que se terminó de abrir como visita: la app la anota en el historial.
     pub visited: Option<PathBuf>,
 }
@@ -89,6 +91,7 @@ impl Tab {
             watcher: None,
             visible: false,
             counts_as_visit: false,
+            auth_nav: 0,
             visited: None,
         }
     }
@@ -309,6 +312,22 @@ impl Tab {
         };
         unsafe {
             ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(file.as_ptr()), None, PCWSTR(dir.as_ptr()), SW_SHOWNORMAL);
+        }
+    }
+
+    /// Si la carpeta de red falló por credenciales (usuario o contraseña incorrectos, acceso
+    /// denegado), muestra el diálogo de Windows y vuelve a cargar. Una vez por navegación.
+    pub fn retry_with_credentials(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
+        let Location::Path(path) = &self.location else { return };
+        let Some(e) = &self.error else { return };
+        let auth = ["os error 1326", "os error 5)", "os error 86", "os error 1219"].iter().any(|c| e.contains(c));
+        if !auth || !fs::is_unc(path) || self.auth_nav == self.nav_id {
+            return;
+        }
+        self.auth_nav = self.nav_id;
+        if fs::connect_share(hwnd, &path.clone()) {
+            self.reload(hwnd, tx, false);
+            self.auth_nav = self.nav_id;
         }
     }
 

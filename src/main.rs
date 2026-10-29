@@ -511,6 +511,7 @@ fn main() -> Result<()> {
             custom_colors: [COLORREF(0x00FFFFFF); 16],
         };
         app.restore_panes(&session, start_path);
+        app.ensure_group();
         #[cfg(feature = "arbol")]
         {
             app.tree.visible = session.show_tree;
@@ -735,9 +736,11 @@ impl App {
                 WM_APP_LOAD => {
                     let t0 = Instant::now();
                     let mut changed = false;
+                    let (hwnd, tx) = (self.hwnd, self.tx.clone());
                     while let Ok(event) = self.rx.try_recv() {
                         if let Some(tab) = self.tab_by_id(event.panel) {
                             changed |= tab.on_load(event);
+                            tab.retry_with_credentials(hwnd, &tx);
                             if let Some(path) = tab.visited.take() {
                                 self.history.record(&path, jump::now());
                             }
@@ -2097,7 +2100,10 @@ impl App {
             }
             Command::ToggleFavorite => self.toggle_favorite(active),
             Command::ToggleFavBar => self.show_favorites = !self.show_favorites,
-            Command::ToggleGroupBar => self.show_group_bar = !self.show_group_bar,
+            Command::ToggleGroupBar => {
+                self.show_group_bar = !self.show_group_bar;
+                self.ensure_group();
+            }
             Command::PowerShell => self.open_console(active, Console::PowerShell),
             Command::Cmd => self.open_console(active, Console::Cmd),
             Command::ToggleDarkMode => self.set_dark_mode(!self.theme.dark),
@@ -2185,6 +2191,19 @@ impl App {
         self.apply_group(self.groups.items.len() - 1);
     }
 
+    /// Con la barra de grupos activa y ningún grupo, crea una pestaña temporal con los paneles de
+    /// ahora, hasta que se decida si guardarla (o se descarte al cerrarla).
+    fn ensure_group(&mut self) {
+        if !self.show_group_bar || !self.groups.items.is_empty() {
+            return;
+        }
+        let mut group = self.group_snapshot("Grupo 1");
+        group.temp = true;
+        self.groups.put(group);
+        self.group_name = Some("Grupo 1".to_string());
+        let _ = self.groups.save();
+    }
+
     fn rename_group(&mut self, old: &str, name: &str) {
         let Some(i) = self.groups.find(old) else { return };
         if self.groups.find(name).is_some_and(|j| j != i) {
@@ -2219,6 +2238,7 @@ impl App {
                 }
             }
         }
+        self.ensure_group();
         self.redraw();
     }
 

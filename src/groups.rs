@@ -14,6 +14,20 @@ pub struct Group {
     pub split_x: f32,
     pub split_y: f32,
     pub panes: Vec<PaneState>,
+    /// Pestaña sin guardar (como un archivo nuevo de un editor): al cerrarla se decide si se conserva.
+    pub temp: bool,
+}
+
+impl Group {
+    /// Mismo contenido, con la tolerancia de los divisores (se guardan con 4 decimales).
+    pub fn same_as(&self, other: &Group) -> bool {
+        self.name == other.name
+            && self.layout == other.layout
+            && self.panes == other.panes
+            && self.temp == other.temp
+            && (self.split_x - other.split_x).abs() < 1e-3
+            && (self.split_y - other.split_y).abs() < 1e-3
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -31,6 +45,10 @@ impl Groups {
         let dir = session::config_dir().ok_or(std::io::ErrorKind::NotFound)?;
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(FILE_NAME), self.write())
+    }
+
+    pub fn find(&self, name: &str) -> Option<usize> {
+        self.items.iter().position(|g| g.name.eq_ignore_ascii_case(name))
     }
 
     /// Agrega el grupo, o reemplaza el que tenga el mismo nombre.
@@ -55,6 +73,9 @@ impl Groups {
         for g in &self.items {
             out += "\n[[grupo]]\n";
             out += &format!("nombre = {}\n", toml::quote(&g.name));
+            if g.temp {
+                out += "temporal = true\n";
+            }
             out += &format!("layout = {}\n", g.layout);
             out += &format!("division_x = {:.4}\n", g.split_x);
             out += &format!("division_y = {:.4}\n", g.split_y);
@@ -97,6 +118,7 @@ impl Groups {
                     split_x: num("division_x", 0.5) as f32,
                     split_y: num("division_y", 0.5) as f32,
                     panes,
+                    temp: s.get("temporal").and_then(Value::as_bool).unwrap_or(false),
                 })
             })
             .collect();
@@ -120,6 +142,7 @@ mod tests {
                 PaneState { tabs: vec![Location::Path(r"C:\dev\a b".into()), Location::Computer], active: 1 },
                 PaneState { tabs: vec![Location::Path(r"\\servidor\recurso".into())], active: 0 },
             ],
+            temp: true,
         };
         let mut gs = Groups::default();
         gs.put(g.clone());
@@ -130,12 +153,13 @@ mod tests {
         assert_eq!(b.layout, 3);
         assert!((b.split_x - 0.3).abs() < 1e-4 && (b.split_y - 0.6).abs() < 1e-4);
         assert_eq!(b.panes, g.panes);
+        assert!(b.temp);
     }
 
     #[test]
     fn put_replaces_by_name() {
         let mut gs = Groups::default();
-        let g = |name: &str, layout| Group { name: name.into(), layout, split_x: 0.5, split_y: 0.5, panes: vec![] };
+        let g = |name: &str, layout| Group { name: name.into(), layout, split_x: 0.5, split_y: 0.5, panes: vec![], temp: false };
         gs.put(g("Uno", 1));
         gs.put(g("dos", 2));
         gs.put(g("UNO", 4));

@@ -31,7 +31,8 @@ const INDENT: f32 = 18.0;
 /// Margen a los costados de las filas.
 const SIDE: f32 = 8.0;
 /// Margen entre el borde de arriba y la primera fila.
-const TOP_PAD: f32 = 4.0;
+/// Franja de arriba: título y chincheta; las filas arrancan debajo.
+const TOP_PAD: f32 = 32.0;
 
 /// Qué es una fila, para su ícono y lo que abre.
 #[derive(Clone, Copy, PartialEq)]
@@ -93,11 +94,18 @@ pub enum TreeHit {
     Toggle(usize),
     /// Abrir la carpeta en el panel activo.
     Open(Location),
+    /// La chincheta: fijar el árbol o dejar que se oculte solo.
+    Pin,
     Nothing,
 }
 
 pub struct Tree {
     pub visible: bool,
+    /// Fijo al lado de los paneles; si no, se oculta y aparece encima al tocar el borde izquierdo.
+    pub pinned: bool,
+    /// Sin fijar: se está mostrando encima de los paneles.
+    pub open: bool,
+    pin_hot: bool,
     nodes: Vec<Node>,
     roots: Vec<usize>,
     scroll: f32,
@@ -122,7 +130,7 @@ pub struct Tree {
 impl Tree {
     pub fn new() -> Self {
         let (tx, rx) = channel();
-        let mut t = Self { visible: false, nodes: Vec::new(), roots: Vec::new(), scroll: 0.0,
+        let mut t = Self { visible: false, pinned: true, open: false, pin_hot: false, nodes: Vec::new(), roots: Vec::new(), scroll: 0.0,
             hscroll: 0.0,
             width: WIDTH,
             content_w: 0.0,
@@ -258,6 +266,9 @@ impl Tree {
         if !contains(&self.area, x, y) {
             return TreeHit::Nothing;
         }
+        if contains(&self.pin_rect(), x, y) {
+            return TreeHit::Pin;
+        }
         let Some(id) = self.node_at(y) else { return TreeHit::Nothing };
         let n = &self.nodes[id];
         let chevron_right = self.area.left + SIDE + 2.0 + n.depth as f32 * INDENT + 18.0 - self.hscroll;
@@ -272,14 +283,26 @@ impl Tree {
         }
     }
 
+    /// Se ve ahora: encendido y, si no está fijo, desplegado sobre los paneles.
+    pub fn shown(&self) -> bool {
+        self.visible && (self.pinned || self.open)
+    }
+
+    fn pin_rect(&self) -> Rect {
+        rect(self.area.right - 30.0, self.area.top + 4.0, self.area.right - 6.0, self.area.top + 28.0)
+    }
+
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        self.visible && contains(&self.area, x, y)
+        self.shown() && contains(&self.area, x, y)
     }
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) -> bool {
-        let hover = if contains(&self.area, x, y) { self.node_at(y) } else { None };
-        let changed = hover != self.hover;
+        let inside = self.shown() && contains(&self.area, x, y);
+        let hover = if inside && y >= self.area.top + TOP_PAD { self.node_at(y) } else { None };
+        let pin_hot = inside && contains(&self.pin_rect(), x, y);
+        let changed = hover != self.hover || pin_hot != self.pin_hot;
         self.hover = hover;
+        self.pin_hot = pin_hot;
         changed
     }
 
@@ -302,7 +325,7 @@ impl Tree {
 
     /// El borde derecho, donde se agarra para cambiar el ancho.
     pub fn edge_at(&self, x: f32, y: f32) -> bool {
-        self.visible && y >= self.area.top && y <= self.area.bottom && x >= self.area.right - 3.0 && x <= self.area.right + crate::ui::GAP + 1.0
+        self.shown() && y >= self.area.top && y <= self.area.bottom && x >= self.area.right - 3.0 && x <= self.area.right + crate::ui::GAP + 1.0
     }
 
     pub fn set_width(&mut self, w: f32) {
@@ -312,12 +335,12 @@ impl Tree {
     /// Barra de desplazamiento bajo el mouse y a qué distancia del inicio de su pulgar se agarró.
     pub fn bar_at(&self, x: f32, y: f32) -> Option<(Bar, f32)> {
         let grow = |t: Rect| rect(t.left - 4.0, t.top - 4.0, t.right + 3.0, t.bottom + 3.0);
-        if self.visible && self.htrack.right > self.htrack.left && contains(&grow(self.htrack), x, y) {
+        if self.shown() && self.htrack.right > self.htrack.left && contains(&grow(self.htrack), x, y) {
             let t = self.hthumb;
             let grab = if x >= t.left && x <= t.right { x - t.left } else { (t.right - t.left) / 2.0 };
             return Some((Bar::H, grab));
         }
-        if self.visible && self.vtrack.bottom > self.vtrack.top && contains(&grow(self.vtrack), x, y) {
+        if self.shown() && self.vtrack.bottom > self.vtrack.top && contains(&grow(self.vtrack), x, y) {
             let t = self.vthumb;
             let grab = if y >= t.top && y <= t.bottom { y - t.top } else { (t.bottom - t.top) / 2.0 };
             return Some((Bar::V, grab));
@@ -387,7 +410,7 @@ impl Tree {
         self.hscroll = self.hscroll.clamp(0.0, (content_w - view_w).max(0.0));
         let hs = self.hscroll;
         let folder = rgb(1.0, 0.79, 0.28);
-        let body = rect(area.left + 1.0, area.top + 1.0, area.left + view_w - 1.0, area.top + view_h);
+        let body = rect(area.left + 1.0, area.top + TOP_PAD - 2.0, area.left + view_w - 1.0, area.top + view_h);
         p.clip(body, || {
             for (i, &id) in rows.iter().enumerate() {
                 let y = area.top + TOP_PAD + i as f32 * ROW_H - self.scroll;
@@ -430,6 +453,18 @@ impl Tree {
                 p.text(&p.fonts.ui, &n.name, rect(x + 48.0, y, x + 48.0 + n.text_w + 12.0, y + ROW_H), th.text);
             }
         });
+
+        // Título y chincheta (acento si está fijo).
+        p.text(&p.fonts.ui_bold, "Carpetas", rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), th.text_dim);
+        let pin = self.pin_rect();
+        if self.pin_hot {
+            p.round_fill(pin, 5.0, th.hover);
+        }
+        let (glyph, color) = if self.pinned { ("\u{E840}", th.accent) } else { ("\u{E718}", if self.pin_hot { th.text } else { th.text_dim }) };
+        p.text(&p.fonts.glyphs_small, glyph, pin, color);
+
+        // Contorno gris, como el de los paneles que no están activos.
+        p.round_stroke(area, 8.0, th.border);
 
         // Barras de desplazamiento.
         self.htrack = rect(0.0, 0.0, 0.0, 0.0);

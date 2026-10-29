@@ -81,8 +81,82 @@ impl Splits {
 
 /// Área de los paneles (sin márgenes ni barra de estado). `left`: ancho que ocupa algo a la
 /// izquierda (el árbol de carpetas, si está).
-pub fn panes_area(w: f32, h: f32, left: f32) -> Rect {
-    rect(GAP + left, GAP / 2.0, w - GAP, h - STATUSBAR_H)
+pub fn panes_area(w: f32, h: f32, left: f32, top: f32) -> Rect {
+    rect(GAP + left, top + GAP / 2.0, w - GAP, h - STATUSBAR_H)
+}
+
+/// Alto de la barra de pestañas de grupos (arriba de todo, solo si hay grupos guardados).
+pub const GROUPBAR_H: f32 = 32.0;
+const GROUP_TAB_W: f32 = 150.0;
+const GROUP_TAB_MIN_W: f32 = 70.0;
+const GROUP_ADD_W: f32 = 28.0;
+
+/// Pestañas de los `n` grupos y botón «+» a su derecha. El ancho de las pestañas se achica para
+/// que entren todas.
+pub fn group_tabs(w: f32, n: usize) -> (Vec<Rect>, Rect) {
+    let avail = (w - GAP * 2.0 - GROUP_ADD_W - 4.0).max(GROUP_TAB_MIN_W);
+    let tab_w = (avail / n.max(1) as f32).clamp(GROUP_TAB_MIN_W.min(avail), GROUP_TAB_W);
+    let (top, bottom) = (4.0, GROUPBAR_H - 2.0);
+    let mut x = GAP;
+    let tabs = (0..n)
+        .map(|_| {
+            let r = rect(x, top, x + tab_w - 2.0, bottom);
+            x += tab_w;
+            r
+        })
+        .collect();
+    (tabs, rect(x + 2.0, top, x + 2.0 + GROUP_ADD_W, bottom))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupHit {
+    Tab(usize),
+    /// La × de una pestaña sin guardar.
+    Close(usize),
+    Add,
+}
+
+/// Cuadrado de la × de una pestaña.
+fn group_close_rect(tab: Rect) -> Rect {
+    rect(tab.right - 24.0, tab.top + 3.0, tab.right - 4.0, tab.bottom - 3.0)
+}
+
+/// `temps[i]`: la pestaña i está sin guardar (tiene ×).
+pub fn group_bar_at(w: f32, temps: &[bool], x: f32, y: f32) -> Option<GroupHit> {
+    let (tabs, add) = group_tabs(w, temps.len());
+    if contains(&add, x, y) {
+        return Some(GroupHit::Add);
+    }
+    let i = tabs.iter().position(|r| contains(r, x, y))?;
+    Some(if temps[i] && contains(&group_close_rect(tabs[i]), x, y) { GroupHit::Close(i) } else { GroupHit::Tab(i) })
+}
+
+pub fn draw_group_bar(p: &Painter, w: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+    let th = p.theme;
+    let (tabs, add) = group_tabs(w, names.len());
+    for (i, (r, (name, temp))) in tabs.iter().zip(names).enumerate() {
+        if active == Some(i) {
+            p.round_fill(*r, 6.0, alpha(th.accent, 0.25));
+        } else if hover == Some(GroupHit::Tab(i)) {
+            p.round_fill(*r, 6.0, th.hover);
+        }
+        let color = if active == Some(i) { th.text } else { th.text_dim };
+        let right = if *temp { r.right - 26.0 } else { r.right - 8.0 };
+        p.text(&p.fonts.ui, name, rect(r.left + 10.0, r.top, right, r.bottom), color);
+        if *temp {
+            let x = group_close_rect(*r);
+            let hot = hover == Some(GroupHit::Close(i));
+            if hot {
+                p.round_fill(x, 4.0, th.hover);
+            }
+            p.text(&p.fonts.glyphs_small, "\u{E711}", x, if hot { th.text } else { th.text_dim });
+        }
+    }
+    let hot = hover == Some(GroupHit::Add);
+    if hot {
+        p.round_fill(add, 6.0, th.hover);
+    }
+    p.text(&p.fonts.glyphs_small, "\u{E710}", add, if hot { th.text } else { th.text_dim });
 }
 
 /// Rectángulos de cada panel visible, en orden.
@@ -225,6 +299,8 @@ pub enum PickerHit {
     DarkMode,
     /// Switch de los colores por tipo de archivo.
     FileColors,
+    /// Switch de la barra de pestañas de grupos.
+    GroupBar,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
     Tree,
     /// Abre el diálogo "Acerca de".
@@ -240,9 +316,9 @@ const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
 const PICKER_SEP_H: f32 = 13.0;
 
-/// Switches del panel: modo oscuro, colores por tipo y, si se compiló, el árbol de carpetas.
+/// Switches del panel: modo oscuro, colores por tipo, barra de grupos y, si se compiló, el árbol.
 fn switch_rows() -> usize {
-    2 + usize::from(cfg!(feature = "arbol"))
+    3 + usize::from(cfg!(feature = "arbol"))
 }
 
 /// Panel flotante sobre la rueda dentada.
@@ -271,7 +347,7 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     out.push((PickerHit::System, rect(l, y, r, y + PICKER_BTN_H)));
     out.push((PickerHit::Custom, rect(l, y + PICKER_BTN_H, r, y + PICKER_BTN_H * 2.0)));
     let y = y + PICKER_BTN_H * 2.0 + PICKER_SEP_H;
-    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors];
+    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors, PickerHit::GroupBar];
     if cfg!(feature = "arbol") {
         kinds.push(PickerHit::Tree);
     }
@@ -292,7 +368,7 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, tree: bool, update: bool) {
+pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, group_bar: bool, tree: bool, update: bool) {
     let th = p.theme;
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
@@ -340,13 +416,14 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                     p.text(&p.fonts.glyphs_small, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
                 }
             }
-            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::Tree => {
+            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::GroupBar | PickerHit::Tree => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
                 let (glyph, label, on) = match kind {
                     PickerHit::DarkMode => ("\u{E708}", "Modo oscuro", th.dark),
                     PickerHit::FileColors => ("\u{E790}", "Colores por tipo", file_colors),
+                    PickerHit::GroupBar => ("\u{E8A9}", "Barra de grupos", group_bar),
                     _ => ("\u{E8B7}", "Árbol de carpetas", tree),
                 };
                 if kind == PickerHit::DarkMode {

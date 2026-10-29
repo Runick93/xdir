@@ -458,6 +458,13 @@ pub fn shell_place_exists(parsing: &str) -> bool {
 /// Subcarpetas con ruta de disco de una carpeta virtual (computadoras de la Red, distribuciones de
 /// Linux), para el árbol lateral: (nombre, ruta). Ordenadas por nombre.
 pub fn shell_subfolders(parsing: &str) -> Vec<(String, PathBuf)> {
+    let mut out = shell_subfolders_unsorted(parsing);
+    out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
+    out
+}
+
+/// Lo mismo, en el orden del Shell.
+fn shell_subfolders_unsorted(parsing: &str) -> Vec<(String, PathBuf)> {
     let Ok(item) = (unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(parsing), None) }) else {
         return Vec::new();
     };
@@ -475,7 +482,6 @@ pub fn shell_subfolders(parsing: &str) -> Vec<(String, PathBuf)> {
         }
         true
     });
-    out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
     out
 }
 
@@ -744,17 +750,40 @@ pub fn drive_label(drive: &str) -> String {
     }
     let root = format!("{drive}\\");
     let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
-    let fixed = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) } == 3; // DRIVE_FIXED
-    let label = fixed
-        .then(|| shell_info(Path::new(&root), FILE_FLAGS_AND_ATTRIBUTES(0), SHGFI_DISPLAYNAME))
-        .flatten()
-        .map(|info| from_wide(&info.szDisplayName))
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| drive.to_string());
+    let kind = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+    // Disco fijo (3) y USB (2): el nombre que muestra el Shell. Unidad de red (4): "recurso (\servidor) (Z:)".
+    let label = match kind {
+        3 | 2 => shell_info(Path::new(&root), FILE_FLAGS_AND_ATTRIBUTES(0), SHGFI_DISPLAYNAME)
+            .map(|info| from_wide(&info.szDisplayName))
+            .filter(|n| !n.is_empty()),
+        4 => network_drive_label(drive),
+        _ => None,
+    }
+    .unwrap_or_else(|| drive.to_string());
     cache.lock().unwrap().insert(drive.to_string(), label.clone());
     label
 }
 
+/// Nombre de una unidad de red como lo muestra el Explorador: "recurso (\\servidor) (Z:)".
+fn network_drive_label(drive: &str) -> Option<String> {
+    use windows::Win32::NetworkManagement::WNet::WNetGetConnectionW;
+    let local: Vec<u16> = drive.encode_utf16().chain(Some(0)).collect();
+    let mut buf = [0u16; 512];
+    let mut len = buf.len() as u32;
+    let err = unsafe { WNetGetConnectionW(PCWSTR(local.as_ptr()), Some(PWSTR(buf.as_mut_ptr())), &mut len) };
+    if err.0 != 0 {
+        return None;
+    }
+    let remote = from_wide(&buf);
+    let mut parts = remote.trim_start_matches('\\').split('\\').filter(|p| !p.is_empty());
+    let (server, share) = (parts.next()?, parts.next()?);
+    Some(format!("{share} (\\\\{server}) ({drive})"))
+}
+
+/// Carpetas del Acceso rápido del Explorador (ancladas y frecuentes), sin las del usuario de siempre.
+pub fn quick_access() -> Vec<(String, PathBuf)> {
+    shell_subfolders_unsorted("::{3936E9E4-D92C-4EEE-A85A-BC16D5EA0819}").into_iter().filter(|(_, p)| p.is_dir()).collect()
+}
 /// Forma larga de una ruta ("C:\Users\LEANDR~1" → "C:\Users\Leandro-Dev"). Si no existe o
 /// falla, la devuelve igual.
 pub fn long_path(path: &Path) -> PathBuf {

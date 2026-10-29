@@ -329,6 +329,10 @@ struct App {
     group_rename: Option<String>,
     /// Cuánto asomó el árbol sin fijar (0 oculto, 100 completo): entra y sale deslizándose.
     tree_slide: f32,
+    /// El árbol sin fijar se cerró por elegir una carpeta: no vuelve a abrirse mientras el mouse siga encima.
+    tree_dismissed: bool,
+    /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
+    groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, HWND)>,
     /// Árbol de carpetas lateral (experimental).
@@ -477,6 +481,8 @@ fn main() -> Result<()> {
             group_name: session.group.clone(),
             group_rename: None,
             tree_slide: 0.0,
+            tree_dismissed: false,
+            groups_menu_closed: None,
             palette: None,
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(),
@@ -1124,6 +1130,11 @@ impl App {
             tree::TreeHit::Open(loc) => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 self.tab_mut().navigate(hwnd, &tx, loc);
+                // Sin fijar, elegir una carpeta lo esconde (hasta que el mouse salga y vuelva al borde).
+                if !self.tree.pinned {
+                    self.tree.open = false;
+                    self.tree_dismissed = true;
+                }
             }
             tree::TreeHit::Pin => self.run_command(Command::ToggleTreePin),
             tree::TreeHit::Nothing => {}
@@ -1615,6 +1626,9 @@ impl App {
                 }
             }
             Hit::TermMenu(None) | Hit::Palette(_) | Hit::Suggest(_) => {}
+            // Un clic en el botón con el menú abierto lo cierra (el menú ya se descartó al llegar el
+            // clic): no hay que volver a abrirlo.
+            Hit::Groups if self.groups_menu_closed.is_some_and(|t| t.elapsed().as_millis() < 300) => self.groups_menu_closed = None,
             Hit::Groups => self.show_groups_menu(),
             Hit::GroupBar(ui::GroupHit::Tab(i)) if double => {
                 if let Some(name) = self.groups.items.get(i).map(|g| g.name.clone()) {
@@ -1903,7 +1917,11 @@ impl App {
             let (w, h) = self.client_dips();
             let area = ui::panes_area(w, h, 0.0, self.groups_bar_h());
             let in_rows = y >= area.top && y <= area.bottom;
-            let want = if self.tree.open { in_rows && x <= ui::GAP + self.tree.width + ui::GAP } else { in_rows && x <= ui::GAP + 4.0 };
+            let inside = in_rows && x <= ui::GAP + self.tree.width + ui::GAP;
+            if self.tree_dismissed && !inside {
+                self.tree_dismissed = false;
+            }
+            let want = !self.tree_dismissed && if self.tree.open { inside } else { in_rows && x <= ui::GAP + 4.0 };
             if want != self.tree.open {
                 self.tree.open = want;
                 redraw = true;
@@ -2341,6 +2359,7 @@ impl App {
             let flags = TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN;
             let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd, None).0 as usize;
             let _ = DestroyMenu(hmenu);
+            self.groups_menu_closed = (cmd == 0).then(Instant::now);
             if let Some((_, bitmap)) = dot {
                 let _ = DeleteObject(bitmap.into());
             }

@@ -187,6 +187,8 @@ enum Hit {
     Gear,
     /// Botón de grupos guardados de la barra de estado.
     Groups,
+    /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
+    GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
@@ -323,12 +325,22 @@ struct App {
     groups: Groups,
     /// Grupo de paneles cargado o guardado en esta ejecución: va en el título de la ventana.
     group_name: Option<String>,
+    /// Grupo al que el nombre que se escriba en la paleta le cambia el nombre (en vez de guardar uno).
+    group_rename: Option<String>,
+    /// Cuánto asomó el árbol sin fijar (0 oculto, 100 completo): entra y sale deslizándose.
+    tree_slide: f32,
+    /// El árbol sin fijar se cerró por elegir una carpeta: no vuelve a abrirse mientras el mouse siga encima.
+    tree_dismissed: bool,
+    /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
+    groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, HWND)>,
     /// Árbol de carpetas lateral (experimental).
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
     show_favorites: bool,
+    /// Barra de pestañas de grupos habilitada (se ve si además hay grupos guardados).
+    show_group_bar: bool,
     /// Colores por tipo de archivo encendidos (switch de la rueda dentada).
     file_colors: bool,
     /// Avisar de versiones nuevas, y la que se encontró (si es más nueva que esta).
@@ -466,11 +478,16 @@ fn main() -> Result<()> {
             history,
             config,
             groups: Groups::load(),
-            group_name: None,
+            group_name: session.group.clone(),
+            group_rename: None,
+            tree_slide: 0.0,
+            tree_dismissed: false,
+            groups_menu_closed: None,
             palette: None,
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(),
             show_favorites: session.show_favorites,
+            show_group_bar: session.group_bar,
             file_colors: session.file_colors,
             new_version: None,
             last_update_check: Instant::now(),
@@ -497,6 +514,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "arbol")]
         {
             app.tree.visible = session.show_tree;
+            app.tree.pinned = session.tree_pinned;
         }
         let app = Box::into_raw(Box::new(app));
 
@@ -947,6 +965,10 @@ impl App {
                 WM_MOUSELEAVE => {
                     self.tracking_mouse = false;
                     self.hover = Hit::None;
+                    #[cfg(feature = "arbol")]
+                    if !self.tree.pinned && matches!(self.drag, Drag::None) {
+                        self.tree.open = false;
+                    }
                     for p in &mut self.panes {
                         p.tab_mut().list.on_mouse_leave();
                     }
@@ -1023,6 +1045,7 @@ impl App {
                 }
                 WM_CLOSE => {
                     if self.probe.is_none() {
+                        self.autosave_group();
                         let _ = session::save(&self.session());
                         let _ = self.history.save();
                     }
@@ -1072,10 +1095,24 @@ impl App {
         tab
     }
 
+    fn tree_visible(&self) -> bool {
+        #[cfg(feature = "arbol")]
+        return self.tree.visible;
+        #[cfg(not(feature = "arbol"))]
+        false
+    }
+
+    fn tree_pinned(&self) -> bool {
+        #[cfg(feature = "arbol")]
+        return self.tree.pinned;
+        #[cfg(not(feature = "arbol"))]
+        true
+    }
+
     /// Ancho que ocupa el árbol de carpetas a la izquierda (0 si no está o no se compiló).
     fn tree_width(&self) -> f32 {
         #[cfg(feature = "arbol")]
-        if self.tree.visible {
+        if self.tree.visible && self.tree.pinned {
             return self.tree.width + ui::GAP;
         }
         0.0
@@ -1093,7 +1130,13 @@ impl App {
             tree::TreeHit::Open(loc) => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 self.tab_mut().navigate(hwnd, &tx, loc);
+                // Sin fijar, elegir una carpeta lo esconde (hasta que el mouse salga y vuelva al borde).
+                if !self.tree.pinned {
+                    self.tree.open = false;
+                    self.tree_dismissed = true;
+                }
             }
+            tree::TreeHit::Pin => self.run_command(Command::ToggleTreePin),
             tree::TreeHit::Nothing => {}
         }
         self.redraw();
@@ -1201,10 +1244,13 @@ impl App {
             active_pane: self.active,
             show_hidden: self.show_hidden,
             show_favorites: self.show_favorites,
+            group_bar: self.show_group_bar,
             file_colors: self.file_colors,
-            show_tree: self.tree_width() > 0.0,
+            show_tree: self.tree_visible(),
+            tree_pinned: self.tree_pinned(),
             accent: self.accent,
             dark_mode: self.dark_mode,
+            group: self.group_name.clone(),
             columns: self.columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),
             panes: self
@@ -1472,7 +1518,15 @@ impl App {
         if contains(&ui::groups_rect(w, h), x, y) {
             return Hit::Groups;
         }
-        let area = ui::panes_area(w, h, self.tree_width());
+        #[cfg(feature = "arbol")]
+        if self.tree.contains(x, y) {
+            return Hit::None;
+        }
+        let temps: Vec<bool> = self.groups.items.iter().map(|g| g.temp).collect();
+        if let Some(g) = ui::group_bar_at(w, &temps, x, y).filter(|_| self.groups_bar_h() > 0.0) {
+            return Hit::GroupBar(g);
+        }
+        let area = ui::panes_area(w, h, self.tree_width(), self.groups_bar_h());
         if self.maximized.is_none() {
             for (s, r) in ui::splitter_rects(self.layout, area, self.splits) {
                 if contains(&r, x, y) {
@@ -1572,7 +1626,19 @@ impl App {
                 }
             }
             Hit::TermMenu(None) | Hit::Palette(_) | Hit::Suggest(_) => {}
+            // Un clic en el botón con el menú abierto lo cierra (el menú ya se descartó al llegar el
+            // clic): no hay que volver a abrirlo.
+            Hit::Groups if self.groups_menu_closed.is_some_and(|t| t.elapsed().as_millis() < 300) => self.groups_menu_closed = None,
             Hit::Groups => self.show_groups_menu(),
+            Hit::GroupBar(ui::GroupHit::Tab(i)) if double => {
+                if let Some(name) = self.groups.items.get(i).map(|g| g.name.clone()) {
+                    self.open_palette(PaletteMode::GroupName);
+                    self.group_rename = Some(name);
+                }
+            }
+            Hit::GroupBar(ui::GroupHit::Tab(i)) => self.switch_group(i),
+            Hit::GroupBar(ui::GroupHit::Close(i)) => self.close_group_tab(i),
+            Hit::GroupBar(ui::GroupHit::Add) => self.new_group(),
             Hit::Gear => {
                 self.picker_open = !self.picker_open;
                 // Una app abierta durante horas no se entera de lo nuevo: al abrir el panel se vuelve
@@ -1592,6 +1658,7 @@ impl App {
                 self.file_colors = !self.file_colors;
                 self.redraw();
             }
+            Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
             Hit::Picker(ui::PickerHit::Panel) => {}
@@ -1754,7 +1821,7 @@ impl App {
         match self.drag {
             Drag::Splitter(s) => {
                 let (w, h) = self.client_dips();
-                self.splits.set(s, ui::split_value(s, ui::panes_area(w, h, self.tree_width()), x, y));
+                self.splits.set(s, ui::split_value(s, ui::panes_area(w, h, self.tree_width(), self.groups_bar_h()), x, y));
                 redraw = true;
             }
             Drag::Tab { pane, index, start_x, start_y, moved, grab } => {
@@ -1845,6 +1912,21 @@ impl App {
             _ => {}
         }
 
+        #[cfg(feature = "arbol")]
+        if self.tree.visible && !self.tree.pinned && matches!(self.drag, Drag::None) {
+            let (w, h) = self.client_dips();
+            let area = ui::panes_area(w, h, 0.0, self.groups_bar_h());
+            let in_rows = y >= area.top && y <= area.bottom;
+            let inside = in_rows && x <= ui::GAP + self.tree.width + ui::GAP;
+            if self.tree_dismissed && !inside {
+                self.tree_dismissed = false;
+            }
+            let want = !self.tree_dismissed && if self.tree.open { inside } else { in_rows && x <= ui::GAP + 4.0 };
+            if want != self.tree.open {
+                self.tree.open = want;
+                redraw = true;
+            }
+        }
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
         #[cfg(feature = "arbol")]
@@ -1937,6 +2019,23 @@ impl App {
                 self.panes[active].cycle_tab(c == Command::NextTab);
                 self.sync_visibility();
             }
+            Command::NextGroup | Command::PrevGroup => {
+                let n = self.groups.items.len();
+                if n == 0 {
+                    // Sin grupos, el atajo sigue siendo útil: pasa de pestaña.
+                    self.panes[active].cycle_tab(c == Command::NextGroup);
+                    self.sync_visibility();
+                } else {
+                    let cur = self.group_name.as_deref().and_then(|g| self.groups.find(g));
+                    let next = match (cur, c == Command::NextGroup) {
+                        (Some(i), true) => (i + 1) % n,
+                        (Some(i), false) => (i + n - 1) % n,
+                        (None, true) => 0,
+                        (None, false) => n - 1,
+                    };
+                    self.switch_group(next);
+                }
+            }
             Command::NextPane | Command::PrevPane => {
                 let n = self.layout.panes();
                 self.set_active(if c == Command::PrevPane { (active + n - 1) % n } else { (active + 1) % n });
@@ -1998,6 +2097,7 @@ impl App {
             }
             Command::ToggleFavorite => self.toggle_favorite(active),
             Command::ToggleFavBar => self.show_favorites = !self.show_favorites,
+            Command::ToggleGroupBar => self.show_group_bar = !self.show_group_bar,
             Command::PowerShell => self.open_console(active, Console::PowerShell),
             Command::Cmd => self.open_console(active, Console::Cmd),
             Command::ToggleDarkMode => self.set_dark_mode(!self.theme.dark),
@@ -2024,6 +2124,15 @@ impl App {
                     self.tree.visible = !self.tree.visible;
                 }
             }
+            Command::ToggleTreePin => {
+                #[cfg(feature = "arbol")]
+                {
+                    self.begin_layout_anim();
+                    self.tree.pinned = !self.tree.pinned;
+                    // Al soltarlo sigue a la vista hasta que el mouse se vaya.
+                    self.tree.open = !self.tree.pinned;
+                }
+            }
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {
@@ -2040,6 +2149,8 @@ impl App {
     /// que había quedan entre las cerradas (Ctrl+Shift+T las recupera).
     fn apply_group(&mut self, index: usize) {
         let Some(g) = self.groups.items.get(index).cloned() else { return };
+        // Lo que se cambió en el grupo que se deja queda guardado en él.
+        self.autosave_group();
         self.end_edit(false);
         self.end_filter(true);
         self.begin_layout_anim();
@@ -2060,16 +2171,146 @@ impl App {
         self.redraw();
     }
 
+    /// Pestaña de grupo nueva, ya guardada como «Grupo N» y vacía (cada panel en Este equipo);
+    /// se le cambia el nombre con doble clic.
+    fn new_group(&mut self) {
+        let mut n = self.groups.items.len() + 1;
+        while self.groups.find(&format!("Grupo {n}")).is_some() {
+            n += 1;
+        }
+        let name = format!("Grupo {n}");
+        let panes = (0..PANES).map(|_| PaneState { tabs: vec![Location::Computer], active: 0 }).collect();
+        self.groups.put(Group { name, layout: self.layout.index(), split_x: self.splits.x, split_y: self.splits.y, panes, temp: true });
+        let _ = self.groups.save();
+        self.apply_group(self.groups.items.len() - 1);
+    }
+
+    fn rename_group(&mut self, old: &str, name: &str) {
+        let Some(i) = self.groups.find(old) else { return };
+        if self.groups.find(name).is_some_and(|j| j != i) {
+            self.notice = Some(format!("Ya hay un grupo «{name}»"));
+        } else {
+            self.groups.items[i].name = name.to_string();
+            if self.group_name.as_deref() == Some(old) {
+                self.group_name = Some(name.to_string());
+            }
+            let _ = self.groups.save();
+        }
+        self.redraw();
+    }
+
+    /// × de una pestaña sin guardar: pregunta si se conserva como grupo o se descarta.
+    fn close_group_tab(&mut self, index: usize) {
+        let Some(name) = self.groups.items.get(index).map(|g| g.name.clone()) else { return };
+        let text: Vec<u16> = format!("¿Guardar «{name}» como grupo?\n\nSí: queda guardado. No: se descarta.\0").encode_utf16().collect();
+        let title: Vec<u16> = "Cerrar pestaña de grupo\0".encode_utf16().collect();
+        let answer = unsafe { MessageBoxW(Some(self.hwnd), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNOCANCEL | MB_ICONQUESTION) };
+        if answer == IDYES {
+            self.groups.items[index].temp = false;
+            let _ = self.groups.save();
+        } else if answer == IDNO {
+            let was_active = self.group_name.as_deref() == Some(name.as_str());
+            self.groups.remove(index);
+            let _ = self.groups.save();
+            if was_active {
+                self.group_name = None;
+                if !self.groups.items.is_empty() {
+                    self.apply_group(index.saturating_sub(1).min(self.groups.items.len() - 1));
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    fn switch_group(&mut self, index: usize) {
+        if self.group_name.as_deref().and_then(|n| self.groups.find(n)) != Some(index) {
+            self.apply_group(index);
+        }
+    }
+
+    /// Alto de la barra de pestañas de grupos: solo aparece cuando hay grupos guardados.
+    fn groups_bar_h(&self) -> f32 {
+        if self.groups.items.is_empty() || !self.show_group_bar { 0.0 } else { ui::GROUPBAR_H }
+    }
+
+    /// Los paneles y carpetas de ahora, con el nombre de un grupo.
+    fn group_snapshot(&self, name: &str) -> Group {
+        // Guardar con un nombre (o reemplazar un grupo) lo vuelve permanente.
+        Group {
+            temp: false,
+            name: name.to_string(),
+            layout: self.layout.index(),
+            split_x: self.splits.x,
+            split_y: self.splits.y,
+            panes: self.panes.iter().map(|p| PaneState { tabs: p.tabs.iter().map(|t| t.location.clone()).collect(), active: p.active }).collect(),
+        }
+    }
+
+    /// Mientras hay un grupo activo, cada cambio de paneles, pestañas o carpetas se guarda en él.
+    fn autosave_group(&mut self) {
+        let Some(name) = self.group_name.clone() else { return };
+        let Some(i) = self.groups.find(&name) else { return };
+        let snap = Group { temp: self.groups.items[i].temp, ..self.group_snapshot(&self.groups.items[i].name) };
+        if snap.same_as(&self.groups.items[i]) {
+            return;
+        }
+        self.groups.items[i] = snap;
+        if let Err(e) = self.groups.save() {
+            self.notice = Some(format!("No se pudo guardar el grupo: {e}"));
+        }
+    }
+
     /// Guarda los paneles y carpetas actuales como grupo (reemplaza uno con el mismo nombre).
     fn save_group(&mut self, name: &str) {
-        let s = self.session();
-        self.groups.put(Group { name: name.to_string(), layout: s.layout, split_x: s.split_x, split_y: s.split_y, panes: s.panes });
+        if let Some(old) = self.group_rename.take() {
+            self.rename_group(&old, name);
+            return;
+        }
+        let group = self.group_snapshot(name);
+        self.groups.put(group);
         self.group_name = Some(name.to_string());
         self.notice = Some(match self.groups.save() {
             Ok(()) => format!("Grupo «{name}» guardado"),
             Err(e) => format!("No se pudo guardar el grupo: {e}"),
         });
         self.redraw();
+    }
+
+    /// Punto del color de acento para marcar un ítem de menú (bitmap de 32 bits con alfa).
+    fn accent_dot(&self) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+        use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DIB_RGB_COLORS};
+        let size = (16.0 * self.dpi as f32 / 96.0).round().max(8.0) as i32;
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let bitmap = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
+        if bits.is_null() {
+            return None;
+        }
+        let px = unsafe { std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize) };
+        let c = self.theme.accent;
+        let (c_r, c_g, c_b) = ((c.r * 255.0) as u32, (c.g * 255.0) as u32, (c.b * 255.0) as u32);
+        let (center, radius) = (size as f32 / 2.0, size as f32 * 0.25);
+        for y in 0..size {
+            for x in 0..size {
+                let (dx, dy) = (x as f32 + 0.5 - center, y as f32 + 0.5 - center);
+                // Borde suave de un píxel; el color va premultiplicado por el alfa.
+                let cover = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+                let a = (cover * 255.0) as u32;
+                px[(y * size + x) as usize] = (a << 24) | ((c_r * a / 255) << 16) | ((c_g * a / 255) << 8) | (c_b * a / 255);
+            }
+        }
+        Some(bitmap)
     }
 
     /// Menú del botón de grupos: abrir uno, guardar el actual, eliminar o editar el archivo.
@@ -2095,6 +2336,12 @@ impl App {
                 let wide: Vec<u16> = "Todavía no hay grupos".encode_utf16().chain(Some(0)).collect();
                 let _ = AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, PCWSTR(wide.as_ptr()));
             }
+            // El grupo activo lleva un punto del color de acento.
+            let dot = self.group_name.as_deref().and_then(|n| self.groups.find(n)).and_then(|i| Some((i, self.accent_dot()?)));
+            if let Some((i, bitmap)) = dot {
+                let mii = MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_BITMAP, hbmpItem: bitmap, ..Default::default() };
+                let _ = SetMenuItemInfoW(hmenu, (OPEN + i) as u32, false, &mii);
+            }
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             add(hmenu, SAVE, "Guardar paneles y carpetas como grupo…");
             if !self.groups.items.is_empty() {
@@ -2112,6 +2359,10 @@ impl App {
             let flags = TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN;
             let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd, None).0 as usize;
             let _ = DestroyMenu(hmenu);
+            self.groups_menu_closed = (cmd == 0).then(Instant::now);
+            if let Some((_, bitmap)) = dot {
+                let _ = DeleteObject(bitmap.into());
+            }
             cmd
         };
         match cmd {
@@ -2125,6 +2376,9 @@ impl App {
                 let i = c - DELETE;
                 if let Some(g) = self.groups.items.get(i) {
                     self.notice = Some(format!("Grupo «{}» eliminado", g.name));
+                    if self.group_name.as_deref() == Some(g.name.as_str()) {
+                        self.group_name = None;
+                    }
                     self.groups.remove(i);
                     let _ = self.groups.save();
                 }
@@ -3151,6 +3405,7 @@ impl App {
 
     /// Abre el salto rápido o la paleta. Si ya está abierta, cambia de modo conservando lo escrito.
     fn open_palette(&mut self, mode: PaletteMode) {
+        self.group_rename = None;
         if let Some((pal, edit)) = &mut self.palette {
             pal.mode = mode;
             let edit = *edit;
@@ -3438,6 +3693,9 @@ impl App {
     }
 
     fn paint(&mut self) {
+        if self.drag == Drag::None {
+            self.autosave_group();
+        }
         let title = match &self.group_name {
             Some(name) => format!("xdir - {name}"),
             None => "xdir".to_string(),
@@ -3466,17 +3724,26 @@ impl App {
             status = format!("{n}   ·   {status}");
         }
         let tree_w = self.tree_width();
+        let groups_h = self.groups_bar_h();
+        let tree_on = self.tree_visible();
+        let tree_slide = self.tree_slide;
         #[cfg(feature = "arbol")]
         let current_folder = self.panes[self.active].tab().location.target();
         // Animaciones: rectángulos de este frame (transición de layout) y scroll suave de las
         // listas a la vista. Mientras algo siga en curso se pide otro frame más abajo.
         let (cw, ch) = self.client_dips();
-        let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w), self.splits);
+        let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w, groups_h), self.splits);
         let (rects, mut animating) = self.animated_rects(target);
         let now = Instant::now();
         let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
         for i in self.shown_panes() {
             animating |= self.panes[i].tab_mut().list.tick(dt);
+        }
+        #[cfg(feature = "arbol")]
+        {
+            let target = if self.tree.pinned || self.tree.open { 100.0 } else { 0.0 };
+            self.tree_slide = if anim::enabled() && !self.tree.pinned { anim::smooth(self.tree_slide, target, dt) } else { target };
+            animating |= self.tree_slide != target;
         }
         self.last_frame = animating.then_some(now);
         for p in &mut self.panes {
@@ -3495,18 +3762,23 @@ impl App {
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
         let about_open = self.about_open;
-        let (file_colors, tree_on) = (self.file_colors, tree_w > 0.0);
+        let file_colors = self.file_colors;
+        let (groups, group_name, show_group_bar) = (&self.groups, &self.group_name, self.show_group_bar);
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
         let suggest = self.suggest.as_ref();
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, if self.file_colors { &self.config.colors } else { &[] }, |p, w, h| {
-            let area = ui::panes_area(w, h, tree_w);
-            #[cfg(feature = "arbol")]
-            if tree.visible {
-                let r = render::rect(ui::GAP, area.top, ui::GAP + tree.width, area.bottom);
-                tree.draw(p, r, current_folder.as_deref());
+            let area = ui::panes_area(w, h, tree_w, groups_h);
+            if groups_h > 0.0 {
+                let names: Vec<(&str, bool)> = groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
+                let active_group = group_name.as_deref().and_then(|n| groups.find(n));
+                let group_hover = match hover {
+                    Hit::GroupBar(g) => Some(g),
+                    _ => None,
+                };
+                ui::draw_group_bar(p, w, &names, active_group, group_hover);
             }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
@@ -3533,6 +3805,24 @@ impl App {
                 panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), filter);
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
                     panes[i].draw_tab_drop(p, at);
+                }
+            }
+            // El árbol va encima de los paneles: fijo ocupa su lugar a la izquierda; sin fijar aparece
+            // superpuesto, con sombra, y mientras está oculto deja una marca en el borde.
+            #[cfg(feature = "arbol")]
+            if tree.visible {
+                let mut r = render::rect(ui::GAP, area.top, ui::GAP + tree.width, area.bottom);
+                if tree.shown() || tree_slide > 0.0 {
+                    // Sin fijar entra y sale deslizándose desde el borde izquierdo.
+                    let off = if tree.pinned { 0.0 } else { -(1.0 - anim::ease_out(tree_slide / 100.0)) * (tree.width + ui::GAP) };
+                    r = render::rect(r.left + off, r.top, r.right + off, r.bottom);
+                    if !tree.pinned {
+                        p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme.background, 0.45));
+                    }
+                    tree.draw(p, r, current_folder.as_deref());
+                } else {
+                    let mid = (area.top + area.bottom) / 2.0;
+                    p.round_fill(render::rect(1.0, mid - 22.0, 4.0, mid + 22.0), 1.5, theme::alpha(p.theme.text_dim, 0.5));
                 }
             }
             if let Some((title, r, detach)) = &ghost {
@@ -3566,7 +3856,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, tree_on, update_available);
+                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, show_group_bar, tree_on, update_available);
             }
             if let Some(sg) = suggest {
                 sg.draw(p);

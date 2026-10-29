@@ -16,6 +16,8 @@ pub enum Command {
     ReopenTab,
     NextTab,
     PrevTab,
+    NextGroup,
+    PrevGroup,
     NextPane,
     PrevPane,
     /// Panel N (0..3).
@@ -49,6 +51,7 @@ pub enum Command {
     Cmd,
     ToggleDarkMode,
     SaveGroup,
+    ToggleGroupBar,
     OpenConfig,
     About,
     /// Vista N (índice de `list::VIEWS`).
@@ -57,6 +60,8 @@ pub enum Command {
     SortBy(u8),
     /// Árbol de carpetas lateral: solo existe compilando con la feature `arbol`.
     ToggleTree,
+    /// Árbol de carpetas: fijarlo o dejar que se oculte solo.
+    ToggleTreePin,
 }
 
 /// ¿La acción existe en esta compilación? (las experimentales dependen de una feature).
@@ -83,8 +88,10 @@ pub const ALL: &[Spec] = &[
     spec(Command::NewTab, "pestana_nueva", "Pestaña nueva", &["Ctrl+T"]),
     spec(Command::CloseTab, "cerrar_pestana", "Cerrar pestaña", &["Ctrl+W"]),
     spec(Command::ReopenTab, "reabrir_pestana", "Reabrir la última pestaña cerrada", &["Ctrl+Shift+T"]),
-    spec(Command::NextTab, "pestana_siguiente", "Pestaña siguiente", &["Ctrl+Tab"]),
-    spec(Command::PrevTab, "pestana_anterior", "Pestaña anterior", &["Ctrl+Shift+Tab"]),
+    spec(Command::NextTab, "pestana_siguiente", "Pestaña siguiente", &["Ctrl+AvPag"]),
+    spec(Command::PrevTab, "pestana_anterior", "Pestaña anterior", &["Ctrl+RePag"]),
+    spec(Command::NextGroup, "grupo_siguiente", "Grupo siguiente", &["Ctrl+Tab"]),
+    spec(Command::PrevGroup, "grupo_anterior", "Grupo anterior", &["Ctrl+Shift+Tab"]),
     spec(Command::NextPane, "panel_siguiente", "Panel siguiente", &["Tab"]),
     spec(Command::PrevPane, "panel_anterior", "Panel anterior", &["Shift+Tab"]),
     spec(Command::FocusPane(0), "panel_1", "Ir al panel 1", &["Alt+1"]),
@@ -123,6 +130,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::Cmd, "cmd", "Abrir CMD en la carpeta", &[]),
     spec(Command::ToggleDarkMode, "modo_oscuro", "Cambiar entre modo claro y oscuro", &[]),
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),
+    spec(Command::ToggleGroupBar, "barra_grupos", "Mostrar u ocultar la barra de grupos", &[]),
     spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
     spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),

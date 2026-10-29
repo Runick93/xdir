@@ -32,6 +32,8 @@ pub struct Session {
     pub active_pane: usize,
     pub show_hidden: bool,
     pub show_favorites: bool,
+    /// Barra de pestañas de grupos habilitada (aparece solo si hay grupos).
+    pub group_bar: bool,
     pub accent: Accent,
     /// Modo fijado por el usuario; None sigue a Windows.
     pub dark_mode: Option<bool>,
@@ -39,6 +41,10 @@ pub struct Session {
     pub file_colors: bool,
     /// Árbol de carpetas lateral visible (solo con la feature `arbol`).
     pub show_tree: bool,
+    /// Árbol fijo al lado de los paneles (si no, se oculta solo y aparece encima).
+    pub tree_pinned: bool,
+    /// Grupo de paneles activo (el que se guarda solo con cada cambio).
+    pub group: Option<String>,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha.
     pub columns: Vec<ColumnSpec>,
@@ -57,10 +63,13 @@ impl Default for Session {
             active_pane: 0,
             show_hidden: false,
             show_favorites: true,
+            group_bar: true,
             accent: DEFAULT_ACCENT,
             dark_mode: None,
             file_colors: true,
             show_tree: false,
+            tree_pinned: true,
+            group: None,
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -104,10 +113,17 @@ fn write(s: &Session) -> String {
     out += &format!("panel_activo = {}\n", s.active_pane);
     out += &format!("ocultos = {}\n", s.show_hidden);
     out += &format!("barra_favoritos = {}\n", s.show_favorites);
+    out += &format!("barra_grupos = {}\n", s.group_bar);
     out += &format!("colores_por_tipo = {}
 ", s.file_colors);
     out += &format!("arbol = {}
 ", s.show_tree);
+    out += &format!("arbol_fijo = {}
+", s.tree_pinned);
+    if let Some(g) = &s.group {
+        out += &format!("grupo = {}
+", quote(g));
+    }
     out += &match s.accent {
         Accent::System => "acento = \"sistema\"\n".to_string(),
         Accent::Rgb(c) => format!("acento = \"#{c:06X}\"\n"),
@@ -189,7 +205,10 @@ fn parse(text: &str) -> Session {
             ("ocultos", None) => s.show_hidden = boolean().unwrap_or(false),
             ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(true),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(false),
+            ("arbol_fijo", None) => s.tree_pinned = boolean().unwrap_or(true),
+            ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
+            ("barra_grupos", None) => s.group_bar = boolean().unwrap_or(true),
             ("modo", None) => {
                 s.dark_mode = match value.trim_matches('"') {
                     "oscuro" => Some(true),
@@ -300,10 +319,13 @@ mod tests {
             active_pane: 2,
             show_hidden: true,
             show_favorites: false,
+            group_bar: false,
             accent: Accent::Rgb(0xA371F7),
             dark_mode: Some(false),
             file_colors: false,
             show_tree: true,
+            tree_pinned: false,
+            group: Some("Trabajo".into()),
             panes: vec![
                 PaneState {
                     tabs: vec![

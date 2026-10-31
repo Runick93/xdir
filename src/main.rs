@@ -733,6 +733,13 @@ impl App {
                     }
                     LRESULT(0)
                 }
+                // Se enchufó (0x8000) o se quitó (0x8004) una unidad: se actualiza como el Explorador.
+                WM_DEVICECHANGE => {
+                    if matches!(wparam.0, 0x8000 | 0x8004) {
+                        self.drives_changed();
+                    }
+                    LRESULT(1)
+                }
                 WM_APP_LOAD => {
                     let t0 = Instant::now();
                     let mut changed = false;
@@ -2247,6 +2254,23 @@ impl App {
         if self.group_name.as_deref().and_then(|n| self.groups.find(n)) != Some(index) {
             self.apply_group(index);
         }
+    }
+
+    /// Cambió el conjunto de unidades: se actualiza "Este equipo" en los paneles y el árbol, y los
+    /// paneles que estaban en una unidad que ya no existe vuelven a "Este equipo".
+    fn drives_changed(&mut self) {
+        fs::forget_drive_labels();
+        #[cfg(feature = "arbol")]
+        self.tree.refresh_drives();
+        let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            match &tab.location {
+                Location::Computer => tab.reload(hwnd, &tx, true),
+                Location::Path(p) if fs::drive_missing(p) => tab.navigate(hwnd, &tx, Location::Computer),
+                _ => {}
+            }
+        }
+        self.redraw();
     }
 
     /// Alto de la barra de pestañas de grupos: solo aparece cuando hay grupos guardados.

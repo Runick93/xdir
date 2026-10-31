@@ -764,6 +764,21 @@ pub fn drive_label(drive: &str) -> String {
     label
 }
 
+/// Olvida los nombres de unidad guardados (cambió el conjunto de unidades: otro pendrive
+/// puede tomar la misma letra).
+pub fn forget_drive_labels() {
+    if let Some(cache) = DRIVE_LABELS.get() {
+        cache.lock().unwrap().clear();
+    }
+}
+
+/// ¿Es una ruta de una unidad con letra que ya no existe (se quitó el pendrive)?
+pub fn drive_missing(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let b = s.as_bytes();
+    b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() && !Path::new(&format!("{}:\\", b[0] as char)).exists()
+}
+
 /// Nombre de una unidad de red como lo muestra el Explorador: "recurso (\\servidor) (Z:)".
 fn network_drive_label(drive: &str) -> Option<String> {
     use windows::Win32::NetworkManagement::WNet::WNetGetConnectionW;

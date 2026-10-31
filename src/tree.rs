@@ -186,34 +186,40 @@ impl Tree {
         // "Este equipo", ya abierto, con sus unidades.
         t.add_root(Kind::Computer, PathBuf::new(), "Este equipo".to_string(), 0);
         let computer = t.roots[t.roots.len() - 1];
-        let drives = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
-        let mut ids = Vec::new();
-        for i in 0..26u32 {
-            if drives & (1 << i) != 0 {
-                let letter = (b'A' + i as u8) as char;
-                let label = crate::fs::drive_label(&format!("{letter}:"));
-                t.nodes.push(Node {
-                    kind: Kind::Drive,
-                    path: PathBuf::from(format!("{letter}:\\")),
-                    name: label,
-                    pin: 0,
-                    depth: 1,
-                    children: None,
-                    expanded: false,
-                    loading: false,
-                    text_w: 0.0,
-                });
-                ids.push(t.nodes.len() - 1);
-            }
-        }
-        t.nodes[computer].children = Some(ids);
         t.nodes[computer].expanded = true;
+        t.refresh_drives();
         // Como en el Explorador: Red y, si hay WSL, Linux. Sus hijos se leen al expandir.
         t.add_root(Kind::Network, PathBuf::from(crate::fs::NETWORK_PLACE), "Red".to_string(), 0);
         if crate::fs::shell_place_exists(crate::fs::LINUX_PLACE) {
             t.add_root(Kind::Linux, PathBuf::from(crate::fs::LINUX_PLACE), "Linux".to_string(), 0);
         }
         t
+    }
+
+    /// Vuelve a leer las unidades de "Este equipo" (se enchufó o quitó una): las que siguen
+    /// conservan su estado, las nuevas se agregan en su lugar.
+    pub fn refresh_drives(&mut self) {
+        let Some(&computer) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::Computer) else { return };
+        let old = self.nodes[computer].children.clone().unwrap_or_default();
+        let drives = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+        let mut ids = Vec::new();
+        for i in 0..26u32 {
+            if drives & (1 << i) == 0 {
+                continue;
+            }
+            let letter = (b'A' + i as u8) as char;
+            let path = PathBuf::from(format!("{letter}:\\"));
+            let name = crate::fs::drive_label(&format!("{letter}:"));
+            if let Some(&id) = old.iter().find(|&&id| self.nodes[id].path == path) {
+                self.nodes[id].name = name;
+                self.nodes[id].text_w = 0.0;
+                ids.push(id);
+            } else {
+                self.nodes.push(Node { kind: Kind::Drive, path, name, pin: 0, depth: 1, children: None, expanded: false, loading: false, text_w: 0.0 });
+                ids.push(self.nodes.len() - 1);
+            }
+        }
+        self.nodes[computer].children = Some(ids);
     }
 
     fn add_root(&mut self, kind: Kind, path: PathBuf, name: String, pin: usize) {

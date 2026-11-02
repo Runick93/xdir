@@ -19,15 +19,18 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_SYSTEM, FILE_FLAGS_AND_ATTRIBUTES, FILE_NOTIFY_CHANGE_ATTRIBUTES,
     FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
-    FILE_NOTIFY_CHANGE_SIZE, FindCloseChangeNotification, FindFirstChangeNotificationW,
-    FindClose, FindFirstFileW, FindNextChangeNotification, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetLongPathNameW,
+    FILE_NOTIFY_CHANGE_SIZE, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
+    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    ReadDirectoryChangesW,
+    FindClose, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetLongPathNameW,
     WIN32_FIND_DATAW,
 };
 use windows::Win32::Storage::EnhancedStorage::{PKEY_Capacity, PKEY_DateModified, PKEY_ItemNameDisplay, PKEY_Size};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::SystemServices::{SFGAO_FOLDER, SFGAO_HIDDEN, SFGAO_STREAM};
 use windows::Win32::System::Threading::{
-    CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+    CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music,
@@ -919,50 +922,84 @@ impl Drop for ComGuard {
 /// Vigila una carpeta y avisa con `WM_APP_CHANGED`. Se detiene al soltarlo.
 pub struct Watcher {
     stop: usize,
+    io: usize,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Watcher {
     pub fn new(hwnd: HWND, panel: usize, generation: u64, path: &Path) -> Option<Self> {
         let wide = wide_path(path);
-        let filter = FILE_NOTIFY_CHANGE_FILE_NAME
-            | FILE_NOTIFY_CHANGE_DIR_NAME
-            | FILE_NOTIFY_CHANGE_SIZE
-            | FILE_NOTIFY_CHANGE_LAST_WRITE
-            | FILE_NOTIFY_CHANGE_ATTRIBUTES;
         unsafe {
-            let change = FindFirstChangeNotificationW(PCWSTR(wide.as_ptr()), false, filter).ok()?;
+            // FILE_SHARE_DELETE: otra ventana puede borrar o renombrar la carpeta mientras se vigila.
+            let dir = CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                FILE_LIST_DIRECTORY.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                None,
+            )
+            .ok()?;
             let stop = CreateEventW(None, true, false, None).ok()?;
-            let (change, stop_raw, hwnd) = (change.0 as usize, stop.0 as usize, hwnd.0 as usize);
+            let io = CreateEventW(None, true, false, None).ok()?;
+            let (dir, stop_raw, io, hwnd) = (dir.0 as usize, stop.0 as usize, io.0 as usize, hwnd.0 as usize);
             let thread = std::thread::spawn(move || {
-                let change = HANDLE(change as *mut _);
+                let dir = HANDLE(dir as *mut _);
                 let stop = HANDLE(stop_raw as *mut _);
-                loop {
-                    if WaitForMultipleObjects(&[change, stop], false, INFINITE) != WAIT_OBJECT_0 {
-                        break;
-                    }
-                    // Junta ráfagas de cambios (copias de muchos archivos) en un solo aviso.
-                    loop {
-                        if FindNextChangeNotification(change).is_err() {
-                            break;
-                        }
-                        if WaitForSingleObject(change, 250) != WAIT_OBJECT_0 {
-                            break;
-                        }
-                    }
-                    if WaitForSingleObject(stop, 0) == WAIT_OBJECT_0 {
-                        break;
-                    }
+                let io = HANDLE(io as *mut _);
+                let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+                    | FILE_NOTIFY_CHANGE_DIR_NAME
+                    | FILE_NOTIFY_CHANGE_SIZE
+                    | FILE_NOTIFY_CHANGE_LAST_WRITE
+                    | FILE_NOTIFY_CHANGE_ATTRIBUTES;
+                let mut buf = [0u32; 1024];
+                let post = || {
                     let _ = PostMessageW(
                         Some(HWND(hwnd as *mut _)),
                         WM_APP_CHANGED,
                         WPARAM(panel),
                         LPARAM(generation as isize),
                     );
+                };
+                loop {
+                    let mut ov = OVERLAPPED { hEvent: io, ..Default::default() };
+                    let _ = ResetEvent(io);
+                    let queued = ReadDirectoryChangesW(
+                        dir,
+                        buf.as_mut_ptr().cast(),
+                        std::mem::size_of_val(&buf) as u32,
+                        false,
+                        filter,
+                        None,
+                        Some(&mut ov),
+                        None,
+                    );
+                    if queued.is_err() {
+                        post();
+                        break;
+                    }
+                    if WaitForMultipleObjects(&[io, stop], false, INFINITE) != WAIT_OBJECT_0 {
+                        let _ = CancelIoEx(dir, Some(&ov));
+                        let mut n = 0;
+                        let _ = GetOverlappedResult(dir, &ov, &mut n, true);
+                        break;
+                    }
+                    let mut n = 0;
+                    if GetOverlappedResult(dir, &ov, &mut n, false).is_err() {
+                        // La carpeta se borró, renombró o desapareció: soltarla y avisar.
+                        post();
+                        break;
+                    }
+                    // Junta ráfagas de cambios (copias de muchos archivos) en un solo aviso.
+                    if WaitForSingleObject(stop, 250) == WAIT_OBJECT_0 {
+                        break;
+                    }
+                    post();
                 }
-                let _ = FindCloseChangeNotification(change);
+                let _ = CloseHandle(dir);
             });
-            Some(Self { stop: stop_raw, thread: Some(thread) })
+            Some(Self { stop: stop_raw, io, thread: Some(thread) })
         }
     }
 }
@@ -978,6 +1015,7 @@ impl Drop for Watcher {
         }
         unsafe {
             let _ = CloseHandle(stop);
+            let _ = CloseHandle(HANDLE(self.io as *mut _));
         }
     }
 }

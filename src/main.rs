@@ -27,7 +27,6 @@ mod toml;
 #[cfg(feature = "arbol")]
 mod tree;
 mod typed;
-mod update;
 mod ui;
 mod uia;
 
@@ -343,13 +342,6 @@ struct App {
     show_group_bar: bool,
     /// Colores por tipo de archivo encendidos (switch de la rueda dentada).
     file_colors: bool,
-    /// Avisar de versiones nuevas, y la que se encontró (si es más nueva que esta).
-    new_version: Option<String>,
-    /// Cuándo se consultó por última vez (se vuelve a consultar al abrir el panel del engranaje).
-    last_update_check: Instant,
-    update_state: update::State,
-    /// Bajando el instalador de la versión nueva.
-    updating: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
     /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
@@ -489,10 +481,6 @@ fn main() -> Result<()> {
             show_favorites: session.show_favorites,
             show_group_bar: session.group_bar,
             file_colors: session.file_colors,
-            new_version: None,
-            last_update_check: Instant::now(),
-            update_state: update::State::Idle,
-            updating: false,
             fav_drop: None,
             tab_drop: None,
             ghost: None,
@@ -551,9 +539,6 @@ fn main() -> Result<()> {
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         (*app).sync_visibility();
         (*app).drop_target = drop::register((*app).hwnd).ok();
-        // Siempre busca; instalar lo nuevo lo decide el usuario (botón de "Acerca de").
-        (*app).update_state = update::State::Checking;
-        update::check((*app).hwnd);
         (*app).marks.push(("ventana creada", ms_since(started)));
         (*app).show();
 
@@ -703,35 +688,6 @@ impl App {
                         SetCursor(Some(c));
                     }
                     LRESULT(1)
-                }
-                update::WM_APP_UPDATE_READY => {
-                    self.updating = false;
-                    let version = self.new_version.clone().unwrap_or_default();
-                    if wparam.0 == 1 && update::launch_installer(self.hwnd, &version) {
-                        // El instalador reemplaza el exe: se cierra la ventana (guarda la sesión) y
-                        // el instalador vuelve a abrir xdir cuando termina (`/RELAUNCH`).
-                        let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-                    } else {
-                        self.notice = Some("No se pudo actualizar (¿sin conexión, o se canceló el permiso de administrador?).".into());
-                        self.redraw();
-                    }
-                    LRESULT(0)
-                }
-                update::WM_APP_UPDATE => {
-                    // Si se apagó el aviso mientras se consultaba, se ignora.
-                    if self.update_state == update::State::Checking {
-                        if wparam.0 == 0 {
-                            self.update_state = update::State::Failed;
-                        } else if update::is_newer(wparam.0) {
-                            self.new_version = Some(update::unpack(wparam.0));
-                            self.update_state = update::State::Idle;
-                        } else {
-                            self.new_version = None;
-                            self.update_state = update::State::UpToDate;
-                        }
-                        self.redraw();
-                    }
-                    LRESULT(0)
                 }
                 // Se enchufó (0x8000) o se quitó (0x8004) una unidad: se actualiza como el Explorador.
                 WM_DEVICECHANGE => {
@@ -1562,16 +1518,6 @@ impl App {
         if self.about_open {
             match hit {
                 Hit::About(about::AboutHit::Report) => open_url(self.hwnd, about::ISSUES_URL),
-                Hit::About(about::AboutHit::Update) => {
-                    if self.new_version.is_some() {
-                        self.start_update();
-                    } else if self.update_state != update::State::Checking {
-                        // Búsqueda a pedido.
-                        self.last_update_check = Instant::now();
-                        self.update_state = update::State::Checking;
-                        update::check(self.hwnd);
-                    }
-                }
                 Hit::About(about::AboutHit::Panel) => {}
                 _ => self.about_open = false,
             }
@@ -1651,13 +1597,6 @@ impl App {
             Hit::GroupBar(ui::GroupHit::Add) => self.new_group(),
             Hit::Gear => {
                 self.picker_open = !self.picker_open;
-                // Una app abierta durante horas no se entera de lo nuevo: al abrir el panel se vuelve
-                // a mirar (a lo sumo cada 10 minutos).
-                if self.picker_open && self.update_state != update::State::Checking && self.last_update_check.elapsed().as_secs() > 600 {
-                    self.last_update_check = Instant::now();
-                    self.update_state = update::State::Checking;
-                    update::check(self.hwnd);
-                }
                 self.redraw();
             }
             Hit::Picker(ui::PickerHit::Preset(i)) => self.set_accent(Accent::Rgb(theme::PRESETS[i].1)),
@@ -2526,36 +2465,6 @@ impl App {
                 self.notice = Some(format!("No se pudo copiar: {}", e.message()));
             }
         }
-    }
-
-    /// Texto del botón de actualizaciones y si hay una versión nueva.
-    fn update_text(&self) -> (String, bool) {
-        match &self.new_version {
-            Some(v) if self.updating => (format!("Bajando xdir {v}…"), true),
-            Some(v) => (format!("Actualizar a xdir {v}"), true),
-            None => (
-                match self.update_state {
-                    update::State::Checking => "Buscando actualizaciones…",
-                    update::State::UpToDate => "xdir está al día · Buscar de nuevo",
-                    update::State::Failed => "No se pudo buscar · Reintentar",
-                    update::State::Idle => "Buscar actualizaciones",
-                }
-                .to_string(),
-                false,
-            ),
-        }
-    }
-
-    /// Instala la versión nueva: baja el instalador (copia instalada) o el zip portable y reemplaza
-    /// esta copia; xdir se reabre solo al terminar.
-    fn start_update(&mut self) {
-        let Some(version) = self.new_version.clone() else { return };
-        if self.updating {
-            return;
-        }
-        self.updating = true;
-        self.notice = Some(format!("Bajando xdir {version}…"));
-        update::download(self.hwnd, version);
     }
 
     fn paste(&mut self) {
@@ -3803,8 +3712,6 @@ impl App {
             animating |= g.step(dt);
         }
         let ghost = self.ghost.as_ref().map(|g| (g.title.clone(), render::rect(g.x, g.y, g.x + g.w, g.y + pane::TABSTRIP_H - 3.0), g.detach));
-        let about_update = self.update_text();
-        let update_available = self.new_version.is_some();
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
@@ -3893,7 +3800,7 @@ impl App {
                 Hit::Layout(l) => Some(l),
                 _ => None,
             };
-            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups, update_available);
+            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups);
             if let Some(pane) = term_menu {
                 let term_hover = match hover {
                     Hit::TermMenu(c) => c,
@@ -3906,7 +3813,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, show_group_bar, tree_on, update_available);
+                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, show_group_bar, tree_on);
             }
             if let Some(sg) = suggest {
                 sg.draw(p);
@@ -3919,7 +3826,7 @@ impl App {
                     Hit::About(k) => Some(k),
                     _ => None,
                 };
-                about::draw(p, w, h, about_hover, (&about_update.0, about_update.1));
+                about::draw(p, w, h, about_hover);
             }
         });
         if result.is_err() {

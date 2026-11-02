@@ -252,7 +252,7 @@ pub fn layout_at(w: f32, h: f32, x: f32, y: f32) -> Option<Layout> {
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool, update: bool) {
+pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool) {
     let th = p.theme;
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
@@ -271,11 +271,6 @@ pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hov
         p.round_fill(gear, 4.0, th.hover);
     }
     p.text(&p.fonts.glyphs, "\u{E713}", gear, if gear_hot { th.text } else { th.text_dim });
-    if update {
-        // Punto de acento: hay una versión nueva (el detalle está en el panel del engranaje).
-        p.circle(gear.right - 6.0, gear.top + 6.0, 4.0, th.accent);
-    }
-
     for (layout, r) in buttons {
         if layout == current {
             p.round_fill(r, 4.0, alpha(th.accent, 0.25));
@@ -376,7 +371,7 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, group_bar: bool, tree: bool, update: bool) {
+pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, group_bar: bool, tree: bool) {
     let th = p.theme;
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
@@ -459,10 +454,6 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                 let sy = r.top - PICKER_SEP_H / 2.0;
                 p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 p.text(&p.fonts.glyphs, "\u{E946}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
-                if update {
-                    // Sigue el rastro del aviso: punto del engranaje -> este -> botón de "Acerca de".
-                    p.circle(r.left + 27.0, r.top + 9.0, 4.0, th.accent);
-                }
                 p.text(&p.fonts.ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
                 p.text(&p.fonts.ui_right, crate::about::VERSION, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
             }

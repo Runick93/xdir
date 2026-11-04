@@ -798,9 +798,62 @@ fn network_drive_label(drive: &str) -> Option<String> {
     Some(format!("{share} (\\\\{server}) ({drive})"))
 }
 
-/// Carpetas del Acceso rápido del Explorador (ancladas y frecuentes), sin las del usuario de siempre.
-pub fn quick_access() -> Vec<(String, PathBuf)> {
-    shell_subfolders_unsorted("::{3936E9E4-D92C-4EEE-A85A-BC16D5EA0819}").into_iter().filter(|(_, p)| p.is_dir()).collect()
+/// Una carpeta del Acceso rápido de Windows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuickItem {
+    pub name: String,
+    pub path: PathBuf,
+    /// Anclada (`System.Home.IsPinned`); si no, es una carpeta frecuente.
+    pub pinned: bool,
+}
+
+/// Carpeta virtual del Acceso rápido del Explorador (con `shell:::`; sin el prefijo el Shell no la resuelve).
+const QUICK_ACCESS_PLACE: &str = "shell:::{3936E9E4-D92C-4EEE-A85A-BC16D5EA0819}";
+
+/// Carpetas del Acceso rápido de Windows, enumeradas del propio Shell y en el mismo orden que
+/// el Explorador (ancladas primero, después las frecuentes). Solo las que son carpetas de disco.
+pub fn quick_access() -> Vec<QuickItem> {
+    let _com = ComGuard::new();
+    let Ok(item) = (unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(QUICK_ACCESS_PLACE), None) }) else {
+        return Vec::new();
+    };
+    let mut key = PROPERTYKEY::default();
+    let have_key = unsafe { windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName(windows::core::w!("System.Home.IsPinned"), &mut key) }.is_ok();
+    let mut out = Vec::new();
+    let _ = for_each_child(&item, |child| {
+        if let Some(path) = item_name(child, SIGDN_FILESYSPATH).map(PathBuf::from).filter(|p| p.is_dir()) {
+            let name = item_name(child, SIGDN_NORMALDISPLAY).unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            let pinned = have_key && child.cast::<IShellItem2>().ok().is_some_and(|i2| unsafe { i2.GetBool(&key) }.is_ok_and(|b| b.as_bool()));
+            out.push(QuickItem { name, path, pinned });
+        }
+        true
+    });
+    out
+}
+
+/// ¿Está anclada ahora mismo al Acceso rápido de Windows? (lectura nueva, no la del árbol)
+pub fn is_quick_pinned(path: &Path) -> bool {
+    quick_access().iter().any(|i| i.pinned && same_path(&i.path, path))
+}
+
+/// El elemento del Acceso rápido que corresponde a una carpeta (el que ofrece "Desanclar").
+pub fn quick_access_item(path: &Path) -> Option<IShellItem> {
+    let _com = ComGuard::new();
+    let item = unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(QUICK_ACCESS_PLACE), None) }.ok()?;
+    let mut found = None;
+    let _ = for_each_child(&item, |child| {
+        if item_name(child, SIGDN_FILESYSPATH).is_some_and(|p| same_path(Path::new(&p), path)) {
+            found = Some(child.clone());
+            return false;
+        }
+        true
+    });
+    found
+}
+
+/// Carpeta cuyos cambios indican que el Acceso rápido se modificó (anclar, desanclar, uso reciente).
+pub fn quick_access_watch_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(r"Microsoft\Windows\Recent\AutomaticDestinations")).filter(|p| p.is_dir())
 }
 /// Forma larga de una ruta ("C:\Users\LEANDR~1" → "C:\Users\Leandro-Dev"). Si no existe o
 /// falla, la devuelve igual.
@@ -928,6 +981,11 @@ pub struct Watcher {
 
 impl Watcher {
     pub fn new(hwnd: HWND, panel: usize, generation: u64, path: &Path) -> Option<Self> {
+        Self::with_message(hwnd, WM_APP_CHANGED, panel, generation as isize, path)
+    }
+
+    /// Vigila una carpeta y avisa a `hwnd` con el mensaje `msg` (y estos `wparam`/`lparam`).
+    pub fn with_message(hwnd: HWND, msg: u32, panel: usize, generation: isize, path: &Path) -> Option<Self> {
         let wide = wide_path(path);
         unsafe {
             // FILE_SHARE_DELETE: otra ventana puede borrar o renombrar la carpeta mientras se vigila.
@@ -957,9 +1015,9 @@ impl Watcher {
                 let post = || {
                     let _ = PostMessageW(
                         Some(HWND(hwnd as *mut _)),
-                        WM_APP_CHANGED,
+                        msg,
                         WPARAM(panel),
-                        LPARAM(generation as isize),
+                        LPARAM(generation),
                     );
                 };
                 loop {

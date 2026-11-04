@@ -28,8 +28,8 @@ use windows::Win32::UI::Shell::{
     SHGetKnownFolderItem, SHMultiFileProperties, SHOP_FILEPATH, SHObjectProperties, SHParseDisplayName,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, HMENU, MF_BYPOSITION, MF_CHECKED, MF_GRAYED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, ModifyMenuW, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
 };
 use windows::core::{Interface, PCSTR, PCWSTR, PSTR, Result, w};
 
@@ -321,10 +321,17 @@ fn append_entries(hmenu: HMENU, entries: &[Entry]) {
     }
 }
 
+/// Lo que devuelve `context_menu` si se eligió "Desanclar de Acceso rápido" (el Shell solo ofrece
+/// ese verbo en el propio Acceso rápido: ahí la aplicación lo resuelve con `unpin_quick_access`).
+pub const UNPIN_QUICK: &str = "unpin-quick";
+
 /// Muestra el menú contextual del Shell. Sin `items`, es el menú del fondo de la carpeta.
 /// Con `intercept`, devuelve el verbo elegido si es uno de `OWN_VERBS` para que lo resuelva
 /// la aplicación; el resto (y todo, en carpetas virtuales) lo ejecuta el Shell y devuelve
-/// `"shell"`. Las `own` van arriba y, si se elige una, devuelve `own:<id>`.
+/// `"shell"`. Las `own` van arriba y, si se elige una, devuelve `own:<id>`. Con `pinned` (la carpeta
+/// única ya está anclada al Acceso rápido) el verbo "Anclar a Acceso rápido" del Shell se muestra
+/// como "Desanclar de Acceso rápido" y, si se elige, devuelve `UNPIN_QUICK`.
+#[allow(clippy::too_many_arguments)]
 pub fn context_menu(
     hwnd: HWND,
     folder: &Location,
@@ -333,6 +340,7 @@ pub fn context_menu(
     extended: bool,
     intercept: bool,
     own: &[Entry],
+    pinned: bool,
 ) -> Option<String> {
     let menu = build_menu(hwnd, folder, items).ok()?;
     unsafe {
@@ -350,6 +358,7 @@ pub fn context_menu(
             let _ = DestroyMenu(hmenu);
             return None;
         }
+        let unpin_id = if pinned { relabel_pin(&menu, hmenu) } else { None };
         OPEN_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
         let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, screen.x, screen.y, hwnd, None).0;
         OPEN_MENU.with(|m| *m.borrow_mut() = None);
@@ -360,7 +369,9 @@ pub fn context_menu(
         } else if cmd > 0 {
             let id = (cmd - 1) as usize;
             let verb = command_verb(&menu, id);
-            if intercept && verb.as_deref().is_some_and(|v| OWN_VERBS.contains(&v)) {
+            if unpin_id == Some(id) {
+                chosen = Some(UNPIN_QUICK.to_string());
+            } else if intercept && verb.as_deref().is_some_and(|v| OWN_VERBS.contains(&v)) {
                 chosen = verb;
             } else {
                 let dir = match folder {
@@ -385,6 +396,50 @@ pub fn context_menu(
         }
         let _ = DestroyMenu(hmenu);
         chosen
+    }
+}
+
+/// Cambia el texto del verbo "pintohome" del menú a "Desanclar de Acceso rápido" y devuelve su
+/// número de comando.
+unsafe fn relabel_pin(menu: &IContextMenu, hmenu: HMENU) -> Option<usize> {
+    unsafe {
+        for pos in 0..GetMenuItemCount(Some(hmenu)).max(0) {
+            let id = GetMenuItemID(hmenu, pos);
+            if id == 0 || id == u32::MAX {
+                continue;
+            }
+            if command_verb(menu, (id - 1) as usize).as_deref() == Some("pintohome") {
+                let _ = ModifyMenuW(hmenu, pos as u32, MF_BYPOSITION | MF_STRING, id as usize, w!("Desanclar de &Acceso rápido"));
+                return Some((id - 1) as usize);
+            }
+        }
+        None
+    }
+}
+
+/// Anclar una carpeta al Acceso rápido de Windows (verbo nativo `pintohome`).
+pub fn pin_quick_access(hwnd: HWND, path: &Path) -> Result<()> {
+    invoke_verb(hwnd, &Location::Path(path.to_path_buf()), &[Item::from(path.to_path_buf())], "pintohome")
+}
+
+/// Desanclar una carpeta del Acceso rápido (verbo nativo `unpinfromhome`). El Shell solo ofrece
+/// ese verbo sobre el elemento del propio Acceso rápido, no sobre la carpeta de disco.
+pub fn unpin_quick_access(hwnd: HWND, path: &Path) -> Result<()> {
+    let item = crate::fs::quick_access_item(path).ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+    unsafe {
+        let menu: IContextMenu = item.BindToHandler(None, &BHID_SFUIObject)?;
+        let hmenu = CreatePopupMenu()?;
+        let _ = menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, CMF_NORMAL);
+        let info = CMINVOKECOMMANDINFO {
+            cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            hwnd,
+            lpVerb: PCSTR(c"unpinfromhome".as_ptr() as *const u8),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        let result = menu.InvokeCommand(&info);
+        let _ = DestroyMenu(hmenu);
+        result
     }
 }
 

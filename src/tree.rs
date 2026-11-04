@@ -337,7 +337,7 @@ impl Tree {
         let mut ids = Vec::new();
         let shown = items.into_iter().filter(|i| !self.known.iter().any(|k| crate::fs::same_path(k, &i.path))).take(QUICK_MAX);
         for (n, item) in shown.enumerate() {
-            let mut node = Node::new(Kind::Folder, item.path, item.name, 0);
+            let mut node = Node::new(Kind::Folder, item.path, item.name, 1);
             node.pinned = item.pinned;
             // Se reusa el hueco del nodo anterior en esa posición, para no crecer con cada lectura.
             if let Some(&id) = old.get(n) {
@@ -349,6 +349,18 @@ impl Tree {
             }
         }
         self.nodes[quick].children = Some(ids);
+    }
+
+    /// ¿Está desplegado el grupo "Acceso rápido"?
+    pub fn quick_open(&self) -> bool {
+        self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::QuickAccess).is_none_or(|&r| self.nodes[r].expanded)
+    }
+
+    /// Despliega o pliega el grupo "Acceso rápido" (al restaurar la sesión).
+    pub fn set_quick_open(&mut self, open: bool) {
+        if let Some(&r) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::QuickAccess) {
+            self.nodes[r].expanded = open;
+        }
     }
 
     /// ¿Está esa carpeta anclada al Acceso rápido de Windows (según la última lectura)?
@@ -397,13 +409,6 @@ impl Tree {
         fn walk(t: &Tree, ids: &[usize], out: &mut Vec<usize>) {
             for &id in ids {
                 let n = &t.nodes[id];
-                // "Acceso rápido" no lleva fila propia: sus carpetas van directo, al nivel de las demás.
-                if n.kind == Kind::QuickAccess {
-                    if let Some(c) = &n.children {
-                        walk(t, c, out);
-                    }
-                    continue;
-                }
                 out.push(id);
                 if n.expanded {
                     if let Some(c) = &n.children {
@@ -417,6 +422,10 @@ impl Tree {
         let mut out: Vec<usize> = Vec::with_capacity(raw.len());
         for id in raw {
             let n = &self.nodes[id];
+            // Sin carpetas en el Acceso rápido no hay grupo que mostrar.
+            if n.kind == Kind::QuickAccess && n.children.as_ref().is_some_and(|c| c.is_empty()) {
+                continue;
+            }
             if n.kind == Kind::Separator && out.last().is_none_or(|&l| self.nodes[l].kind == Kind::Separator) {
                 continue;
             }
@@ -678,7 +687,8 @@ impl Tree {
             Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
             Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
-            Kind::QuickAccess => ("\u{E734}", rgb(0.95, 0.75, 0.25)),
+            // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
+            Kind::QuickAccess => ("\u{E8EC}", rgb(0.93, 0.50, 0.55)),
             Kind::Drive => ("\u{EDA2}", th.text_dim),
             Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),
             Kind::Linux => ("\u{E756}", th.text_dim),

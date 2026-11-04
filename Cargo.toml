@@ -15,7 +15,14 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# xtree (mapa de uso de disco) no va en la release: solo se compila con --features xtree.
+[[bin]]
+name = "xtree"
+path = "src/bin/xtree.rs"
+required-features = ["xtree"]
+
 [features]
+xtree = []
 # Árbol de carpetas lateral (F-3.5), experimental: incluido por defecto pero oculto hasta que se
 # enciende (switch de la rueda dentada o Ctrl+Shift+E). Para quitarlo del programa:
 # scripts\build.cmd build --release --no-default-features

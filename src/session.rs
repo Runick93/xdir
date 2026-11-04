@@ -43,6 +43,8 @@ pub struct Session {
     pub show_tree: bool,
     /// Árbol fijo al lado de los paneles (si no, queda la franja de íconos y se expande al asomar el mouse).
     pub tree_pinned: bool,
+    /// Grupo "Acceso rápido" del árbol desplegado (se puede plegar para no scrollear tanto).
+    pub quick_open: bool,
     /// Grupo de paneles activo (el que se guarda solo con cada cambio).
     pub group: Option<String>,
     pub panes: Vec<PaneState>,
@@ -69,6 +71,7 @@ impl Default for Session {
             file_colors: false,
             show_tree: true,
             tree_pinned: true,
+            quick_open: true,
             group: None,
             panes: Vec::new(),
             columns: default_columns(),
@@ -77,7 +80,15 @@ impl Default for Session {
     }
 }
 
+/// En pruebas la configuración nunca es la real: cada hilo de prueba tiene su propia carpeta temporal.
+#[cfg(test)]
+pub fn config_dir() -> Option<PathBuf> {
+    let name = format!("{}-{:?}", std::process::id(), std::thread::current().id());
+    Some(std::env::temp_dir().join("xdir-tests").join(name.replace(['(', ')'], "")))
+}
+
 /// Carpeta de configuración: junto al .exe en modo portable, si no `%APPDATA%\xdir`.
+#[cfg(not(test))]
 pub fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
         if dir.join("xdir.portable").exists() {
@@ -120,6 +131,8 @@ fn write(s: &Session) -> String {
 ", s.show_tree);
     out += &format!("arbol_fijo = {}
 ", s.tree_pinned);
+    out += &format!("arbol_rapido = {}
+", s.quick_open);
     if let Some(g) = &s.group {
         out += &format!("grupo = {}
 ", quote(g));
@@ -206,6 +219,7 @@ fn parse(text: &str) -> Session {
             ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(false),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(true),
             ("arbol_fijo", None) => s.tree_pinned = boolean().unwrap_or(true),
+            ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
             ("barra_grupos", None) => s.group_bar = boolean().unwrap_or(false),
@@ -325,6 +339,7 @@ mod tests {
             file_colors: false,
             show_tree: true,
             tree_pinned: false,
+            quick_open: true,
             group: Some("Trabajo".into()),
             panes: vec![
                 PaneState {

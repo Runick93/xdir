@@ -855,6 +855,28 @@ pub fn quick_access_item(path: &Path) -> Option<IShellItem> {
 pub fn quick_access_watch_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(r"Microsoft\Windows\Recent\AutomaticDestinations")).filter(|p| p.is_dir())
 }
+/// Quita los `.` y resuelve los `..` de una ruta escrita a mano, sin tocar el disco
+/// ("C:\a\b\.." → "C:\a"). Un `..` en la raíz se ignora; en una ruta relativa sin nada que
+/// quitar, se conserva.
+pub fn normalize_lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::Prefix(_) | Component::RootDir) => {}
+                _ => out.push(".."),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Forma larga de una ruta ("C:\Users\LEANDR~1" → "C:\Users\Leandro-Dev"). Si no existe o
 /// falla, la devuelve igual.
 pub fn long_path(path: &Path) -> PathBuf {
@@ -1080,8 +1102,24 @@ impl Drop for Watcher {
 
 #[cfg(test)]
 mod tests {
-    use super::true_case;
+    use super::{normalize_lexical, true_case};
     use std::path::Path;
+
+    #[test]
+    fn normalize_resolves_dots_without_touching_the_disk() {
+        let n = |s: &str| normalize_lexical(Path::new(s));
+        assert_eq!(n(r"C:\a\b\.."), Path::new(r"C:\a"));
+        assert_eq!(n(r"C:\a\.\b"), Path::new(r"C:\a\b"));
+        assert_eq!(n(r"C:\a\b\..\..\c"), Path::new(r"C:\c"));
+        // Más `..` que carpetas: se queda en la raíz.
+        assert_eq!(n(r"C:\a\..\..\.."), Path::new(r"C:\"));
+        assert_eq!(n(r"\\srv\share\x\.."), Path::new(r"\\srv\share\"));
+        // Sin `..` no cambia nada.
+        assert_eq!(n(r"C:\Users\yo"), Path::new(r"C:\Users\yo"));
+        // Relativa: un `..` sin nada que quitar se conserva.
+        assert_eq!(n(r"..\x"), Path::new(r"..\x"));
+        assert_eq!(n(r"a\..\b"), Path::new("b"));
+    }
 
     #[test]
     fn true_case_fixes_typed_paths() {

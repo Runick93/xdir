@@ -34,7 +34,8 @@ use windows::core::{BOOL, Error, HRESULT, IUnknown, IUnknownImpl, Interface, Res
 
 use crate::list::Action;
 use crate::render::{self, contains, rect};
-use crate::{App, ui};
+use super::App;
+use crate::ui;
 
 /// "El elemento ya no existe" (la carpeta cambió, el panel se ocultó…).
 const UIA_E_ELEMENTNOTAVAILABLE: HRESULT = HRESULT(0x8004_0201_u32 as i32);

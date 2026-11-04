@@ -42,6 +42,12 @@ pub struct Tab {
 }
 
 impl Tab {
+    /// Si la pestaña está a la vista (carga y vigila su carpeta).
+    #[cfg(test)]
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
     /// Muestra u oculta la pestaña. Al mostrarse por primera vez carga su carpeta; al volver
     /// a mostrarse, recarga en silencio por si cambió mientras no se veía.
     pub fn set_visible(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>, visible: bool) {

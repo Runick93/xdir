@@ -13,6 +13,7 @@ pub const GAP: f32 = 6.0;
 const LAYOUT_BTN_W: f32 = 30.0;
 const GEAR_W: f32 = 30.0;
 const GROUPS_W: f32 = 84.0;
+const XTREE_W: f32 = 74.0;
 const MIN_SPLIT: f32 = 0.15;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -246,17 +247,24 @@ pub fn groups_rect(w: f32, h: f32) -> Rect {
     rect(first.left - 10.0 - GROUPS_W, first.top, first.left - 10.0, first.bottom)
 }
 
+/// Botón que abre xtree (mapa de uso de disco), a la izquierda del de grupos.
+pub fn xtree_rect(w: f32, h: f32) -> Rect {
+    let g = groups_rect(w, h);
+    rect(g.left - 10.0 - XTREE_W, g.top, g.left - 10.0, g.bottom)
+}
+
 pub fn layout_at(w: f32, h: f32, x: f32, y: f32) -> Option<Layout> {
     layout_buttons(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(l, _)| l)
 }
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool) {
+pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool, xtree_hot: bool) {
     let th = p.theme;
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
-    let text_r = rect(GAP * 2.0, h - STATUSBAR_H, groups.left - GAP, h);
+    let xtree = xtree_rect(w, h);
+    let text_r = rect(GAP * 2.0, h - STATUSBAR_H, xtree.left - GAP, h);
     p.text(&p.fonts.ui, text, text_r, th.text_dim);
 
     if groups_hot {
@@ -265,6 +273,13 @@ pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hov
     let color = if groups_hot { th.text } else { th.text_dim };
     p.text(&p.fonts.glyphs_small, "\u{E8A9}", rect(groups.left + 6.0, groups.top, groups.left + 26.0, groups.bottom), color);
     p.text(&p.fonts.ui, "Grupos", rect(groups.left + 30.0, groups.top, groups.right - 4.0, groups.bottom), color);
+
+    if xtree_hot {
+        p.round_fill(xtree, 4.0, th.hover);
+    }
+    let color = if xtree_hot { th.text } else { th.text_dim };
+    p.text(&p.fonts.glyphs_small, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
+    p.text(&p.fonts.ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
 
     let gear = gear_rect(w, h);
     if gear_hot {

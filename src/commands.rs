@@ -60,8 +60,10 @@ pub enum Command {
     SortBy(u8),
     /// Árbol de carpetas lateral: solo existe compilando con la feature `arbol`.
     ToggleTree,
-    /// Árbol de carpetas: fijarlo o dejar que se oculte solo.
+    /// Árbol de carpetas: fijarlo o dejarlo en franja de íconos (se expande al asomar el mouse).
     ToggleTreePin,
+    /// Anclar la carpeta del panel activo al Acceso rápido de Windows, o desanclarla.
+    ToggleQuickPin,
 }
 
 /// ¿La acción existe en esta compilación? (las experimentales dependen de una feature).

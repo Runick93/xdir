@@ -186,6 +186,8 @@ enum Hit {
     Gear,
     /// Botón de grupos guardados de la barra de estado.
     Groups,
+    /// Botón que abre xtree, el mapa de uso de disco.
+    Xtree,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
@@ -326,10 +328,10 @@ struct App {
     group_name: Option<String>,
     /// Grupo al que el nombre que se escriba en la paleta le cambia el nombre (en vez de guardar uno).
     group_rename: Option<String>,
-    /// Cuánto asomó el árbol sin fijar (0 oculto, 100 completo): entra y sale deslizándose.
-    tree_slide: f32,
-    /// El árbol sin fijar se cerró por elegir una carpeta: no vuelve a abrirse mientras el mouse siga encima.
-    tree_dismissed: bool,
+    /// Vigila los cambios del Acceso rápido de Windows para releerlo en el árbol.
+    quick_watch: Option<fs::Watcher>,
+    /// El último clic derecho fue sobre el árbol: la carpeta (si tiene ruta de disco).
+    tree_ctx: Option<Option<PathBuf>>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
@@ -424,6 +426,7 @@ fn main() -> Result<()> {
         let config = if probe.is_none() { Config::load() } else { Config::default() };
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
         anim::set_enabled(config.animations.unwrap_or_else(anim::system_allows));
+        anim::set_off_by_config(config.animations == Some(false));
         let mut app = App {
             hwnd: HWND::default(),
             dpi: 96,
@@ -472,8 +475,8 @@ fn main() -> Result<()> {
             groups: Groups::load(),
             group_name: session.group.clone(),
             group_rename: None,
-            tree_slide: 0.0,
-            tree_dismissed: false,
+            quick_watch: None,
+            tree_ctx: None,
             groups_menu_closed: None,
             palette: None,
             #[cfg(feature = "arbol")]
@@ -503,7 +506,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "arbol")]
         {
             app.tree.visible = session.show_tree;
-            app.tree.pinned = session.tree_pinned;
+            app.tree.set_pinned(session.tree_pinned, false);
         }
         let app = Box::into_raw(Box::new(app));
 
@@ -539,6 +542,8 @@ fn main() -> Result<()> {
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         (*app).sync_visibility();
         (*app).drop_target = drop::register((*app).hwnd).ok();
+        #[cfg(feature = "arbol")]
+        (*app).start_quick_access();
         (*app).marks.push(("ventana creada", ms_since(started)));
         (*app).show();
 
@@ -775,6 +780,20 @@ impl App {
                     self.redraw();
                     LRESULT(0)
                 }
+                // Terminó de leerse el Acceso rápido de Windows (wparam 1), o el vigilante avisó que
+                // cambió (wparam 0): se relee.
+                #[cfg(feature = "arbol")]
+                tree::WM_APP_QUICK => {
+                    if wparam.0 == 1 {
+                        if self.tree.on_quick_loaded() {
+                            self.tree.request_quick(self.hwnd);
+                        }
+                    } else {
+                        self.tree.request_quick(self.hwnd);
+                    }
+                    self.redraw();
+                    LRESULT(0)
+                }
                 // Solo con `--features pruebas`: otro proceso maneja la app por texto (capturas y
                 // pruebas automáticas sin mouse ni teclado reales).
                 #[cfg(feature = "pruebas")]
@@ -801,6 +820,8 @@ impl App {
                 WM_ACTIVATEAPP if wparam.0 != 0 => {
                     // Al volver a la ventana, el lector tiene que leer de nuevo el elemento con foco.
                     self.uia_focus = None;
+                    #[cfg(feature = "arbol")]
+                    self.tree.request_quick(self.hwnd);
                     let fresh = Favorites::load();
                     if fresh != self.favorites {
                         self.favorites = fresh;
@@ -839,6 +860,10 @@ impl App {
                     self.fav_ctx = None;
                     self.header_ctx = None;
                     self.term_ctx = None;
+                    #[cfg(feature = "arbol")]
+                    {
+                        self.tree_ctx = self.tree.contains(x, y).then(|| self.tree.path_at(x, y));
+                    }
                     match self.hit(x, y) {
                         Hit::Pane(i, PaneHit::List) if self.panes[i].tab().list.in_header(x, y) => {
                             self.set_active(i);
@@ -868,6 +893,13 @@ impl App {
                     }
                     if let Some((pane, console)) = self.term_ctx.take().filter(|_| lparam.0 != -1) {
                         self.console_context_menu(pane, console);
+                        return LRESULT(0);
+                    }
+                    #[cfg(feature = "arbol")]
+                    if let Some(target) = self.tree_ctx.take().filter(|_| lparam.0 != -1) {
+                        if let Some(path) = target {
+                            self.tree_context_menu(path, lparam);
+                        }
                         return LRESULT(0);
                     }
                     match self.fav_ctx.take() {
@@ -932,8 +964,8 @@ impl App {
                     self.tracking_mouse = false;
                     self.hover = Hit::None;
                     #[cfg(feature = "arbol")]
-                    if !self.tree.pinned && matches!(self.drag, Drag::None) {
-                        self.tree.open = false;
+                    if matches!(self.drag, Drag::None) {
+                        self.tree.on_mouse_leave();
                     }
                     for p in &mut self.panes {
                         p.tab_mut().list.on_mouse_leave();
@@ -1075,11 +1107,48 @@ impl App {
         true
     }
 
+    /// Lee el Acceso rápido de Windows para el árbol y empieza a vigilar sus cambios.
+    #[cfg(feature = "arbol")]
+    fn start_quick_access(&mut self) {
+        self.tree.request_quick(self.hwnd);
+        self.quick_watch = fs::quick_access_watch_dir().and_then(|dir| fs::Watcher::with_message(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
+    }
+
+    /// Menú contextual nativo de una carpeta del árbol (incluye "Anclar a Acceso rápido" /
+    /// "Desanclar de Acceso rápido"); al cerrarse se relee el Acceso rápido.
+    #[cfg(feature = "arbol")]
+    fn tree_context_menu(&mut self, path: PathBuf, lparam: LPARAM) {
+        let screen = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+        let items = [shell::Item::from(path.clone())];
+        let pinned = self.tree.is_pinned(&path);
+        let chosen = shell::context_menu(self.hwnd, &Location::Path(path.clone()), &items, screen, key_down(VK_SHIFT), false, &[], pinned);
+        if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
+            self.toggle_quick_pin(path);
+        } else if chosen.is_some() {
+            self.tree.request_quick(self.hwnd);
+            self.tree.on_mouse_leave();
+        }
+        self.redraw();
+    }
+
+    /// Ancla la carpeta al Acceso rápido de Windows, o la desancla si ya lo está (verbos nativos
+    /// `pintohome` y `unpinfromhome`), y relee el Acceso rápido.
+    #[cfg(feature = "arbol")]
+    fn toggle_quick_pin(&mut self, path: PathBuf) {
+        // El estado se pregunta de nuevo al Shell: "pintohome" sobre una carpeta ya anclada la desancla.
+        let done = if fs::is_quick_pinned(&path) { shell::unpin_quick_access(self.hwnd, &path) } else { shell::pin_quick_access(self.hwnd, &path) };
+        if done.is_err() {
+            self.notice = Some("No se pudo cambiar el Acceso rápido".into());
+        }
+        self.tree.request_quick(self.hwnd);
+        self.redraw();
+    }
+
     /// Ancho que ocupa el árbol de carpetas a la izquierda (0 si no está o no se compiló).
     fn tree_width(&self) -> f32 {
         #[cfg(feature = "arbol")]
-        if self.tree.visible && self.tree.pinned {
-            return self.tree.width + ui::GAP;
+        if self.tree.visible {
+            return self.tree.layout_width() + ui::GAP;
         }
         0.0
     }
@@ -1096,13 +1165,10 @@ impl App {
             tree::TreeHit::Open(loc) => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 self.tab_mut().navigate(hwnd, &tx, loc);
-                // Sin fijar, elegir una carpeta lo esconde (hasta que el mouse salga y vuelva al borde).
-                if !self.tree.pinned {
-                    self.tree.open = false;
-                    self.tree_dismissed = true;
-                }
             }
             tree::TreeHit::Pin => self.run_command(Command::ToggleTreePin),
+            // La chincheta de una carpeta anclada la desancla, como en el Explorador.
+            tree::TreeHit::Unpin(path) => self.toggle_quick_pin(path),
             tree::TreeHit::Nothing => {}
         }
         self.redraw();
@@ -1349,6 +1415,7 @@ impl App {
     /// Animaciones: la opción de `config.toml` y la preferencia de Windows tienen que permitirlas.
     fn apply_animation_setting(&mut self) {
         anim::set_enabled(self.config.animations.unwrap_or_else(anim::system_allows));
+        anim::set_off_by_config(self.config.animations == Some(false));
         if !anim::enabled() {
             self.layout_anim = None;
         }
@@ -1484,6 +1551,9 @@ impl App {
         if contains(&ui::groups_rect(w, h), x, y) {
             return Hit::Groups;
         }
+        if contains(&ui::xtree_rect(w, h), x, y) {
+            return Hit::Xtree;
+        }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
             return Hit::None;
@@ -1586,6 +1656,7 @@ impl App {
             // clic): no hay que volver a abrirlo.
             Hit::Groups if self.groups_menu_closed.is_some_and(|t| t.elapsed().as_millis() < 300) => self.groups_menu_closed = None,
             Hit::Groups => self.show_groups_menu(),
+            Hit::Xtree => self.open_xtree(),
             Hit::GroupBar(ui::GroupHit::Tab(i)) if double => {
                 if let Some(name) = self.groups.items.get(i).map(|g| g.name.clone()) {
                     self.open_palette(PaletteMode::GroupName);
@@ -1862,26 +1933,11 @@ impl App {
             _ => {}
         }
 
-        #[cfg(feature = "arbol")]
-        if self.tree.visible && !self.tree.pinned && matches!(self.drag, Drag::None) {
-            let (w, h) = self.client_dips();
-            let area = ui::panes_area(w, h, 0.0, self.groups_bar_h());
-            let in_rows = y >= area.top && y <= area.bottom;
-            let inside = in_rows && x <= ui::GAP + self.tree.width + ui::GAP;
-            if self.tree_dismissed && !inside {
-                self.tree_dismissed = false;
-            }
-            let want = !self.tree_dismissed && if self.tree.open { inside } else { in_rows && x <= ui::GAP + 4.0 };
-            if want != self.tree.open {
-                self.tree.open = want;
-                redraw = true;
-            }
-        }
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
         #[cfg(feature = "arbol")]
         {
-            redraw |= self.tree.on_mouse_move(x, y);
+            redraw |= self.tree.on_mouse_move(x, y, !matches!(self.drag, Drag::None));
         }
         if let Some(sg) = &mut self.suggest {
             let h = match hover {
@@ -2080,10 +2136,15 @@ impl App {
             Command::ToggleTreePin => {
                 #[cfg(feature = "arbol")]
                 {
-                    self.begin_layout_anim();
-                    self.tree.pinned = !self.tree.pinned;
-                    // Al soltarlo sigue a la vista hasta que el mouse se vaya.
-                    self.tree.open = !self.tree.pinned;
+                    // El ancho del árbol y el lugar que se le reserva se animan cuadro a cuadro
+                    // (ver `tree.tick` al dibujar); los paneles siguen ese ancho.
+                    self.tree.set_pinned(!self.tree.pinned, true);
+                }
+            }
+            Command::ToggleQuickPin => {
+                #[cfg(feature = "arbol")]
+                if let Location::Path(p) = self.panes[self.active].tab().location.clone() {
+                    self.toggle_quick_pin(p);
                 }
             }
             Command::OpenConfig => {
@@ -2192,6 +2253,18 @@ impl App {
     fn switch_group(&mut self, index: usize) {
         if self.group_name.as_deref().and_then(|n| self.groups.find(n)) != Some(index) {
             self.apply_group(index);
+        }
+    }
+
+    /// Abre xtree (junto a xdir.exe) en la carpeta del panel activo, o en la unidad del sistema.
+    fn open_xtree(&mut self) {
+        let Some(exe) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("xtree.exe"))) else { return };
+        let mut cmd = std::process::Command::new(exe);
+        if let Location::Path(p) = &self.panes[self.active].tab().location {
+            cmd.arg(p);
+        }
+        if cmd.spawn().is_err() {
+            self.notice = Some("No se pudo abrir xtree.exe (tiene que estar junto a xdir.exe)".into());
         }
     }
 
@@ -2680,14 +2753,25 @@ impl App {
             .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
             .collect();
         let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
-        vec![
+        let mut entries = vec![
             Entry::Sub("Ver".into(), views),
             Entry::Sub("Ordenar por".into(), sorts),
             item("Actualizar", Command::Refresh, true, false),
             Entry::Sep,
             item("Pegar", Command::Paste, true, false),
             undo,
-        ]
+        ];
+        // Anclar la carpeta que se está viendo al Acceso rápido de Windows (el menú del fondo del
+        // Shell no trae ese verbo).
+        #[cfg(feature = "arbol")]
+        if let Location::Path(p) = &self.panes[pane].tab().location {
+            if pane == self.active && p.parent().is_some() {
+                let label = if self.tree.is_pinned(p) { "Desanclar de Acceso rápido" } else { "Anclar a Acceso rápido" };
+                entries.push(Entry::Sep);
+                entries.push(item(label, Command::ToggleQuickPin, true, false));
+            }
+        }
+        entries
     }
 
     fn on_context_menu(&mut self, lparam: LPARAM) {
@@ -2714,7 +2798,26 @@ impl App {
         let own = if items.is_empty() && intercept { self.background_entries(pane, &mut cmds) } else { Vec::new() };
         let before: Option<std::collections::HashSet<String>> = (items.is_empty() && matches!(location, Location::Path(_)))
             .then(|| self.panes[pane].tab().list.entries.iter().map(|e| e.display.to_lowercase()).collect());
-        let chosen = shell::context_menu(self.hwnd, &location, &items, screen, key_down(VK_SHIFT), intercept, &own);
+        // Una sola carpeta anclada: su menú dice "Desanclar de Acceso rápido".
+        #[cfg(feature = "arbol")]
+        let pinned_one = match items.as_slice() {
+            [one] if one.pidl.is_none() && one.path.is_dir() => self.tree.is_pinned(&one.path).then(|| one.path.clone()),
+            _ => None,
+        };
+        #[cfg(not(feature = "arbol"))]
+        let pinned_one: Option<PathBuf> = None;
+        let chosen = shell::context_menu(self.hwnd, &location, &items, screen, key_down(VK_SHIFT), intercept, &own, pinned_one.is_some());
+        #[cfg(feature = "arbol")]
+        if let (Some(shell::UNPIN_QUICK), Some(path)) = (chosen.as_deref(), pinned_one) {
+            self.toggle_quick_pin(path);
+            self.redraw();
+            return;
+        }
+        // El menú del Shell puede haber anclado o desanclado una carpeta del Acceso rápido.
+        #[cfg(feature = "arbol")]
+        if chosen.as_deref() == Some("shell") {
+            self.tree.request_quick(self.hwnd);
+        }
         if let (Some("shell"), Some(before)) = (chosen.as_deref(), before) {
             self.new_watch = Some(NewWatch { pane, before, since: Instant::now() });
         }
@@ -3682,10 +3785,16 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        // El ancho del árbol se anima al colapsar o expandir: se avanza antes de calcular el layout.
+        let now = Instant::now();
+        let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
+        #[cfg(feature = "arbol")]
+        let tree_animating = self.tree.tick(dt);
+        #[cfg(not(feature = "arbol"))]
+        let tree_animating = false;
         let tree_w = self.tree_width();
         let groups_h = self.groups_bar_h();
         let tree_on = self.tree_visible();
-        let tree_slide = self.tree_slide;
         #[cfg(feature = "arbol")]
         let current_folder = self.panes[self.active].tab().location.target();
         // Animaciones: rectángulos de este frame (transición de layout) y scroll suave de las
@@ -3693,16 +3802,9 @@ impl App {
         let (cw, ch) = self.client_dips();
         let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w, groups_h), self.splits);
         let (rects, mut animating) = self.animated_rects(target);
-        let now = Instant::now();
-        let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
+        animating |= tree_animating;
         for i in self.shown_panes() {
             animating |= self.panes[i].tab_mut().list.tick(dt);
-        }
-        #[cfg(feature = "arbol")]
-        {
-            let target = if self.tree.pinned || self.tree.open { 100.0 } else { 0.0 };
-            self.tree_slide = if anim::enabled() && !self.tree.pinned { anim::smooth(self.tree_slide, target, dt) } else { target };
-            animating |= self.tree_slide != target;
         }
         self.last_frame = animating.then_some(now);
         for p in &mut self.panes {
@@ -3764,23 +3866,15 @@ impl App {
                     panes[i].draw_tab_drop(p, at);
                 }
             }
-            // El árbol va encima de los paneles: fijo ocupa su lugar a la izquierda; sin fijar aparece
-            // superpuesto, con sombra, y mientras está oculto deja una marca en el borde.
+            // El árbol ocupa su lugar a la izquierda de los paneles: fijo, con su ancho; suelto, una
+            // franja de íconos que al asomar el mouse se expande encima de los paneles (con sombra).
             #[cfg(feature = "arbol")]
             if tree.visible {
-                let mut r = render::rect(ui::GAP, area.top, ui::GAP + tree.width, area.bottom);
-                if tree.shown() || tree_slide > 0.0 {
-                    // Sin fijar entra y sale deslizándose desde el borde izquierdo.
-                    let off = if tree.pinned { 0.0 } else { -(1.0 - anim::ease_out(tree_slide / 100.0)) * (tree.width + ui::GAP) };
-                    r = render::rect(r.left + off, r.top, r.right + off, r.bottom);
-                    if !tree.pinned {
-                        p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme.background, 0.45));
-                    }
-                    tree.draw(p, r, current_folder.as_deref());
-                } else {
-                    let mid = (area.top + area.bottom) / 2.0;
-                    p.round_fill(render::rect(1.0, mid - 22.0, 4.0, mid + 22.0), 1.5, theme::alpha(p.theme.text_dim, 0.5));
+                let r = render::rect(ui::GAP, area.top, ui::GAP + tree.width_now(), area.bottom);
+                if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
+                    p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme.background, 0.45));
                 }
+                tree.draw(p, r, current_folder.as_deref());
             }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);
@@ -3800,7 +3894,7 @@ impl App {
                 Hit::Layout(l) => Some(l),
                 _ => None,
             };
-            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups);
+            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups, hover == Hit::Xtree);
             if let Some(pane) = term_menu {
                 let term_hover = match hover {
                     Hit::TermMenu(c) => c,

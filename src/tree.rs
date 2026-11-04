@@ -4,6 +4,11 @@
 //! Panel a la izquierda de la ventana que navega el panel activo. Arranca con la carpeta del
 //! usuario y las unidades; las subcarpetas se leen al expandir un nodo, en un hilo aparte (una
 //! unidad de red lenta no congela la ventana), y el resultado vuelve con `WM_APP_TREE`.
+//!
+//! La barra se puede fijar (expandida, al lado de los paneles) o soltar: suelta queda una franja
+//! angosta con solo los íconos y, al asomar el mouse, se expande encima de los paneles. La sección
+//! "Acceso rápido" se lee del propio Shell (`fs::quick_access`) y se vuelve a leer en un hilo
+//! cuando cambia (`WM_APP_QUICK`).
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -12,17 +17,22 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
-use crate::fs::Location;
+use crate::anim;
+use crate::fs::{Location, QuickItem};
 use crate::render::{Painter, Rect, contains, rect};
-use crate::theme::alpha;
+use crate::theme::{Theme, alpha};
 
 /// Terminó de leerse una carpeta del árbol.
 pub const WM_APP_TREE: u32 = WM_APP + 20;
+/// Terminó de leerse el Acceso rápido de Windows (o el watcher avisó que cambió).
+pub const WM_APP_QUICK: u32 = WM_APP + 21;
 
 /// Ancho inicial del panel; se puede cambiar arrastrando su borde derecho.
 pub const WIDTH: f32 = 240.0;
 pub const MIN_W: f32 = 160.0;
 pub const MAX_W: f32 = 560.0;
+/// Ancho de la franja colapsada (solo íconos).
+pub const COLLAPSED_W: f32 = 48.0;
 /// Grosor de las barras de desplazamiento y lugar que ocupan al pie / al costado.
 const BAR: f32 = 6.0;
 const BAR_ROOM: f32 = 12.0;
@@ -30,9 +40,12 @@ const ROW_H: f32 = 32.0;
 const INDENT: f32 = 18.0;
 /// Margen a los costados de las filas.
 const SIDE: f32 = 8.0;
-/// Margen entre el borde de arriba y la primera fila.
-/// Franja de arriba: título y chincheta; las filas arrancan debajo.
+/// Franja de arriba: título y botón de colapsar; las filas arrancan debajo.
 const TOP_PAD: f32 = 32.0;
+/// Duración de la animación del ancho al fijar, soltar y expandir.
+const SLIDE_SECS: f32 = 0.32;
+/// Máximo de carpetas del Acceso rápido que se muestran.
+const QUICK_MAX: usize = 20;
 
 /// Qué es una fila, para su ícono y lo que abre.
 #[derive(Clone, Copy, PartialEq)]
@@ -42,11 +55,13 @@ enum Kind {
     Pinned,
     /// OneDrive.
     Cloud,
-    /// Inicio y Galería: lugares del Shell sin subcarpetas en el árbol (posición en `PLACES`).
-    Place,
+    /// "Inicio": lleva a "Este equipo"; sin subcarpetas en el árbol.
+    Home,
     Drive,
     /// "Este equipo": no es una ruta.
     Computer,
+    /// "Acceso rápido": agrupa las carpetas ancladas y frecuentes de Windows; no es una ruta.
+    QuickAccess,
     /// "Red" y "Linux": carpetas virtuales del Shell (el nombre de análisis va en `path`).
     Network,
     Linux,
@@ -68,13 +83,46 @@ const PINNED: [(&str, &str, (f32, f32, f32)); 6] = [
     ("Vídeos", "\u{E714}", (0.70, 0.45, 0.90)),
 ];
 
-/// Lugares fijos de arriba: nombre y nombre de análisis del Shell (Inicio, Galería).
-const PLACES: [(&str, &str); 2] = [
-    ("Inicio", "::{679F85CB-0220-4080-B29B-5540CC05AAB6}"),
-    ("Galería", "::{E88865EA-0E1C-4E20-9AA6-EDCD0212C87C}"),
-];
-/// Íconos de `PLACES`.
-const PLACE_ICONS: [(&str, (f32, f32, f32)); 2] = [("\u{E80F}", (0.95, 0.60, 0.30)), ("\u{E91B}", (0.35, 0.60, 0.95))];
+/// Chincheta: carpeta anclada al Acceso rápido.
+const PIN_GLYPH: &str = "\u{E840}";
+
+/// Valor animado (0..100) con curva suave: va de donde está al destino nuevo en `SLIDE_SECS`.
+#[derive(Clone, Copy)]
+struct Slide {
+    value: f32,
+    from: f32,
+    to: f32,
+    t: f32,
+}
+
+impl Slide {
+    fn at(v: f32) -> Self {
+        Self { value: v, from: v, to: v, t: SLIDE_SECS }
+    }
+
+    /// Salta al valor sin animar.
+    fn jump(&mut self, v: f32) {
+        *self = Self::at(v);
+    }
+
+    /// Avanza `dt` segundos hacia `target`. Devuelve si sigue en curso.
+    fn tick(&mut self, target: f32, dt: f32) -> bool {
+        if !anim::slide_enabled() {
+            self.jump(target);
+            return false;
+        }
+        // Un destino nuevo (también a mitad de camino) arranca de donde está ahora.
+        if target != self.to {
+            (self.from, self.to, self.t) = (self.value, target, 0.0);
+        }
+        self.t = (self.t + dt).min(SLIDE_SECS);
+        let k = self.t / SLIDE_SECS;
+        // Arranca y frena despacio (ease in-out cúbico): sin tirón al empezar ni al llegar.
+        let eased = if k < 0.5 { 4.0 * k * k * k } else { 1.0 - (-2.0 * k + 2.0).powi(3) / 2.0 };
+        self.value = anim::lerp(self.from, self.to, eased);
+        self.t < SLIDE_SECS
+    }
+}
 
 /// Barra de desplazamiento del panel.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -92,11 +140,31 @@ struct Node {
     name: String,
     /// Posición en `PINNED` si es una carpeta fijada.
     pin: usize,
+    /// Está anclada al Acceso rápido de Windows (con su chincheta).
+    pinned: bool,
     depth: usize,
     /// None: sin leer todavía. Some(vacío): no tiene subcarpetas.
     children: Option<Vec<usize>>,
     expanded: bool,
     loading: bool,
+}
+
+impl Node {
+    fn new(kind: Kind, path: PathBuf, name: String, depth: usize) -> Self {
+        Self { text_w: 0.0, kind, path, name, pin: 0, pinned: false, depth, children: None, expanded: false, loading: false }
+    }
+
+    /// Lo que abre en el panel activo (None si no es navegable).
+    fn location(&self) -> Option<Location> {
+        match self.kind {
+            Kind::Separator | Kind::QuickAccess => None,
+            Kind::Computer | Kind::Home => Some(Location::Computer),
+            Kind::Network | Kind::Linux => {
+                Some(Location::Shell { parsing: self.path.to_string_lossy().into_owned(), name: self.name.clone(), parent: None })
+            }
+            _ => Some(Location::Path(self.path.clone())),
+        }
+    }
 }
 
 /// Qué tocó un clic.
@@ -105,24 +173,33 @@ pub enum TreeHit {
     Toggle(usize),
     /// Abrir la carpeta en el panel activo.
     Open(Location),
-    /// La chincheta: fijar el árbol o dejar que se oculte solo.
+    /// La chincheta: fijar la barra o dejar que quede en franja.
     Pin,
+    /// La chincheta de una carpeta anclada: la desancla del Acceso rápido (como en el Explorador).
+    Unpin(PathBuf),
     Nothing,
 }
 
 pub struct Tree {
     pub visible: bool,
-    /// Fijo al lado de los paneles; si no, se oculta y aparece encima al tocar el borde izquierdo.
+    /// Fija al lado de los paneles; si no, queda la franja de íconos y se expande encima al asomar el mouse.
     pub pinned: bool,
-    /// Sin fijar: se está mostrando encima de los paneles.
-    pub open: bool,
-    pin_hot: bool,
+    /// Sin fijar: el mouse está encima y se muestra expandida.
+    open: bool,
+    /// Avance de la animación: 0 franja de íconos, 100 expandida.
+    expand: Slide,
+    /// Lugar que se le reserva a los paneles (fija: el ancho; suelta: la franja). Se anima aparte
+    /// para que los paneles se acomoden con suavidad aunque la barra siga expandida encima.
+    lay: Slide,
+    toggle_hot: bool,
+    /// Fila cuya chincheta tiene el mouse encima.
+    pin_hover: Option<usize>,
     nodes: Vec<Node>,
     roots: Vec<usize>,
     scroll: f32,
     /// Desplazamiento horizontal.
     hscroll: f32,
-    /// Ancho del panel (cambiable).
+    /// Ancho del panel expandido (cambiable).
     pub width: f32,
     /// Lo que ocupa el contenido y lo que se ve, del último cuadro.
     content_w: f32,
@@ -134,14 +211,33 @@ pub struct Tree {
     vthumb: Rect,
     hover: Option<usize>,
     area: Rect,
+    /// Carpetas del usuario que ya están arriba (no se repiten en el Acceso rápido).
+    known: Vec<PathBuf>,
+    /// Rutas ancladas al Acceso rápido de Windows, de la última lectura.
+    pinned_paths: Vec<PathBuf>,
+    quick_loading: bool,
+    quick_dirty: bool,
     tx: Sender<(usize, Vec<(String, PathBuf)>)>,
     rx: Receiver<(usize, Vec<(String, PathBuf)>)>,
+    qtx: Sender<Vec<QuickItem>>,
+    qrx: Receiver<Vec<QuickItem>>,
 }
 
 impl Tree {
     pub fn new() -> Self {
         let (tx, rx) = channel();
-        let mut t = Self { visible: false, pinned: true, open: false, pin_hot: false, nodes: Vec::new(), roots: Vec::new(), scroll: 0.0,
+        let (qtx, qrx) = channel();
+        let mut t = Self {
+            visible: false,
+            pinned: true,
+            open: false,
+            expand: Slide::at(100.0),
+            lay: Slide::at(100.0),
+            toggle_hot: false,
+            pin_hover: None,
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            scroll: 0.0,
             hscroll: 0.0,
             width: WIDTH,
             content_w: 0.0,
@@ -153,36 +249,37 @@ impl Tree {
             vthumb: rect(0.0, 0.0, 0.0, 0.0),
             hover: None,
             area: rect(0.0, 0.0, 0.0, 0.0),
+            known: Vec::new(),
+            pinned_paths: Vec::new(),
+            quick_loading: false,
+            quick_dirty: false,
             tx,
             rx,
+            qtx,
+            qrx,
         };
-        // Como el panel de navegación del Explorador: Inicio, Galería y OneDrive.
-        for (i, (name, parsing)) in PLACES.iter().enumerate() {
-            if crate::fs::shell_place_exists(parsing) {
-                t.add_root(Kind::Place, PathBuf::from(parsing), (*name).to_string(), i);
-                let id = t.nodes.len() - 1;
-                t.nodes[id].children = Some(Vec::new());
-            }
-        }
+        // Inicio (lleva a "Este equipo") y OneDrive.
+        t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
+        let home = t.roots[t.roots.len() - 1];
+        t.nodes[home].children = Some(Vec::new());
         if let Some(cloud) = std::env::var_os("OneDrive").map(PathBuf::from).filter(|p| p.is_dir()) {
             t.add_root(Kind::Cloud, cloud, "OneDrive".to_string(), 0);
         }
         t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
-        // Acceso rápido: carpetas del usuario y, después, las ancladas o frecuentes del Explorador.
-        let before = t.roots.len();
-        let mut known = Vec::new();
+        // Carpetas del usuario, como en el Explorador.
         for (i, (name, ..)) in PINNED.iter().enumerate() {
             if let Some(path) = crate::fs::user_folder(i) {
-                known.push(path.clone());
+                t.known.push(path.clone());
                 t.add_root(Kind::Pinned, path, (*name).to_string(), i);
             }
         }
-        for (name, path) in crate::fs::quick_access().into_iter().filter(|(_, p)| !known.iter().any(|k| crate::fs::same_path(k, p))).take(12) {
-            t.add_root(Kind::Folder, path, name, 0);
-        }
-        if t.roots.len() > before {
-            t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
-        }
+        // Acceso rápido de Windows: ya abierto; sus carpetas llegan de `request_quick` (en otro hilo).
+        t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
+        t.add_root(Kind::QuickAccess, PathBuf::new(), "Acceso rápido".to_string(), 0);
+        let quick = t.roots[t.roots.len() - 1];
+        t.nodes[quick].expanded = true;
+        t.nodes[quick].children = Some(Vec::new());
+        t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
         // "Este equipo", ya abierto, con sus unidades.
         t.add_root(Kind::Computer, PathBuf::new(), "Este equipo".to_string(), 0);
         let computer = t.roots[t.roots.len() - 1];
@@ -195,6 +292,71 @@ impl Tree {
         }
         t
     }
+
+    // ---------- Acceso rápido ----------
+
+    /// Vuelve a leer el Acceso rápido de Windows en otro hilo (si ya hay una lectura en curso,
+    /// se repite al terminar).
+    pub fn request_quick(&mut self, hwnd: HWND) {
+        if self.quick_loading {
+            self.quick_dirty = true;
+            return;
+        }
+        self.quick_loading = true;
+        let (tx, hwnd) = (self.qtx.clone(), hwnd.0 as usize);
+        std::thread::spawn(move || {
+            let items = crate::fs::quick_access();
+            if tx.send(items).is_ok() {
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_QUICK, WPARAM(1), LPARAM(0));
+                }
+            }
+        });
+    }
+
+    /// Aplica la lectura terminada del Acceso rápido. Devuelve si hay que pedir otra (cambió
+    /// algo mientras se leía).
+    pub fn on_quick_loaded(&mut self) -> bool {
+        self.quick_loading = false;
+        let mut last = None;
+        while let Ok(items) = self.qrx.try_recv() {
+            last = Some(items);
+        }
+        if let Some(items) = last {
+            self.apply_quick(items);
+        }
+        std::mem::take(&mut self.quick_dirty)
+    }
+
+    /// Rearma las carpetas del grupo "Acceso rápido" (sin repetir las del usuario que ya están
+    /// arriba) y recuerda cuáles están ancladas, para ponerles la chincheta.
+    fn apply_quick(&mut self, items: Vec<QuickItem>) {
+        self.pinned_paths = items.iter().filter(|i| i.pinned).map(|i| i.path.clone()).collect();
+        let Some(&quick) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::QuickAccess) else { return };
+        let old = self.nodes[quick].children.clone().unwrap_or_default();
+        let mut ids = Vec::new();
+        let shown = items.into_iter().filter(|i| !self.known.iter().any(|k| crate::fs::same_path(k, &i.path))).take(QUICK_MAX);
+        for (n, item) in shown.enumerate() {
+            let mut node = Node::new(Kind::Folder, item.path, item.name, 1);
+            node.pinned = item.pinned;
+            // Se reusa el hueco del nodo anterior en esa posición, para no crecer con cada lectura.
+            if let Some(&id) = old.get(n) {
+                self.nodes[id] = node;
+                ids.push(id);
+            } else {
+                self.nodes.push(node);
+                ids.push(self.nodes.len() - 1);
+            }
+        }
+        self.nodes[quick].children = Some(ids);
+    }
+
+    /// ¿Está esa carpeta anclada al Acceso rápido de Windows (según la última lectura)?
+    pub fn is_pinned(&self, path: &Path) -> bool {
+        self.pinned_paths.iter().any(|p| crate::fs::same_path(p, path))
+    }
+
+    // ---------- unidades ----------
 
     /// Vuelve a leer las unidades de "Este equipo" (se enchufó o quitó una): las que siguen
     /// conservan su estado, las nuevas se agregan en su lugar.
@@ -215,7 +377,7 @@ impl Tree {
                 self.nodes[id].text_w = 0.0;
                 ids.push(id);
             } else {
-                self.nodes.push(Node { kind: Kind::Drive, path, name, pin: 0, depth: 1, children: None, expanded: false, loading: false, text_w: 0.0 });
+                self.nodes.push(Node::new(Kind::Drive, path, name, 1));
                 ids.push(self.nodes.len() - 1);
             }
         }
@@ -223,11 +385,14 @@ impl Tree {
     }
 
     fn add_root(&mut self, kind: Kind, path: PathBuf, name: String, pin: usize) {
-        self.nodes.push(Node { kind, path, name, pin, depth: 0, children: None, expanded: false, loading: false, text_w: 0.0 });
+        let mut node = Node::new(kind, path, name, 0);
+        node.pin = pin;
+        self.nodes.push(node);
         self.roots.push(self.nodes.len() - 1);
     }
 
-    /// Nodos a la vista, en orden (los hijos de los expandidos, recursivamente).
+    /// Nodos a la vista, en orden (los hijos de los expandidos, recursivamente; son los mismos con
+    /// la barra fija o en franja, así nada se corre cuando se expande). Sin el Acceso rápido si está vacío ni separadores repetidos.
     fn rows(&self) -> Vec<usize> {
         fn walk(t: &Tree, ids: &[usize], out: &mut Vec<usize>) {
             for &id in ids {
@@ -240,10 +405,77 @@ impl Tree {
                 }
             }
         }
-        let mut out = Vec::new();
-        walk(self, &self.roots, &mut out);
+        let mut raw = Vec::new();
+        walk(self, &self.roots, &mut raw);
+        let mut out: Vec<usize> = Vec::with_capacity(raw.len());
+        for id in raw {
+            let n = &self.nodes[id];
+            if n.kind == Kind::QuickAccess && n.children.as_ref().is_some_and(|c| c.is_empty()) {
+                continue;
+            }
+            if n.kind == Kind::Separator && out.last().is_none_or(|&l| self.nodes[l].kind == Kind::Separator) {
+                continue;
+            }
+            out.push(id);
+        }
+        while out.last().is_some_and(|&l| self.nodes[l].kind == Kind::Separator) {
+            out.pop();
+        }
         out
     }
+
+    // ---------- fijar / franja ----------
+
+    /// Ancho que ocupa ahora (entre la franja y el ancho completo, según la animación).
+    pub fn width_now(&self) -> f32 {
+        COLLAPSED_W + (self.width - COLLAPSED_W) * (self.expand.value / 100.0).clamp(0.0, 1.0)
+    }
+
+    /// Ancho que se le reserva a la izquierda de los paneles: fija, el que tiene ahora; suelta,
+    /// solo la franja (al expandirse se superpone).
+    pub fn layout_width(&self) -> f32 {
+        COLLAPSED_W + (self.width - COLLAPSED_W) * (self.lay.value / 100.0).clamp(0.0, 1.0)
+    }
+
+    /// Fija o suelta; sin `animate` salta al final (al arrancar). Al soltarla sigue expandida
+    /// hasta que el mouse se vaya.
+    pub fn set_pinned(&mut self, pinned: bool, animate: bool) {
+        self.pinned = pinned;
+        self.open = !pinned && animate;
+        self.hover = None;
+        if !animate {
+            let v = if pinned { 100.0 } else { 0.0 };
+            self.expand.jump(v);
+            self.lay.jump(v);
+        }
+    }
+
+    /// Avanza la animación del ancho. Devuelve si sigue en curso.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let shown = if self.pinned || self.open { 100.0 } else { 0.0 };
+        let reserved = if self.pinned { 100.0 } else { 0.0 };
+        let a = self.expand.tick(shown, dt);
+        let b = self.lay.tick(reserved, dt);
+        a || b
+    }
+
+    /// Expandida del todo (con el ancho a mano y las barras de desplazamiento).
+    fn settled(&self) -> bool {
+        self.expand.value >= 99.9
+    }
+
+    /// ¿Se ve (y responde) la chincheta de arriba? No en la franja de íconos.
+    fn pin_btn_shown(&self) -> bool {
+        self.expand.value >= 50.0
+    }
+
+    fn toggle_rect(&self) -> Rect {
+        let e = (self.expand.value / 100.0).clamp(0.0, 1.0);
+        let left = anim::lerp(self.area.left + (COLLAPSED_W - 24.0) / 2.0, self.area.right - 30.0, e);
+        rect(left, self.area.top + 4.0, left + 24.0, self.area.top + 28.0)
+    }
+
+    // ---------- lectura de subcarpetas ----------
 
     /// Expande o contrae; la primera vez lee las subcarpetas en otro hilo.
     pub fn toggle(&mut self, hwnd: HWND, id: usize, show_hidden: bool) {
@@ -252,19 +484,28 @@ impl Tree {
             return;
         }
         n.expanded = !n.expanded;
-        if n.expanded && n.children.is_none() && !n.loading {
-            n.loading = true;
-            let (tx, path, virt) = (self.tx.clone(), n.path.clone(), matches!(n.kind, Kind::Network | Kind::Linux));
-            let hwnd = hwnd.0 as usize;
-            std::thread::spawn(move || {
-                let dirs = if virt { crate::fs::shell_subfolders(&path.to_string_lossy()) } else { subfolders(&path, show_hidden) };
-                if tx.send((id, dirs)).is_ok() {
-                    unsafe {
-                        let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_TREE, WPARAM(0), LPARAM(0));
-                    }
-                }
-            });
+        if n.expanded {
+            self.load_children(hwnd, id, show_hidden);
         }
+    }
+
+    /// Lee las subcarpetas de un nodo en otro hilo, si todavía no se leyeron.
+    fn load_children(&mut self, hwnd: HWND, id: usize, show_hidden: bool) {
+        let n = &mut self.nodes[id];
+        if n.children.is_some() || n.loading {
+            return;
+        }
+        n.loading = true;
+        let (tx, path, virt) = (self.tx.clone(), n.path.clone(), matches!(n.kind, Kind::Network | Kind::Linux));
+        let hwnd = hwnd.0 as usize;
+        std::thread::spawn(move || {
+            let dirs = if virt { crate::fs::shell_subfolders(&path.to_string_lossy()) } else { subfolders(&path, show_hidden) };
+            if tx.send((id, dirs)).is_ok() {
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_TREE, WPARAM(0), LPARAM(0));
+                }
+            }
+        });
     }
 
     /// Aplica las lecturas terminadas.
@@ -273,7 +514,7 @@ impl Tree {
             let depth = self.nodes[id].depth + 1;
             let mut ids = Vec::with_capacity(dirs.len());
             for (name, path) in dirs {
-                self.nodes.push(Node { kind: Kind::Folder, path, name, pin: 0, depth, children: None, expanded: false, loading: false, text_w: 0.0 });
+                self.nodes.push(Node::new(Kind::Folder, path, name, depth));
                 ids.push(self.nodes.len() - 1);
             }
             let n = &mut self.nodes[id];
@@ -281,6 +522,8 @@ impl Tree {
             n.loading = false;
         }
     }
+
+    // ---------- mouse ----------
 
     /// Nodo de la fila bajo `y` (las filas arrancan `TOP_PAD` debajo del borde).
     fn node_at(&self, y: f32) -> Option<usize> {
@@ -295,44 +538,65 @@ impl Tree {
         if !contains(&self.area, x, y) {
             return TreeHit::Nothing;
         }
-        if contains(&self.pin_rect(), x, y) {
+        if self.pin_btn_shown() && contains(&self.toggle_rect(), x, y) {
             return TreeHit::Pin;
         }
         let Some(id) = self.node_at(y) else { return TreeHit::Nothing };
         let n = &self.nodes[id];
+        if self.settled() && self.shows_pin(n) && self.on_row_pin(x) {
+            return TreeHit::Unpin(n.path.clone());
+        }
         let chevron_right = self.area.left + SIDE + 2.0 + n.depth as f32 * INDENT + 18.0 - self.hscroll;
         match n.kind {
             Kind::Separator => TreeHit::Nothing,
-            _ if x < chevron_right => TreeHit::Toggle(id),
-            Kind::Computer => TreeHit::Open(Location::Computer),
-            Kind::Network | Kind::Linux | Kind::Place => {
-                TreeHit::Open(Location::Shell { parsing: n.path.to_string_lossy().into_owned(), name: n.name.clone(), parent: None })
-            }
-            _ => TreeHit::Open(Location::Path(n.path.clone())),
+            _ if self.settled() && x < chevron_right => TreeHit::Toggle(id),
+            // El grupo no es una carpeta: al tocarlo se abre o cierra.
+            Kind::QuickAccess => TreeHit::Toggle(id),
+            _ => n.location().map_or(TreeHit::Nothing, TreeHit::Open),
         }
     }
 
-    /// Se ve ahora: encendido y, si no está fijo, desplegado sobre los paneles.
-    pub fn shown(&self) -> bool {
-        self.visible && (self.pinned || self.open)
+    /// Ruta de disco del elemento bajo el mouse, para su menú contextual.
+    pub fn path_at(&self, x: f32, y: f32) -> Option<PathBuf> {
+        if !(contains(&self.area, x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        let id = self.node_at(y)?;
+        let n = &self.nodes[id];
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive).then(|| n.path.clone())
     }
 
-    fn pin_rect(&self) -> Rect {
-        rect(self.area.right - 30.0, self.area.top + 4.0, self.area.right - 6.0, self.area.top + 28.0)
+    /// Se ve ahora.
+    pub fn shown(&self) -> bool {
+        self.visible
     }
 
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        self.shown() && contains(&self.area, x, y)
+        self.visible && contains(&self.area, x, y)
     }
 
-    pub fn on_mouse_move(&mut self, x: f32, y: f32) -> bool {
-        let inside = self.shown() && contains(&self.area, x, y);
+    /// `keep_open`: hay un arrastre en curso (no se abre ni se cierra la franja).
+    pub fn on_mouse_move(&mut self, x: f32, y: f32, keep_open: bool) -> bool {
+        let inside = self.visible && contains(&self.area, x, y);
         let hover = if inside && y >= self.area.top + TOP_PAD { self.node_at(y) } else { None };
-        let pin_hot = inside && contains(&self.pin_rect(), x, y);
-        let changed = hover != self.hover || pin_hot != self.pin_hot;
+        let toggle_hot = inside && self.pin_btn_shown() && contains(&self.toggle_rect(), x, y);
+        // Sin fijar, asomar el mouse sobre la franja la expande; al salir vuelve a la franja.
+        let open = if !self.pinned && self.visible && !keep_open { inside } else { self.open };
+        let pin_hover = hover.filter(|&id| self.settled() && self.shows_pin(&self.nodes[id]) && self.on_row_pin(x));
+        let changed = hover != self.hover || toggle_hot != self.toggle_hot || open != self.open || pin_hover != self.pin_hover;
+        self.pin_hover = pin_hover;
         self.hover = hover;
-        self.pin_hot = pin_hot;
+        self.toggle_hot = toggle_hot;
+        self.open = open;
         changed
+    }
+
+    /// El mouse salió de la ventana.
+    pub fn on_mouse_leave(&mut self) {
+        self.hover = None;
+        self.toggle_hot = false;
+        self.pin_hover = None;
+        self.open = false;
     }
 
     pub fn on_wheel(&mut self, rows: f32) {
@@ -349,12 +613,17 @@ impl Tree {
     }
 
     fn max_hscroll(&self) -> f32 {
-        (self.content_w - self.view_w).max(0.0)
+        if self.settled() { (self.content_w - self.view_w).max(0.0) } else { 0.0 }
     }
 
-    /// El borde derecho, donde se agarra para cambiar el ancho.
+    /// El borde derecho, donde se agarra para cambiar el ancho (solo expandida).
     pub fn edge_at(&self, x: f32, y: f32) -> bool {
-        self.shown() && y >= self.area.top && y <= self.area.bottom && x >= self.area.right - 3.0 && x <= self.area.right + crate::ui::GAP + 1.0
+        self.visible
+            && self.settled()
+            && y >= self.area.top
+            && y <= self.area.bottom
+            && x >= self.area.right - 3.0
+            && x <= self.area.right + crate::ui::GAP + 1.0
     }
 
     pub fn set_width(&mut self, w: f32) {
@@ -397,10 +666,42 @@ impl Tree {
         }
     }
 
+    // ---------- dibujo ----------
+
+    /// Ícono y color de un nodo.
+    fn icon(&self, n: &Node, th: &Theme) -> (&'static str, D2D1_COLOR_F) {
+        match n.kind {
+            Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
+            Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
+            Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
+            Kind::QuickAccess => ("\u{E734}", rgb(0.95, 0.75, 0.25)),
+            Kind::Drive => ("\u{EDA2}", th.text_dim),
+            Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),
+            Kind::Linux => ("\u{E756}", th.text_dim),
+            Kind::Pinned => {
+                let (_, glyph, (r, g, b)) = PINNED[n.pin];
+                (glyph, rgb(r, g, b))
+            }
+            _ => ("\u{E8D5}", rgb(1.0, 0.79, 0.28)),
+        }
+    }
+
+    /// ¿Está `x` sobre el lugar de la chincheta de una fila?
+    fn on_row_pin(&self, x: f32) -> bool {
+        let right = self.area.left + self.view_w - SIDE;
+        x >= right - 28.0 && x <= right - 2.0
+    }
+
+    /// ¿Lleva la chincheta? (anclada en el Acceso rápido de Windows, esté arriba o abajo).
+    fn shows_pin(&self, n: &Node) -> bool {
+        n.pinned || (n.kind == Kind::Pinned && self.is_pinned(&n.path))
+    }
+
     /// `current`: carpeta del panel activo, resaltada si está a la vista.
     pub fn draw(&mut self, p: &Painter, area: Rect, current: Option<&Path>) {
         self.area = area;
         let th = p.theme;
+        let e = (self.expand.value / 100.0).clamp(0.0, 1.0);
         p.round_fill(area, 8.0, th.surface);
         let rows = self.rows();
         // Lo que ocupa cada fila de ancho (se mide una sola vez por nodo).
@@ -415,7 +716,8 @@ impl Tree {
             }
             content_w = content_w.max(SIDE + 2.0 + n.depth as f32 * INDENT + 48.0 + n.text_w + SIDE + 8.0);
         }
-        // Qué barras hacen falta (una puede hacer necesaria la otra).
+        // Qué barras hacen falta (una puede hacer necesaria la otra). Colapsada o a mitad de la
+        // animación no hay barra horizontal.
         let total_h = rows.len() as f32 * ROW_H + TOP_PAD;
         let (full_w, full_h) = (area.right - area.left, area.bottom - area.top);
         let mut view_w = full_w;
@@ -424,7 +726,8 @@ impl Tree {
         if need_v {
             view_w -= BAR_ROOM;
         }
-        let need_h = content_w > view_w;
+        let allow_h = self.settled();
+        let need_h = allow_h && content_w > view_w;
         if need_h {
             view_h -= BAR_ROOM;
             if !need_v && total_h > view_h {
@@ -432,14 +735,19 @@ impl Tree {
                 view_w -= BAR_ROOM;
             }
         }
+        // En la franja no hay barras: se desplaza con la rueda.
+        if !allow_h {
+            need_v = false;
+            view_w = full_w;
+        }
         self.content_w = content_w;
         self.view_w = view_w;
         self.view_h = view_h;
         self.scroll = self.scroll.clamp(0.0, (total_h - view_h).max(0.0));
-        self.hscroll = self.hscroll.clamp(0.0, (content_w - view_w).max(0.0));
+        self.hscroll = self.hscroll.clamp(0.0, if allow_h { (content_w - view_w).max(0.0) } else { 0.0 });
         let hs = self.hscroll;
-        let folder = rgb(1.0, 0.79, 0.28);
         let body = rect(area.left + 1.0, area.top + TOP_PAD - 2.0, area.left + view_w - 1.0, area.top + view_h);
+        let centered_x = area.left + (COLLAPSED_W - 22.0) / 2.0;
         p.clip(body, || {
             for (i, &id) in rows.iter().enumerate() {
                 let y = area.top + TOP_PAD + i as f32 * ROW_H - self.scroll;
@@ -453,48 +761,52 @@ impl Tree {
                     continue;
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
-                let is_current = !matches!(n.kind, Kind::Computer | Kind::Network | Kind::Linux | Kind::Place) && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
+                let is_current = !matches!(n.kind, Kind::Computer | Kind::Home | Kind::Network | Kind::Linux | Kind::QuickAccess)
+                    && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
                 if is_current {
                     p.round_fill(row, 5.0, alpha(th.text, 0.11));
                 } else if self.hover == Some(id) {
                     p.round_fill(row, 5.0, alpha(th.text, 0.06));
                 }
                 let x = area.left + SIDE + 2.0 + n.depth as f32 * INDENT - hs;
+                // El ícono se desliza de su lugar en la lista al centro de la franja.
+                let icon_x = anim::lerp(centered_x, x + 20.0, e);
                 // Chevron: derecha (contraído), abajo (expandido); nada si no tiene subcarpetas.
                 let has_children = n.children.as_ref().is_none_or(|c| !c.is_empty());
-                if has_children {
+                if has_children && e > 0.05 {
                     let glyph = if n.loading { "\u{E712}" } else if n.expanded { "\u{E70D}" } else { "\u{E76C}" };
-                    p.text(&p.fonts.glyphs_small, glyph, rect(x, y, x + 16.0, y + ROW_H), th.text_dim);
+                    p.text(&p.fonts.glyphs_small, glyph, rect(x, y, x + 16.0, y + ROW_H), alpha(th.text_dim, e * e));
                 }
-                let (icon, color) = match n.kind {
-                    Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
-                    Kind::Place => {
-                        let (glyph, (r, g, b)) = PLACE_ICONS[n.pin];
-                        (glyph, rgb(r, g, b))
+                let (icon, color) = self.icon(n, th);
+                p.text(&p.fonts.glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
+                if e > 0.05 {
+                    p.text(&p.fonts.ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
+                    if self.shows_pin(n) {
+                        let slot = rect(row.right - 26.0, y + 5.0, row.right - 4.0, y + ROW_H - 5.0);
+                        let hot = self.pin_hover == Some(id);
+                        if hot {
+                            p.round_fill(slot, 5.0, alpha(th.text, 0.12));
+                        }
+                        let c = if hot { th.text } else { th.text_dim };
+                        p.text(&p.fonts.glyphs_small, PIN_GLYPH, slot, alpha(c, e * e));
                     }
-                    Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
-                    Kind::Drive => ("\u{EDA2}", th.text_dim),
-                    Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),
-                    Kind::Linux => ("\u{E756}", th.text_dim),
-                    Kind::Pinned => {
-                        let (_, glyph, (r, g, b)) = PINNED[n.pin];
-                        (glyph, rgb(r, g, b))
-                    }
-                    _ => ("\u{E8D5}", folder),
-                };
-                p.text(&p.fonts.glyphs, icon, rect(x + 20.0, y, x + 42.0, y + ROW_H), color);
-                p.text(&p.fonts.ui, &n.name, rect(x + 48.0, y, x + 48.0 + n.text_w + 12.0, y + ROW_H), th.text);
+                }
             }
         });
 
-        // Título y chincheta (acento si está fijo).
-        p.text(&p.fonts.ui_bold, "Carpetas", rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), th.text_dim);
-        let pin = self.pin_rect();
-        if self.pin_hot {
-            p.round_fill(pin, 5.0, th.hover);
+        // Título y chincheta (acento si está fija).
+        if e > 0.05 {
+            p.text(&p.fonts.ui_bold, "Carpetas", rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), alpha(th.text_dim, e * e));
         }
-        let (glyph, color) = if self.pinned { ("\u{E840}", th.accent) } else { ("\u{E718}", if self.pin_hot { th.text } else { th.text_dim }) };
-        p.text(&p.fonts.glyphs_small, glyph, pin, color);
+        // En la franja de íconos no hay chincheta: aparece al expandirse.
+        if e > 0.05 {
+            let btn = self.toggle_rect();
+            if self.toggle_hot {
+                p.round_fill(btn, 5.0, alpha(th.hover, e * e));
+            }
+            let (glyph, color) = if self.pinned { (PIN_GLYPH, th.accent) } else { ("\u{E718}", if self.toggle_hot { th.text } else { th.text_dim }) };
+            p.text(&p.fonts.glyphs_small, glyph, btn, alpha(color, e * e));
+        }
 
         // Contorno gris, como el de los paneles que no están activos.
         p.round_stroke(area, 8.0, th.border);

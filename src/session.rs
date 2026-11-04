@@ -41,7 +41,7 @@ pub struct Session {
     pub file_colors: bool,
     /// Árbol de carpetas lateral visible (solo con la feature `arbol`).
     pub show_tree: bool,
-    /// Árbol fijo al lado de los paneles (si no, se oculta solo y aparece encima).
+    /// Árbol fijo al lado de los paneles (si no, queda la franja de íconos y se expande al asomar el mouse).
     pub tree_pinned: bool,
     /// Grupo de paneles activo (el que se guarda solo con cada cambio).
     pub group: Option<String>,

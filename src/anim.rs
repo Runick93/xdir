@@ -21,9 +21,23 @@ const SCROLL_RATE: f32 = 18.0;
 const SNAP: f32 = 0.4;
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
+/// `animaciones = false` escrito en `config.toml`.
+static OFF_BY_CONFIG: AtomicBool = AtomicBool::new(false);
 
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
+}
+
+/// Anotar si `config.toml` apaga las animaciones a propósito (no solo por el ajuste de Windows).
+pub fn set_off_by_config(off: bool) {
+    OFF_BY_CONFIG.store(off, Ordering::Relaxed);
+}
+
+/// ¿Se anima el deslizar de la barra lateral? Sigue a Windows como el resto, salvo que Windows
+/// tenga apagados los efectos y `config.toml` no diga nada: ahí se anima igual (es un movimiento
+/// que se pidió expresamente); solo `animaciones = false` lo apaga.
+pub fn slide_enabled() -> bool {
+    !OFF_BY_CONFIG.load(Ordering::Relaxed)
 }
 
 pub fn set_enabled(on: bool) {

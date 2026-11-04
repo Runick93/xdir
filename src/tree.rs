@@ -337,7 +337,7 @@ impl Tree {
         let mut ids = Vec::new();
         let shown = items.into_iter().filter(|i| !self.known.iter().any(|k| crate::fs::same_path(k, &i.path))).take(QUICK_MAX);
         for (n, item) in shown.enumerate() {
-            let mut node = Node::new(Kind::Folder, item.path, item.name, 1);
+            let mut node = Node::new(Kind::Folder, item.path, item.name, 0);
             node.pinned = item.pinned;
             // Se reusa el hueco del nodo anterior en esa posición, para no crecer con cada lectura.
             if let Some(&id) = old.get(n) {
@@ -396,8 +396,15 @@ impl Tree {
     fn rows(&self) -> Vec<usize> {
         fn walk(t: &Tree, ids: &[usize], out: &mut Vec<usize>) {
             for &id in ids {
-                out.push(id);
                 let n = &t.nodes[id];
+                // "Acceso rápido" no lleva fila propia: sus carpetas van directo, al nivel de las demás.
+                if n.kind == Kind::QuickAccess {
+                    if let Some(c) = &n.children {
+                        walk(t, c, out);
+                    }
+                    continue;
+                }
+                out.push(id);
                 if n.expanded {
                     if let Some(c) = &n.children {
                         walk(t, c, out);
@@ -410,9 +417,6 @@ impl Tree {
         let mut out: Vec<usize> = Vec::with_capacity(raw.len());
         for id in raw {
             let n = &self.nodes[id];
-            if n.kind == Kind::QuickAccess && n.children.as_ref().is_some_and(|c| c.is_empty()) {
-                continue;
-            }
             if n.kind == Kind::Separator && out.last().is_none_or(|&l| self.nodes[l].kind == Kind::Separator) {
                 continue;
             }
@@ -796,7 +800,9 @@ impl Tree {
 
         // Título y chincheta (acento si está fija).
         if e > 0.05 {
-            p.text(&p.fonts.ui_bold, "Carpetas", rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), alpha(th.text_dim, e * e));
+            static USER_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let user = USER_NAME.get_or_init(|| std::env::var("USERNAME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "Inicio".to_string()));
+            p.text(&p.fonts.ui_bold, user, rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), alpha(th.text_dim, e * e));
         }
         // En la franja de íconos no hay chincheta: aparece al expandirse.
         if e > 0.05 {

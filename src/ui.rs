@@ -250,7 +250,9 @@ pub fn groups_rect(w: f32, h: f32) -> Rect {
 /// Botón que abre xtree (mapa de uso de disco), a la izquierda del de grupos.
 pub fn xtree_rect(w: f32, h: f32) -> Rect {
     let g = groups_rect(w, h);
-    rect(g.left - 10.0 - XTREE_W, g.top, g.left - 10.0, g.bottom)
+    // Sin la feature `xtree` (la release) el botón no existe: queda de ancho cero y no se dibuja ni responde.
+    let width = if cfg!(feature = "xtree") { XTREE_W } else { 0.0 };
+    rect(g.left - 10.0 - width, g.top, g.left - 10.0, g.bottom)
 }
 
 pub fn layout_at(w: f32, h: f32, x: f32, y: f32) -> Option<Layout> {
@@ -274,12 +276,14 @@ pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hov
     p.text(&p.fonts.glyphs_small, "\u{E8A9}", rect(groups.left + 6.0, groups.top, groups.left + 26.0, groups.bottom), color);
     p.text(&p.fonts.ui, "Grupos", rect(groups.left + 30.0, groups.top, groups.right - 4.0, groups.bottom), color);
 
-    if xtree_hot {
-        p.round_fill(xtree, 4.0, th.hover);
+    if cfg!(feature = "xtree") {
+        if xtree_hot {
+            p.round_fill(xtree, 4.0, th.hover);
+        }
+        let color = if xtree_hot { th.text } else { th.text_dim };
+        p.text(&p.fonts.glyphs_small, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
+        p.text(&p.fonts.ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
     }
-    let color = if xtree_hot { th.text } else { th.text_dim };
-    p.text(&p.fonts.glyphs_small, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
-    p.text(&p.fonts.ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
 
     let gear = gear_rect(w, h);
     if gear_hot {

@@ -29,10 +29,13 @@ pub enum Column {
     Extension,
     Size,
     Attributes,
+    /// Dónde está cada resultado de una búsqueda (relativo a la carpeta buscada). Solo se ve
+    /// mientras hay una búsqueda.
+    Folder,
 }
 
 /// Todas las columnas: (columna, título, identificador para la sesión, ancho inicial).
-pub const COLUMNS: [(Column, &str, &str, f32); 7] = [
+pub const COLUMNS: [(Column, &str, &str, f32); 8] = [
     (Column::Name, "Nombre", "nombre", 0.0),
     (Column::Modified, "Fecha de modificación", "modificado", 160.0),
     (Column::Created, "Fecha de creación", "creado", 160.0),
@@ -40,6 +43,7 @@ pub const COLUMNS: [(Column, &str, &str, f32); 7] = [
     (Column::Extension, "Extensión", "extension", 80.0),
     (Column::Size, "Tamaño", "tamano", 96.0),
     (Column::Attributes, "Atributos", "atributos", 80.0),
+    (Column::Folder, "Carpeta", "carpeta", 220.0),
 ];
 
 impl Column {
@@ -229,9 +233,6 @@ pub struct FileList {
     press: Option<(f32, f32)>,
     /// Carpeta resaltada como destino mientras se arrastra algo encima (índice en `entries`).
     pub drop_target: Option<usize>,
-    /// Filtro rápido tal como se escribió (vacío: sin filtro) y sus partes ya en minúsculas.
-    filter: String,
-    filter_parts: Vec<String>,
     /// Columnas a la vista, de izquierda a derecha.
     pub columns: Vec<ColumnSpec>,
     /// Ancho del nombre una vez que se lo fijó (arrastre o doble clic en un borde del encabezado).
@@ -241,6 +242,8 @@ pub struct FileList {
     pub view: View,
     /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
     pub folder: Option<std::path::PathBuf>,
+    /// Carpeta en la que se busca, mientras la lista muestra resultados de una búsqueda.
+    pub search_root: Option<std::path::PathBuf>,
     header_drag: Option<HeaderDrag>,
     band: Option<Band>,
     /// Se dibuja el marcador de foco. Un clic en un hueco limpia la selección y lo oculta, para
@@ -253,6 +256,29 @@ pub struct FileList {
     /// desde la posición `name_ends_first`. Lo de más a la derecha, en la misma columna, es hueco.
     name_ends: Vec<f32>,
     name_ends_first: usize,
+}
+
+/// Carpeta de un elemento con ruta completa (resultado de búsqueda).
+fn parent_of(e: &Entry) -> String {
+    e.full.as_ref().and_then(|f| std::path::Path::new(f).parent()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Carpeta de un resultado relativa a la carpeta buscada ("fotos/2024"); vacío si está en la
+/// misma carpeta buscada.
+fn relative_folder(root: Option<&std::path::Path>, e: &Entry) -> String {
+    let Some(parent) = e.full.as_ref().and_then(|f| std::path::Path::new(f).parent()) else { return String::new() };
+    match root.and_then(|r| parent.strip_prefix(r).ok()) {
+        Some(rel) => rel.to_string_lossy().into_owned(),
+        None => parent.to_string_lossy().into_owned(),
+    }
+}
+
+/// Comparador de nombres para lo escrito en el buscador: partes separadas por `;`, cada una un
+/// patrón con `*` y `?` o un texto que el nombre contiene (sin distinguir mayúsculas). El
+/// comparador recibe el nombre ya en minúsculas.
+pub fn name_matcher(query: &str) -> impl Fn(&str) -> bool + Send + 'static {
+    let parts: Vec<String> = query.split(';').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    move |name: &str| filter_matches(&parts, name)
 }
 
 /// ¿El nombre (en minúsculas) pasa el filtro? Cada parte separada por `;` es un patrón: con `*`
@@ -308,12 +334,11 @@ impl Default for FileList {
             pending_select: None,
             press: None,
             drop_target: None,
-            filter: String::new(),
-            filter_parts: Vec::new(),
             columns: default_columns(),
             name_width: None,
             view: View::Details,
             folder: None,
+            search_root: None,
             header_drag: None,
             band: None,
             focus_visible: true,
@@ -335,6 +360,7 @@ fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
             Column::Extension => extension_of(a).cmp(extension_of(b)),
             Column::Size => a.size.cmp(&b.size),
             Column::Attributes => attr_letters(a.attrs).cmp(&attr_letters(b.attrs)),
+            Column::Folder => format::caseless_cmp(&parent_of(a), &parent_of(b)),
         }
         .then_with(|| format::natural_cmp(&a.sort_key, &b.sort_key));
         if desc { ord.reverse() } else { ord }
@@ -342,38 +368,12 @@ fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
 }
 
 impl FileList {
-    /// ¿Se ve el elemento con la configuración actual (ocultos y filtro)?
+    /// ¿Se ve el elemento con la configuración actual (ocultos)?
     fn shows(&self, e: &Entry) -> bool {
-        (self.show_hidden || !e.is_hidden()) && filter_matches(&self.filter_parts, &e.sort_key)
+        self.show_hidden || !e.is_hidden()
     }
 
-    pub fn filter(&self) -> &str {
-        &self.filter
-    }
-
-    /// Aplica el filtro rápido al instante, conservando el foco si el elemento sigue a la vista.
-    pub fn set_filter(&mut self, text: &str) {
-        if text == self.filter {
-            return;
-        }
-        self.filter = text.to_string();
-        self.filter_parts = text.split(';').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
-        let focus = self.focused_index();
-        self.rebuild(focus);
-        self.scroll = 0.0;
-        self.scroll_target = 0.0;
-        if let Some(f) = self.focus {
-            self.ensure_visible(f);
-            self.snap_scroll();
-        }
-    }
-
-    /// Elementos que se verían sin el filtro (para mostrar "N de M").
-    pub fn unfiltered_count(&self) -> usize {
-        self.entries.iter().filter(|e| self.show_hidden || !e.is_hidden()).count()
-    }
-
-    /// Vacía la lista (navegación a otra carpeta). El filtro no pasa a la carpeta nueva.
+    /// Vacía la lista (navegación a otra carpeta).
     pub fn clear(&mut self) {
         let (columns, view) = (std::mem::take(&mut self.columns), self.view);
         *self = Self { sort: self.sort, descending: self.descending, show_hidden: self.show_hidden, columns, view, ..Default::default() };
@@ -849,7 +849,7 @@ impl FileList {
     }
 
     /// Texto de una celda de una columna que no es el nombre (para medirla).
-    fn cell_text(col: Column, e: &Entry) -> String {
+    fn cell_text(col: Column, e: &Entry, root: Option<&std::path::Path>) -> String {
         match col {
             Column::Name => e.display.clone(),
             Column::Modified => format::date(e.modified),
@@ -857,6 +857,7 @@ impl FileList {
             Column::Type => e.type_name.to_string(),
             Column::Extension => extension_of(e).to_string(),
             Column::Attributes => attr_letters(e.attrs),
+            Column::Folder => relative_folder(root, e),
             Column::Size => match (e.is_dir, e.modified) {
                 (true, 0) if e.size > 0 => format::size_short(e.size),
                 (true, _) => String::new(),
@@ -874,7 +875,8 @@ impl FileList {
         self.pin_name();
         let col = self.columns[index].col;
         // Solo se miden los textos más largos: medir cada fila de una carpeta enorme sería lento.
-        let mut texts: Vec<String> = self.visible.iter().map(|&v| Self::cell_text(col, &self.entries[v as usize])).collect();
+        let root = self.search_root.as_deref();
+        let mut texts: Vec<String> = self.visible.iter().map(|&v| Self::cell_text(col, &self.entries[v as usize], root)).collect();
         texts.sort_unstable_by_key(|t| std::cmp::Reverse(t.chars().count()));
         texts.dedup();
         let widest = texts.iter().take(40).map(|t| measure(t, false)).fold(0.0, f32::max);
@@ -1485,6 +1487,7 @@ impl FileList {
                         Column::Type => p.text(&p.fonts.ui, &e.type_name, cell, th.text_secondary),
                         Column::Extension => p.text(&p.fonts.ui, extension_of(e), cell, th.text_secondary),
                         Column::Attributes => p.text(&p.fonts.ui, &attr_letters(e.attrs), cell, th.text_secondary),
+                        Column::Folder => p.text(&p.fonts.ui, &relative_folder(self.search_root.as_deref(), e), cell, th.text_secondary),
                         Column::Size => {
                             let s = match (e.is_dir, e.modified) {
                                 // Unidades (sin fecha): capacidad total.

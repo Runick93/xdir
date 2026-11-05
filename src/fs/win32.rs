@@ -202,6 +202,66 @@ fn list_dir(out: &mut Batcher, path: &Path) {
     }
 }
 
+/// Prepara el hilo de una búsqueda para hablar con el Shell (tipos e íconos) y corre `f`.
+pub fn with_search_thread(f: impl FnOnce()) {
+    let _com = ComGuard::new();
+    crate::icons::wait_shell_ready();
+    f();
+}
+
+/// Datos de un elemento encontrado por la búsqueda (en Windows salen de la misma lectura).
+pub fn search_metadata(item: &std::fs::DirEntry, _path: &Path) -> Option<std::fs::Metadata> {
+    item.metadata().ok()
+}
+
+/// ¿Es la raíz de otro disco montado adentro? En Windows los puntos de montaje son enlaces (la
+/// búsqueda ya no los recorre).
+pub fn is_mount_point(_path: &Path) -> bool {
+    false
+}
+
+/// ¿La búsqueda entra en esta carpeta? En Windows, en todas.
+pub fn searchable_dir(_name: &std::ffi::OsStr) -> bool {
+    true
+}
+
+/// Entrada de la lista para un elemento de disco fuera de la carpeta del panel (resultado de
+/// búsqueda): con su ruta completa, tipo e ícono.
+pub fn disk_entry(path: &Path, name: OsString, meta: &std::fs::Metadata) -> Entry {
+    let attrs = meta.file_attributes();
+    let is_dir = attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let display = name.to_string_lossy().into_owned();
+    let ext = if is_dir { None } else { extension(&display) };
+    let (type_name, mut icon) = type_info(ext.as_deref(), is_dir);
+    let custom_icon = if is_dir {
+        attrs & (FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_SYSTEM.0) != 0
+    } else {
+        ext.as_deref().is_some_and(has_own_icon)
+    };
+    if custom_icon {
+        if let Some(info) = shell_info(path, FILE_FLAGS_AND_ATTRIBUTES(0), SHGFI_SYSICONINDEX) {
+            icon = info.iIcon;
+        }
+    }
+    Entry {
+        sort_key: display.to_lowercase(),
+        display,
+        name,
+        full: Some(path.as_os_str().to_os_string()),
+        group: 0,
+        pidl: None,
+        is_dir,
+        size: if is_dir { 0 } else { meta.file_size() },
+        modified: meta.last_write_time(),
+        created: meta.creation_time(),
+        attrs,
+        type_name,
+        icon,
+        overlay: 0,
+        overlay_checked: false,
+    }
+}
+
 /// Carpetas del usuario que se muestran en "Este equipo".
 const USER_FOLDERS: [GUID; 6] =
     [FOLDERID_Desktop, FOLDERID_Downloads, FOLDERID_Documents, FOLDERID_Pictures, FOLDERID_Music, FOLDERID_Videos];

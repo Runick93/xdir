@@ -75,6 +75,19 @@ fn wide_str(buf: &[u16], len: i32) -> String {
     String::from_utf16_lossy(&buf[..end])
 }
 
+/// Número con separador de miles: 12345 → "12.345".
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push('.');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Orden natural como el del Explorador: "img2" < "img10". Espera textos ya en minúsculas.
 ///
 /// Trabaja sobre los bytes UTF-8 sin reservar memoria: el orden de bytes UTF-8 coincide con el

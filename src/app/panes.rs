@@ -129,8 +129,15 @@ impl App {
 
     /// Las columnas son las mismas en todas las listas (y se guardan en la sesión).
     pub(super) fn set_columns(&mut self, columns: Vec<ColumnSpec>) {
+        // La columna de carpeta es solo de las búsquedas: no se guarda ni pasa a otras listas.
+        let folder = columns.iter().position(|c| c.col == list::Column::Folder).map(|i| (i, columns[i]));
+        let columns: Vec<ColumnSpec> = columns.into_iter().filter(|c| c.col != list::Column::Folder).collect();
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
             tab.list.columns = columns.clone();
+            if tab.search.is_some() {
+                let (at, spec) = folder.unwrap_or((1, list::ColumnSpec { col: list::Column::Folder, width: list::COLUMNS[7].3 }));
+                tab.list.columns.insert(at.min(tab.list.columns.len()), spec);
+            }
         }
         self.columns = columns;
         self.redraw();
@@ -144,6 +151,7 @@ impl App {
         let mut entries: Vec<shell::Entry> = list::COLUMNS
             .iter()
             .enumerate()
+            .filter(|(_, c)| c.0 != list::Column::Folder)
             .map(|(i, &(col, title, _, _))| shell::Entry::Item {
                 id: i as u32 + 1,
                 label: title.to_string(),

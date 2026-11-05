@@ -5,10 +5,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use crate::fs::{self, Entry, LoadEvent, LoadMsg, Location, Watcher};
-use crate::list::FileList;
+use crate::list::{self, Column, ColumnSpec, FileList};
 use crate::platform::Handle;
+
+/// Búsqueda en la carpeta de la pestaña y todas sus subcarpetas (en curso o terminada).
+pub struct Search {
+    /// Lo que se escribió en el buscador.
+    pub query: String,
+    /// Elementos revisados hasta ahora.
+    pub scanned: u64,
+    /// Fracción estimada del recorrido (0 a 1).
+    pub progress: f32,
+    /// Terminó de recorrer todo.
+    pub done: bool,
+    /// Cuándo empezó y cuándo terminó (para mostrar cuánto tardó).
+    pub started: Instant,
+    pub finished: Option<Instant>,
+}
 
 pub struct Tab {
     pub id: usize,
@@ -35,6 +51,8 @@ pub struct Tab {
     auth_nav: u64,
     /// Carpeta que se terminó de abrir como visita: la app la anota en el historial.
     pub visited: Option<PathBuf>,
+    /// Mientras hay una búsqueda, la lista muestra sus resultados en vez de la carpeta.
+    pub search: Option<Search>,
 }
 
 impl Tab {
@@ -95,6 +113,7 @@ impl Tab {
             counts_as_visit: false,
             auth_nav: 0,
             visited: None,
+            search: None,
         }
     }
 
@@ -158,6 +177,14 @@ impl Tab {
 
     /// Vuelve a leer la carpeta. `silent`: sin vaciar la lista mientras tanto.
     pub fn reload(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, silent: bool) {
+        // Con una búsqueda a la vista: recargar es repetirla; las recargas silenciosas (cambios
+        // en la carpeta) no la interrumpen.
+        if let Some(query) = self.search.as_ref().map(|s| s.query.clone()) {
+            if !silent {
+                self.search(hwnd, tx, &query);
+            }
+            return;
+        }
         if silent {
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
             self.reload_buf = Some(Vec::new());
@@ -173,7 +200,57 @@ impl Tab {
         self.focus_after_load = Some(name);
     }
 
+    /// Busca `query` en la carpeta de la pestaña y todas sus subcarpetas ("Este equipo": en
+    /// todas las unidades). Los resultados van apareciendo en la lista. Con el texto vacío,
+    /// termina la búsqueda y vuelve a la carpeta.
+    pub fn search(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, query: &str) {
+        if query.trim().is_empty() {
+            self.end_search(hwnd, tx);
+            return;
+        }
+        let (roots, root) = match &self.location {
+            Location::Path(p) => (vec![p.clone()], Some(p.clone())),
+            Location::Computer => (fs::drives(), None),
+            // Las carpetas virtuales no se recorren.
+            Location::Shell { .. } => return,
+        };
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.list.clear();
+        self.list.search_root = root;
+        if !self.list.columns.iter().any(|c| c.col == Column::Folder) {
+            let at = self.list.columns.iter().position(|c| c.col == Column::Name).map_or(0, |i| i + 1);
+            self.list.columns.insert(at, ColumnSpec { col: Column::Folder, width: list::COLUMNS[7].3 });
+        }
+        self.loading = true;
+        self.error = None;
+        self.reload_buf = None;
+        self.focus_after_load = None;
+        self.counts_as_visit = false;
+        self.search = Some(Search { query: query.to_string(), scanned: 0, progress: 0.0, done: false, started: Instant::now(), finished: None });
+        fs::spawn_search(hwnd, tx.clone(), self.id, generation, self.generation.clone(), roots, self.list.show_hidden, list::name_matcher(query));
+    }
+
+    /// Termina la búsqueda (si había) y vuelve a mostrar la carpeta.
+    pub fn end_search(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        if self.search.is_some() {
+            self.start(hwnd, tx);
+        }
+    }
+
+    /// Lo escrito en el buscador, si hay una búsqueda.
+    pub fn search_query(&self) -> &str {
+        self.search.as_ref().map_or("", |s| s.query.as_str())
+    }
+
+    /// Saca de la lista lo propio de la búsqueda (la columna de carpeta).
+    fn drop_search(&mut self) {
+        self.search = None;
+        self.list.search_root = None;
+        self.list.columns.retain(|c| c.col != Column::Folder);
+    }
+
     fn start(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        self.drop_search();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.nav_id += 1;
         // Quien navega la vuelve a marcar como visita después; una recarga no cuenta.
@@ -191,7 +268,7 @@ impl Tab {
 
     /// Aviso del vigilante: recarga silenciosa si sigue siendo la misma navegación.
     pub fn on_changed(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, nav_id: u64) {
-        if nav_id == self.nav_id && !self.loading {
+        if nav_id == self.nav_id && !self.loading && self.search.is_none() {
             self.reload(hwnd, tx, true);
         }
     }
@@ -209,8 +286,19 @@ impl Tab {
                 }
                 None => self.list.append(batch),
             },
+            LoadMsg::Progress { scanned, done } => {
+                if let Some(s) = &mut self.search {
+                    s.scanned = scanned;
+                    s.progress = done.clamp(0.0, 1.0);
+                }
+            }
             LoadMsg::Listed(result) => {
                 self.loading = false;
+                if let Some(s) = &mut self.search {
+                    s.done = true;
+                    s.progress = 1.0;
+                    s.finished = Some(Instant::now());
+                }
                 if let Some(buf) = self.reload_buf.take() {
                     if result.is_ok() {
                         self.list.replace(buf);
@@ -341,6 +429,17 @@ impl Tab {
     }
 
     pub fn status(&self) -> String {
+        if let Some(s) = &self.search {
+            let found = self.list.count();
+            let found = if found == 1 { "1 encontrado".to_string() } else { format!("{found} encontrados") };
+            let scanned = crate::format::thousands(s.scanned);
+            return if s.done {
+                let secs = s.finished.unwrap_or(s.started).duration_since(s.started).as_secs_f32();
+                format!("Búsqueda «{}»: {found} · {scanned} elementos revisados en {secs:.1} s", s.query)
+            } else {
+                format!("Buscando «{}»…   {:.0} %   ·   {found} · {scanned} elementos revisados", s.query, (s.progress * 100.0).floor().min(99.0))
+            };
+        }
         if let Some(e) = &self.error {
             return format!("No se pudo abrir: {e}");
         }

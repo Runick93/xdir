@@ -161,7 +161,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::Up, "subir", "Subir a la carpeta superior", &["Alt+Arriba", "Retroceso"]),
     spec(Command::Refresh, "recargar", "Recargar", &["F5"]),
     spec(Command::EditAddress, "escribir_ruta", "Escribir una ruta", &["Ctrl+L", "F4", "Alt+D"]),
-    spec(Command::Filter, "filtrar", "Filtrar la lista", &["Ctrl+F"]),
+    spec(Command::Filter, "filtrar", "Buscar en la carpeta y sus subcarpetas", &["Ctrl+F"]),
     spec(Command::GoComputer, "este_equipo", "Ir a Este equipo", &[]),
     spec(Command::ToggleHidden, "mostrar_ocultos", "Mostrar u ocultar archivos ocultos", &["Ctrl+H"]),
     spec(Command::SelectAll, "seleccionar_todo", "Seleccionar todo", &["Ctrl+A"]),

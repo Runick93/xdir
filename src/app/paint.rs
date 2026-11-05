@@ -103,17 +103,15 @@ impl App {
                     _ => PaneHit::None,
                 };
                 let favs = show_favorites.then(|| (favorites, fav_drop.filter(|(j, _)| *j == i).map(|(_, d)| d)));
-                // La fila del filtro se ve mientras se edita o si hay uno aplicado.
-                let list = &panes[i].tab().list;
-                let editing_filter = filter_pane == Some(i);
-                let filter_text = list.filter().to_string();
-                let filter = (editing_filter || !filter_text.is_empty()).then(|| FilterView {
-                    text: &filter_text,
-                    shown: list.count(),
-                    total: list.unfiltered_count(),
-                    editing: editing_filter,
-                });
-                panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), filter);
+                let tab = panes[i].tab();
+                let query = tab.search_query().to_string();
+                let search = SearchView {
+                    text: &query,
+                    editing: filter_pane == Some(i),
+                    running: tab.search.as_ref().filter(|s| !s.done).map(|s| s.progress),
+                    enabled: !matches!(tab.location, Location::Shell { .. }),
+                };
+                panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), search);
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
                     panes[i].draw_tab_drop(p, at);
                 }
@@ -178,8 +176,9 @@ impl App {
         if result.is_err() {
             return;
         }
-        // Pestañas deslizándose hacia su lugar: otro cuadro.
-        if self.panes.iter().any(|p| p.tab_busy) {
+        // Pestañas deslizándose hacia su lugar, o una búsqueda en curso (su indicador gira): otro cuadro.
+        let searching = self.shown_panes().into_iter().any(|i| self.panes[i].tab().search.as_ref().is_some_and(|s| !s.done));
+        if self.panes.iter().any(|p| p.tab_busy) || searching {
             animating = true;
             self.last_frame = Some(now);
         }

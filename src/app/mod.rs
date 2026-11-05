@@ -63,7 +63,7 @@ use crate::favorites::{Fav, FavPath, Favorites};
 use crate::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use crate::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use crate::list::{Action, ColumnSpec};
-use crate::pane::{Button, FavDrop, FilterView, Pane, PaneHit};
+use crate::pane::{Button, FavDrop, Pane, PaneHit, SearchView};
 use crate::render::{Renderer, contains};
 use crate::session::{PaneState, Session};
 use crate::tab::Tab;
@@ -95,6 +95,10 @@ const WM_APP_SUGGEST_KEY: u32 = WM_APP + 15;
 /// Cambió el texto de una caja de edición. `lparam` = `TextBox::id`.
 #[cfg_attr(windows, allow(dead_code))]
 const WM_APP_TEXT_CHANGED: u32 = WM_APP + 16;
+/// Pasó la pausa después de escribir en el buscador. `lparam` = turno de la búsqueda pendiente.
+const WM_APP_SEARCH: u32 = WM_APP + 17;
+/// Cuánto se espera después de la última tecla para empezar a buscar.
+const SEARCH_DELAY_MS: u64 = 300;
 
 /// Qué muestra un menú desplegable de favoritos.
 enum FavMenuSource {
@@ -311,6 +315,10 @@ struct App {
     fav_edit: Option<(TextBox, FavPath)>,
     /// Control de edición del filtro rápido abierto y su panel.
     filter_edit: Option<(TextBox, usize)>,
+    /// Búsqueda esperando que se deje de escribir: (panel, texto, turno).
+    pending_search: Option<(usize, String, u64)>,
+    /// Turno de la última tecla en el buscador (las pausas viejas se descartan).
+    search_token: u64,
     /// El último clic derecho fue sobre la barra de favoritos: (panel, favorito).
     fav_ctx: Option<(usize, Option<FavPath>)>,
     /// Clic derecho en el encabezado de la lista de ese panel: menú de columnas.
@@ -462,6 +470,8 @@ impl App {
             ghost: None,
             fav_edit: None,
             filter_edit: None,
+            pending_search: None,
+            search_token: 0,
             fav_ctx: None,
             header_ctx: None,
             columns: session.columns.clone(),

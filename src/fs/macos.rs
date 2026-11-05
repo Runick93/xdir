@@ -173,6 +173,43 @@ fn entry_for(path: &Path, name: OsString, meta: &std::fs::Metadata, group: u8, d
     }
 }
 
+/// Prepara el hilo de una búsqueda y corre `f` (en macOS no hace falta nada).
+pub fn with_search_thread(f: impl FnOnce()) {
+    f();
+}
+
+/// Datos de un elemento encontrado por la búsqueda: los enlaces simbólicos, de lo que apuntan.
+pub fn search_metadata(item: &std::fs::DirEntry, path: &Path) -> Option<std::fs::Metadata> {
+    std::fs::metadata(path).or_else(|_| item.metadata()).ok()
+}
+
+/// ¿Es la raíz de otro disco montado adentro (la búsqueda no cruza)? En APFS los volúmenes del
+/// sistema y de datos comparten el identificador de dispositivo, así que se pregunta el punto de
+/// montaje.
+pub fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    let mount = unsafe { std::ffi::CStr::from_ptr(st.f_mntonname.as_ptr()) };
+    Path::new(std::ffi::OsStr::from_bytes(mount.to_bytes())) == path
+}
+
+/// ¿La búsqueda entra en esta carpeta? No en las que el Finder muestra como archivo (apps...).
+pub fn searchable_dir(name: &OsStr) -> bool {
+    !is_package(extension(&name.to_string_lossy()).as_deref())
+}
+
+/// Entrada de la lista para un elemento de disco fuera de la carpeta del panel (resultado de
+/// búsqueda): con su ruta completa.
+pub fn disk_entry(path: &Path, name: OsString, meta: &std::fs::Metadata) -> Entry {
+    let mut e = entry_for(path, name, meta, 0, None);
+    e.full = Some(path.as_os_str().to_os_string());
+    e
+}
+
 fn list_dir(out: &mut Batcher, path: &Path) {
     let reader = match std::fs::read_dir(path) {
         Ok(r) => r,

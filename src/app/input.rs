@@ -205,8 +205,8 @@ impl App {
                         self.set_view(i, list::VIEWS[next].0);
                     }
                     PaneHit::NewFolderButton => self.run_command(Command::NewFolder),
-                    PaneHit::FilterButton | PaneHit::FilterBar => self.begin_filter(i),
-                    PaneHit::FilterClose => self.clear_filter(i),
+                    PaneHit::Search => self.begin_filter(i),
+                    PaneHit::SearchClear => self.clear_filter(i),
                     PaneHit::TabStrip if double => self.toggle_maximize(i),
                     PaneHit::TabStrip => {}
                     PaneHit::Button(b) => {

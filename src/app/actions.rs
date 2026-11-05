@@ -11,7 +11,7 @@ impl App {
             VK_ESCAPE if self.about_open => self.about_open = false,
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
-            VK_ESCAPE if !self.panes[active].tab().list.filter().is_empty() => self.clear_filter(active),
+            VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
             _ => match self.config.keymap.lookup(vk, ctrl, shift, false) {
                 Some(c) => self.run_command(c),
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {

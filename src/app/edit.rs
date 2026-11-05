@@ -147,7 +147,7 @@ impl App {
     }
 
 
-    /// Abre el filtro rápido del panel (o le devuelve el foco si ya está abierto).
+    /// Pone el foco en la caja de búsqueda del panel (o se lo devuelve si ya está abierta).
     pub(super) fn begin_filter(&mut self, pane: usize) {
         if let Some((edit, p)) = self.filter_edit {
             if p == pane {
@@ -158,9 +158,13 @@ impl App {
         }
         self.end_edit(false);
         self.set_active(pane);
-        let r = self.panes[pane].filter_text_rect();
+        if matches!(self.panes[pane].tab().location, Location::Shell { .. }) {
+            beep();
+            return;
+        }
+        let r = self.panes[pane].search_text_rect();
         let y = (r.top + r.bottom) / 2.0 - 10.0;
-        let text = self.panes[pane].tab().list.filter().to_string();
+        let text = self.panes[pane].tab().search_query().to_string();
         let Some(edit) = TextBox::create(self, TextKind::Filter, render::rect(r.left, y, r.right, y + 20.0), &text) else { return };
         edit.select(0, -1);
         edit.focus();
@@ -168,25 +172,68 @@ impl App {
         self.redraw();
     }
 
-    /// Cierra el control del filtro. `keep`: Enter o perder el foco lo dejan aplicado; Escape lo quita.
+    /// Cierra la caja de búsqueda. `keep`: Enter o perder el foco dejan la búsqueda (y la lanzan
+    /// ya si estaba esperando que se deje de escribir); Escape la termina y vuelve a la carpeta.
     pub(super) fn end_filter(&mut self, keep: bool) {
         let Some((edit, pane)) = self.filter_edit.take() else { return };
+        let text = edit.text();
         edit.destroy();
         focus_main_if_lost(self.hwnd);
+        self.pending_search = None;
+        let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        let tab = self.panes[pane].tab_mut();
         if !keep {
-            self.panes[pane].tab_mut().list.set_filter("");
+            tab.end_search(hwnd, &tx);
+        } else if text.trim() != tab.search_query() {
+            tab.search(hwnd, &tx, text.trim());
         }
         self.redraw();
     }
 
-    /// Quita el filtro del panel (cruz de la fila o Escape sobre la lista).
+    /// Termina la búsqueda del panel (cruz de la caja o Escape sobre la lista).
     pub(super) fn clear_filter(&mut self, pane: usize) {
         if self.filter_edit.is_some_and(|(_, p)| p == pane) {
             self.end_filter(false);
         } else {
-            self.panes[pane].tab_mut().list.set_filter("");
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            self.panes[pane].tab_mut().end_search(hwnd, &tx);
             self.redraw();
         }
+    }
+
+    /// Cambió lo escrito en la caja de búsqueda: se busca cuando se deja de escribir un momento
+    /// (para no recorrer el disco con cada letra). Vacía, vuelve a la carpeta enseguida.
+    pub(super) fn search_typed(&mut self, pane: usize, text: &str) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            self.pending_search = None;
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            self.panes[pane].tab_mut().end_search(hwnd, &tx);
+            self.redraw();
+            return;
+        }
+        self.search_token += 1;
+        let token = self.search_token;
+        self.pending_search = Some((pane, text, token));
+        let hwnd = self.hwnd;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(SEARCH_DELAY_MS));
+            hwnd.post(WM_APP_SEARCH, 0, token as isize);
+        });
+    }
+
+    /// Pasó la pausa después de escribir: si no se siguió escribiendo, se busca.
+    pub(super) fn on_search_due(&mut self, token: u64) {
+        let Some((pane, text, t)) = self.pending_search.take() else { return };
+        if t != token {
+            self.pending_search = Some((pane, text, t));
+            return;
+        }
+        let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        if self.panes[pane].tab().search_query() != text {
+            self.panes[pane].tab_mut().search(hwnd, &tx, &text);
+        }
+        self.redraw();
     }
 
     /// Navega a lo que se escribió en la barra de dirección.

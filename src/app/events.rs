@@ -53,6 +53,7 @@ impl App {
             WM_APP_SUGGEST_KEY => self.on_suggest_key(Key(wparam as u16)),
             WM_APP_PALETTE_KEY => self.on_palette_key(Key(wparam as u16), lparam == 1),
             WM_APP_TEXT_CHANGED => self.on_text_changed(lparam),
+            WM_APP_SEARCH => self.on_search_due(lparam as u64),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {
                 self.tree.on_loaded();
@@ -88,8 +89,7 @@ impl App {
         if let Some((edit, pane)) = self.filter_edit {
             if edit.id() == id {
                 let text = edit.text();
-                self.panes[pane].tab_mut().list.set_filter(&text);
-                self.redraw();
+                self.search_typed(pane, &text);
             }
         }
         if self.palette.as_ref().is_some_and(|(_, e)| e.id() == id) {

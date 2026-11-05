@@ -142,9 +142,6 @@ pub fn set_menu_mode(_dark: Option<bool>) {}
 
 // ---------- verbos y menú contextual ----------
 
-/// Verbos que la aplicación resuelve por su cuenta.
-pub const OWN_VERBS: [&str; 5] = ["rename", "delete", "cut", "copy", "paste"];
-
 /// Ejecuta un verbo sobre los elementos. En macOS solo "delete" (a la Papelera).
 pub fn invoke_verb(_owner: Handle, _folder: &Location, items: &[Item], verb: &str) -> Result<()> {
     match verb {

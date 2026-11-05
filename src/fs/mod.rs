@@ -166,6 +166,7 @@ impl Entry {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum LoadMsg {
     /// Un lote de elementos (en orden de llegada).
     Entries(Vec<Entry>),

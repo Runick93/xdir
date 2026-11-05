@@ -226,6 +226,7 @@ impl App {
     }
 
     /// Posición del mouse en DIPs del área de la ventana.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(super) fn cursor_pos(&self) -> (f32, f32) {
         cursor_dips(self.hwnd, self.dpi)
     }

@@ -117,12 +117,18 @@ pub fn run() -> Result<(), String> {
     let delegate = Delegate::new(mtm);
     window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     nsapp.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    for name in unsafe { [objc2_app_kit::NSWorkspaceDidMountNotification, objc2_app_kit::NSWorkspaceDidUnmountNotification] } {
+        unsafe { center.addObserver_selector_name_object(&delegate, sel!(volumesChanged:), Some(name), None) };
+    }
     KEEP.with(|k| k.borrow_mut().push(Retained::into_super(delegate)));
 
     with_app(|app| {
         app.apply_window_theme();
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         app.sync_visibility();
+        #[cfg(feature = "arbol")]
+        app.start_quick_access();
         app.marks.push(("ventana creada", ms_since(started)));
         app.show();
     });
@@ -261,6 +267,12 @@ define_class!(
     }
 
     impl Delegate {
+        /// Se conectó o se expulsó un disco: se actualiza "Este equipo", como en Windows.
+        #[unsafe(method(volumesChanged:))]
+        fn volumes_changed(&self, _n: &NSNotification) {
+            with_app(|app| app.drives_changed());
+        }
+
         #[unsafe(method(showAbout:))]
         fn show_about(&self, _sender: Option<&AnyObject>) {
             with_app(|app| app.run_command(Command::About));
@@ -373,6 +385,7 @@ define_class!(
             let (x, y) = self.point(event);
             with_app(|app| {
                 app.on_mouse_move(x, y);
+                #[allow(deprecated)]
                 let cursor = match app.cursor_at(x, y) {
                     CursorKind::SizeWE => NSCursor::resizeLeftRightCursor(),
                     CursorKind::SizeNS => NSCursor::resizeUpDownCursor(),
@@ -703,45 +716,45 @@ define_class!(
 impl TextDelegate {
     /// Enter, Escape y las flechas en la caja. Devuelve si se usó la tecla.
     fn handle_command(&self, command: Sel) -> bool {
-            let iv = self.ivars();
-            let h = Handle(1);
-            let palette = iv.kind == TextKind::Palette;
-            let cmd = NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Command) as isize;
-            let nav = if command == sel!(moveUp:) {
-                Some(keys::VK_UP)
-            } else if command == sel!(moveDown:) {
-                Some(keys::VK_DOWN)
-            } else if command == sel!(scrollPageUp:) || command == sel!(pageUp:) {
-                Some(keys::VK_PRIOR)
-            } else if command == sel!(scrollPageDown:) || command == sel!(pageDown:) {
-                Some(keys::VK_NEXT)
-            } else {
-                None
-            };
-            if let Some(vk) = nav {
-                match iv.kind {
-                    TextKind::Address => h.post(WM_APP_SUGGEST_KEY, vk.0 as usize, 0),
-                    TextKind::Palette => h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd),
-                    _ => return false,
-                }
-                return true;
+        let iv = self.ivars();
+        let h = Handle(1);
+        let palette = iv.kind == TextKind::Palette;
+        let cmd = NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Command) as isize;
+        let nav = if command == sel!(moveUp:) {
+            Some(keys::VK_UP)
+        } else if command == sel!(moveDown:) {
+            Some(keys::VK_DOWN)
+        } else if command == sel!(scrollPageUp:) || command == sel!(pageUp:) {
+            Some(keys::VK_PRIOR)
+        } else if command == sel!(scrollPageDown:) || command == sel!(pageDown:) {
+            Some(keys::VK_NEXT)
+        } else {
+            None
+        };
+        if let Some(vk) = nav {
+            match iv.kind {
+                TextKind::Address => h.post(WM_APP_SUGGEST_KEY, vk.0 as usize, 0),
+                TextKind::Palette => h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd),
+                _ => return false,
             }
-            let commit = if command == sel!(insertNewline:) {
-                true
-            } else if command == sel!(cancelOperation:) {
-                false
-            } else {
-                return false;
-            };
-            if palette {
-                let vk = if commit { keys::VK_RETURN } else { keys::VK_ESCAPE };
-                h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd);
-            } else {
-                iv.done.set(true);
-                h.post(iv.kind.done_msg(), commit as usize, 0);
-            }
-            true
+            return true;
         }
+        let commit = if command == sel!(insertNewline:) {
+            true
+        } else if command == sel!(cancelOperation:) {
+            false
+        } else {
+            return false;
+        };
+        if palette {
+            let vk = if commit { keys::VK_RETURN } else { keys::VK_ESCAPE };
+            h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd);
+        } else {
+            iv.done.set(true);
+            h.post(iv.kind.done_msg(), commit as usize, 0);
+        }
+        true
+    }
 }
 
 impl TextDelegate {
@@ -920,6 +933,7 @@ pub(super) fn client_size(_h: Handle, _dpi: u32) -> (f32, f32) {
 }
 
 /// Posición del mouse en DIPs del área de la ventana.
+#[allow(dead_code)]
 pub(super) fn cursor_dips(_h: Handle, _dpi: u32) -> (f32, f32) {
     let (Some(w), Some(v)) = (window(), view()) else { return (0.0, 0.0) };
     let p = v.convertPoint_fromView(w.mouseLocationOutsideOfEventStream(), None);
@@ -972,6 +986,7 @@ pub(super) fn open_in_editor(_h: Handle, path: &std::path::Path) {
 }
 
 /// Filas por "clic" de una rueda de mouse.
+#[allow(dead_code)]
 pub(super) fn wheel_lines() -> f32 {
     3.0
 }

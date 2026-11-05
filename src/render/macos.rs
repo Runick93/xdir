@@ -5,7 +5,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
@@ -85,6 +84,7 @@ impl Renderer {
     }
 
     /// Tamaño del área en puntos; `dpi` = 96 × píxeles por punto.
+    #[allow(dead_code)]
     pub fn resize(&mut self, width: u32, height: u32, dpi: u32) {
         self.size = (width as f32, height as f32);
         self.set_dpi(dpi);
@@ -97,6 +97,7 @@ impl Renderer {
 
     pub fn set_transparent(&mut self, _on: bool) {}
 
+    #[allow(dead_code)]
     pub fn set_dpi(&mut self, dpi: u32) {
         self.scale = (dpi as f32 / 96.0).max(1.0);
     }
@@ -402,7 +403,7 @@ fn cgimage_from(px: &Pixels) -> Option<CFRetained<CGImage>> {
     let data = CFData::from_bytes(&px.data);
     let provider = CGDataProvider::with_cf_data(Some(&data))?;
     let space = CGColorSpace::new_device_rgb()?;
-    let info = CGBitmapInfo(CGBitmapInfo::ByteOrder32Little.0 | CGImageAlphaInfo::PremultipliedFirst.0);
+    let info = CGBitmapInfo(objc2_core_graphics::CGImageByteOrderInfo::Order32Little.0 | CGImageAlphaInfo::PremultipliedFirst.0);
     unsafe {
         CGImage::new(
             px.width as usize,
@@ -539,9 +540,3 @@ fn symbol_image(ch: char, size: f32, c: Color) -> Option<Retained<NSImage>> {
     base.imageWithSymbolConfiguration(&config)
 }
 
-// La creación por `alloc` exige el rasgo en alcance aunque no se use en todas las versiones.
-#[allow(dead_code)]
-fn _alloc_marker() -> Option<Retained<NSImage>> {
-    let _ = NSImage::alloc;
-    None
-}

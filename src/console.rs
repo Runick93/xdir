@@ -1,6 +1,8 @@
 //! Abrir una consola (PowerShell o CMD) en la carpeta de un panel.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 #[cfg(windows)]
 use windows::Win32::UI::Shell::ShellExecuteW;

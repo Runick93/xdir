@@ -1,6 +1,10 @@
-# Compila xdir y genera el zip portable y el instalador. Se lanza a mano desde Actions → "Run workflow".
-# Sube la versión (patch por defecto), la deja commiteada en la rama y publica el release.
-# Al publicar conserva solo los dos releases más recientes.
+# Compila xdir para Windows (zip portable e instalador) y macOS (dmg y zip de la app). Se lanza a
+# mano desde Actions → "Run workflow". Sube la versión (patch por defecto), la deja commiteada en la
+# rama y publica el release con todo. Al publicar conserva solo los dos releases más recientes.
+#
+# Firma de macOS (opcional): con los secretos MACOS_CERT_P12 (certificado "Developer ID
+# Application" en base64), MACOS_CERT_PASSWORD, MACOS_SIGN_ID, APPLE_ID, APPLE_TEAM_ID y
+# APPLE_APP_PASSWORD la app sale firmada y notarizada; sin ellos, firmada "ad hoc".
 name: Release
 
 on:
@@ -16,36 +20,56 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: windows-latest
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Subir la versión
         id: bump
-        shell: pwsh
+        shell: bash
         run: |
-          $toml = Get-Content Cargo.toml -Raw
-          $m = [regex]::Match($toml, '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"')
-          if (-not $m.Success) { throw "No se encontró la versión en Cargo.toml" }
-          [int]$maj, [int]$min, [int]$pat = $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value
-          switch ('${{ inputs.subir }}') {
-            'patch' { $pat++ }
-            'minor' { $min++; $pat = 0 }
-            'major' { $maj++; $min = 0; $pat = 0 }
-          }
-          $new = "$maj.$min.$pat"
-          $changed = $new -ne "$($m.Groups[1].Value).$($m.Groups[2].Value).$($m.Groups[3].Value)"
-          if ($changed) {
-            $toml = [regex]::new('(?m)^version\s*=\s*"[^"]+"').Replace($toml, "version = `"$new`"", 1)
-            Set-Content Cargo.toml -Value $toml -NoNewline -Encoding utf8NoBOM
-            # Cargo.lock también lleva la versión de xdir y el build usa --locked.
-            $lock = Get-Content Cargo.lock -Raw
-            $lock = [regex]::new('(name = "xdir"\r?\nversion = )"[^"]+"').Replace($lock, "`$1`"$new`"", 1)
-            Set-Content Cargo.lock -Value $lock -NoNewline -Encoding utf8NoBOM
-          }
-          "changed=$($changed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-          Write-Host "Versión: $new"
+          current=$(sed -n 's/^version *= *"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' Cargo.toml | head -1)
+          [ -n "$current" ] || { echo "No se encontró la versión en Cargo.toml"; exit 1; }
+          IFS=. read -r maj min pat <<< "$current"
+          case "${{ inputs.subir }}" in
+            patch) pat=$((pat + 1)) ;;
+            minor) min=$((min + 1)); pat=0 ;;
+            major) maj=$((maj + 1)); min=0; pat=0 ;;
+          esac
+          new="$maj.$min.$pat"
+          if [ "$new" != "$current" ]; then
+            # Solo la primera línea "version" (la de [package]); Cargo.lock también la lleva y el build usa --locked.
+            sed -i "0,/^version *= *\"$current\"/s//version = \"$new\"/" Cargo.toml
+            sed -i "/^name = \"xdir\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
+          fi
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "changed=$([ "$new" != "$current" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "Versión: $new"
+
+      - name: Guardar la versión en el repositorio
+        id: commit
+        shell: bash
+        run: |
+          if [ "${{ steps.bump.outputs.changed }}" = "true" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.toml Cargo.lock
+            git commit -m "Versión ${{ steps.bump.outputs.version }}"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
 
       - name: Rust estable (MSVC)
         run: |
@@ -65,43 +89,91 @@ jobs:
           }
 
       - name: Empaquetar
-        id: pack
         shell: pwsh
-        run: |
-          scripts\package.ps1 -Exe target\x86_64-pc-windows-msvc\release\xdir.exe -OutDir dist
-          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          "version=$v" >> $env:GITHUB_OUTPUT
+        run: scripts\package.ps1 -Exe target\x86_64-pc-windows-msvc\release\xdir.exe -OutDir dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: xdir-${{ steps.pack.outputs.version }}
+          name: xdir-windows
           path: |
             dist/*.zip
             dist/*-setup.exe
           if-no-files-found: error
 
-      - name: Guardar la versión en el repositorio
-        if: steps.bump.outputs.changed == 'true'
-        shell: bash
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Rust estable (Apple Silicon e Intel)
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-          git commit -m "Versión ${{ steps.pack.outputs.version }}"
-          git push origin "HEAD:${{ github.ref_name }}"
+          rustup toolchain install stable --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Certificado de firma
+        if: env.MACOS_CERT_P12 != ''
+        env:
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          rm cert.p12
+
+      - name: Compilar y empaquetar
+        env:
+          XDIR_SIGN_ID: ${{ secrets.MACOS_SIGN_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: sh scripts/package-mac.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xdir-macos
+          path: |
+            dist/*.dmg
+            dist/*-macos.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [version, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publicar release
-        # bash expande los comodines; pwsh no lo hace para comandos externos.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v${{ steps.pack.outputs.version }}"
+          version="${{ needs.version.outputs.version }}"
+          tag="v$version"
           # Si ya hay un release con esta versión se reemplaza (y su tag pasa a este commit).
           if gh release view "$tag" > /dev/null 2>&1; then
             gh release delete "$tag" --yes --cleanup-tag
           fi
-          gh release create "$tag" dist/*.zip dist/*-setup.exe --title "xdir ${{ steps.pack.outputs.version }}" --target "$(git rev-parse HEAD)" --generate-notes
+          gh release create "$tag" dist/*.zip dist/*-setup.exe dist/*.dmg --title "xdir $version" --target "${{ needs.version.outputs.sha }}" --generate-notes
           # Solo quedan la versión nueva y la anterior: el resto de los releases se borra con su tag.
           gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].tagName' |
             while read -r old; do

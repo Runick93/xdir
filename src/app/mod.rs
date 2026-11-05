@@ -36,7 +36,9 @@ mod tests;
 
 use events::CursorKind;
 
-use crate::{about, anim, config, drop, fs, icons, jump, list, ops, palette, pane, render, session, shell, theme, typed, ui};
+use crate::{about, anim, config, fs, icons, jump, list, ops, palette, pane, render, session, shell, theme, typed, ui};
+#[cfg(windows)]
+use crate::drop;
 #[cfg(feature = "arbol")]
 use crate::tree;
 
@@ -54,7 +56,9 @@ use crate::console::Console;
 use crate::groups::{Group, Groups};
 use crate::jump::History;
 use crate::palette::{Palette, PaletteMode, Sources, Target};
-use crate::drop::{DragEvent, DragKind, Effect, WM_APP_DRAG};
+use crate::drop::{DragEvent, DragKind, Effect};
+#[cfg(windows)]
+use crate::drop::WM_APP_DRAG;
 use crate::favorites::{Fav, FavPath, Favorites};
 use crate::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use crate::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
@@ -244,6 +248,7 @@ struct App {
     /// Desplegable de rutas de la barra de dirección (vive mientras `edit`).
     suggest: Option<typed::Suggest>,
     /// Estado propio del sistema (fuentes de los controles, destino de arrastre...).
+    #[cfg_attr(not(windows), allow(dead_code))]
     sys: Sys,
     hover: Hit,
     drag: Drag,

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use block2::RcBlock;
 use objc2::AnyThread;
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapInfo, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo};
+use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo};
 use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
@@ -77,7 +77,7 @@ fn pixels_of(image: &CGImage) -> Option<Pixels> {
     }
     let mut data = vec![0u8; w * h * 4];
     let space = CGColorSpace::new_device_rgb()?;
-    let info = CGBitmapInfo::ByteOrder32Little.0 | CGImageAlphaInfo::PremultipliedFirst.0;
+    let info = objc2_core_graphics::CGImageByteOrderInfo::Order32Little.0 | CGImageAlphaInfo::PremultipliedFirst.0;
     let ctx = unsafe { CGBitmapContextCreate(data.as_mut_ptr().cast(), w, h, 8, w * 4, Some(&space), info) }?;
     CGContext::draw_image(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as CGFloat, h as CGFloat)), Some(image));
     drop(ctx);

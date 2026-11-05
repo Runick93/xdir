@@ -74,6 +74,7 @@ pub fn image(index: i32) -> Option<Retained<NSImage>> {
 
 /// Pedido de superposiciones de íconos: en macOS no hay (las etiquetas de color del Finder van
 /// aparte), así que no se hace nada.
+#[allow(dead_code)]
 pub struct OverlayRequest {
     pub hwnd: Handle,
     pub tx: Sender<LoadEvent>,

@@ -10,7 +10,9 @@ mod win32;
 #[cfg(windows)]
 pub use self::win32::*;
 
-/// Evento de arrastre para la ventana. `lparam` apunta a un `DragEvent`.
+/// Evento de arrastre para la ventana. `lparam` apunta a un `DragEvent` (en macOS la vista llama
+/// directo a la ventana).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const WM_APP_DRAG: u32 = WM_APP + 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

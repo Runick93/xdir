@@ -1182,12 +1182,14 @@ impl ColorTarget {
 /// Solo con `--features pruebas`: la app se maneja con comandos de texto escritos (uno por línea)
 /// en el archivo de `XDIR_PRUEBAS`, igual que el gancho `WM_COPYDATA` de Windows. Además de los de
 /// `test_hook`: `captura <archivo.png>` guarda la vista, `clic <x> <y>`, `doble <x> <y>`,
-/// `derecho <x> <y>`, `tecla <vk>`, `escribir <texto>` y `salir`.
+/// `derecho <x> <y>`, `tecla <vk>`, `escribir <texto>`, `enter`, `escape` y `salir`.
 #[cfg(feature = "pruebas")]
 mod pruebas {
     use super::*;
     use std::collections::VecDeque;
     use std::path::Path;
+
+    use objc2_app_kit::NSStandardKeyBindingResponding;
     use std::sync::Mutex;
 
     static QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
@@ -1245,6 +1247,16 @@ mod pruebas {
                         Handle(1).post(WM_APP_TEXT_CHANGED, 0, id as isize);
                     }
                     None => with_app(|app| rest.chars().for_each(|c| app.on_char(c))),
+                }
+            }
+            // Enter o Escape en la caja de texto con foco (pasan por su delegado, como al teclear).
+            ("enter" | "escape", _) => {
+                let ids: Vec<u32> = TEXT_BOXES.with(|t| t.borrow().keys().copied().collect());
+                if let Some(field) = ids.into_iter().find(|&id| TextBox(id).has_focus()).and_then(|id| TextBox(id).field()) {
+                    if let Some(editor) = field.currentEditor() {
+                        let command = if verb == "enter" { sel!(insertNewline:) } else { sel!(cancelOperation:) };
+                        unsafe { editor.doCommandBySelector(command) };
+                    }
                 }
             }
             _ => with_app(|app| app.test_hook(&line)),

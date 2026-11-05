@@ -47,6 +47,10 @@ thread_local! {
     static TEXT_BOXES: RefCell<HashMap<u32, TextBoxData>> = RefCell::new(HashMap::new());
     static NEXT_TEXT_BOX: Cell<u32> = const { Cell::new(1) };
     static CLOSED: Cell<bool> = const { Cell::new(false) };
+    /// Se está dibujando un cuadro (un pedido de repintar en ese momento AppKit lo descarta).
+    static DRAWING: Cell<bool> = const { Cell::new(false) };
+    /// Ya hay un cuadro programado para el próximo refresco de pantalla.
+    static FRAME_PENDING: Cell<bool> = const { Cell::new(false) };
     /// Objetos que tienen que vivir mientras la aplicación corre (delegados).
     static KEEP: RefCell<Vec<Retained<NSObject>>> = const { RefCell::new(Vec::new()) };
 }
@@ -323,10 +327,12 @@ define_class!(
         fn draw_rect(&self, _dirty: NSRect) {
             let size = self.bounds().size;
             let scale = self.window().map_or(2.0, |w| w.backingScaleFactor()) as f32;
+            DRAWING.with(|d| d.set(true));
             with_app(|app| {
                 app.renderer.set_size(size.width as f32, size.height as f32, scale);
                 app.paint();
             });
+            DRAWING.with(|d| d.set(false));
         }
 
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
@@ -917,11 +923,26 @@ pub(super) fn capture_mouse(_h: Handle) {}
 
 pub(super) fn release_mouse() {}
 
-/// Pide repintar toda la ventana.
+/// Pide repintar toda la ventana. Durante el dibujo (una animación que pide el cuadro siguiente)
+/// el pedido se programa para el próximo refresco de pantalla: AppKit descarta los que se hacen
+/// mientras dibuja, y la animación avanzaría solo con cada evento del mouse.
 pub(super) fn invalidate(_h: Handle) {
-    if let Some(v) = view() {
+    let Some(v) = view() else { return };
+    if !DRAWING.with(|d| d.get()) {
         v.setNeedsDisplay(true);
+        return;
     }
+    if FRAME_PENDING.with(|p| p.replace(true)) {
+        return;
+    }
+    let fps = v.window().and_then(|w| w.screen()).map_or(60, |s| s.maximumFramesPerSecond()).clamp(30, 240);
+    let when = dispatch2::DispatchTime::try_from(std::time::Duration::from_secs_f64(1.0 / fps as f64)).unwrap_or(dispatch2::DispatchTime::NOW);
+    let _ = dispatch2::DispatchQueue::main().after(when, || {
+        FRAME_PENDING.with(|p| p.set(false));
+        if let Some(v) = view() {
+            v.setNeedsDisplay(true);
+        }
+    });
 }
 
 /// Tamaño del área de la ventana en DIPs (puntos).

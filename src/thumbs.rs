@@ -20,6 +20,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::PCWSTR;
 
+use crate::platform::Handle;
 use crate::fs::wide_path;
 use crate::icons::{self, Pixels, WM_APP_ICONS};
 
@@ -54,7 +55,7 @@ fn done() -> &'static Mutex<Vec<(Key, Option<Arc<Pixels>>)>> {
 }
 
 /// Encarga una imagen (si no estaba encargada ya).
-pub fn request(hwnd: HWND, key: Key) {
+pub fn request(hwnd: Handle, key: Key) {
     let (lock, cv) = queue();
     let mut q = lock.lock().unwrap();
     if q.pending.insert(key.clone()) {

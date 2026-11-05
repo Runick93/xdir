@@ -30,7 +30,6 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
     ClientToScreen, DeleteObject, FW_NORMAL, HBRUSH, HDC, HFONT, InvalidateRect, OUT_DEFAULT_PRECIS, ScreenToClient,
@@ -49,9 +48,10 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP,
+    GetFocus, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
+use crate::platform::{Handle, Key, key_down};
+use crate::platform::keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, SHDoDragDrop,
     SetWindowSubclass, ShellExecuteW,
@@ -60,6 +60,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::commands::Command;
+use crate::platform::Color;
 use crate::config::Config;
 use crate::console::Console;
 use crate::groups::{Group, Groups};
@@ -256,7 +257,7 @@ struct LayoutAnim {
 }
 
 struct App {
-    hwnd: HWND,
+    hwnd: Handle,
     dpi: u32,
     theme: Theme,
     renderer: Renderer,
@@ -445,7 +446,7 @@ pub fn run() -> Result<()> {
             dwMask: windows::Win32::UI::Controls::WTNCA_NODRAWICON,
         };
         let _ = windows::Win32::UI::Controls::SetWindowThemeAttribute(
-            (*app).hwnd,
+            (*app).hwnd.hwnd(),
             windows::Win32::UI::Controls::WTA_NONCLIENT,
             &no_icon as *const _ as *const std::ffi::c_void,
             size_of::<windows::Win32::UI::Controls::WTA_OPTIONS>() as u32,
@@ -453,7 +454,7 @@ pub fn run() -> Result<()> {
 
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         (*app).sync_visibility();
-        (*app).drop_target = drop::register((*app).hwnd).ok();
+        (*app).drop_target = drop::register((*app).hwnd.hwnd()).ok();
         #[cfg(feature = "arbol")]
         (*app).start_quick_access();
         (*app).marks.push(("ventana creada", ms_since(started)));
@@ -511,7 +512,7 @@ impl App {
         let (ops_tx, ops_rx) = channel();
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
         let mut app = App {
-            hwnd: HWND::default(),
+            hwnd: Handle::default(),
             dpi: 96,
             theme,
             renderer,
@@ -609,7 +610,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         if msg == WM_NCCREATE {
             let cs = &*(lparam.0 as *const CREATESTRUCTW);
             let app = cs.lpCreateParams as *mut App;
-            (*app).hwnd = hwnd;
+            (*app).hwnd = hwnd.into();
             (*app).dpi = GetDpiForWindow(hwnd);
             let mica = (*app).theme.apply_to_window(hwnd);
             (*app).renderer.set_transparent(mica);

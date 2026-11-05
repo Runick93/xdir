@@ -4,7 +4,7 @@ use super::*;
 
 impl App {
     /// Atajos de la ventana. Devuelve si la tecla se usó.
-    pub(super) fn on_key(&mut self, vk: VIRTUAL_KEY) -> bool {
+    pub(super) fn on_key(&mut self, vk: Key) -> bool {
         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
         let active = self.active;
         match vk {
@@ -178,7 +178,7 @@ impl App {
                     if !path.exists() {
                         self.config = Config::load();
                     }
-                    open_in_editor(hwnd, &path);
+                    open_in_editor(hwnd.hwnd(), &path);
                 }
             }
         }
@@ -219,11 +219,11 @@ impl App {
 
     pub(super) fn redraw(&self) {
         // Sin ventana todavía (o en pruebas) no hay nada que repintar: un HWND nulo invalidaría todas las ventanas.
-        if self.hwnd.0.is_null() {
+        if self.hwnd.is_null() {
             return;
         }
         unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
+            let _ = InvalidateRect(Some(self.hwnd.hwnd()), None, false);
         }
     }
 
@@ -238,7 +238,7 @@ impl App {
         let mut pt = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
-            let _ = ScreenToClient(self.hwnd, &mut pt);
+            let _ = ScreenToClient(self.hwnd.hwnd(), &mut pt);
         }
         let k = 96.0 / self.dpi as f32;
         (pt.x as f32 * k, pt.y as f32 * k)

@@ -150,7 +150,7 @@ impl App {
             let _ = ReleaseCapture();
             self.drag = Drag::None;
             // Bucle modal: mientras dura, los eventos de soltar llegan por `WM_APP_DRAG`.
-            SHDoDragDrop(Some(self.hwnd), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)
+            SHDoDragDrop(Some(self.hwnd.hwnd()), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)
         };
         // Cancelar con Esc no es un error; que Windows no pueda arrastrar, sí: se avisa.
         if let Err(e) = result {
@@ -176,7 +176,7 @@ impl App {
     pub(super) fn on_drag(&mut self, ev: &mut DragEvent) {
         let mut pt = ev.point;
         unsafe {
-            let _ = ScreenToClient(self.hwnd, &mut pt);
+            let _ = ScreenToClient(self.hwnd.hwnd(), &mut pt);
         }
         let k = 96.0 / self.dpi as f32;
         if self.on_drag_favbar(ev, pt.x as f32 * k, pt.y as f32 * k) {
@@ -268,7 +268,7 @@ impl App {
             let k = self.dpi as f32 / 96.0;
             let mut pt = POINT { x: (x * k) as i32, y: (y * k) as i32 };
             unsafe {
-                let _ = ClientToScreen(self.hwnd, &mut pt);
+                let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
             }
             pt
         } else {

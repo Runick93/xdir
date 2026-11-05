@@ -17,6 +17,7 @@ mod list;
 mod ops;
 mod pane;
 mod palette;
+mod platform;
 mod render;
 mod session;
 mod shell;

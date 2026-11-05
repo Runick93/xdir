@@ -37,7 +37,7 @@ impl App {
                 y as i32,
                 width as i32,
                 h as i32,
-                Some(self.hwnd),
+                Some(self.hwnd.hwnd()),
                 None,
                 None,
                 None,
@@ -61,7 +61,7 @@ impl App {
         self.redraw();
     }
 
-    pub(super) fn on_palette_key(&mut self, vk: VIRTUAL_KEY, ctrl: bool) {
+    pub(super) fn on_palette_key(&mut self, vk: Key, ctrl: bool) {
         let Some((pal, edit)) = &mut self.palette else { return };
         match vk {
             VK_UP => pal.move_by(-1),
@@ -74,7 +74,7 @@ impl App {
                 return;
             }
             // Ctrl+P / Ctrl+Shift+P dentro de la paleta: cambiar de modo.
-            VIRTUAL_KEY(0x50) => {
+            Key(0x50) => {
                 let mode = if key_down(VK_SHIFT) { PaletteMode::All } else { PaletteMode::Folders };
                 self.open_palette(mode);
                 return;
@@ -96,7 +96,7 @@ impl App {
         unsafe {
             let _ = DestroyWindow(edit);
             if GetFocus().is_invalid() {
-                let _ = SetFocus(Some(self.hwnd));
+                let _ = SetFocus(Some(self.hwnd.hwnd()));
             }
         }
         self.redraw();

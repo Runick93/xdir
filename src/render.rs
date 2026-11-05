@@ -52,12 +52,13 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{BOOL, HSTRING, Interface, PCWSTR, Result, w};
 
+use crate::platform::Handle;
 use crate::config::ColorRule;
 use crate::icons;
 use crate::thumbs;
 use crate::theme::Theme;
 
-pub type Rect = D2D_RECT_F;
+pub use crate::platform::{Color, Rect, contains, rect};
 
 pub struct Renderer {
     d2d: ID2D1Factory1,
@@ -173,7 +174,7 @@ impl Renderer {
                 None => create_gpu(&self.d2d)?,
             };
             self.target = Some(create_target(gpu, hwnd, dpi, self.transparent)?);
-            self.icons.borrow_mut().hwnd = hwnd;
+            self.icons.borrow_mut().hwnd = hwnd.into();
         }
         Ok(())
     }
@@ -204,7 +205,7 @@ impl Renderer {
 
         // Con fondo translúcido se limpia a transparente: ahí se ve Mica.
         // Con Mica el fondo se pinta casi opaco: el diseño manda, Mica apenas tiñe los huecos.
-        let clear = if t.composition.is_some() { theme_alpha(theme.background, 0.88) } else { theme.background };
+        let clear = if t.composition.is_some() { theme_alpha(theme.background, 0.88) } else { theme.background.into() };
         unsafe {
             ctx.BeginDraw();
             ctx.Clear(Some(&clear));
@@ -251,25 +252,26 @@ pub struct Painter<'a> {
 }
 
 impl Painter<'_> {
-    fn color(&self, c: D2D1_COLOR_F) {
+    fn color(&self, c: Color) {
+        let c: D2D1_COLOR_F = c.into();
         unsafe { self.brush.SetColor(&c) };
     }
 
-    pub fn fill(&self, r: Rect, c: D2D1_COLOR_F) {
+    pub fn fill(&self, r: Rect, c: Color) {
         self.color(c);
-        unsafe { self.ctx.FillRectangle(&r, self.brush) };
+        unsafe { self.ctx.FillRectangle(&d2r(r), self.brush) };
     }
 
-    pub fn round_fill(&self, r: Rect, radius: f32, c: D2D1_COLOR_F) {
+    pub fn round_fill(&self, r: Rect, radius: f32, c: Color) {
         self.color(c);
-        let rr = D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius };
+        let rr = D2D1_ROUNDED_RECT { rect: d2r(r), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.FillRoundedRectangle(&rr, self.brush) };
     }
 
     /// Polígono con esquinas redondeadas: cada punto es (x, y, radio de la esquina). Abierto, los
     /// extremos no se redondean. Sirve para el contorno de panel + pestaña activa como una sola
     /// línea continua, y para las pestañas.
-    pub fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<D2D1_COLOR_F>, stroke: Option<(D2D1_COLOR_F, f32)>) {
+    pub fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, stroke: Option<(Color, f32)>) {
         let n = pts.len();
         if n < 2 {
             return;
@@ -329,36 +331,36 @@ impl Painter<'_> {
         }
     }
 
-    pub fn circle(&self, cx: f32, cy: f32, radius: f32, fill: D2D1_COLOR_F) {
+    pub fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
         self.color(fill);
         let e = D2D1_ELLIPSE { point: v2(cx, cy), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.FillEllipse(&e, self.brush) };
     }
 
-    pub fn circle_stroke(&self, cx: f32, cy: f32, radius: f32, c: D2D1_COLOR_F, width: f32) {
+    pub fn circle_stroke(&self, cx: f32, cy: f32, radius: f32, c: Color, width: f32) {
         self.color(c);
         let e = D2D1_ELLIPSE { point: v2(cx, cy), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.DrawEllipse(&e, self.brush, width, None) };
     }
 
     /// Contorno redondeado de grosor arbitrario.
-    pub fn round_stroke_w(&self, r: Rect, radius: f32, c: D2D1_COLOR_F, width: f32) {
+    pub fn round_stroke_w(&self, r: Rect, radius: f32, c: Color, width: f32) {
         self.color(c);
         let h = width / 2.0;
         let r = rect(r.left + h, r.top + h, r.right - h, r.bottom - h);
-        let rr = D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius };
+        let rr = D2D1_ROUNDED_RECT { rect: d2r(r), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.DrawRoundedRectangle(&rr, self.brush, width, None) };
     }
 
-    pub fn round_stroke(&self, r: Rect, radius: f32, c: D2D1_COLOR_F) {
+    pub fn round_stroke(&self, r: Rect, radius: f32, c: Color) {
         self.color(c);
         // Medio DIP hacia adentro para que el trazo de 1 DIP quede nítido.
         let r = rect(r.left + 0.5, r.top + 0.5, r.right - 0.5, r.bottom - 0.5);
-        let rr = D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius };
+        let rr = D2D1_ROUNDED_RECT { rect: d2r(r), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.DrawRoundedRectangle(&rr, self.brush, 1.0, None) };
     }
 
-    pub fn text(&self, format: &IDWriteTextFormat, s: &str, r: Rect, c: D2D1_COLOR_F) {
+    pub fn text(&self, format: &IDWriteTextFormat, s: &str, r: Rect, c: Color) {
         if r.right <= r.left {
             return;
         }
@@ -368,7 +370,7 @@ impl Painter<'_> {
             self.ctx.DrawText(
                 &wide,
                 format,
-                &r,
+                &d2r(r),
                 self.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_NATURAL,
@@ -387,7 +389,7 @@ impl Painter<'_> {
         unsafe {
             self.ctx.DrawBitmap(
                 &bitmap,
-                Some(&dest),
+                Some(&d2r(dest)),
                 1.0,
                 D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                 None,
@@ -412,7 +414,7 @@ impl Painter<'_> {
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
         let dest = rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
         unsafe {
-            self.ctx.DrawBitmap(&bitmap, Some(&dest), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+            self.ctx.DrawBitmap(&bitmap, Some(&d2r(dest)), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
         }
         true
     }
@@ -432,7 +434,7 @@ impl Painter<'_> {
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
         let dest = rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
         unsafe {
-            self.ctx.DrawBitmap(&bitmap, Some(&dest), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+            self.ctx.DrawBitmap(&bitmap, Some(&d2r(dest)), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
         }
     }
 
@@ -443,7 +445,7 @@ impl Painter<'_> {
 
     pub fn clip<R>(&self, r: Rect, f: impl FnOnce() -> R) -> R {
         unsafe {
-            self.ctx.PushAxisAlignedClip(&r, windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED);
+            self.ctx.PushAxisAlignedClip(&d2r(r), windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED);
         }
         let out = f();
         unsafe { self.ctx.PopAxisAlignedClip() };
@@ -536,7 +538,7 @@ fn measure(dwrite: &IDWriteFactory, format: &IDWriteTextFormat, s: &str) -> f32 
 /// Bitmaps de Direct2D hechos con los píxeles que prepara `crate::icons`, cacheados por índice.
 struct Icons {
     kind: icons::ListKind,
-    hwnd: HWND,
+    hwnd: Handle,
     bitmaps: HashMap<(i32, u8), Option<ID2D1Bitmap1>>,
     /// Píxeles por DIP del monitor (las miniaturas se piden en píxeles).
     dpi_k: f32,
@@ -553,7 +555,7 @@ impl Icons {
     fn new(dpi: u32) -> Self {
         let kind = icons::list_for_dpi(dpi);
         icons::prewarm(kind);
-        Self { kind, hwnd: HWND::default(), bitmaps: HashMap::new(), dpi_k: dpi as f32 / 96.0, thumbs: HashMap::new(), logo: None }
+        Self { kind, hwnd: Handle::default(), bitmaps: HashMap::new(), dpi_k: dpi as f32 / 96.0, thumbs: HashMap::new(), logo: None }
     }
 
     /// Miniatura del elemento; si no está, la encarga y devuelve None.
@@ -710,14 +712,11 @@ fn v2(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
 
-fn theme_alpha(c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F { a, ..c }
+fn theme_alpha(c: Color, a: f32) -> D2D1_COLOR_F {
+    Color { a, ..c }.into()
 }
 
-pub fn rect(left: f32, top: f32, right: f32, bottom: f32) -> Rect {
-    D2D_RECT_F { left, top, right, bottom }
-}
-
-pub fn contains(r: &Rect, x: f32, y: f32) -> bool {
-    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+/// Rectángulo propio → el de Direct2D.
+fn d2r(r: Rect) -> D2D_RECT_F {
+    r.into()
 }

@@ -22,6 +22,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::PCWSTR;
 
+use crate::platform::Handle;
 use crate::fs::{LoadEvent, LoadMsg, WM_APP_LOAD, wide_path};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW, WM_APP};
 
@@ -96,7 +97,7 @@ fn ready() -> &'static (Mutex<bool>, Condvar) {
 
 /// Devuelve el ícono si ya está; si no, lo encarga y devuelve None.
 /// `Some(None)` significa que el ícono no se pudo obtener (no volver a pedirlo).
-pub fn get(hwnd: HWND, kind: ListKind, index: i32, overlay: u8) -> Option<Option<Arc<Pixels>>> {
+pub fn get(hwnd: Handle, kind: ListKind, index: i32, overlay: u8) -> Option<Option<Arc<Pixels>>> {
     let key = (kind, index, overlay);
     let mut s = shared().lock().unwrap();
     if let Some(hit) = s.ready.get(&key) {
@@ -155,7 +156,7 @@ fn run(rx: Receiver<(Key, usize)>) {
 /// Pedido de superposiciones (flecha de acceso directo, estado de OneDrive, Git...) para
 /// elementos de una pestaña. El resultado vuelve como `LoadMsg::Overlays` por el canal de carga.
 pub struct OverlayRequest {
-    pub hwnd: HWND,
+    pub hwnd: Handle,
     pub tx: Sender<LoadEvent>,
     pub panel: usize,
     pub generation: u64,

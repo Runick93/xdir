@@ -33,6 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{Interface, PCSTR, PCWSTR, PSTR, Result, w};
 
+use crate::platform::Handle;
 use crate::fs::{Location, wide_path};
 
 // ---------- elementos y objetos de datos ----------
@@ -117,7 +118,7 @@ pub fn clipboard_files() -> Option<(Vec<PathBuf>, bool)> {
 /// + FileContents) en vez de rutas de disco: lo que se copia por Escritorio remoto (RDP) o desde un
 /// zip, un teléfono, etc. Lo hace el verbo "pegar" de la propia carpeta, como el Explorador.
 /// Devuelve `false` si el portapapeles no tiene archivos de ese tipo.
-pub fn paste_virtual(hwnd: HWND, dest: &Location) -> Result<bool> {
+pub fn paste_virtual(owner: Handle, dest: &Location) -> Result<bool> {
     unsafe {
         let obj = OleGetClipboard()?;
         let descriptor = FORMATETC {
@@ -131,7 +132,7 @@ pub fn paste_virtual(hwnd: HWND, dest: &Location) -> Result<bool> {
             return Ok(false);
         }
     }
-    invoke_verb(hwnd, dest, &[], "paste")?;
+    invoke_verb(owner, dest, &[], "paste")?;
     Ok(true)
 }
 
@@ -201,7 +202,8 @@ fn drop_effect(obj: &IDataObject) -> Option<DROPEFFECT> {
 }
 
 /// Copia texto al portapapeles (para "copiar como ruta").
-pub fn copy_text(hwnd: HWND, text: &str) -> Result<()> {
+pub fn copy_text(owner: Handle, text: &str) -> Result<()> {
+    let hwnd = owner.hwnd();
     let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
     unsafe {
         OpenClipboard(Some(hwnd))?;
@@ -220,7 +222,8 @@ pub fn copy_text(hwnd: HWND, text: &str) -> Result<()> {
 
 /// Abre un elemento con su acción por defecto a partir de su PIDL (sirve para elementos
 /// virtuales, que no tienen ruta de disco).
-pub fn open_item(hwnd: HWND, item: &Item) {
+pub fn open_item(owner: Handle, item: &Item) {
+    let hwnd = owner.hwnd();
     let Ok(pidls) = Pidls::new(std::slice::from_ref(item)) else { return };
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -237,7 +240,17 @@ pub fn open_item(hwnd: HWND, item: &Item) {
 
 // ---------- propiedades ----------
 
-pub fn properties(hwnd: HWND, items: &[Item]) {
+/// Abre un archivo de disco con su programa, con `dir` como carpeta de trabajo.
+pub fn open_file(owner: Handle, file: &Path, dir: Option<&Path>) {
+    let file = wide_path(file);
+    let dir = dir.map(wide_path).unwrap_or_else(|| vec![0]);
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(Some(owner.hwnd()), w!("open"), PCWSTR(file.as_ptr()), None, PCWSTR(dir.as_ptr()), SW_SHOWNORMAL);
+    }
+}
+
+pub fn properties(owner: Handle, items: &[Item]) {
+    let hwnd = owner.hwnd();
     unsafe {
         if let [Item { path, pidl: None }] = items {
             let wide = wide_path(path);
@@ -333,7 +346,7 @@ pub const UNPIN_QUICK: &str = "unpin-quick";
 /// como "Desanclar de Acceso rápido" y, si se elige, devuelve `UNPIN_QUICK`.
 #[allow(clippy::too_many_arguments)]
 pub fn context_menu(
-    hwnd: HWND,
+    owner: Handle,
     folder: &Location,
     items: &[Item],
     screen: POINT,
@@ -342,6 +355,7 @@ pub fn context_menu(
     own: &[Entry],
     pinned: bool,
 ) -> Option<String> {
+    let hwnd = owner.hwnd();
     let menu = build_menu(hwnd, folder, items).ok()?;
     unsafe {
         let hmenu = CreatePopupMenu().ok()?;
@@ -418,13 +432,14 @@ unsafe fn relabel_pin(menu: &IContextMenu, hmenu: HMENU) -> Option<usize> {
 }
 
 /// Anclar una carpeta al Acceso rápido de Windows (verbo nativo `pintohome`).
-pub fn pin_quick_access(hwnd: HWND, path: &Path) -> Result<()> {
-    invoke_verb(hwnd, &Location::Path(path.to_path_buf()), &[Item::from(path.to_path_buf())], "pintohome")
+pub fn pin_quick_access(owner: Handle, path: &Path) -> Result<()> {
+    invoke_verb(owner, &Location::Path(path.to_path_buf()), &[Item::from(path.to_path_buf())], "pintohome")
 }
 
 /// Desanclar una carpeta del Acceso rápido (verbo nativo `unpinfromhome`). El Shell solo ofrece
 /// ese verbo sobre el elemento del propio Acceso rápido, no sobre la carpeta de disco.
-pub fn unpin_quick_access(hwnd: HWND, path: &Path) -> Result<()> {
+pub fn unpin_quick_access(owner: Handle, path: &Path) -> Result<()> {
+    let hwnd = owner.hwnd();
     let item = crate::fs::quick_access_item(path).ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
     unsafe {
         let menu: IContextMenu = item.BindToHandler(None, &BHID_SFUIObject)?;
@@ -445,7 +460,8 @@ pub fn unpin_quick_access(hwnd: HWND, path: &Path) -> Result<()> {
 
 /// Ejecuta un verbo del Shell ("delete", "undelete"...) sobre elementos, como si se
 /// eligiera en su menú contextual.
-pub fn invoke_verb(hwnd: HWND, folder: &Location, items: &[Item], verb: &str) -> Result<()> {
+pub fn invoke_verb(owner: Handle, folder: &Location, items: &[Item], verb: &str) -> Result<()> {
+    let hwnd = owner.hwnd();
     let menu = build_menu(hwnd, folder, items)?;
     let verb = std::ffi::CString::new(verb).unwrap_or_default();
     unsafe {

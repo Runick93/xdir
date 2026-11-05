@@ -2,9 +2,10 @@
 //! busca, y los atajos de teclado se resuelven con un `Keymap` que parte de los de fábrica y
 //! toma los cambios de la sección `[atajos]` de `config.toml`.
 
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_BACK, VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+use crate::platform::Key;
+use crate::platform::keys::{
+    VK_BACK, VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT,
+    VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -159,7 +160,7 @@ pub struct Combo {
 
 /// Nombres de teclas que no son una letra, un número ni F1..F24: (nombre en config, tecla, nombre
 /// para mostrar). Se aceptan también en inglés.
-const KEY_NAMES: &[(&[&str], VIRTUAL_KEY, &str)] = &[
+const KEY_NAMES: &[(&[&str], Key, &str)] = &[
     (&["tab"], VK_TAB, "Tab"),
     (&["enter", "intro", "return"], VK_RETURN, "Enter"),
     (&["supr", "delete", "del"], VK_DELETE, "Supr"),
@@ -255,7 +256,7 @@ impl Keymap {
         displaced
     }
 
-    pub fn lookup(&self, vk: VIRTUAL_KEY, ctrl: bool, shift: bool, alt: bool) -> Option<Command> {
+    pub fn lookup(&self, vk: Key, ctrl: bool, shift: bool, alt: bool) -> Option<Command> {
         let combo = Combo { vk: vk.0, ctrl, shift, alt };
         self.bindings.iter().find(|(k, _)| *k == combo).map(|(_, c)| *c)
     }
@@ -293,7 +294,7 @@ mod tests {
             for k in s.default_keys {
                 let c = parse_combo(k).unwrap();
                 assert!(seen.insert(c), "atajo repetido: {k}");
-                assert_eq!(km.lookup(VIRTUAL_KEY(c.vk), c.ctrl, c.shift, c.alt), Some(s.command), "{k}");
+                assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(s.command), "{k}");
             }
         }
         let ids: std::collections::HashSet<_> = ALL.iter().map(|s| s.id).collect();
@@ -305,7 +306,7 @@ mod tests {
     fn experimental_tree_depends_on_feature() {
         let km = Keymap::default();
         let e = parse_combo("Ctrl+Shift+E").unwrap();
-        let bound = km.lookup(VIRTUAL_KEY(e.vk), e.ctrl, e.shift, e.alt);
+        let bound = km.lookup(Key(e.vk), e.ctrl, e.shift, e.alt);
         assert_eq!(available(Command::ToggleTree), cfg!(feature = "arbol"));
         assert_eq!(bound, cfg!(feature = "arbol").then_some(Command::ToggleTree));
     }
@@ -318,9 +319,9 @@ mod tests {
         // pestana_nueva = ["Ctrl+K", "Ctrl+W"]: Ctrl+T deja de funcionar y Ctrl+W se le saca a cerrar.
         let displaced = km.set(Command::NewTab, &[ctrl_k, ctrl_w]);
         assert_eq!(displaced, [Command::CloseTab]);
-        assert_eq!(km.lookup(VIRTUAL_KEY(b'K' as u16), true, false, false), Some(Command::NewTab));
-        assert_eq!(km.lookup(VIRTUAL_KEY(b'W' as u16), true, false, false), Some(Command::NewTab));
-        assert_eq!(km.lookup(VIRTUAL_KEY(b'T' as u16), true, false, false), None);
+        assert_eq!(km.lookup(Key(b'K' as u16), true, false, false), Some(Command::NewTab));
+        assert_eq!(km.lookup(Key(b'W' as u16), true, false, false), Some(Command::NewTab));
+        assert_eq!(km.lookup(Key(b'T' as u16), true, false, false), None);
         assert_eq!(km.label(Command::CloseTab), "");
         km.set(Command::NewTab, &[]);
         assert_eq!(km.label(Command::NewTab), "");

@@ -3,10 +3,10 @@
 //! xdir solo lo lee (nunca lo reescribe, para no perder lo que se editó) y lo vuelve a leer
 //! cuando cambia (al volver a la ventana), así los cambios se aplican sin reiniciar.
 
+use crate::platform::Color;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 use crate::commands::{self, Keymap};
 use crate::session;
@@ -44,7 +44,7 @@ pub enum ColorMatch {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColorRule {
     pub matches: ColorMatch,
-    pub color: D2D1_COLOR_F,
+    pub color: Color,
 }
 
 #[derive(Debug)]
@@ -182,7 +182,7 @@ impl Config {
 }
 
 /// Color del nombre según la primera regla que coincide. `name` en minúsculas.
-pub fn color_for(rules: &[ColorRule], name: &str, is_dir: bool, attrs: u32) -> Option<D2D1_COLOR_F> {
+pub fn color_for(rules: &[ColorRule], name: &str, is_dir: bool, attrs: u32) -> Option<Color> {
     rules
         .iter()
         .find(|r| match &r.matches {
@@ -202,13 +202,13 @@ pub fn color_for(rules: &[ColorRule], name: &str, is_dir: bool, attrs: u32) -> O
 }
 
 /// "#RRGGBB" → color.
-fn parse_color(s: &str) -> Option<D2D1_COLOR_F> {
+fn parse_color(s: &str) -> Option<Color> {
     let hex = s.trim().strip_prefix('#')?;
     if hex.len() != 6 {
         return None;
     }
     let v = u32::from_str_radix(hex, 16).ok()?;
-    Some(D2D1_COLOR_F {
+    Some(Color {
         r: ((v >> 16) & 0xFF) as f32 / 255.0,
         g: ((v >> 8) & 0xFF) as f32 / 255.0,
         b: (v & 0xFF) as f32 / 255.0,
@@ -278,7 +278,7 @@ pub fn template() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+    use crate::platform::Key;
 
     #[test]
     fn template_parses_clean_and_keeps_defaults() {
@@ -322,7 +322,7 @@ mod tests {
             "[atajos]\npestana_nueva = \"Ctrl+K\"\ninexistente = \"Ctrl+J\"\nrecargar = \"Ctrl+Hiper\"\n\
              [colores]\n\"*.PDF; *.ps\" = \"#FF0000\"\n'@oculto' = \"#00FF00\"\n'@raro' = \"#000000\"\n\"*.x\" = \"rojo\"\n[otra]\n",
         );
-        assert_eq!(c.keymap.lookup(VIRTUAL_KEY(b'K' as u16), true, false, false), Some(commands::Command::NewTab));
+        assert_eq!(c.keymap.lookup(Key(b'K' as u16), true, false, false), Some(commands::Command::NewTab));
         let own = 2;
         assert_eq!(c.colors.len(), own + Config::parse_rules(DEFAULT_COLORS).colors.len());
         assert_eq!(c.colors[0].matches, ColorMatch::Names(vec!["*.pdf".into(), "*.ps".into()]));

@@ -1,9 +1,9 @@
 //! Tema claro/oscuro y color de acento, leídos de la configuración de Windows.
 
+use crate::platform::Color;
 use std::ffi::c_void;
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, HWND};
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::Graphics::Dwm::{
     DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
@@ -15,22 +15,22 @@ use windows::core::{BOOL, PCWSTR, w};
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub dark: bool,
-    pub background: D2D1_COLOR_F,
-    pub surface: D2D1_COLOR_F,
-    pub surface_alt: D2D1_COLOR_F,
-    pub border: D2D1_COLOR_F,
-    pub text: D2D1_COLOR_F,
-    pub text_dim: D2D1_COLOR_F,
+    pub background: Color,
+    pub surface: Color,
+    pub surface_alt: Color,
+    pub border: Color,
+    pub text: Color,
+    pub text_dim: Color,
     /// Datos secundarios de la lista (fecha, tipo, tamaño): entre `text` y `text_dim`.
-    pub text_secondary: D2D1_COLOR_F,
-    pub accent: D2D1_COLOR_F,
+    pub text_secondary: Color,
+    pub accent: Color,
     /// Fondo tenue de la fila con foco (sin seleccionar).
-    pub focus_fill: D2D1_COLOR_F,
+    pub focus_fill: Color,
     /// Fila bajo el mouse.
-    pub hover: D2D1_COLOR_F,
+    pub hover: Color,
     /// Filas seleccionadas.
-    pub selection: D2D1_COLOR_F,
-    pub scrollbar: D2D1_COLOR_F,
+    pub selection: Color,
+    pub scrollbar: Color,
 }
 
 /// Colores de acento predefinidos (rueda dentada de la barra de estado): (nombre, 0xRRGGBB).
@@ -166,12 +166,12 @@ fn read_dword(subkey: PCWSTR, value: PCWSTR) -> Option<u32> {
     (status == ERROR_SUCCESS).then_some(data)
 }
 
-fn rgb(r: u32, g: u32, b: u32) -> D2D1_COLOR_F {
+fn rgb(r: u32, g: u32, b: u32) -> Color {
     rgba(r, g, b, 1.0)
 }
 
-fn rgba(r: u32, g: u32, b: u32, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
+fn rgba(r: u32, g: u32, b: u32, a: f32) -> Color {
+    Color {
         r: r as f32 / 255.0,
         g: g as f32 / 255.0,
         b: b as f32 / 255.0,
@@ -179,6 +179,6 @@ fn rgba(r: u32, g: u32, b: u32, a: f32) -> D2D1_COLOR_F {
     }
 }
 
-pub fn alpha(c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F { a, ..c }
+pub fn alpha(c: Color, a: f32) -> Color {
+    Color { a, ..c }
 }

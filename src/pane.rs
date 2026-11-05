@@ -1,12 +1,12 @@
 //! Un panel: tira de pestañas, barra de navegación con dirección y la lista de la pestaña activa.
 //! Guarda las áreas del último frame para resolver clics.
 
+use crate::platform::Color;
 use crate::favorites::{Fav, Favorites};
 use crate::fs::Location;
 use crate::render::{Painter, Rect, contains, rect};
 use crate::tab::Tab;
 use crate::theme::alpha;
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 pub const TABSTRIP_H: f32 = 34.0;
 pub const NAVBAR_H: f32 = 42.0;
@@ -717,7 +717,7 @@ impl Pane {
     pub fn draw_ghost(p: &Painter, r: Rect, title: &str, detach: f32) {
         let th = p.theme;
         if detach > 0.01 {
-            let shadow = |a: f32| D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a };
+            let shadow = |a: f32| Color { r: 0.0, g: 0.0, b: 0.0, a };
             for (grow, a) in [(6.0, 0.05), (3.0, 0.08), (1.0, 0.10)] {
                 p.round_fill(rect(r.left - grow, r.top - grow + 4.0, r.right + grow, r.bottom + grow + 4.0), 8.0 + grow, shadow(a * detach));
             }

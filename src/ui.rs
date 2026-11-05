@@ -1,8 +1,8 @@
 //! Marco de la ventana: distribución de los paneles (layout), divisores arrastrables y barra
 //! de estado con los botones para cambiar de layout.
 
+use crate::platform::Color;
 use crate::render::{Painter, Rect, contains, rect};
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 use crate::console::Console;
 use crate::theme::{Accent, PRESETS, alpha};
@@ -529,8 +529,8 @@ pub fn draw_terminal_menu(p: &Painter, anchor: Rect, w: f32, hover: Option<Conso
     }
 }
 
-fn hex(c: u32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
+fn hex(c: u32) -> Color {
+    Color {
         r: (c >> 16) as f32 / 255.0,
         g: ((c >> 8) & 0xFF) as f32 / 255.0,
         b: (c & 0xFF) as f32 / 255.0,

@@ -10,12 +10,12 @@
 //! "Acceso rápido" se lee del propio Shell (`fs::quick_access`) y se vuelve a leer en un hilo
 //! cuando cambia (`WM_APP_QUICK`).
 
+use crate::platform::Handle;
+use crate::platform::Color;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use crate::platform::WM_APP;
 
 use crate::anim;
 use crate::fs::{Location, QuickItem};
@@ -69,8 +69,8 @@ enum Kind {
     Separator,
 }
 
-fn rgb(r: f32, g: f32, b: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F { r, g, b, a: 1.0 }
+fn rgb(r: f32, g: f32, b: f32) -> Color {
+    Color { r, g, b, a: 1.0 }
 }
 
 /// Ícono y color de una carpeta del usuario fijada (la posición es la de `fs::user_folder`).
@@ -297,19 +297,17 @@ impl Tree {
 
     /// Vuelve a leer el Acceso rápido de Windows en otro hilo (si ya hay una lectura en curso,
     /// se repite al terminar).
-    pub fn request_quick(&mut self, hwnd: HWND) {
+    pub fn request_quick(&mut self, hwnd: Handle) {
         if self.quick_loading {
             self.quick_dirty = true;
             return;
         }
         self.quick_loading = true;
-        let (tx, hwnd) = (self.qtx.clone(), hwnd.0 as usize);
+        let tx = self.qtx.clone();
         std::thread::spawn(move || {
             let items = crate::fs::quick_access();
             if tx.send(items).is_ok() {
-                unsafe {
-                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_QUICK, WPARAM(1), LPARAM(0));
-                }
+                hwnd.post(WM_APP_QUICK, 1, 0);
             }
         });
     }
@@ -491,7 +489,7 @@ impl Tree {
     // ---------- lectura de subcarpetas ----------
 
     /// Expande o contrae; la primera vez lee las subcarpetas en otro hilo.
-    pub fn toggle(&mut self, hwnd: HWND, id: usize, show_hidden: bool) {
+    pub fn toggle(&mut self, hwnd: Handle, id: usize, show_hidden: bool) {
         let n = &mut self.nodes[id];
         if n.kind == Kind::Separator {
             return;
@@ -503,20 +501,17 @@ impl Tree {
     }
 
     /// Lee las subcarpetas de un nodo en otro hilo, si todavía no se leyeron.
-    fn load_children(&mut self, hwnd: HWND, id: usize, show_hidden: bool) {
+    fn load_children(&mut self, hwnd: Handle, id: usize, show_hidden: bool) {
         let n = &mut self.nodes[id];
         if n.children.is_some() || n.loading {
             return;
         }
         n.loading = true;
         let (tx, path, virt) = (self.tx.clone(), n.path.clone(), matches!(n.kind, Kind::Network | Kind::Linux));
-        let hwnd = hwnd.0 as usize;
         std::thread::spawn(move || {
             let dirs = if virt { crate::fs::shell_subfolders(&path.to_string_lossy()) } else { subfolders(&path, show_hidden) };
             if tx.send((id, dirs)).is_ok() {
-                unsafe {
-                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_TREE, WPARAM(0), LPARAM(0));
-                }
+                hwnd.post(WM_APP_TREE, 0, 0);
             }
         });
     }
@@ -682,7 +677,7 @@ impl Tree {
     // ---------- dibujo ----------
 
     /// Ícono y color de un nodo.
-    fn icon(&self, n: &Node, th: &Theme) -> (&'static str, D2D1_COLOR_F) {
+    fn icon(&self, n: &Node, th: &Theme) -> (&'static str, Color) {
         match n.kind {
             Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),

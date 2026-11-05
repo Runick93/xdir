@@ -1,7 +1,7 @@
-//! Lectura de carpetas en segundo plano y vigilancia de cambios.
-//!
-//! Cada lectura corre en su propio hilo y manda los resultados por un canal, avisando a la
-//! ventana con `WM_APP_LOAD`. La interfaz nunca espera al disco.
+//! Lectura de carpetas y vigilancia de cambios en Windows (Shell, FindFirstFile y
+//! ReadDirectoryChangesW).
+
+use super::*;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -40,98 +40,12 @@ use windows::Win32::UI::Shell::{
     SHGetIDListFromObject, SHGetKnownFolderPath, SIGDN, SIGDN_DESKTOPABSOLUTEPARSING,
     SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
 };
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+use crate::platform::Handle;
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR};
 
-/// Hay mensajes nuevos en el canal de carga. `wparam` = panel.
-pub const WM_APP_LOAD: u32 = WM_APP + 1;
-/// Cambió algo en la carpeta vigilada. `wparam` = panel, `lparam` = generación.
-pub const WM_APP_CHANGED: u32 = WM_APP + 2;
 
-/// Lugar que muestra un panel.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Location {
-    /// "Este equipo": carpetas del usuario, unidades, dispositivos, Red y Papelera.
-    Computer,
-    Path(PathBuf),
-    /// Carpeta virtual del Shell sin ruta de disco: Papelera, Red, un teléfono (MTP)...
-    Shell {
-        /// Nombre de análisis del Shell ("::{645FF040-...}" para la Papelera).
-        parsing: String,
-        name: String,
-        /// De dónde se llegó, para "subir"; sin él, se sube a "Este equipo".
-        parent: Option<Box<Location>>,
-    },
-}
-
-impl Location {
-    pub fn parent(&self) -> Option<Location> {
-        match self {
-            Location::Computer => None,
-            Location::Path(p) => Some(match p.parent() {
-                Some(parent) => Location::Path(parent.to_path_buf()),
-                None => Location::Computer,
-            }),
-            Location::Shell { parent, .. } => Some(parent.as_deref().cloned().unwrap_or(Location::Computer)),
-        }
-    }
-
-    pub fn title(&self) -> String {
-        match self {
-            Location::Computer => "Este equipo".into(),
-            Location::Path(p) => match p.file_name() {
-                Some(name) => name.to_string_lossy().into_owned(),
-                None => {
-                    let root = p.to_string_lossy().trim_end_matches('\\').to_string();
-                    // Una unidad se titula como en el Explorador: "Disco local (C:)".
-                    if root.len() == 2 && root.ends_with(':') { drive_label(&root) } else { root }
-                }
-            },
-            Location::Shell { name, .. } => name.clone(),
-        }
-    }
-
-    /// Segmentos de la barra de dirección: (texto, destino).
-    pub fn crumbs(&self) -> Vec<(String, Location)> {
-        let mut out = vec![("Este equipo".to_string(), Location::Computer)];
-        match self {
-            Location::Computer => {}
-            Location::Path(p) => {
-                let mut acc = PathBuf::new();
-                for comp in p.components() {
-                    acc.push(comp.as_os_str());
-                    // "C:" y "\" llegan como dos componentes; el segundo se pega al primero.
-                    if matches!(comp, std::path::Component::RootDir) {
-                        out.last_mut().unwrap().1 = Location::Path(acc.clone());
-                        continue;
-                    }
-                    let mut label = comp.as_os_str().to_string_lossy().into_owned();
-                    // Una unidad se muestra como en el Explorador: "Disco local (C:)".
-                    if matches!(comp, std::path::Component::Prefix(_)) && label.len() == 2 && label.ends_with(':') {
-                        label = drive_label(&label);
-                    }
-                    out.push((label, Location::Path(acc.clone())));
-                }
-            }
-            Location::Shell { name, parent, .. } => {
-                if let Some(parent) = parent {
-                    out = parent.crumbs();
-                }
-                out.push((name.clone(), self.clone()));
-            }
-        }
-        out
-    }
-
-    /// Ruta o nombre de análisis que entiende `IFileOperation` como destino (pegar, soltar).
-    pub fn target(&self) -> Option<PathBuf> {
-        match self {
-            Location::Computer => None,
-            Location::Path(p) => Some(p.clone()),
-            Location::Shell { parsing, .. } => Some(PathBuf::from(parsing)),
-        }
-    }
-}
 
 /// Interpreta lo escrito en la barra de dirección como elemento del Shell
 /// ("shell:RecycleBinFolder", "::{GUID}", ...).
@@ -147,71 +61,16 @@ pub fn shell_location(text: &str) -> Option<Location> {
     })
 }
 
-pub struct Entry {
-    /// Nombre real en disco (se usa para abrir y navegar).
-    pub name: OsString,
-    /// Ruta completa o nombre de análisis del Shell, cuando no sale de "carpeta + nombre"
-    /// (carpetas virtuales, accesos de "Este equipo").
-    pub full: Option<OsString>,
-    /// Grupo de orden: va antes que cualquier columna (en "Este equipo": carpetas,
-    /// unidades, dispositivos, lugares del Shell).
-    pub group: u8,
-    /// PIDL absoluto de los elementos del Shell (ver `shell::Item`).
-    pub pidl: Option<Arc<[u8]>>,
-    /// Nombre para mostrar (en unidades, "Disco local (C:)").
-    pub display: String,
-    /// `display` en minúsculas, para ordenar y buscar sin recalcular.
-    pub sort_key: String,
-    pub is_dir: bool,
-    pub size: u64,
-    /// FILETIME en UTC; 0 si no aplica.
-    pub modified: u64,
-    /// Fecha de creación (FILETIME en UTC); 0 si no aplica.
-    pub created: u64,
-    pub attrs: u32,
-    pub type_name: Arc<str>,
-    /// Índice en la lista de imágenes del sistema.
-    pub icon: i32,
-    /// Superposición del ícono (0 = ninguna).
-    pub overlay: u8,
-    /// Ya se consultó la superposición (se hace solo para las filas que se llegan a ver).
-    pub overlay_checked: bool,
-}
-
-impl Entry {
-    pub fn is_hidden(&self) -> bool {
-        const HIDDEN: u32 = 0x2;
-        self.attrs & HIDDEN != 0
-    }
-}
-
-pub enum LoadMsg {
-    /// Un lote de elementos (en orden de llegada).
-    Entries(Vec<Entry>),
-    /// Ya se listó todo. Error si no se pudo abrir la carpeta.
-    Listed(Result<(), String>),
-    /// Íconos individuales resueltos después: (posición en orden de llegada, ícono).
-    Icons(Vec<(u32, i32)>),
-    /// Superposiciones: (posición, índice de superposición).
-    Overlays(Vec<(u32, u8)>),
-}
-
-pub struct LoadEvent {
-    pub panel: usize,
-    pub generation: u64,
-    pub msg: LoadMsg,
-}
 
 /// Lanza la lectura de `location` en un hilo. Se abandona si `current` deja de valer `generation`.
 pub fn spawn_load(
-    hwnd: HWND,
+    hwnd: Handle,
     tx: Sender<LoadEvent>,
     panel: usize,
     generation: u64,
     current: Arc<AtomicU64>,
     location: Location,
 ) {
-    let hwnd = hwnd.0 as usize;
     std::thread::spawn(move || {
         let _com = ComGuard::new();
         crate::icons::wait_shell_ready();
@@ -225,7 +84,7 @@ pub fn spawn_load(
 }
 
 struct Batcher {
-    hwnd: usize,
+    hwnd: Handle,
     tx: Sender<LoadEvent>,
     panel: usize,
     generation: u64,
@@ -258,14 +117,7 @@ impl Batcher {
     fn send(&self, msg: LoadMsg) {
         let event = LoadEvent { panel: self.panel, generation: self.generation, msg };
         if self.tx.send(event).is_ok() {
-            unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(self.hwnd as *mut _)),
-                    WM_APP_LOAD,
-                    WPARAM(self.panel),
-                    LPARAM(0),
-                );
-            }
+            self.hwnd.post(WM_APP_LOAD, self.panel, 0);
         }
     }
 }
@@ -798,14 +650,6 @@ fn network_drive_label(drive: &str) -> Option<String> {
     Some(format!("{share} (\\\\{server}) ({drive})"))
 }
 
-/// Una carpeta del Acceso rápido de Windows.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QuickItem {
-    pub name: String,
-    pub path: PathBuf,
-    /// Anclada (`System.Home.IsPinned`); si no, es una carpeta frecuente.
-    pub pinned: bool,
-}
 
 /// Carpeta virtual del Acceso rápido del Explorador (con `shell:::`; sin el prefijo el Shell no la resuelve).
 const QUICK_ACCESS_PLACE: &str = "shell:::{3936E9E4-D92C-4EEE-A85A-BC16D5EA0819}";
@@ -854,27 +698,6 @@ pub fn quick_access_item(path: &Path) -> Option<IShellItem> {
 /// Carpeta cuyos cambios indican que el Acceso rápido se modificó (anclar, desanclar, uso reciente).
 pub fn quick_access_watch_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(r"Microsoft\Windows\Recent\AutomaticDestinations")).filter(|p| p.is_dir())
-}
-/// Quita los `.` y resuelve los `..` de una ruta escrita a mano, sin tocar el disco
-/// ("C:\a\b\.." → "C:\a"). Un `..` en la raíz se ignora; en una ruta relativa sin nada que
-/// quitar, se conserva.
-pub fn normalize_lexical(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => match out.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                Some(Component::Prefix(_) | Component::RootDir) => {}
-                _ => out.push(".."),
-            },
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// Forma larga de una ruta ("C:\Users\LEANDR~1" → "C:\Users\Leandro-Dev"). Si no existe o
@@ -926,20 +749,10 @@ pub fn true_case(path: &Path) -> PathBuf {
     out
 }
 
-/// ¿Tiene extensión .zip?
-pub fn is_zip(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-}
-
-/// ¿Es una ruta de red (`\\servidor\recurso\...`)? Los prefijos `\\?\` y `\\.\` no cuentan.
-pub fn is_unc(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s.starts_with(r"\\") && !s.starts_with(r"\\?\") && !s.starts_with(r"\\.\")
-}
 
 /// Conecta con el recurso de red de `path` (`\\servidor\recurso`) mostrando el diálogo de
 /// credenciales de Windows si hace falta, como el Explorador. Devuelve si quedó conectado.
-pub fn connect_share(owner: HWND, path: &Path) -> bool {
+pub fn connect_share(owner: Handle, path: &Path) -> bool {
     use windows::Win32::NetworkManagement::WNet::{CONNECT_INTERACTIVE, CONNECT_PROMPT, NETRESOURCEW, RESOURCETYPE_DISK, WNetUseConnectionW};
     let s = path.to_string_lossy();
     // Solo `\\servidor\recurso`: lo que sigue es una carpeta dentro del recurso.
@@ -950,7 +763,7 @@ pub fn connect_share(owner: HWND, path: &Path) -> bool {
     let mut access = [0u16; 260];
     let (mut len, mut result) = (access.len() as u32, 0u32);
     let err = unsafe {
-        WNetUseConnectionW(Some(owner), &res, PCWSTR::null(), PCWSTR::null(), CONNECT_INTERACTIVE | CONNECT_PROMPT, Some(PWSTR(access.as_mut_ptr())), Some(&mut len), Some(&mut result))
+        WNetUseConnectionW(Some(owner.hwnd()), &res, PCWSTR::null(), PCWSTR::null(), CONNECT_INTERACTIVE | CONNECT_PROMPT, Some(PWSTR(access.as_mut_ptr())), Some(&mut len), Some(&mut result))
     };
     err.0 == 0
 }
@@ -961,12 +774,6 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
-impl Location {
-    /// ¿Esta ubicación es la carpeta `p`?
-    pub fn is_path(&self, p: &Path) -> bool {
-        matches!(self, Location::Path(own) if same_path(own, p))
-    }
-}
 
 pub fn wide_path(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
@@ -1002,12 +809,12 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    pub fn new(hwnd: HWND, panel: usize, generation: u64, path: &Path) -> Option<Self> {
+    pub fn new(hwnd: Handle, panel: usize, generation: u64, path: &Path) -> Option<Self> {
         Self::with_message(hwnd, WM_APP_CHANGED, panel, generation as isize, path)
     }
 
     /// Vigila una carpeta y avisa a `hwnd` con el mensaje `msg` (y estos `wparam`/`lparam`).
-    pub fn with_message(hwnd: HWND, msg: u32, panel: usize, generation: isize, path: &Path) -> Option<Self> {
+    pub fn with_message(hwnd: Handle, msg: u32, panel: usize, generation: isize, path: &Path) -> Option<Self> {
         let wide = wide_path(path);
         unsafe {
             // FILE_SHARE_DELETE: otra ventana puede borrar o renombrar la carpeta mientras se vigila.
@@ -1102,7 +909,8 @@ impl Drop for Watcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_lexical, true_case};
+    use super::true_case;
+    use crate::fs::normalize_lexical;
     use std::path::Path;
 
     #[test]

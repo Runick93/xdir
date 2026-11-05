@@ -29,7 +29,7 @@ impl App {
         self.dark_mode = Some(dark);
         self.theme = Theme::from_system(self.accent, self.dark_mode);
         // Barra de título y menús nativos al mismo modo.
-        let mica = self.theme.apply_to_window(self.hwnd);
+        let mica = self.theme.apply_to_window(self.hwnd.hwnd());
         self.renderer.set_transparent(mica);
         self.transparent = mica;
         shell::set_menu_mode(self.dark_mode);
@@ -47,7 +47,7 @@ impl App {
         let bgr = |c: u32| COLORREF((c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16));
         let mut cc = CHOOSECOLORW {
             lStructSize: size_of::<CHOOSECOLORW>() as u32,
-            hwndOwner: self.hwnd,
+            hwndOwner: self.hwnd.hwnd(),
             rgbResult: bgr(current),
             lpCustColors: self.custom_colors.as_mut_ptr(),
             Flags: CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR,

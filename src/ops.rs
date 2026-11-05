@@ -23,6 +23,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, PostMessageW, WM_APP};
 use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s, w};
 
+use crate::platform::Handle;
 use crate::fs::wide_path;
 
 /// Terminó una operación; el resultado está en el canal.
@@ -59,7 +60,8 @@ pub struct OpResult {
     pub error: Option<String>,
 }
 
-pub fn spawn(hwnd: HWND, tx: Sender<OpResult>, op: Op) {
+pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
+    let hwnd = owner.hwnd();
     let hwnd_raw = hwnd.0 as usize;
     std::thread::spawn(move || {
         let hwnd = HWND(hwnd_raw as *mut _);

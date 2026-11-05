@@ -2,6 +2,7 @@
 //! frame no depende de cuántos archivos tenga la carpeta. En detalles (filas con columnas) o en
 //! cuadrícula de íconos y miniaturas.
 
+use crate::platform::Color;
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
@@ -11,7 +12,6 @@ use crate::fs::Entry;
 use crate::render::{Painter, Rect, contains, rect};
 use crate::theme::alpha;
 use crate::thumbs;
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 pub const ROW_H: f32 = 24.0;
 pub const HEADER_H: f32 = 30.0;
@@ -1059,7 +1059,8 @@ impl FileList {
 
     /// Teclas de navegación. Devuelve None si la tecla no es de la lista.
     pub fn on_key(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        use crate::platform::Key;
+        use crate::platform::keys::*;
         let n = self.visible.len();
         if n == 0 {
             return None;
@@ -1072,7 +1073,7 @@ impl FileList {
         // En la cuadrícula arriba/abajo saltan una fila de celdas y izquierda/derecha, una celda.
         let per = self.per_line();
         let grid = self.view.is_grid();
-        let target = match VIRTUAL_KEY(vk) {
+        let target = match Key(vk) {
             VK_UP => cur.saturating_sub(step * per),
             VK_DOWN if cur + step * per < n => cur + step * per,
             // Abajo desde la última fila incompleta: el último elemento.
@@ -1506,7 +1507,7 @@ impl FileList {
     }
 
     /// Celda de la cuadrícula: miniatura (o ícono grande) arriba y el nombre en hasta dos líneas.
-    fn draw_cell(&self, p: &Painter, e: &Entry, cell: Rect, color: D2D1_COLOR_F) {
+    fn draw_cell(&self, p: &Painter, e: &Entry, cell: Rect, color: Color) {
         let size = self.view.icon();
         let cx = (cell.left + cell.right) / 2.0;
         let image = rect(cx - size / 2.0, cell.top + 6.0, cx + size / 2.0, cell.top + 6.0 + size);
@@ -1607,7 +1608,7 @@ mod column_tests {
 
     #[test]
     fn grid_geometry_and_keys() {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
+        use crate::platform::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
         let mut l = list(800.0);
         l.append((0..25).map(|i| entry(&format!("f{i:02}"))).collect());
         l.set_view(View::LargeIcons);
@@ -1700,7 +1701,7 @@ mod column_tests {
         l.on_mouse_up();
         assert!(l.selected_positions().is_empty());
         assert!(!l.focus_visible, "no debe parecer seleccionada la fila que tenía el foco");
-        l.on_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN.0, false, false);
+        l.on_key(crate::platform::keys::VK_DOWN.0, false, false);
         assert!(l.focus_visible);
     }
 

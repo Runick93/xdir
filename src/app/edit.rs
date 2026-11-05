@@ -37,7 +37,7 @@ impl App {
                 (r.top * k) as i32,
                 ((r.right - r.left) * k) as i32,
                 ((r.bottom - r.top) * k) as i32,
-                Some(self.hwnd),
+                Some(self.hwnd.hwnd()),
                 None,
                 None,
                 None,
@@ -60,7 +60,7 @@ impl App {
         let text = unsafe {
             let len = GetWindowTextW(edit, &mut buf);
             let _ = DestroyWindow(edit);
-            let _ = SetFocus(Some(self.hwnd));
+            let _ = SetFocus(Some(self.hwnd.hwnd()));
             String::from_utf16_lossy(&buf[..len.max(0) as usize])
         };
         let new_name = text.trim().to_string();
@@ -99,7 +99,7 @@ impl App {
                 y as i32,
                 w as i32,
                 h as i32,
-                Some(self.hwnd),
+                Some(self.hwnd.hwnd()),
                 None,
                 None,
                 None,
@@ -130,7 +130,7 @@ impl App {
         let kk = self.dpi as f32 / 96.0;
         let mut pt = POINT { x: (r.left * kk) as i32, y: (r.bottom * kk) as i32 + 2 };
         let cmd = unsafe {
-            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(self.hwnd);
+            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(self.hwnd.hwnd());
             let Ok(hmenu) = CreatePopupMenu() else { return };
             for (i, (name, _)) in items.iter().enumerate() {
                 let wide: Vec<u16> = name.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
@@ -140,8 +140,8 @@ impl App {
                 let wide: Vec<u16> = "Sin subcarpetas".encode_utf16().chain(Some(0)).collect();
                 let _ = AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, PCWSTR(wide.as_ptr()));
             }
-            let _ = ClientToScreen(self.hwnd, &mut pt);
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd, None).0 as usize;
+            let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd.hwnd(), None).0 as usize;
             let _ = DestroyMenu(hmenu);
             cmd
         };
@@ -167,7 +167,7 @@ impl App {
     }
 
     /// Flechas y Re Pág / Av Pág sobre el desplegable: la barra muestra la ruta elegida.
-    pub(super) fn on_suggest_key(&mut self, vk: VIRTUAL_KEY) {
+    pub(super) fn on_suggest_key(&mut self, vk: Key) {
         let (Some((edit, _)), Some(sg)) = (self.edit, self.suggest.as_mut()) else { return };
         let delta = match vk {
             VK_UP => -1,
@@ -205,7 +205,7 @@ impl App {
         let text = unsafe {
             let len = GetWindowTextW(edit, &mut buf);
             let _ = DestroyWindow(edit);
-            let _ = SetFocus(Some(self.hwnd));
+            let _ = SetFocus(Some(self.hwnd.hwnd()));
             String::from_utf16_lossy(&buf[..len.max(0) as usize])
         };
         if commit {
@@ -248,7 +248,7 @@ impl App {
                 y as i32,
                 w as i32,
                 h as i32,
-                Some(self.hwnd),
+                Some(self.hwnd.hwnd()),
                 None,
                 None,
                 None,
@@ -272,7 +272,7 @@ impl App {
         unsafe {
             let _ = DestroyWindow(edit);
             if GetFocus().is_invalid() {
-                let _ = SetFocus(Some(self.hwnd));
+                let _ = SetFocus(Some(self.hwnd.hwnd()));
             }
         }
         if !keep {

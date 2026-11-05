@@ -75,7 +75,7 @@ impl App {
         let Some(name) = self.groups.items.get(index).map(|g| g.name.clone()) else { return };
         let text: Vec<u16> = format!("¿Guardar «{name}» como grupo?\n\nSí: queda guardado. No: se descarta.\0").encode_utf16().collect();
         let title: Vec<u16> = "Cerrar pestaña de grupo\0".encode_utf16().collect();
-        let answer = unsafe { MessageBoxW(Some(self.hwnd), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNOCANCEL | MB_ICONQUESTION) };
+        let answer = unsafe { MessageBoxW(Some(self.hwnd.hwnd()), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNOCANCEL | MB_ICONQUESTION) };
         if answer == IDYES {
             self.groups.items[index].temp = false;
             let _ = self.groups.save();
@@ -255,10 +255,10 @@ impl App {
                 }
                 add(hmenu, EDIT, "Editar grupos.toml");
             }
-            let _ = ClientToScreen(self.hwnd, &mut pt);
+            let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
             // Hacia arriba desde el botón: la barra de estado está abajo de todo.
             let flags = TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN;
-            let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd, None).0 as usize;
+            let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd.hwnd(), None).0 as usize;
             let _ = DestroyMenu(hmenu);
             self.groups_menu_closed = (cmd == 0).then(Instant::now);
             if let Some((_, bitmap)) = dot {
@@ -270,7 +270,7 @@ impl App {
             SAVE => self.open_palette(PaletteMode::GroupName),
             EDIT => {
                 if let Some(dir) = session::config_dir() {
-                    open_in_editor(self.hwnd, &dir.join("grupos.toml"));
+                    open_in_editor(self.hwnd.hwnd(), &dir.join("grupos.toml"));
                 }
             }
             c if c >= DELETE => {

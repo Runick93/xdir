@@ -1,10 +1,10 @@
 //! Diálogo "Acerca de": logo, versión y enlaces para reportar un problema. Es un panel dibujado
 //! como el resto de la interfaz (sin ventana de Windows aparte); un clic fuera o Esc lo cierra.
 
+use crate::platform::Color;
 use crate::icons::Pixels;
 use crate::render::{Painter, Rect, contains, rect};
 use crate::theme::alpha;
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ISSUES_URL: &str = "https://github.com/Runick93/xdir/issues/new/choose";
@@ -32,7 +32,7 @@ const HEIGHT: f32 = 234.0;
 const BANNER_H: f32 = 108.0;
 const BTN_H: f32 = 34.0;
 /// El logo es de letras blancas: va sobre una franja oscura aunque el tema sea claro.
-const BANNER: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.055, g: 0.059, b: 0.078, a: 1.0 };
+const BANNER: Color = Color { r: 0.055, g: 0.059, b: 0.078, a: 1.0 };
 
 fn panel(w: f32, h: f32) -> Rect {
     let (cx, cy) = (w / 2.0, h / 2.0);
@@ -58,7 +58,7 @@ pub fn at(w: f32, h: f32, x: f32, y: f32) -> Option<AboutHit> {
 pub fn draw(p: &Painter, w: f32, h: f32, hover: Option<AboutHit>) {
     let th = p.theme;
     // Velo sobre la ventana, para que el diálogo se lea como modal.
-    p.fill(rect(0.0, 0.0, w, h), D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
+    p.fill(rect(0.0, 0.0, w, h), Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
     let pn = panel(w, h);
     p.round_fill(rect(pn.left - 2.0, pn.top, pn.right + 2.0, pn.bottom + 4.0), 14.0, alpha(th.background, 0.5));
     p.round_fill(pn, 12.0, th.surface_alt);

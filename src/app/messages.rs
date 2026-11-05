@@ -10,8 +10,8 @@ impl App {
                     // BeginPaint valida antes de pintar (si `paint` pide otro frame, no se
                     // pierde) y dispara el borrado de fondo cuando hace falta.
                     let mut ps = PAINTSTRUCT::default();
-                    BeginPaint(self.hwnd, &mut ps);
-                    let _ = EndPaint(self.hwnd, &ps);
+                    BeginPaint(self.hwnd.hwnd(), &mut ps);
+                    let _ = EndPaint(self.hwnd.hwnd(), &ps);
                     self.paint();
                     LRESULT(0)
                 }
@@ -21,7 +21,7 @@ impl App {
                     // En modo opaco todo el fondo lo pinta Direct2D.
                     if self.transparent {
                         let mut rc = RECT::default();
-                        let _ = GetClientRect(self.hwnd, &mut rc);
+                        let _ = GetClientRect(self.hwnd.hwnd(), &mut rc);
                         FillRect(HDC(wparam.0 as *mut _), &rc, HBRUSH(GetStockObject(BLACK_BRUSH).0));
                     }
                     LRESULT(1)
@@ -44,7 +44,7 @@ impl App {
                     self.update_edit_resources();
                     let r = &*(lparam.0 as *const RECT);
                     let _ = SetWindowPos(
-                        self.hwnd,
+                        self.hwnd.hwnd(),
                         None,
                         r.left,
                         r.top,
@@ -67,7 +67,7 @@ impl App {
                     let area = PCWSTR(lparam.0 as *const u16);
                     if !area.is_null() && area.to_string().is_ok_and(|s| s == "ImmersiveColorSet") {
                         self.theme = Theme::from_system(self.accent, self.dark_mode);
-                        let mica = self.theme.apply_to_window(self.hwnd);
+                        let mica = self.theme.apply_to_window(self.hwnd.hwnd());
                         self.renderer.set_transparent(mica);
                         self.transparent = mica;
                         self.update_edit_resources();
@@ -215,11 +215,11 @@ impl App {
                     LRESULT(1)
                 }
                 WM_APP_SUGGEST_KEY => {
-                    self.on_suggest_key(VIRTUAL_KEY(wparam.0 as u16));
+                    self.on_suggest_key(Key(wparam.0 as u16));
                     LRESULT(0)
                 }
                 WM_APP_PALETTE_KEY => {
-                    self.on_palette_key(VIRTUAL_KEY(wparam.0 as u16), lparam.0 == 1);
+                    self.on_palette_key(Key(wparam.0 as u16), lparam.0 == 1);
                     LRESULT(0)
                 }
                 WM_MENURBUTTONUP if self.fav_menu.is_some() => {
@@ -261,12 +261,12 @@ impl App {
                 WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR => {
                     match shell::handle_menu_message(msg, wparam, lparam) {
                         Some(r) => r,
-                        None => DefWindowProcW(self.hwnd, msg, wparam, lparam),
+                        None => DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam),
                     }
                 }
                 WM_RBUTTONDOWN => {
                     let (x, y) = self.mouse_pos(lparam);
-                    let _ = SetFocus(Some(self.hwnd));
+                    let _ = SetFocus(Some(self.hwnd.hwnd()));
                     self.fav_ctx = None;
                     self.header_ctx = None;
                     self.term_ctx = None;
@@ -323,17 +323,17 @@ impl App {
                     LRESULT(0)
                 }
                 WM_KEYDOWN => {
-                    if self.on_key(VIRTUAL_KEY(wparam.0 as u16)) {
+                    if self.on_key(Key(wparam.0 as u16)) {
                         LRESULT(0)
                     } else {
-                        DefWindowProcW(self.hwnd, msg, wparam, lparam)
+                        DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam)
                     }
                 }
                 WM_SYSKEYDOWN => {
                     // Alt+flechas como en el Explorador; el resto (Alt+F4, Alt+Espacio) sigue de largo.
-                    match self.config.keymap.lookup(VIRTUAL_KEY(wparam.0 as u16), key_down(VK_CONTROL), key_down(VK_SHIFT), true) {
+                    match self.config.keymap.lookup(Key(wparam.0 as u16), key_down(VK_CONTROL), key_down(VK_SHIFT), true) {
                         Some(c) => self.run_command(c),
-                        None => return DefWindowProcW(self.hwnd, msg, wparam, lparam),
+                        None => return DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam),
                     }
                     LRESULT(0)
                 }
@@ -350,7 +350,7 @@ impl App {
                     let (x, y) = self.mouse_pos(lparam);
                     // El desplegable de la barra de dirección no le quita el foco a la caja.
                     if !matches!(self.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
-                        let _ = SetFocus(Some(self.hwnd));
+                        let _ = SetFocus(Some(self.hwnd.hwnd()));
                     }
                     self.on_left_down(x, y, msg == WM_LBUTTONDBLCLK);
                     LRESULT(0)
@@ -457,30 +457,30 @@ impl App {
                         let _ = session::save(&self.session());
                         let _ = self.history.save();
                     }
-                    let _ = DestroyWindow(self.hwnd);
+                    let _ = DestroyWindow(self.hwnd.hwnd());
                     LRESULT(0)
                 }
                 // Un lector de pantalla pregunta por la raíz de UI Automation (ver uia.rs).
                 WM_GETOBJECT if lparam.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId => {
                     let provider = uia::root_provider(self);
-                    windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(self.hwnd, wparam, lparam, &provider)
+                    windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(self.hwnd.hwnd(), wparam, lparam, &provider)
                 }
                 WM_DESTROY => {
                     // Se desconectan los lectores: los proveedores que les quedan dejan de responder.
                     uia::shutdown();
                     let _ = windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(
-                        self.hwnd,
+                        self.hwnd.hwnd(),
                         WPARAM(0),
                         LPARAM(0),
                         None::<&windows::Win32::UI::Accessibility::IRawElementProviderSimple>,
                     );
-                    let _ = RevokeDragDrop(self.hwnd);
+                    let _ = RevokeDragDrop(self.hwnd.hwnd());
                     let _ = DeleteObject(self.edit_font.into());
                     let _ = DeleteObject(self.edit_brush.into());
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
-                _ => DefWindowProcW(self.hwnd, msg, wparam, lparam),
+                _ => DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam),
             }
         }
     }

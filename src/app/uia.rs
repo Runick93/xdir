@@ -251,7 +251,7 @@ fn property(app: &App, el: El, id: UIA_PROPERTY_ID) -> VARIANT {
         return VARIANT::from(i.focusable);
     }
     if id == UIA_HasKeyboardFocusPropertyId {
-        let focused = unsafe { GetForegroundWindow() } == app.hwnd && focus_el(app) == el;
+        let focused = unsafe { GetForegroundWindow() } == app.hwnd.hwnd() && focus_el(app) == el;
         return VARIANT::from(focused);
     }
     if id == UIA_IsOffscreenPropertyId {
@@ -279,7 +279,7 @@ fn screen_rect(app: &App, r: render::Rect) -> UiaRect {
     let k = app.dpi as f64 / 96.0;
     let mut pt = POINT { x: (r.left as f64 * k).round() as i32, y: (r.top as f64 * k).round() as i32 };
     unsafe {
-        let _ = ClientToScreen(app.hwnd, &mut pt);
+        let _ = ClientToScreen(app.hwnd.hwnd(), &mut pt);
     }
     UiaRect { left: pt.x as f64, top: pt.y as f64, width: (r.right - r.left) as f64 * k, height: (r.bottom - r.top) as f64 * k }
 }
@@ -408,7 +408,7 @@ impl IRawElementProviderSimple_Impl for Root_Impl {
 
     fn HostRawElementProvider(&self) -> Result<IRawElementProviderSimple> {
         let app = self.app.get()?;
-        unsafe { UiaHostProviderFromHwnd(app.hwnd) }
+        unsafe { UiaHostProviderFromHwnd(app.hwnd.hwnd()) }
     }
 }
 
@@ -417,7 +417,7 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
         let app = self.app.get()?;
         let mut pt = POINT { x: x.round() as i32, y: y.round() as i32 };
         unsafe {
-            let _ = ScreenToClient(app.hwnd, &mut pt);
+            let _ = ScreenToClient(app.hwnd.hwnd(), &mut pt);
         }
         let k = 96.0 / app.dpi as f32;
         let (cx, cy) = (pt.x as f32 * k, pt.y as f32 * k);
@@ -594,7 +594,7 @@ pub fn notify_focus(app: &mut App) {
         return;
     }
     app.uia_focus = Some(now);
-    if unsafe { GetForegroundWindow() } != app.hwnd {
+    if unsafe { GetForegroundWindow() } != app.hwnd.hwnd() {
         return;
     }
     let el = focus_el(app);

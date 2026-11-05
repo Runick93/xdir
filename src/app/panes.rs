@@ -158,7 +158,7 @@ impl App {
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             let wide: Vec<u16> = "Columnas de fábrica".encode_utf16().chain(Some(0)).collect();
             let _ = AppendMenuW(hmenu, MF_STRING, RESET, PCWSTR(wide.as_ptr()));
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, screen.x, screen.y, self.hwnd, None).0 as usize;
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, screen.x, screen.y, self.hwnd.hwnd(), None).0 as usize;
             let _ = DestroyMenu(hmenu);
             cmd
         };
@@ -229,7 +229,7 @@ impl App {
             ..Default::default()
         };
         let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        if unsafe { GetWindowPlacement(self.hwnd, &mut wp) }.is_ok() {
+        if unsafe { GetWindowPlacement(self.hwnd.hwnd(), &mut wp) }.is_ok() {
             let r = wp.rcNormalPosition;
             s.window = Some([r.left, r.top, r.right - r.left, r.bottom - r.top]);
             s.maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
@@ -248,12 +248,12 @@ impl App {
                         ..Default::default()
                     };
                     // Ajusta solo si la posición guardada quedó fuera de los monitores actuales.
-                    let _ = SetWindowPlacement(self.hwnd, &wp);
+                    let _ = SetWindowPlacement(self.hwnd.hwnd(), &wp);
                 }
                 None => {
-                    let dpi = GetDpiForWindow(self.hwnd);
+                    let dpi = GetDpiForWindow(self.hwnd.hwnd());
                     let _ = SetWindowPos(
-                        self.hwnd,
+                        self.hwnd.hwnd(),
                         None,
                         0,
                         0,
@@ -261,7 +261,7 @@ impl App {
                         scale(INITIAL_SIZE.1, dpi),
                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                     );
-                    let _ = ShowWindow(self.hwnd, SW_SHOW);
+                    let _ = ShowWindow(self.hwnd.hwnd(), SW_SHOW);
                 }
             }
         }

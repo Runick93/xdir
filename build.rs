@@ -9,6 +9,12 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/xdir.ico");
     println!("cargo:rerun-if-changed=assets/xdir.manifest");
 
+    // El recurso (ícono y manifiesto) es solo del exe de Windows. Compilando desde otro sistema
+    // (macOS, o `cargo check --target x86_64-pc-windows-msvc` en una Mac) no hay rc.exe: se omite.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") || !cfg!(windows) {
+        return;
+    }
+
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("xdir.res");
     let status = Command::new(rc_exe())
         .args(["/nologo", "/fo"])

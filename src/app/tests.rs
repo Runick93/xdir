@@ -602,7 +602,7 @@ fn escape_closes_overlays_one_at_a_time() {
 #[test]
 fn unmapped_keys_are_not_consumed() {
     let mut a = app();
-    assert!(!a.on_key(VIRTUAL_KEY(0xFF)));
+    assert!(!a.on_key(Key(0xFF)));
 }
 
 // ---------- ir a una ruta escrita ----------

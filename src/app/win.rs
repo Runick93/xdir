@@ -18,7 +18,7 @@ pub(super) unsafe extern "system" fn edit_proc(
         match msg {
             WM_KEYDOWN
                 if done_msg as u32 == WM_APP_EDIT_DONE
-                    && matches!(VIRTUAL_KEY(wparam.0 as u16), VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT) =>
+                    && matches!(Key(wparam.0 as u16), VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT) =>
             {
                 let _ = PostMessageW(Some(parent), WM_APP_SUGGEST_KEY, wparam, LPARAM(0));
                 return LRESULT(0);
@@ -52,8 +52,8 @@ pub(super) unsafe extern "system" fn palette_proc(hwnd: HWND, msg: u32, wparam: 
         };
         match msg {
             WM_KEYDOWN => {
-                let vk = VIRTUAL_KEY(wparam.0 as u16);
-                if matches!(vk, VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN | VK_ESCAPE) || (ctrl && vk == VIRTUAL_KEY(0x50)) {
+                let vk = Key(wparam.0 as u16);
+                if matches!(vk, VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN | VK_ESCAPE) || (ctrl && vk == Key(0x50)) {
                     post(wparam.0);
                     return LRESULT(0);
                 }
@@ -121,10 +121,6 @@ pub(super) fn window_text(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..len.max(0) as usize])
 }
 
-pub(super) fn key_down(vk: VIRTUAL_KEY) -> bool {
-    unsafe { GetKeyState(vk.0 as i32) < 0 }
-}
-
 /// Ícono de la app (recurso 1) al tamaño de la métrica dada; nulo si no está (la clase usa el genérico).
 pub(super) fn app_icon(instance: HINSTANCE, metric: SYSTEM_METRICS_INDEX) -> HICON {
     unsafe {
@@ -160,7 +156,7 @@ pub(super) fn expand_env(s: &str) -> String {
     String::from_utf16_lossy(&buf[..n - 1])
 }
 
-pub(super) fn colorref(c: D2D1_COLOR_F) -> COLORREF {
+pub(super) fn colorref(c: Color) -> COLORREF {
     let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
     COLORREF(ch(c.r) | ch(c.g) << 8 | ch(c.b) << 16)
 }

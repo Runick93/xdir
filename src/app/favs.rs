@@ -75,9 +75,9 @@ impl App {
         unsafe {
             let Ok(hmenu) = CreatePopupMenu() else { return };
             build_fav_menu(&mut menu, hmenu, &entries);
-            let _ = ClientToScreen(self.hwnd, &mut pt);
+            let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
             self.fav_menu = Some(menu);
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd, None).0;
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd.hwnd(), None).0;
             let menu = self.fav_menu.take();
             let _ = DestroyMenu(hmenu);
             let Some(menu) = menu else { return };
@@ -116,7 +116,7 @@ impl App {
             let _ = AppendMenuW(hmenu, MF_STRING, OTHER, w!("Ejecutar como otro usuario"));
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, self.hwnd, None).0;
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, self.hwnd.hwnd(), None).0;
             let _ = DestroyMenu(hmenu);
             cmd as usize
         };
@@ -179,7 +179,7 @@ impl App {
             if recurse {
                 flags |= TPM_RECURSE;
             }
-            let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd, None).0;
+            let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd.hwnd(), None).0;
             let _ = DestroyMenu(hmenu);
             FavAct::from_id(cmd)
         }
@@ -219,7 +219,7 @@ impl App {
                 if let Some(file) = Favorites::file_path() {
                     let wide = fs::wide_path(&file);
                     unsafe {
-                        ShellExecuteW(Some(self.hwnd), w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
+                        ShellExecuteW(Some(self.hwnd.hwnd()), w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
                     }
                 }
             }
@@ -258,7 +258,7 @@ impl App {
                 (r.top * k) as i32,
                 ((r.right - r.left) * k) as i32,
                 ((r.bottom - r.top) * k) as i32,
-                Some(self.hwnd),
+                Some(self.hwnd.hwnd()),
                 None,
                 None,
                 None,
@@ -281,7 +281,7 @@ impl App {
         let text = unsafe {
             let len = GetWindowTextW(edit, &mut buf);
             let _ = DestroyWindow(edit);
-            let _ = SetFocus(Some(self.hwnd));
+            let _ = SetFocus(Some(self.hwnd.hwnd()));
             String::from_utf16_lossy(&buf[..len.max(0) as usize])
         };
         let name = text.trim().to_string();

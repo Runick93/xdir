@@ -6,13 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{PCWSTR, w};
-
 use crate::fs::{self, Entry, LoadEvent, LoadMsg, Location, Watcher};
 use crate::list::FileList;
+use crate::platform::Handle;
 
 pub struct Tab {
     pub id: usize,
@@ -50,7 +46,7 @@ impl Tab {
 
     /// Muestra u oculta la pestaña. Al mostrarse por primera vez carga su carpeta; al volver
     /// a mostrarse, recarga en silencio por si cambió mientras no se veía.
-    pub fn set_visible(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>, visible: bool) {
+    pub fn set_visible(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, visible: bool) {
         if visible == self.visible {
             return;
         }
@@ -114,7 +110,7 @@ impl Tab {
         self.location.parent().is_some()
     }
 
-    pub fn navigate(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>, to: Location) {
+    pub fn navigate(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, to: Location) {
         // Rutas cortas 8.3 (LEANDR~1) a su forma larga, para mostrarlas y compararlas bien.
         let to = match to {
             Location::Path(p) => Location::Path(fs::long_path(&p)),
@@ -133,7 +129,7 @@ impl Tab {
         self.counts_as_visit = true;
     }
 
-    pub fn go_back(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
+    pub fn go_back(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         if let Some(prev) = self.back.pop() {
             let from = std::mem::replace(&mut self.location, prev);
             self.focus_after_load = child_name(&self.location, &from);
@@ -143,7 +139,7 @@ impl Tab {
         }
     }
 
-    pub fn go_forward(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
+    pub fn go_forward(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         if let Some(next) = self.forward.pop() {
             let from = std::mem::replace(&mut self.location, next);
             self.back.push(from);
@@ -152,7 +148,7 @@ impl Tab {
         }
     }
 
-    pub fn go_up(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
+    pub fn go_up(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         if let Some(parent) = self.location.parent() {
             let child = child_name(&parent, &self.location);
             self.navigate(hwnd, tx, parent);
@@ -161,7 +157,7 @@ impl Tab {
     }
 
     /// Vuelve a leer la carpeta. `silent`: sin vaciar la lista mientras tanto.
-    pub fn reload(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>, silent: bool) {
+    pub fn reload(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, silent: bool) {
         if silent {
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
             self.reload_buf = Some(Vec::new());
@@ -177,7 +173,7 @@ impl Tab {
         self.focus_after_load = Some(name);
     }
 
-    fn start(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
+    fn start(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.nav_id += 1;
         // Quien navega la vuelve a marcar como visita después; una recarga no cuenta.
@@ -194,7 +190,7 @@ impl Tab {
     }
 
     /// Aviso del vigilante: recarga silenciosa si sigue siendo la misma navegación.
-    pub fn on_changed(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>, nav_id: u64) {
+    pub fn on_changed(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, nav_id: u64) {
         if nav_id == self.nav_id && !self.loading {
             self.reload(hwnd, tx, true);
         }
@@ -266,7 +262,7 @@ impl Tab {
     }
 
     /// Pide las superposiciones de las filas que se acaban de ver (solo carpetas de disco).
-    pub fn request_overlays(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
+    pub fn request_overlays(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         if !matches!(self.location, Location::Path(_)) {
             return;
         }
@@ -289,7 +285,7 @@ impl Tab {
     }
 
     /// Abre un elemento: las carpetas se navegan, los archivos se abren con su programa.
-    pub fn open(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>, idx: usize) {
+    pub fn open(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, idx: usize) {
         let path = self.entry_path(idx);
         let e = &self.list.entries[idx];
         if e.is_dir {
@@ -321,19 +317,16 @@ impl Tab {
             crate::shell::open_item(hwnd, &self.entry_item(idx));
             return;
         }
-        let file = fs::wide_path(&path);
         let dir = match &self.location {
-            Location::Path(p) => fs::wide_path(p),
-            _ => vec![0],
+            Location::Path(p) => Some(p.as_path()),
+            _ => None,
         };
-        unsafe {
-            ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(file.as_ptr()), None, PCWSTR(dir.as_ptr()), SW_SHOWNORMAL);
-        }
+        crate::shell::open_file(hwnd, &path, dir);
     }
 
     /// Si la carpeta de red falló por credenciales (usuario o contraseña incorrectos, acceso
     /// denegado), muestra el diálogo de Windows y vuelve a cargar. Una vez por navegación.
-    pub fn retry_with_credentials(&mut self, hwnd: HWND, tx: &Sender<LoadEvent>) {
+    pub fn retry_with_credentials(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         let Location::Path(path) = &self.location else { return };
         let Some(e) = &self.error else { return };
         let auth = ["os error 1326", "os error 5)", "os error 86", "os error 1219"].iter().any(|c| e.contains(c));

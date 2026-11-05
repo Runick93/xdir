@@ -38,6 +38,11 @@ impl Console {
         }
     }
 
+    /// Otras formas de abrirla (clic derecho en el menú de terminales): (verbo, texto del menú).
+    pub fn alt_verbs() -> &'static [(&'static str, &'static str)] {
+        &[("runas", "Ejecutar como administrador"), ("runasuser", "Ejecutar como otro usuario")]
+    }
+
     /// Abre la consola con `dir` como carpeta de trabajo. Si la terminal predeterminada de
     /// Windows es Windows Terminal, se abre ahí.
     pub fn open(self, owner: Handle, dir: &Path) -> bool {

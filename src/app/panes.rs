@@ -52,11 +52,10 @@ impl App {
     /// Menú contextual nativo de una carpeta del árbol (incluye "Anclar a Acceso rápido" /
     /// "Desanclar de Acceso rápido"); al cerrarse se relee el Acceso rápido.
     #[cfg(feature = "arbol")]
-    pub(super) fn tree_context_menu(&mut self, path: PathBuf, lparam: LPARAM) {
-        let screen = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+    pub(super) fn tree_context_menu(&mut self, path: PathBuf, at: (f32, f32)) {
         let items = [shell::Item::from(path.clone())];
         let pinned = self.tree.is_pinned(&path);
-        let chosen = shell::context_menu(self.hwnd, &Location::Path(path.clone()), &items, screen, key_down(VK_SHIFT), false, &[], pinned);
+        let chosen = shell::context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &[], pinned);
         if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
             self.toggle_quick_pin(path);
         } else if chosen.is_some() {
@@ -138,30 +137,24 @@ impl App {
     }
 
     /// Menú del clic derecho en el encabezado: mostrar u ocultar columnas.
-    pub(super) fn show_columns_menu(&mut self, pane: usize, screen: POINT) {
+    /// `at`: punto del clic derecho, en DIPs del área de la ventana.
+    pub(super) fn show_columns_menu(&mut self, pane: usize, at: (f32, f32)) {
         const RESET: usize = 100;
         let current = self.panes[pane].tab().list.columns.clone();
-        let cmd = unsafe {
-            let Ok(hmenu) = CreatePopupMenu() else { return };
-            for (i, &(col, title, _, _)) in list::COLUMNS.iter().enumerate() {
-                let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-                let mut flags = MF_STRING;
-                if current.iter().any(|c| c.col == col) {
-                    flags |= MF_CHECKED;
-                }
+        let mut entries: Vec<shell::Entry> = list::COLUMNS
+            .iter()
+            .enumerate()
+            .map(|(i, &(col, title, _, _))| shell::Entry::Item {
+                id: i as u32 + 1,
+                label: title.to_string(),
                 // El nombre no se puede ocultar.
-                if col == list::Column::Name {
-                    flags |= MF_GRAYED;
-                }
-                let _ = AppendMenuW(hmenu, flags, i + 1, PCWSTR(wide.as_ptr()));
-            }
-            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
-            let wide: Vec<u16> = "Columnas de fábrica".encode_utf16().chain(Some(0)).collect();
-            let _ = AppendMenuW(hmenu, MF_STRING, RESET, PCWSTR(wide.as_ptr()));
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, screen.x, screen.y, self.hwnd.hwnd(), None).0 as usize;
-            let _ = DestroyMenu(hmenu);
-            cmd
-        };
+                enabled: col != list::Column::Name,
+                checked: current.iter().any(|c| c.col == col),
+            })
+            .collect();
+        entries.push(shell::Entry::Sep);
+        entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
+        let cmd = popup_menu(self, &entries, MenuPos::At(at.0, at.1), None).map_or(0, |c| c as usize);
         match cmd {
             RESET => {
                 for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
@@ -228,43 +221,11 @@ impl App {
                 .collect(),
             ..Default::default()
         };
-        let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        if unsafe { GetWindowPlacement(self.hwnd.hwnd(), &mut wp) }.is_ok() {
-            let r = wp.rcNormalPosition;
-            s.window = Some([r.left, r.top, r.right - r.left, r.bottom - r.top]);
-            s.maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
+        if let Some((window, maximized)) = self.window_placement() {
+            s.window = Some(window);
+            s.maximized = maximized;
         }
         s
-    }
-
-    pub(super) fn show(&mut self) {
-        unsafe {
-            match self.window_state.take() {
-                Some(([x, y, w, h], maximized)) => {
-                    let wp = WINDOWPLACEMENT {
-                        length: size_of::<WINDOWPLACEMENT>() as u32,
-                        showCmd: if maximized { SW_SHOWMAXIMIZED.0 as u32 } else { SW_SHOWNORMAL.0 as u32 },
-                        rcNormalPosition: RECT { left: x, top: y, right: x + w, bottom: y + h },
-                        ..Default::default()
-                    };
-                    // Ajusta solo si la posición guardada quedó fuera de los monitores actuales.
-                    let _ = SetWindowPlacement(self.hwnd.hwnd(), &wp);
-                }
-                None => {
-                    let dpi = GetDpiForWindow(self.hwnd.hwnd());
-                    let _ = SetWindowPos(
-                        self.hwnd.hwnd(),
-                        None,
-                        0,
-                        0,
-                        scale(INITIAL_SIZE.0, dpi),
-                        scale(INITIAL_SIZE.1, dpi),
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                    let _ = ShowWindow(self.hwnd.hwnd(), SW_SHOW);
-                }
-            }
-        }
     }
 
     /// Solo las pestañas a la vista cargan y vigilan su carpeta.

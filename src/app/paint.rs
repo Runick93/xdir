@@ -18,16 +18,13 @@ impl App {
             None => "xdir".to_string(),
         };
         if title != self.title {
-            let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-            unsafe {
-                let _ = SetWindowTextW(self.hwnd.hwnd(), PCWSTR(wide.as_ptr()));
-            }
+            set_title(self.hwnd, &title);
             self.title = title;
         }
 
         if self.first_frame_ms.is_none() {
             self.marks.push(("WM_PAINT", ms_since(self.started)));
-            if self.renderer.ensure_target(self.hwnd.hwnd(), self.dpi).is_ok() {
+            if self.renderer.ensure_target(self.hwnd, self.dpi).is_ok() {
                 self.marks.push(("render target", ms_since(self.started)));
             }
         }
@@ -83,7 +80,7 @@ impl App {
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
         let suggest = self.suggest.as_ref();
-        let result = self.renderer.draw(self.hwnd.hwnd(), self.dpi, &self.theme, if self.file_colors { &self.config.colors } else { &[] }, |p, w, h| {
+        let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, if self.file_colors { &self.config.colors } else { &[] }, |p, w, h| {
             let area = ui::panes_area(w, h, tree_w, groups_h);
             if groups_h > 0.0 {
                 let names: Vec<(&str, bool)> = groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
@@ -189,6 +186,7 @@ impl App {
         if animating {
             self.redraw();
         }
+        #[cfg(windows)]
         uia::notify_focus(self);
         // Superposiciones de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
@@ -217,9 +215,7 @@ impl App {
                     out += &format!("  {t:7.2}  {name}\n");
                 }
                 let _ = std::fs::write(path, out);
-                unsafe {
-                    let _ = PostMessageW(Some(self.hwnd.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
+                request_close(self.hwnd);
             }
         }
     }

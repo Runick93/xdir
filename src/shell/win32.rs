@@ -6,7 +6,6 @@ use std::ffi::OsString;
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Com::{
@@ -36,23 +35,10 @@ use windows::core::{Interface, PCSTR, PCWSTR, PSTR, Result, w};
 use crate::platform::Handle;
 use crate::fs::{Location, wide_path};
 
+use super::*;
+
 // ---------- elementos y objetos de datos ----------
 
-/// Un elemento para el Shell: su ruta (o nombre de análisis) y, si es virtual, su PIDL.
-///
-/// El PIDL hace falta cuando la ruta no alcanza para identificarlo en su contexto: un
-/// elemento de la Papelera tiene ruta física, pero su menú ("Restaurar") es el de la Papelera.
-#[derive(Clone)]
-pub struct Item {
-    pub path: PathBuf,
-    pub pidl: Option<Arc<[u8]>>,
-}
-
-impl From<PathBuf> for Item {
-    fn from(path: PathBuf) -> Self {
-        Self { path, pidl: None }
-    }
-}
 
 /// PIDLs absolutos de una lista de elementos. Los que se obtuvieron de una ruta se liberan al
 /// soltarlos; los guardados en el elemento solo se prestan.
@@ -294,13 +280,6 @@ pub fn handle_menu_message(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<L
 /// Verbos que resuelve la propia aplicación en vez del Shell.
 pub const OWN_VERBS: [&str; 5] = ["rename", "delete", "cut", "copy", "paste"];
 
-/// Entrada propia del menú del fondo (Ver, Ordenar por, Actualizar...): el Shell solo aporta las
-/// de las extensiones ("Nuevo", Git...), el resto lo pone la vista de carpeta del Explorador.
-pub enum Entry {
-    Item { id: u32, label: String, enabled: bool, checked: bool },
-    Sub(String, Vec<Entry>),
-    Sep,
-}
 
 /// Identificadores propios: por encima de los que el Shell recibe (1..=0x7FFF).
 const OWN_BASE: u32 = 0x8000;
@@ -334,10 +313,6 @@ fn append_entries(hmenu: HMENU, entries: &[Entry]) {
     }
 }
 
-/// Lo que devuelve `context_menu` si se eligió "Desanclar de Acceso rápido" (el Shell solo ofrece
-/// ese verbo en el propio Acceso rápido: ahí la aplicación lo resuelve con `unpin_quick_access`).
-pub const UNPIN_QUICK: &str = "unpin-quick";
-
 /// Muestra el menú contextual del Shell. Sin `items`, es el menú del fondo de la carpeta.
 /// Con `intercept`, devuelve el verbo elegido si es uno de `OWN_VERBS` para que lo resuelva
 /// la aplicación; el resto (y todo, en carpetas virtuales) lo ejecuta el Shell y devuelve
@@ -349,13 +324,20 @@ pub fn context_menu(
     owner: Handle,
     folder: &Location,
     items: &[Item],
-    screen: POINT,
+    at: (f32, f32),
     extended: bool,
     intercept: bool,
     own: &[Entry],
     pinned: bool,
 ) -> Option<String> {
     let hwnd = owner.hwnd();
+    // Punto del área de la ventana (DIPs) → pantalla (píxeles).
+    let screen = unsafe {
+        let k = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) as f32 / 96.0;
+        let mut pt = POINT { x: (at.0 * k) as i32, y: (at.1 * k) as i32 };
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+        pt
+    };
     let menu = build_menu(hwnd, folder, items).ok()?;
     unsafe {
         let hmenu = CreatePopupMenu().ok()?;

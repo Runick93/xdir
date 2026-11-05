@@ -54,77 +54,39 @@ impl App {
         self.redraw();
     }
 
-    /// Menú desplegable de una carpeta de favoritos o del desborde "»".
-    pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: render::Rect) {
-        let entries: Vec<(FavPath, Fav)> = match &source {
+    /// Favoritos de un menú desplegable: el contenido de una carpeta de favoritos, o los de la
+    /// raíz que no entraron en la barra. None si la carpeta ya no existe.
+    pub(super) fn fav_menu_entries(&self, source: &FavMenuSource) -> Option<Vec<(FavPath, Fav)>> {
+        Some(match source {
             FavMenuSource::Group(path) => match self.favorites.get(path) {
                 Some(Fav::Group { items, .. }) => items
                     .iter()
                     .enumerate()
                     .map(|(j, f)| ([path.as_slice(), &[j]].concat(), f.clone()))
                     .collect(),
-                _ => return,
+                _ => return None,
             },
             FavMenuSource::Overflow(first) => {
                 self.favorites.items.iter().enumerate().skip(*first).map(|(i, f)| (vec![i], f.clone())).collect()
             }
-        };
-        let mut menu = FavMenu { ids: Vec::new(), positions: HashMap::new(), action: None };
-        let k = self.dpi as f32 / 96.0;
-        let mut pt = POINT { x: (anchor.left * k) as i32, y: (anchor.bottom * k) as i32 };
-        unsafe {
-            let Ok(hmenu) = CreatePopupMenu() else { return };
-            build_fav_menu(&mut menu, hmenu, &entries);
-            let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
-            self.fav_menu = Some(menu);
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd.hwnd(), None).0;
-            let menu = self.fav_menu.take();
-            let _ = DestroyMenu(hmenu);
-            let Some(menu) = menu else { return };
-            // Si dentro del menú se eligió algo con clic derecho, eso manda.
-            if let Some((path, act)) = menu.action {
-                self.fav_action(pane, Some(path), act);
-            } else if cmd > 0 {
-                if let Some(path) = menu.ids.get(cmd as usize - 1).cloned() {
-                    self.activate_fav(pane, &path, key_down(VK_CONTROL));
-                }
-            }
-        }
-    }
-
-    /// Clic derecho sobre un elemento de un menú de favoritos (`WM_MENURBUTTONUP`).
-    pub(super) fn on_fav_menu_right_click(&mut self, hmenu: isize, pos: u32) {
-        let Some(path) = self.fav_menu.as_ref().and_then(|m| m.positions.get(&(hmenu, pos)).cloned()) else { return };
-        if let Some(act) = self.fav_context_menu(Some(&path), true) {
-            if let Some(m) = self.fav_menu.as_mut() {
-                m.action = Some((path, act));
-            }
-            unsafe {
-                let _ = EndMenu();
-            }
-        }
+        })
     }
 
     /// Clic derecho en PowerShell o CMD del menú de terminales: abrirla como administrador o con
     /// las credenciales de otro usuario.
     pub(super) fn console_context_menu(&mut self, pane: usize, console: Console) {
-        const ADMIN: usize = 1;
-        const OTHER: usize = 2;
-        let cmd = unsafe {
-            let Ok(hmenu) = CreatePopupMenu() else { return };
-            let _ = AppendMenuW(hmenu, MF_STRING, ADMIN, w!("Ejecutar como administrador"));
-            let _ = AppendMenuW(hmenu, MF_STRING, OTHER, w!("Ejecutar como otro usuario"));
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, self.hwnd.hwnd(), None).0;
-            let _ = DestroyMenu(hmenu);
-            cmd as usize
-        };
-        let verb = match cmd {
-            ADMIN => "runas",
-            OTHER => "runasuser",
-            _ => return,
-        };
+        // Las variantes que ofrece el sistema (en Windows: administrador y otro usuario).
+        let verbs = Console::alt_verbs();
+        if verbs.is_empty() {
+            return;
+        }
+        let entries: Vec<shell::Entry> = verbs
+            .iter()
+            .enumerate()
+            .map(|(i, (_, label))| shell::Entry::Item { id: i as u32 + 1, label: label.to_string(), enabled: true, checked: false })
+            .collect();
+        let Some(cmd) = popup_menu(self, &entries, MenuPos::Cursor, None) else { return };
+        let Some(&(verb, _)) = verbs.get(cmd as usize - 1) else { return };
         self.term_menu = None;
         if let Location::Path(dir) = self.panes[pane].tab().location.clone() {
             if !console.open_as(self.hwnd, &dir, verb) {
@@ -135,54 +97,40 @@ impl App {
     }
 
     /// Menú contextual de la barra de favoritos (o de un favorito). Devuelve la acción elegida.
+    /// `recurse`: se abre desde un menú de favoritos todavía abierto.
     pub(super) fn fav_context_menu(&self, path: Option<&FavPath>, recurse: bool) -> Option<FavAct> {
         let fav = path.and_then(|p| self.favorites.get(p));
-        unsafe {
-            let hmenu = CreatePopupMenu().ok()?;
-            let add = |id: FavAct, text: &str| {
-                let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-                let _ = AppendMenuW(hmenu, MF_STRING, id as usize, PCWSTR(wide.as_ptr()));
-            };
-            let sep = || {
-                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
-            };
-            match fav {
-                Some(Fav::Link { .. }) => {
-                    add(FavAct::Open, "Abrir");
-                    add(FavAct::OpenNewTab, "Abrir en pestaña nueva");
-                    sep();
-                }
-                Some(Fav::Group { .. }) => {
-                    add(FavAct::OpenNewTab, "Abrir todo en pestañas nuevas");
-                    sep();
-                }
-                None => {}
+        let mut entries = Vec::new();
+        let item = |id: FavAct, text: &str| shell::Entry::Item { id: id as u32, label: text.to_string(), enabled: true, checked: false };
+        match fav {
+            Some(Fav::Link { .. }) => {
+                entries.push(item(FavAct::Open, "Abrir"));
+                entries.push(item(FavAct::OpenNewTab, "Abrir en pestaña nueva"));
+                entries.push(shell::Entry::Sep);
             }
-            if fav.is_some() {
-                add(FavAct::Rename, "Renombrar");
-                add(FavAct::Delete, "Eliminar");
-                if path.is_some_and(|p| p.len() > 1) {
-                    add(FavAct::MoveOut, "Sacar de la carpeta");
-                }
-                sep();
+            Some(Fav::Group { .. }) => {
+                entries.push(item(FavAct::OpenNewTab, "Abrir todo en pestañas nuevas"));
+                entries.push(shell::Entry::Sep);
             }
-            if !recurse {
-                add(FavAct::NewGroup, "Nueva carpeta de favoritos");
-                add(FavAct::AddCurrent, "Agregar la carpeta actual");
-                sep();
-                add(FavAct::EditFile, "Editar el archivo de favoritos");
-                add(FavAct::HideBar, "Ocultar la barra de favoritos (Ctrl+Shift+B)");
-            }
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let mut flags = TPM_RETURNCMD | TPM_RIGHTBUTTON;
-            if recurse {
-                flags |= TPM_RECURSE;
-            }
-            let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd.hwnd(), None).0;
-            let _ = DestroyMenu(hmenu);
-            FavAct::from_id(cmd)
+            None => {}
         }
+        if fav.is_some() {
+            entries.push(item(FavAct::Rename, "Renombrar"));
+            entries.push(item(FavAct::Delete, "Eliminar"));
+            if path.is_some_and(|p| p.len() > 1) {
+                entries.push(item(FavAct::MoveOut, "Sacar de la carpeta"));
+            }
+            entries.push(shell::Entry::Sep);
+        }
+        if !recurse {
+            entries.push(item(FavAct::NewGroup, "Nueva carpeta de favoritos"));
+            entries.push(item(FavAct::AddCurrent, "Agregar la carpeta actual"));
+            entries.push(shell::Entry::Sep);
+            entries.push(item(FavAct::EditFile, "Editar el archivo de favoritos"));
+            entries.push(item(FavAct::HideBar, &format!("Ocultar la barra de favoritos ({})", crate::commands::shortcut_label("Ctrl+Shift+B"))));
+        }
+        let pos = if recurse { MenuPos::CursorNested } else { MenuPos::Cursor };
+        popup_menu(self, &entries, pos, None).and_then(|id| FavAct::from_id(id as i32))
     }
 
     pub(super) fn fav_action(&mut self, pane: usize, path: Option<FavPath>, act: FavAct) {
@@ -217,10 +165,7 @@ impl App {
                 // Se guarda antes para que exista; al volver a la ventana se relee.
                 self.save_favorites();
                 if let Some(file) = Favorites::file_path() {
-                    let wide = fs::wide_path(&file);
-                    unsafe {
-                        ShellExecuteW(Some(self.hwnd.hwnd()), w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
-                    }
+                    shell::open_file(self.hwnd, &file, None);
                 }
             }
             (FavAct::HideBar, _) => {
@@ -246,44 +191,17 @@ impl App {
             _ => bar,
         };
         let r = render::rect(r.left, r.top, r.right.max(r.left + 200.0).min(bar.right), r.bottom);
-        let k = self.dpi as f32 / 96.0;
-        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            let Ok(edit) = CreateWindowExW(
-                WS_EX_LAYERED,
-                w!("EDIT"),
-                PCWSTR(wide.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-                (r.left * k) as i32,
-                (r.top * k) as i32,
-                ((r.right - r.left) * k) as i32,
-                ((r.bottom - r.top) * k) as i32,
-                Some(self.hwnd.hwnd()),
-                None,
-                None,
-                None,
-            ) else {
-                return;
-            };
-            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
-            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
-            SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_FAVEDIT_DONE as usize);
-            SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
-            let _ = SetFocus(Some(edit));
-            self.fav_edit = Some((edit, path));
-        }
+        let Some(edit) = TextBox::create(self, TextKind::FavRename, r, &name) else { return };
+        edit.select(0, -1);
+        edit.focus();
+        self.fav_edit = Some((edit, path));
     }
 
     pub(super) fn end_fav_edit(&mut self, commit: bool) {
         let Some((edit, path)) = self.fav_edit.take() else { return };
-        let mut buf = vec![0u16; 512];
-        let text = unsafe {
-            let len = GetWindowTextW(edit, &mut buf);
-            let _ = DestroyWindow(edit);
-            let _ = SetFocus(Some(self.hwnd.hwnd()));
-            String::from_utf16_lossy(&buf[..len.max(0) as usize])
-        };
+        let text = edit.text();
+        edit.destroy();
+        focus_main(self.hwnd);
         let name = text.trim().to_string();
         if commit && !name.is_empty() {
             if let Some(f) = self.favorites.get_mut(&path) {
@@ -310,13 +228,13 @@ impl App {
         let dirs: Vec<PathBuf> = ev.paths.map(|p| p.iter().filter(|p| p.is_dir()).cloned().collect()).unwrap_or_default();
         // Un favorito es un vínculo: no se copia ni se mueve nada.
         ev.effect = if dirs.is_empty() {
-            DROPEFFECT_NONE
-        } else if ev.allowed.0 & DROPEFFECT_LINK.0 != 0 {
-            DROPEFFECT_LINK
-        } else if ev.allowed.0 & DROPEFFECT_COPY.0 != 0 {
-            DROPEFFECT_COPY
+            Effect::NONE
+        } else if ev.allowed.allows(Effect::LINK) {
+            Effect::LINK
+        } else if ev.allowed.allows(Effect::COPY) {
+            Effect::COPY
         } else {
-            DROPEFFECT_NONE
+            Effect::NONE
         };
         let target = self.panes[pane].fav_drop_at(&self.favorites, x);
         for p in &mut self.panes {
@@ -324,7 +242,7 @@ impl App {
         }
         if ev.kind == DragKind::Drop {
             self.fav_drop = None;
-            if ev.effect != DROPEFFECT_NONE {
+            if ev.effect != Effect::NONE {
                 let new: Vec<Fav> = dirs
                     .into_iter()
                     .map(|d| Fav::Link { name: Location::Path(d.clone()).title(), location: Location::Path(d) })
@@ -344,7 +262,7 @@ impl App {
                 self.save_favorites();
             }
         } else {
-            let want = (ev.effect != DROPEFFECT_NONE).then_some((pane, target));
+            let want = (ev.effect != Effect::NONE).then_some((pane, target));
             if want != self.fav_drop {
                 self.fav_drop = want;
             }

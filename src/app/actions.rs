@@ -178,7 +178,7 @@ impl App {
                     if !path.exists() {
                         self.config = Config::load();
                     }
-                    open_in_editor(hwnd.hwnd(), &path);
+                    open_in_editor(hwnd, &path);
                 }
             }
         }
@@ -222,25 +222,11 @@ impl App {
         if self.hwnd.is_null() {
             return;
         }
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd.hwnd()), None, false);
-        }
+        invalidate(self.hwnd);
     }
 
-    pub(super) fn mouse_pos(&self, lparam: LPARAM) -> (f32, f32) {
-        let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
-        let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
-        let k = 96.0 / self.dpi as f32;
-        (x * k, y * k)
-    }
-
+    /// Posición del mouse en DIPs del área de la ventana.
     pub(super) fn cursor_pos(&self) -> (f32, f32) {
-        let mut pt = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut pt);
-            let _ = ScreenToClient(self.hwnd.hwnd(), &mut pt);
-        }
-        let k = 96.0 / self.dpi as f32;
-        (pt.x as f32 * k, pt.y as f32 * k)
+        cursor_dips(self.hwnd, self.dpi)
     }
 }

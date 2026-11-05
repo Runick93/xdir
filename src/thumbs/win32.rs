@@ -7,7 +7,6 @@
 //! rápido), y lo que ya no se ve no se descarta pero queda al final de la cola.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, SIZE, WPARAM};
@@ -24,15 +23,8 @@ use crate::platform::Handle;
 use crate::fs::wide_path;
 use crate::icons::{self, Pixels, WM_APP_ICONS};
 
-/// De qué elemento: una ruta de disco o un PIDL absoluto (elementos virtuales del Shell).
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Source {
-    Path(PathBuf),
-    Pidl(Arc<[u8]>),
-}
+use super::*;
 
-/// (elemento, lado en píxeles).
-pub type Key = (Source, u32);
 
 struct Queue {
     /// Pila: se atiende primero lo último pedido.

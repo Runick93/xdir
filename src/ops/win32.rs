@@ -1,10 +1,10 @@
-//! Operaciones de archivos con `IFileOperation`: la misma maquinaria del Explorador (progreso,
-//! conflictos, confirmaciones, papelera). Cada operación corre en su propio hilo para que la
-//! ventana nunca se congele; al terminar avisa con `WM_APP_OP_DONE`.
+//! Operaciones de archivos en Windows con `IFileOperation`: la misma maquinaria del Explorador
+//! (progreso, conflictos, confirmaciones, papelera).
 //!
 //! Un `IFileOperationProgressSink` anota qué se creó, movió o mandó a la papelera, y con eso se
 //! arma la operación inversa para deshacer (Ctrl+Z).
 
+use super::*;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -20,45 +20,13 @@ use windows::Win32::UI::Shell::{
     IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem, SHCreateItemFromParsingName,
     SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
 };
-use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, PostMessageW, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, PostMessageW};
 use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s, w};
 
 use crate::platform::Handle;
 use crate::fs::wide_path;
 
-/// Terminó una operación; el resultado está en el canal.
-pub const WM_APP_OP_DONE: u32 = WM_APP + 4;
 
-pub enum Op {
-    Copy { sources: Vec<PathBuf>, dest: PathBuf },
-    Move { sources: Vec<PathBuf>, dest: PathBuf },
-    Delete { paths: Vec<PathBuf>, recycle: bool },
-    Rename { path: PathBuf, new_name: String },
-    NewFolder { parent: PathBuf },
-    Undo(Undo),
-}
-
-/// Cómo deshacer una operación ya hecha.
-#[derive(Clone, Debug)]
-pub enum Undo {
-    /// Volver a llamar `path` como `old_name`.
-    Rename { path: PathBuf, old_name: String },
-    /// Copias o carpetas nuevas: se mandan a la papelera.
-    Created(Vec<PathBuf>),
-    /// (dónde quedó, dónde estaba).
-    Moved(Vec<(PathBuf, PathBuf)>),
-    /// (nombre del elemento dentro de la papelera, dónde estaba).
-    Recycled(Vec<(String, PathBuf)>),
-}
-
-pub struct OpResult {
-    pub undo: Option<Undo>,
-    /// Elemento a enfocar al terminar (renombrado o carpeta nueva).
-    pub focus: Option<PathBuf>,
-    /// Carpeta nueva: se abre el renombrado en línea sobre ella.
-    pub rename_after: bool,
-    pub error: Option<String>,
-}
 
 pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
     let hwnd = owner.hwnd();

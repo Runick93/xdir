@@ -1,9 +1,14 @@
-//! Despacho de mensajes de la ventana (`WM_*`) hacia los métodos de `App`.
+//! Despacho de mensajes de la ventana (`WM_*`) hacia los métodos de `App` (solo Windows).
+//! Lo que no es propio de Win32 está en `events.rs`.
 
 use super::*;
+use super::win::*;
 
 impl App {
     pub(super) fn handle(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if msg >= crate::platform::WM_APP && self.on_app_message(msg, wparam.0, lparam.0) {
+            return LRESULT(0);
+        }
         unsafe {
             match msg {
                 WM_PAINT => {
@@ -30,16 +35,12 @@ impl App {
                     let width = (lparam.0 & 0xFFFF) as u32;
                     let height = ((lparam.0 >> 16) & 0xFFFF) as u32;
                     self.renderer.resize(width, height, self.dpi);
-                    self.end_edit(false);
-                    self.end_filter(true);
-                    self.close_palette();
+                    self.on_resized();
                     LRESULT(0)
                 }
                 WM_DPICHANGED => {
                     self.dpi = (wparam.0 & 0xFFFF) as u32;
-                    self.end_edit(false);
-                    self.end_filter(true);
-                    self.close_palette();
+                    self.on_resized();
                     self.renderer.set_dpi(self.dpi);
                     self.update_edit_resources();
                     let r = &*(lparam.0 as *const RECT);
@@ -66,38 +67,16 @@ impl App {
                     // Windows avisa así cuando el usuario cambia entre modo claro y oscuro.
                     let area = PCWSTR(lparam.0 as *const u16);
                     if !area.is_null() && area.to_string().is_ok_and(|s| s == "ImmersiveColorSet") {
-                        self.theme = Theme::from_system(self.accent, self.dark_mode);
-                        let mica = self.theme.apply_to_window(self.hwnd.hwnd());
-                        self.renderer.set_transparent(mica);
-                        self.transparent = mica;
-                        self.update_edit_resources();
-                        self.redraw();
+                        self.on_system_theme_changed();
                     }
                     LRESULT(0)
                 }
                 WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
                     let (x, y) = self.cursor_pos();
-                    let splitter = match self.drag {
-                        Drag::Splitter(s) => Some(s),
-                        _ => match self.hit(x, y) {
-                            Hit::Splitter(s) => Some(s),
-                            _ => None,
-                        },
-                    };
-                    // Borde de un encabezado de columna: cambiar el ancho.
-                    let column_edge = match (self.drag, self.hit(x, y)) {
-                        (Drag::List(i), _) | (_, Hit::Pane(i, PaneHit::List)) => self.panes[i].tab().list.wants_resize_cursor(x, y),
-                        _ => false,
-                    };
-                    #[cfg(feature = "arbol")]
-                    let tree_edge = matches!(self.drag, Drag::TreeEdge) || (matches!(self.drag, Drag::None) && self.tree.edge_at(x, y));
-                    #[cfg(not(feature = "arbol"))]
-                    let tree_edge = false;
-                    let cursor = match splitter {
-                        Some(Splitter::Vertical) => IDC_SIZEWE,
-                        Some(Splitter::Horizontal) => IDC_SIZENS,
-                        None if column_edge || tree_edge => IDC_SIZEWE,
-                        None => IDC_ARROW,
+                    let cursor = match self.cursor_at(x, y) {
+                        CursorKind::SizeWE => IDC_SIZEWE,
+                        CursorKind::SizeNS => IDC_SIZENS,
+                        CursorKind::Arrow => IDC_ARROW,
                     };
                     if let Ok(c) = LoadCursorW(None, cursor) {
                         SetCursor(Some(c));
@@ -111,97 +90,15 @@ impl App {
                     }
                     LRESULT(1)
                 }
-                WM_APP_LOAD => {
-                    let t0 = Instant::now();
-                    let mut changed = false;
-                    let (hwnd, tx) = (self.hwnd, self.tx.clone());
-                    while let Ok(event) = self.rx.try_recv() {
-                        if let Some(tab) = self.tab_by_id(event.panel) {
-                            changed |= tab.on_load(event);
-                            tab.retry_with_credentials(hwnd, &tx);
-                            if let Some(path) = tab.visited.take() {
-                                self.history.record(&path, jump::now());
-                            }
-                        }
-                    }
-                    self.ui_load_ms += ms_since(t0);
-                    if changed {
-                        self.try_pending_rename();
-                        self.try_new_watch();
-                        self.redraw();
-                    }
-                    LRESULT(0)
-                }
-                icons::WM_APP_ICONS => {
-                    self.redraw();
-                    LRESULT(0)
-                }
-                WM_APP_CHANGED => {
-                    let (hwnd, tx) = (self.hwnd, self.tx.clone());
-                    if let Some(tab) = self.tab_by_id(wparam.0) {
-                        tab.on_changed(hwnd, &tx, lparam.0 as u64);
-                    }
-                    LRESULT(0)
-                }
-                WM_APP_EDIT_DONE => {
-                    self.end_edit(wparam.0 == 1);
-                    LRESULT(0)
-                }
                 WM_CTLCOLOREDIT => {
                     let hdc = HDC(wparam.0 as *mut _);
                     SetTextColor(hdc, colorref(self.theme.text));
                     SetBkColor(hdc, colorref(self.theme.surface_alt));
-                    LRESULT(self.edit_brush.0 as isize)
-                }
-                WM_APP_FAVEDIT_DONE => {
-                    self.end_fav_edit(wparam.0 == 1);
-                    LRESULT(0)
-                }
-                WM_APP_FILTER_DONE => {
-                    self.end_filter(wparam.0 == 1);
-                    LRESULT(0)
+                    LRESULT(self.sys.edit_brush.0 as isize)
                 }
                 // El filtro y la paleta se actualizan con cada tecla.
                 WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == EN_CHANGE_CODE => {
-                    if let Some((edit, pane)) = self.filter_edit {
-                        if lparam.0 == edit.0 as isize {
-                            let text = window_text(edit);
-                            self.panes[pane].tab_mut().list.set_filter(&text);
-                            self.redraw();
-                        }
-                    }
-                    if self.palette.as_ref().is_some_and(|(_, e)| lparam.0 == e.0 as isize) {
-                        self.refresh_palette();
-                    }
-                    if let Some((edit, _)) = self.edit {
-                        if lparam.0 == edit.0 as isize {
-                            let text = window_text(edit);
-                            if let Some(sg) = self.suggest.as_mut().filter(|sg| !sg.quiet) {
-                                sg.set_query(&text);
-                                self.redraw();
-                            }
-                        }
-                    }
-                    LRESULT(0)
-                }
-                #[cfg(feature = "arbol")]
-                tree::WM_APP_TREE => {
-                    self.tree.on_loaded();
-                    self.redraw();
-                    LRESULT(0)
-                }
-                // Terminó de leerse el Acceso rápido de Windows (wparam 1), o el vigilante avisó que
-                // cambió (wparam 0): se relee.
-                #[cfg(feature = "arbol")]
-                tree::WM_APP_QUICK => {
-                    if wparam.0 == 1 {
-                        if self.tree.on_quick_loaded() {
-                            self.tree.request_quick(self.hwnd);
-                        }
-                    } else {
-                        self.tree.request_quick(self.hwnd);
-                    }
-                    self.redraw();
+                    self.on_text_changed(lparam.0);
                     LRESULT(0)
                 }
                 // Solo con `--features pruebas`: otro proceso maneja la app por texto (capturas y
@@ -214,43 +111,13 @@ impl App {
                     self.test_hook(text.trim_end_matches('\0'));
                     LRESULT(1)
                 }
-                WM_APP_SUGGEST_KEY => {
-                    self.on_suggest_key(Key(wparam.0 as u16));
-                    LRESULT(0)
-                }
-                WM_APP_PALETTE_KEY => {
-                    self.on_palette_key(Key(wparam.0 as u16), lparam.0 == 1);
-                    LRESULT(0)
-                }
-                WM_MENURBUTTONUP if self.fav_menu.is_some() => {
+                WM_MENURBUTTONUP if self.sys.fav_menu.is_some() => {
                     self.on_fav_menu_right_click(lparam.0, wparam.0 as u32);
                     LRESULT(0)
                 }
                 // Al volver a la ventana se releen los favoritos (por si se editó el archivo).
                 WM_ACTIVATEAPP if wparam.0 != 0 => {
-                    // Al volver a la ventana, el lector tiene que leer de nuevo el elemento con foco.
-                    self.uia_focus = None;
-                    #[cfg(feature = "arbol")]
-                    self.tree.request_quick(self.hwnd);
-                    let fresh = Favorites::load();
-                    if fresh != self.favorites {
-                        self.favorites = fresh;
-                        self.redraw();
-                    }
-                    if self.probe.is_none() {
-                        self.reload_config();
-                    }
-                    LRESULT(0)
-                }
-                WM_APP_RENAME_DONE => {
-                    self.end_rename(wparam.0 == 1);
-                    LRESULT(0)
-                }
-                WM_APP_OP_DONE => {
-                    while let Ok(result) = self.ops_rx.try_recv() {
-                        self.on_op_done(result);
-                    }
-                    self.redraw();
+                    self.on_app_activated();
                     LRESULT(0)
                 }
                 WM_APP_DRAG => {
@@ -266,60 +133,18 @@ impl App {
                 }
                 WM_RBUTTONDOWN => {
                     let (x, y) = self.mouse_pos(lparam);
-                    let _ = SetFocus(Some(self.hwnd.hwnd()));
-                    self.fav_ctx = None;
-                    self.header_ctx = None;
-                    self.term_ctx = None;
-                    #[cfg(feature = "arbol")]
-                    {
-                        self.tree_ctx = self.tree.contains(x, y).then(|| self.tree.path_at(x, y));
-                    }
-                    match self.hit(x, y) {
-                        Hit::Pane(i, PaneHit::List) if self.panes[i].tab().list.in_header(x, y) => {
-                            self.set_active(i);
-                            self.header_ctx = Some(i);
-                        }
-                        Hit::Pane(i, PaneHit::List) => {
-                            self.set_active(i);
-                            self.panes[i].tab_mut().list.on_right_down(x, y);
-                            self.redraw();
-                        }
-                        Hit::TermMenu(Some(c)) => {
-                            if let Some(pane) = self.term_menu {
-                                self.term_ctx = Some((pane, c));
-                            }
-                        }
-                        Hit::Pane(i, PaneHit::Fav(j)) => self.fav_ctx = Some((i, Some(vec![j]))),
-                        Hit::Pane(i, PaneHit::FavBar | PaneHit::FavOverflow) => self.fav_ctx = Some((i, None)),
-                        _ => {}
-                    }
+                    self.on_right_down(x, y);
                     LRESULT(0)
                 }
                 WM_CONTEXTMENU => {
-                    if let Some(pane) = self.header_ctx.take().filter(|_| lparam.0 != -1) {
-                        let pt = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
-                        self.show_columns_menu(pane, pt);
-                        return LRESULT(0);
-                    }
-                    if let Some((pane, console)) = self.term_ctx.take().filter(|_| lparam.0 != -1) {
-                        self.console_context_menu(pane, console);
-                        return LRESULT(0);
-                    }
-                    #[cfg(feature = "arbol")]
-                    if let Some(target) = self.tree_ctx.take().filter(|_| lparam.0 != -1) {
-                        if let Some(path) = target {
-                            self.tree_context_menu(path, lparam);
-                        }
-                        return LRESULT(0);
-                    }
-                    match self.fav_ctx.take() {
-                        Some((pane, path)) if lparam.0 != -1 => {
-                            if let Some(act) = self.fav_context_menu(path.as_ref(), false) {
-                                self.fav_action(pane, path, act);
-                            }
-                        }
-                        _ => self.on_context_menu(lparam),
-                    }
+                    // lparam -1: tecla de menú o Shift+F10.
+                    let at = (lparam.0 != -1).then(|| {
+                        let mut pt = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+                        let _ = ScreenToClient(self.hwnd.hwnd(), &mut pt);
+                        let k = 96.0 / self.dpi as f32;
+                        (pt.x as f32 * k, pt.y as f32 * k)
+                    });
+                    self.on_context_menu_request(at);
                     LRESULT(0)
                 }
                 WM_KEYDOWN => {
@@ -331,18 +156,15 @@ impl App {
                 }
                 WM_SYSKEYDOWN => {
                     // Alt+flechas como en el Explorador; el resto (Alt+F4, Alt+Espacio) sigue de largo.
-                    match self.config.keymap.lookup(Key(wparam.0 as u16), key_down(VK_CONTROL), key_down(VK_SHIFT), true) {
-                        Some(c) => self.run_command(c),
-                        None => return DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam),
+                    if self.on_alt_key(Key(wparam.0 as u16)) {
+                        LRESULT(0)
+                    } else {
+                        DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam)
                     }
-                    LRESULT(0)
                 }
                 WM_CHAR => {
                     if let Some(c) = char::from_u32(wparam.0 as u32) {
-                        if !c.is_control() && !key_down(VK_CONTROL) {
-                            let action = self.tab_mut().list.on_char(c);
-                            self.apply(self.active, action);
-                        }
+                        self.on_char(c);
                     }
                     LRESULT(0)
                 }
@@ -350,7 +172,7 @@ impl App {
                     let (x, y) = self.mouse_pos(lparam);
                     // El desplegable de la barra de dirección no le quita el foco a la caja.
                     if !matches!(self.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
-                        let _ = SetFocus(Some(self.hwnd.hwnd()));
+                        focus_main(self.hwnd);
                     }
                     self.on_left_down(x, y, msg == WM_LBUTTONDBLCLK);
                     LRESULT(0)
@@ -371,92 +193,34 @@ impl App {
                     LRESULT(0)
                 }
                 WM_MOUSELEAVE => {
-                    self.tracking_mouse = false;
-                    self.hover = Hit::None;
-                    #[cfg(feature = "arbol")]
-                    if matches!(self.drag, Drag::None) {
-                        self.tree.on_mouse_leave();
-                    }
-                    for p in &mut self.panes {
-                        p.tab_mut().list.on_mouse_leave();
-                    }
-                    self.redraw();
+                    self.sys.tracking_mouse = false;
+                    self.on_mouse_left();
                     LRESULT(0)
                 }
                 WM_MOUSEWHEEL => {
-                    // La rueda va al panel bajo el mouse, aunque no sea el activo.
                     let (x, y) = self.cursor_pos();
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
-                    let pane = match self.hit(x, y) {
-                        Hit::Palette(_) => {
-                            if let Some((pal, _)) = &mut self.palette {
-                                pal.on_wheel(delta.round() as i32 * 3);
-                                self.redraw();
-                            }
-                            return LRESULT(0);
-                        }
-                        Hit::Suggest(_) => {
-                            if let Some(sg) = &mut self.suggest {
-                                sg.on_wheel(delta.round() as i32 * 3);
-                                self.redraw();
-                            }
-                            return LRESULT(0);
-                        }
-                        Hit::Pane(i, _) => i,
-                        _ => self.active,
-                    };
-                    #[cfg(feature = "arbol")]
-                    if self.tree.contains(x, y) {
-                        if key_down(VK_SHIFT) {
-                            self.tree.on_wheel_h(delta * wheel_lines());
-                        } else {
-                            self.tree.on_wheel(delta * wheel_lines());
-                        }
-                        self.redraw();
-                        return LRESULT(0);
-                    }
-                    // Ctrl+rueda: tamaño de la vista, como en el Explorador.
-                    if key_down(VK_CONTROL) {
-                        self.cycle_view(pane, delta > 0.0);
-                        return LRESULT(0);
-                    }
-                    let action = self.panes[pane].tab_mut().list.on_wheel(delta * wheel_lines());
-                    self.apply(pane, action);
+                    self.on_wheel(x, y, delta, wheel_lines());
                     LRESULT(0)
                 }
-                // Rueda horizontal (touchpad, mouse con inclinación): el árbol se mueve a los costados.
+                // Rueda horizontal (touchpad, mouse con inclinación).
                 0x020E => {
                     let (x, y) = self.cursor_pos();
-                    #[cfg(feature = "arbol")]
-                    if self.tree.contains(x, y) {
-                        let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
-                        self.tree.on_wheel_h(-delta * wheel_lines());
-                        self.redraw();
-                    }
-                    let _ = (x, y);
+                    let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
+                    self.on_wheel_h(x, y, delta, wheel_lines());
                     LRESULT(0)
                 }
                 WM_XBUTTONUP => {
-                    // Botones laterales del mouse: atrás y adelante en el panel bajo el mouse.
                     let (x, y) = self.mouse_pos(lparam);
-                    if let Hit::Pane(i, _) = self.hit(x, y) {
-                        self.set_active(i);
-                    }
-                    let (hwnd, tx) = (self.hwnd, self.tx.clone());
                     match ((wparam.0 >> 16) & 0xFFFF) as u16 {
-                        1 => self.tab_mut().go_back(hwnd, &tx),
-                        2 => self.tab_mut().go_forward(hwnd, &tx),
+                        1 => self.on_back_forward(x, y, false),
+                        2 => self.on_back_forward(x, y, true),
                         _ => {}
                     }
-                    self.redraw();
                     LRESULT(1)
                 }
                 WM_CLOSE => {
-                    if self.probe.is_none() {
-                        self.autosave_group();
-                        let _ = session::save(&self.session());
-                        let _ = self.history.save();
-                    }
+                    self.on_closing();
                     let _ = DestroyWindow(self.hwnd.hwnd());
                     LRESULT(0)
                 }
@@ -475,13 +239,20 @@ impl App {
                         None::<&windows::Win32::UI::Accessibility::IRawElementProviderSimple>,
                     );
                     let _ = RevokeDragDrop(self.hwnd.hwnd());
-                    let _ = DeleteObject(self.edit_font.into());
-                    let _ = DeleteObject(self.edit_brush.into());
+                    let _ = DeleteObject(self.sys.edit_font.into());
+                    let _ = DeleteObject(self.sys.edit_brush.into());
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam),
             }
         }
+    }
+
+    pub(super) fn mouse_pos(&self, lparam: LPARAM) -> (f32, f32) {
+        let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
+        let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
+        let k = 96.0 / self.dpi as f32;
+        (x * k, y * k)
     }
 }

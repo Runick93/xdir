@@ -4,21 +4,37 @@
 mod actions;
 mod appearance;
 mod edit;
+mod events;
 mod favs;
 mod fileops;
 mod saved_groups;
 mod input;
-mod messages;
 mod paint;
 mod quick_jump;
 mod panes;
+
+// Lo propio de cada sistema: arranque, ventana, controles nativos y menús.
+#[cfg(windows)]
+mod messages;
+#[cfg(windows)]
 mod uia;
+#[cfg(windows)]
 mod win;
+#[cfg(windows)]
+use win::*;
+#[cfg(windows)]
+pub use win::run;
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
+use mac::*;
+#[cfg(target_os = "macos")]
+pub use mac::run;
 
 #[cfg(test)]
 mod tests;
 
-use win::*;
+use events::CursorKind;
 
 use crate::{about, anim, config, drop, fs, icons, jump, list, ops, palette, pane, render, session, shell, theme, typed, ui};
 #[cfg(feature = "arbol")]
@@ -29,44 +45,16 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
-    ClientToScreen, DeleteObject, FW_NORMAL, HBRUSH, HDC, HFONT, InvalidateRect, OUT_DEFAULT_PRECIS, ScreenToClient,
-    BLACK_BRUSH, BeginPaint, EndPaint, FillRect, GetStockObject, PAINTSTRUCT, SetBkColor, SetTextColor,
-};
-use windows::Win32::System::Ole::{
-    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, IDropTarget, OleInitialize,
-    RevokeDragDrop,
-};
-use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
-use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::Dialogs::{CC_ANYCOLOR, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
-use windows::Win32::UI::Controls::{EM_SETSEL, WM_MOUSELEAVE};
-use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
-};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-};
-use crate::platform::{Handle, Key, key_down};
+use crate::platform::{Color, Handle, Key, WM_APP, key_down};
 use crate::platform::keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP};
-use windows::Win32::UI::Shell::{
-    DefSubclassProc, SHDoDragDrop,
-    SetWindowSubclass, ShellExecuteW,
-};
-use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, Result, w};
 
 use crate::commands::Command;
-use crate::platform::Color;
 use crate::config::Config;
 use crate::console::Console;
 use crate::groups::{Group, Groups};
 use crate::jump::History;
 use crate::palette::{Palette, PaletteMode, Sources, Target};
-use crate::drop::{DragEvent, DragKind, WM_APP_DRAG};
+use crate::drop::{DragEvent, DragKind, Effect, WM_APP_DRAG};
 use crate::favorites::{Fav, FavPath, Favorites};
 use crate::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use crate::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
@@ -78,7 +66,12 @@ use crate::tab::Tab;
 use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
 
-const CLASS_NAME: PCWSTR = w!("xdir.main");
+/// Error de las llamadas al sistema (crear el renderizador, la ventana...).
+#[cfg(windows)]
+pub type SysResult<T> = windows::core::Result<T>;
+#[cfg(target_os = "macos")]
+pub type SysResult<T> = Result<T, String>;
+
 /// Tamaño inicial en DIPs; se escala según el DPI del monitor.
 const INITIAL_SIZE: (i32, i32) = (1280, 800);
 /// Siempre hay 4 paneles; el layout decide cuántos se ven. Los ocultos conservan sus pestañas.
@@ -91,12 +84,13 @@ const WM_APP_RENAME_DONE: u32 = WM_APP + 11;
 const WM_APP_FAVEDIT_DONE: u32 = WM_APP + 12;
 /// Terminó la edición del filtro rápido. `wparam` = 1 si se conserva, 0 si se quita (Escape).
 const WM_APP_FILTER_DONE: u32 = WM_APP + 13;
-/// Notificación de un control de edición: el texto cambió.
-const EN_CHANGE_CODE: usize = 0x0300;
 /// Tecla de la paleta: `wparam` = tecla virtual (0: perdió el foco), `lparam` = 1 si con Ctrl.
 const WM_APP_PALETTE_KEY: u32 = WM_APP + 14;
 /// Flecha / Re Pág / Av Pág en la barra de dirección: recorren el desplegable de rutas.
 const WM_APP_SUGGEST_KEY: u32 = WM_APP + 15;
+/// Cambió el texto de una caja de edición. `lparam` = `TextBox::id`.
+#[cfg_attr(windows, allow(dead_code))]
+const WM_APP_TEXT_CHANGED: u32 = WM_APP + 16;
 
 /// Qué muestra un menú desplegable de favoritos.
 enum FavMenuSource {
@@ -104,15 +98,6 @@ enum FavMenuSource {
     Group(FavPath),
     /// Los favoritos de la raíz que no entraron en la barra, desde este índice.
     Overflow(usize),
-}
-
-/// Menú de favoritos abierto: a qué favorito corresponde cada comando y cada posición
-/// (para el clic derecho dentro del menú).
-struct FavMenu {
-    ids: Vec<FavPath>,
-    positions: HashMap<(isize, u32), FavPath>,
-    /// Acción elegida con clic derecho dentro del menú.
-    action: Option<(FavPath, FavAct)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -137,37 +122,12 @@ impl FavAct {
     }
 }
 
-/// Arma el menú (y submenús) de favoritos. En los menús, "&" marca el atajo: se duplica.
-unsafe fn build_fav_menu(menu: &mut FavMenu, hmenu: HMENU, entries: &[(FavPath, Fav)]) {
-    for (pos, (path, fav)) in entries.iter().enumerate() {
-        let label: Vec<u16> = fav.name().replace('&', "&&").encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            match fav {
-                Fav::Link { .. } => {
-                    menu.ids.push(path.clone());
-                    let _ = AppendMenuW(hmenu, MF_STRING, menu.ids.len(), PCWSTR(label.as_ptr()));
-                }
-                Fav::Group { items, .. } => {
-                    let Ok(sub) = CreatePopupMenu() else { continue };
-                    let children: Vec<(FavPath, Fav)> =
-                        items.iter().enumerate().map(|(j, f)| ([path.as_slice(), &[j]].concat(), f.clone())).collect();
-                    if children.is_empty() {
-                        let _ = AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, w!("(vacía)"));
-                    }
-                    build_fav_menu(menu, sub, &children);
-                    let _ = AppendMenuW(hmenu, MF_POPUP, sub.0 as usize, PCWSTR(label.as_ptr()));
-                }
-            }
-        }
-        menu.positions.insert((hmenu.0 as isize, pos as u32), path.clone());
-    }
-}
 /// Operaciones que se pueden deshacer (Ctrl+Z).
 const UNDO_MAX: usize = 50;
 
 /// Renombrado en línea en curso.
 struct Rename {
-    edit: HWND,
+    edit: TextBox,
     path: PathBuf,
 }
 
@@ -280,12 +240,11 @@ struct App {
     tx: Sender<fs::LoadEvent>,
     rx: Receiver<fs::LoadEvent>,
     /// Control de edición nativo sobre la barra de dirección de un panel.
-    edit: Option<(HWND, usize)>,
+    edit: Option<(TextBox, usize)>,
     /// Desplegable de rutas de la barra de dirección (vive mientras `edit`).
     suggest: Option<typed::Suggest>,
-    edit_font: HFONT,
-    edit_brush: HBRUSH,
-    tracking_mouse: bool,
+    /// Estado propio del sistema (fuentes de los controles, destino de arrastre...).
+    sys: Sys,
     hover: Hit,
     drag: Drag,
     title: String,
@@ -309,8 +268,6 @@ struct App {
     new_watch: Option<NewWatch>,
     /// Mensaje para la barra de estado (errores de operaciones).
     notice: Option<String>,
-    /// Se mantiene viva mientras exista la ventana.
-    drop_target: Option<IDropTarget>,
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
     transparent: bool,
     favorites: Favorites,
@@ -330,7 +287,7 @@ struct App {
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
-    palette: Option<(Palette, HWND)>,
+    palette: Option<(Palette, TextBox)>,
     /// Árbol de carpetas lateral (experimental).
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
@@ -345,11 +302,10 @@ struct App {
     tab_drop: Option<(usize, usize)>,
     /// Pestaña flotante mientras se arrastra una.
     ghost: Option<Ghost>,
-    fav_menu: Option<FavMenu>,
     /// Renombrado de un favorito en curso.
-    fav_edit: Option<(HWND, FavPath)>,
+    fav_edit: Option<(TextBox, FavPath)>,
     /// Control de edición del filtro rápido abierto y su panel.
-    filter_edit: Option<(HWND, usize)>,
+    filter_edit: Option<(TextBox, usize)>,
     /// El último clic derecho fue sobre la barra de favoritos: (panel, favorito).
     fav_ctx: Option<(usize, Option<FavPath>)>,
     /// Clic derecho en el encabezado de la lista de ese panel: menú de columnas.
@@ -367,15 +323,14 @@ struct App {
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
     term_ctx: Option<(usize, Console)>,
-    /// Colores personalizados del selector de Windows, para que se recuerden entre usos.
-    custom_colors: [COLORREF; 16],
     /// Tamaño de la ventana en DIPs fijado por las pruebas (sin ventana real no hay `GetClientRect`).
     #[cfg(test)]
     client: Option<(f32, f32)>,
 }
 
-pub fn run() -> Result<()> {
-    let started = Instant::now();
+/// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
+/// arranque y cierra) y una carpeta para abrir.
+pub(crate) fn startup_args() -> (Option<Session>, Option<String>, Option<PathBuf>) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let probe = args.iter().position(|a| a == "--probe").and_then(|i| args.get(i + 1).cloned());
     let start_path = args
@@ -385,88 +340,8 @@ pub fn run() -> Result<()> {
         .map(|(_, a)| PathBuf::from(a))
         .filter(|p| p.is_dir());
     // `--probe` mide el arranque limpio: sin sesión, con la carpeta pedida en un solo panel.
-    let mut session = if probe.is_some() { None } else { session::load() };
-    if probe.is_some() {
-        session = Some(Session { layout: 0, ..Default::default() });
-    }
-
-    unsafe {
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;
-        // OLE (STA): lo exigen el Shell, el portapapeles y arrastrar y soltar.
-        OleInitialize(None)?;
-        let instance = GetModuleHandleW(None)?;
-        let class = WNDCLASSEXW {
-            cbSize: size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
-            lpfnWndProc: Some(wndproc),
-            hInstance: instance.into(),
-            hCursor: LoadCursorW(None, IDC_ARROW)?,
-            // Ícono del exe (recurso 1, ver assets/xdir.rc): grande para Alt+Tab, chico para la barra de tareas.
-            hIcon: app_icon(instance.into(), SM_CXICON),
-            hIconSm: app_icon(instance.into(), SM_CXSMICON),
-            lpszClassName: CLASS_NAME,
-            ..Default::default()
-        };
-        if RegisterClassExW(&class) == 0 {
-            return Err(windows::core::Error::from_thread());
-        }
-
-        let marks = vec![("init", ms_since(started))];
-        let session = session.unwrap_or_else(default_session);
-        shell::set_menu_mode(session.dark_mode);
-        // `--probe` mide un arranque limpio: sin historial ni configuración del usuario.
-        let history = if probe.is_none() { History::load() } else { History::default() };
-        let config = if probe.is_none() { Config::load() } else { Config::default() };
-        anim::set_enabled(config.animations.unwrap_or_else(anim::system_allows));
-        anim::set_off_by_config(config.animations == Some(false));
-        let init = Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), probe, start_path, started, marks };
-        let app = App::new(init)?;
-        let app = Box::into_raw(Box::new(app));
-
-        // La ventana se crea oculta para aplicar tema y tamaño antes de mostrarla (sin flash blanco).
-        // El HWND queda guardado en `App` desde WM_NCCREATE.
-        CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
-            CLASS_NAME,
-            w!("xdir"),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            None,
-            None,
-            Some(instance.into()),
-            Some(app as *const _),
-        )?;
-
-        // Sin ícono en la barra de título (la barra de tareas y Alt+Tab siguen usando el de la clase).
-        let no_icon = windows::Win32::UI::Controls::WTA_OPTIONS {
-            dwFlags: windows::Win32::UI::Controls::WTNCA_NODRAWICON,
-            dwMask: windows::Win32::UI::Controls::WTNCA_NODRAWICON,
-        };
-        let _ = windows::Win32::UI::Controls::SetWindowThemeAttribute(
-            (*app).hwnd.hwnd(),
-            windows::Win32::UI::Controls::WTA_NONCLIENT,
-            &no_icon as *const _ as *const std::ffi::c_void,
-            size_of::<windows::Win32::UI::Controls::WTA_OPTIONS>() as u32,
-        );
-
-        // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
-        (*app).sync_visibility();
-        (*app).drop_target = drop::register((*app).hwnd.hwnd()).ok();
-        #[cfg(feature = "arbol")]
-        (*app).start_quick_access();
-        (*app).marks.push(("ventana creada", ms_since(started)));
-        (*app).show();
-
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    Ok(())
+    let session = if probe.is_some() { Some(Session { layout: 0, ..Default::default() }) } else { session::load() };
+    (session, probe, start_path)
 }
 
 /// Todo lo que `App::new` toma del exterior (disco, argumentos, hora de inicio): así se puede armar
@@ -484,6 +359,18 @@ pub(crate) struct Init {
 }
 
 impl Init {
+    /// Lee del disco lo que hace falta para arrancar (historial, configuración, favoritos y
+    /// grupos) y aplica la preferencia de animaciones.
+    pub(crate) fn load(session: Option<Session>, probe: Option<String>, start_path: Option<PathBuf>, started: Instant, marks: Vec<(&'static str, f64)>) -> Init {
+        let session = session.unwrap_or_else(default_session);
+        // `--probe` mide un arranque limpio: sin historial ni configuración del usuario.
+        let history = if probe.is_none() { History::load() } else { History::default() };
+        let config = if probe.is_none() { Config::load() } else { Config::default() };
+        anim::set_enabled(config.animations.unwrap_or_else(anim::system_allows));
+        anim::set_off_by_config(config.animations == Some(false));
+        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), probe, start_path, started, marks }
+    }
+
     /// Datos vacíos y sesión por defecto: nada del disco.
     #[cfg(test)]
     pub fn blank() -> Init {
@@ -503,7 +390,7 @@ impl Init {
 
 impl App {
     /// Arma la aplicación (sin ventana: el `HWND` llega en `WM_NCCREATE`) y abre sus paneles.
-    pub(crate) fn new(init: Init) -> Result<App> {
+    pub(crate) fn new(init: Init) -> SysResult<App> {
         let Init { session, history, config, favorites, groups, probe, start_path, started, mut marks } = init;
         let theme = Theme::from_system(session.accent, session.dark_mode);
         let renderer = Renderer::new()?;
@@ -531,9 +418,7 @@ impl App {
             rx,
             edit: None,
             suggest: None,
-            edit_font: HFONT::default(),
-            edit_brush: HBRUSH::default(),
-            tracking_mouse: false,
+            sys: Sys::new(),
             hover: Hit::None,
             drag: Drag::None,
             title: String::new(),
@@ -551,7 +436,6 @@ impl App {
             pending_rename: None,
             new_watch: None,
             notice: config_errors,
-            drop_target: None,
             transparent: false,
             favorites,
             history,
@@ -571,7 +455,6 @@ impl App {
             fav_drop: None,
             tab_drop: None,
             ghost: None,
-            fav_menu: None,
             fav_edit: None,
             filter_edit: None,
             fav_ctx: None,
@@ -583,7 +466,6 @@ impl App {
             about_open: false,
             term_menu: None,
             term_ctx: None,
-            custom_colors: [COLORREF(0x00FFFFFF); 16],
             #[cfg(test)]
             client: Some((1280.0, 800.0)),
         };
@@ -599,38 +481,12 @@ impl App {
     }
 }
 
+pub(super) fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
 /// Primera vez: 4 paneles en "Este equipo".
 fn default_session() -> Session {
     let panes = (0..PANES).map(|_| PaneState { tabs: vec![Location::Computer], active: 0 }).collect();
     Session { panes, ..Default::default() }
-}
-
-extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
-        if msg == WM_NCCREATE {
-            let cs = &*(lparam.0 as *const CREATESTRUCTW);
-            let app = cs.lpCreateParams as *mut App;
-            (*app).hwnd = hwnd.into();
-            (*app).dpi = GetDpiForWindow(hwnd);
-            let mica = (*app).theme.apply_to_window(hwnd);
-            (*app).renderer.set_transparent(mica);
-            (*app).transparent = mica;
-            (*app).update_edit_resources();
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
-        }
-
-        let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
-        if app.is_null() {
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
-        }
-
-        if msg == WM_NCDESTROY {
-            drop(Box::from_raw(app));
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
-        }
-
-        (*app).handle(msg, wparam, lparam)
-    }
 }

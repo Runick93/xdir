@@ -1,0 +1,54 @@
+//! Arrastrar y soltar archivos sobre la ventana. Cada evento se le pasa a la ventana con
+//! `WM_APP_DRAG` (en el mismo hilo, llamada directa), que decide la carpeta destino y el efecto.
+
+use std::path::PathBuf;
+
+use crate::platform::WM_APP;
+
+#[cfg(windows)]
+mod win32;
+#[cfg(windows)]
+pub use self::win32::*;
+
+/// Evento de arrastre para la ventana. `lparam` apunta a un `DragEvent`.
+pub const WM_APP_DRAG: u32 = WM_APP + 5;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DragKind {
+    Enter,
+    Over,
+    Leave,
+    Drop,
+}
+
+/// Efectos de soltar, combinables (los mismos valores que `DROPEFFECT` de Windows).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Effect(pub u32);
+
+impl Effect {
+    pub const NONE: Effect = Effect(0);
+    pub const COPY: Effect = Effect(1);
+    pub const MOVE: Effect = Effect(2);
+    pub const LINK: Effect = Effect(4);
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const ALL: Effect = Effect(7);
+
+    pub fn allows(self, e: Effect) -> bool {
+        self.0 & e.0 != 0
+    }
+}
+
+pub struct DragEvent<'a> {
+    pub kind: DragKind,
+    /// Posición en el área de la ventana, en DIPs.
+    pub point: (f32, f32),
+    /// Teclas apretadas: Ctrl (⌥ en macOS) copia, Shift (⌘ en macOS) mueve.
+    pub ctrl: bool,
+    pub shift: bool,
+    /// Rutas arrastradas (solo archivos de disco; None si el origen no tiene rutas).
+    pub paths: Option<&'a [PathBuf]>,
+    /// Efectos que permite el origen.
+    pub allowed: Effect,
+    /// Respuesta de la ventana.
+    pub effect: Effect,
+}

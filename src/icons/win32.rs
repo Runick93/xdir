@@ -1,4 +1,4 @@
-//! Íconos del sistema en un hilo propio. Sacar un ícono de Windows puede tardar decenas de
+//! Íconos del sistema de Windows en un hilo propio. Sacar un ícono de Windows puede tardar decenas de
 //! milisegundos la primera vez (carga DLLs y handlers de íconos), así que la interfaz nunca lo
 //! hace: pide el ícono, dibuja sin él, y el hilo avisa con `WM_APP_ICONS` cuando está listo.
 
@@ -24,17 +24,11 @@ use windows::core::PCWSTR;
 
 use crate::platform::Handle;
 use crate::fs::{LoadEvent, LoadMsg, WM_APP_LOAD, wide_path};
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW};
 
-/// Hay íconos nuevos listos para dibujar.
-pub const WM_APP_ICONS: u32 = WM_APP + 3;
+use super::*;
 
-/// Píxeles BGRA premultiplicados.
-pub struct Pixels {
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>,
-}
+
 
 /// Qué lista de imágenes del sistema usar (pequeña, grande o extra grande).
 pub type ListKind = u32;

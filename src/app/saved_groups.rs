@@ -73,13 +73,12 @@ impl App {
     /// × de una pestaña sin guardar: pregunta si se conserva como grupo o se descarta.
     pub(super) fn close_group_tab(&mut self, index: usize) {
         let Some(name) = self.groups.items.get(index).map(|g| g.name.clone()) else { return };
-        let text: Vec<u16> = format!("¿Guardar «{name}» como grupo?\n\nSí: queda guardado. No: se descarta.\0").encode_utf16().collect();
-        let title: Vec<u16> = "Cerrar pestaña de grupo\0".encode_utf16().collect();
-        let answer = unsafe { MessageBoxW(Some(self.hwnd.hwnd()), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNOCANCEL | MB_ICONQUESTION) };
-        if answer == IDYES {
+        let text = format!("¿Guardar «{name}» como grupo?\n\nSí: queda guardado. No: se descarta.");
+        let answer = ask_yes_no_cancel(self.hwnd, "Cerrar pestaña de grupo", &text);
+        if answer == Some(true) {
             self.groups.items[index].temp = false;
             let _ = self.groups.save();
-        } else if answer == IDNO {
+        } else if answer == Some(false) {
             let was_active = self.group_name.as_deref() == Some(name.as_str());
             self.groups.remove(index);
             let _ = self.groups.save();
@@ -177,43 +176,6 @@ impl App {
         self.redraw();
     }
 
-    /// Punto del color de acento para marcar un ítem de menú (bitmap de 32 bits con alfa).
-    pub(super) fn accent_dot(&self) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
-        use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DIB_RGB_COLORS};
-        let size = (16.0 * self.dpi as f32 / 96.0).round().max(8.0) as i32;
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: size,
-                biHeight: -size,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits = std::ptr::null_mut();
-        let bitmap = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
-        if bits.is_null() {
-            return None;
-        }
-        let px = unsafe { std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize) };
-        let c = self.theme.accent;
-        let (c_r, c_g, c_b) = ((c.r * 255.0) as u32, (c.g * 255.0) as u32, (c.b * 255.0) as u32);
-        let (center, radius) = (size as f32 / 2.0, size as f32 * 0.25);
-        for y in 0..size {
-            for x in 0..size {
-                let (dx, dy) = (x as f32 + 0.5 - center, y as f32 + 0.5 - center);
-                // Borde suave de un píxel; el color va premultiplicado por el alfa.
-                let cover = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-                let a = (cover * 255.0) as u32;
-                px[(y * size + x) as usize] = (a << 24) | ((c_r * a / 255) << 16) | ((c_g * a / 255) << 8) | (c_b * a / 255);
-            }
-        }
-        Some(bitmap)
-    }
-
     /// Menú del botón de grupos: abrir uno, guardar el actual, eliminar o editar el archivo.
     pub(super) fn show_groups_menu(&mut self) {
         const SAVE: usize = 1;
@@ -222,55 +184,28 @@ impl App {
         const DELETE: usize = 2000;
         let (w, h) = self.client_dips();
         let r = ui::groups_rect(w, h);
-        let k = self.dpi as f32 / 96.0;
-        let mut pt = POINT { x: (r.left * k) as i32, y: (r.top * k) as i32 };
-        let cmd = unsafe {
-            let Ok(hmenu) = CreatePopupMenu() else { return };
-            let add = |menu: HMENU, id: usize, text: &str| {
-                let wide: Vec<u16> = text.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
-                let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(wide.as_ptr()));
-            };
-            for (i, g) in self.groups.items.iter().enumerate() {
-                add(hmenu, OPEN + i, &g.name);
-            }
-            if self.groups.items.is_empty() {
-                let wide: Vec<u16> = "Todavía no hay grupos".encode_utf16().chain(Some(0)).collect();
-                let _ = AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, PCWSTR(wide.as_ptr()));
-            }
-            // El grupo activo lleva un punto del color de acento.
-            let dot = self.group_name.as_deref().and_then(|n| self.groups.find(n)).and_then(|i| Some((i, self.accent_dot()?)));
-            if let Some((i, bitmap)) = dot {
-                let mii = MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_BITMAP, hbmpItem: bitmap, ..Default::default() };
-                let _ = SetMenuItemInfoW(hmenu, (OPEN + i) as u32, false, &mii);
-            }
-            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
-            add(hmenu, SAVE, "Guardar paneles y carpetas como grupo…");
-            if !self.groups.items.is_empty() {
-                if let Ok(sub) = CreatePopupMenu() {
-                    for (i, g) in self.groups.items.iter().enumerate() {
-                        add(sub, DELETE + i, &g.name);
-                    }
-                    let wide: Vec<u16> = "Eliminar".encode_utf16().chain(Some(0)).collect();
-                    let _ = AppendMenuW(hmenu, MF_POPUP, sub.0 as usize, PCWSTR(wide.as_ptr()));
-                }
-                add(hmenu, EDIT, "Editar grupos.toml");
-            }
-            let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
-            // Hacia arriba desde el botón: la barra de estado está abajo de todo.
-            let flags = TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN;
-            let cmd = TrackPopupMenuEx(hmenu, flags.0, pt.x, pt.y, self.hwnd.hwnd(), None).0 as usize;
-            let _ = DestroyMenu(hmenu);
-            self.groups_menu_closed = (cmd == 0).then(Instant::now);
-            if let Some((_, bitmap)) = dot {
-                let _ = DeleteObject(bitmap.into());
-            }
-            cmd
-        };
+        let item = |id: usize, text: &str| shell::Entry::Item { id: id as u32, label: text.to_string(), enabled: true, checked: false };
+        let mut entries: Vec<shell::Entry> = self.groups.items.iter().enumerate().map(|(i, g)| item(OPEN + i, &g.name)).collect();
+        if self.groups.items.is_empty() {
+            entries.push(shell::Entry::Item { id: 0, label: "Todavía no hay grupos".into(), enabled: false, checked: false });
+        }
+        entries.push(shell::Entry::Sep);
+        entries.push(item(SAVE, "Guardar paneles y carpetas como grupo…"));
+        if !self.groups.items.is_empty() {
+            let delete = self.groups.items.iter().enumerate().map(|(i, g)| item(DELETE + i, &g.name)).collect();
+            entries.push(shell::Entry::Sub("Eliminar".into(), delete));
+            entries.push(item(EDIT, "Editar grupos.toml"));
+        }
+        // El grupo activo lleva un punto del color de acento.
+        let dot = self.group_name.as_deref().and_then(|n| self.groups.find(n)).map(|i| ((OPEN + i) as u32, self.theme.accent));
+        // Hacia arriba desde el botón: la barra de estado está abajo de todo.
+        let cmd = popup_menu(self, &entries, MenuPos::Above(r.left, r.top), dot).map_or(0, |c| c as usize);
+        self.groups_menu_closed = (cmd == 0).then(Instant::now);
         match cmd {
             SAVE => self.open_palette(PaletteMode::GroupName),
             EDIT => {
                 if let Some(dir) = session::config_dir() {
-                    open_in_editor(self.hwnd.hwnd(), &dir.join("grupos.toml"));
+                    open_in_editor(self.hwnd, &dir.join("grupos.toml"));
                 }
             }
             c if c >= DELETE => {

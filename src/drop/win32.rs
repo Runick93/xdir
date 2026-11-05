@@ -1,4 +1,4 @@
-//! Destino de arrastrar y soltar (`IDropTarget`). Cada evento se le pasa a la ventana con
+//! Destino de arrastrar y soltar en Windows (`IDropTarget`). Cada evento se le pasa a la ventana con
 //! `WM_APP_DRAG` (SendMessage: mismo hilo, llamada directa), que decide la carpeta destino y el
 //! efecto. Además muestra la imagen de arrastre del Shell con `IDropTargetHelper`.
 
@@ -10,34 +10,15 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IDataO
 use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl};
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper};
-use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_APP};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use windows::core::{Ref, Result, implement};
 
 use crate::shell;
 
-/// Evento de arrastre para la ventana. `lparam` apunta a un `DragEvent`.
-pub const WM_APP_DRAG: u32 = WM_APP + 5;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DragKind {
-    Enter,
-    Over,
-    Leave,
-    Drop,
-}
-
-pub struct DragEvent<'a> {
-    pub kind: DragKind,
-    /// Posición en pantalla.
-    pub point: POINT,
-    pub keys: MODIFIERKEYS_FLAGS,
-    /// Rutas arrastradas (solo archivos de disco; None si el origen no tiene rutas).
-    pub paths: Option<&'a [PathBuf]>,
-    /// Efectos que permite el origen.
-    pub allowed: DROPEFFECT,
-    /// Respuesta de la ventana.
-    pub effect: DROPEFFECT,
-}
+use super::*;
 
 #[implement(IDropTarget)]
 pub struct DropTarget {
@@ -67,21 +48,29 @@ impl DropTarget_Impl {
     fn dispatch(&self, kind: DragKind, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> DROPEFFECT {
         let paths = self.paths.borrow();
         let allowed = if effect.is_null() { DROPEFFECT_NONE } else { unsafe { *effect } };
+        let hwnd = HWND(self.hwnd as *mut _);
+        // Pantalla → cliente, en DIPs.
+        let mut client = POINT { x: pt.x, y: pt.y };
+        let k = unsafe {
+            let _ = ScreenToClient(hwnd, &mut client);
+            96.0 / GetDpiForWindow(hwnd).max(1) as f32
+        };
         let mut ev = DragEvent {
             kind,
-            point: POINT { x: pt.x, y: pt.y },
-            keys,
+            point: (client.x as f32 * k, client.y as f32 * k),
+            ctrl: keys.0 & MK_CONTROL.0 != 0,
+            shift: keys.0 & MK_SHIFT.0 != 0,
             paths: paths.as_deref(),
-            allowed,
-            effect: DROPEFFECT_NONE,
+            allowed: Effect(allowed.0),
+            effect: Effect::NONE,
         };
         unsafe {
-            SendMessageW(HWND(self.hwnd as *mut _), WM_APP_DRAG, Some(WPARAM(0)), Some(LPARAM(&mut ev as *mut _ as isize)));
+            SendMessageW(hwnd, WM_APP_DRAG, Some(WPARAM(0)), Some(LPARAM(&mut ev as *mut _ as isize)));
             if !effect.is_null() {
-                *effect = ev.effect;
+                *effect = DROPEFFECT(ev.effect.0);
             }
         }
-        ev.effect
+        DROPEFFECT(ev.effect.0)
     }
 }
 

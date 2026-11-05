@@ -133,32 +133,6 @@ impl App {
         }
     }
 
-    pub(super) fn start_drag(&mut self, pane: usize) {
-        let items = self.selection_items(pane);
-        if items.is_empty() {
-            return;
-        }
-        let obj = match shell::data_object(&items) {
-            Ok(o) => o,
-            Err(e) => {
-                self.notice = Some(format!("No se pudo arrastrar: {e}"));
-                self.redraw();
-                return;
-            }
-        };
-        let result = unsafe {
-            let _ = ReleaseCapture();
-            self.drag = Drag::None;
-            // Bucle modal: mientras dura, los eventos de soltar llegan por `WM_APP_DRAG`.
-            SHDoDragDrop(Some(self.hwnd.hwnd()), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)
-        };
-        // Cancelar con Esc no es un error; que Windows no pueda arrastrar, sí: se avisa.
-        if let Err(e) = result {
-            self.notice = Some(format!("No se pudo arrastrar: {e}"));
-        }
-        self.redraw();
-    }
-
     /// Carpeta destino bajo un punto: una carpeta de la lista o la carpeta del panel.
     pub(super) fn drop_folder(&self, x: f32, y: f32) -> Option<(usize, Option<usize>, PathBuf)> {
         let Hit::Pane(i, ph) = self.hit(x, y) else { return None };
@@ -174,28 +148,24 @@ impl App {
     }
 
     pub(super) fn on_drag(&mut self, ev: &mut DragEvent) {
-        let mut pt = ev.point;
-        unsafe {
-            let _ = ScreenToClient(self.hwnd.hwnd(), &mut pt);
-        }
-        let k = 96.0 / self.dpi as f32;
-        if self.on_drag_favbar(ev, pt.x as f32 * k, pt.y as f32 * k) {
+        let (x, y) = ev.point;
+        if self.on_drag_favbar(ev, x, y) {
             return;
         }
         let target = match ev.kind {
             DragKind::Leave => None,
-            _ => self.drop_folder(pt.x as f32 * k, pt.y as f32 * k),
+            _ => self.drop_folder(x, y),
         };
         ev.effect = match (&target, ev.paths) {
-            (Some((_, _, dest)), Some(paths)) => drop_effect(paths, dest, ev.keys, ev.allowed),
-            _ => DROPEFFECT_NONE,
+            (Some((_, _, dest)), Some(paths)) => drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed),
+            _ => Effect::NONE,
         };
 
         // Resaltado de la carpeta destino.
         let mut changed = false;
         for (i, pane) in self.panes.iter_mut().enumerate() {
             let want = match &target {
-                Some((p, Some(idx), _)) if *p == i && ev.effect != DROPEFFECT_NONE && ev.kind != DragKind::Drop => {
+                Some((p, Some(idx), _)) if *p == i && ev.effect != Effect::NONE && ev.kind != DragKind::Drop => {
                     Some(*idx)
                 }
                 _ => None,
@@ -210,10 +180,10 @@ impl App {
             self.redraw();
         }
 
-        if ev.kind == DragKind::Drop && ev.effect != DROPEFFECT_NONE {
+        if ev.kind == DragKind::Drop && ev.effect != Effect::NONE {
             if let (Some((pane, _, dest)), Some(paths)) = (target, ev.paths) {
                 let sources = paths.to_vec();
-                let op = if ev.effect == DROPEFFECT_MOVE { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
+                let op = if ev.effect == Effect::MOVE { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
                 ops::spawn(self.hwnd, self.ops_tx.clone(), op);
                 self.set_active(pane);
             }
@@ -260,20 +230,11 @@ impl App {
         entries
     }
 
-    pub(super) fn on_context_menu(&mut self, lparam: LPARAM) {
+    /// Menú contextual de la lista en `at` (DIPs del área de la ventana). Sin punto (tecla de
+    /// menú o Shift+F10) se abre sobre la fila con foco.
+    pub(super) fn on_context_menu(&mut self, at: Option<(f32, f32)>) {
         let pane = self.active;
-        // lparam -1: tecla de menú o Shift+F10; se abre sobre la fila con foco.
-        let screen = if lparam.0 == -1 {
-            let (x, y) = self.panes[pane].tab().list.focus_point().unwrap_or((40.0, 80.0));
-            let k = self.dpi as f32 / 96.0;
-            let mut pt = POINT { x: (x * k) as i32, y: (y * k) as i32 };
-            unsafe {
-                let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
-            }
-            pt
-        } else {
-            POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 }
-        };
+        let at = at.unwrap_or_else(|| self.panes[pane].tab().list.focus_point().unwrap_or((40.0, 80.0)));
         let location = self.panes[pane].tab().location.clone();
         let items = self.selection_items(pane);
         // En carpetas virtuales el Shell resuelve todo: conoce el contexto (p. ej. la Papelera).
@@ -292,7 +253,7 @@ impl App {
         };
         #[cfg(not(feature = "arbol"))]
         let pinned_one: Option<PathBuf> = None;
-        let chosen = shell::context_menu(self.hwnd, &location, &items, screen, key_down(VK_SHIFT), intercept, &own, pinned_one.is_some());
+        let chosen = shell::context_menu(self.hwnd, &location, &items, at, key_down(VK_SHIFT), intercept, &own, pinned_one.is_some());
         #[cfg(feature = "arbol")]
         if let (Some(shell::UNPIN_QUICK), Some(path)) = (chosen.as_deref(), pinned_one) {
             self.toggle_quick_pin(path);
@@ -323,5 +284,55 @@ impl App {
             _ => {}
         }
         self.redraw();
+    }
+}
+
+/// Efecto al soltar como en el Explorador: Ctrl copia, Shift mueve; sin teclas, mueve dentro
+/// de la misma unidad y copia entre unidades. Soltar en la misma carpeta (o dentro de sí
+/// misma) no hace nada.
+pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
+    if paths.iter().any(|p| p.parent() == Some(dest) || dest.starts_with(p)) {
+        return Effect::NONE;
+    }
+    let same_volume = paths.first().and_then(|p| shell::volume_of(p)) == shell::volume_of(dest);
+    let want = if ctrl {
+        Effect::COPY
+    } else if shift || same_volume {
+        Effect::MOVE
+    } else {
+        Effect::COPY
+    };
+    if allowed.allows(want) {
+        want
+    } else if allowed.allows(Effect::COPY) {
+        Effect::COPY
+    } else {
+        Effect::NONE
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    fn effect(sources: &[&str], dest: &str, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
+        let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+        drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed)
+    }
+
+    #[test]
+    fn drop_rules() {
+        let all = Effect::ALL;
+        // Misma unidad: mueve; otra unidad: copia.
+        assert_eq!(effect(&[r"C:\a\x.txt"], r"C:\b", false, false, all), Effect::MOVE);
+        assert_eq!(effect(&[r"D:\a\x.txt"], r"C:\b", false, false, all), Effect::COPY);
+        // Ctrl copia, Shift mueve.
+        assert_eq!(effect(&[r"C:\a\x.txt"], r"C:\b", true, false, all), Effect::COPY);
+        assert_eq!(effect(&[r"D:\a\x.txt"], r"C:\b", false, true, all), Effect::MOVE);
+        // A la misma carpeta, o una carpeta dentro de sí misma: nada.
+        assert_eq!(effect(&[r"C:\a\x.txt"], r"C:\a", false, false, all), Effect::NONE);
+        assert_eq!(effect(&[r"C:\a"], r"C:\a\sub", false, false, all), Effect::NONE);
+        // Si el origen solo permite copiar, se copia.
+        assert_eq!(effect(&[r"C:\a\x.txt"], r"C:\b", false, false, Effect::COPY), Effect::COPY);
     }
 }

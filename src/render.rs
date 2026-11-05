@@ -167,7 +167,8 @@ impl Renderer {
     }
 
     /// Crea el target si no existe (también lo hace `draw`; separado para medir el arranque).
-    pub fn ensure_target(&mut self, hwnd: HWND, dpi: u32) -> Result<()> {
+    pub fn ensure_target(&mut self, owner: Handle, dpi: u32) -> Result<()> {
+        let hwnd = owner.hwnd();
         if self.target.is_none() {
             let gpu = match self.pending.take() {
                 Some(handle) => handle.join().expect("hilo de creación de GPU")?,
@@ -183,7 +184,7 @@ impl Renderer {
     /// `file_colors`: reglas de color por tipo de archivo de `config.toml`.
     pub fn draw(
         &mut self,
-        hwnd: HWND,
+        hwnd: Handle,
         dpi: u32,
         theme: &Theme,
         file_colors: &[ColorRule],

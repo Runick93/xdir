@@ -224,6 +224,11 @@ pub fn combo_label(c: Combo) -> String {
     s
 }
 
+/// Texto de un atajo escrito como en `config.toml` ("Ctrl+Shift+B") para mostrar en la interfaz.
+pub fn shortcut_label(text: &str) -> String {
+    parse_combo(text).map(combo_label).unwrap_or_else(|_| text.to_string())
+}
+
 /// Atajos en uso: los de fábrica con los cambios de `config.toml`.
 #[derive(Clone, Debug)]
 pub struct Keymap {

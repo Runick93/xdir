@@ -25,44 +25,17 @@ impl App {
         };
         self.redraw();
 
-        let k = self.dpi as f32 / 96.0;
-        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            let Ok(edit) = CreateWindowExW(
-                WS_EX_LAYERED,
-                w!("EDIT"),
-                PCWSTR(wide.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-                (r.left * k) as i32,
-                (r.top * k) as i32,
-                ((r.right - r.left) * k) as i32,
-                ((r.bottom - r.top) * k) as i32,
-                Some(self.hwnd.hwnd()),
-                None,
-                None,
-                None,
-            ) else {
-                return;
-            };
-            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
-            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
-            SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_RENAME_DONE as usize);
-            SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(stem_len as isize)));
-            let _ = SetFocus(Some(edit));
-            self.rename = Some(Rename { edit, path });
-        }
+        let Some(edit) = TextBox::create(self, TextKind::Rename, r, &name) else { return };
+        edit.select(0, stem_len as isize);
+        edit.focus();
+        self.rename = Some(Rename { edit, path });
     }
 
     pub(super) fn end_rename(&mut self, commit: bool) {
         let Some(Rename { edit, path }) = self.rename.take() else { return };
-        let mut buf = vec![0u16; 1024];
-        let text = unsafe {
-            let len = GetWindowTextW(edit, &mut buf);
-            let _ = DestroyWindow(edit);
-            let _ = SetFocus(Some(self.hwnd.hwnd()));
-            String::from_utf16_lossy(&buf[..len.max(0) as usize])
-        };
+        let text = edit.text();
+        edit.destroy();
+        focus_main(self.hwnd);
         let new_name = text.trim().to_string();
         let old_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if commit && !new_name.is_empty() && new_name != old_name {
@@ -84,36 +57,12 @@ impl App {
             Location::Shell { parsing, .. } => parsing.clone(),
         };
         let r = self.panes[pane].address;
-        let k = self.dpi as f32 / 96.0;
-        let (x, w) = ((r.left + 10.0) * k, (r.right - r.left - 20.0 - pane::ADDRESS_CLEAR_W) * k);
-        let h = 20.0 * k;
-        let y = (r.top + r.bottom) / 2.0 * k - h / 2.0;
-        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            let Ok(edit) = CreateWindowExW(
-                WS_EX_LAYERED,
-                w!("EDIT"),
-                PCWSTR(wide.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-                x as i32,
-                y as i32,
-                w as i32,
-                h as i32,
-                Some(self.hwnd.hwnd()),
-                None,
-                None,
-                None,
-            ) else {
-                return;
-            };
-            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
-            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
-            SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_EDIT_DONE as usize);
-            SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
-            let _ = SetFocus(Some(edit));
-            self.edit = Some((edit, pane));
-        }
+        let (x, w) = (r.left + 10.0, r.right - r.left - 20.0 - pane::ADDRESS_CLEAR_W);
+        let y = (r.top + r.bottom) / 2.0 - 10.0;
+        let Some(edit) = TextBox::create(self, TextKind::Address, render::rect(x, y, x + w, y + 20.0), &text) else { return };
+        edit.select(0, -1);
+        edit.focus();
+        self.edit = Some((edit, pane));
         // Como el Explorador: al abrir, el historial de rutas escritas.
         self.suggest = Some(typed::Suggest::new(r, ""));
         self.redraw();
@@ -127,26 +76,17 @@ impl App {
         self.set_active(pane);
         self.panes[pane].open_chevron = Some(k);
         self.redraw();
-        let kk = self.dpi as f32 / 96.0;
-        let mut pt = POINT { x: (r.left * kk) as i32, y: (r.bottom * kk) as i32 + 2 };
-        let cmd = unsafe {
-            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(self.hwnd.hwnd());
-            let Ok(hmenu) = CreatePopupMenu() else { return };
-            for (i, (name, _)) in items.iter().enumerate() {
-                let wide: Vec<u16> = name.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
-                let _ = AppendMenuW(hmenu, MF_STRING, i + 1, PCWSTR(wide.as_ptr()));
-            }
-            if items.is_empty() {
-                let wide: Vec<u16> = "Sin subcarpetas".encode_utf16().chain(Some(0)).collect();
-                let _ = AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, PCWSTR(wide.as_ptr()));
-            }
-            let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
-            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd.hwnd(), None).0 as usize;
-            let _ = DestroyMenu(hmenu);
-            cmd
-        };
+        let mut entries: Vec<shell::Entry> = items
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| shell::Entry::Item { id: i as u32 + 1, label: name.clone(), enabled: true, checked: false })
+            .collect();
+        if items.is_empty() {
+            entries.push(shell::Entry::Item { id: 0, label: "Sin subcarpetas".into(), enabled: false, checked: false });
+        }
+        let cmd = popup_menu(self, &entries, MenuPos::At(r.left, r.bottom + 2.0), None);
         self.panes[pane].open_chevron = None;
-        if let Some((_, target)) = cmd.checked_sub(1).and_then(|i| items.get(i)) {
+        if let Some((_, target)) = cmd.and_then(|c| (c as usize).checked_sub(1)).and_then(|i| items.get(i)) {
             let (hwnd, tx) = (self.hwnd, self.tx.clone());
             self.panes[pane].tab_mut().navigate(hwnd, &tx, target.clone());
         }
@@ -156,10 +96,8 @@ impl App {
     /// Cruz de la barra de dirección: borra lo escrito y sigue editando (con el historial a la vista).
     pub(super) fn clear_edit(&mut self) {
         let Some((edit, _)) = self.edit else { return };
-        unsafe {
-            let _ = SetWindowTextW(edit, w!(""));
-            let _ = SetFocus(Some(edit));
-        }
+        edit.set_text("");
+        edit.focus();
         if let Some(sg) = &mut self.suggest {
             sg.set_query("");
         }
@@ -178,11 +116,8 @@ impl App {
         if let Some(text) = sg.move_by(delta) {
             // Cambiar el texto dispara EN_CHANGE: que no vuelva a buscar y pierda la elección.
             sg.quiet = true;
-            let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-            unsafe {
-                let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
-                SendMessageW(edit, EM_SETSEL, Some(WPARAM(text.encode_utf16().count())), Some(LPARAM(-1)));
-            }
+            edit.set_text(&text);
+            edit.select(text.encode_utf16().count(), -1);
             sg.quiet = false;
             self.redraw();
         }
@@ -191,23 +126,16 @@ impl App {
     /// Clic en una ruta del desplegable: se navega a ella.
     pub(super) fn pick_suggestion(&mut self, index: usize) {
         let (Some((edit, _)), Some(path)) = (self.edit, self.suggest.as_ref().and_then(|s| s.items.get(index).cloned())) else { return };
-        let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
-        }
+        edit.set_text(&path);
         self.end_edit(true);
     }
 
     pub(super) fn end_edit(&mut self, commit: bool) {
         let Some((edit, pane)) = self.edit.take() else { return };
         self.suggest = None;
-        let mut buf = vec![0u16; 32 * 1024];
-        let text = unsafe {
-            let len = GetWindowTextW(edit, &mut buf);
-            let _ = DestroyWindow(edit);
-            let _ = SetFocus(Some(self.hwnd.hwnd()));
-            String::from_utf16_lossy(&buf[..len.max(0) as usize])
-        };
+        let text = edit.text();
+        edit.destroy();
+        focus_main(self.hwnd);
         if commit {
             self.go_to_text(pane, &text);
             let typed = text.trim().trim_matches('"');
@@ -223,9 +151,7 @@ impl App {
     pub(super) fn begin_filter(&mut self, pane: usize) {
         if let Some((edit, p)) = self.filter_edit {
             if p == pane {
-                unsafe {
-                    let _ = SetFocus(Some(edit));
-                }
+                edit.focus();
                 return;
             }
             self.end_filter(true);
@@ -233,48 +159,20 @@ impl App {
         self.end_edit(false);
         self.set_active(pane);
         let r = self.panes[pane].filter_text_rect();
-        let k = self.dpi as f32 / 96.0;
-        let h = 20.0 * k;
-        let (x, w) = (r.left * k, (r.right - r.left) * k);
-        let y = (r.top + r.bottom) / 2.0 * k - h / 2.0;
-        let wide: Vec<u16> = self.panes[pane].tab().list.filter().encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            let Ok(edit) = CreateWindowExW(
-                WS_EX_LAYERED,
-                w!("EDIT"),
-                PCWSTR(wide.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-                x as i32,
-                y as i32,
-                w as i32,
-                h as i32,
-                Some(self.hwnd.hwnd()),
-                None,
-                None,
-                None,
-            ) else {
-                return;
-            };
-            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
-            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
-            SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.0 as usize)), Some(LPARAM(1)));
-            let _ = SetWindowSubclass(edit, Some(edit_proc), 1, WM_APP_FILTER_DONE as usize);
-            SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
-            let _ = SetFocus(Some(edit));
-            self.filter_edit = Some((edit, pane));
-        }
+        let y = (r.top + r.bottom) / 2.0 - 10.0;
+        let text = self.panes[pane].tab().list.filter().to_string();
+        let Some(edit) = TextBox::create(self, TextKind::Filter, render::rect(r.left, y, r.right, y + 20.0), &text) else { return };
+        edit.select(0, -1);
+        edit.focus();
+        self.filter_edit = Some((edit, pane));
         self.redraw();
     }
 
     /// Cierra el control del filtro. `keep`: Enter o perder el foco lo dejan aplicado; Escape lo quita.
     pub(super) fn end_filter(&mut self, keep: bool) {
         let Some((edit, pane)) = self.filter_edit.take() else { return };
-        unsafe {
-            let _ = DestroyWindow(edit);
-            if GetFocus().is_invalid() {
-                let _ = SetFocus(Some(self.hwnd.hwnd()));
-            }
-        }
+        edit.destroy();
+        focus_main_if_lost(self.hwnd);
         if !keep {
             self.panes[pane].tab_mut().list.set_filter("");
         }
@@ -304,9 +202,7 @@ impl App {
         if text.starts_with("shell:") || text.starts_with("::") {
             match fs::shell_location(text) {
                 Some(loc) => tab.navigate(hwnd, &tx, loc),
-                None => unsafe {
-                    let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONWARNING);
-                },
+                None => beep(),
             }
             return;
         }
@@ -346,37 +242,7 @@ impl App {
                 tab.focus_after_load(name.to_os_string());
             }
         } else {
-            unsafe {
-                let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONWARNING);
-            }
-        }
-    }
-
-    pub(super) fn update_edit_resources(&mut self) {
-        unsafe {
-            if !self.edit_font.is_invalid() {
-                let _ = DeleteObject(self.edit_font.into());
-            }
-            if !self.edit_brush.is_invalid() {
-                let _ = DeleteObject(self.edit_brush.into());
-            }
-            self.edit_font = CreateFontW(
-                -(13 * self.dpi as i32 / 96),
-                0,
-                0,
-                0,
-                FW_NORMAL.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                0,
-                w!("Segoe UI"),
-            );
-            self.edit_brush = CreateSolidBrush(colorref(self.theme.surface_alt));
+            beep();
         }
     }
 }

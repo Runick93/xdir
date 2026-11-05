@@ -69,6 +69,10 @@ pub enum Command {
 
 /// ¿La acción existe en esta compilación? (las experimentales dependen de una feature).
 pub fn available(c: Command) -> bool {
+    // En macOS hay una sola consola (Terminal) y no existe el Acceso rápido de Windows.
+    if cfg!(target_os = "macos") && matches!(c, Command::Cmd | Command::ToggleQuickPin) {
+        return false;
+    }
     c != Command::ToggleTree || cfg!(feature = "arbol")
 }
 
@@ -82,6 +86,51 @@ pub struct Spec {
 
 const fn spec(command: Command, id: &'static str, name: &'static str, default_keys: &'static [&'static str]) -> Spec {
     Spec { command, id, name, default_keys }
+}
+
+/// macOS: atajos de fábrica distintos a los de Windows, con las convenciones del Finder (Ctrl es
+/// ⌘ y Alt es ⌥). ⌘H oculta la app, así que los ocultos van con ⌘⇧. como en el Finder.
+#[cfg(target_os = "macos")]
+const MAC_KEYS: &[(Command, &[&str])] = &[
+    (Command::Back, &["Ctrl+[", "Ctrl+Izquierda", "NavegadorAtras"]),
+    (Command::Forward, &["Ctrl+]", "Ctrl+Derecha", "NavegadorAdelante"]),
+    (Command::Up, &["Ctrl+Arriba", "Retroceso"]),
+    (Command::Refresh, &["F5", "Ctrl+R"]),
+    (Command::EditAddress, &["Ctrl+L", "Ctrl+Shift+G", "F4"]),
+    (Command::ToggleHidden, &["Ctrl+Shift+."]),
+    (Command::InvertSelection, &["Ctrl+Alt+I"]),
+    (Command::Properties, &["Ctrl+I"]),
+    (Command::Recycle, &["Ctrl+Retroceso", "Supr"]),
+    (Command::Delete, &["Ctrl+Alt+Retroceso", "Shift+Supr"]),
+    (Command::CopyPaths, &["Ctrl+Alt+C"]),
+];
+
+/// macOS: nombres distintos a los de Windows.
+#[cfg(target_os = "macos")]
+const MAC_NAMES: &[(Command, &str)] = &[
+    (Command::PowerShell, "Abrir Terminal en la carpeta"),
+    (Command::Recycle, "Trasladar a la Papelera"),
+    (Command::Properties, "Obtener información"),
+];
+
+impl Spec {
+    /// Atajos de fábrica en este sistema.
+    pub fn keys(&self) -> &'static [&'static str] {
+        #[cfg(target_os = "macos")]
+        if let Some((_, keys)) = MAC_KEYS.iter().find(|(c, _)| *c == self.command) {
+            return keys;
+        }
+        self.default_keys
+    }
+
+    /// Nombre para la paleta en este sistema.
+    pub fn title(&self) -> &'static str {
+        #[cfg(target_os = "macos")]
+        if let Some((_, name)) = MAC_NAMES.iter().find(|(c, _)| *c == self.command) {
+            return name;
+        }
+        self.name
+    }
 }
 
 /// Todas las acciones, en el orden en que la paleta las muestra sin búsqueda.
@@ -178,7 +227,28 @@ const KEY_NAMES: &[(&[&str], Key, &str)] = &[
     (&["avpag", "pagedown"], VK_NEXT, "AvPág"),
     (&["navegadoratras", "browserback"], VK_BROWSER_BACK, "Botón atrás del mouse"),
     (&["navegadoradelante", "browserforward"], VK_BROWSER_FORWARD, "Botón adelante del mouse"),
+    (&["punto", "."], Key(0xBE), "."),
+    (&["coma", ","], Key(0xBC), ","),
+    (&["["], Key(0xDB), "["),
+    (&["]"], Key(0xDD), "]"),
 ];
+
+/// macOS: símbolos, en el orden de Apple (⌥⇧⌘).
+#[cfg(target_os = "macos")]
+fn mac_key_label(vk: u16) -> Option<&'static str> {
+    Some(match vk {
+        0x2E => "⌦",
+        0x08 => "⌫",
+        0x0D => "↩",
+        0x1B => "⎋",
+        0x09 => "⇥",
+        0x21 => "⇞",
+        0x22 => "⇟",
+        0x24 => "↖",
+        0x23 => "↘",
+        _ => return None,
+    })
+}
 
 /// "Ctrl+Shift+T" → combinación. Sin distinguir mayúsculas; acepta "Control" y "Mayús".
 pub fn parse_combo(text: &str) -> Result<Combo, String> {
@@ -209,10 +279,19 @@ pub fn parse_combo(text: &str) -> Result<Combo, String> {
 /// Combinación → texto para mostrar ("Ctrl+Shift+T", "Alt+←").
 pub fn combo_label(c: Combo) -> String {
     let mut s = String::new();
-    for (on, name) in [(c.ctrl, "Ctrl+"), (c.shift, "Shift+"), (c.alt, "Alt+")] {
+    #[cfg(target_os = "macos")]
+    let mods = [(c.alt, "⌥"), (c.shift, "⇧"), (c.ctrl, "⌘")];
+    #[cfg(not(target_os = "macos"))]
+    let mods = [(c.ctrl, "Ctrl+"), (c.shift, "Shift+"), (c.alt, "Alt+")];
+    for (on, name) in mods {
         if on {
             s.push_str(name);
         }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(label) = mac_key_label(c.vk) {
+        s.push_str(label);
+        return s;
     }
     if let Some((_, _, label)) = KEY_NAMES.iter().find(|(_, vk, _)| vk.0 == c.vk) {
         s.push_str(label);
@@ -240,7 +319,7 @@ impl Default for Keymap {
         let bindings = ALL
             .iter()
             .filter(|s| available(s.command))
-            .flat_map(|s| s.default_keys.iter().map(move |k| (parse_combo(k).expect("atajo de fábrica válido"), s.command)))
+            .flat_map(|s| s.keys().iter().map(move |k| (parse_combo(k).expect("atajo de fábrica válido"), s.command)))
             .collect();
         Self { bindings }
     }
@@ -282,8 +361,18 @@ mod tests {
     fn combos_parse_and_print() {
         let c = parse_combo("ctrl+shift+t").unwrap();
         assert_eq!(c, Combo { vk: b'T' as u16, ctrl: true, shift: true, alt: false });
-        assert_eq!(combo_label(c), "Ctrl+Shift+T");
-        assert_eq!(combo_label(parse_combo("Alt+Izquierda").unwrap()), "Alt+←");
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(combo_label(c), "Ctrl+Shift+T");
+            assert_eq!(combo_label(parse_combo("Alt+Izquierda").unwrap()), "Alt+←");
+        }
+        // macOS: símbolos en el orden de Apple; Ctrl es ⌘ y Alt es ⌥.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(combo_label(c), "⇧⌘T");
+            assert_eq!(combo_label(parse_combo("Alt+Izquierda").unwrap()), "⌥←");
+            assert_eq!(combo_label(parse_combo("Ctrl+Retroceso").unwrap()), "⌘⌫");
+        }
         assert_eq!(combo_label(parse_combo("F12").unwrap()), "F12");
         assert_eq!(parse_combo("Mayús+Supr").unwrap().vk, VK_DELETE.0);
         assert!(parse_combo("Ctrl+Hiper").is_err());
@@ -296,7 +385,7 @@ mod tests {
         let km = Keymap::default();
         let mut seen = std::collections::HashSet::new();
         for s in ALL.iter().filter(|s| available(s.command)) {
-            for k in s.default_keys {
+            for k in s.keys() {
                 let c = parse_combo(k).unwrap();
                 assert!(seen.insert(c), "atajo repetido: {k}");
                 assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(s.command), "{k}");

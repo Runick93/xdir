@@ -246,13 +246,13 @@ pub fn template() -> String {
     );
     let width = commands::ALL.iter().map(|s| s.id.len()).max().unwrap_or(0);
     for s in commands::ALL.iter().filter(|s| commands::available(s.command)) {
-        let keys: Vec<String> = s.default_keys.iter().map(|k| toml::quote(k)).collect();
+        let keys: Vec<String> = s.keys().iter().map(|k| toml::quote(k)).collect();
         let value = match keys.len() {
             0 => "\"\"".to_string(),
             1 => keys[0].clone(),
             _ => format!("[{}]", keys.join(", ")),
         };
-        out += &format!("# {:width$} = {:<24} # {}\n", s.id, value, s.name, width = width);
+        out += &format!("# {:width$} = {:<24} # {}\n", s.id, value, s.title(), width = width);
     }
     out += "\n\
             [colores]\n\
@@ -286,7 +286,7 @@ mod tests {
         assert!(c.errors.is_empty(), "{:?}", c.errors);
         // Sin reglas propias quedan solo las de fábrica.
         assert_eq!(c.colors.len(), Config::parse_rules(DEFAULT_COLORS).colors.len());
-        assert_eq!(c.keymap.label(commands::Command::NewTab), "Ctrl+T");
+        assert_eq!(c.keymap.label(commands::Command::NewTab), commands::shortcut_label("Ctrl+T"));
         // Sacar los '#' de las líneas de atajos tiene que dar exactamente lo mismo.
         let uncommented: String = template()
             .lines()

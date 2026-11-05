@@ -169,7 +169,7 @@ pub fn search(mode: PaletteMode, query: &str, src: &Sources, expand: impl Fn(&st
             // Abrir la paleta desde la paleta no hace nada; "ir a carpeta" solo sin buscar.
             .filter(|(_, s)| commands::available(s.command) && s.command != Command::Palette && (s.command != Command::JumpTo || folded.is_empty()))
             .filter_map(|(i, s)| {
-                let name = fold(s.name);
+                let name = fold(s.title());
                 if !folded.iter().all(|w| name.contains(w.as_str())) {
                     return None;
                 }
@@ -183,7 +183,7 @@ pub fn search(mode: PaletteMode, query: &str, src: &Sources, expand: impl Fn(&st
             let s = &commands::ALL[i];
             out.push(Item {
                 target: Target::Command(s.command),
-                title: s.name.to_string(),
+                title: s.title().to_string(),
                 detail: String::new(),
                 keys: src.keymap.label(s.command),
                 glyph: "\u{E756}",
@@ -359,11 +359,17 @@ impl Palette {
         // Pie: cómo se usa, y barra que indica que hay más resultados.
         let foot = rect(panel.left + 16.0, panel.bottom - FOOTER_H - 2.0, panel.right - 16.0, panel.bottom - 2.0);
         let hint = match self.mode {
-            PaletteMode::Folders => "↑↓ elegir · Enter abrir · Ctrl+Enter en pestaña nueva · Ctrl+Shift+P comandos",
-            PaletteMode::All => "↑↓ elegir · Enter ejecutar · Ctrl+Enter carpetas en pestaña nueva · Esc cerrar",
-            PaletteMode::GroupName => "Nombre del grupo nuevo, o elegí uno para reemplazarlo · Enter guardar · Esc cancelar",
+            PaletteMode::Folders => format!(
+                "↑↓ elegir · Enter abrir · {} en pestaña nueva · {} comandos",
+                commands::shortcut_label("Ctrl+Enter"),
+                commands::shortcut_label("Ctrl+Shift+P")
+            ),
+            PaletteMode::All => {
+                format!("↑↓ elegir · Enter ejecutar · {} carpetas en pestaña nueva · Esc cerrar", commands::shortcut_label("Ctrl+Enter"))
+            }
+            PaletteMode::GroupName => "Nombre del grupo nuevo, o elegí uno para reemplazarlo · Enter guardar · Esc cancelar".to_string(),
         };
-        p.text(&p.fonts.ui, hint, foot, th.text_dim);
+        p.text(&p.fonts.ui, &hint, foot, th.text_dim);
         if self.items.len() > MAX_ROWS {
             let more = format!("{}–{} de {}", self.scroll + 1, (self.scroll + MAX_ROWS).min(self.items.len()), self.items.len());
             p.text(&p.fonts.ui_right, &more, foot, th.text_dim);
@@ -384,6 +390,8 @@ mod tests {
         assert_eq!(fold("Pestaña ÚLTIMA"), "pestana ultima");
     }
 
+    // Usa rutas de Windows.
+    #[cfg(windows)]
     #[test]
     fn folders_by_frecency_and_favorites() {
         let now = jump::now();
@@ -413,10 +421,12 @@ mod tests {
         let q = search(PaletteMode::All, "pestana nueva", &src, |s| s.to_string());
         assert_eq!(q.first().map(|i| i.target.clone()), Some(Target::Command(Command::NewTab)));
         // El atajo que se muestra es el configurado.
-        assert_eq!(q[0].keys, "Ctrl+K");
+        assert_eq!(q[0].keys, commands::shortcut_label("Ctrl+K"));
         assert!(search(PaletteMode::Folders, "pestana", &src, |s| s.to_string()).is_empty());
     }
 
+    // Usa rutas de Windows.
+    #[cfg(windows)]
     #[test]
     fn groups_open_and_save() {
         use crate::groups::Group;

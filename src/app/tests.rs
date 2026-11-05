@@ -633,9 +633,18 @@ fn go_to_text_accepts_quotes_relative_paths_and_variables() {
     assert_eq!(leaf(&a, 0), leaf_of(&base));
     let Location::Path(p) = &a.panes[0].tab().location else { panic!("no es una carpeta") };
     assert!(!p.to_string_lossy().contains(".."), "{}", p.display());
-    a.go_to_text(0, r"hijo\..\hijo");
-    assert_eq!(leaf(&a, 0), "hijo");
-    a.go_to_text(1, "%TEMP%");
+    #[cfg(windows)]
+    {
+        a.go_to_text(0, r"hijo\..\hijo");
+        assert_eq!(leaf(&a, 0), "hijo");
+        a.go_to_text(1, "%TEMP%");
+    }
+    #[cfg(not(windows))]
+    {
+        a.go_to_text(0, "hijo/../hijo");
+        assert_eq!(leaf(&a, 0), "hijo");
+        a.go_to_text(1, "$TMPDIR");
+    }
     assert_eq!(leaf(&a, 1), leaf_of(&std::env::temp_dir()));
 }
 
@@ -644,6 +653,7 @@ fn leaf_of(p: &std::path::Path) -> String {
 }
 
 #[test]
+#[cfg(windows)]
 fn go_to_text_drive_letter_means_the_root() {
     let mut a = app();
     a.go_to_text(0, "C:");

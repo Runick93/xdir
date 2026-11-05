@@ -601,6 +601,11 @@ fn translate_key(event: &NSEvent) -> Option<Key> {
         109 => Some(Key(keys::VK_F1.0 + 9)),
         103 => Some(Key(keys::VK_F1.0 + 10)),
         111 => Some(Key(keys::VK_F1.0 + 11)),
+        // Signos por posición física (con ⇧ cambian de carácter): ".", ",", "[" y "]".
+        47 => Some(Key(0xBE)),
+        43 => Some(Key(0xBC)),
+        33 => Some(Key(0xDB)),
+        30 => Some(Key(0xDD)),
         _ => None,
     };
     if special.is_some() {
@@ -778,8 +783,10 @@ impl TextBox {
         Some(TextBox(id))
     }
 
-    fn with<R>(self, f: impl FnOnce(&mut TextBoxData) -> R) -> Option<R> {
-        TEXT_BOXES.with(|t| t.borrow_mut().get_mut(&self.0).map(f))
+    /// El control (se clona para no tener el registro prestado mientras AppKit trabaja: sus
+    /// avisos pueden volver a entrar acá).
+    fn field(self) -> Option<Retained<NSTextField>> {
+        TEXT_BOXES.with(|t| t.borrow().get(&self.0).map(|d| d.field.clone()))
     }
 
     pub(super) fn id(self) -> isize {
@@ -787,38 +794,43 @@ impl TextBox {
     }
 
     pub(super) fn text(self) -> String {
-        self.with(|d| d.field.stringValue().to_string()).unwrap_or_default()
+        self.field().map(|f| f.stringValue().to_string()).unwrap_or_default()
     }
 
     pub(super) fn set_text(self, text: &str) {
-        self.with(|d| d.field.setStringValue(&NSString::from_str(text)));
+        if let Some(f) = self.field() {
+            f.setStringValue(&NSString::from_str(text));
+        }
     }
 
     /// Selecciona de `from` a `to` (en unidades UTF-16; `to` = -1: hasta el final).
     pub(super) fn select(self, from: usize, to: isize) {
-        self.with(|d| match d.field.currentEditor() {
+        let Some(field) = self.field() else { return };
+        match field.currentEditor() {
             Some(editor) => {
-                let len = d.field.stringValue().length();
+                let len = field.stringValue().length();
                 let end = if to < 0 { len } else { (to as usize).min(len) };
                 editor.setSelectedRange(NSRange::new(from.min(end), end - from.min(end)));
             }
-            None => d.pending_select = Some((from, to)),
-        });
+            None => TEXT_BOXES.with(|t| {
+                if let Some(d) = t.borrow_mut().get_mut(&self.0) {
+                    d.pending_select = Some((from, to));
+                }
+            }),
+        }
     }
 
     pub(super) fn focus(self) {
-        let Some(window) = window() else { return };
-        let pending = self.with(|d| {
-            window.makeFirstResponder(Some(&d.field));
-            d.pending_select.take()
-        });
-        if let Some(Some((from, to))) = pending {
+        let (Some(window), Some(field)) = (window(), self.field()) else { return };
+        window.makeFirstResponder(Some(&field));
+        let pending = TEXT_BOXES.with(|t| t.borrow_mut().get_mut(&self.0).and_then(|d| d.pending_select.take()));
+        if let Some((from, to)) = pending {
             self.select(from, to);
         }
     }
 
     pub(super) fn has_focus(self) -> bool {
-        self.with(|d| d.field.currentEditor().is_some()).unwrap_or(false)
+        self.field().is_some_and(|f| f.currentEditor().is_some())
     }
 
     pub(super) fn destroy(self) {
@@ -1002,11 +1014,10 @@ impl App {
     /// Colores de las cajas de texto abiertas según el tema.
     pub(super) fn update_edit_resources(&mut self) {
         let theme = self.theme;
-        TEXT_BOXES.with(|t| {
-            for d in t.borrow().values() {
-                style_field(&d.field, &theme);
-            }
-        });
+        let fields: Vec<Retained<NSTextField>> = TEXT_BOXES.with(|t| t.borrow().values().map(|d| d.field.clone()).collect());
+        for f in fields {
+            style_field(&f, &theme);
+        }
     }
 
     /// Barra de título y menús al modo claro u oscuro del tema.
@@ -1210,7 +1221,8 @@ mod pruebas {
                 app.on_key(Key(*vk as u16));
             }),
             ("escribir", _) => {
-                let focused = TEXT_BOXES.with(|t| t.borrow().keys().copied().find(|&id| TextBox(id).has_focus()));
+                let ids: Vec<u32> = TEXT_BOXES.with(|t| t.borrow().keys().copied().collect());
+                let focused = ids.into_iter().find(|&id| TextBox(id).has_focus());
                 match focused {
                     Some(id) => {
                         let tb = TextBox(id);

@@ -95,7 +95,11 @@ pub fn config_dir() -> Option<PathBuf> {
             return Some(dir);
         }
     }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("xdir"))
+    #[cfg(windows)]
+    return std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("xdir"));
+    // macOS: ~/Library/Application Support/xdir
+    #[cfg(not(windows))]
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/xdir"))
 }
 
 pub fn load() -> Option<Session> {

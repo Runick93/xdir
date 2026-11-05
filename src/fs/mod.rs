@@ -59,6 +59,10 @@ impl Location {
             Location::Computer => "Este equipo".into(),
             Location::Path(p) => match p.file_name() {
                 Some(name) => name.to_string_lossy().into_owned(),
+                // macOS: la raíz es el disco de arranque ("Macintosh HD").
+                #[cfg(not(windows))]
+                None => drive_label(&p.to_string_lossy()),
+                #[cfg(windows)]
                 None => {
                     let root = p.to_string_lossy().trim_end_matches('\\').to_string();
                     // Una unidad se titula como en el Explorador: "Disco local (C:)".
@@ -80,7 +84,13 @@ impl Location {
                     acc.push(comp.as_os_str());
                     // "C:" y "\" llegan como dos componentes; el segundo se pega al primero.
                     if matches!(comp, std::path::Component::RootDir) {
-                        out.last_mut().unwrap().1 = Location::Path(acc.clone());
+                        // macOS: "/" es el disco de arranque, un tramo propio.
+                        #[cfg(not(windows))]
+                        out.push((drive_label("/"), Location::Path(acc.clone())));
+                        #[cfg(windows)]
+                        {
+                            out.last_mut().unwrap().1 = Location::Path(acc.clone());
+                        }
                         continue;
                     }
                     let mut label = comp.as_os_str().to_string_lossy().into_owned();

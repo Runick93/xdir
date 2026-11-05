@@ -31,6 +31,12 @@ mod typed;
 mod ui;
 mod app;
 
+#[cfg(windows)]
 fn main() -> windows::core::Result<()> {
+    app::run()
+}
+
+#[cfg(target_os = "macos")]
+fn main() -> Result<(), String> {
     app::run()
 }

@@ -1,16 +1,7 @@
-//! Tema claro/oscuro y color de acento, leídos de la configuración de Windows.
+//! Tema claro/oscuro y color de acento, leídos de la configuración del sistema.
 
 use crate::platform::Color;
-use std::ffi::c_void;
-
-use windows::Win32::Foundation::{ERROR_SUCCESS, HWND};
-use windows::Win32::Graphics::Dwm::{
-    DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
-};
-use windows::Win32::UI::Controls::MARGINS;
-use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::core::{BOOL, PCWSTR, w};
+pub use crate::platform::system_dark;
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -69,9 +60,8 @@ impl Theme {
 
         let accent = match accent {
             Accent::Rgb(c) => rgb(c >> 16, (c >> 8) & 0xFF, c & 0xFF),
-            // AccentColor se guarda como 0xAABBGGRR.
-            Accent::System => read_dword(w!("Software\\Microsoft\\Windows\\DWM"), w!("AccentColor"))
-                .map(|abgr| rgb(abgr & 0xFF, (abgr >> 8) & 0xFF, (abgr >> 16) & 0xFF))
+            Accent::System => crate::platform::system_accent()
+                .map(|c| rgb(c >> 16, (c >> 8) & 0xFF, c & 0xFF))
                 .unwrap_or(rgb(0x00, 0x78, 0xD4)),
         };
 
@@ -115,7 +105,15 @@ impl Theme {
     /// Ajusta la ventana al tema: barra de título oscura y fondo Mica (Windows 11).
     /// Devuelve si Mica quedó activo; en ese caso el marco se extiende a toda la ventana para
     /// que el fondo se vea donde la aplicación no pinta.
-    pub fn apply_to_window(&self, hwnd: HWND) -> bool {
+    #[cfg(windows)]
+    pub fn apply_to_window(&self, hwnd: windows::Win32::Foundation::HWND) -> bool {
+        use std::ffi::c_void;
+        use windows::Win32::Graphics::Dwm::{
+            DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
+            DwmSetWindowAttribute,
+        };
+        use windows::Win32::UI::Controls::MARGINS;
+        use windows::core::BOOL;
         let dark = BOOL::from(self.dark);
         unsafe {
             // Los errores se ignoran: en versiones viejas de Windows el atributo no existe.
@@ -140,30 +138,6 @@ impl Theme {
             false
         }
     }
-}
-
-/// ¿Windows está en modo oscuro para las apps?
-pub fn system_dark() -> bool {
-    read_dword(w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("AppsUseLightTheme"))
-        .map(|v| v == 0)
-        .unwrap_or(false)
-}
-
-fn read_dword(subkey: PCWSTR, value: PCWSTR) -> Option<u32> {
-    let mut data = 0u32;
-    let mut size = size_of::<u32>() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            subkey,
-            value,
-            RRF_RT_REG_DWORD,
-            None,
-            Some(&mut data as *mut _ as *mut c_void),
-            Some(&mut size),
-        )
-    };
-    (status == ERROR_SUCCESS).then_some(data)
 }
 
 fn rgb(r: u32, g: u32, b: u32) -> Color {

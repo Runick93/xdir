@@ -21,6 +21,7 @@ objc2-uniform-type-identifiers = "0.3.2"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 notify = "8"
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

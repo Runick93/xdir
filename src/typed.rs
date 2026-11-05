@@ -5,16 +5,20 @@
 //! hasta 25). Así una ruta escrita en uno aparece en el otro. El desplegable lo dibuja xdir (el de
 //! Windows no sigue el tema oscuro): une ese historial con las subcarpetas de lo que se escribe.
 
+#[cfg(windows)]
 use windows::Win32::Foundation::ERROR_SUCCESS;
+#[cfg(windows)]
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
     RegDeleteValueW, RegGetValueW, RegSetValueExW,
 };
+#[cfg(windows)]
 use windows::core::{PCWSTR, w};
 
 use crate::render::{Painter, Rect, contains, rect};
 use crate::theme::alpha;
 
+#[cfg(windows)]
 const KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\TypedPaths");
 const MAX: usize = 25;
 const ROW_H: f32 = 26.0;
@@ -23,6 +27,7 @@ const MAX_ROWS: usize = 10;
 const MAX_DIRS: usize = 100;
 
 /// Rutas escritas, de la más reciente a la más antigua.
+#[cfg(windows)]
 pub fn load() -> Vec<String> {
     (1..=MAX)
         .map_while(|i| {
@@ -32,6 +37,7 @@ pub fn load() -> Vec<String> {
         .collect()
 }
 
+#[cfg(windows)]
 fn read_string(name: PCWSTR) -> Option<String> {
     let mut size = 0u32;
     unsafe {
@@ -68,6 +74,7 @@ pub fn push(path: &str) {
     save(&list);
 }
 
+#[cfg(windows)]
 fn save(list: &[String]) {
     unsafe {
         let mut key = HKEY::default();
@@ -90,6 +97,27 @@ fn save(list: &[String]) {
         }
         let _ = RegCloseKey(key);
     }
+}
+
+/// macOS: el historial va en `rutas.txt` de la carpeta de configuración, una por línea.
+#[cfg(not(windows))]
+fn typed_file() -> Option<std::path::PathBuf> {
+    crate::session::config_dir().map(|d| d.join("rutas.txt"))
+}
+
+#[cfg(not(windows))]
+pub fn load() -> Vec<String> {
+    let Some(text) = typed_file().and_then(|f| std::fs::read_to_string(f).ok()) else { return Vec::new() };
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).take(MAX).map(str::to_string).collect()
+}
+
+#[cfg(not(windows))]
+fn save(list: &[String]) {
+    let Some(file) = typed_file() else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(file, list.join("\n") + "\n");
 }
 
 /// Sugerencias para `query`: el historial que empieza igual y las subcarpetas de la carpeta escrita.

@@ -9,7 +9,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW};
 
 use crate::render::Rect;
 
@@ -44,11 +43,9 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
-/// ¿Windows permite animaciones? (por defecto sí si la consulta falla).
+/// ¿El sistema permite animaciones?
 pub fn system_allows() -> bool {
-    let mut on = windows::core::BOOL(1);
-    let ok = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut _ as *mut _), Default::default()) };
-    ok.is_err() || on.as_bool()
+    crate::platform::animations_allowed()
 }
 
 /// Acerca `current` a `target` en `dt` segundos, sin pasarse. Devuelve el valor nuevo.

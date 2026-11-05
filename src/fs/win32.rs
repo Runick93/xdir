@@ -619,6 +619,22 @@ pub fn drive_label(drive: &str) -> String {
     label
 }
 
+/// Raíces de las unidades con letra ("C:\\", "D:\\"...).
+pub fn drives() -> Vec<PathBuf> {
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u8).filter(|i| mask & (1 << i) != 0).map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char))).collect()
+}
+
+/// Nombre corto de una unidad para `drive_label`: "C:\\" → "C:".
+pub fn drive_name(root: &Path) -> String {
+    root.to_string_lossy().trim_end_matches('\\').to_string()
+}
+
+/// ¿Está oculto? (atributo de Windows).
+pub fn is_hidden(meta: &std::fs::Metadata, _name: &std::ffi::OsStr) -> bool {
+    meta.file_attributes() & 0x2 != 0
+}
+
 /// Olvida los nombres de unidad guardados (cambió el conjunto de unidades: otro pendrive
 /// puede tomar la misma letra).
 pub fn forget_drive_labels() {

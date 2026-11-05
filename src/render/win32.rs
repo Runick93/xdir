@@ -1,4 +1,4 @@
-//! Dibujo con Direct2D + DirectWrite sobre un swapchain DXGI (flip model).
+//! Windows: dibujo con Direct2D + DirectWrite sobre un swapchain DXGI (flip model).
 //! Todas las coordenadas están en DIPs (1 DIP = 1 px a 96 DPI); Direct2D escala según el DPI.
 
 use std::cell::RefCell;
@@ -58,7 +58,7 @@ use crate::icons;
 use crate::thumbs;
 use crate::theme::Theme;
 
-pub use crate::platform::{Color, Rect, contains, rect};
+use super::{Color, Rect, rect};
 
 pub struct Renderer {
     d2d: ID2D1Factory1,

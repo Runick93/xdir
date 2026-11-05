@@ -373,15 +373,9 @@ impl Tree {
     pub fn refresh_drives(&mut self) {
         let Some(&computer) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::Computer) else { return };
         let old = self.nodes[computer].children.clone().unwrap_or_default();
-        let drives = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
         let mut ids = Vec::new();
-        for i in 0..26u32 {
-            if drives & (1 << i) == 0 {
-                continue;
-            }
-            let letter = (b'A' + i as u8) as char;
-            let path = PathBuf::from(format!("{letter}:\\"));
-            let name = crate::fs::drive_label(&format!("{letter}:"));
+        for path in crate::fs::drives() {
+            let name = crate::fs::drive_label(&crate::fs::drive_name(&path));
             if let Some(&id) = old.iter().find(|&&id| self.nodes[id].path == path) {
                 self.nodes[id].name = name;
                 self.nodes[id].text_w = 0.0;
@@ -853,16 +847,10 @@ impl Tree {
 
 /// Subcarpetas ordenadas por nombre (sin las ocultas, salvo que se muestren).
 fn subfolders(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
-    use std::os::windows::fs::MetadataExt;
     let Ok(reader) = std::fs::read_dir(path) else { return Vec::new() };
     let mut out: Vec<(String, PathBuf)> = reader
         .flatten()
-        .filter(|e| {
-            e.metadata().is_ok_and(|m| {
-                let a = m.file_attributes();
-                m.is_dir() && (show_hidden || a & 0x2 == 0)
-            })
-        })
+        .filter(|e| e.metadata().is_ok_and(|m| m.is_dir() && (show_hidden || !crate::fs::is_hidden(&m, &e.file_name()))))
         .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
         .collect();
     out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));

@@ -1,5 +1,5 @@
 ; Instalador de xdir (Inno Setup 6).
-; Uso: ISCC.exe /DAppVersion=0.1.6 /DSourceExe=..\target\release\xdir.exe /DXtreeExe=..\target\release\xtree.exe /DOutputDir=..\dist installer\xdir.iss
+; Uso: ISCC.exe /DAppVersion=0.1.6 /DSourceExe=..\target\release\xdir.exe /DOutputDir=..\dist installer\xdir.iss
 ; Lo invoca scripts\package.ps1; las rutas relativas son respecto de este archivo.
 
 #ifndef AppVersion
@@ -7,9 +7,6 @@
 #endif
 #ifndef SourceExe
   #define SourceExe "..\target\release\xdir.exe"
-#endif
-#ifndef XtreeExe
-  #define XtreeExe "..\target\release\xtree.exe"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\dist"
@@ -53,7 +50,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#XtreeExe}"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; xtree ahora es parte de xdir: se borra el programa aparte que dejaron las versiones anteriores.
+Type: files; Name: "{app}\xtree.exe"
 
 [Icons]
 Name: "{autoprograms}\xdir"; Filename: "{app}\xdir.exe"
@@ -87,8 +87,6 @@ begin
   end;
   if FindWindowByClassName('xdir.main') <> 0 then
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM xdir.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  // xtree (mapa de uso de disco) también vive en la carpeta de instalación.
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM xtree.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function InitializeUninstall(): Boolean;

@@ -7,7 +7,7 @@
 //! carpeta; clic derecho o Retroceso suben; T cambia el color; F5 vuelve a analizar.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -316,23 +316,28 @@ impl Xtree {
     /// Tecla A: vuelve a analizar con permisos (administrador en Windows; en macOS abre el ajuste
     /// de Acceso total al disco). Solo si faltaron permisos.
     fn elevate(&mut self) -> Action {
-        let p = self.progress();
-        let lacking = p.need_admin.load(Ordering::Relaxed) || p.denied.load(Ordering::Relaxed) > 0;
-        if !lacking || self.elevating.swap(true, Ordering::Relaxed) {
+        self.elevate_with(fs::xtree_elevate)
+    }
+
+    /// `elevate` con el escaneo elevado como parámetro (las pruebas pasan uno falso).
+    fn elevate_with<F>(&mut self, run: F) -> Action
+    where
+        F: FnOnce(&Path, &Progress, &AtomicBool) -> Option<Vec<Node>> + Send + 'static,
+    {
+        if !fs::xtree_permission_issue(self.progress()) || self.elevating.swap(true, Ordering::Relaxed) {
             return Action::None;
         }
         let (root, hwnd, id) = (self.root.clone(), self.hwnd, self.scan.id);
         let (progress, cancel, result, elevating) =
             (self.scan.progress.clone(), self.scan.cancel.clone(), self.scan.result.clone(), self.elevating.clone());
         let _ = std::thread::Builder::new().spawn(move || {
-            let tree = fs::xtree_elevate(&root, &progress, &cancel);
-            elevating.store(false, Ordering::Relaxed);
+            let tree = run(&root, &progress, &cancel);
             if let Some(arena) = tree
-                && !cancel.load(Ordering::Relaxed)
+                && scan::deliver(&result, &cancel, arena, true)
             {
-                *result.lock().unwrap() = Some(arena);
                 hwnd.post(WM_APP_XTREE, id, 1);
             }
+            elevating.store(false, Ordering::Relaxed);
         });
         Action::Redraw
     }
@@ -883,7 +888,7 @@ impl Xtree {
         }
         // Aviso de permisos: administrador en Windows, Acceso total al disco en macOS (tecla A).
         let denied = progress.denied.load(Ordering::Relaxed);
-        let hint = if progress.need_admin.load(Ordering::Relaxed) || denied > 0 {
+        let hint = if fs::xtree_permission_issue(&progress) {
             fs::XTREE_PERMISSION_HINT.replace("{n}", &fmt_count(denied))
         } else {
             String::new()
@@ -1000,6 +1005,49 @@ mod tests {
         let b = ui.buttons[2];
         let _ = x.on_click(area, (b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0, false);
         x.prepare(area);
+    }
+
+    /// Espera a que termine el hilo de la tecla A.
+    fn wait_elevated(x: &Xtree) {
+        let t0 = std::time::Instant::now();
+        while x.elevating.load(Ordering::Relaxed) {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(5), "el hilo elevado no terminó");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn lacking_permissions(x: &Xtree) {
+        x.scan.progress.need_admin.store(true, Ordering::Relaxed);
+        x.scan.progress.denied.store(1, Ordering::Relaxed);
+    }
+
+    /// Tecla A: el árbol elevado le gana al del escaneo normal aunque este termine después.
+    #[test]
+    fn elevated_tree_wins_over_later_normal_result() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.scanning = true;
+        lacking_permissions(&x);
+        let elevated = || vec![node("raiz", NO_PARENT, 99, true, vec![1]), node("admin.bin", 0, 99, false, vec![])];
+        assert_eq!(x.elevate_with(move |_, _, _| Some(elevated())), Action::Redraw);
+        wait_elevated(&x);
+        // El escaneo normal termina después: su árbol no debe pisar al elevado.
+        let normal = vec![node("raiz", NO_PARENT, 5, true, vec![])];
+        assert!(!scan::deliver(&x.scan.result, &x.scan.cancel, normal, false));
+        assert!(x.take_result());
+        assert_eq!(x.arena[0].size, 99);
+    }
+
+    /// Si el escaneo normal terminó antes, el elevado igual lo reemplaza.
+    #[test]
+    fn elevated_tree_replaces_earlier_normal_result() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.scanning = true;
+        lacking_permissions(&x);
+        assert!(scan::deliver(&x.scan.result, &x.scan.cancel, vec![node("raiz", NO_PARENT, 5, true, vec![])], false));
+        assert_eq!(x.elevate_with(|_, _, _| Some(vec![node("raiz", NO_PARENT, 99, true, vec![])])), Action::Redraw);
+        wait_elevated(&x);
+        assert!(x.take_result());
+        assert_eq!(x.arena[0].size, 99);
     }
 
     #[test]

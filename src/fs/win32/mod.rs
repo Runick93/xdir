@@ -1018,53 +1018,8 @@ mod tests {
     }
 }
 
-// ---------- xtree (interfaz del escáner; implementación pendiente) ----------
+// ---------- xtree (escáner de uso de disco) ----------
 
-use crate::xtree::scan::{DirListing, DriveEntry, FastScan, ListError, Lister, Progress};
-use crate::xtree::tree::Node;
-
-struct StubLister;
-
-impl Lister for StubLister {
-    fn list(&self, _path: &Path) -> Result<DirListing, ListError> {
-        Err(ListError::Other)
-    }
-}
-
-/// Listador de carpetas para el escáner de xtree.
-pub fn xtree_lister(_root: &Path) -> impl Lister + 'static {
-    StubLister
-}
-
-/// Escaneo rápido de un volumen entero, si Windows lo permite.
-pub fn xtree_fast_scan(_root: &Path, _progress: &Progress, _cancel: &std::sync::atomic::AtomicBool) -> FastScan {
-    FastScan::NotApplicable
-}
-
-/// Reintenta el escaneo con permisos de administrador.
-pub fn xtree_elevate(_root: &Path, _progress: &Progress, _cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<Node>> {
-    None
-}
-
-/// Unidades que se ofrecen para analizar.
-pub fn xtree_drives() -> Vec<DriveEntry> {
-    Vec::new()
-}
-
-/// (total, libre) en bytes del volumen que contiene `path`.
-pub fn volume_space(_path: &Path) -> Option<(u64, u64)> {
-    None
-}
-
-/// `true` si `path` es la raíz de un volumen.
-pub fn whole_volume(_path: &Path) -> bool {
-    false
-}
-
-/// Carpeta que se analiza al abrir xtree sin elegir nada.
-pub fn xtree_default_root() -> PathBuf {
-    PathBuf::new()
-}
-
-/// Aviso de la barra de datos cuando faltan permisos (tecla A: escaneo como administrador).
-pub const XTREE_PERMISSION_HINT: &str = "Escaneo rápido de la MFT: requiere administrador (tecla A)";
+mod mft;
+mod xtree;
+pub use self::xtree::*;

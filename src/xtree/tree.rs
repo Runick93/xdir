@@ -64,7 +64,7 @@ pub fn node_path(arena: &[Node], root: &Path, mut id: u32) -> PathBuf {
 
 /// Serializa el árbol (little endian): `u32` cantidad y, por nodo, `u32` largo + nombre, `u32` padre,
 /// `u64` tamaño, `u8` banderas (dir = 1, small = 2) y `u32` cantidad de hijos + `u32` por hijo.
-#[allow(dead_code)] // Temporal: lo usa el ayudante elevado de Windows (Task 5).
+#[allow(dead_code)] // Solo lo usa el ayudante elevado de Windows: en macOS no se compila ningún uso.
 pub fn encode(arena: &[Node]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend((arena.len() as u32).to_le_bytes());
@@ -82,10 +82,10 @@ pub fn encode(arena: &[Node]) -> Vec<u8> {
     out
 }
 
-#[allow(dead_code)] // Temporal: lo usa el ayudante elevado de Windows (Task 5).
+#[allow(dead_code)] // Solo lo usa el ayudante elevado de Windows: en macOS no se compila ningún uso.
 struct Reader<'a>(&'a [u8]);
 
-#[allow(dead_code)] // Temporal: lo usa el ayudante elevado de Windows (Task 5).
+#[allow(dead_code)] // Solo lo usa el ayudante elevado de Windows: en macOS no se compila ningún uso.
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let (head, tail) = self.0.split_at_checked(n)?;
@@ -101,7 +101,7 @@ impl<'a> Reader<'a> {
 }
 
 /// Inverso de `encode`. Devuelve `None` ante cualquier lectura fuera de rango o dato inválido.
-#[allow(dead_code)] // Temporal: lo usa el ayudante elevado de Windows (Task 5).
+#[allow(dead_code)] // Solo lo usa el ayudante elevado de Windows: en macOS no se compila ningún uso.
 pub fn decode(bytes: &[u8]) -> Option<Vec<Node>> {
     let mut r = Reader(bytes);
     let count = r.u32()? as usize;
@@ -125,7 +125,7 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<Node>> {
 
 /// Comprueba que padres e hijos apunten dentro de la arena y que subiendo por los padres se
 /// llegue siempre a `NO_PARENT` (sin ciclos).
-#[allow(dead_code)] // Temporal: lo usa el ayudante elevado de Windows (Task 5).
+#[allow(dead_code)] // Solo lo usa el ayudante elevado de Windows: en macOS no se compila ningún uso.
 fn valid_graph(arena: &[Node]) -> bool {
     let n = arena.len();
     let in_range = |i: u32| (i as usize) < n;

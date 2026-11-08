@@ -16,7 +16,7 @@ use crate::platform::{Handle, WM_APP};
 pub const WM_APP_XTREE: u32 = WM_APP + 22;
 
 /// Archivos que se guardan como nodos propios por carpeta; el resto se suma en un solo nodo.
-const MAX_FILES_PER_DIR: usize = 1500;
+pub const MAX_FILES_PER_DIR: usize = 1500;
 const ID_SHARDS: usize = 64;
 
 pub struct FileEntry {
@@ -33,7 +33,7 @@ pub struct DirListing {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Temporal: lo construyen los listadores reales de cada sistema (Tasks 5 y 6).
+#[allow(dead_code)] // Temporal: Windows ya lo construye; falta el escáner de macOS (Task 6).
 pub enum ListError {
     Denied,
     Other,
@@ -64,7 +64,7 @@ pub struct Scan {
     pub result: Arc<Mutex<Option<Vec<Node>>>>,
 }
 
-#[allow(dead_code)] // Temporal: lo construyen los listadores reales de cada sistema (Tasks 5 y 6).
+#[allow(dead_code)] // Temporal: Windows ya lo construye; falta el escáner de macOS (Task 6).
 pub enum FastScan {
     NotApplicable,
     Done(Vec<Node>),
@@ -276,16 +276,30 @@ pub fn start(hwnd: Handle, id: usize, root: PathBuf) -> Scan {
                 }
             };
             finished.store(true, Ordering::Relaxed);
-            // Un resultado que llega después de cancelar se descarta.
             if let Some(arena) = tree
-                && !cancel.load(Ordering::Relaxed)
+                && deliver(&result, &cancel, arena, false)
             {
-                *result.lock().unwrap() = Some(arena);
                 hwnd.post(WM_APP_XTREE, id, 1);
             }
         });
     }
     scan
+}
+
+/// Deja un árbol terminado en `result` para la vista. Un resultado que llega después de cancelar
+/// se descarta (devuelve `false`). Con `last` (escaneo elevado, tecla A) además cancela el escaneo:
+/// el recorrido normal que siga corriendo se corta y su árbol ya no reemplaza a este.
+/// Todo pasa con `result` bloqueado: la comprobación y la escritura no se pueden intercalar.
+pub fn deliver(result: &Mutex<Option<Vec<Node>>>, cancel: &AtomicBool, arena: Vec<Node>, last: bool) -> bool {
+    let mut slot = result.lock().unwrap();
+    if cancel.load(Ordering::Relaxed) {
+        return false;
+    }
+    if last {
+        cancel.store(true, Ordering::Relaxed);
+    }
+    *slot = Some(arena);
+    true
 }
 
 #[cfg(test)]

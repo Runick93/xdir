@@ -33,7 +33,10 @@ impl App {
             self.marks.push(("inicio frame con la carpeta", ms_since(self.started)));
         }
 
-        let mut status = self.panes[self.active].tab().status();
+        let mut status = match self.xtree.as_ref().filter(|_| self.xtree_open) {
+            Some(v) => v.status_text(),
+            None => self.panes[self.active].tab().status(),
+        };
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
@@ -80,9 +83,15 @@ impl App {
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
         let suggest = self.suggest.as_ref();
+        // Vista de xtree abierta: se dibuja en lugar de los paneles, la franja de grupos y el árbol.
+        let xtree_open = self.xtree_open;
+        let mut xtree = self.xtree.as_mut().filter(|_| xtree_open);
         let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, if self.file_colors { &self.config.colors } else { &[] }, |p, w, h| {
             let area = ui::panes_area(w, h, tree_w, groups_h);
-            if groups_h > 0.0 {
+            let rects = if xtree.is_some() { &[][..] } else { &rects[..] };
+            if let Some(v) = xtree.as_deref_mut() {
+                v.paint(p, ui::xtree_area(w, h));
+            } else if groups_h > 0.0 {
                 let names: Vec<(&str, bool)> = groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
                 let active_group = group_name.as_deref().and_then(|n| groups.find(n));
                 let group_hover = match hover {
@@ -93,7 +102,7 @@ impl App {
             }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
-            for &(i, r) in &rects {
+            for &(i, r) in rects {
                 let ph = match hover {
                     Hit::Pane(j, ph) if j == i => ph,
                     _ => PaneHit::None,
@@ -119,7 +128,7 @@ impl App {
             // El árbol ocupa su lugar a la izquierda de los paneles: fijo, con su ancho; suelto, una
             // franja de íconos que al asomar el mouse se expande encima de los paneles (con sombra).
             #[cfg(feature = "arbol")]
-            if tree.visible {
+            if tree.visible && !xtree_open {
                 let r = render::rect(ui::GAP, area.top - groups_h, ui::GAP + tree.width_now(), area.bottom);
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
                     p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme.background, 0.45));
@@ -133,7 +142,7 @@ impl App {
                 (Drag::Splitter(s), _) | (_, Hit::Splitter(s)) => Some(s),
                 _ => None,
             };
-            if let Some(s) = hot.filter(|_| maximized.is_none()) {
+            if let Some(s) = hot.filter(|_| maximized.is_none() && !xtree_open) {
                 for (which, r) in ui::splitter_rects(layout, area, splits) {
                     if which == s {
                         ui::draw_splitter(p, r);
@@ -144,7 +153,7 @@ impl App {
                 Hit::Layout(l) => Some(l),
                 _ => None,
             };
-            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups, hover == Hit::Xtree);
+            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups, hover == Hit::Xtree, xtree_open);
             if let Some(pane) = term_menu {
                 let term_hover = match hover {
                     Hit::TermMenu(c) => c,

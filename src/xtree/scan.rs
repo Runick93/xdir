@@ -33,6 +33,7 @@ pub struct DirListing {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Temporal: lo construyen los listadores reales de cada sistema (Tasks 5 y 6).
 pub enum ListError {
     Denied,
     Other,
@@ -63,6 +64,7 @@ pub struct Scan {
     pub result: Arc<Mutex<Option<Vec<Node>>>>,
 }
 
+#[allow(dead_code)] // Temporal: lo construyen los listadores reales de cada sistema (Tasks 5 y 6).
 pub enum FastScan {
     NotApplicable,
     Done(Vec<Node>),

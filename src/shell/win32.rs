@@ -206,6 +206,26 @@ pub fn copy_text(owner: Handle, text: &str) -> Result<()> {
     }
 }
 
+/// Diálogo del sistema para elegir una carpeta (`IFileOpenDialog` con `FOS_PICKFOLDERS`).
+pub fn pick_folder(owner: Handle, title: &str) -> Option<PathBuf> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
+    use windows::core::HSTRING;
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+        let _ = dialog.SetTitle(&HSTRING::from(title));
+        // Cancelar devuelve un error: no se eligió nada.
+        dialog.Show(Some(owner.hwnd())).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const std::ffi::c_void));
+        path.map(PathBuf::from)
+    }
+}
+
 /// Abre un elemento con su acción por defecto a partir de su PIDL (sirve para elementos
 /// virtuales, que no tienen ruta de disco).
 pub fn open_item(owner: Handle, item: &Item) {

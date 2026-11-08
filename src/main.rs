@@ -29,8 +29,6 @@ mod toml;
 mod tree;
 mod typed;
 mod ui;
-// Temporal: la vista de xtree se conecta en la Task 4.
-#[allow(dead_code)]
 mod xtree;
 mod app;
 

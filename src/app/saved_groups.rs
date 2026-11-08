@@ -99,18 +99,6 @@ impl App {
         }
     }
 
-    /// Abre xtree (junto a xdir.exe) en la carpeta del panel activo, o en la unidad del sistema.
-    pub(super) fn open_xtree(&mut self) {
-        let Some(exe) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("xtree.exe"))) else { return };
-        let mut cmd = std::process::Command::new(exe);
-        if let Location::Path(p) = &self.panes[self.active].tab().location {
-            cmd.arg(p);
-        }
-        if cmd.spawn().is_err() {
-            self.notice = Some("No se pudo abrir xtree.exe (tiene que estar junto a xdir.exe)".into());
-        }
-    }
-
     /// Cambió el conjunto de unidades: se actualiza "Este equipo" en los paneles y el árbol, y los
     /// paneles que estaban en una unidad que ya no existe vuelven a "Este equipo".
     pub(super) fn drives_changed(&mut self) {

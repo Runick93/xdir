@@ -341,6 +341,8 @@ impl Xtree {
 
     fn go(&mut self, node: u32) {
         self.current = node;
+        // Los bloques son de la carpeta (o del árbol) anterior: no deben responder más.
+        self.cells.clear();
         self.cells_for = None;
         self.hover = None;
         self.hover_row = None;
@@ -490,7 +492,7 @@ impl Xtree {
         }
         if let Some(b) = self.button_at(area, x, y) {
             let t = self.target();
-            let n = &self.arena[t as usize];
+            let Some(n) = self.arena.get(t as usize) else { return Action::None };
             return match b {
                 0 => {
                     // La carpeta del elemento; si es un archivo, su carpeta con el archivo enfocado.
@@ -793,7 +795,8 @@ impl Xtree {
             p.round_stroke_w(ui.map, 8.0, th.border, 1.0);
 
             // ----- tarjeta de detalle -----
-            let shown = hover_node.or(self.selected).unwrap_or(self.current);
+            // Un nodo que no está en este árbol (selección vieja) cae en la carpeta actual.
+            let shown = hover_node.or(self.selected).filter(|&n| (n as usize) < arena.len()).unwrap_or(self.current);
             let n = &arena[shown as usize];
             let cd = ui.card;
             p.round_fill(cd, 8.0, th.surface);
@@ -968,6 +971,35 @@ mod tests {
         poke(&mut x, area);
         // Área demasiado chica para el mapa.
         poke(&mut x, rect(0.0, 0.0, 10.0, 10.0));
+    }
+
+    /// Un árbol nuevo (resultado elevado, escaneo rápido) reemplaza al anterior: los bloques viejos
+    /// no pueden seleccionar nodos que ya no existen.
+    #[test]
+    fn click_after_tree_swap_does_not_panic() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let mut big = vec![node("raiz", NO_PARENT, 300, true, (1..4).collect())];
+        big.push(node("a", 0, 100, true, vec![4, 5]));
+        big.push(node("b.bin", 0, 100, false, vec![]));
+        big.push(node("c.bin", 0, 50, false, vec![]));
+        big.push(node("d.bin", 1, 60, false, vec![]));
+        big.push(node("e.bin", 1, 40, false, vec![]));
+        x.set_arena(big);
+        x.prepare(area);
+        // Un bloque de un nodo que no existe en el árbol chico.
+        let c = x.cells.iter().find(|c| c.node >= 2).expect("bloque");
+        let (cx, cy) = ((c.r.left + c.r.right) / 2.0, (c.r.top + c.r.bottom) / 2.0);
+        // Mismo camino que el aviso del escáner (`WM_APP_XTREE`, lparam 1).
+        x.scanning = true;
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz", NO_PARENT, 10, true, vec![1]), node("f.bin", 0, 10, false, vec![])]);
+        assert!(x.take_result());
+        let _ = x.on_click(area, cx, cy, false);
+        assert!(x.selected.is_none_or(|n| (n as usize) < x.arena.len()), "selección fuera del árbol");
+        let ui = layout_ui(area, x.legend_h());
+        let b = ui.buttons[2];
+        let _ = x.on_click(area, (b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0, false);
+        x.prepare(area);
     }
 
     #[test]

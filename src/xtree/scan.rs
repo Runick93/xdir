@@ -38,6 +38,7 @@ pub enum ListError {
     Other,
 }
 
+/// Los listadores pueden devolver archivos de tamaño 0: el núcleo los descarta.
 pub trait Lister: Sync {
     fn list(&self, path: &Path) -> Result<DirListing, ListError>;
 }
@@ -103,6 +104,10 @@ fn insert_listing(ctx: &Ctx, job: &Job, l: DirListing) {
     let mut files: Vec<(Box<str>, u64)> = Vec::with_capacity(l.files.len());
     let (mut n_files, mut n_bytes) = (0u64, 0u64);
     for f in l.files {
+        // Los archivos vacíos no ocupan nada: no son nodos ni entran en la deduplicación.
+        if f.size == 0 {
+            continue;
+        }
         if let Some(id) = f.id
             && !ctx.first_time(id)
         {
@@ -384,5 +389,23 @@ mod tests {
         });
         assert!(r.is_none());
         assert!(t0.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn walk_ignores_empty_files() {
+        let mut l = FakeLister::default();
+        let mut files: Vec<(String, u64, Option<u64>)> = (0..1400u64).map(|i| f(&format!("f{i}"), i + 1)).collect();
+        files.extend((0..200).map(|i| f(&format!("e{i}"), 0)));
+        // Un archivo vacío con el mismo id que uno con datos no debe taparlo.
+        files.push(("vacio".into(), 0, Some(9)));
+        files.push(("lleno".into(), 50, Some(9)));
+        l.dirs.insert("/r".into(), Ok((vec![], files)));
+        let (r, p) = run(&l);
+        let t = r.unwrap();
+        assert!(t.iter().all(|n| !n.small));
+        assert_eq!(t[0].children.len(), 1401);
+        let expected: u64 = (1..=1400u64).sum::<u64>() + 50;
+        assert_eq!(t[0].size, expected);
+        assert_eq!(p.files.load(Ordering::Relaxed), 1401);
     }
 }

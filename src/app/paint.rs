@@ -89,7 +89,7 @@ impl App {
                     Hit::GroupBar(g) => Some(g),
                     _ => None,
                 };
-                ui::draw_group_bar(p, w, &names, active_group, group_hover);
+                ui::draw_group_bar(p, w, area.left, &names, active_group, group_hover);
             }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
@@ -120,7 +120,7 @@ impl App {
             // franja de íconos que al asomar el mouse se expande encima de los paneles (con sombra).
             #[cfg(feature = "arbol")]
             if tree.visible {
-                let r = render::rect(ui::GAP, area.top, ui::GAP + tree.width_now(), area.bottom);
+                let r = render::rect(ui::GAP, area.top - groups_h, ui::GAP + tree.width_now(), area.bottom);
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
                     p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme.background, 0.45));
                 }

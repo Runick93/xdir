@@ -1,6 +1,6 @@
 [package]
 name = "xdir"
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 
 [target.'cfg(windows)'.dependencies]
@@ -30,7 +30,8 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# xtree (mapa de uso de disco) no va en la release: solo se compila con --features xtree.
+# xtree (mapa de uso de disco): programa aparte que xdir abre desde su botón de la barra de estado.
+# Se compila y empaqueta junto a xdir.exe (feature `xtree`, incluida por defecto).
 [[bin]]
 name = "xtree"
 path = "src/bin/xtree.rs"
@@ -41,7 +42,8 @@ xtree = []
 # Árbol de carpetas lateral (F-3.5), experimental: incluido por defecto pero oculto hasta que se
 # enciende (switch de la rueda dentada o Ctrl+Shift+E). Para quitarlo del programa:
 # scripts\build.cmd build --release --no-default-features
-default = ["arbol"]
+# (esa opción también deja afuera xtree y su botón; para quitar solo el árbol: --no-default-features --features xtree)
+default = ["arbol", "xtree"]
 arbol = []
 # Gancho de pruebas: deja manejar la ventana por WM_COPYDATA desde otro proceso (capturas y
 # pruebas automáticas sin mouse real). Nunca se compila en la versión normal.

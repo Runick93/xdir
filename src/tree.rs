@@ -680,15 +680,15 @@ impl Tree {
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
             Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
             // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
-            Kind::QuickAccess => ("\u{E8EC}", rgb(0.93, 0.50, 0.55)),
+            Kind::QuickAccess => ("\u{EC50}", rgb(0.93, 0.50, 0.55)),
             Kind::Drive => ("\u{EDA2}", th.text_dim),
             Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),
-            Kind::Linux => ("\u{E756}", th.text_dim),
+            Kind::Linux => ("\u{E968}", th.text_dim),
             Kind::Pinned => {
                 let (_, glyph, (r, g, b)) = PINNED[n.pin];
                 (glyph, rgb(r, g, b))
             }
-            _ => ("\u{E8D5}", rgb(1.0, 0.79, 0.28)),
+            _ => ("\u{E8B7}", rgb(1.0, 0.79, 0.28)),
         }
     }
 

@@ -2,5 +2,6 @@
 //! No depende del sistema operativo; el escáner y la vista se apoyan en estos módulos.
 
 pub mod colors;
+pub mod scan;
 pub mod tree;
 pub mod treemap;

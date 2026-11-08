@@ -476,3 +476,62 @@ impl Watcher {
         Some(Self { _watcher: watcher })
     }
 }
+
+// ---------- xtree (interfaz del escáner; implementación pendiente) ----------
+
+use crate::xtree::scan::{DirListing, DriveEntry, FastScan, ListError, Lister, Progress};
+use crate::xtree::tree::Node;
+
+struct StubLister;
+
+impl Lister for StubLister {
+    fn list(&self, _path: &Path) -> Result<DirListing, ListError> {
+        Err(ListError::Other)
+    }
+}
+
+/// Listador de carpetas para el escáner de xtree.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub fn xtree_lister(_root: &Path) -> impl Lister + 'static {
+    StubLister
+}
+
+/// Escaneo rápido de un volumen entero, si macOS lo permite.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub fn xtree_fast_scan(_root: &Path, _progress: &Progress, _cancel: &std::sync::atomic::AtomicBool) -> FastScan {
+    FastScan::NotApplicable
+}
+
+/// Reintenta el escaneo con permisos de administrador.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub fn xtree_elevate(_root: &Path, _progress: &Progress, _cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<Node>> {
+    None
+}
+
+/// Unidades que se ofrecen para analizar.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub fn xtree_drives() -> Vec<DriveEntry> {
+    Vec::new()
+}
+
+/// (usado, total) en bytes del volumen que contiene `path`.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub fn volume_space(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// `true` si `path` es la raíz de un volumen.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub fn whole_volume(_path: &Path) -> bool {
+    false
+}
+
+/// Carpeta que se analiza al abrir xtree sin elegir nada.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub fn xtree_default_root() -> PathBuf {
+    PathBuf::new()
+}
+
+/// Texto que explica cómo dar permiso de acceso cuando hay carpetas denegadas.
+#[allow(dead_code)] // Temporal: la vista se conecta en la Task 4.
+pub const XTREE_PERMISSION_HINT: &str = "";

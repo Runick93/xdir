@@ -96,11 +96,11 @@ const GROUP_ADD_W: f32 = 28.0;
 
 /// Pestañas de los `n` grupos y botón «+» a su derecha. El ancho de las pestañas se achica para
 /// que entren todas.
-pub fn group_tabs(w: f32, n: usize) -> (Vec<Rect>, Rect) {
-    let avail = (w - GAP * 2.0 - GROUP_ADD_W - 4.0).max(GROUP_TAB_MIN_W);
+pub fn group_tabs(w: f32, left: f32, n: usize) -> (Vec<Rect>, Rect) {
+    let avail = (w - GAP - left - GROUP_ADD_W - 4.0).max(GROUP_TAB_MIN_W);
     let tab_w = (avail / n.max(1) as f32).clamp(GROUP_TAB_MIN_W.min(avail), GROUP_TAB_W);
     let (top, bottom) = (5.0, GROUPBAR_H - 3.0);
-    let mut x = GAP;
+    let mut x = left;
     let tabs = (0..n)
         .map(|_| {
             let r = rect(x, top, x + tab_w - GROUP_TAB_GAP, bottom);
@@ -125,8 +125,8 @@ fn group_close_rect(tab: Rect) -> Rect {
 }
 
 /// `temps[i]`: la pestaña i está sin guardar (tiene ×).
-pub fn group_bar_at(w: f32, temps: &[bool], x: f32, y: f32) -> Option<GroupHit> {
-    let (tabs, add) = group_tabs(w, temps.len());
+pub fn group_bar_at(w: f32, left: f32, temps: &[bool], x: f32, y: f32) -> Option<GroupHit> {
+    let (tabs, add) = group_tabs(w, left, temps.len());
     if contains(&add, x, y) {
         return Some(GroupHit::Add);
     }
@@ -134,9 +134,9 @@ pub fn group_bar_at(w: f32, temps: &[bool], x: f32, y: f32) -> Option<GroupHit> 
     Some(if temps[i] && contains(&group_close_rect(tabs[i]), x, y) { GroupHit::Close(i) } else { GroupHit::Tab(i) })
 }
 
-pub fn draw_group_bar(p: &Painter, w: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+pub fn draw_group_bar(p: &Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
     let th = p.theme;
-    let (tabs, add) = group_tabs(w, names.len());
+    let (tabs, add) = group_tabs(w, left, names.len());
     for (i, (r, (name, temp))) in tabs.iter().zip(names).enumerate() {
         // Píldora con borde fino; la activa lleva el contorno y un velo del color de acento.
         p.round_fill(*r, 9.0, th.surface);

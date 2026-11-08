@@ -116,7 +116,35 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<Node>> {
         }
         arena.push(Node { name, parent, size, is_dir: flags & 1 != 0, small: flags & 2 != 0, children });
     }
-    Some(arena)
+    valid_graph(&arena).then_some(arena)
+}
+
+/// Comprueba que padres e hijos apunten dentro de la arena y que subiendo por los padres se
+/// llegue siempre a `NO_PARENT` (sin ciclos).
+fn valid_graph(arena: &[Node]) -> bool {
+    let n = arena.len();
+    let in_range = |i: u32| (i as usize) < n;
+    if !arena.iter().all(|a| (a.parent == NO_PARENT || in_range(a.parent)) && a.children.iter().all(|&c| in_range(c))) {
+        return false;
+    }
+    // 0 = sin ver, 1 = en el camino actual, 2 = ya comprobado.
+    let mut state = vec![0u8; n];
+    for start in 0..n {
+        let mut path = Vec::new();
+        let mut cur = start as u32;
+        while cur != NO_PARENT && state[cur as usize] == 0 {
+            state[cur as usize] = 1;
+            path.push(cur);
+            cur = arena[cur as usize].parent;
+        }
+        if cur != NO_PARENT && state[cur as usize] == 1 {
+            return false;
+        }
+        for id in path {
+            state[id as usize] = 2;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -167,6 +195,34 @@ mod tests {
         assert_eq!(decode(&[1, 2, 3]), None);
         let bytes = encode(&[node("x", NO_PARENT, 1, false, vec![])]);
         assert_eq!(decode(&bytes[..bytes.len() - 1]), None);
+    }
+
+    fn one_root_with_child() -> Vec<Node> {
+        vec![node("r", NO_PARENT, 1, true, vec![1]), node("a", 0, 1, false, vec![])]
+    }
+
+    #[test]
+    fn decode_rejects_out_of_range_child() {
+        let mut t = one_root_with_child();
+        t[0].children = vec![7];
+        assert_eq!(decode(&encode(&t)), None);
+    }
+
+    #[test]
+    fn decode_rejects_out_of_range_parent() {
+        let mut t = one_root_with_child();
+        t[1].parent = 9;
+        assert_eq!(decode(&encode(&t)), None);
+    }
+
+    #[test]
+    fn decode_rejects_parent_cycle() {
+        let mut t = one_root_with_child();
+        t[0].parent = 1;
+        assert_eq!(decode(&encode(&t)), None);
+        let mut t = one_root_with_child();
+        t[1].parent = 1;
+        assert_eq!(decode(&encode(&t)), None);
     }
 
     #[test]

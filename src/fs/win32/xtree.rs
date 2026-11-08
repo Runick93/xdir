@@ -299,10 +299,17 @@ pub fn xtree_helper_main(args: &[String]) -> i32 {
     let Some(drive) = volume_drive(drive.trim_end_matches('\\')).filter(|d| is_ntfs(d)) else { return 1 };
     let progress = Progress::default();
     match mft::scan(&drive, &format!("{drive}\\"), &progress, &AtomicBool::new(false)) {
-        Ok(arena) => match std::fs::write(file, encode(&arena)) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        },
+        Ok(arena) => {
+            // Proceso de administrador escribiendo en %TEMP% del usuario: solo un archivo nuevo.
+            // Si ya existe algo con ese nombre (archivo o enlace puesto mientras se esperaba el
+            // UAC) no se abre, para no pisar otro archivo con permisos elevados.
+            let written = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(file)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, &encode(&arena)));
+            if written.is_ok() { 0 } else { 1 }
+        }
         Err(mft::Fail::Denied) => 2,
         Err(mft::Fail::Other) => 1,
     }
@@ -388,3 +395,6 @@ pub fn xtree_permission_issue(p: &Progress) -> bool {
 
 /// Aviso de la barra de datos cuando el escaneo rápido necesita administrador (tecla A).
 pub const XTREE_PERMISSION_HINT: &str = "Escaneo rápido de la MFT: requiere administrador (tecla A)";
+
+/// Texto de la barra de datos y de estado mientras corre el escaneo con permisos (tecla A).
+pub const XTREE_ELEVATING_TEXT: &str = "Leyendo la tabla de archivos (MFT) como administrador\u{2026}";

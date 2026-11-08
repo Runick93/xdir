@@ -533,3 +533,6 @@ pub const XTREE_PERMISSION_HINT: &str = "{n} carpetas sin permiso: dale a xdir A
 pub fn xtree_permission_issue(p: &Progress) -> bool {
     p.denied.load(std::sync::atomic::Ordering::Relaxed) > 0
 }
+
+/// Texto de la barra de datos y de estado mientras corre el escaneo con permisos (tecla A).
+pub const XTREE_ELEVATING_TEXT: &str = "Reintentando con Acceso total al disco\u{2026}";

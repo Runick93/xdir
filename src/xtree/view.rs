@@ -236,12 +236,26 @@ impl Xtree {
 
     /// Texto para la barra de estado de xdir mientras la vista está abierta.
     pub fn status_text(&self) -> String {
-        if self.scanning {
+        if self.elevating.load(Ordering::Relaxed) {
+            format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), fs::XTREE_ELEVATING_TEXT)
+        } else if self.scanning {
             format!("xtree \u{B7} {} \u{B7} escaneando\u{2026}", self.root.display())
         } else if self.arena.is_empty() {
             format!("xtree \u{B7} {}", self.root.display())
         } else {
             format!("xtree \u{B7} {} \u{B7} análisis completado", self.path_of(&self.arena, self.current).display())
+        }
+    }
+
+    /// Aviso de la barra de datos: escaneo elevado en curso o permisos que faltan (tecla A).
+    fn data_hint(&self) -> String {
+        let progress = self.progress();
+        if self.elevating.load(Ordering::Relaxed) {
+            fs::XTREE_ELEVATING_TEXT.to_string()
+        } else if fs::xtree_permission_issue(progress) {
+            fs::XTREE_PERMISSION_HINT.replace("{n}", &fmt_count(progress.denied.load(Ordering::Relaxed)))
+        } else {
+            String::new()
         }
     }
 
@@ -306,11 +320,12 @@ impl Xtree {
         if lparam == 1 {
             return self.take_result();
         }
-        // Avance: el mapa en vivo se recalcula con lo que lleva descubierto el escáner.
+        // Avance: el mapa en vivo se recalcula con lo que lleva descubierto el escáner. También
+        // llega cuando termina el escaneo elevado sin árbol: hay que repintar su aviso.
         if self.scanning {
             self.cells_for = None;
         }
-        self.scanning
+        true
     }
 
     /// Tecla A: vuelve a analizar con permisos (administrador en Windows; en macOS abre el ajuste
@@ -332,12 +347,15 @@ impl Xtree {
             (self.scan.progress.clone(), self.scan.cancel.clone(), self.scan.result.clone(), self.elevating.clone());
         let _ = std::thread::Builder::new().spawn(move || {
             let tree = run(&root, &progress, &cancel);
-            if let Some(arena) = tree
-                && scan::deliver(&result, &cancel, arena, true)
-            {
-                hwnd.post(WM_APP_XTREE, id, 1);
+            let delivered = tree.is_some_and(|arena| scan::deliver(&result, &cancel, arena, true));
+            if delivered {
+                // Ya no faltan permisos: se apagan el aviso y la tecla A.
+                progress.need_admin.store(false, Ordering::Relaxed);
+                progress.denied.store(0, Ordering::Relaxed);
             }
             elevating.store(false, Ordering::Relaxed);
+            // Siempre se avisa: el escaneo normal pudo haber terminado y ya no hay quien repinte.
+            hwnd.post(WM_APP_XTREE, id, delivered as isize);
         });
         Action::Redraw
     }
@@ -887,12 +905,7 @@ impl Xtree {
             p.round_fill(rect(track.left, track.top, track.left + (track.right - track.left) * frac, track.bottom), 2.0, fillc);
         }
         // Aviso de permisos: administrador en Windows, Acceso total al disco en macOS (tecla A).
-        let denied = progress.denied.load(Ordering::Relaxed);
-        let hint = if fs::xtree_permission_issue(&progress) {
-            fs::XTREE_PERMISSION_HINT.replace("{n}", &fmt_count(denied))
-        } else {
-            String::new()
-        };
+        let hint = self.data_hint();
         // Con el aviso, las columnas se achican para que entre el texto.
         let widths: [f32; 5] = if hint.is_empty() { [250.0, 120.0, 190.0, 180.0, 190.0] } else { [220.0, 110.0, 170.0, 150.0, 170.0] };
         let mut x = bar.left + 16.0;
@@ -1035,6 +1048,30 @@ mod tests {
         assert!(!scan::deliver(&x.scan.result, &x.scan.cancel, normal, false));
         assert!(x.take_result());
         assert_eq!(x.arena[0].size, 99);
+        // Ya no faltan permisos: sin aviso y la tecla A no vuelve a lanzar nada.
+        assert!(!fs::xtree_permission_issue(&x.scan.progress));
+        assert_eq!(x.data_hint(), "");
+        assert_eq!(x.elevate_with(|_, _, _| panic!("no debe relanzar")), Action::None);
+    }
+
+    /// Mientras corre el escaneo elevado, la barra y la barra de estado lo dicen; si falla (UAC
+    /// rechazado), vuelve el aviso de permisos y la vista se repinta.
+    #[test]
+    fn elevating_is_shown_and_failure_restores_hint() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(vec![node("raiz", NO_PARENT, 5, true, vec![])]);
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); None }), Action::Redraw);
+        assert_eq!(x.data_hint(), fs::XTREE_ELEVATING_TEXT);
+        assert!(x.status_text().contains(fs::XTREE_ELEVATING_TEXT));
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        assert!(fs::xtree_permission_issue(&x.scan.progress));
+        assert!(x.data_hint().contains("(tecla A)"));
+        assert!(!x.status_text().contains(fs::XTREE_ELEVATING_TEXT));
+        // El aviso del hilo elevado (sin árbol) repinta aunque el escaneo normal ya haya terminado.
+        assert!(x.on_message(x.scan.id, 0));
     }
 
     /// Si el escaneo normal terminó antes, el elevado igual lo reemplaza.

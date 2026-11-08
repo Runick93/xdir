@@ -31,10 +31,11 @@ panic = "abort"
 strip = true
 
 # xtree (mapa de uso de disco): programa aparte que xdir abre desde su botón de la barra de estado.
-# Se compila y empaqueta junto a xdir.exe (feature `xtree`, incluida por defecto).
+# Se compila y empaqueta junto a xdir.exe (feature `xtree`, incluida por defecto). Por ahora solo
+# existe en Windows: en macOS compila a un aviso y el botón no aparece.
 [[bin]]
 name = "xtree"
-path = "src/bin/xtree.rs"
+path = "src/bin/xtree/main.rs"
 required-features = ["xtree"]
 
 [features]

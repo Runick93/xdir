@@ -228,9 +228,9 @@ fn status_bar_buttons_are_hit() {
     assert_eq!(a.hit(x, y), Hit::Gear);
     let (x, y) = center(&ui::groups_rect(w, h));
     assert_eq!(a.hit(x, y), Hit::Groups);
-    // Sin la feature `xtree` (la release) el botón no existe y no responde.
+    // Sin la feature `xtree`, o fuera de Windows, el botón no existe y no responde.
     let (x, y) = center(&ui::xtree_rect(w, h));
-    assert_eq!(a.hit(x, y) == Hit::Xtree, cfg!(feature = "xtree"));
+    assert_eq!(a.hit(x, y) == Hit::Xtree, cfg!(all(windows, feature = "xtree")));
     for (layout, r) in ui::layout_buttons(w, h) {
         let (x, y) = center(&r);
         assert_eq!(a.hit(x, y), Hit::Layout(layout));

@@ -5,8 +5,6 @@
 //! Direct2D, tabla de lo más pesado de la carpeta actual y tarjeta de detalle con acciones.
 //! Clic selecciona; doble clic entra en la carpeta; clic derecho o Retroceso suben; F5 reescanea.
 
-#![windows_subsystem = "windows"]
-
 use std::cell::Cell as StdCell;
 use std::ffi::c_void;
 use std::collections::{HashSet, VecDeque};
@@ -85,7 +83,6 @@ static MFT_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// El escaneo rÃ¡pido de un disco completo necesita administrador y no se pudo usar.
 static NEED_ADMIN: AtomicBool = AtomicBool::new(false);
 
-#[path = "xtree_mft/mod.rs"]
 mod mft;
 
 // ---------- escáner ----------
@@ -1718,7 +1715,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     let root = std::env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
         let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
         PathBuf::from(format!("{drive}\\"))

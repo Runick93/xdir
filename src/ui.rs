@@ -250,8 +250,8 @@ pub fn groups_rect(w: f32, h: f32) -> Rect {
 /// Botón que abre xtree (mapa de uso de disco), a la izquierda del de grupos.
 pub fn xtree_rect(w: f32, h: f32) -> Rect {
     let g = groups_rect(w, h);
-    // Sin la feature `xtree` (la release) el botón no existe: queda de ancho cero y no se dibuja ni responde.
-    let width = if cfg!(feature = "xtree") { XTREE_W } else { 0.0 };
+    // Sin la feature `xtree`, o fuera de Windows (xtree aún no existe ahí), el botón no existe: queda de ancho cero y no se dibuja ni responde.
+    let width = if cfg!(all(windows, feature = "xtree")) { XTREE_W } else { 0.0 };
     rect(g.left - 10.0 - width, g.top, g.left - 10.0, g.bottom)
 }
 
@@ -276,7 +276,7 @@ pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hov
     p.text(&p.fonts.glyphs_small, "\u{E8A9}", rect(groups.left + 6.0, groups.top, groups.left + 26.0, groups.bottom), color);
     p.text(&p.fonts.ui, "Grupos", rect(groups.left + 30.0, groups.top, groups.right - 4.0, groups.bottom), color);
 
-    if cfg!(feature = "xtree") {
+    if cfg!(all(windows, feature = "xtree")) {
         if xtree_hot {
             p.round_fill(xtree, 4.0, th.hover);
         }

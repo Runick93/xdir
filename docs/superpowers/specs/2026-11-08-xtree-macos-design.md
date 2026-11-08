@@ -38,7 +38,7 @@ Dos razones:
   - «Copiar ruta» queda igual;
   - «Explorar aquí» queda igual (entra en la carpeta dentro del mapa).
 - **macOS:** un escáner propio (ver «Escáner en Mac») y el aviso de permisos.
-- **Diseño en FigCraft antes de programar**, en `design/xdir.figcraft`, con `docs/DISENO.md`
+- **Diseño en FigCraft antes de programar**, en `docs/design/xdir.figcraft`, con `docs/DISENO.md`
   como en cromos (ver «Diseño en FigCraft»). La implementación arranca cuando el usuario apruebe
   esas pantallas.
 - Se borran `src/bin/xtree/`, el `[[bin]]` de Cargo.toml y su feature, y el empaquetado de
@@ -187,8 +187,8 @@ Dos razones:
 
 Sigue la forma de cromos (`cromos/docs/DISENO.md`), adaptada a una app de escritorio en Rust:
 
-- `design/xdir.figcraft` es la fuente; se edita con `figcraft-cli` (`run` y `render`). En
-  `design/` no van imágenes; los renders se hacen fuera del repo.
+- `docs/design/xdir.figcraft` es la fuente; se edita con `figcraft-cli` (`run` y `render`). En
+  `docs/design/` no van imágenes; los renders se hacen fuera del repo.
 - `docs/DISENO.md` explica qué hay en el archivo, cómo se edita y cómo se mantiene sincronizado.
 - Páginas:
   - **Tokens:** los colores de `theme.rs` (claro y oscuro, y los 12 acentos), los colores del

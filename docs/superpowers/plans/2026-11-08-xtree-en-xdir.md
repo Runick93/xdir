@@ -34,7 +34,7 @@
 ### Task 1: Pantallas en FigCraft y `docs/DISENO.md` (puerta: aprobación del usuario)
 
 **Files:**
-- Create: `design/xdir.figcraft`
+- Create: `docs/design/xdir.figcraft`
 - Create: `docs/DISENO.md`
 - Create (fuera del repo): scripts de `figcraft-cli run` en el scratchpad
 
@@ -45,10 +45,10 @@
 - [ ] **Step 2:** Página **Tokens**: variables con los colores de `src/theme.rs` (modo claro y oscuro, los 12 `PRESETS` de acento), `WHEEL` y `CATS` de `src/bin/xtree/win.rs`, y medidas de las Global Constraints. Estilos de texto: `ui` 13, `ui_bold` 13 semibold, `title` 16 semibold, `small` 11.5, `small_bold` 12.5 semibold.
 - [ ] **Step 3:** Página **Componentes**, con el nombre de la función de Rust que lo dibuja: `ui::draw_status` (barra de estado con botón «xtree» encendido), `xtree::view::table_row`, `xtree::view::folder_block`, `xtree::view::file_block`, `xtree::view::card` (botones «Abrir en el panel», «Copiar ruta», «Explorar aquí»), `xtree::view::drive_menu`, `xtree::view::disk_bar`, `xtree::view::legend`.
 - [ ] **Step 4:** Página **Pantallas · xtree**, 1400×820, en tema oscuro y claro: (1) escaneando con mapa en vivo, (2) escaneando, fase MFT con % (Windows), (3) completo con color por carpeta, (4) color por tipo con leyenda, (5) menú de discos abierto, (6) aviso «N carpetas sin permiso… (tecla A)» (Mac), (7) aviso de administrador (Windows).
-- [ ] **Step 5:** Renderizar fuera del repo: `figcraft-cli render design/xdir.figcraft -o <scratchpad>/xtree-<n>.png --page "Pantallas · xtree"`. Revisar las imágenes.
-- [ ] **Step 6:** Escribir `docs/DISENO.md` con: qué páginas hay y a qué módulo corresponde cada una, archivos de `design/` (solo el `.figcraft`, sin imágenes), cómo se edita (`figcraft-cli run` / `render`, MCP opcional con `claude mcp add -s local figcraft -- ~/bin/figcraft-cli-0.12.1/figcraft-cli mcp`), y diferencias a propósito (fuente Inter en FigCraft vs Segoe UI / San Francisco).
+- [ ] **Step 5:** Renderizar fuera del repo: `figcraft-cli render docs/design/xdir.figcraft -o <scratchpad>/xtree-<n>.png --page "Pantallas · xtree"`. Revisar las imágenes.
+- [ ] **Step 6:** Escribir `docs/DISENO.md` con: qué páginas hay y a qué módulo corresponde cada una, archivos de `docs/design/` (solo el `.figcraft`, sin imágenes), cómo se edita (`figcraft-cli run` / `render`, MCP opcional con `claude mcp add -s local figcraft -- ~/bin/figcraft-cli-0.12.1/figcraft-cli mcp`), y diferencias a propósito (fuente Inter en FigCraft vs Segoe UI / San Francisco).
 - [ ] **Step 7:** Mostrar los renders al usuario y **esperar su aprobación**. Los cambios que pida se hacen en el `.figcraft` antes de seguir.
-- [ ] **Step 8: Commit** `design/xdir.figcraft` (y `docs/DISENO.md` solo si el usuario destrabó `docs/` del `.gitignore`): `docs(design): pantallas de xtree dentro de xdir en FigCraft`.
+- [ ] **Step 8: Commit** `docs/design/xdir.figcraft` (y `docs/DISENO.md` solo si el usuario destrabó `docs/` del `.gitignore`): `docs(design): pantallas de xtree dentro de xdir en FigCraft`.
 
 ### Task 2: Núcleo de datos: árbol, treemap y colores
 

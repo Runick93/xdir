@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use xdir_core::format::thousands;
+use xdir_core::format::{date_time_text, size_kb_text, size_short_text};
 use xdir_core::keys::Key;
 use xdir_core::sys::{ConsoleInfo, Handle, SystemEnv};
 
@@ -24,22 +24,20 @@ fn typed_file() -> Option<PathBuf> {
     xdir_core::session::config_dir().map(|d| d.join("rutas.txt"))
 }
 
-/// Días entre 1601-01-01 (época de FILETIME) y 1970-01-01.
-const DAYS_1601_TO_1970: i64 = 134_774;
+/// Segundos entre 1601-01-01 (época de FILETIME) y 1970-01-01.
+const SECS_1601_TO_1970: i64 = 11_644_473_600;
 
-/// Fecha civil (año, mes, día) de un número de días desde 1970-01-01 (algoritmo de Howard
-/// Hinnant, el mismo del entorno falso del núcleo).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
+/// Diferencia con UTC (en segundos) de la hora local en el instante `unix` (segundos desde 1970),
+/// según la zona horaria del sistema; 0 si no se puede saber.
+fn utc_offset(unix: i64) -> i64 {
+    let t = unix as libc::time_t;
+    // SAFETY: `localtime_r` escribe en `tm`, que es nuestro (la versión `_r` no usa memoria
+    // compartida entre hilos).
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return 0;
+    }
+    i64::from(tm.tm_gmtoff)
 }
 
 /// Entorno de Linux sin interfaz.
@@ -68,42 +66,20 @@ impl SystemEnv for LinuxEnv {
         config_dir_from(std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"))
     }
 
-    /// "AAAA-MM-DD HH:MM" (UTC) del FILETIME; vacío si es 0.
+    /// "AAAA-MM-DD HH:MM" (hora local) del FILETIME; vacío si es 0.
     fn format_date(&self, filetime: u64) -> String {
-        if filetime == 0 {
-            return String::new();
-        }
-        let secs = (filetime / 10_000_000) as i64;
-        let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-        let (y, m, d) = civil_from_days(days - DAYS_1601_TO_1970);
-        format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", rest / 3600, rest % 3600 / 60)
+        let unix = (filetime / 10_000_000) as i64 - SECS_1601_TO_1970;
+        date_time_text(filetime, utc_offset(unix))
     }
 
     /// "1.234 KB" (redondea hacia arriba), como el entorno falso del núcleo.
     fn format_size_kb(&self, bytes: u64) -> String {
-        format!("{} KB", thousands(bytes.div_ceil(1024)))
+        size_kb_text(bytes)
     }
 
     /// "123 bytes", "1,23 KB", "12,3 MB", "476 GB" (tres cifras, truncadas).
     fn format_size_short(&self, bytes: u64) -> String {
-        if bytes < 1024 {
-            return format!("{bytes} bytes");
-        }
-        let units = ["KB", "MB", "GB", "TB", "PB", "EB"];
-        let mut unit = 0;
-        let mut scale = 1024u128;
-        while (bytes as u128) >= scale * 1024 && unit + 1 < units.len() {
-            scale *= 1024;
-            unit += 1;
-        }
-        // Centésimas de la unidad, truncadas.
-        let hundredths = bytes as u128 * 100 / scale;
-        let text = match hundredths {
-            0..1000 => format!("{},{:02}", hundredths / 100, hundredths % 100),
-            1000..10000 => format!("{},{}", hundredths / 100, hundredths % 100 / 10),
-            _ => format!("{}", hundredths / 100),
-        };
-        format!("{text} {}", units[unit])
+        size_short_text(bytes)
     }
 
     fn typed_paths_load(&self) -> Vec<String> {
@@ -139,6 +115,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::config_dir_from;
+    use xdir_core::format::date_time_text;
 
     fn os(s: &str) -> Option<OsString> {
         Some(OsString::from(s))
@@ -157,6 +134,17 @@ mod tests {
     #[test]
     fn config_dir_ignores_relative_xdg() {
         assert_eq!(config_dir_from(os("rel"), os("/home/a")), Some(PathBuf::from("/home/a/.config/xdir")));
+    }
+
+    #[test]
+    fn format_date_known_filetime() {
+        // 2024-03-05 14:07 UTC.
+        const FT: u64 = 133_541_212_200_000_000;
+        assert_eq!(date_time_text(FT, 0), "2024-03-05 14:07");
+        // UTC-3 (Argentina) y una diferencia que cruza la medianoche.
+        assert_eq!(date_time_text(FT, -3 * 3600), "2024-03-05 11:07");
+        assert_eq!(date_time_text(FT, 10 * 3600), "2024-03-06 00:07");
+        assert_eq!(date_time_text(0, -3 * 3600), "");
     }
 
     #[test]

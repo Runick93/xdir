@@ -414,6 +414,7 @@ mod tests {
 
     #[test]
     fn commands_in_all_mode() {
+        xdir_core::sys::testing::install_fakes();
         let (h, favs, groups) = (History::default(), Favorites { items: Vec::new() }, Groups::default());
         let mut keymap = Keymap::default();
         keymap.set(Command::NewTab, &[commands::parse_combo("Ctrl+K").unwrap()]);

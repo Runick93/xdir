@@ -1,9 +1,10 @@
 // En release no se abre consola; en debug sí, para ver logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use xdir_core::commands;
+
 mod about;
 mod anim;
-mod commands;
 mod config;
 mod console;
 mod drop;

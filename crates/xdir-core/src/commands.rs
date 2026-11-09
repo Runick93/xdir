@@ -2,8 +2,9 @@
 //! busca, y los atajos de teclado se resuelven con un `Keymap` que parte de los de fábrica y
 //! toma los cambios de la sección `[atajos]` de `config.toml`.
 
-use crate::platform::Key;
-use crate::platform::keys::{
+use crate::keys::Key;
+use crate::sys::{KeyStyle, SystemEnv, env};
+use crate::keys::keys::{
     VK_BACK, VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT,
     VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
@@ -69,13 +70,15 @@ pub enum Command {
     Xtree,
 }
 
-/// ¿La acción existe en esta compilación? (las experimentales dependen de una feature).
+/// ¿La acción existe en esta compilación y en este sistema? (las experimentales dependen de una
+/// feature; el sistema puede no tenerla, como el Acceso rápido de Windows).
 pub fn available(c: Command) -> bool {
-    // En macOS hay una sola consola (Terminal) y no existe el Acceso rápido de Windows.
-    if cfg!(target_os = "macos") && matches!(c, Command::Cmd | Command::ToggleQuickPin) {
-        return false;
-    }
-    c != Command::ToggleTree || cfg!(feature = "arbol")
+    available_in(env(), c)
+}
+
+/// `available` con el entorno dado.
+pub fn available_in(env: &dyn SystemEnv, c: Command) -> bool {
+    env.command_available(c) && (c != Command::ToggleTree || cfg!(feature = "arbol"))
 }
 
 /// Una acción: identificador para `config.toml`, nombre para la paleta y atajos de fábrica.
@@ -90,48 +93,25 @@ const fn spec(command: Command, id: &'static str, name: &'static str, default_ke
     Spec { command, id, name, default_keys }
 }
 
-/// macOS: atajos de fábrica distintos a los de Windows, con las convenciones del Finder (Ctrl es
-/// ⌘ y Alt es ⌥). ⌘H oculta la app, así que los ocultos van con ⌘⇧. como en el Finder.
-#[cfg(target_os = "macos")]
-const MAC_KEYS: &[(Command, &[&str])] = &[
-    (Command::Back, &["Ctrl+[", "Ctrl+Izquierda", "NavegadorAtras"]),
-    (Command::Forward, &["Ctrl+]", "Ctrl+Derecha", "NavegadorAdelante"]),
-    (Command::Up, &["Ctrl+Arriba", "Retroceso"]),
-    (Command::Refresh, &["F5", "Ctrl+R"]),
-    (Command::EditAddress, &["Ctrl+L", "Ctrl+Shift+G", "F4"]),
-    (Command::ToggleHidden, &["Ctrl+Shift+."]),
-    (Command::InvertSelection, &["Ctrl+Alt+I"]),
-    (Command::Properties, &["Ctrl+I"]),
-    (Command::Recycle, &["Ctrl+Retroceso", "Supr"]),
-    (Command::Delete, &["Ctrl+Alt+Retroceso", "Shift+Supr"]),
-    (Command::CopyPaths, &["Ctrl+Alt+C"]),
-];
-
-/// macOS: nombres distintos a los de Windows.
-#[cfg(target_os = "macos")]
-const MAC_NAMES: &[(Command, &str)] = &[
-    (Command::PowerShell, "Abrir Terminal en la carpeta"),
-    (Command::Recycle, "Trasladar a la Papelera"),
-    (Command::Properties, "Obtener información"),
-];
-
 impl Spec {
     /// Atajos de fábrica en este sistema.
     pub fn keys(&self) -> &'static [&'static str] {
-        #[cfg(target_os = "macos")]
-        if let Some((_, keys)) = MAC_KEYS.iter().find(|(c, _)| *c == self.command) {
-            return keys;
-        }
-        self.default_keys
+        self.keys_in(env())
+    }
+
+    /// `keys` con el entorno dado.
+    pub fn keys_in(&self, env: &dyn SystemEnv) -> &'static [&'static str] {
+        env.command_keys(self.command).unwrap_or(self.default_keys)
     }
 
     /// Nombre para la paleta en este sistema.
     pub fn title(&self) -> &'static str {
-        #[cfg(target_os = "macos")]
-        if let Some((_, name)) = MAC_NAMES.iter().find(|(c, _)| *c == self.command) {
-            return name;
-        }
-        self.name
+        self.title_in(env())
+    }
+
+    /// `title` con el entorno dado.
+    pub fn title_in(&self, env: &dyn SystemEnv) -> &'static str {
+        env.command_title(self.command).unwrap_or(self.name)
     }
 }
 
@@ -236,8 +216,7 @@ const KEY_NAMES: &[(&[&str], Key, &str)] = &[
     (&["]"], Key(0xDD), "]"),
 ];
 
-/// macOS: símbolos, en el orden de Apple (⌥⇧⌘).
-#[cfg(target_os = "macos")]
+/// Estilo Apple: símbolos, en el orden de Apple (⌥⇧⌘).
 fn mac_key_label(vk: u16) -> Option<&'static str> {
     Some(match vk {
         0x2E => "⌦",
@@ -281,18 +260,24 @@ pub fn parse_combo(text: &str) -> Result<Combo, String> {
 
 /// Combinación → texto para mostrar ("Ctrl+Shift+T", "Alt+←").
 pub fn combo_label(c: Combo) -> String {
+    combo_label_in(env().key_style(), c)
+}
+
+/// `combo_label` con el estilo dado.
+pub fn combo_label_in(style: KeyStyle, c: Combo) -> String {
     let mut s = String::new();
-    #[cfg(target_os = "macos")]
-    let mods = [(c.alt, "⌥"), (c.shift, "⇧"), (c.ctrl, "⌘")];
-    #[cfg(not(target_os = "macos"))]
-    let mods = [(c.ctrl, "Ctrl+"), (c.shift, "Shift+"), (c.alt, "Alt+")];
+    let mods = match style {
+        KeyStyle::Mac => [(c.alt, "⌥"), (c.shift, "⇧"), (c.ctrl, "⌘")],
+        KeyStyle::Windows => [(c.ctrl, "Ctrl+"), (c.shift, "Shift+"), (c.alt, "Alt+")],
+    };
     for (on, name) in mods {
         if on {
             s.push_str(name);
         }
     }
-    #[cfg(target_os = "macos")]
-    if let Some(label) = mac_key_label(c.vk) {
+    if style == KeyStyle::Mac
+        && let Some(label) = mac_key_label(c.vk)
+    {
         s.push_str(label);
         return s;
     }
@@ -359,23 +344,19 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::testing::install_fakes;
 
     #[test]
     fn combos_parse_and_print() {
+        install_fakes();
         let c = parse_combo("ctrl+shift+t").unwrap();
         assert_eq!(c, Combo { vk: b'T' as u16, ctrl: true, shift: true, alt: false });
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(combo_label(c), "Ctrl+Shift+T");
-            assert_eq!(combo_label(parse_combo("Alt+Izquierda").unwrap()), "Alt+←");
-        }
-        // macOS: símbolos en el orden de Apple; Ctrl es ⌘ y Alt es ⌥.
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(combo_label(c), "⇧⌘T");
-            assert_eq!(combo_label(parse_combo("Alt+Izquierda").unwrap()), "⌥←");
-            assert_eq!(combo_label(parse_combo("Ctrl+Retroceso").unwrap()), "⌘⌫");
-        }
+        assert_eq!(combo_label(c), "Ctrl+Shift+T");
+        assert_eq!(combo_label(parse_combo("Alt+Izquierda").unwrap()), "Alt+←");
+        // Estilo Apple: símbolos en el orden de Apple; Ctrl es ⌘ y Alt es ⌥.
+        assert_eq!(combo_label_in(KeyStyle::Mac, c), "⇧⌘T");
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Alt+Izquierda").unwrap()), "⌥←");
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Retroceso").unwrap()), "⌘⌫");
         assert_eq!(combo_label(parse_combo("F12").unwrap()), "F12");
         assert_eq!(parse_combo("Mayús+Supr").unwrap().vk, VK_DELETE.0);
         assert!(parse_combo("Ctrl+Hiper").is_err());
@@ -385,6 +366,7 @@ mod tests {
     /// Cada atajo de fábrica resuelve a su propia acción, y no hay dos acciones con la misma tecla.
     #[test]
     fn defaults_are_consistent() {
+        install_fakes();
         let km = Keymap::default();
         let mut seen = std::collections::HashSet::new();
         for s in ALL.iter().filter(|s| available(s.command)) {
@@ -401,6 +383,7 @@ mod tests {
     /// El árbol solo existe con la feature `arbol`: sin ella, ni su atajo queda tomado.
     #[test]
     fn experimental_tree_depends_on_feature() {
+        install_fakes();
         let km = Keymap::default();
         let e = parse_combo("Ctrl+Shift+E").unwrap();
         let bound = km.lookup(Key(e.vk), e.ctrl, e.shift, e.alt);
@@ -410,6 +393,7 @@ mod tests {
 
     #[test]
     fn overrides() {
+        install_fakes();
         let mut km = Keymap::default();
         let ctrl_k = parse_combo("Ctrl+K").unwrap();
         let ctrl_w = parse_combo("Ctrl+W").unwrap();

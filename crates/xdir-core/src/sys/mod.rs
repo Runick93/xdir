@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use crate::commands::Command;
 use crate::keys::Key;
 
 pub mod testing;
@@ -43,6 +44,15 @@ pub struct ConsoleInfo {
     pub label: &'static str,
 }
 
+/// Cómo se escriben los atajos en pantalla.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyStyle {
+    /// "Ctrl+Shift+T".
+    Windows,
+    /// Símbolos de Apple: "⇧⌘T".
+    Mac,
+}
+
 /// Datos y preferencias del entorno del sistema: tema, animaciones, teclado, carpeta de
 /// configuración, formatos regionales, historial de rutas escritas y consolas.
 pub trait SystemEnv: Send + Sync {
@@ -73,6 +83,22 @@ pub trait SystemEnv: Send + Sync {
     /// Abre la consola `id` con `dir` como carpeta de trabajo. `verb`: "open" o uno de
     /// `console_alt_verbs`.
     fn open_console(&self, owner: Handle, id: u8, dir: &Path, verb: &str) -> bool;
+    /// Cómo se muestran los atajos. Por defecto, al estilo de Windows.
+    fn key_style(&self) -> KeyStyle {
+        KeyStyle::Windows
+    }
+    /// Atajos de fábrica propios del sistema para un comando (reemplazan a los comunes).
+    fn command_keys(&self, _c: Command) -> Option<&'static [&'static str]> {
+        None
+    }
+    /// Nombre propio del sistema para un comando en la paleta (reemplaza al común).
+    fn command_title(&self, _c: Command) -> Option<&'static str> {
+        None
+    }
+    /// ¿El comando existe en este sistema?
+    fn command_available(&self, _c: Command) -> bool {
+        true
+    }
 }
 
 /// Operaciones de archivos del sistema (se completa en una tarea siguiente).

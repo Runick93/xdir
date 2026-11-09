@@ -8,8 +8,9 @@ use objc2_app_kit::{NSColor, NSColorSpace, NSEvent, NSEventModifierFlags, NSWork
 use objc2_foundation::{
     NSByteCountFormatter, NSByteCountFormatterCountStyle, NSDate, NSDateFormatter, NSDateFormatterStyle, NSString, NSUserDefaults,
 };
+use xdir_core::commands::Command;
 use xdir_core::keys::Key;
-use xdir_core::sys::{ConsoleInfo, FileOps, Handle, Services, SystemEnv, Waker};
+use xdir_core::sys::{ConsoleInfo, FileOps, Handle, KeyStyle, Services, SystemEnv, Waker};
 
 /// Quién atiende los mensajes de la aplicación en el hilo principal (lo fija la ventana al
 /// arrancar).
@@ -55,6 +56,29 @@ thread_local! {
 fn typed_file() -> Option<PathBuf> {
     xdir_core::session::config_dir().map(|d| d.join("rutas.txt"))
 }
+
+/// macOS: atajos de fábrica distintos a los de Windows, con las convenciones del Finder (Ctrl es
+/// ⌘ y Alt es ⌥). ⌘H oculta la app, así que los ocultos van con ⌘⇧. como en el Finder.
+const KEYS: &[(Command, &[&str])] = &[
+    (Command::Back, &["Ctrl+[", "Ctrl+Izquierda", "NavegadorAtras"]),
+    (Command::Forward, &["Ctrl+]", "Ctrl+Derecha", "NavegadorAdelante"]),
+    (Command::Up, &["Ctrl+Arriba", "Retroceso"]),
+    (Command::Refresh, &["F5", "Ctrl+R"]),
+    (Command::EditAddress, &["Ctrl+L", "Ctrl+Shift+G", "F4"]),
+    (Command::ToggleHidden, &["Ctrl+Shift+."]),
+    (Command::InvertSelection, &["Ctrl+Alt+I"]),
+    (Command::Properties, &["Ctrl+I"]),
+    (Command::Recycle, &["Ctrl+Retroceso", "Supr"]),
+    (Command::Delete, &["Ctrl+Alt+Retroceso", "Shift+Supr"]),
+    (Command::CopyPaths, &["Ctrl+Alt+C"]),
+];
+
+/// macOS: nombres distintos a los de Windows.
+const NAMES: &[(Command, &str)] = &[
+    (Command::PowerShell, "Abrir Terminal en la carpeta"),
+    (Command::Recycle, "Trasladar a la Papelera"),
+    (Command::Properties, "Obtener información"),
+];
 
 /// Entorno de macOS: apariencia del sistema, formatos del usuario y Terminal.
 struct MacEnv;
@@ -134,6 +158,23 @@ impl SystemEnv for MacEnv {
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {
         &[]
+    }
+
+    fn key_style(&self) -> KeyStyle {
+        KeyStyle::Mac
+    }
+
+    fn command_keys(&self, c: Command) -> Option<&'static [&'static str]> {
+        KEYS.iter().find(|(k, _)| *k == c).map(|(_, keys)| *keys)
+    }
+
+    fn command_title(&self, c: Command) -> Option<&'static str> {
+        NAMES.iter().find(|(k, _)| *k == c).map(|(_, name)| *name)
+    }
+
+    /// En macOS hay una sola consola (Terminal) y no existe el Acceso rápido de Windows.
+    fn command_available(&self, c: Command) -> bool {
+        !matches!(c, Command::Cmd | Command::ToggleQuickPin)
     }
 
     /// Abre Terminal en la carpeta (el verbo no aplica).

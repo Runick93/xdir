@@ -61,7 +61,7 @@ impl Favorites {
         fn normalize(items: &mut [Fav]) {
             for item in items {
                 match item {
-                    Fav::Link { location: Location::Path(p), .. } => *p = crate::fs::long_path(p),
+                    Fav::Link { location: Location::Path(p), .. } => *p = crate::sys::file_system().long_path(p),
                     Fav::Group { items, .. } => normalize(items),
                     _ => {}
                 }
@@ -173,7 +173,7 @@ impl Favorites {
 /// Dos ubicaciones son el mismo favorito (rutas sin distinguir mayúsculas).
 fn same(a: &Location, b: &Location) -> bool {
     match (a, b) {
-        (Location::Path(x), Location::Path(y)) => crate::fs::same_path(x, y),
+        (Location::Path(x), Location::Path(y)) => crate::sys::file_system().same_path(x, y),
         (Location::Shell { parsing: x, .. }, Location::Shell { parsing: y, .. }) => x.eq_ignore_ascii_case(y),
         (Location::Computer, Location::Computer) => true,
         _ => false,
@@ -248,6 +248,7 @@ fn parse(text: &str) -> Favorites {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::testing::install_fakes;
 
     fn link(name: &str, path: &str) -> Fav {
         Fav::Link { name: name.into(), location: Location::Path(path.into()) }
@@ -272,12 +273,14 @@ mod tests {
 
     #[test]
     fn round_trip() {
+        install_fakes();
         let f = sample();
         assert_eq!(parse(&write(&f)), f);
     }
 
     #[test]
     fn find_and_edit() {
+        install_fakes();
         let mut f = sample();
         assert_eq!(f.find(&Location::Path(r"c:\INF".into())), Some(vec![1, 2]));
         assert_eq!(f.get(&[1, 1, 0]).map(|x| x.name()), Some("2019"));
@@ -291,6 +294,7 @@ mod tests {
 
     #[test]
     fn hand_edited() {
+        install_fakes();
         let f = parse("# comentario\nA = C:\\a\nGrupo:\n  B = C:\\b\n    mal indentado = C:\\x\nC = C:\\c\n");
         assert_eq!(f.items.len(), 3);
         assert_eq!(f.get(&[1, 0]).map(|x| x.name()), Some("B"));

@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 
-use crate::render::Rect;
+use crate::geom::Rect;
 
 /// Duración de la transición de layout.
 pub const LAYOUT_MS: f32 = 160.0;
@@ -45,7 +45,7 @@ pub fn set_enabled(on: bool) {
 
 /// ¿El sistema permite animaciones?
 pub fn system_allows() -> bool {
-    crate::platform::animations_allowed()
+    crate::sys::env().animations_allowed()
 }
 
 /// Acerca `current` a `target` en `dt` segundos, sin pasarse. Devuelve el valor nuevo.

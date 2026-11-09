@@ -4,22 +4,10 @@
 //! dependencias: `clave = valor`, tablas `[[panel]]`, strings, números, booleanos y listas en
 //! una línea. Va en `%APPDATA%\xdir\`, o junto al .exe si existe `xdir.portable` (modo portable).
 
-use std::path::PathBuf;
-
-use crate::fs::Location;
 use crate::list::{Column, ColumnSpec, View, default_columns};
 use crate::theme::{Accent, DEFAULT_ACCENT};
 
 const FILE_NAME: &str = "sesion.toml";
-const COMPUTER: &str = "Este equipo";
-/// Carpetas virtuales: "shell:<nombre de análisis>|<nombre visible>".
-const SHELL_PREFIX: &str = "shell:";
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PaneState {
-    pub tabs: Vec<Location>,
-    pub active: usize,
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
@@ -82,7 +70,7 @@ impl Default for Session {
 
 /// Carpeta de configuración: junto al .exe en modo portable, si no la del usuario (la resuelve
 /// el núcleo; en pruebas, una carpeta temporal por hilo).
-pub use xdir_core::session::config_dir;
+pub use xdir_core::session::{PaneState, config_dir, location_from, location_str};
 
 pub fn load() -> Option<Session> {
     let text = std::fs::read_to_string(config_dir()?.join(FILE_NAME)).ok()?;
@@ -231,24 +219,6 @@ fn parse(text: &str) -> Session {
     s
 }
 
-pub fn location_str(l: &Location) -> String {
-    match l {
-        Location::Computer => COMPUTER.to_string(),
-        Location::Path(p) => p.to_string_lossy().into_owned(),
-        Location::Shell { parsing, name, .. } => format!("{SHELL_PREFIX}{parsing}|{name}"),
-    }
-}
-
-pub fn location_from(s: &str) -> Location {
-    if s == COMPUTER {
-        return Location::Computer;
-    }
-    if let Some((parsing, name)) = s.strip_prefix(SHELL_PREFIX).and_then(|r| r.rsplit_once('|')) {
-        return Location::Shell { parsing: parsing.to_string(), name: name.to_string(), parent: None };
-    }
-    Location::Path(PathBuf::from(s))
-}
-
 fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -307,6 +277,7 @@ fn parse_list(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::Location;
 
     #[test]
     fn round_trip() {

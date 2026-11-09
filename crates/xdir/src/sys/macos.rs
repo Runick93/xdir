@@ -1,5 +1,6 @@
 //! Servicios del sistema en macOS.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -13,9 +14,13 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, KeyStyle, Services, SystemEnv, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, Shell, KeyStyle, Services, SystemEnv, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
+use xdir_core::fs::Location;
+use xdir_core::shell::{Entry, Item};
+
+use crate::shell::macos as sh;
 
 /// Quién atiende los mensajes de la aplicación en el hilo principal (lo fija la ventana al
 /// arrancar).
@@ -186,6 +191,11 @@ impl SystemEnv for MacEnv {
     fn open_console(&self, _owner: Handle, _id: u8, dir: &Path, _verb: &str) -> bool {
         std::process::Command::new("open").args(["-a", "Terminal"]).arg(dir).status().is_ok_and(|s| s.success())
     }
+
+    /// Cualquier raíz es un disco: su nombre ("/" → "Macintosh HD").
+    fn root_title(&self, path: &Path) -> Option<String> {
+        Some(crate::fs::drive_label(&path.to_string_lossy()))
+    }
 }
 
 /// El entorno real de macOS (lo que instala `install`).
@@ -245,6 +255,82 @@ impl DiskScan for MacDiskScan {
     }
 }
 
+/// Shell: delega en `crate::shell::macos`; los errores pasan a texto con el mismo mensaje que
+/// se mostraba antes (`ShellError::message`).
+struct MacShell;
+
+impl Shell for MacShell {
+    fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
+        sh::copy_files(items, cut).map_err(|e| e.message())
+    }
+
+    fn clipboard_files(&self) -> Option<(Vec<PathBuf>, bool)> {
+        sh::clipboard_files()
+    }
+
+    fn paste_virtual(&self, owner: Handle, dest: &Location) -> Result<bool, String> {
+        sh::paste_virtual(owner, dest).map_err(|e| e.message())
+    }
+
+    fn clear_clipboard(&self) {
+        sh::clear_clipboard()
+    }
+
+    fn copy_text(&self, owner: Handle, text: &str) -> Result<(), String> {
+        sh::copy_text(owner, text).map_err(|e| e.message())
+    }
+
+    fn pick_folder(&self, owner: Handle, title: &str) -> Option<PathBuf> {
+        sh::pick_folder(owner, title)
+    }
+
+    fn open_item(&self, owner: Handle, item: &Item) {
+        sh::open_item(owner, item)
+    }
+
+    fn open_file(&self, owner: Handle, file: &Path, dir: Option<&Path>) {
+        sh::open_file(owner, file, dir)
+    }
+
+    fn properties(&self, owner: Handle, items: &[Item]) {
+        sh::properties(owner, items)
+    }
+
+    fn context_menu(
+        &self,
+        owner: Handle,
+        folder: &Location,
+        items: &[Item],
+        at: (f32, f32),
+        extended: bool,
+        intercept: bool,
+        own: &[Entry],
+        pinned: bool,
+    ) -> Option<String> {
+        sh::context_menu(owner, folder, items, at, extended, intercept, own, pinned)
+    }
+
+    fn invoke_verb(&self, owner: Handle, folder: &Location, items: &[Item], verb: &str) -> Result<(), String> {
+        sh::invoke_verb(owner, folder, items, verb).map_err(|e| e.message())
+    }
+
+    fn pin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String> {
+        sh::pin_quick_access(owner, path).map_err(|e| e.message())
+    }
+
+    fn unpin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String> {
+        sh::unpin_quick_access(owner, path).map_err(|e| e.message())
+    }
+
+    fn set_menu_mode(&self, dark: Option<bool>) {
+        sh::set_menu_mode(dark)
+    }
+
+    fn volume_of(&self, path: &Path) -> Option<OsString> {
+        sh::volume_of(path)
+    }
+}
+
 /// Instala los servicios de macOS en el registro del núcleo.
 pub fn install() {
     xdir_core::sys::install(Services {
@@ -252,5 +338,6 @@ pub fn install() {
         env: platform_env(),
         file_ops: Box::new(MacFileOps),
         disk_scan: Box::new(MacDiskScan),
+        shell: Box::new(MacShell),
     });
 }

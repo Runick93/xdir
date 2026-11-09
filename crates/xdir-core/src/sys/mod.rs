@@ -1,16 +1,19 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
-//! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()` y
-//! `disk_scan()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
+//! `disk_scan()` y `shell()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 
 use crate::commands::Command;
+use crate::fs::Location;
 use crate::keys::Key;
 use crate::ops::{Op, OpResult};
+use crate::shell::{Entry, Item};
 use crate::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use crate::xtree::tree::Node;
 
@@ -88,6 +91,10 @@ pub trait SystemEnv: Send + Sync {
     /// Abre la consola `id` con `dir` como carpeta de trabajo. `verb`: "open" o uno de
     /// `console_alt_verbs`.
     fn open_console(&self, owner: Handle, id: u8, dir: &Path, verb: &str) -> bool;
+    /// Nombre que el sistema le da a una raíz (una ruta sin último tramo: `C:`, `C:\`, `/`), para
+    /// títulos y migas: "Disco local (C:)" en Windows, el nombre del disco en macOS. `None` = se
+    /// muestra el texto de la ruta (y, en las migas, la raíz sola se pega al tramo anterior).
+    fn root_title(&self, path: &Path) -> Option<String>;
     /// Cómo se muestran los atajos. Por defecto, al estilo de Windows.
     fn key_style(&self) -> KeyStyle {
         KeyStyle::Windows
@@ -141,12 +148,64 @@ pub trait DiskScan: Send + Sync {
     fn elevating_text(&self) -> &'static str;
 }
 
+/// Integración con el shell del sistema: portapapeles de archivos, abrir con el programa
+/// asociado, propiedades y menú contextual. Los errores son el texto que ve el usuario.
+///
+/// Los menús y diálogos corren en el hilo de interfaz; lo que necesiten guardar mientras están
+/// abiertos (el menú del Shell de Windows) es estado de ese hilo dentro de la plataforma, no del
+/// servicio.
+pub trait Shell: Send + Sync {
+    /// Copia (o corta, con `cut`) los elementos al portapapeles de archivos.
+    fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String>;
+    /// Archivos del portapapeles y si se cortaron.
+    fn clipboard_files(&self) -> Option<(Vec<PathBuf>, bool)>;
+    /// Pega en `dest` lo que no tiene rutas de disco (elementos virtuales). `Ok(true)` si pegó algo.
+    fn paste_virtual(&self, owner: Handle, dest: &Location) -> Result<bool, String>;
+    /// Vacía el portapapeles (lo cortado se pega una sola vez).
+    fn clear_clipboard(&self);
+    fn copy_text(&self, owner: Handle, text: &str) -> Result<(), String>;
+    /// Diálogo del sistema para elegir una carpeta.
+    fn pick_folder(&self, owner: Handle, title: &str) -> Option<PathBuf>;
+    /// Abre un elemento con su programa (las aplicaciones se ejecutan).
+    fn open_item(&self, owner: Handle, item: &Item);
+    /// Abre un archivo con su programa, con `dir` como carpeta de trabajo.
+    fn open_file(&self, owner: Handle, file: &Path, dir: Option<&Path>);
+    /// Ventana de propiedades ("Obtener información") de los elementos.
+    fn properties(&self, owner: Handle, items: &[Item]);
+    /// Menú contextual de `items` en `at` (DIPs del área de la ventana); sin `items`, el del fondo
+    /// de `folder`. Con `intercept` devuelve los verbos que resuelve la aplicación ("rename",
+    /// "delete", "cut", "copy", "paste"); `own` va arriba y si se elige una devuelve `own:<id>`;
+    /// `"shell"` si lo resolvió el sistema; `UNPIN_QUICK` si se desancló la carpeta `pinned`.
+    #[allow(clippy::too_many_arguments)]
+    fn context_menu(
+        &self,
+        owner: Handle,
+        folder: &Location,
+        items: &[Item],
+        at: (f32, f32),
+        extended: bool,
+        intercept: bool,
+        own: &[Entry],
+        pinned: bool,
+    ) -> Option<String>;
+    /// Ejecuta un verbo del sistema ("delete"...) sobre los elementos.
+    fn invoke_verb(&self, owner: Handle, folder: &Location, items: &[Item], verb: &str) -> Result<(), String>;
+    /// Ancla una carpeta al Acceso rápido de Windows.
+    fn pin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String>;
+    fn unpin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String>;
+    /// Modo de los menús nativos: `None` sigue al sistema, `Some(oscuro)` lo fuerza.
+    fn set_menu_mode(&self, dark: Option<bool>);
+    /// Volumen de una ruta, para decidir si arrastrar mueve o copia.
+    fn volume_of(&self, path: &Path) -> Option<OsString>;
+}
+
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {
     pub waker: Box<dyn Waker>,
     pub env: Box<dyn SystemEnv>,
     pub file_ops: Box<dyn FileOps>,
     pub disk_scan: Box<dyn DiskScan>,
+    pub shell: Box<dyn Shell>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -185,4 +244,8 @@ pub fn file_ops() -> &'static dyn FileOps {
 
 pub fn disk_scan() -> &'static dyn DiskScan {
     &*services().disk_scan
+}
+
+pub fn shell() -> &'static dyn Shell {
+    &*services().shell
 }

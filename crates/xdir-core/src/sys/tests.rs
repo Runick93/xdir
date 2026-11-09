@@ -81,3 +81,31 @@ fn fake_formats_are_deterministic() {
     assert_eq!(e.format_size_short(12_900_000), "12,3 MB");
     assert_eq!(e.format_size_short(476 * 1024 * 1024 * 1024), "476 GB");
 }
+
+/// El `FakeShell` anota por hilo y responde lo configurado: lo copiado vuelve del portapapeles,
+/// los errores se devuelven como texto y el menú elige lo pedido.
+#[test]
+fn fake_shell_records_per_thread_and_answers() {
+    use super::testing::{FakeShell, ShellCall};
+    use crate::fs::Location;
+    use crate::shell::Item;
+    install_fakes();
+    FakeShell::take_calls();
+    let a = PathBuf::from("/x/a.txt");
+    shell().copy_files(&[Item::from(a.clone())], true).unwrap();
+    assert_eq!(shell().clipboard_files(), Some((vec![a.clone()], true)));
+    FakeShell::fail_with(Some("sin permiso"));
+    assert_eq!(shell().copy_text(Handle(1), "hola"), Err("sin permiso".to_string()));
+    FakeShell::fail_with(None);
+    FakeShell::choose(Some("own:3"));
+    let chosen = shell().context_menu(Handle(1), &Location::Computer, &[], (1.0, 2.0), false, true, &[], false);
+    assert_eq!(chosen.as_deref(), Some("own:3"));
+    FakeShell::choose(None);
+    let calls = FakeShell::take_calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0], ShellCall::CopyFiles { paths: vec![a], cut: true });
+    assert_eq!(calls[1], ShellCall::CopyText("hola".into()));
+    // Otro hilo no ve lo anotado en este.
+    std::thread::spawn(|| assert!(FakeShell::take_calls().is_empty())).join().unwrap();
+    assert_eq!(shell().volume_of(std::path::Path::new("/x/a")), shell().volume_of(std::path::Path::new("/y")));
+}

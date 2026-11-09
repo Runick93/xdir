@@ -12,7 +12,7 @@ use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSPasteboardURLReadingFileURLsOnlyKey, NSPasteboardWriting, NSWorkspace};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
 
-use super::*;
+use super::{Entry, Item};
 use crate::fs::Location;
 use crate::platform::{Handle, MenuAt, popup_menu};
 

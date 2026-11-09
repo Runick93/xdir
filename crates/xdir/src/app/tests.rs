@@ -935,3 +935,68 @@ fn command_xtree_is_listed() {
     assert_eq!(spec.name, "Mapa de uso de disco (xtree)");
     assert!(spec.default_keys.is_empty());
 }
+
+// ---------- shell ----------
+
+/// Una fila de archivo para cargar a mano en la lista (sin leer el disco).
+fn file_entry(name: &str) -> crate::fs::Entry {
+    crate::fs::Entry {
+        name: name.into(),
+        full: None,
+        group: 0,
+        pidl: None,
+        display: name.into(),
+        sort_key: name.to_lowercase(),
+        is_dir: false,
+        size: 0,
+        modified: 0,
+        created: 0,
+        attrs: 0,
+        type_name: std::sync::Arc::from("Archivo"),
+        icon: 0,
+        overlay: 0,
+        overlay_checked: true,
+    }
+}
+
+/// «Copiar las rutas como texto» manda al portapapeles del `Shell` las rutas entre comillas, una
+/// por línea.
+#[test]
+fn copy_paths_uses_shell() {
+    use xdir_core::sys::testing::{FakeShell, ShellCall};
+    let mut a = app();
+    let dir = std::env::temp_dir().join("xdir-tests").join("copiar-rutas");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    let list = &mut a.panes[0].tab_mut().list;
+    list.append(vec![file_entry("a.txt"), file_entry("b.txt")]);
+    list.select_all();
+    FakeShell::take_calls();
+    a.run_command(Command::CopyPaths);
+    let expected = format!("\"{}\"\r\n\"{}\"", dir.join("a.txt").display(), dir.join("b.txt").display());
+    assert_eq!(FakeShell::take_calls(), [ShellCall::CopyText(expected)]);
+}
+
+/// El menú contextual del fondo de un panel le pasa al `Shell` las entradas propias (Ver, Ordenar
+/// por, Actualizar, Pegar, Deshacer) y la carpeta del panel.
+#[test]
+fn context_menu_own_entries_reach_shell() {
+    use xdir_core::sys::testing::{FakeShell, ShellCall};
+    let mut a = app();
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    FakeShell::take_calls();
+    a.on_context_menu(Some((10.0, 20.0)));
+    let calls = FakeShell::take_calls();
+    let [ShellCall::ContextMenu { folder, items, at, own, .. }] = calls.as_slice() else { panic!("se esperaba un menú: {calls:?}") };
+    assert_eq!(folder, &Location::Path(dir));
+    assert!(items.is_empty());
+    assert_eq!(*at, (10.0, 20.0));
+    let labels: Vec<&str> = own
+        .iter()
+        .map(|e| match e {
+            shell::Entry::Item { label, .. } | shell::Entry::Sub(label, _) => label.as_str(),
+            shell::Entry::Sep => "-",
+        })
+        .collect();
+    assert_eq!(&labels[..6], ["Ver", "Ordenar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+}

@@ -33,7 +33,6 @@ pub struct DirListing {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Temporal: Windows ya lo construye; falta el escáner de macOS (Task 6).
 pub enum ListError {
     Denied,
     Other,
@@ -64,7 +63,7 @@ pub struct Scan {
     pub result: Arc<Mutex<Option<Vec<Node>>>>,
 }
 
-#[allow(dead_code)] // Temporal: Windows ya lo construye; falta el escáner de macOS (Task 6).
+#[allow(dead_code)] // `Done` y `NeedsAdmin` solo los arma Windows (MFT); macOS siempre recorre.
 pub enum FastScan {
     NotApplicable,
     Done(Vec<Node>),

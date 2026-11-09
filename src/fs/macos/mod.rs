@@ -477,62 +477,7 @@ impl Watcher {
     }
 }
 
-// ---------- xtree (interfaz del escáner; implementación pendiente) ----------
+// ---------- xtree (escáner de uso de disco) ----------
 
-use crate::xtree::scan::{DirListing, DriveEntry, FastScan, ListError, Lister, Progress};
-use crate::xtree::tree::Node;
-
-struct StubLister;
-
-impl Lister for StubLister {
-    fn list(&self, _path: &Path) -> Result<DirListing, ListError> {
-        Err(ListError::Other)
-    }
-}
-
-/// Listador de carpetas para el escáner de xtree.
-pub fn xtree_lister(_root: &Path) -> impl Lister + 'static {
-    StubLister
-}
-
-/// Escaneo rápido de un volumen entero, si macOS lo permite.
-pub fn xtree_fast_scan(_root: &Path, _progress: &Progress, _cancel: &std::sync::atomic::AtomicBool) -> FastScan {
-    FastScan::NotApplicable
-}
-
-/// Reintenta el escaneo con permisos de administrador.
-pub fn xtree_elevate(_root: &Path, _progress: &Progress, _cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<Node>> {
-    None
-}
-
-/// Unidades que se ofrecen para analizar.
-pub fn xtree_drives() -> Vec<DriveEntry> {
-    Vec::new()
-}
-
-/// (total, libre) en bytes del volumen que contiene `path`.
-pub fn volume_space(_path: &Path) -> Option<(u64, u64)> {
-    None
-}
-
-/// `true` si `path` es la raíz de un volumen.
-pub fn whole_volume(_path: &Path) -> bool {
-    false
-}
-
-/// Carpeta que se analiza al abrir xtree sin elegir nada.
-pub fn xtree_default_root() -> PathBuf {
-    PathBuf::new()
-}
-
-/// Aviso de la barra de datos cuando hay carpetas sin permiso; la vista cambia `{n}` por la
-/// cantidad (tecla A: abre el ajuste de Acceso total al disco).
-pub const XTREE_PERMISSION_HINT: &str = "{n} carpetas sin permiso: dale a xdir Acceso total al disco (tecla A)";
-
-/// Faltaron permisos (aviso de la barra de datos y tecla A): carpetas que no se pudieron leer.
-pub fn xtree_permission_issue(p: &Progress) -> bool {
-    p.denied.load(std::sync::atomic::Ordering::Relaxed) > 0
-}
-
-/// Texto de la barra de datos y de estado mientras corre el escaneo con permisos (tecla A).
-pub const XTREE_ELEVATING_TEXT: &str = "Reintentando con Acceso total al disco\u{2026}";
+mod xtree;
+pub use self::xtree::*;

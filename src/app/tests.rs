@@ -776,15 +776,16 @@ fn xtree_view_swallows_pane_clicks() {
 
 #[test]
 fn open_in_panel_navigates_active_pane() {
-    let mut a = app();
-    assert_eq!(a.panes[a.active].tab().location, Location::Computer);
+    // Se abre desde una carpeta temporal: desde "Este equipo" analizaría el disco del usuario.
+    let (mut a, from) = app_in("open-desde");
     let tmp = xtree_dir("open");
+    assert_eq!(a.panes[a.active].tab().location, Location::Path(from));
     a.run_command(Command::Xtree);
     assert!(a.xtree_open);
     a.xtree_action(crate::xtree::view::Action::OpenInPanel { folder: tmp.clone(), select: None });
     assert!(!a.xtree_open);
     let Location::Path(p) = &a.panes[a.active].tab().location else { panic!("no es una carpeta") };
-    assert_eq!(p.file_name(), tmp.file_name());
+    assert_eq!(p, &tmp);
     a.on_closing();
 }
 

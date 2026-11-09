@@ -153,13 +153,11 @@ impl FileSystem for LinuxFileSystem {
         false
     }
 
-    /// El mismo archivo en disco (`st_dev` e `st_ino`); si alguna no existe, las rutas por tramos
-    /// (así se ignora la barra final).
+    /// Misma ruta escrita, tramo por tramo y distinguiendo mayúsculas (como en macOS, sin tocar
+    /// el disco: el núcleo la llama en bucles del hilo de interfaz y un `stat` sobre un montaje
+    /// de red colgado congelaría la ventana). `Path::components` ignora la barra final y los `.`.
     fn same_path(&self, a: &Path, b: &Path) -> bool {
-        match (std::fs::metadata(a), std::fs::metadata(b)) {
-            (Ok(x), Ok(y)) => (x.dev(), x.ino()) == (y.dev(), y.ino()),
-            _ => a.components().eq(b.components()),
-        }
+        a.components().eq(b.components())
     }
 
     fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {

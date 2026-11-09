@@ -120,3 +120,10 @@ fn watch_reports_new_file() {
     drop(guard);
     assert!(FakeWaker::count(MSG) > before, "no llegó el aviso del cambio");
 }
+
+#[test]
+fn same_path_does_not_touch_disk() {
+    let fs = LinuxFileSystem;
+    assert!(fs.same_path(Path::new("/no/existe/a"), Path::new("/no/existe/a/")));
+    assert!(!fs.same_path(Path::new("/no/existe/a"), Path::new("/no/existe/A")));
+}

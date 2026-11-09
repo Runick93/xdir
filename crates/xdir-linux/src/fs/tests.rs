@@ -122,6 +122,26 @@ fn watch_reports_new_file() {
 }
 
 #[test]
+fn watch_ignores_opening_the_folder() {
+    install_fakes();
+    // Número de mensaje propio de este test (el contador del `FakeWaker` es de todo el proceso).
+    const MSG: u32 = 0xB0B1;
+    let t = TempDir::new("watch-abrir");
+    std::fs::write(t.0.join("a.txt"), b"x").unwrap();
+    let guard = LinuxFileSystem.watch(Handle(1), MSG, 0, 0, &t.0).expect("no se pudo vigilar");
+    // Que pase cualquier aviso del arranque antes de contar.
+    std::thread::sleep(Duration::from_millis(600));
+    let before = FakeWaker::count(MSG);
+    // Lo que hace una recarga: leer la carpeta (y abrir un archivo de adentro).
+    let _ = std::fs::read_dir(&t.0).unwrap().count();
+    let _ = std::fs::read(t.0.join("a.txt")).unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    let after = FakeWaker::count(MSG);
+    drop(guard);
+    assert_eq!(after, before, "leer la carpeta no es un cambio");
+}
+
+#[test]
 fn same_path_does_not_touch_disk() {
     let fs = LinuxFileSystem;
     assert!(fs.same_path(Path::new("/no/existe/a"), Path::new("/no/existe/a/")));

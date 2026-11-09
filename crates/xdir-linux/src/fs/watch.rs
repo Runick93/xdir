@@ -20,7 +20,9 @@ impl Watcher {
         use notify::Watcher as _;
         let (tx, rx) = channel::<()>();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
+            // Los accesos (`IN_OPEN`, `IN_CLOSE_NOWRITE`) no cambian nada; además el propio
+            // `read_dir` de la recarga los produce y volvería a avisar cada 250 ms.
+            if res.is_ok_and(|ev| !matches!(ev.kind, notify::EventKind::Access(_))) {
                 let _ = tx.send(());
             }
         })

@@ -15,8 +15,10 @@ use crate::paint::{FontId, Painter};
 use crate::theme::alpha;
 use crate::thumbs;
 
+pub mod filters;
 pub mod groups;
 
+pub use filters::ListHit;
 pub use groups::{GROUPINGS, GroupKey, LocalNow, Meta, Row, group_key};
 
 pub const ROW_H: f32 = 24.0;
@@ -282,6 +284,10 @@ pub struct FileList {
     header_focus: Option<String>,
     /// Cuántas veces se rearmaron las filas (los tests miran que dibujar no las rearme).
     pub(crate) rows_built: u64,
+    /// Desplegable de filtros abierto (ver `filters`).
+    menu: Option<filters::FilterMenu>,
+    /// Columna del encabezado bajo el mouse: muestra la flecha de su filtro.
+    header_hover: Option<Column>,
     /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
     pub folder: Option<std::path::PathBuf>,
     /// Carpeta en la que se busca, mientras la lista muestra resultados de una búsqueda.
@@ -379,6 +385,8 @@ impl Default for FileList {
             layout: None,
             header_focus: None,
             rows_built: 0,
+            menu: None,
+            header_hover: None,
             folder: None,
             search_root: None,
             header_drag: None,
@@ -457,6 +465,7 @@ impl FileList {
     pub fn apply_view_settings(&mut self, v: &ViewSettings) {
         let resort = self.sort != v.sort || self.descending != v.descending;
         let regroup = self.group_by != v.group_by || self.collapsed != v.collapsed;
+        let refilter = self.filters != v.filters;
         self.sort = v.sort;
         self.descending = v.descending;
         self.columns = v.columns.clone();
@@ -468,7 +477,7 @@ impl FileList {
         if self.view != v.view {
             self.set_view(v.view);
         }
-        if resort && !self.entries.is_empty() {
+        if (resort || refilter) && !self.entries.is_empty() {
             let focus = self.focused_index();
             self.rebuild(focus);
             if let Some(f) = self.focus {
@@ -487,7 +496,14 @@ impl FileList {
         self.selected.extend(std::iter::repeat_n(false, batch.len()));
         self.entries.extend(batch);
 
-        let mut new: Vec<u32> = (start..self.entries.len() as u32).filter(|&i| self.shows(&self.entries[i as usize])).collect();
+        // Primero los filtros por columna (ver `filters`); después se ordena y se agrupa.
+        let now = self.filter_now();
+        let mut new: Vec<u32> = (start..self.entries.len() as u32)
+            .filter(|&i| {
+                let e = &self.entries[i as usize];
+                self.shows(e) && self.passes_filters(e, now)
+            })
+            .collect();
         let entries = &self.entries;
         let (sort, desc) = (self.sort, self.descending);
         let cmp = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], sort, desc);
@@ -509,6 +525,7 @@ impl FileList {
         merged.extend_from_slice(&new[j..]);
         self.order = merged;
         self.regroup();
+        self.refresh_filter_menu();
 
         self.restore_focus(focus_entry);
     }
@@ -671,9 +688,10 @@ impl FileList {
         self.focus.and_then(|p| self.visible.get(p)).map(|&i| i as usize)
     }
 
-    /// Filtra ocultos y filtro rápido, ordena y reubica el foco en `focus_entry`.
+    /// Filtra ocultos y filtros por columna, ordena, agrupa y reubica el foco en `focus_entry`.
     fn rebuild(&mut self, focus_entry: Option<usize>) {
-        let shown: Vec<bool> = self.entries.iter().map(|e| self.shows(e)).collect();
+        let now = self.filter_now();
+        let shown: Vec<bool> = self.entries.iter().map(|e| self.shows(e) && self.passes_filters(e, now)).collect();
         self.order = (0..self.entries.len() as u32).filter(|&i| shown[i as usize]).collect();
         // Lo que queda fuera se deselecciona para no operar sobre lo que no se ve.
         for (s, &v) in self.selected.iter_mut().zip(&shown) {
@@ -683,6 +701,7 @@ impl FileList {
         let (entries, sort, desc) = (&self.entries, self.sort, self.descending);
         self.order.sort_unstable_by(|&a, &b| compare(&entries[a as usize], &entries[b as usize], sort, desc));
         self.regroup();
+        self.refresh_filter_menu();
 
         self.restore_focus(focus_entry);
     }
@@ -878,6 +897,9 @@ impl FileList {
         self.view = view;
         self.name_ends.clear();
         self.header_drag = None;
+        // Las cuadrículas no tienen encabezado: ni flecha ni desplegable.
+        self.menu = None;
+        self.header_hover = None;
         self.hover = None;
         self.scroll = 0.0;
         self.scroll_target = 0.0;
@@ -1497,6 +1519,11 @@ impl FileList {
                 self.header_drag = Some(HeaderDrag::Resize { index, start_x: x, start_w: self.width_of(index) });
                 return (Action::None, true);
             }
+            // La flecha del filtro abre (o cierra) su desplegable.
+            if let Some(col) = self.header_filter_at(x, y) {
+                self.click_filter_menu(ListHit::HeaderFilter(col));
+                return (Action::Redraw, false);
+            }
             if let Some(&(index, ..)) = self.layout_columns().iter().find(|(_, _, l, r)| x >= *l && x < *r) {
                 self.header_drag = Some(HeaderDrag::Press { index, start_x: x, moved: false });
                 return (Action::None, true);
@@ -1664,8 +1691,12 @@ impl FileList {
                 return Action::Redraw;
             }
         }
+        // Columna del encabezado bajo el mouse: muestra la flecha de su filtro.
+        let header = if self.in_header(x, y) { self.layout_columns().iter().find(|c| x >= c.2 && x < c.3).map(|c| c.1) } else { None };
+        let header_changed = header != self.header_hover;
+        self.header_hover = header;
         let hover = if contains(&self.rows_area(), x, y) { self.pos_at(x, y) } else { None };
-        if hover != self.hover {
+        if hover != self.hover || header_changed {
             self.hover = hover;
             return Action::Redraw;
         }
@@ -1673,7 +1704,8 @@ impl FileList {
     }
 
     pub fn on_mouse_leave(&mut self) -> Action {
-        if self.hover.take().is_some() { Action::Redraw } else { Action::None }
+        let header = self.header_hover.take().is_some();
+        if self.hover.take().is_some() || header { Action::Redraw } else { Action::None }
     }
 
     fn update_hover_after_scroll(&mut self) {
@@ -1709,15 +1741,23 @@ impl FileList {
             if dragging == Some(col) {
                 p.fill(rect(left, header.top, right, header.bottom - 1.0), alpha(th.accent, 0.18));
             }
+            // Con el mouse encima (o su desplegable abierto) la columna se resalta y muestra la
+            // flecha del filtro a la derecha (diseño X33): el título y el orden le dejan lugar.
+            let button = self.shows_filter_button(col);
+            if button {
+                p.fill(rect(left, header.top, right, header.bottom - 1.0), th.hover);
+            }
+            let room = if button { filters::BUTTON_ROOM } else { PAD };
             let format = if col.right_aligned() { FontId::UiRight } else { FontId::UiBold };
-            let text_r = rect(left + PAD, header.top, right - PAD, header.bottom);
+            let text_r = rect(left + PAD, header.top, (right - room).max(left + PAD), header.bottom);
             p.text(format, col.title(), text_r, th.text_dim);
             if col == self.sort {
                 // Chevron arriba/abajo de Segoe Fluent Icons.
                 let glyph = if self.descending { "\u{E70D}" } else { "\u{E70E}" };
-                let gx = if col.right_aligned() { left + 2.0 } else { right - 22.0 };
+                let gx = if col.right_aligned() { left + 2.0 } else { right - 22.0 - if button { filters::BUTTON_ROOM - 4.0 } else { 0.0 } };
                 p.text(FontId::Glyphs, glyph, rect(gx, header.top, gx + 20.0, header.bottom), th.text_dim);
             }
+            self.draw_header_filter(p, col, left, text_r.right);
             if left > area.left {
                 p.fill(rect(left, header.top + 7.0, left + 1.0, header.bottom - 7.0), th.border);
             }

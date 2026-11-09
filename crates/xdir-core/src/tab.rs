@@ -59,7 +59,32 @@ pub struct Tab {
     view_applied: Option<(String, ViewSettings)>,
     /// Lo que el usuario había cambiado en la vista de la ubicación que se acaba de dejar,
     /// pendiente de guardar en `sync_view`.
-    left_view: Option<(String, ViewSettings)>,
+    left_view: Option<LeftView>,
+}
+
+/// Vista cambiada de una ubicación que se dejó: su clave, cómo quedó, los filtros con los que se
+/// había aplicado y, si era una búsqueda, la clave de la carpeta buscada (dueña de los filtros).
+struct LeftView {
+    key: String,
+    view: ViewSettings,
+    applied_filters: Vec<(Column, Vec<String>)>,
+    folder: Option<String>,
+}
+
+/// Guarda la vista `v` de la ubicación `key`. En una búsqueda (`folder` con la clave de la
+/// carpeta buscada) los filtros por columna son de la carpeta: si cambiaron respecto de
+/// `applied_filters` se guardan en ella, y la entrada de la búsqueda se queda sin filtros.
+fn store_view(views: &mut FolderViews, key: &str, v: ViewSettings, applied_filters: &[(Column, Vec<String>)], folder: Option<&str>) {
+    let Some(folder) = folder else {
+        views.set(key, v);
+        return;
+    };
+    if v.filters != applied_filters {
+        let mut fv = views.get(folder);
+        fv.filters = v.filters.clone();
+        views.set(folder, fv);
+    }
+    views.set(key, ViewSettings { filters: Vec::new(), ..v });
 }
 
 impl Tab {
@@ -137,8 +162,13 @@ impl Tab {
     }
 
     /// La vista guardada, como se ve en esta ubicación: con una búsqueda, con la columna de la
-    /// carpeta de cada resultado (después del nombre si no la tenía); sin búsqueda, sin ella.
+    /// carpeta de cada resultado (después del nombre si no la tenía) y los filtros por columna de
+    /// la carpeta buscada (el filtro rápido se aplica sobre lo que dejan pasar); sin búsqueda, sin
+    /// esa columna.
     fn view_here(&self, mut v: ViewSettings) -> ViewSettings {
+        if self.search.is_some() {
+            v.filters = self.list.filters.clone();
+        }
         let folder = v.columns.iter().position(|c| c.col == Column::Folder);
         match (self.search.is_some(), folder) {
             (true, None) => {
@@ -160,8 +190,8 @@ impl Tab {
     /// su vista cuando llegan los elementos. Devuelve si cambió algo de `views`.
     pub fn sync_view(&mut self, views: &mut FolderViews) -> bool {
         let mut changed = false;
-        if let Some((key, v)) = self.left_view.take() {
-            views.set(&key, v);
+        if let Some(left) = self.left_view.take() {
+            store_view(views, &left.key, left.view, &left.applied_filters, left.folder.as_deref());
             changed = true;
         }
         let key = self.view_key();
@@ -169,7 +199,8 @@ impl Tab {
         match &self.view_applied {
             Some((k, applied)) if *k == key => {
                 if current != *applied {
-                    views.set(&key, current.clone());
+                    let folder = self.search_folder_key();
+                    store_view(views, &key, current.clone(), &applied.filters, folder.as_deref());
                     self.view_applied = Some((key, current));
                     changed = true;
                 }
@@ -196,9 +227,14 @@ impl Tab {
         if let Some((key, applied)) = self.view_applied.take() {
             let current = self.list.view_settings();
             if current != applied {
-                self.left_view = Some((key, current));
+                self.left_view = Some(LeftView { key, view: current, applied_filters: applied.filters, folder: self.search_folder_key() });
             }
         }
+    }
+
+    /// Con una búsqueda, la clave de la carpeta buscada: los filtros por columna son de ella.
+    fn search_folder_key(&self) -> Option<String> {
+        self.search.is_some().then(|| folder_views::folder_key(&self.location, None))
     }
 
     pub fn can_back(&self) -> bool {
@@ -550,12 +586,16 @@ impl Tab {
             let found = self.list.total();
             let found = if found == 1 { "1 encontrado".to_string() } else { format!("{found} encontrados") };
             let scanned = crate::format::thousands(s.scanned);
-            return if s.done {
+            let mut text = if s.done {
                 let secs = s.finished.unwrap_or(s.started).duration_since(s.started).as_secs_f32();
                 format!("Búsqueda «{}»: {found} · {scanned} elementos revisados en {secs:.1} s", s.query)
             } else {
                 format!("Buscando «{}»…   {:.0} %   ·   {found} · {scanned} elementos revisados", s.query, (s.progress * 100.0).floor().min(99.0))
             };
+            if self.list.is_filtered() {
+                text.push_str(" (filtrado)");
+            }
+            return text;
         }
         if let Some(e) = &self.error {
             return format!("No se pudo abrir: {e}");
@@ -577,6 +617,10 @@ impl Tab {
         if count > 0 {
             s.push_str("   ·   ");
             s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
+        }
+        // Solo los filtros por columna (no el filtro rápido, que ya se ve en el buscador).
+        if self.list.is_filtered() {
+            s.push_str(" (filtrado)");
         }
         s
     }
@@ -735,5 +779,37 @@ mod tests {
         assert_eq!(FakeFileSystem::watches(&other), (1, 1));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// La barra de estado termina en « (filtrado)» solo con filtros de columna.
+    #[test]
+    fn status_says_filtered() {
+        install_fakes();
+        let mut tab = Tab::new(9, Location::Path(PathBuf::from("/filtrado")), false);
+        let entry = |name: &str| Entry {
+            name: name.into(),
+            full: None,
+            group: 0,
+            pidl: None,
+            display: name.into(),
+            sort_key: name.to_lowercase(),
+            is_dir: false,
+            size: 0,
+            modified: 0,
+            created: 0,
+            attrs: 0,
+            type_name: Arc::from("Archivo"),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+        };
+        tab.list.append(vec![entry("a.jpg"), entry("b.png"), entry("c.png")]);
+        assert_eq!(tab.status(), "3 elementos");
+        tab.list.set_filter(Column::Extension, vec!["PNG".into()]);
+        assert_eq!(tab.status(), "2 elementos (filtrado)");
+        tab.list.select_all();
+        assert!(tab.status().ends_with(" (filtrado)"), "{}", tab.status());
+        tab.list.set_filter(Column::Extension, Vec::new());
+        assert!(!tab.status().contains("filtrado"));
     }
 }

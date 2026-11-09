@@ -240,6 +240,9 @@ impl Pane {
     /// Inserta una pestaña a la derecha de la activa. Devuelve su posición.
     pub fn add_tab(&mut self, tab: Tab, activate: bool) -> usize {
         let at = (self.active + 1).min(self.tabs.len());
+        if activate {
+            self.leave_active();
+        }
         self.tabs.insert(at, tab);
         if activate {
             self.active = at;
@@ -269,11 +272,23 @@ impl Pane {
 
     pub fn select_tab(&mut self, i: usize) {
         if i < self.tabs.len() {
+            if i != self.active {
+                self.leave_active();
+            }
             self.active = i;
         }
     }
 
+    /// La pestaña activa deja de serlo: su desplegable de filtros se cierra (no vuelve a
+    /// aparecer al volver a ella).
+    fn leave_active(&mut self) {
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            t.list.close_filter_menu();
+        }
+    }
+
     pub fn cycle_tab(&mut self, forward: bool) {
+        self.leave_active();
         let n = self.tabs.len();
         self.active = if forward { (self.active + 1) % n } else { (self.active + n - 1) % n };
     }
@@ -314,6 +329,7 @@ impl Pane {
 
     /// Inserta una pestaña traída de otro panel en la posición `at` y la activa.
     pub fn insert_tab(&mut self, at: usize, tab: Tab) {
+        self.leave_active();
         let at = at.min(self.tabs.len());
         self.tabs.insert(at, tab);
         self.active = at;

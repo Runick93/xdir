@@ -269,6 +269,7 @@ impl App {
     /// Menú contextual de la lista en `at` (DIPs del área de la ventana). Sin punto (tecla de
     /// menú o Shift+F10) se abre sobre la fila con foco.
     pub(super) fn on_context_menu(&mut self, at: Option<(f32, f32)>) {
+        self.close_filter_menus();
         let pane = self.active;
         let at = at.unwrap_or_else(|| self.panes[pane].tab().list.focus_point().unwrap_or((40.0, 80.0)));
         let location = self.panes[pane].tab().location.clone();

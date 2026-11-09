@@ -1763,6 +1763,190 @@ fn group_menu_in_background_menu() {
     assert_eq!(a.folder_views.get(&view_key(&a, 0)).collapsed, [label]);
 }
 
+// ---------- tanda B: filtros por columna ----------
+
+/// El filtro de columna se combina con el filtro rápido (la búsqueda): con Extensión = JPG y
+/// «2036» queda uno solo; al terminar la búsqueda la carpeta sigue filtrada.
+#[test]
+fn filter_then_quick_filter() {
+    let dir = fixture("filtro-y-busqueda");
+    for n in ["IMG_2035.jpg", "IMG_2036.jpg", "IMG_2036.png", "notas 2036.txt"] {
+        std::fs::write(dir.join(n), "x").unwrap();
+    }
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(dir.clone()));
+    a.panes[0].tab_mut().list.set_filter(list::Column::Extension, vec!["JPG".into()]);
+    a.sync_folder_views();
+    assert_eq!(a.panes[0].tab().list.count(), 2);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "2036");
+    pump(&mut a, 0);
+    let list = &a.panes[0].tab().list;
+    let names: Vec<String> = (0..list.count()).map(|p| list.entries[list.entry_of_pos(p).unwrap()].display.clone()).collect();
+    assert_eq!(names, ["IMG_2036.jpg"]);
+    assert!(a.panes[0].tab().status().ends_with(" (filtrado)"), "{}", a.panes[0].tab().status());
+    a.clear_filter(0);
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.filters, [(list::Column::Extension, vec!["JPG".to_string()])]);
+    assert_eq!(a.panes[0].tab().list.count(), 2);
+}
+
+/// «Quitar los filtros» borra los filtros de todas las columnas y la carpeta lo recuerda.
+#[test]
+fn clear_filters_command() {
+    let dir = fixture("quitar-filtros");
+    for n in ["a.jpg", "b.png", "c.txt"] {
+        std::fs::write(dir.join(n), "x").unwrap();
+    }
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(dir));
+    let list = &mut a.panes[0].tab_mut().list;
+    list.set_filter(list::Column::Extension, vec!["JPG".into(), "PNG".into()]);
+    list.set_filter(list::Column::Name, vec!["A–H".into()]);
+    a.sync_folder_views();
+    assert_eq!(a.panes[0].tab().list.count(), 2);
+    assert_eq!(a.folder_views.get(&view_key(&a, 0)).filters.len(), 2);
+    let spec = crate::commands::ALL.iter().find(|s| s.id == "quitar_filtros").expect("comando quitar_filtros");
+    assert_eq!((spec.command, spec.title()), (Command::ClearFilters, "Quitar los filtros"));
+    a.run_command(Command::ClearFilters);
+    assert!(a.panes[0].tab().list.filters.is_empty());
+    assert_eq!(a.panes[0].tab().list.count(), 3);
+    assert!(a.folder_views.get(&view_key(&a, 0)).filters.is_empty(), "la carpeta lo recuerda");
+}
+
+/// Con el mouse: pasar por el encabezado «Tipo» muestra su flecha; un clic abre el desplegable,
+/// otro en «Imagen JPEG» filtra (y el desplegable queda abierto); Esc lo cierra; la carpeta
+/// recuerda el filtro al volver a ella.
+#[test]
+fn filter_dropdown_click_flow() {
+    let dir = fixture("filtro-desplegable");
+    let other = fixture("filtro-desplegable-otra");
+    std::fs::write(dir.join("a.jpg"), "x").unwrap();
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(dir.clone()));
+    let typed = |name: &str, t: &str| {
+        let mut e = file_entry(name);
+        e.type_name = std::sync::Arc::from(t);
+        e
+    };
+    a.panes[0].tab_mut().list.replace(vec![typed("a.jpg", "Imagen JPEG"), typed("b.jpg", "Imagen JPEG"), typed("c.png", "Imagen PNG"), typed("d.pdf", "Documento PDF")]);
+    a.paint();
+    let button = a.panes[0].tab().list.filter_button_rect(list::Column::Type).expect("columna Tipo a la vista");
+    // Pasar por el encabezado de la columna (sobre el título) muestra la flecha.
+    let title_x = button.left - 60.0;
+    a.on_mouse_move(title_x, (button.top + button.bottom) / 2.0);
+    assert_eq!(a.panes[0].tab().list.header_hover(), Some(list::Column::Type));
+    let (bx, by) = center(&button);
+    a.on_mouse_move(bx, by);
+    a.on_left_down(bx, by, false);
+    a.on_left_up(bx, by);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), Some(list::Column::Type));
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|t| t == "Imagen JPEG (2)"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Quitar el filtro"));
+    let i = a.panes[0].tab().list.filter_options(list::Column::Type).iter().position(|o| o.0.label == "Imagen JPEG").unwrap();
+    let (ox, oy) = center(&a.panes[0].tab().list.filter_option_rect(i).unwrap());
+    a.on_mouse_move(ox, oy);
+    a.on_left_down(ox, oy, false);
+    a.on_left_up(ox, oy);
+    let list = &a.panes[0].tab().list;
+    assert_eq!(list.filters, [(list::Column::Type, vec!["Imagen JPEG".to_string()])]);
+    assert_eq!(list.count(), 2);
+    assert_eq!(list.filter_menu(), Some(list::Column::Type), "el desplegable sigue abierto");
+    assert!(a.on_key(VK_ESCAPE));
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+    assert_eq!(a.panes[0].tab().list.filters.len(), 1, "Esc cierra sin tocar el filtro");
+    // Un clic afuera también cierra (y no llega a lo de abajo).
+    a.on_left_down(bx, by, false);
+    a.on_left_up(bx, by);
+    assert!(a.panes[0].tab().list.filter_menu().is_some());
+    let (sx, sy) = (button.left - 300.0, button.bottom + 200.0);
+    a.on_left_down(sx, sy, false);
+    a.on_left_up(sx, sy);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+    // Otra carpeta, y Atrás: la carpeta recuerda su filtro.
+    go(&mut a, 0, Location::Path(other));
+    assert!(a.panes[0].tab().list.filters.is_empty());
+    a.run_command(Command::Back);
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.filters, [(list::Column::Type, vec!["Imagen JPEG".to_string()])]);
+    assert!(a.panes[0].tab().status().ends_with(" (filtrado)"));
+}
+
+/// Un filtro cambiado durante una búsqueda es de la carpeta buscada: al terminar la búsqueda la
+/// carpeta lo conserva, y también al volver a abrirla.
+#[test]
+fn filter_changed_during_search_sticks_to_folder() {
+    let dir = fixture("filtro-en-busqueda");
+    let other = fixture("filtro-en-busqueda-otra");
+    for n in ["IMG_2035.jpg", "IMG_2036.jpg", "IMG_2036.png"] {
+        std::fs::write(dir.join(n), "x").unwrap();
+    }
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(dir.clone()));
+    let folder_key = view_key(&a, 0);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "2036");
+    pump(&mut a, 0);
+    assert_ne!(view_key(&a, 0), folder_key, "la búsqueda tiene su propia vista");
+    a.panes[0].tab_mut().list.set_filter(list::Column::Extension, vec!["PNG".into()]);
+    a.sync_folder_views();
+    assert_eq!(a.panes[0].tab().list.count(), 1);
+    assert_eq!(a.folder_views.get(&folder_key).filters, [(list::Column::Extension, vec!["PNG".to_string()])]);
+    assert!(a.folder_views.get(&view_key(&a, 0)).filters.is_empty(), "la entrada de la búsqueda no guarda filtros");
+    a.clear_filter(0);
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.filters, [(list::Column::Extension, vec!["PNG".to_string()])]);
+    assert_eq!(a.panes[0].tab().list.count(), 1);
+    go(&mut a, 0, Location::Path(other));
+    go(&mut a, 0, Location::Path(dir));
+    assert_eq!(a.panes[0].tab().list.filters, [(list::Column::Extension, vec!["PNG".to_string()])]);
+    // Cambiado justo antes de terminar la búsqueda (sin sincronizar en el medio): también queda.
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "2036");
+    pump(&mut a, 0);
+    a.panes[0].tab_mut().list.set_filter(list::Column::Extension, Vec::new());
+    a.clear_filter(0);
+    pump(&mut a, 0);
+    assert!(a.panes[0].tab().list.filters.is_empty());
+    assert!(a.folder_views.get(&folder_key).filters.is_empty());
+}
+
+/// El desplegable de filtros se cierra al cambiar de pestaña (no reaparece al volver), al abrir
+/// la paleta y al abrir un menú contextual.
+#[test]
+fn filter_menu_closes_on_tab_switch_palette_and_context_menu() {
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(fixture("filtro-cierra")));
+    a.paint();
+    let open = |a: &mut App| {
+        a.panes[0].tab_mut().list.open_filter_menu(list::Column::Type);
+        assert!(a.filter_menu_pane().is_some());
+    };
+    open(&mut a);
+    a.new_tab(0, Location::Path(fixture("filtro-cierra-2")), true);
+    a.run_command(Command::PrevTab);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None, "no reaparece al volver");
+    open(&mut a);
+    a.run_command(Command::NextTab);
+    a.select_tab(0, 0);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+    open(&mut a);
+    a.open_palette(PaletteMode::All);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+    a.close_palette();
+    open(&mut a);
+    a.on_right_down(10.0, 10.0);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+}
+
 // ---------- carteles de ayuda de los botones sin texto ----------
 
 /// Un punto de la ventana donde `hit` da `want` (recorre una grilla de 2 DIPs).

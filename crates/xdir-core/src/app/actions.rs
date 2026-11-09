@@ -15,6 +15,9 @@ impl App {
             VK_ESCAPE if self.about_open => self.about_open = false,
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
+            VK_ESCAPE if self.filter_menu_pane().is_some() => {
+                self.close_filter_menus();
+            }
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
@@ -173,6 +176,10 @@ impl App {
             }
             Command::ApplyViewToAll => self.apply_view_to_all(),
             Command::ResetFolderView => self.reset_folder_view(),
+            Command::ClearFilters => {
+                self.tab_mut().list.clear_filters();
+                self.sync_folder_views();
+            }
             Command::About => {
                 self.picker_open = false;
                 self.term_menu = None;
@@ -248,6 +255,7 @@ impl App {
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.picker_open = false;
             self.term_menu = None;
+            self.close_filter_menus();
             self.end_edit(false);
             self.end_filter(true);
             self.xtree_open = true;

@@ -164,6 +164,23 @@ impl App {
         }
     }
 
+    /// Panel a la vista con el desplegable de filtros abierto en su lista.
+    pub(super) fn filter_menu_pane(&self) -> Option<usize> {
+        if self.xtree_open {
+            return None;
+        }
+        self.shown_panes().into_iter().find(|&i| self.panes[i].tab().list.filter_menu().is_some())
+    }
+
+    /// Cierra los desplegables de filtros (de todas las pestañas). Devuelve si había alguno.
+    pub(super) fn close_filter_menus(&mut self) -> bool {
+        let mut closed = false;
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            closed |= tab.list.close_filter_menu();
+        }
+        closed
+    }
+
     /// Guardado diferido de `carpetas.toml`: un segundo después del último cambio (un solo aviso
     /// en camino, con el mismo patrón que la pausa del buscador) y al cerrar.
     pub(super) fn schedule_views_save(&mut self) {

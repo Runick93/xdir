@@ -17,6 +17,7 @@ impl App {
         self.end_filter(true);
         self.picker_open = false;
         self.term_menu = None;
+        self.close_filter_menus();
         let (w, _) = self.client_dips();
         let items = palette::search(mode, "", &Sources { history: &self.history, favorites: &self.favorites, groups: &self.groups, keymap: &self.config.keymap }, |s| self.host.expand_env(s));
         let pal = Palette::new(mode, items);

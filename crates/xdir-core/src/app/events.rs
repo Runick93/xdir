@@ -173,6 +173,10 @@ impl App {
         self.header_ctx = None;
         self.term_ctx = None;
         self.history_ctx = None;
+        // Un menú contextual (de elementos, del fondo o de columnas) cierra el desplegable de filtros.
+        if self.close_filter_menus() {
+            self.redraw();
+        }
         // Clic derecho en la vista de xtree: sube a la carpeta superior (no hay menú).
         if self.xtree_open {
             if self.hit(x, y) == Hit::XtreeView {
@@ -309,6 +313,12 @@ impl App {
             Hit::Suggest(_) => {
                 if let Some(sg) = &mut self.suggest {
                     sg.on_wheel(delta.round() as i32 * 3);
+                    self.redraw();
+                }
+                return;
+            }
+            Hit::FilterMenu(i, _) => {
+                if self.panes[i].tab_mut().list.filter_menu_wheel(delta * lines) {
                     self.redraw();
                 }
                 return;

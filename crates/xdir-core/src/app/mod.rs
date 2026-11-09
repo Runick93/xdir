@@ -144,6 +144,8 @@ enum Hit {
     Palette(Option<usize>),
     /// Desplegable de la barra de dirección: una ruta, o el panel sin nada debajo.
     Suggest(Option<usize>),
+    /// Desplegable de filtros de la lista de un panel: una opción, o el desplegable sin nada debajo.
+    FilterMenu(usize, Option<list::ListHit>),
     /// La chincheta de arriba del árbol (fijarlo o soltarlo). El resto del árbol es `None`: lo
     /// maneja el árbol.
     // Solo existe con el árbol (feature `arbol`).

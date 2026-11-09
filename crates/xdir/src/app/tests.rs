@@ -4,11 +4,24 @@
 use super::*;
 
 fn app() -> App {
+    // Servicios del sistema falsos (el `Waker` solo cuenta los mensajes).
+    xdir_core::sys::testing::install_fakes();
     App::new(Init::blank()).expect("App sin ventana")
 }
 
 fn count(a: &App, pane: usize) -> usize {
     a.panes[pane].tabs.len()
+}
+
+#[test]
+fn test_app_posts_through_the_fake_waker() {
+    use xdir_core::sys::testing::FakeWaker;
+    // Número propio de este test, para que los demás (en paralelo) no lo cuenten.
+    const MSG: u32 = crate::platform::WM_APP + 0x7B01;
+    let a = app();
+    let before = FakeWaker::count(MSG);
+    a.hwnd.post(MSG, 0, 0);
+    assert_eq!(FakeWaker::count(MSG) - before, 1);
 }
 
 #[test]

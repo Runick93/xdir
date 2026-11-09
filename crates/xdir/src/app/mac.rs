@@ -86,6 +86,8 @@ impl Sys {
 
 pub fn run() -> Result<(), String> {
     let started = Instant::now();
+    // Servicios del sistema para el núcleo: antes que nada, porque la `App` ya los usa.
+    crate::sys::install();
     let mtm = MainThreadMarker::new().ok_or("xdir tiene que arrancar en el hilo principal")?;
     let (session, probe, start_path) = startup_args();
     let marks = vec![("init", ms_since(started))];
@@ -116,7 +118,7 @@ pub fn run() -> Result<(), String> {
     app.renderer.set_size(INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32, scale);
     let ptr = Box::into_raw(app);
     APP.with(|a| a.set(ptr));
-    crate::platform::set_message_handler(on_message);
+    crate::sys::set_message_handler(on_message);
 
     let delegate = Delegate::new(mtm);
     window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

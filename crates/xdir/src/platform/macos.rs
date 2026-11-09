@@ -1,28 +1,9 @@
 //! Parte de `platform` propia de macOS.
 
-use std::sync::OnceLock;
-
 use objc2_app_kit::{NSColor, NSColorSpace, NSEvent, NSEventModifierFlags, NSWorkspace};
 use objc2_foundation::{NSString, NSUserDefaults};
 
-use super::{Handle, Key};
-
-/// Quién atiende los mensajes de la aplicación en el hilo principal (lo fija la ventana al
-/// arrancar).
-static HANDLER: OnceLock<fn(u32, usize, isize)> = OnceLock::new();
-
-/// Registra la función que recibe en el hilo principal los mensajes de `Handle::post`.
-pub fn set_message_handler(f: fn(u32, usize, isize)) {
-    let _ = HANDLER.set(f);
-}
-
-pub(super) fn post_message(_h: Handle, msg: u32, wparam: usize, lparam: isize) {
-    dispatch2::DispatchQueue::main().exec_async(move || {
-        if let Some(f) = HANDLER.get() {
-            f(msg, wparam, lparam);
-        }
-    });
-}
+use super::Key;
 
 /// ¿La tecla está apretada ahora? En macOS, Ctrl de los atajos es ⌘ (como Ctrl+C → ⌘C) y Alt es ⌥.
 pub fn key_down(k: Key) -> bool {

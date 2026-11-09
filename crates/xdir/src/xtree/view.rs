@@ -212,6 +212,8 @@ impl Xtree {
     /// Vista sin escaneo (pruebas).
     #[cfg(test)]
     pub fn idle(root: PathBuf) -> Xtree {
+        // La vista avisa a la ventana con `Handle::post`: en las pruebas, al `Waker` falso.
+        xdir_core::sys::testing::install_fakes();
         Xtree::with_scan(Handle::default(), root, idle_scan())
     }
 

@@ -104,6 +104,9 @@ pub fn run() -> windows::core::Result<()> {
         std::process::exit(crate::fs::xtree_helper_main(&args[1..]));
     }
     let started = Instant::now();
+    // Servicios del sistema para el núcleo: antes que nada (salvo el ayudante de arriba, que no
+    // los usa), porque la `App` ya los usa.
+    crate::sys::install();
     let (session, probe, start_path) = startup_args();
 
     unsafe {
@@ -184,7 +187,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         if msg == WM_NCCREATE {
             let cs = &*(lparam.0 as *const CREATESTRUCTW);
             let app = cs.lpCreateParams as *mut App;
-            (*app).hwnd = hwnd.into();
+            (*app).hwnd = crate::platform::handle_from_hwnd(hwnd);
             (*app).dpi = GetDpiForWindow(hwnd);
             let mica = (*app).theme.apply_to_window(hwnd);
             (*app).renderer.set_transparent(mica);

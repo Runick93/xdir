@@ -1,35 +1,33 @@
 //! Parte de `platform` propia de Windows.
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW};
+use windows::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW};
 use windows::core::{PCWSTR, w};
 
 use super::{Handle, Key};
-
-pub(super) fn post_message(h: Handle, msg: u32, wparam: usize, lparam: isize) {
-    unsafe {
-        let _ = PostMessageW(Some(h.hwnd()), msg, WPARAM(wparam), LPARAM(lparam));
-    }
-}
 
 /// ¿La tecla está apretada ahora? (Ctrl, Shift, Alt…)
 pub fn key_down(k: Key) -> bool {
     unsafe { GetKeyState(k.0 as i32) < 0 }
 }
 
-impl Handle {
-    pub fn hwnd(self) -> HWND {
+/// `Handle` vive en el núcleo, que no conoce `HWND`: la conversión va por este trait.
+pub trait HandleExt {
+    fn hwnd(self) -> HWND;
+}
+
+impl HandleExt for Handle {
+    fn hwnd(self) -> HWND {
         HWND(self.0 as *mut _)
     }
 }
 
-impl From<HWND> for Handle {
-    fn from(h: HWND) -> Self {
-        Handle(h.0 as isize)
-    }
+/// El `Handle` de una ventana de Windows.
+pub fn handle_from_hwnd(h: HWND) -> Handle {
+    Handle(h.0 as isize)
 }
 
 /// ¿Windows está en modo oscuro para las apps?

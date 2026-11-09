@@ -330,6 +330,8 @@ mod search_tests {
 
     /// Corre una búsqueda y junta todo lo que manda hasta que termina.
     fn run(root: &Path, query: &str, show_hidden: bool) -> (Vec<String>, f32) {
+        // La búsqueda avisa a la ventana con `Handle::post`: necesita un `Waker` (el falso).
+        xdir_core::sys::testing::install_fakes();
         let (tx, rx) = channel();
         let current = Arc::new(AtomicU64::new(7));
         spawn_search(crate::platform::Handle(0), tx, 1, 7, current, vec![root.to_path_buf()], show_hidden, crate::list::name_matcher(query));

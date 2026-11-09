@@ -18,13 +18,13 @@ use crate::xtree::tree::Node;
 
 /// Buffer de `getattrlistbulk` (256 KiB), uno por hilo de trabajo.
 const BULK_BUF: usize = 256 * 1024;
-/// `SF_DATALESS` de `chflags`: archivo que solo está en la nube (iCloud y similares) y no ocupa
-/// lugar en el disco.
+/// `SF_DATALESS` de `chflags`: archivo o carpeta que solo está en la nube (iCloud y similares) y
+/// no ocupa lugar en el disco; entrar a la carpeta haría que el sistema la baje.
 const SF_DATALESS: u32 = 0x4000_0000;
-/// Tipos de `fsobj_type_t` (`VREG`, `VDIR`); el resto (enlaces simbólicos, sockets...) se ignora.
 /// `EF_MAY_SHARE_BLOCKS` de `ATTR_CMNEXT_EXT_FLAGS`: puede compartir bloques con otro archivo
 /// (copia APFS hecha con `clonefile`).
 const EF_MAY_SHARE_BLOCKS: u64 = 0x1;
+/// Tipos de `fsobj_type_t` (`VREG`, `VDIR`); el resto (enlaces simbólicos, sockets...) se ignora.
 const VREG: u32 = 1;
 const VDIR: u32 = 2;
 /// Datos del sistema montados aparte en el disco de arranque (Data, Preboot, VM...): lo que
@@ -244,10 +244,13 @@ impl MacLister {
     }
 
     /// Suma una entrada al listado: carpetas sin enlaces simbólicos ni otros discos; archivos con
-    /// su tamaño asignado, salvo los que solo están en la nube.
+    /// su tamaño asignado. Lo que solo está en la nube (archivos y carpetas) no se cuenta.
     fn add(&self, dir: &Path, a: Attrs, out: &mut DirListing) {
         let Some(name) = a.name.filter(|n| !n.is_empty() && *n != b"." && *n != b"..") else { return };
         if a.dev.is_some_and(|d| !self.allows(d)) {
+            return;
+        }
+        if a.flags.is_some_and(|f| f & SF_DATALESS != 0) {
             return;
         }
         match a.objtype {
@@ -264,9 +267,6 @@ impl MacLister {
                 out.dirs.push(OsString::from_vec(name.to_vec()));
             }
             Some(VREG) => {
-                if a.flags.is_some_and(|f| f & SF_DATALESS != 0) {
-                    return;
-                }
                 let size = a.alloc.unwrap_or(0).max(0) as u64;
                 // El id solo hace falta si el espacio puede estar repetido: copias APFS que
                 // comparten los datos (mismo id de clon) u otros enlaces duros al mismo archivo.
@@ -293,8 +293,8 @@ pub fn xtree_fast_scan(_root: &Path, _progress: &Progress, _cancel: &AtomicBool)
 }
 
 /// Tecla A: abre Ajustes en Privacidad y seguridad > Acceso total al disco para que el usuario le
-/// dé permiso a xdir. No hay escaneo elevado: devuelve `None` y el aviso sigue hasta volver a
-/// analizar. NSWorkspace se usa en el hilo principal (la vista llama desde un hilo propio).
+/// dé permiso a xdir. No hay escaneo elevado: devuelve `None` y el aviso sigue; el permiso nuevo
+/// recién vale al reabrir xdir. NSWorkspace se usa en el hilo principal (la vista llama desde un hilo propio).
 pub fn xtree_elevate(_root: &Path, _progress: &Progress, _cancel: &AtomicBool) -> Option<Vec<Node>> {
     dispatch2::DispatchQueue::main().exec_async(|| {
         if let Some(url) = NSURL::URLWithString(&NSString::from_str(FULL_DISK_ACCESS_URL)) {
@@ -360,8 +360,9 @@ pub fn xtree_default_root() -> PathBuf {
 }
 
 /// Aviso de la barra de datos cuando hay carpetas sin permiso; la vista cambia `{n}` por la
-/// cantidad (tecla A: abre el ajuste de Acceso total al disco).
-pub const XTREE_PERMISSION_HINT: &str = "{n} carpetas sin permiso: dale a xdir Acceso total al disco (tecla A)";
+/// cantidad (tecla A: abre el ajuste de Acceso total al disco). macOS le da el permiso al proceso
+/// recién al volver a abrirlo: por eso se pide reabrir xdir.
+pub const XTREE_PERMISSION_HINT: &str = "{n} carpetas sin permiso: dale a xdir Acceso total al disco (tecla A) y reabrí xdir";
 
 /// Faltaron permisos (aviso de la barra de datos y tecla A): carpetas que no se pudieron leer.
 pub fn xtree_permission_issue(p: &Progress) -> bool {
@@ -538,6 +539,28 @@ mod tests {
         assert!(parse_entry(&entry(-100, 3)).is_none());
         assert!(parse_entry(&ok[..30]).is_none());
         assert!(parse_entry(&ok[..10]).is_none());
+    }
+
+    /// Carpetas que solo están en la nube (iCloud, `SF_DATALESS`): no se entra (las bajaría).
+    #[test]
+    fn dataless_dirs_are_skipped() {
+        let dir = tmp("nube");
+        let l = MacLister::new(&dir);
+        let mut out = DirListing::default();
+        let carpeta = |name: &'static [u8], flags| Attrs { name: Some(name), objtype: Some(VDIR), flags: Some(flags), ..Default::default() };
+        l.add(&dir, carpeta(b"nube", SF_DATALESS), &mut out);
+        l.add(&dir, carpeta(b"local", 0), &mut out);
+        assert_eq!(out.dirs, ["local"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// El aviso dice que hay que reabrir xdir: el permiso nuevo no le llega al proceso abierto.
+    #[test]
+    fn permission_hint_asks_to_reopen() {
+        assert_eq!(
+            XTREE_PERMISSION_HINT.replace("{n}", "3"),
+            "3 carpetas sin permiso: dale a xdir Acceso total al disco (tecla A) y reabrí xdir"
+        );
     }
 
     #[test]

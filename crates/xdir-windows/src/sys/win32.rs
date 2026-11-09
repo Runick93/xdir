@@ -2,7 +2,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, LPARAM, SYSTEMTIME, WPARAM};
@@ -160,8 +160,7 @@ impl SystemEnv for Win32Env {
     }
 
     fn consoles(&self) -> Vec<ConsoleInfo> {
-        let (path, local) = (std::env::var_os("PATH"), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
-        windows_consoles(path.as_deref(), local.as_deref(), &|p| p.exists())
+        detected_consoles().0.clone()
     }
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {
@@ -176,8 +175,7 @@ impl SystemEnv for Win32Env {
     fn open_console(&self, owner: Handle, id: u8, dir: &Path, verb: &str) -> bool {
         let hwnd = owner.hwnd();
         let (program, params) = if id == WINDOWS_TERMINAL {
-            let (path, local) = (std::env::var_os("PATH"), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
-            let wt = find_wt(path.as_deref(), local.as_deref(), &|p| p.exists()).unwrap_or_else(|| PathBuf::from("wt.exe"));
+            let wt = detected_consoles().1.clone().unwrap_or_else(|| PathBuf::from("wt.exe"));
             (wt, Some(HSTRING::from(wt_params(dir))))
         } else {
             (console_program(id), None)
@@ -190,6 +188,17 @@ impl SystemEnv for Win32Env {
         // ShellExecute devuelve un valor mayor que 32 si salió bien.
         r.0 as usize > 32
     }
+}
+
+/// Las consolas del sistema y la ruta de `wt.exe`, buscadas una sola vez por proceso: el menú de
+/// consolas las pide en cada pintado y la búsqueda recorre el disco.
+fn detected_consoles() -> &'static (Vec<ConsoleInfo>, Option<PathBuf>) {
+    static DETECTED: OnceLock<(Vec<ConsoleInfo>, Option<PathBuf>)> = OnceLock::new();
+    DETECTED.get_or_init(|| {
+        let (path, local) = (std::env::var_os("PATH"), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
+        let wt = find_wt(path.as_deref(), local.as_deref(), &|p| p.exists());
+        (windows_consoles(path.as_deref(), local.as_deref(), &|p| wt.as_deref() == Some(p)), wt)
+    })
 }
 
 /// Consolas en el orden del menú: PowerShell, CMD y, si se encuentra `wt.exe`, Windows Terminal.
@@ -212,9 +221,10 @@ pub(super) fn find_wt(path: Option<&OsStr>, local_app_data: Option<&Path>, exist
 }
 
 /// Parámetros de `wt.exe` para abrir en `dir`: `-d "<dir>"`. Las barras al final se duplican
-/// (`C:\` → `"C:\\"`) para que no escapen la comilla de cierre al separar los argumentos.
+/// (`C:\` → `"C:\\"`) para que no escapen la comilla de cierre al separar los argumentos, y
+/// los `;` se escriben `\;` porque para wt separan comandos.
 pub(super) fn wt_params(dir: &Path) -> String {
-    let d = dir.to_string_lossy();
+    let d = dir.to_string_lossy().replace(';', "\\;");
     let trailing = d.len() - d.trim_end_matches('\\').len();
     format!("-d \"{d}{}\"", "\\".repeat(trailing))
 }

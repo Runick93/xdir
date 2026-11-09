@@ -168,9 +168,15 @@ impl SystemEnv for MacEnv {
     }
 
     /// Terminal, y iTerm si está instalada.
+    /// Se busca una sola vez por proceso: el menú de consolas la pide en cada pintado.
     fn consoles(&self) -> Vec<ConsoleInfo> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        mac_consoles(home.as_deref(), &|p| p.exists())
+        static DETECTED: OnceLock<Vec<ConsoleInfo>> = OnceLock::new();
+        DETECTED
+            .get_or_init(|| {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                mac_consoles(home.as_deref(), &|p| p.exists())
+            })
+            .clone()
     }
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {

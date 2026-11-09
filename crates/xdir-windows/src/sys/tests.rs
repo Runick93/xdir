@@ -38,6 +38,8 @@ fn windows_terminal_listed_when_present() {
     // La carpeta se pasa con -d entre comillas; la barra final se duplica para no escapar la comilla.
     assert_eq!(wt_params(Path::new(r"C:\Mis cosas")), r#"-d "C:\Mis cosas""#);
     assert_eq!(wt_params(Path::new(r"C:\")), r#"-d "C:\\""#);
+    // El ; separa comandos de wt: se escapa con \;.
+    assert_eq!(wt_params(Path::new(r"C:\a;b")), r#"-d "C:\a\;b""#);
 }
 
 #[test]

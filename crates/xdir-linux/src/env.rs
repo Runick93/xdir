@@ -3,6 +3,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use xdir_core::format::{date_time_text, size_kb_text, size_short_text};
 use xdir_core::keys::Key;
@@ -95,10 +96,16 @@ impl SystemEnv for LinuxEnv {
         let _ = std::fs::write(file, list.join("\n") + "\n");
     }
 
-    /// La terminal por defecto: la primera de `TERMINALS` que esté en el PATH.
+    /// La terminal por defecto: la primera de `TERMINALS` que esté en el PATH. Se busca una sola
+    /// vez por proceso: el menú de consolas la pide en cada pintado.
     fn consoles(&self) -> Vec<ConsoleInfo> {
-        let path = std::env::var_os("PATH");
-        linux_terminal(path.as_deref(), &|p| p.is_file()).map(|t| vec![t.info()]).unwrap_or_default()
+        static DETECTED: OnceLock<Vec<ConsoleInfo>> = OnceLock::new();
+        DETECTED
+            .get_or_init(|| {
+                let path = std::env::var_os("PATH");
+                linux_terminal(path.as_deref(), &|p| p.is_file()).map(|t| vec![t.info()]).unwrap_or_default()
+            })
+            .clone()
     }
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {

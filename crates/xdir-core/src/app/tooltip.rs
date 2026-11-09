@@ -127,6 +127,11 @@ impl App {
     /// cambia enseguida si ya había uno a la vista, o lo saca. Devuelve si hay que redibujar.
     pub(super) fn update_tooltip(&mut self, hover: Hit, x: f32, y: f32) -> bool {
         let was_visible = self.tip.is_some_and(|t| t.state == TipState::Visible);
+        // Botón apretado (Atrás, Adelante…): es un clic, no un arrastre; el cartel sigue descartado
+        // hasta que el mouse salga del botón.
+        if matches!(self.drag, Drag::Button(..)) {
+            return false;
+        }
         if self.drag != Drag::None {
             self.tip = None;
             return was_visible;

@@ -1992,3 +1992,38 @@ fn tab_tooltip_is_full_path() {
     let want = dir.display().to_string();
     assert!(drawn(&host).contains(&want), "falta «{want}»");
 }
+
+/// Un clic en Atrás con un movimiento mínimo mientras el botón está apretado (arrastre de botón):
+/// el cartel no vuelve hasta que el mouse sale del botón y regresa.
+#[test]
+fn tooltip_does_not_return_after_click() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.paint();
+    let back = Hit::Pane(0, PaneHit::Button(Button::Back));
+    let (x, y) = point_of(&a, back);
+    let shown = |a: &mut App| {
+        a.paint();
+        drawn(&host).iter().any(|s| s.starts_with("Atrás"))
+    };
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+    a.on_left_down(x, y, false);
+    assert!(matches!(a.drag, Drag::Button(0, Button::Back)));
+    a.on_mouse_move(x + 1.0, y);
+    a.on_left_up(x + 1.0, y);
+    a.on_mouse_move(x, y);
+    // Cualquier aviso de espera que llegue no lo muestra.
+    if let Some(t) = a.tip {
+        a.on_app_message(WM_APP_TOOLTIP, 0, t.token as isize);
+    }
+    assert!(!shown(&mut a));
+    // Sale del botón y vuelve: aparece otra vez después de la espera.
+    let (w, h) = a.client_dips();
+    a.on_mouse_move(w / 4.0, h / 2.0);
+    a.on_mouse_move(x, y);
+    assert!(!shown(&mut a));
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+}

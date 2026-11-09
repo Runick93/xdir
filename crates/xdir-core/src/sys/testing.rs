@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
 use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
@@ -66,6 +66,8 @@ thread_local! {
     static TYPED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Teclas que el falso informa como apretadas (por hilo).
     static KEYS_DOWN: RefCell<Vec<Key>> = const { RefCell::new(Vec::new()) };
+    /// Fecha local que informa el falso (por hilo; ver `FakeEnv::set_local_now`).
+    static LOCAL_NOW: Cell<LocalNow> = const { Cell::new(FakeEnv::DEFAULT_NOW) };
 }
 
 /// `SystemEnv` falso: tema claro, sin animaciones, sin teclas apretadas salvo las de `hold_keys`, una carpeta de
@@ -76,6 +78,14 @@ impl FakeEnv {
     /// Desde ahora (en este hilo) `key_down` informa como apretadas solo estas teclas; `&[]` las suelta.
     pub fn hold_keys(keys: &[Key]) {
         KEYS_DOWN.with(|k| *k.borrow_mut() = keys.to_vec());
+    }
+
+    /// Fecha fija de `local_now` si no se configura otra: miércoles 11/11/2026, en UTC.
+    pub const DEFAULT_NOW: LocalNow = LocalNow { day: 20_768, weekday: 2, month: 11, year: 2026, offset: 0 };
+
+    /// Desde ahora (en este hilo) `local_now` devuelve esta fecha.
+    pub fn set_local_now(now: LocalNow) {
+        LOCAL_NOW.with(|n| n.set(now));
     }
 }
 
@@ -140,6 +150,12 @@ impl SystemEnv for FakeEnv {
 
     fn open_console(&self, _owner: Handle, _id: u8, _dir: &Path, _verb: &str) -> bool {
         false
+    }
+
+    /// Fija y configurable (`FakeEnv::set_local_now`), para que los grupos por fecha no dependan
+    /// del día en que corren los tests.
+    fn local_now(&self) -> LocalNow {
+        LOCAL_NOW.with(|n| n.get())
     }
 }
 

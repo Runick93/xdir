@@ -1137,7 +1137,7 @@ fn context_menu_own_entries_reach_shell() {
             shell::Entry::Sep => "-",
         })
         .collect();
-    assert_eq!(&labels[..6], ["Ver", "Ordenar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+    assert_eq!(&labels[..7], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
 }
 
 // ---------- ventana (WindowHost) ----------
@@ -1711,4 +1711,54 @@ fn app_migrates_session_view() {
     assert_eq!(a.folder_views.default_view().columns[1..], cols[1..]);
     assert!(a.panes.iter().all(|p| p.tab().list.view == list::View::Icons));
     assert_eq!(a.session().columns[1..], cols[1..]);
+}
+
+/// El menú del fondo trae «Agrupar por» con los 5 criterios y «(Ninguno)»; elegir «Tipo» agrupa la
+/// lista y la vista de la carpeta lo recuerda.
+#[test]
+fn group_menu_in_background_menu() {
+    use crate::sys::testing::{FakeShell, ShellCall};
+    let dir = fixture("agrupar-menu");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("a.txt"), "x").unwrap();
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(dir.clone()));
+    FakeShell::choose(None);
+    FakeShell::take_calls();
+    a.on_context_menu(Some((10.0, 20.0)));
+    let calls = FakeShell::take_calls();
+    let [ShellCall::ContextMenu { own, .. }] = calls.as_slice() else { panic!("se esperaba un menú: {calls:?}") };
+    let sub = own
+        .iter()
+        .find_map(|e| match e {
+            shell::Entry::Sub(name, items) if name == "Agrupar por" => Some(items.clone()),
+            _ => None,
+        })
+        .expect("falta «Agrupar por»");
+    let labels: Vec<(String, u32)> = sub
+        .iter()
+        .filter_map(|e| match e {
+            shell::Entry::Item { id, label, .. } => Some((label.clone(), *id)),
+            _ => None,
+        })
+        .collect();
+    let names: Vec<&str> = labels.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(names, ["Nombre", "Fecha de modificación", "Fecha de creación", "Tipo", "Tamaño", "(Ninguno)"]);
+    let tipo = labels.iter().find(|(l, _)| l == "Tipo").unwrap().1;
+    FakeShell::choose(Some(&format!("own:{tipo}")));
+    a.on_context_menu(Some((10.0, 20.0)));
+    FakeShell::choose(None);
+    let list = &a.panes[0].tab().list;
+    assert_eq!(list.group_by, Some(list::Column::Type));
+    assert!(matches!(list.rows().first(), Some(list::Row::Header { .. })), "la lista queda agrupada");
+    assert_eq!(a.folder_views.get(&view_key(&a, 0)).group_by, Some(list::Column::Type), "la carpeta lo recuerda");
+    // Plegar un grupo también se recuerda.
+    let label = match &a.panes[0].tab().list.rows()[0] {
+        list::Row::Header { key, .. } => key.label.clone(),
+        _ => unreachable!(),
+    };
+    a.panes[0].tab_mut().list.toggle_group(&label);
+    a.paint();
+    assert_eq!(a.folder_views.get(&view_key(&a, 0)).collapsed, [label]);
 }

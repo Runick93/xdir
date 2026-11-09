@@ -19,7 +19,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
 use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
@@ -104,6 +104,19 @@ impl SystemEnv for Win32Env {
             let t = GetTimeFormatEx(PCWSTR::null(), TIME_NOSECONDS, Some(&local), PCWSTR::null(), Some(&mut time));
             format!("{} {}", wide_str(&date, d), wide_str(&time, t))
         }
+    }
+
+    /// Hoy en hora local: la hora UTC llevada a la zona horaria del sistema
+    /// (`SystemTimeToTzSpecificLocalTime`); la diferencia entre las dos es la de la zona.
+    fn local_now(&self) -> LocalNow {
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let ft = ((unix + 11_644_473_600) as u64) * 10_000_000;
+        let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
+        let mut utc = SYSTEMTIME::default();
+        let mut local = SYSTEMTIME::default();
+        let ok = unsafe { FileTimeToSystemTime(&ft, &mut utc).is_ok() && SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_ok() };
+        let offset = if ok { system_time_secs(&local) - system_time_secs(&utc) } else { 0 };
+        LocalNow::from_unix(unix, offset)
     }
 
     /// Como lo muestra el Explorador: "1.234 KB".
@@ -564,4 +577,16 @@ pub fn install() {
         file_system: Box::new(Win32FileSystem),
         overlays: Box::new(Win32Overlays),
     });
+}
+
+/// Segundos desde 1970 de un SYSTEMTIME (sin zona: el que se le pasa). Días por el algoritmo de
+/// Howard Hinnant.
+fn system_time_secs(t: &SYSTEMTIME) -> i64 {
+    let (y, m, d) = (i64::from(t.wYear), i64::from(t.wMonth), i64::from(t.wDay));
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + (153 * m + 2) / 5 + d - 1;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + i64::from(t.wHour) * 3600 + i64::from(t.wMinute) * 60 + i64::from(t.wSecond)
 }

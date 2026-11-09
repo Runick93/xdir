@@ -164,6 +164,12 @@ impl App {
                     self.sync_folder_views();
                 }
             }
+            Command::GroupBy(i) => {
+                if let Some(&col) = list::GROUPINGS.get(i as usize) {
+                    self.tab_mut().list.set_group(col);
+                    self.sync_folder_views();
+                }
+            }
             Command::ApplyViewToAll => self.apply_view_to_all(),
             Command::ResetFolderView => self.reset_folder_view(),
             Command::About => {

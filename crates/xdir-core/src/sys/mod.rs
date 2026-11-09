@@ -62,6 +62,38 @@ pub enum KeyStyle {
     Mac,
 }
 
+/// Fecha de hoy en hora local, para agrupar por fecha (`list::groups::group_key`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LocalNow {
+    /// Días desde 1970-01-01 en hora local.
+    pub day: i64,
+    /// Día de la semana: 0 = lunes … 6 = domingo.
+    pub weekday: u8,
+    /// Mes (1–12).
+    pub month: u8,
+    pub year: i32,
+    /// Diferencia de la hora local con UTC, en segundos (-10800 es UTC-3): con ella se lleva la
+    /// fecha de cada archivo (en UTC) al día local.
+    pub offset: i64,
+}
+
+impl LocalNow {
+    /// La fecha local del instante `unix` (segundos desde 1970, UTC) con la diferencia `offset`
+    /// (segundos) de la zona horaria. Cálculo puro.
+    pub fn from_unix(unix: i64, offset: i64) -> LocalNow {
+        let day = (unix + offset).div_euclid(86_400);
+        let (year, month, _) = crate::format::civil_from_days(day);
+        // 1970-01-01 fue jueves (3 contando desde el lunes).
+        LocalNow { day, weekday: (day + 3).rem_euclid(7) as u8, month: month as u8, year: year as i32, offset }
+    }
+
+    /// Ahora, con la diferencia `offset` (segundos) de la zona horaria.
+    pub fn now_with_offset(offset: i64) -> LocalNow {
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        LocalNow::from_unix(unix, offset)
+    }
+}
+
 /// Datos y preferencias del entorno del sistema: tema, animaciones, teclado, carpeta de
 /// configuración, formatos regionales, historial de rutas escritas y consolas.
 pub trait SystemEnv: Send + Sync {
@@ -107,6 +139,10 @@ pub trait SystemEnv: Send + Sync {
     /// ¿El comando existe en este sistema?
     fn command_available(&self, _c: Command) -> bool {
         true
+    }
+    /// Fecha de hoy en hora local. Por defecto, en UTC; cada sistema la da con su zona horaria.
+    fn local_now(&self) -> LocalNow {
+        LocalNow::now_with_offset(0)
     }
 }
 

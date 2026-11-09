@@ -66,6 +66,8 @@ pub enum Command {
     View(u8),
     /// Ordenar por la columna N (índice de `list::COLUMNS`); repetirlo invierte el orden.
     SortBy(u8),
+    /// Agrupar por el criterio N (índice de `list::GROUPINGS`; el último es «No agrupar»).
+    GroupBy(u8),
     /// Árbol de carpetas lateral: solo existe compilando con la feature `arbol`.
     ToggleTree,
     /// Árbol de carpetas: fijarlo o dejarlo en franja de íconos (se expande al asomar el mouse).
@@ -191,6 +193,12 @@ pub const ALL: &[Spec] = &[
     spec(Command::SortBy(3), "ordenar_tipo", "Ordenar por tipo", &[]),
     spec(Command::SortBy(4), "ordenar_extension", "Ordenar por extensión", &[]),
     spec(Command::SortBy(5), "ordenar_tamano", "Ordenar por tamaño", &[]),
+    spec(Command::GroupBy(0), "agrupar_nombre", "Agrupar por nombre", &[]),
+    spec(Command::GroupBy(1), "agrupar_modificado", "Agrupar por fecha de modificación", &[]),
+    spec(Command::GroupBy(2), "agrupar_creado", "Agrupar por fecha de creación", &[]),
+    spec(Command::GroupBy(3), "agrupar_tipo", "Agrupar por tipo", &[]),
+    spec(Command::GroupBy(4), "agrupar_tamano", "Agrupar por tamaño", &[]),
+    spec(Command::GroupBy(5), "no_agrupar", "No agrupar", &[]),
     spec(Command::ApplyViewToAll, "vista_en_todas", "Usar esta vista en todas las carpetas", &[]),
     spec(Command::ResetFolderView, "restablecer_vista", "Restablecer la vista de esta carpeta", &[]),
     spec(Command::ToggleTree, "arbol", "Mostrar u ocultar el árbol de carpetas (experimental)", &["Ctrl+Shift+E"]),

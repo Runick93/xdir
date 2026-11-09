@@ -2098,11 +2098,19 @@ impl FileList {
                 if active && self.focus_visible && item_focus == Some(pos) {
                     p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
                 }
-                // Casilla: con el mouse encima o si está seleccionado.
-                if (self.hover == Some(pos) || self.selected[idx])
+                // Casilla: con el mouse encima o si está seleccionado. En la cuadrícula va después
+                // de la celda para que una miniatura ancha no la tape.
+                let checkbox = if (self.hover == Some(pos) || self.selected[idx])
                     && let Some(r) = self.checkbox_rect_in(item, name_left)
                 {
-                    draw_checkbox(p, r, if self.selected[idx] { CheckState::Checked } else { CheckState::Empty });
+                    Some((r, if self.selected[idx] { CheckState::Checked } else { CheckState::Empty }))
+                } else {
+                    None
+                };
+                if !self.view.is_grid()
+                    && let Some((r, st)) = checkbox
+                {
+                    draw_checkbox(p, r, st);
                 }
 
                 // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
@@ -2111,6 +2119,9 @@ impl FileList {
                 match self.view {
                     v if v.is_grid() => {
                         self.draw_cell(p, e, row, color);
+                        if let Some((r, st)) = checkbox {
+                            draw_checkbox(p, r, st);
+                        }
                         continue;
                     }
                     View::List => {

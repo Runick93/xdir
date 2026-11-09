@@ -274,8 +274,9 @@ pub fn context_menu(
     Some(verb.to_string())
 }
 
-/// Entradas del menú contextual propio: las de la aplicación (`own`, con identificadores corridos)
-/// arriba y las de la Mac debajo; sin `items`, el menú del fondo. `apps` son las de "Abrir con".
+/// Entradas del menú contextual propio: las de la Mac y las de la aplicación (`own`, con
+/// identificadores corridos), arriba en el menú del fondo (sin `items`) y después de «Copiar la
+/// ruta» en el de los elementos. `apps` son las de "Abrir con".
 fn menu_entries(items: &[Item], own: &[Entry], apps: &[PathBuf]) -> Vec<Entry> {
     let item = |a: Act, label: &str| Entry::Item { id: a as u32, label: label.to_string(), enabled: true, checked: false };
     let mut entries = Vec::new();
@@ -286,11 +287,6 @@ fn menu_entries(items: &[Item], own: &[Entry], apps: &[PathBuf]) -> Vec<Entry> {
         entries.push(item(Act::Reveal, "Mostrar en el Finder"));
         entries.push(item(Act::Info, "Obtener información"));
         return entries;
-    }
-    // Entradas propias de la aplicación («Copiar como ruta de acceso»...), arriba como en Windows.
-    if !own.is_empty() {
-        entries.extend(offset_own(own));
-        entries.push(Entry::Sep);
     }
     entries.push(item(Act::Open, "Abrir"));
     if !apps.is_empty() {
@@ -311,6 +307,8 @@ fn menu_entries(items: &[Item], own: &[Entry], apps: &[PathBuf]) -> Vec<Entry> {
     entries.push(item(Act::Cut, "Cortar"));
     entries.push(item(Act::Copy, "Copiar"));
     entries.push(item(Act::CopyPath, "Copiar la ruta"));
+    // Entradas propias de la aplicación («Copiar como ruta de acceso»...), junto a «Copiar la ruta».
+    entries.extend(offset_own(own));
     entries.push(item(Act::Paste, "Pegar"));
     entries.push(Entry::Sep);
     entries.push(item(Act::Rename, "Renombrar"));
@@ -384,19 +382,22 @@ mod tests {
             .collect()
     }
 
-    /// Las entradas propias de la aplicación aparecen también en el menú de los elementos, arriba,
-    /// con un separador; el «Copiar la ruta» de la Mac sigue estando.
+    /// Las entradas propias de la aplicación aparecen también en el menú de los elementos, justo
+    /// después del «Copiar la ruta» de la Mac; «Abrir» sigue primero.
     #[test]
     fn item_menu_includes_own_entries() {
         let own = [Entry::Item { id: 0, label: "Copiar como ruta de acceso".into(), enabled: true, checked: false }];
         let items = [Item::from(PathBuf::from("/tmp/a.txt")), Item::from(PathBuf::from("/tmp/b.txt"))];
         let entries = menu_entries(&items, &own, &[]);
         let l = labels(&entries);
-        assert_eq!(l[..3], ["Copiar como ruta de acceso", "-", "Abrir"]);
-        assert!(l.iter().any(|s| s == "Copiar la ruta"));
-        let Entry::Item { id, .. } = &entries[0] else { panic!() };
+        assert_eq!(l[0], "Abrir");
+        let at = l.iter().position(|s| s == "Copiar la ruta").expect("falta «Copiar la ruta»");
+        assert_eq!(l[at + 1], "Copiar como ruta de acceso");
+        let Entry::Item { id, .. } = &entries[at + 1] else { panic!() };
         assert_eq!(*id, OWN_BASE);
-        // Sin entradas propias, el menú de siempre (sin separador arriba).
-        assert_eq!(labels(&menu_entries(&items, &[], &[]))[0], "Abrir");
+        // Sin entradas propias, el menú de siempre.
+        let plain = labels(&menu_entries(&items, &[], &[]));
+        assert_eq!(plain[0], "Abrir");
+        assert_eq!(plain.len(), l.len() - 1);
     }
 }

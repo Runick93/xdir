@@ -1,8 +1,8 @@
 //! Marco de la ventana: distribución de los paneles (layout), divisores arrastrables y barra
 //! de estado con los botones para cambiar de layout.
 
-use crate::platform::Color;
-use crate::render::{FontId, Painter, Rect, contains, rect};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter};
 
 use crate::console::Console;
 use crate::theme::{Accent, PRESETS, alpha};

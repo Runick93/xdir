@@ -1,7 +1,6 @@
 //! Dibujo de la ventana.
 
 use super::*;
-use crate::typed::SuggestDraw;
 
 impl App {
     // ---------- dibujo ----------

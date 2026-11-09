@@ -1,7 +1,8 @@
 //! Núcleo neutro de xdir: todo lo que no depende del sistema operativo (geometría, teclas,
-//! configuración TOML, tema, dibujo abstracto, formato de textos y datos de xtree). Sin
-//! dependencias externas.
+//! configuración TOML, tema, dibujo abstracto, lista de archivos, sesión, barra de estado y
+//! diálogos, formato de textos y datos de xtree). Sin dependencias externas.
 
+pub mod about;
 pub mod anim;
 pub mod commands;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod geom;
 pub mod groups;
 pub mod jump;
 pub mod keys;
+pub mod list;
 pub mod ops;
 pub mod paint;
 pub mod session;
@@ -22,6 +24,9 @@ pub mod theme;
 pub mod thumbs;
 pub mod toml;
 pub mod typed;
+/// `Suggest::draw`: el desplegable de rutas.
+mod typed_draw;
+pub mod ui;
 pub mod xtree;
 
 /// Primer número de mensaje libre para la aplicación (igual que `WM_APP` de Windows).

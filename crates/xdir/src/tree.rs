@@ -856,6 +856,6 @@ fn subfolders(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
         .filter(|e| e.metadata().is_ok_and(|m| m.is_dir() && (show_hidden || !crate::fs::is_hidden(&m, &e.file_name()))))
         .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
         .collect();
-    out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
+    out.sort_by(|a, b| xdir_core::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
     out
 }

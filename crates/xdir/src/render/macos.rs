@@ -329,7 +329,7 @@ impl paint::Painter for Painter<'_> {
         let image = {
             let mut images = self.images.borrow_mut();
             if images.logo.is_none() {
-                images.logo = crate::about::logo_pixels().and_then(|px| cgimage_from(&px));
+                images.logo = xdir_core::about::logo_pixels().and_then(|px| cgimage_from(&px));
             }
             images.logo.clone()
         };

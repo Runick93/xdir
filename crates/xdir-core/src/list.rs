@@ -2,14 +2,14 @@
 //! frame no depende de cuántos archivos tenga la carpeta. En detalles (filas con columnas) o en
 //! cuadrícula de íconos y miniaturas.
 
-use crate::platform::Color;
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
 use crate::format;
 use crate::fs::Entry;
-use crate::render::{FontId, Painter, Rect, contains, rect};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter};
 use crate::theme::alpha;
 use crate::thumbs;
 
@@ -288,7 +288,7 @@ fn filter_matches(parts: &[String], name: &str) -> bool {
         || parts.iter().any(|p| if p.contains(['*', '?']) { wildcard(p, name) } else { name.contains(p.as_str()) })
 }
 
-pub use xdir_core::config::wildcard;
+pub use crate::config::wildcard;
 
 impl Default for FileList {
     fn default() -> Self {
@@ -1051,8 +1051,8 @@ impl FileList {
 
     /// Teclas de navegación. Devuelve None si la tecla no es de la lista.
     pub fn on_key(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
-        use crate::platform::Key;
-        use crate::platform::keys::*;
+        use crate::keys::Key;
+        use crate::keys::keys::*;
         let n = self.visible.len();
         if n == 0 {
             return None;
@@ -1601,7 +1601,7 @@ mod column_tests {
 
     #[test]
     fn grid_geometry_and_keys() {
-        use crate::platform::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
+        use crate::keys::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
         let mut l = list(800.0);
         l.append((0..25).map(|i| entry(&format!("f{i:02}"))).collect());
         l.set_view(View::LargeIcons);
@@ -1694,7 +1694,7 @@ mod column_tests {
         l.on_mouse_up();
         assert!(l.selected_positions().is_empty());
         assert!(!l.focus_visible, "no debe parecer seleccionada la fila que tenía el foco");
-        l.on_key(crate::platform::keys::VK_DOWN.0, false, false);
+        l.on_key(crate::keys::keys::VK_DOWN.0, false, false);
         assert!(l.focus_visible);
     }
 
@@ -1765,8 +1765,8 @@ mod column_tests {
     /// La columna Tamaño va alineada a la derecha: su texto usa `FontId::UiRight`.
     #[test]
     fn list_size_column_is_right_aligned() {
-        use xdir_core::sys::testing::RecordingPainter;
-        xdir_core::sys::testing::install_fakes();
+        use crate::sys::testing::RecordingPainter;
+        crate::sys::testing::install_fakes();
         let mut l = list(800.0);
         let mut e = entry("datos.bin");
         e.size = 2048;

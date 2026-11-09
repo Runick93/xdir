@@ -1,15 +1,18 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
-//! de crear la `App`, y el resto del código las pide con `waker()`, `env()` y `file_ops()`. Los
-//! tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()` y
+//! `disk_scan()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 
 use crate::commands::Command;
 use crate::keys::Key;
 use crate::ops::{Op, OpResult};
+use crate::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
+use crate::xtree::tree::Node;
 
 pub mod testing;
 
@@ -110,11 +113,40 @@ pub trait FileOps: Send + Sync {
     fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op);
 }
 
+/// Lo que el escáner y la vista de xtree necesitan del sistema: listar carpetas, el escaneo
+/// rápido de un volumen entero, el escaneo con permisos (tecla A), los discos y su espacio.
+pub trait DiskScan: Send + Sync {
+    /// Listador de carpetas para un escaneo que empieza en `root` (cada sistema decide qué no
+    /// recorrer: otros discos, enlaces...).
+    fn lister(&self, root: &Path) -> Box<dyn Lister>;
+    /// Escaneo rápido del volumen entero (la MFT en Windows), si aplica a `root`.
+    fn fast_scan(&self, root: &Path, p: &Progress, cancel: &AtomicBool) -> FastScan;
+    /// Tecla A: vuelve a analizar con permisos (bloqueante, corre en un hilo propio). `None` si no
+    /// hay árbol (rechazado, cancelado o, en macOS, solo se abre el ajuste de permisos).
+    fn elevate(&self, owner: Handle, root: &Path, p: &Progress, cancel: &AtomicBool) -> Option<Vec<Node>>;
+    /// Discos que se ofrecen para analizar (se vuelve a leer al abrir el menú).
+    fn drives(&self) -> Vec<DriveEntry>;
+    /// (total, libre) en bytes del volumen que contiene `path`.
+    fn volume_space(&self, path: &Path) -> Option<(u64, u64)>;
+    /// ¿`path` es un disco entero (`C:\`, `/`, `/Volumes/X`)?
+    fn whole_volume(&self, path: &Path) -> bool;
+    /// Carpeta que se analiza al abrir xtree sin elegir nada (el disco del sistema).
+    fn default_root(&self) -> PathBuf;
+    /// ¿Faltaron permisos en el escaneo? (aviso de la barra de datos y tecla A).
+    fn permission_issue(&self, p: &Progress) -> bool;
+    /// Aviso de la barra de datos cuando faltan permisos; la vista cambia `{n}` por la cantidad
+    /// de carpetas sin permiso.
+    fn permission_hint(&self) -> &'static str;
+    /// Texto de la barra de datos y de estado mientras corre `elevate`.
+    fn elevating_text(&self) -> &'static str;
+}
+
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {
     pub waker: Box<dyn Waker>,
     pub env: Box<dyn SystemEnv>,
     pub file_ops: Box<dyn FileOps>,
+    pub disk_scan: Box<dyn DiskScan>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -149,4 +181,8 @@ pub fn env() -> &'static dyn SystemEnv {
 
 pub fn file_ops() -> &'static dyn FileOps {
     &*services().file_ops
+}
+
+pub fn disk_scan() -> &'static dyn DiskScan {
+    &*services().disk_scan
 }

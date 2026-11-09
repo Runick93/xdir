@@ -909,6 +909,25 @@ fn open_in_panel_navigates_active_pane() {
     a.on_closing();
 }
 
+/// Desde «Este equipo» (sin carpeta) xtree analiza la raíz por defecto del `DiskScan`: con los
+/// falsos, una carpeta temporal servida por el listador en memoria, nunca el disco real.
+#[test]
+fn view_default_root_comes_from_disk_scan() {
+    use xdir_core::sys::testing::FakeDiskScan;
+    let mut a = app();
+    assert!(!matches!(a.panes[a.active].tab().location, Location::Path(_)), "la App en blanco arranca en «Este equipo»");
+    a.run_command(Command::Xtree);
+    assert!(a.xtree_open);
+    let root = FakeDiskScan::root();
+    assert_eq!(a.xtree.as_ref().unwrap().root(), root.as_path());
+    let t0 = std::time::Instant::now();
+    while !FakeDiskScan::was_listed(&root) {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "el escaneo no usó el listador del DiskScan");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    a.on_closing();
+}
+
 #[test]
 fn command_xtree_is_listed() {
     let spec = crate::commands::ALL.iter().find(|s| s.command == Command::Xtree).expect("falta el comando");

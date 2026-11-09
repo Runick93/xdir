@@ -1,6 +1,7 @@
 //! Servicios del sistema en Windows.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, LPARAM, SYSTEMTIME, WPARAM};
 use windows::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS};
@@ -16,7 +17,9 @@ use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, FileOps, Handle, Services, SystemEnv, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, Services, SystemEnv, Waker};
+use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
+use xdir_core::xtree::tree::Node;
 use xdir_core::typed::MAX as TYPED_MAX;
 
 use crate::fs::wide_path;
@@ -232,7 +235,58 @@ impl FileOps for Win32FileOps {
     }
 }
 
-/// Instala los servicios de Windows en el registro del núcleo.
+/// xtree: delega en las funciones de `fs` de Windows (MFT, ayudante elevado y unidades).
+struct Win32DiskScan;
+
+impl DiskScan for Win32DiskScan {
+    fn lister(&self, root: &Path) -> Box<dyn Lister> {
+        Box::new(crate::fs::xtree_lister(root))
+    }
+
+    fn fast_scan(&self, root: &Path, p: &Progress, cancel: &AtomicBool) -> FastScan {
+        crate::fs::xtree_fast_scan(root, p, cancel)
+    }
+
+    fn elevate(&self, owner: Handle, root: &Path, p: &Progress, cancel: &AtomicBool) -> Option<Vec<Node>> {
+        crate::fs::xtree_elevate(owner, root, p, cancel)
+    }
+
+    fn drives(&self) -> Vec<DriveEntry> {
+        crate::fs::xtree_drives()
+    }
+
+    fn volume_space(&self, path: &Path) -> Option<(u64, u64)> {
+        crate::fs::volume_space(path)
+    }
+
+    fn whole_volume(&self, path: &Path) -> bool {
+        crate::fs::whole_volume(path)
+    }
+
+    fn default_root(&self) -> PathBuf {
+        crate::fs::xtree_default_root()
+    }
+
+    fn permission_issue(&self, p: &Progress) -> bool {
+        crate::fs::xtree_permission_issue(p)
+    }
+
+    fn permission_hint(&self) -> &'static str {
+        crate::fs::XTREE_PERMISSION_HINT
+    }
+
+    fn elevating_text(&self) -> &'static str {
+        crate::fs::XTREE_ELEVATING_TEXT
+    }
+}
+
+/// Instala los servicios de Windows en el registro del núcleo. El ayudante elevado de xtree
+/// (`--xtree-mft`) sale antes de llegar acá: no usa servicios.
 pub fn install() {
-    xdir_core::sys::install(Services { waker: Box::new(Win32Waker), env: platform_env(), file_ops: Box::new(Win32FileOps) });
+    xdir_core::sys::install(Services {
+        waker: Box::new(Win32Waker),
+        env: platform_env(),
+        file_ops: Box::new(Win32FileOps),
+        disk_scan: Box::new(Win32DiskScan),
+    });
 }

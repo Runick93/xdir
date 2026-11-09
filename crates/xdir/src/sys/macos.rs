@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 
 use objc2::rc::Retained;
 use objc2_app_kit::{NSColor, NSColorSpace, NSEvent, NSEventModifierFlags, NSWorkspace};
@@ -12,7 +13,9 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, FileOps, Handle, KeyStyle, Services, SystemEnv, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, KeyStyle, Services, SystemEnv, Waker};
+use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
+use xdir_core::xtree::tree::Node;
 
 /// Quién atiende los mensajes de la aplicación en el hilo principal (lo fija la ventana al
 /// arrancar).
@@ -197,7 +200,57 @@ impl FileOps for MacFileOps {
     }
 }
 
+/// xtree: delega en las funciones de `fs` de macOS.
+struct MacDiskScan;
+
+impl DiskScan for MacDiskScan {
+    fn lister(&self, root: &Path) -> Box<dyn Lister> {
+        Box::new(crate::fs::xtree_lister(root))
+    }
+
+    fn fast_scan(&self, root: &Path, p: &Progress, cancel: &AtomicBool) -> FastScan {
+        crate::fs::xtree_fast_scan(root, p, cancel)
+    }
+
+    fn elevate(&self, owner: Handle, root: &Path, p: &Progress, cancel: &AtomicBool) -> Option<Vec<Node>> {
+        crate::fs::xtree_elevate(owner, root, p, cancel)
+    }
+
+    fn drives(&self) -> Vec<DriveEntry> {
+        crate::fs::xtree_drives()
+    }
+
+    fn volume_space(&self, path: &Path) -> Option<(u64, u64)> {
+        crate::fs::volume_space(path)
+    }
+
+    fn whole_volume(&self, path: &Path) -> bool {
+        crate::fs::whole_volume(path)
+    }
+
+    fn default_root(&self) -> PathBuf {
+        crate::fs::xtree_default_root()
+    }
+
+    fn permission_issue(&self, p: &Progress) -> bool {
+        crate::fs::xtree_permission_issue(p)
+    }
+
+    fn permission_hint(&self) -> &'static str {
+        crate::fs::XTREE_PERMISSION_HINT
+    }
+
+    fn elevating_text(&self) -> &'static str {
+        crate::fs::XTREE_ELEVATING_TEXT
+    }
+}
+
 /// Instala los servicios de macOS en el registro del núcleo.
 pub fn install() {
-    xdir_core::sys::install(Services { waker: Box::new(MacWaker), env: platform_env(), file_ops: Box::new(MacFileOps) });
+    xdir_core::sys::install(Services {
+        waker: Box::new(MacWaker),
+        env: platform_env(),
+        file_ops: Box::new(MacFileOps),
+        disk_scan: Box::new(MacDiskScan),
+    });
 }

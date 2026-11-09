@@ -221,7 +221,7 @@ impl App {
             if self.xtree.is_none() {
                 let root = match &self.panes[self.active].tab().location {
                     Location::Path(p) => p.clone(),
-                    _ => fs::xtree_default_root(),
+                    _ => xdir_core::sys::disk_scan().default_root(),
                 };
                 self.xtree = Some(Xtree::new(self.hwnd, root));
             }

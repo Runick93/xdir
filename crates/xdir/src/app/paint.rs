@@ -22,16 +22,12 @@ impl App {
             self.title = title;
         }
 
-        if self.first_frame_ms.is_none() {
+        let first_frame = self.first_frame_ms.is_none();
+        if first_frame {
             self.marks.push(("WM_PAINT", ms_since(self.started)));
-            if self.renderer.ensure_target(self.hwnd, self.dpi).is_ok() {
-                self.marks.push(("render target", ms_since(self.started)));
-            }
         }
         let listed = self.all_listed();
-        if listed && !self.list_frame_done {
-            self.marks.push(("inicio frame con la carpeta", ms_since(self.started)));
-        }
+        let mark_list_frame = listed && !self.list_frame_done;
 
         let mut status = match self.xtree.as_ref().filter(|_| self.xtree_open) {
             Some(v) => v.status_text(),
@@ -86,7 +82,18 @@ impl App {
         // Vista de xtree abierta: se dibuja en lugar de los paneles, la franja de grupos y el árbol.
         let xtree_open = self.xtree_open;
         let mut xtree = self.xtree.as_mut().filter(|_| xtree_open);
-        let result = self.renderer.draw(self.hwnd, self.dpi, &self.theme, if self.file_colors { &self.config.colors } else { &[] }, |p, w, h| {
+        let (marks, started) = (&mut self.marks, self.started);
+        // El host crea el destino de dibujo en el primer cuadro y recién ahí llama a la clausura:
+        // las marcas de `--probe` "render target" e "inicio frame con la carpeta" se toman al
+        // empezar a dibujar, en el mismo orden que antes. Los campos de `App` se prestan por
+        // separado (el host también es un campo), así que no hace falta clonar el `Rc`.
+        let result = self.host.draw(&self.theme, if self.file_colors { &self.config.colors } else { &[] }, &mut |p, w, h| {
+            if first_frame {
+                marks.push(("render target", ms_since(started)));
+            }
+            if mark_list_frame {
+                marks.push(("inicio frame con la carpeta", ms_since(started)));
+            }
             let area = ui::panes_area(w, h, tree_w, groups_h);
             let rects = if xtree.is_some() { &[][..] } else { &rects[..] };
             if let Some(v) = xtree.as_deref_mut() {

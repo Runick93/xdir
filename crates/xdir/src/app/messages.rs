@@ -34,14 +34,18 @@ impl App {
                 WM_SIZE => {
                     let width = (lparam.0 & 0xFFFF) as u32;
                     let height = ((lparam.0 >> 16) & 0xFFFF) as u32;
-                    self.renderer.resize(width, height, self.dpi);
+                    if let Some(host) = Win32Host::current() {
+                        host.resize(width, height, self.dpi);
+                    }
                     self.on_resized();
                     LRESULT(0)
                 }
                 WM_DPICHANGED => {
                     self.dpi = (wparam.0 & 0xFFFF) as u32;
                     self.on_resized();
-                    self.renderer.set_dpi(self.dpi);
+                    if let Some(host) = Win32Host::current() {
+                        host.set_dpi(self.dpi);
+                    }
                     self.update_edit_resources();
                     let r = &*(lparam.0 as *const RECT);
                     let _ = SetWindowPos(
@@ -94,7 +98,7 @@ impl App {
                     let hdc = HDC(wparam.0 as *mut _);
                     SetTextColor(hdc, colorref(self.theme.text));
                     SetBkColor(hdc, colorref(self.theme.surface_alt));
-                    LRESULT(self.sys.edit_brush.0 as isize)
+                    LRESULT(Win32Host::current().map_or(0, |h| h.edit_brush.get().0 as isize))
                 }
                 // El filtro y la paleta se actualizan con cada tecla.
                 WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == EN_CHANGE_CODE => {
@@ -111,7 +115,7 @@ impl App {
                     self.test_hook(text.trim_end_matches('\0'));
                     LRESULT(1)
                 }
-                WM_MENURBUTTONUP if self.sys.fav_menu.is_some() => {
+                WM_MENURBUTTONUP if Win32Host::current().is_some_and(|h| h.fav_menu.borrow().is_some()) => {
                     self.on_fav_menu_right_click(lparam.0, wparam.0 as u32);
                     LRESULT(0)
                 }
@@ -241,8 +245,10 @@ impl App {
                         None::<&windows::Win32::UI::Accessibility::IRawElementProviderSimple>,
                     );
                     let _ = RevokeDragDrop(self.hwnd.hwnd());
-                    let _ = DeleteObject(self.sys.edit_font.into());
-                    let _ = DeleteObject(self.sys.edit_brush.into());
+                    if let Some(host) = Win32Host::current() {
+                        let _ = DeleteObject(host.edit_font.get().into());
+                        let _ = DeleteObject(host.edit_brush.get().into());
+                    }
                     PostQuitMessage(0);
                     LRESULT(0)
                 }

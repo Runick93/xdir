@@ -30,26 +30,7 @@ const CLASS_NAME: PCWSTR = w!("xdir.main");
 /// Notificación de un control de edición: el texto cambió.
 pub(super) const EN_CHANGE_CODE: usize = 0x0300;
 
-// ---------- estado propio de Windows ----------
-
-/// Lo que la ventana de Windows necesita guardar además del estado de la aplicación.
-pub(super) struct Sys {
-    /// Fuente y fondo de los controles de edición (siguen el DPI y el tema).
-    pub edit_font: HFONT,
-    pub edit_brush: HBRUSH,
-    /// Menú de favoritos abierto (para el clic derecho dentro del menú).
-    pub fav_menu: Option<FavMenu>,
-}
-
-impl Sys {
-    pub(super) fn new() -> Self {
-        Sys {
-            edit_font: HFONT::default(),
-            edit_brush: HBRUSH::default(),
-            fav_menu: None,
-        }
-    }
-}
+// ---------- menú de favoritos ----------
 
 /// Menú de favoritos abierto: a qué favorito corresponde cada comando y cada posición
 /// (para el clic derecho dentro del menú).
@@ -123,10 +104,12 @@ pub fn run() -> windows::core::Result<()> {
         }
 
         let marks = vec![("init", ms_since(started))];
-        let init = Init::load(session, probe, start_path, started, marks);
+        let mut init = Init::load(session, probe, start_path, started, marks);
         shell::set_menu_mode(init.session.dark_mode);
-        let host = Win32Host::install();
-        let app = App::new(init, host.clone())?;
+        // El renderizador vive en el host: crear sus fábricas es lo que mide esta marca.
+        let host = Win32Host::install()?;
+        init.marks.push(("fabricas d2d/dwrite", ms_since(started)));
+        let app = App::new(init, host.clone());
         let app = Box::into_raw(Box::new(app));
 
         // La ventana se crea oculta para aplicar tema y tamaño antes de mostrarla (sin flash blanco).
@@ -264,7 +247,8 @@ impl TextBox {
             .ok()?;
             // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
             let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
-            SendMessageW(edit, WM_SETFONT, Some(WPARAM(app.sys.edit_font.0 as usize)), Some(LPARAM(1)));
+            let font = Win32Host::current().map_or(HFONT::default(), |h| h.edit_font.get());
+            SendMessageW(edit, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
             if kind == TextKind::Palette {
                 let _ = SetWindowSubclass(edit, Some(palette_proc), 2, 0);
             } else {
@@ -527,15 +511,17 @@ pub(super) fn scale(dips: i32, dpi: u32) -> i32 {
 
 impl App {
     /// Fuente y fondo de los controles de edición según el DPI y el tema.
+    /// Viven en el host de la ventana (sin host instalado, como en las pruebas, no hace nada).
     pub(super) fn update_edit_resources(&mut self) {
+        let Some(host) = Win32Host::current() else { return };
         unsafe {
-            if !self.sys.edit_font.is_invalid() {
-                let _ = DeleteObject(self.sys.edit_font.into());
+            if !host.edit_font.get().is_invalid() {
+                let _ = DeleteObject(host.edit_font.get().into());
             }
-            if !self.sys.edit_brush.is_invalid() {
-                let _ = DeleteObject(self.sys.edit_brush.into());
+            if !host.edit_brush.get().is_invalid() {
+                let _ = DeleteObject(host.edit_brush.get().into());
             }
-            self.sys.edit_font = CreateFontW(
+            host.edit_font.set(CreateFontW(
                 -(13 * self.dpi as i32 / 96),
                 0,
                 0,
@@ -550,14 +536,15 @@ impl App {
                 CLEARTYPE_QUALITY,
                 0,
                 w!("Segoe UI"),
-            );
-            self.sys.edit_brush = CreateSolidBrush(colorref(self.theme.surface_alt));
+            ));
+            host.edit_brush.set(CreateSolidBrush(colorref(self.theme.surface_alt)));
         }
     }
 
     /// Menú desplegable de una carpeta de favoritos o del desborde "»". Se puede hacer clic
     /// derecho sobre un favorito del menú (`WM_MENURBUTTONUP`).
     pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: render::Rect) {
+        let Some(host) = Win32Host::current() else { return };
         let Some(entries) = self.fav_menu_entries(&source) else { return };
         let mut menu = FavMenu { ids: Vec::new(), positions: HashMap::new(), action: None };
         let k = self.dpi as f32 / 96.0;
@@ -566,9 +553,9 @@ impl App {
             let Ok(hmenu) = CreatePopupMenu() else { return };
             build_fav_menu(&mut menu, hmenu, &entries);
             let _ = ClientToScreen(self.hwnd.hwnd(), &mut pt);
-            self.sys.fav_menu = Some(menu);
+            *host.fav_menu.borrow_mut() = Some(menu);
             let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN).0, pt.x, pt.y, self.hwnd.hwnd(), None).0;
-            let menu = self.sys.fav_menu.take();
+            let menu = host.fav_menu.borrow_mut().take();
             let _ = DestroyMenu(hmenu);
             let Some(menu) = menu else { return };
             // Si dentro del menú se eligió algo con clic derecho, eso manda.
@@ -584,9 +571,10 @@ impl App {
 
     /// Clic derecho sobre un elemento de un menú de favoritos (`WM_MENURBUTTONUP`).
     pub(super) fn on_fav_menu_right_click(&mut self, hmenu: isize, pos: u32) {
-        let Some(path) = self.sys.fav_menu.as_ref().and_then(|m| m.positions.get(&(hmenu, pos)).cloned()) else { return };
+        let Some(host) = Win32Host::current() else { return };
+        let Some(path) = host.fav_menu.borrow().as_ref().and_then(|m| m.positions.get(&(hmenu, pos)).cloned()) else { return };
         if let Some(act) = self.fav_context_menu(Some(&path), true) {
-            if let Some(m) = self.sys.fav_menu.as_mut() {
+            if let Some(m) = host.fav_menu.borrow_mut().as_mut() {
                 m.action = Some((path, act));
             }
             unsafe {

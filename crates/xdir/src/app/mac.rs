@@ -69,15 +69,6 @@ pub(super) fn view() -> Option<Retained<XdirView>> {
     VIEW.with(|v| v.borrow().clone())
 }
 
-/// Lo que la ventana de macOS necesita guardar además del estado de la aplicación.
-pub(super) struct Sys {}
-
-impl Sys {
-    pub(super) fn new() -> Self {
-        Sys {}
-    }
-}
-
 // ---------- arranque ----------
 
 pub fn run() -> Result<(), String> {
@@ -87,9 +78,11 @@ pub fn run() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("xdir tiene que arrancar en el hilo principal")?;
     let (session, probe, start_path) = startup_args();
     let marks = vec![("init", ms_since(started))];
-    let init = Init::load(session, probe, start_path, started, marks);
-    let host = MacHost::new();
-    let mut app = Box::new(App::new(init, host.clone())?);
+    let mut init = Init::load(session, probe, start_path, started, marks);
+    // El renderizador vive en el host: se crea acá (y se mide igual que en Windows).
+    let host = MacHost::install()?;
+    init.marks.push(("fabricas d2d/dwrite", ms_since(started)));
+    let mut app = Box::new(App::new(init, host.clone()));
 
     let nsapp = NSApplication::sharedApplication(mtm);
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -113,7 +106,7 @@ pub fn run() -> Result<(), String> {
     host.attach(app.hwnd);
     app.dpi = 96;
     let scale = window.backingScaleFactor() as f32;
-    app.renderer.set_size(INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32, scale);
+    host.set_size(INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32, scale);
     let ptr = Box::into_raw(app);
     APP.with(|a| a.set(ptr));
     crate::sys::set_message_handler(on_message);
@@ -329,10 +322,10 @@ define_class!(
             let size = self.bounds().size;
             let scale = self.window().map_or(2.0, |w| w.backingScaleFactor()) as f32;
             DRAWING.with(|d| d.set(true));
-            with_app(|app| {
-                app.renderer.set_size(size.width as f32, size.height as f32, scale);
-                app.paint();
-            });
+            if let Some(host) = MacHost::current() {
+                host.set_size(size.width as f32, size.height as f32, scale);
+            }
+            with_app(|app| app.paint());
             DRAWING.with(|d| d.set(false));
         }
 

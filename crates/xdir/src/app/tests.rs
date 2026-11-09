@@ -18,7 +18,7 @@ fn app_with(init: Init) -> App {
 /// Igual que `app_with`, con una ventana falsa propia para mirar qué le pidió la `App`.
 fn app_with_host(init: Init, host: Rc<FakeHost>) -> App {
     xdir_core::sys::testing::install_fakes();
-    App::new(init, host).expect("App sin ventana")
+    App::new(init, host)
 }
 
 /// La `App` de prueba usa el entorno falso: configuración en la carpeta temporal del hilo, una
@@ -1081,4 +1081,63 @@ fn failed_drag_shows_notice() {
     a.apply(0, Action::BeginDrag);
     assert_eq!(a.notice.as_deref(), Some("No se pudo arrastrar: x"));
     assert_eq!(a.drag, Drag::None);
+}
+
+// ---------- dibujo con el host ----------
+
+/// `paint` dibuja a través del host: el pintor falso registra el texto de la barra de estado del
+/// panel activo.
+#[test]
+fn paint_draws_with_host() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.paint();
+    let status = a.panes[a.active].tab().status();
+    let texts = host.drawn_texts();
+    assert!(texts.iter().any(|(_, s, _)| *s == status), "falta «{status}» entre {:?}", texts.iter().map(|t| &t.1).collect::<Vec<_>>());
+}
+
+/// App con el panel 0 en una carpeta temporal, con archivos cuyo nombre más largo tiene 10
+/// caracteres, ya dibujada (la lista conoce su área).
+fn app_with_files(host: Rc<FakeHost>, name: &str) -> App {
+    let mut a = app_with_host(Init::blank(), host);
+    let dir = xtree_dir(name);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
+    a.set_active(0);
+    a.panes[0].tab_mut().list.replace(vec![file_entry("a.txt"), file_entry("abcdefghij"), file_entry("b")]);
+    a.paint();
+    a
+}
+
+/// Punto sobre el borde derecho de la columna Nombre, en el encabezado de la lista del panel 0.
+fn name_edge(a: &App) -> (f32, f32) {
+    let r = a.panes[0].rect;
+    let list = &a.panes[0].tab().list;
+    let x_mid = (r.left + r.right) / 2.0;
+    let y = (r.top as i32..r.bottom as i32).map(|y| y as f32 + 0.5).find(|&y| list.in_header(x_mid, y)).expect("encabezado");
+    let xs: Vec<f32> = (0..((r.right - r.left) * 4.0) as i32).map(|i| r.left + i as f32 / 4.0).collect();
+    let start = xs.iter().position(|&x| list.wants_resize_cursor(x, y)).expect("borde del nombre");
+    let len = xs[start..].iter().take_while(|&&x| list.wants_resize_cursor(x, y)).count();
+    (xs[start + len / 2], y)
+}
+
+/// Doble clic en el borde de la columna Nombre: se ajusta con el ancho de texto del host (7 DIPs
+/// por carácter en el falso), igual que `fit_column_at` con esa medida.
+#[test]
+fn double_click_header_fits_column_with_host_width() {
+    let (host_a, host_b) = (FakeHost::new(), FakeHost::new());
+    let mut a = app_with_files(host_a.clone(), "ajuste");
+    let mut b = app_with_files(host_b.clone(), "ajuste");
+    let (x, y) = name_edge(&a);
+    assert_eq!(name_edge(&b), (x, y));
+    a.on_left_down(x, y, true);
+    a.on_left_up(x, y);
+    let fit = b.panes[0].tab_mut().list.fit_column_at(x, y, &|s, _| 7.0 * s.chars().count() as f32);
+    assert!(fit.is_some(), "el punto está sobre el borde");
+    assert_ne!(name_edge(&a).0, x, "el borde se movió");
+    assert_eq!(name_edge(&a), name_edge(&b));
+    a.paint();
+    b.paint();
+    assert_eq!(host_a.drawn_texts(), host_b.drawn_texts());
 }

@@ -781,6 +781,8 @@ impl Painter for RecordingPainter {
 /// Ventana falsa para las pruebas de `App`: no crea nada. El área mide 1280×800 DIPs (se puede
 /// cambiar con `client`), registra títulos, pedidos de repintar y pitidos, expande variables del
 /// entorno y responde lo que el test le fije a las preguntas, al selector de color y al arrastre.
+/// Dibuja con un `RecordingPainter` (guarda los textos del último cuadro) y mide 7 DIPs por
+/// carácter.
 pub struct FakeHost {
     /// Tamaño del área de la ventana en DIPs.
     pub client: Cell<(f32, f32)>,
@@ -790,6 +792,7 @@ pub struct FakeHost {
     color_choice: Cell<Option<u32>>,
     answer: Cell<Option<bool>>,
     drag_result: RefCell<Result<(), String>>,
+    drawn: RefCell<Vec<(FontId, String, Rect)>>,
 }
 
 impl FakeHost {
@@ -802,7 +805,13 @@ impl FakeHost {
             color_choice: Cell::new(None),
             answer: Cell::new(None),
             drag_result: RefCell::new(Ok(())),
+            drawn: RefCell::new(Vec::new()),
         })
+    }
+
+    /// Los textos del último cuadro dibujado, en orden.
+    pub fn drawn_texts(&self) -> Vec<(FontId, String, Rect)> {
+        self.drawn.borrow().clone()
     }
 
     /// Los títulos que se pusieron, en orden.
@@ -920,4 +929,17 @@ impl WindowHost for FakeHost {
     }
 
     fn show(&self, _saved: Option<([i32; 4], bool)>) {}
+
+    /// Dibuja en un `RecordingPainter` del tamaño de `client` y guarda sus textos.
+    fn draw(&self, theme: &Theme, _file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
+        let p = RecordingPainter::new(*theme);
+        let (w, h) = self.client.get();
+        paint(&p, w, h);
+        *self.drawn.borrow_mut() = p.texts();
+        Ok(())
+    }
+
+    fn text_width(&self, s: &str, _bold: bool) -> f32 {
+        7.0 * s.chars().count() as f32
+    }
 }

@@ -1,7 +1,7 @@
 //! macOS: la ventana de la aplicación (`WindowHost`) sobre la `NSWindow` y la vista de `mac.rs`.
 //! Es la contraparte de `host_win.rs`. La vista trabaja en puntos, que ya son DIPs.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use objc2::rc::Retained;
@@ -13,6 +13,10 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use xdir_core::host::WindowHost;
+use xdir_core::paint::Painter;
+
+use crate::config::ColorRule;
+use crate::render::Renderer;
 
 use super::*;
 use super::mac::{DRAWING, KEEP, LAST_MOUSE, MSG_ACCENT, MSG_CLOSE, view, window};
@@ -20,22 +24,50 @@ use super::mac::{DRAWING, KEEP, LAST_MOUSE, MSG_ACCENT, MSG_CLOSE, view, window}
 thread_local! {
     /// Ya hay un cuadro programado para el próximo refresco de pantalla.
     static FRAME_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// El host de la ventana, para el código de AppKit que necesita el tipo concreto (`drawRect:`
+    /// le pasa el tamaño de la vista al renderizador): la `App` lo tiene como `dyn WindowHost`.
+    static HOST: RefCell<Option<Rc<MacHost>>> = const { RefCell::new(None) };
 }
 
 /// La ventana principal de macOS. La ventana y la vista viven en los `thread_local!` de `mac.rs`.
 pub(super) struct MacHost {
     window: Cell<Handle>,
+    /// Dibujo con Core Graphics (fuentes, imágenes y tamaño del área).
+    renderer: RefCell<Renderer>,
 }
 
 impl MacHost {
-    pub(super) fn new() -> Rc<MacHost> {
-        Rc::new(MacHost { window: Cell::new(Handle::default()) })
+    /// Crea el host (todavía sin ventana) con su renderizador y lo deja en el `thread_local`.
+    pub(super) fn install() -> Result<Rc<MacHost>, String> {
+        let host = Rc::new(MacHost { window: Cell::new(Handle::default()), renderer: RefCell::new(Renderer::new()?) });
+        HOST.with(|h| *h.borrow_mut() = Some(host.clone()));
+        Ok(host)
+    }
+
+    /// El host instalado con `install`.
+    pub(super) fn current() -> Option<Rc<MacHost>> {
+        HOST.with(|h| h.borrow().clone())
+    }
+
+    /// Tamaño del área en puntos y píxeles por punto de la pantalla (lo fija la vista antes de
+    /// dibujar).
+    pub(super) fn set_size(&self, width: f32, height: f32, scale: f32) {
+        self.renderer.borrow_mut().set_size(width, height, scale);
     }
 }
 
 impl WindowHost for MacHost {
     fn attach(&self, window: Handle) {
         self.window.set(window);
+    }
+
+    /// Dibuja en el contexto actual de AppKit (dentro de `drawRect:`).
+    fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
+        self.renderer.borrow_mut().draw(self.window.get(), theme, file_colors, |p, w, h| paint(p, w, h))
+    }
+
+    fn text_width(&self, s: &str, bold: bool) -> f32 {
+        self.renderer.borrow().text_width(s, bold)
     }
 
     /// Durante el dibujo (una animación que pide el cuadro siguiente) el pedido se programa para

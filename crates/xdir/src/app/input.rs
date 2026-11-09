@@ -248,8 +248,8 @@ impl App {
                     }
                     PaneHit::FavBar => {}
                     PaneHit::List if double => {
-                        let renderer = &self.renderer;
-                        let fit = self.panes[i].tab_mut().list.fit_column_at(x, y, &|s, bold| renderer.text_width(s, bold));
+                        let host = &self.host;
+                        let fit = self.panes[i].tab_mut().list.fit_column_at(x, y, &|s, bold| host.text_width(s, bold));
                         let action = match fit {
                             Some(action) => action,
                             None => self.panes[i].tab_mut().list.on_double_click(x, y),

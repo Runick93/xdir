@@ -39,8 +39,8 @@ impl App {
 
     /// Ajusta la ventana al tema (barra de título, fondo Mica en Windows) y los controles de edición.
     pub(super) fn apply_window_theme(&mut self) {
+        // El host también pasa el renderizador a fondo translúcido si quedó Mica.
         let mica = self.host.apply_theme(&self.theme, self.dark_mode.is_none());
-        self.renderer.set_transparent(mica);
         self.transparent = mica;
         self.update_edit_resources();
     }

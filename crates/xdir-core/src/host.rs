@@ -9,6 +9,8 @@
 
 use std::path::Path;
 
+use crate::config::ColorRule;
+use crate::paint::Painter;
 use crate::shell::Item;
 use crate::sys::Handle;
 use crate::theme::Theme;
@@ -60,4 +62,12 @@ pub trait WindowHost {
     fn placement(&self) -> Option<([i32; 4], bool)>;
     /// Muestra la ventana con la posición guardada (o el tamaño inicial).
     fn show(&self, saved: Option<([i32; 4], bool)>);
+    /// Dibuja un cuadro: `paint` recibe el pintor y el tamaño del área en DIPs. El primer cuadro
+    /// crea el destino de dibujo; si el destino se perdió o no se pudo crear, devuelve el error
+    /// (sin llamar a `paint` si no llegó a dibujar). `file_colors`: reglas de color por tipo de
+    /// archivo de `config.toml`.
+    fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String>;
+    /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
+    /// necesitar un cuadro en curso.
+    fn text_width(&self, s: &str, bold: bool) -> f32;
 }

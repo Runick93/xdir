@@ -86,23 +86,15 @@ impl Renderer {
         self.scale = scale.max(1.0);
     }
 
-    pub fn set_transparent(&mut self, _on: bool) {}
-
     #[allow(dead_code)]
     pub fn set_dpi(&mut self, dpi: u32) {
         self.scale = (dpi as f32 / 96.0).max(1.0);
-    }
-
-    pub fn ensure_target(&mut self, owner: Handle, _dpi: u32) -> Result<(), String> {
-        self.images.borrow_mut().handle = owner;
-        Ok(())
     }
 
     /// Dibuja un frame en el contexto actual de AppKit: `paint` recibe el pintor y el tamaño.
     pub fn draw(
         &mut self,
         owner: Handle,
-        _dpi: u32,
         theme: &Theme,
         file_colors: &[ColorRule],
         paint: impl FnOnce(&dyn paint::Painter, f32, f32),

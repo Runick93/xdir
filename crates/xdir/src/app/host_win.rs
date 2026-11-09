@@ -5,6 +5,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use xdir_core::host::WindowHost;
+use xdir_core::paint::Painter;
+
+use crate::config::ColorRule;
+use crate::render::Renderer;
 
 use super::*;
 
@@ -23,19 +27,33 @@ pub(super) struct Win32Host {
     custom_colors: Cell<[COLORREF; 16]>,
     /// Destino de arrastre de la ventana: se mantiene vivo mientras ella exista.
     drop_target: RefCell<Option<IDropTarget>>,
+    /// Direct2D / DirectWrite: fábricas, fuentes y el destino de dibujo de la ventana.
+    renderer: RefCell<Renderer>,
+    /// Fuente y fondo de los controles de edición (siguen el DPI y el tema; los arma
+    /// `App::update_edit_resources`).
+    pub(super) edit_font: Cell<HFONT>,
+    pub(super) edit_brush: Cell<HBRUSH>,
+    /// Menú de favoritos abierto (para el clic derecho dentro del menú). No se presta mientras
+    /// el menú está abierto: el clic derecho llega anidado.
+    pub(super) fav_menu: RefCell<Option<FavMenu>>,
 }
 
 impl Win32Host {
-    /// Crea el host (todavía sin ventana) y lo deja en el `thread_local` de la plataforma.
-    pub(super) fn install() -> Rc<Win32Host> {
+    /// Crea el host (todavía sin ventana) con su renderizador (arranca la creación del
+    /// dispositivo de GPU en otro hilo) y lo deja en el `thread_local` de la plataforma.
+    pub(super) fn install() -> windows::core::Result<Rc<Win32Host>> {
         let host = Rc::new(Win32Host {
             hwnd: Cell::new(Handle::default()),
             tracking_mouse: Cell::new(false),
             custom_colors: Cell::new([COLORREF(0x00FFFFFF); 16]),
             drop_target: RefCell::new(None),
+            renderer: RefCell::new(Renderer::new()?),
+            edit_font: Cell::new(HFONT::default()),
+            edit_brush: Cell::new(HBRUSH::default()),
+            fav_menu: RefCell::new(None),
         });
         HOST.with(|h| *h.borrow_mut() = Some(host.clone()));
-        host
+        Ok(host)
     }
 
     /// El host instalado con `install`.
@@ -64,11 +82,33 @@ impl Win32Host {
     pub(super) fn mouse_left(&self) {
         self.tracking_mouse.set(false);
     }
+
+    /// `WM_SIZE`: el área de la ventana cambió (en píxeles).
+    pub(super) fn resize(&self, width: u32, height: u32, dpi: u32) {
+        self.renderer.borrow_mut().resize(width, height, dpi);
+    }
+
+    /// `WM_DPICHANGED`: la ventana pasó a un monitor con otro DPI.
+    pub(super) fn set_dpi(&self, dpi: u32) {
+        self.renderer.borrow_mut().set_dpi(dpi);
+    }
 }
 
 impl WindowHost for Win32Host {
     fn attach(&self, window: Handle) {
         self.hwnd.set(window);
+    }
+
+    /// El primer cuadro crea el destino de dibujo (espera al hilo que crea el dispositivo de GPU).
+    fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
+        self.renderer
+            .borrow_mut()
+            .draw(self.hwnd.get(), self.dpi(), theme, file_colors, |p, w, h| paint(p, w, h))
+            .map_err(|e| e.to_string())
+    }
+
+    fn text_width(&self, s: &str, bold: bool) -> f32 {
+        self.renderer.borrow().text_width(s, bold)
     }
 
     fn invalidate(&self) {
@@ -246,11 +286,13 @@ impl WindowHost for Win32Host {
                 size_of_val(&backdrop) as u32,
             )
             .is_ok();
-            if mica {
+            let mica = mica && {
                 let all = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
-                return DwmExtendFrameIntoClientArea(hwnd, &all).is_ok();
-            }
-            false
+                DwmExtendFrameIntoClientArea(hwnd, &all).is_ok()
+            };
+            // Con Mica el renderizador presenta con DirectComposition (fondo translúcido).
+            self.renderer.borrow_mut().set_transparent(mica);
+            mica
         }
     }
 

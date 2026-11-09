@@ -76,18 +76,12 @@ use crate::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use crate::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use crate::list::{Action, ColumnSpec};
 use crate::pane::{Button, FavDrop, Pane, PaneHit, SearchView};
-use crate::render::{Renderer, contains};
+use crate::render::contains;
 use crate::session::{PaneState, Session};
 use crate::tab::Tab;
 use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
 use xdir_core::host::WindowHost;
-
-/// Error de las llamadas al sistema (crear el renderizador, la ventana...).
-#[cfg(windows)]
-pub type SysResult<T> = windows::core::Result<T>;
-#[cfg(target_os = "macos")]
-pub type SysResult<T> = Result<T, String>;
 
 /// Tamaño inicial en DIPs; se escala según el DPI del monitor.
 const INITIAL_SIZE: (i32, i32) = (1280, 800);
@@ -245,7 +239,6 @@ struct App {
     host: Rc<dyn WindowHost>,
     dpi: u32,
     theme: Theme,
-    renderer: Renderer,
     panes: Vec<Pane>,
     layout: Layout,
     splits: Splits,
@@ -268,9 +261,6 @@ struct App {
     edit: Option<(TextBox, usize)>,
     /// Desplegable de rutas de la barra de dirección (vive mientras `edit`).
     suggest: Option<typed::Suggest>,
-    /// Estado propio del sistema (fuente y fondo de los controles, menú de favoritos abierto).
-    #[cfg_attr(not(windows), allow(dead_code))]
-    sys: Sys,
     hover: Hit,
     drag: Drag,
     title: String,
@@ -424,11 +414,9 @@ impl Init {
 impl App {
     /// Arma la aplicación (sin ventana: el `HWND` llega en `WM_NCCREATE` y se le pasa al host con
     /// `attach`) y abre sus paneles.
-    pub(crate) fn new(init: Init, host: Rc<dyn WindowHost>) -> SysResult<App> {
-        let Init { session, history, config, favorites, groups, probe, start_path, started, mut marks } = init;
+    pub(crate) fn new(init: Init, host: Rc<dyn WindowHost>) -> App {
+        let Init { session, history, config, favorites, groups, probe, start_path, started, marks } = init;
         let theme = Theme::from_system(session.accent, session.dark_mode);
-        let renderer = Renderer::new()?;
-        marks.push(("fabricas d2d/dwrite", ms_since(started)));
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
@@ -437,7 +425,6 @@ impl App {
             host,
             dpi: 96,
             theme,
-            renderer,
             panes: Vec::new(),
             layout: Layout::from_index(session.layout).unwrap_or(Layout::Four),
             splits: Splits { x: session.split_x, y: session.split_y },
@@ -453,7 +440,6 @@ impl App {
             rx,
             edit: None,
             suggest: None,
-            sys: Sys::new(),
             hover: Hit::None,
             drag: Drag::None,
             title: String::new(),
@@ -514,7 +500,7 @@ impl App {
             app.tree.set_pinned(session.tree_pinned, false);
             app.tree.set_quick_open(session.quick_open);
         }
-        Ok(app)
+        app
     }
 }
 

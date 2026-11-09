@@ -157,7 +157,7 @@ impl Renderer {
         *self.icons.borrow_mut() = icons;
     }
 
-    /// Crea el target si no existe (también lo hace `draw`; separado para medir el arranque).
+    /// Crea el target si no existe (lo llama `draw`; el primer cuadro espera acá a la GPU).
     pub fn ensure_target(&mut self, owner: Handle, dpi: u32) -> Result<()> {
         let hwnd = owner.hwnd();
         if self.target.is_none() {

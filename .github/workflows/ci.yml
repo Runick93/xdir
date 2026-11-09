@@ -1,0 +1,71 @@
+# Tests en Windows y macOS en cada PR, y una prueba de humo en Windows que abre la app compilada
+# con `--features pruebas` y la maneja por WM_COPYDATA (scripts/humo.ps1).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar
+        run: cargo build --locked
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Compilar con pruebas
+        run: cargo build --locked --features pruebas
+
+      - name: Prueba de humo
+        shell: pwsh
+        run: pwsh scripts/humo.ps1 -Exe target\debug\xdir.exe -Out humo
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: humo-windows
+          path: humo/
+          if-no-files-found: warn
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --locked
+
+  estilo:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+
+      - name: Formato
+        run: cargo fmt --check

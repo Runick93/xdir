@@ -742,6 +742,41 @@ fn op_done_with_a_new_folder_asks_for_the_rename() {
     assert_eq!(c.pending_rename, None);
 }
 
+/// Entrega a la `App` lo que el `FileOps` falso respondió por el canal (lo que haría el
+/// `WM_APP_OP_DONE` en la ventana).
+fn drain_op_results(a: &mut App) {
+    while let Ok(r) = a.ops_rx.try_recv() {
+        a.on_op_done(r);
+    }
+}
+
+#[test]
+fn rename_sends_rename_op() {
+    use xdir_core::sys::testing::FakeFileOps;
+    let mut a = app();
+    FakeFileOps::take_ops();
+    let path = std::env::temp_dir().join("viejo.txt");
+    a.commit_rename(path.clone(), "nuevo.txt".into());
+    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Rename { path, new_name: "nuevo.txt".into() }]);
+}
+
+#[test]
+fn undo_after_new_folder_sends_undo() {
+    use xdir_core::sys::testing::FakeFileOps;
+    let mut a = app();
+    a.new_tab(0, Location::Path(std::env::temp_dir()), true);
+    FakeFileOps::take_ops();
+    let created = vec![std::env::temp_dir().join("Nueva carpeta")];
+    FakeFileOps::respond_with(OpResult { undo: Some(ops::Undo::Created(created.clone())), ..OpResult::default() });
+    a.run_command(Command::NewFolder);
+    drain_op_results(&mut a);
+    assert_eq!(FakeFileOps::take_ops(), [ops::Op::NewFolder { parent: std::env::temp_dir() }]);
+    FakeFileOps::respond_with(OpResult::default());
+    a.run_command(Command::Undo);
+    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Undo(ops::Undo::Created(created))]);
+    assert!(a.undo.is_empty());
+}
+
 // ---------- xtree ----------
 
 /// Carpeta temporal propia de una prueba (así la vista no analiza el disco del usuario).

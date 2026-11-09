@@ -6,6 +6,7 @@ pub mod console;
 pub mod format;
 pub mod geom;
 pub mod keys;
+pub mod ops;
 pub mod session;
 pub mod sys;
 pub mod toml;

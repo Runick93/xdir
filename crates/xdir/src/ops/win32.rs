@@ -4,7 +4,7 @@
 //! Un `IFileOperationProgressSink` anota qué se creó, movió o mandó a la papelera, y con eso se
 //! arma la operación inversa para deshacer (Ctrl+Z).
 
-use super::*;
+use super::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;

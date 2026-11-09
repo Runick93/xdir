@@ -5,10 +5,12 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::mpsc::Sender;
 
 use super::{ConsoleInfo, FileOps, Handle, Services, SystemEnv, Waker};
 use crate::format::thousands;
 use crate::keys::Key;
+use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
 /// instala, y si ya había servicios instalados no hace nada.
@@ -149,5 +151,34 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
+thread_local! {
+    /// Operaciones recibidas por el falso y respuesta configurada: por hilo, para que los tests
+    /// (que corren en paralelo, cada uno en su hilo) no se vean entre sí.
+    static OPS: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
+    static RESPONSE: RefCell<OpResult> = RefCell::new(OpResult::default());
+}
+
+/// `FileOps` falso: no toca el disco; anota cada `Op` recibida y responde por el canal, en el
+/// acto, con el `OpResult` configurado (por defecto, éxito sin deshacer). El registro es del hilo
+/// que llama a `spawn`, o sea el del test.
 pub struct FakeFileOps;
-impl FileOps for FakeFileOps {}
+
+impl FakeFileOps {
+    /// Las operaciones pedidas desde este hilo hasta ahora (y vacía el registro).
+    pub fn take_ops() -> Vec<Op> {
+        OPS.with(|o| std::mem::take(&mut *o.borrow_mut()))
+    }
+
+    /// Respuesta de las próximas operaciones de este hilo.
+    pub fn respond_with(result: OpResult) {
+        RESPONSE.with(|r| *r.borrow_mut() = result);
+    }
+}
+
+impl FileOps for FakeFileOps {
+    fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op) {
+        OPS.with(|o| o.borrow_mut().push(op));
+        let _ = tx.send(RESPONSE.with(|r| r.borrow().clone()));
+        owner.post(WM_APP_OP_DONE, 0, 0);
+    }
+}

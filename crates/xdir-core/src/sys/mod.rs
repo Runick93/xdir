@@ -5,9 +5,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::mpsc::Sender;
 
 use crate::commands::Command;
 use crate::keys::Key;
+use crate::ops::{Op, OpResult};
 
 pub mod testing;
 
@@ -101,8 +103,12 @@ pub trait SystemEnv: Send + Sync {
     }
 }
 
-/// Operaciones de archivos del sistema (se completa en una tarea siguiente).
-pub trait FileOps: Send + Sync {}
+/// Operaciones de archivos del sistema.
+pub trait FileOps: Send + Sync {
+    /// Corre `op` en su propio hilo; al terminar manda el resultado por `tx` y avisa a `owner`
+    /// con `WM_APP_OP_DONE`. Vuelve enseguida.
+    fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op);
+}
 
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {

@@ -764,13 +764,16 @@ fn rename_sends_rename_op() {
 fn undo_after_new_folder_sends_undo() {
     use xdir_core::sys::testing::FakeFileOps;
     let mut a = app();
-    a.new_tab(0, Location::Path(std::env::temp_dir()), true);
+    // La ruta como la guarda la pestaña: en Windows la carpeta temporal puede venir con nombre
+    // corto (`RUNNER~1`) y la navegación la pasa al largo.
+    let tmp = crate::fs::true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp.clone()), true);
     FakeFileOps::take_ops();
-    let created = vec![std::env::temp_dir().join("Nueva carpeta")];
+    let created = vec![tmp.join("Nueva carpeta")];
     FakeFileOps::respond_with(OpResult { undo: Some(ops::Undo::Created(created.clone())), ..OpResult::default() });
     a.run_command(Command::NewFolder);
     drain_op_results(&mut a);
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::NewFolder { parent: std::env::temp_dir() }]);
+    assert_eq!(FakeFileOps::take_ops(), [ops::Op::NewFolder { parent: tmp }]);
     FakeFileOps::respond_with(OpResult::default());
     a.run_command(Command::Undo);
     assert_eq!(FakeFileOps::take_ops(), [ops::Op::Undo(ops::Undo::Created(created))]);

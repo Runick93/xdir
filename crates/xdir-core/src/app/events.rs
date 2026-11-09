@@ -360,7 +360,7 @@ impl App {
     /// La ventana se va a cerrar: se guardan la sesión y el historial.
     pub fn on_closing(&mut self) {
         // El escaneo de xtree (abierto o en segundo plano) no sigue después de cerrar xdir.
-        if let Some(v) = &self.xtree {
+        if let Some(v) = &mut self.xtree {
             v.cancel();
         }
         if self.probe.is_none() {

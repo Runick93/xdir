@@ -443,26 +443,36 @@ impl Tab {
         if let Some(e) = &self.error {
             return format!("No se pudo abrir: {e}");
         }
-        let n = self.list.count();
-        let mut s = match n {
-            1 => "1 elemento".to_string(),
-            _ => format!("{n} elementos"),
-        };
-        if self.loading {
-            s.push_str("   ·   cargando…");
-        }
+        // Con selección, como el Explorador: cuántos y cuánto pesan los archivos (las carpetas no
+        // suman; si solo hay carpetas, no hay tamaño).
         let (count, bytes, files) = self
             .list
             .selected_entries()
             .fold((0usize, 0u64, 0usize), |(c, b, f), e| (c + 1, b + if e.is_dir { 0 } else { e.size }, f + !e.is_dir as usize));
-        if count > 0 {
-            s.push_str(&format!("   ·   {count} seleccionado{}", if count == 1 { "" } else { "s" }));
-            if files > 0 {
-                s.push_str(&format!("   ·   {}", crate::format::size_short(bytes)));
+        let mut s = if count > 0 {
+            selection_summary(count, (files > 0).then_some(bytes))
+        } else {
+            match self.list.count() {
+                1 => "1 elemento".to_string(),
+                n => format!("{n} elementos"),
             }
+        };
+        if self.loading {
+            s.push_str("   ·   cargando…");
         }
         s
     }
+}
+
+/// Texto de la barra de estado con elementos seleccionados: «3 elementos seleccionados · 4,2 MB».
+/// `file_bytes` es lo que suman los archivos (`None` si solo hay carpetas: no se muestra tamaño).
+pub fn selection_summary(count: usize, file_bytes: Option<u64>) -> String {
+    let mut s = if count == 1 { "1 elemento seleccionado".to_string() } else { format!("{count} elementos seleccionados") };
+    if let Some(b) = file_bytes {
+        s.push_str(" · ");
+        s.push_str(&crate::format::size_short(b));
+    }
+    s
 }
 
 /// Nombre del hijo directo de `parent` en el camino hacia `descendant`.
@@ -497,6 +507,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         sys::file_system().true_case(&dir)
+    }
+
+    /// Texto de la selección en la barra de estado: singular o plural y, si hay archivos, su tamaño.
+    #[test]
+    fn selection_summary_texts() {
+        install_fakes();
+        assert_eq!(selection_summary(1, Some(2048)), format!("1 elemento seleccionado · {}", crate::format::size_short(2048)));
+        assert_eq!(selection_summary(3, None), "3 elementos seleccionados");
     }
 
     /// Una pestaña que se muestra en una carpeta la lee con el `FileSystem` instalado y recibe

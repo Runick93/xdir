@@ -18,6 +18,7 @@ mod panes;
 mod tests;
 
 pub use events::CursorKind;
+pub use fileops::quoted_paths;
 
 use crate::{about, anim, config, jump, list, palette, pane, session, theme, typed, ui};
 use crate::xtree::view::{self as xtree_view, Xtree};
@@ -284,6 +285,8 @@ pub struct App {
     show_group_bar: bool,
     /// Colores por tipo de archivo encendidos (switch de la rueda dentada).
     file_colors: bool,
+    /// Nombres de archivo con su extensión (switch «Mostrar extensiones» de la rueda dentada).
+    show_extensions: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
     /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
@@ -452,6 +455,7 @@ impl App {
             show_favorites: session.show_favorites,
             show_group_bar: session.group_bar,
             file_colors: session.file_colors,
+            show_extensions: session.show_extensions,
             fav_drop: None,
             tab_drop: None,
             ghost: None,

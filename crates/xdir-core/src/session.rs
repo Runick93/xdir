@@ -75,6 +75,8 @@ pub struct Session {
     pub dark_mode: Option<bool>,
     /// Colores por tipo de archivo (reglas de `config.toml`) encendidos.
     pub file_colors: bool,
+    /// Nombres de archivo con su extensión (switch «Mostrar extensiones»).
+    pub show_extensions: bool,
     /// Árbol de carpetas lateral visible (solo con la feature `arbol`).
     pub show_tree: bool,
     /// Árbol fijo al lado de los paneles (si no, queda la franja de íconos y se expande al asomar el mouse).
@@ -105,6 +107,7 @@ impl Default for Session {
             accent: DEFAULT_ACCENT,
             dark_mode: None,
             file_colors: false,
+            show_extensions: true,
             show_tree: true,
             tree_pinned: true,
             quick_open: true,
@@ -145,6 +148,7 @@ fn write(s: &Session) -> String {
     out += &format!("barra_grupos = {}\n", s.group_bar);
     out += &format!("colores_por_tipo = {}
 ", s.file_colors);
+    out += &format!("extensiones = {}\n", s.show_extensions);
     out += &format!("arbol = {}
 ", s.show_tree);
     out += &format!("arbol_fijo = {}
@@ -235,6 +239,7 @@ fn parse(text: &str) -> Session {
             ("panel_activo", None) => s.active_pane = int().unwrap_or(0).max(0) as usize,
             ("ocultos", None) => s.show_hidden = boolean().unwrap_or(false),
             ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(false),
+            ("extensiones", None) => s.show_extensions = boolean().unwrap_or(true),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(true),
             ("arbol_fijo", None) => s.tree_pinned = boolean().unwrap_or(true),
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
@@ -381,6 +386,7 @@ mod tests {
             accent: Accent::Rgb(0xA371F7),
             dark_mode: Some(false),
             file_colors: false,
+            show_extensions: false,
             show_tree: true,
             tree_pinned: false,
             quick_open: true,
@@ -410,6 +416,8 @@ mod tests {
         assert_eq!(parse(&write(&s)), s);
         // Sin la columna del nombre, las de fábrica.
         assert_eq!(parse("columnas = [\"tamano:90\"]\n").columns, default_columns());
+        // Las sesiones de antes (sin la clave) muestran las extensiones.
+        assert!(parse("layout = 2\n").show_extensions);
     }
 
     #[test]

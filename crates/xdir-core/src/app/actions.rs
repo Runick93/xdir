@@ -107,9 +107,9 @@ impl App {
             Command::Cut => self.copy_selection(true),
             Command::Paste => self.paste(),
             Command::CopyPaths => {
-                let text: Vec<String> = self.selection(active).iter().map(|p| format!("\"{}\"", p.display())).collect();
-                if !text.is_empty() {
-                    let _ = sys::shell().copy_text(hwnd, &text.join("\r\n"));
+                let paths = self.selection(active);
+                if !paths.is_empty() {
+                    let _ = sys::shell().copy_text(hwnd, &fileops::quoted_paths(&paths));
                 }
             }
             Command::Undo => {

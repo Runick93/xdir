@@ -325,6 +325,8 @@ pub enum PickerHit {
     DarkMode,
     /// Switch de los colores por tipo de archivo.
     FileColors,
+    /// Switch «Mostrar extensiones» (nombres de archivo con su extensión).
+    Extensions,
     /// Switch de la barra de pestañas de grupos.
     GroupBar,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
@@ -342,9 +344,10 @@ const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
 const PICKER_SEP_H: f32 = 13.0;
 
-/// Switches del panel: modo oscuro, colores por tipo, barra de grupos y, si se compiló, el árbol.
+/// Switches del panel: modo oscuro, colores por tipo, extensiones, barra de grupos y, si se
+/// compiló, el árbol.
 fn switch_rows() -> usize {
-    3 + usize::from(cfg!(feature = "arbol"))
+    4 + usize::from(cfg!(feature = "arbol"))
 }
 
 /// Panel flotante sobre la rueda dentada.
@@ -373,7 +376,7 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     out.push((PickerHit::System, rect(l, y, r, y + PICKER_BTN_H)));
     out.push((PickerHit::Custom, rect(l, y + PICKER_BTN_H, r, y + PICKER_BTN_H * 2.0)));
     let y = y + PICKER_BTN_H * 2.0 + PICKER_SEP_H;
-    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors, PickerHit::GroupBar];
+    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors, PickerHit::Extensions, PickerHit::GroupBar];
     if cfg!(feature = "arbol") {
         kinds.push(PickerHit::Tree);
     }
@@ -394,7 +397,7 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, group_bar: bool, tree: bool) {
+pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, extensions: bool, group_bar: bool, tree: bool) {
     let th = p.theme();
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
@@ -442,13 +445,14 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                     p.text(FontId::GlyphsSmall, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
                 }
             }
-            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::GroupBar | PickerHit::Tree => {
+            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::Extensions | PickerHit::GroupBar | PickerHit::Tree => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
                 let (glyph, label, on) = match kind {
                     PickerHit::DarkMode => ("\u{E708}", "Modo oscuro", th.dark),
                     PickerHit::FileColors => ("\u{E790}", "Colores por tipo", file_colors),
+                    PickerHit::Extensions => ("\u{E8EC}", "Mostrar extensiones", extensions),
                     PickerHit::GroupBar => ("\u{E8A9}", "Barra de grupos", group_bar),
                     _ => ("\u{E8B7}", "Árbol de carpetas", tree),
                 };

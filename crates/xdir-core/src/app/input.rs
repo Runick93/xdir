@@ -179,6 +179,7 @@ impl App {
                 self.file_colors = !self.file_colors;
                 self.redraw();
             }
+            Hit::Picker(ui::PickerHit::Extensions) => self.set_show_extensions(!self.show_extensions),
             Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),

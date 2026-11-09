@@ -1243,3 +1243,138 @@ fn startup_args_folder_only() {
     assert_eq!(parse_args(&args(&[&missing.to_string_lossy()])), (false, None, None));
     assert_eq!(parse_args(&[]), (false, None, None));
 }
+
+// ---------- tanda A: selección, copiar como ruta, extensiones ----------
+
+/// Espera a que la pestaña activa del panel 0 termine de leer su carpeta (lo que haría el
+/// `WM_APP_LOAD` en la ventana).
+fn wait_loaded(a: &mut App) {
+    while a.panes[0].tab().loading {
+        let ev = a.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la carga termina");
+        if let Some(tab) = a.tab_by_id(ev.panel) {
+            tab.on_load(ev);
+        }
+    }
+}
+
+/// Con algo seleccionado la barra de estado dice cuántos y cuánto pesan los archivos; las
+/// carpetas no suman y, si solo hay carpetas, no hay tamaño.
+#[test]
+fn status_shows_selection_size() {
+    let (mut a, dir) = app_in("seleccion-tamano");
+    std::fs::write(dir.join("uno.bin"), vec![0u8; 1000]).unwrap();
+    std::fs::write(dir.join("tres.bin"), vec![0u8; 3000]).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().reload(hwnd, &tx, true);
+    wait_loaded(&mut a);
+    a.set_active(0);
+    let list = &mut a.panes[0].tab_mut().list;
+    assert_eq!(list.count(), 3);
+    list.select_all();
+    let status = a.panes[0].tab().status();
+    assert!(status.starts_with("3 elementos seleccionados"), "{status}");
+    assert!(status.contains(&crate::format::size_short(4000)), "{status}");
+    let list = &mut a.panes[0].tab_mut().list;
+    let sub = list.entries.iter().position(|e| e.is_dir).unwrap();
+    list.select_index(sub);
+    let status = a.panes[0].tab().status();
+    assert!(status.starts_with("1 elemento seleccionado"), "{status}");
+    assert!(!status.contains(" · "), "{status}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// «Copiar como ruta de acceso» del menú contextual de los elementos copia la selección entre
+/// comillas, una ruta por línea.
+#[test]
+fn copy_as_path_quotes() {
+    use crate::sys::testing::{FakeShell, ShellCall};
+    let mut a = app();
+    let dir = std::env::temp_dir().join("xdir-tests").join("copiar-como-ruta");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    let list = &mut a.panes[0].tab_mut().list;
+    list.append(vec![file_entry("a.txt"), file_entry("b.txt")]);
+    list.select_all();
+    // Primer menú: se mira qué entradas propias trae y no se elige nada.
+    FakeShell::choose(None);
+    FakeShell::take_calls();
+    a.on_context_menu(Some((10.0, 20.0)));
+    let calls = FakeShell::take_calls();
+    let [ShellCall::ContextMenu { items, own, .. }] = calls.as_slice() else { panic!("se esperaba un menú: {calls:?}") };
+    assert_eq!(items.len(), 2);
+    let id = own
+        .iter()
+        .find_map(|e| match e {
+            shell::Entry::Item { id, label, .. } if label == "Copiar como ruta de acceso" => Some(*id),
+            _ => None,
+        })
+        .expect("falta «Copiar como ruta de acceso»");
+    // Segundo menú: se elige la entrada.
+    FakeShell::choose(Some(&format!("own:{id}")));
+    a.on_context_menu(Some((10.0, 20.0)));
+    FakeShell::choose(None);
+    let copied: Vec<String> = FakeShell::take_calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            ShellCall::CopyText(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let [text] = copied.as_slice() else { panic!("se esperaba una copia: {copied:?}") };
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, [format!("\"{}\"", dir.join("a.txt").display()), format!("\"{}\"", dir.join("b.txt").display())]);
+    assert_eq!(*text, quoted_paths(&[dir.join("a.txt"), dir.join("b.txt")]));
+}
+
+/// Punto del panel de la rueda dentada sobre un elemento.
+fn picker_point(a: &App, want: ui::PickerHit) -> (f32, f32) {
+    let (w, h) = a.client_dips();
+    let r = ui::picker_rect(w, h);
+    let x = (r.left + r.right) / 2.0;
+    let mut y = r.top;
+    while y < r.bottom {
+        if ui::picker_at(w, h, x, y) == Some(want) {
+            return (x, y);
+        }
+        y += 1.0;
+    }
+    panic!("no se encontró {want:?}");
+}
+
+/// El switch «Mostrar extensiones» se apaga desde la rueda dentada, se guarda en la sesión y, apagado,
+/// la lista dibuja los nombres de archivo sin la extensión.
+#[test]
+fn extensions_switch_persists() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    assert!(a.show_extensions, "prendido por defecto");
+    a.picker_open = true;
+    a.paint();
+    assert!(host.drawn_texts().iter().any(|(_, s, _)| s == "Mostrar extensiones"));
+    let at = picker_point(&a, ui::PickerHit::Extensions);
+    click(&mut a, at);
+    assert!(!a.show_extensions);
+    assert!(a.panes.iter().flat_map(|p| p.tabs.iter()).all(|t| !t.list.show_extensions));
+    let s = a.session();
+    assert!(!s.show_extensions);
+    session::save(&s).unwrap();
+    let loaded = session::load().expect("sesión guardada");
+    assert!(!loaded.show_extensions);
+    let mut init = Init::blank();
+    init.session = loaded;
+    let host = FakeHost::new();
+    let mut b = app_with_host(init, host.clone());
+    assert!(!b.show_extensions);
+    // Las pestañas nuevas también nacen sin extensiones.
+    b.new_tab(0, Location::Computer, true);
+    assert!(!b.panes[0].tab().list.show_extensions);
+    let dir = xtree_dir("extensiones");
+    let (hwnd, tx) = (b.hwnd, b.tx.clone());
+    b.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
+    b.set_active(0);
+    b.panes[0].tab_mut().list.replace(vec![file_entry("foto.jpg")]);
+    b.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|s| s == "foto"), "{texts:?}");
+    assert!(!texts.iter().any(|s| s == "foto.jpg"), "{texts:?}");
+}

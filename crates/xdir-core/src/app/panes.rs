@@ -18,6 +18,7 @@ impl App {
         self.next_tab_id += 1;
         let mut tab = Tab::new(id, location, self.show_hidden);
         tab.list.columns = self.columns.clone();
+        tab.list.show_extensions = self.show_extensions;
         tab
     }
 
@@ -214,6 +215,7 @@ impl App {
             show_favorites: self.show_favorites,
             group_bar: self.show_group_bar,
             file_colors: self.file_colors,
+            show_extensions: self.show_extensions,
             show_tree: self.tree_visible(),
             tree_pinned: self.tree_pinned(),
             quick_open: self.tree_quick_open(),

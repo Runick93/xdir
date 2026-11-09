@@ -155,6 +155,19 @@ fn attr_letters(attrs: u32) -> String {
         .collect()
 }
 
+/// Nombre que se muestra de un elemento: con `show_ext` apagado, los archivos sin su extensión
+/// (lo que sigue al último punto, si ese punto no es el primer carácter); las carpetas, completas.
+/// Ordenar y renombrar siguen usando el nombre completo.
+pub fn display_name(name: &str, is_dir: bool, show_ext: bool) -> &str {
+    if show_ext || is_dir {
+        return name;
+    }
+    match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    }
+}
+
 /// Extensión en minúsculas (sin punto); vacía para carpetas.
 fn extension_of(e: &Entry) -> &str {
     if e.is_dir {
@@ -207,6 +220,8 @@ pub struct FileList {
     pub sort: Column,
     pub descending: bool,
     pub show_hidden: bool,
+    /// Nombres de archivo con su extensión (el switch «Mostrar extensiones»; lo fija la `App`).
+    pub show_extensions: bool,
     hover: Option<usize>,
     typeahead: String,
     typeahead_at: Option<Instant>,
@@ -291,6 +306,7 @@ impl Default for FileList {
             sort: Column::Name,
             descending: false,
             show_hidden: false,
+            show_extensions: true,
             hover: None,
             typeahead: String::new(),
             typeahead_at: None,
@@ -341,7 +357,15 @@ impl FileList {
     /// Vacía la lista (navegación a otra carpeta).
     pub fn clear(&mut self) {
         let (columns, view) = (std::mem::take(&mut self.columns), self.view);
-        *self = Self { sort: self.sort, descending: self.descending, show_hidden: self.show_hidden, columns, view, ..Default::default() };
+        *self = Self {
+            sort: self.sort,
+            descending: self.descending,
+            show_hidden: self.show_hidden,
+            show_extensions: self.show_extensions,
+            columns,
+            view,
+            ..Default::default()
+        };
     }
 
     /// Agrega un lote durante la carga progresiva. Solo se ordena el lote nuevo y se mezcla
@@ -798,9 +822,9 @@ impl FileList {
     }
 
     /// Texto de una celda de una columna que no es el nombre (para medirla).
-    fn cell_text(col: Column, e: &Entry, root: Option<&std::path::Path>) -> String {
+    fn cell_text(col: Column, e: &Entry, root: Option<&std::path::Path>, show_ext: bool) -> String {
         match col {
-            Column::Name => e.display.clone(),
+            Column::Name => display_name(&e.display, e.is_dir, show_ext).to_string(),
             Column::Modified => format::date(e.modified),
             Column::Created => format::date(e.created),
             Column::Type => e.type_name.to_string(),
@@ -825,7 +849,7 @@ impl FileList {
         let col = self.columns[index].col;
         // Solo se miden los textos más largos: medir cada fila de una carpeta enorme sería lento.
         let root = self.search_root.as_deref();
-        let mut texts: Vec<String> = self.visible.iter().map(|&v| Self::cell_text(col, &self.entries[v as usize], root)).collect();
+        let mut texts: Vec<String> = self.visible.iter().map(|&v| Self::cell_text(col, &self.entries[v as usize], root, self.show_extensions)).collect();
         texts.sort_unstable_by_key(|t| std::cmp::Reverse(t.chars().count()));
         texts.dedup();
         let widest = texts.iter().take(40).map(|t| measure(t, false)).fold(0.0, f32::max);
@@ -1428,8 +1452,9 @@ impl FileList {
                             let iy = y + (ROW_H - ICON) / 2.0;
                             p.shell_icon(e.icon, e.overlay, cell.left, iy, ICON);
                             let text = rect(cell.left + ICON + 8.0, y, cell.right, y + ROW_H);
-                            p.text(FontId::Ui, &e.display, text, color);
-                            ends.push(text.left + p.measure(FontId::Ui, &e.display) + 6.0);
+                            let name = display_name(&e.display, e.is_dir, self.show_extensions);
+                            p.text(FontId::Ui, name, text, color);
+                            ends.push(text.left + p.measure(FontId::Ui, name) + 6.0);
                         }
                         Column::Modified => p.text(FontId::Ui, &format::date(e.modified), cell, th.text_secondary),
                         Column::Created => p.text(FontId::Ui, &format::date(e.created), cell, th.text_secondary),
@@ -1489,7 +1514,7 @@ impl FileList {
             p.shell_icon(e.icon, e.overlay, ix, iy, small);
         }
         let label = rect(cell.left + 4.0, image.bottom + 4.0, cell.right - 4.0, cell.bottom - 2.0);
-        p.text(FontId::Label, &e.display, label, color);
+        p.text(FontId::Label, display_name(&e.display, e.is_dir, self.show_extensions), label, color);
     }
 }
 
@@ -1731,6 +1756,21 @@ mod column_tests {
         l.toggle_column(Column::Name);
         assert!(l.columns.iter().any(|c| c.col == Column::Name));
         assert_eq!(attr_letters(0x1 | 0x2 | 0x20), "RHA");
+    }
+
+    /// Sin extensiones se oculta lo que sigue al último punto de los archivos; los nombres que
+    /// empiezan con punto y las carpetas se muestran completos.
+    #[test]
+    fn display_name_hides_extension() {
+        assert_eq!(display_name("foto.jpg", false, false), "foto");
+        assert_eq!(display_name("a.tar.gz", false, false), "a.tar");
+        assert_eq!(display_name(".gitignore", false, false), ".gitignore");
+        assert_eq!(display_name("archivo.", false, false), "archivo");
+        assert_eq!(display_name("sin", false, false), "sin");
+        assert_eq!(display_name("x.d", true, false), "x.d");
+        for (name, is_dir) in [("foto.jpg", false), ("a.tar.gz", false), (".gitignore", false), ("archivo.", false), ("sin", false), ("x.d", true)] {
+            assert_eq!(display_name(name, is_dir, true), name);
+        }
     }
 
     /// La columna Tamaño va alineada a la derecha: su texto usa `FontId::UiRight`.

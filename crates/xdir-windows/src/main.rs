@@ -35,7 +35,7 @@ fn main() -> windows::core::Result<()> {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("xdir solo funciona en Windows");
+    eprintln!("xdir-windows solo funciona en Windows");
 }
 
 // Fuera de Windows igual corren las pruebas que no tocan el sistema: el nombre del temporal del

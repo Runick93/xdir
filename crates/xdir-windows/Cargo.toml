@@ -1,7 +1,11 @@
 [package]
-name = "xdir"
+name = "xdir-windows"
 version.workspace = true
 edition.workspace = true
+
+[[bin]]
+name = "xdir-windows"
+path = "src/main.rs"
 
 [dependencies]
 xdir-core = { path = "../xdir-core" }

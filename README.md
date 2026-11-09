@@ -64,17 +64,17 @@ Para compilarlo necesitás Rust (`rustup`).
 En **Windows**, además, Visual Studio Build Tools con el Windows SDK:
 
 ```bat
-scripts\build.cmd                  :: compilar
-scripts\build.cmd run --release    :: compilar y ejecutar
-scripts\build.cmd test --release   :: correr los tests
+scripts\build.cmd                                  :: compilar
+scripts\build.cmd run --release -p xdir-windows    :: compilar y ejecutar
+scripts\build.cmd test --release                   :: correr los tests
 ```
 
-El ejecutable queda en `target\release\xdir.exe`.
+El ejecutable queda en `target\release\xdir-windows.exe` (los paquetes lo copian como `xdir.exe`).
 
 En **macOS**, las herramientas de línea de comandos de Xcode (`xcode-select --install`):
 
 ```sh
-cargo run --release              # compilar y ejecutar
+cargo run --release -p xdir-mac  # compilar y ejecutar
 cargo test                       # correr los tests
 sh scripts/package-mac.sh        # xdir.app universal y el .dmg en dist/
 ```
@@ -82,8 +82,8 @@ sh scripts/package-mac.sh        # xdir.app universal y el .dmg en dist/
 Desde una Mac también se puede verificar que la versión de Windows compile:
 `rustup target add x86_64-pc-windows-msvc && cargo check --target x86_64-pc-windows-msvc`.
 
-El código propio de cada sistema está separado: `crates/xdir/src/platform`, y en `fs`, `shell`, `ops`, `icons`,
+El código propio de cada sistema está separado: `crates/xdir-windows/src/platform`, y en `fs`, `shell`, `ops`, `icons`,
 `thumbs`, `render` y `drop` un `win32.rs` y un `macos.rs` con la misma interfaz; la ventana está en
-`crates/xdir/src/app/host_win.rs` (Windows) y `crates/xdir/src/app/host_mac.rs` (macOS), con el arranque
+`crates/xdir-windows/src/app/host_win.rs` (Windows) y `crates/xdir-mac/src/app/host_mac.rs` (macOS), con el arranque
 y los mensajes en `app/win.rs` y `app/mac.rs`. El dibujo, la lista, los paneles, las pestañas, el árbol,
 la paleta, xtree, la configuración y la sesión viven en `crates/xdir-core`, sin código de ningún sistema.

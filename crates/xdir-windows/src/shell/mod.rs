@@ -6,8 +6,6 @@
 //! menú abierto) se usa directo desde `shell::win32`.
 
 pub use xdir_core::shell::{Entry, Item};
-#[cfg(windows)]
 pub use xdir_core::shell::UNPIN_QUICK;
 
-#[cfg(windows)]
 pub mod win32;

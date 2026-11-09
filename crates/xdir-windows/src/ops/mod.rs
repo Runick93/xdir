@@ -4,9 +4,6 @@
 
 pub use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 
-#[cfg(windows)]
 mod win32;
-#[cfg(windows)]
 pub use self::win32::item;
-#[cfg(windows)]
 pub(crate) use self::win32::spawn as spawn_native;

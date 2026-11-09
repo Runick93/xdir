@@ -1,5 +1,6 @@
-# Tests en Windows, macOS y (solo el núcleo) Linux en cada PR, y una prueba de humo en Windows que abre la app compilada
-# con `--features pruebas` y la maneja por WM_COPYDATA (scripts/humo.ps1).
+# Tests en Windows, macOS y Linux (ahí las crates de Windows y macOS compilan vacías) en cada PR, y
+# una prueba de humo en Windows que abre la app compilada con `--features pruebas` y la maneja por
+# WM_COPYDATA (scripts/humo.ps1).
 name: CI
 
 on:
@@ -39,7 +40,7 @@ jobs:
 
       - name: Prueba de humo
         shell: pwsh
-        run: ./scripts/humo.ps1 -Exe target\debug\xdir.exe -Out humo
+        run: ./scripts/humo.ps1 -Exe target\debug\xdir-windows.exe -Out humo
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -80,8 +81,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Tests del núcleo
-        run: cargo test --locked -p xdir-core
+      - name: Tests
+        run: cargo test --locked
 
   estilo:
     runs-on: ubuntu-latest

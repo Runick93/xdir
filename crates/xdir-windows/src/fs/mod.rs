@@ -10,12 +10,9 @@
 
 pub use xdir_core::fs::{Entry, LoadEvent, LoadMsg, Location, QuickItem, WM_APP_LOAD};
 
-#[cfg(windows)]
 pub(crate) mod win32;
-#[cfg(windows)]
 pub use self::win32::{XTREE_HELPER_ARG, quick_access_item, wide_path, xtree_helper_main};
 
 // Nombre del temporal del ayudante elevado de xtree (fuera de Windows sus pruebas las incluye
 // `main.rs`).
-#[cfg(any(windows, test))]
 mod xtree_temp;

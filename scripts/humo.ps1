@@ -2,9 +2,9 @@
 # WM_COPYDATA (layouts, paleta, panel de favoritos, xtree, aviso), captura la ventana y la cierra.
 # Falla si no aparece la ventana, si un comando no responde 1, si el proceso muere o si no sale con 0.
 # Una captura vacía solo avisa (en runners sin GPU puede salir en blanco).
-# Uso: pwsh scripts/humo.ps1 [-Exe target\debug\xdir.exe] [-Out humo]
+# Uso: pwsh scripts/humo.ps1 [-Exe target\debug\xdir-windows.exe] [-Out humo]
 param(
-    [string]$Exe = 'target\debug\xdir.exe',
+    [string]$Exe = 'target\debug\xdir-windows.exe',
     [string]$Out = 'humo'
 )
 

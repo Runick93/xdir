@@ -4,9 +4,7 @@
 //! Lo propio de Windows está en `win32` y se reexporta acá; el resto del programa solo usa lo de
 //! este módulo.
 
-#[cfg(windows)]
 mod win32;
-#[cfg(windows)]
 pub use self::win32::*;
 
 pub use xdir_core::WM_APP;

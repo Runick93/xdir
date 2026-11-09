@@ -40,6 +40,8 @@ impl App {
         let now = Instant::now();
         let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
         #[cfg(feature = "arbol")]
+        self.follow_tree();
+        #[cfg(feature = "arbol")]
         let tree_animating = self.tree.tick(dt);
         #[cfg(not(feature = "arbol"))]
         let tree_animating = false;

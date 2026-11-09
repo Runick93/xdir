@@ -221,6 +221,17 @@ pub struct Tree {
     rx: Receiver<(usize, Vec<(String, PathBuf)>)>,
     qtx: Sender<Vec<QuickItem>>,
     qrx: Receiver<Vec<QuickItem>>,
+    /// Carpeta que se está revelando: se sigue bajando a medida que llegan las lecturas.
+    reveal: Option<Reveal>,
+    /// Nodo que el próximo cuadro deja a la vista (desplazando lo justo).
+    scroll_to: Option<usize>,
+}
+
+/// Revelación pendiente (`Tree::reveal`).
+struct Reveal {
+    hwnd: Handle,
+    path: PathBuf,
+    show_hidden: bool,
 }
 
 impl Tree {
@@ -257,6 +268,8 @@ impl Tree {
             rx,
             qtx,
             qrx,
+            reveal: None,
+            scroll_to: None,
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
         t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
@@ -526,6 +539,81 @@ impl Tree {
             n.children = Some(ids);
             n.loading = false;
         }
+        self.advance_reveal();
+    }
+
+    // ---------- seguir al panel ----------
+
+    /// Despliega las carpetas padre de `path` y la deja a la vista. Solo si está bajo una raíz
+    /// del árbol (una unidad o una carpeta del usuario); si no (red, comprimido, "Este equipo"),
+    /// no hace nada. Las carpetas que falta leer se leen en otro hilo y se sigue en `on_loaded`;
+    /// recién al encontrar la rama completa se despliega (una carpeta que ya no existe no
+    /// despliega nada). Una revelación nueva reemplaza a la pendiente.
+    pub fn reveal(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
+        self.reveal = None;
+        // Ya hay una fila a la vista con esa carpeta (una del usuario, una del Acceso rápido, la
+        // que se acaba de tocar): solo se desplaza hasta ella, sin desplegar otra rama.
+        let fs = crate::sys::file_system();
+        let shown = self.rows().into_iter().find(|&id| {
+            matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path)
+        });
+        if let Some(id) = shown {
+            self.scroll_to = Some(id);
+            return;
+        }
+        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden });
+        self.advance_reveal();
+    }
+
+    /// Carpeta que se está revelando (esperando lecturas), si hay una.
+    pub fn revealing(&self) -> Option<&Path> {
+        self.reveal.as_ref().map(|r| r.path.as_path())
+    }
+
+    /// Baja por el árbol hacia la carpeta pendiente con lo que ya está leído: pide la lectura que
+    /// falte (y espera) o, si llegó, despliega la rama y la deja a la vista.
+    fn advance_reveal(&mut self) {
+        let Some(r) = self.reveal.take() else { return };
+        let fs = crate::sys::file_system();
+        // Raíces con ruta de disco: las carpetas del usuario, OneDrive y las unidades (dentro de
+        // "Este equipo"). Gana la más profunda que contiene la ruta (Documentos antes que C:\).
+        let computer = self.roots.iter().copied().find(|&id| self.nodes[id].kind == Kind::Computer);
+        let drives = computer.and_then(|c| self.nodes[c].children.clone()).unwrap_or_default();
+        let candidates = self.roots.iter().copied().filter(|&id| matches!(self.nodes[id].kind, Kind::Pinned | Kind::Cloud)).chain(drives);
+        let Some(root) = candidates
+            .filter(|&id| !self.nodes[id].path.as_os_str().is_empty() && is_under(&self.nodes[id].path, &r.path))
+            .max_by_key(|&id| self.nodes[id].path.components().count())
+        else {
+            return;
+        };
+        // Los que hay que desplegar para que se vea la carpeta.
+        let mut chain = Vec::new();
+        if self.nodes[root].kind == Kind::Drive {
+            chain.extend(computer);
+        }
+        let mut id = root;
+        loop {
+            if fs.same_path(&self.nodes[id].path, &r.path) {
+                for a in chain {
+                    self.nodes[a].expanded = true;
+                }
+                self.scroll_to = Some(id);
+                return;
+            }
+            let next = match &self.nodes[id].children {
+                Some(children) => children.iter().copied().find(|&c| is_under(&self.nodes[c].path, &r.path)),
+                None => {
+                    // Falta leer esta carpeta: se pide y se sigue cuando llegue.
+                    self.load_children(r.hwnd, id, r.show_hidden);
+                    self.reveal = Some(r);
+                    return;
+                }
+            };
+            // Sin la subcarpeta (se borró, está oculta o no es una carpeta): no se despliega nada.
+            let Some(next) = next else { return };
+            chain.push(id);
+            id = next;
+        }
     }
 
     // ---------- mouse ----------
@@ -749,6 +837,23 @@ impl Tree {
         self.content_w = content_w;
         self.view_w = view_w;
         self.view_h = view_h;
+        // La carpeta revelada: se desplaza lo justo para que su fila (y el comienzo de su nombre)
+        // quede a la vista.
+        if let Some(i) = self.scroll_to.take().and_then(|id| rows.iter().position(|&r| r == id)) {
+            let top = i as f32 * ROW_H;
+            let rows_h = view_h - TOP_PAD;
+            if top < self.scroll {
+                self.scroll = top;
+            } else if top + ROW_H > self.scroll + rows_h {
+                self.scroll = top + ROW_H - rows_h;
+            }
+            let x = SIDE + 2.0 + self.nodes[rows[i]].depth as f32 * INDENT;
+            if x < self.hscroll {
+                self.hscroll = (x - SIDE).max(0.0);
+            } else if x + 120.0 > self.hscroll + view_w {
+                self.hscroll = x + 120.0 - view_w;
+            }
+        }
         self.scroll = self.scroll.clamp(0.0, (total_h - view_h).max(0.0));
         self.hscroll = self.hscroll.clamp(0.0, if allow_h { (content_w - view_w).max(0.0) } else { 0.0 });
         let hs = self.hscroll;
@@ -848,6 +953,14 @@ impl Tree {
     }
 }
 
+/// ¿Está `path` dentro de `base` (o es la misma)? Tramo por tramo, comparando cada uno como el
+/// sistema (sin distinguir mayúsculas en Windows), sin tocar el disco.
+fn is_under(base: &Path, path: &Path) -> bool {
+    let fs = crate::sys::file_system();
+    let mut tail = path.components();
+    base.components().all(|b| tail.next().is_some_and(|c| c == b || fs.same_path(Path::new(b.as_os_str()), Path::new(c.as_os_str()))))
+}
+
 /// Subcarpetas ordenadas por nombre (sin las ocultas, salvo que se muestren).
 fn subfolders(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
     let Ok(reader) = std::fs::read_dir(path) else { return Vec::new() };
@@ -880,5 +993,106 @@ mod tests {
             .map(|n| (n.name.as_str(), n.path.as_path()))
             .collect();
         assert_eq!(drives, [("Disco A", Path::new("/unidad-a")), ("Disco B", Path::new("/unidad-b"))]);
+    }
+
+    /// Carpeta temporal propia de una prueba, como la nombra el sistema de archivos instalado.
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdir-tree-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::sys::file_system().true_case(&dir)
+    }
+
+    /// Árbol con `root` como única unidad.
+    fn tree_with_drive(root: &Path) -> Tree {
+        FakeFileSystem::set_drives(&[(root, "Disco")]);
+        let t = Tree::new();
+        FakeFileSystem::set_drives(&[]);
+        t
+    }
+
+    /// Aplica las lecturas del árbol hasta que no quede una revelación pendiente.
+    fn finish_reveal(t: &mut Tree) {
+        let start = std::time::Instant::now();
+        while t.revealing().is_some() {
+            assert!(start.elapsed().as_secs() < 10, "la revelación no terminó");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            t.on_loaded();
+        }
+    }
+
+    fn node_by_path<'a>(t: &'a Tree, path: &Path) -> Option<&'a Node> {
+        t.nodes.iter().find(|n| n.kind == Kind::Folder && n.path == path)
+    }
+
+    fn expanded_flags(t: &Tree) -> Vec<bool> {
+        t.nodes.iter().map(|n| n.expanded).collect()
+    }
+
+    /// Revelar una carpeta anidada bajo una unidad despliega sus carpetas padre (leyéndolas) y,
+    /// al dibujar, la fila queda dentro del área visible aunque el área sea chica.
+    #[test]
+    fn tree_reveal_expands_ancestors() {
+        install_fakes();
+        let root = temp_root("revelar");
+        let target = root.join("alfa").join("beta").join("gama");
+        std::fs::create_dir_all(&target).unwrap();
+        for i in 0..8 {
+            std::fs::create_dir_all(root.join("alfa").join(format!("aa{i}"))).unwrap();
+        }
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        let alfa = node_by_path(&t, &root.join("alfa")).expect("se leyó alfa");
+        let beta = node_by_path(&t, &root.join("alfa").join("beta")).expect("se leyó beta");
+        assert!(alfa.expanded && beta.expanded);
+        let drive = t.nodes.iter().find(|n| n.kind == Kind::Drive).unwrap();
+        assert!(drive.expanded, "la unidad también se despliega");
+        assert!(node_by_path(&t, &target).is_some_and(|n| !n.expanded), "la carpeta misma no se despliega");
+
+        // Un área de pocas filas: hay que desplazarse para ver «gama».
+        let area = rect(0.0, 0.0, 240.0, 200.0);
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, Some(&target));
+        assert!(t.scroll > 0.0, "se desplazó");
+        let texts = p.texts();
+        let (_, _, r) = texts.iter().find(|(_, s, _)| s == "gama").expect("se dibujó gama");
+        assert!(r.top >= area.top + TOP_PAD - 0.01 && r.bottom <= area.bottom + 0.01, "{r:?}");
+
+        // Ya a la vista: no se vuelve a leer ni a desplegar nada.
+        let flags = expanded_flags(&t);
+        t.reveal(Handle(0), &root.join("alfa"), false);
+        assert!(t.revealing().is_none());
+        assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Una ruta que no está bajo ninguna raíz (otra carpeta, una ubicación del Shell) no cambia
+    /// nada; una que no existe bajo una unidad tampoco despliega nada.
+    #[test]
+    fn tree_reveal_ignores_paths_outside_roots() {
+        install_fakes();
+        let root = temp_root("fuera");
+        std::fs::create_dir_all(root.join("uno")).unwrap();
+        let mut t = tree_with_drive(&root);
+        let before = expanded_flags(&t);
+        t.reveal(Handle(0), &root.with_file_name("xdir-tree-otra-raiz").join("x"), false);
+        assert!(t.revealing().is_none());
+        t.reveal(Handle(0), Path::new("::{red}"), false);
+        assert!(t.revealing().is_none());
+        assert_eq!(expanded_flags(&t), before);
+
+        t.reveal(Handle(0), &root.join("uno").join("no-existe"), false);
+        finish_reveal(&mut t);
+        assert_eq!(expanded_flags(&t)[..before.len()], before[..], "sin la rama completa no se despliega nada");
+        assert!(node_by_path(&t, &root.join("uno")).is_some_and(|n| !n.expanded));
+
+        // Una revelación nueva reemplaza a la pendiente.
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &root.join("uno").join("no-existe"), false);
+        t.reveal(Handle(0), &root.join("uno"), false);
+        assert_eq!(t.revealing(), Some(root.join("uno").as_path()));
+        finish_reveal(&mut t);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

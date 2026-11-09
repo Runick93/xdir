@@ -157,6 +157,7 @@ impl App {
         self.fav_ctx = None;
         self.header_ctx = None;
         self.term_ctx = None;
+        self.history_ctx = None;
         // Clic derecho en la vista de xtree: sube a la carpeta superior (no hay menú).
         if self.xtree_open {
             if self.hit(x, y) == Hit::XtreeView {
@@ -184,6 +185,10 @@ impl App {
                     self.term_ctx = Some((pane, c));
                 }
             }
+            Hit::Pane(i, PaneHit::Button(b @ (Button::Back | Button::Forward))) => {
+                self.set_active(i);
+                self.history_ctx = Some((i, b == Button::Forward));
+            }
             Hit::Pane(i, PaneHit::Fav(j)) => self.fav_ctx = Some((i, Some(vec![j]))),
             Hit::Pane(i, PaneHit::FavBar | PaneHit::FavOverflow) => self.fav_ctx = Some((i, None)),
             _ => {}
@@ -199,6 +204,10 @@ impl App {
         }
         if let Some(pane) = self.header_ctx.take().filter(|_| at.is_some()) {
             self.show_columns_menu(pane, at.unwrap());
+            return;
+        }
+        if let Some((pane, forward)) = self.history_ctx.take().filter(|_| at.is_some()) {
+            self.history_menu(pane, forward);
             return;
         }
         if let Some((pane, console)) = self.term_ctx.take().filter(|_| at.is_some()) {

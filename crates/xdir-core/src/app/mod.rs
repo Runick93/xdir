@@ -273,6 +273,9 @@ pub struct App {
     // Solo lo usa el árbol (feature `arbol`).
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     tree_ctx: Option<Option<PathBuf>>,
+    /// Carpeta del panel activo que el árbol ya siguió (`follow_tree`); None: ninguna todavía.
+    #[cfg(feature = "arbol")]
+    tree_followed: Option<Location>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
@@ -318,6 +321,8 @@ pub struct App {
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
     term_ctx: Option<(usize, Console)>,
+    /// Clic derecho sobre Atrás (false) o Adelante (true) de este panel: su menú del historial.
+    history_ctx: Option<(usize, bool)>,
     /// Mapa de uso de disco: se crea al abrirlo y sigue vivo (con su escaneo) al cerrarlo.
     xtree: Option<Xtree>,
     /// La vista de xtree tapa los paneles.
@@ -448,6 +453,8 @@ impl App {
             group_rename: None,
             quick_watch: None,
             tree_ctx: None,
+            #[cfg(feature = "arbol")]
+            tree_followed: None,
             groups_menu_closed: None,
             palette: None,
             #[cfg(feature = "arbol")]
@@ -472,6 +479,7 @@ impl App {
             about_open: false,
             term_menu: None,
             term_ctx: None,
+            history_ctx: None,
             xtree: None,
             xtree_open: false,
         };

@@ -291,6 +291,35 @@ impl App {
         }
     }
 
+    /// Menú del historial de Atrás (o Adelante) de la pestaña activa del panel: hasta
+    /// `HISTORY_MENU_MAX` carpetas, la más cercana primero. Elegir la i-ésima equivale a apretar
+    /// el botón i veces.
+    pub(super) fn history_menu(&mut self, pane: usize, forward: bool) {
+        let tab = self.panes[pane].tab();
+        let list = if forward { tab.forward_list(HISTORY_MENU_MAX) } else { tab.back_list(HISTORY_MENU_MAX) };
+        if list.is_empty() {
+            return;
+        }
+        let entries: Vec<shell::Entry> = list
+            .iter()
+            .enumerate()
+            .map(|(i, loc)| shell::Entry::Item { id: i as u32 + 1, label: loc.title(), enabled: true, checked: false })
+            .collect();
+        let Some(id) = self.host.popup_menu(&entries, MenuPos::Cursor, None, None) else { return };
+        let n = id as usize;
+        if n == 0 || n > list.len() {
+            return;
+        }
+        let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        let tab = self.panes[pane].tab_mut();
+        if forward {
+            tab.go_forward_n(n, hwnd, &tx);
+        } else {
+            tab.go_back_n(n, hwnd, &tx);
+        }
+        self.redraw();
+    }
+
     pub(super) fn apply(&mut self, pane: usize, action: Action) {
         match action {
             Action::None => return,
@@ -320,6 +349,9 @@ impl App {
         self.host.cursor_dips()
     }
 }
+
+/// Máximo de carpetas en el menú del historial de Atrás y Adelante.
+const HISTORY_MENU_MAX: usize = 15;
 
 /// Comandos que se pueden usar con la vista de xtree abierta sin cerrarla: no tocan los paneles
 /// (o solo abren la paleta, y lo que se elija ahí decide).

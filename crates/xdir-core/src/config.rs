@@ -54,6 +54,9 @@ pub struct Config {
     /// `[opciones] animaciones`: forzar las animaciones sutiles (scroll suave, transición de layout)
     /// o apagarlas. Sin la opción, se sigue la preferencia de Windows.
     pub animations: Option<bool>,
+    /// `[opciones] arbol_sigue_panel`: el árbol de carpetas despliega y muestra la carpeta del
+    /// panel activo cuando cambia (por defecto, sí).
+    pub tree_follows_pane: bool,
     /// Problemas al leer el archivo, para avisar en la barra de estado.
     pub errors: Vec<String>,
     /// Fecha del archivo leído, para saber si cambió.
@@ -62,7 +65,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, errors: Vec::new(), modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, errors: Vec::new(), modified: None }
     }
 }
 
@@ -169,6 +172,8 @@ impl Config {
                         match (e.key.as_str(), e.value.as_bool()) {
                             ("animaciones", Some(on)) => c.animations = Some(on),
                             ("animaciones", None) => c.errors.push(format!("línea {}: animaciones va como true o false", e.line)),
+                            ("arbol_sigue_panel", Some(on)) => c.tree_follows_pane = on,
+                            ("arbol_sigue_panel", None) => c.errors.push(format!("línea {}: arbol_sigue_panel va como true o false", e.line)),
                             (other, _) => c.errors.push(format!("línea {}: opción desconocida «{other}»", e.line)),
                         }
                     }
@@ -294,7 +299,10 @@ pub fn template() -> String {
             # Animaciones sutiles (scroll suave y transición al cambiar de layout). Sin esta opción\n\
             # se sigue a Windows (Accesibilidad → Efectos visuales → Mostrar animaciones);\n\
             # true o false lo fuerza.\n\
-            # animaciones = true\n";
+            # animaciones = true\n\
+            # El árbol de carpetas despliega y muestra la carpeta del panel activo cuando cambia;\n\
+            # false lo apaga.\n\
+            # arbol_sigue_panel = true\n";
     out
 }
 
@@ -339,6 +347,17 @@ mod tests {
         let bad = Config::parse("[opciones]\nanimaciones = \"no\"\nzoom = 2\n");
         assert_eq!(bad.animations, None);
         assert_eq!(bad.errors.len(), 2, "{:?}", bad.errors);
+    }
+
+    #[test]
+    fn tree_follows_pane_option() {
+        crate::sys::testing::install_fakes();
+        assert!(Config::parse("").tree_follows_pane, "por defecto el árbol sigue al panel");
+        let off = Config::parse("[opciones]\narbol_sigue_panel = false\n");
+        assert!(!off.tree_follows_pane && off.errors.is_empty(), "{:?}", off.errors);
+        let bad = Config::parse("[opciones]\narbol_sigue_panel = 0\n");
+        assert!(bad.tree_follows_pane);
+        assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
     }
 
     #[test]

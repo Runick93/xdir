@@ -1472,3 +1472,88 @@ fn palette_pattern_mode_selects_on_enter() {
     assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
     assert_eq!(selected(&a), ["a.jpg"]);
 }
+
+// ---------- historial de Atrás y Adelante ----------
+
+/// Clic derecho sobre Atrás: menú con las carpetas anteriores de la pestaña (la más cercana
+/// primero); elegir la segunda equivale a dos «Atrás».
+#[test]
+fn back_button_right_click_shows_history() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    for p in ["/hist-app/A", "/hist-app/B", "/hist-app/C"] {
+        a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(PathBuf::from(p)));
+    }
+    a.paint();
+    let (x, y) = center(&a.panes[0].button_rect(Button::Back).expect("se dibujó el botón Atrás"));
+    host.set_menu_choice(None);
+    a.on_right_down(x, y);
+    a.on_context_menu_request(Some((x, y)));
+    let menus = host.menus();
+    let menu = menus.last().expect("se mostró el menú del historial");
+    let items: Vec<(u32, String)> = menu
+        .iter()
+        .filter_map(|e| match e {
+            shell::Entry::Item { id, label, .. } => Some((*id, label.clone())),
+            _ => None,
+        })
+        .collect();
+    let labels: Vec<&str> = items.iter().map(|(_, l)| l.as_str()).collect();
+    assert_eq!(labels[..2], ["B", "A"], "{labels:?}");
+    assert_eq!(a.panes[0].tab().location, Location::Path(PathBuf::from("/hist-app/C")), "cerrar el menú no navega");
+
+    host.set_menu_choice(Some(items[1].0));
+    a.on_right_down(x, y);
+    a.on_context_menu_request(Some((x, y)));
+    let tab = a.panes[0].tab();
+    assert_eq!(tab.location, Location::Path(PathBuf::from("/hist-app/A")));
+    assert_eq!(tab.forward_list(15), [Location::Path(PathBuf::from("/hist-app/B")), Location::Path(PathBuf::from("/hist-app/C"))]);
+
+    // Adelante: el menú lista B y C; elegir la primera va a B.
+    let (x, y) = center(&a.panes[0].button_rect(Button::Forward).expect("se dibujó el botón Adelante"));
+    let first = 1;
+    host.set_menu_choice(Some(first));
+    a.on_right_down(x, y);
+    a.on_context_menu_request(Some((x, y)));
+    let menus = host.menus();
+    let labels: Vec<String> = menus
+        .last()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            shell::Entry::Item { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, ["B", "C"]);
+    assert_eq!(a.panes[0].tab().location, Location::Path(PathBuf::from("/hist-app/B")));
+}
+
+/// `arbol_sigue_panel`: prendido (por defecto), al cambiar la carpeta del panel activo el árbol
+/// empieza a revelarla; apagado, el árbol no se mueve.
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_follow_option() {
+    use crate::sys::testing::FakeFileSystem;
+    assert!(Config::parse("").tree_follows_pane);
+    let off = Config::parse("[opciones]\narbol_sigue_panel = false\n");
+    assert!(!off.tree_follows_pane && off.errors.is_empty(), "{:?}", off.errors);
+    for follow in [true, false] {
+        crate::sys::testing::install_fakes();
+        let root = xtree_dir(&format!("sigue-{follow}"));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        FakeFileSystem::set_drives(&[(root.as_path(), "Disco")]);
+        let mut init = Init::blank();
+        init.config = Config::parse(if follow { "" } else { "[opciones]\narbol_sigue_panel = false\n" });
+        let mut a = app_with(init);
+        FakeFileSystem::set_drives(&[]);
+        a.tree.visible = true;
+        a.paint();
+        let (hwnd, tx) = (a.hwnd, a.tx.clone());
+        let active = a.active;
+        a.panes[active].tab_mut().navigate(hwnd, &tx, Location::Path(root.join("sub")));
+        a.paint();
+        assert_eq!(a.tree.revealing().is_some(), follow, "sigue al panel: {follow}");
+    }
+}

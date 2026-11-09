@@ -31,8 +31,7 @@ impl App {
             Accent::Rgb(c) => c,
             Accent::System => theme::PRESETS[0].1,
         };
-        let host = self.host.clone();
-        if let Some(c) = host.choose_color(current) {
+        if let Some(c) = self.host.choose_color(current) {
             self.set_accent(Accent::Rgb(c));
         }
     }

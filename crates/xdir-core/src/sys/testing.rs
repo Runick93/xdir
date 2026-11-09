@@ -1003,7 +1003,7 @@ impl WindowHost for FakeHost {
 
     fn text_restyle(&self, _theme: &Theme) {}
 
-    fn popup_menu(&self, entries: &[Entry], _pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32> {
+    fn popup_menu(&self, entries: &[Entry], _pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<crate::host::OnContext<'_>>) -> Option<u32> {
         self.menus.borrow_mut().push(entries.to_vec());
         self.menu_choice.get()
     }

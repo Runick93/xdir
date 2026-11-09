@@ -115,6 +115,9 @@ impl App {
         let host = self.host.clone();
         let mut chosen: Option<(FavPath, FavAct)> = None;
         let cmd = {
+            // SAFETY (aliasing): `this` convive con el `&mut App` que arma el `wndproc` para los
+            // mensajes que se atienden dentro del bucle modal del menú. Es el mismo patrón
+            // reentrante del `wndproc` que ya usa el resto de la `App`.
             let this = &*self;
             let mut on_context = |positions: &[usize]| {
                 let Some(path) = crate::favorites::fav_path_at(&this.favorites, &base, first, positions) else { return false };

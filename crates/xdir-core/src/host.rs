@@ -80,6 +80,10 @@ pub enum MenuPos {
     CursorNested,
 }
 
+/// La respuesta al clic derecho dentro de un menú de `WindowHost::popup_menu`: recibe el camino
+/// de posiciones del elemento y devuelve `true` para cerrar el menú.
+pub type OnContext<'a> = &'a mut dyn FnMut(&[usize]) -> bool;
+
 /// La ventana principal. Los tamaños y posiciones están en DIPs: el host lee el DPI de su ventana.
 pub trait WindowHost {
     /// La ventana ya existe (en Windows el `HWND` llega después de armar la `App`).
@@ -130,7 +134,8 @@ pub trait WindowHost {
     /// Dibuja un cuadro: `paint` recibe el pintor y el tamaño del área en DIPs. El primer cuadro
     /// crea el destino de dibujo; si el destino se perdió o no se pudo crear, devuelve el error
     /// (sin llamar a `paint` si no llegó a dibujar). `file_colors`: reglas de color por tipo de
-    /// archivo de `config.toml`.
+    /// archivo de `config.toml`. En macOS, sin un contexto de AppKit (fuera de `drawRect:`), no
+    /// dibuja y devuelve `Ok`.
     fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String>;
     /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
     /// necesitar un cuadro en curso.
@@ -155,5 +160,5 @@ pub trait WindowHost {
     /// camino de posiciones dentro del menú (por ejemplo `[2, 0]`: primer elemento de la tercera
     /// entrada) al hacer clic derecho sobre un elemento; si devuelve `true`, el menú se cierra y
     /// el resultado es `None`. Donde el sistema no avisa ese clic (macOS), no se llama.
-    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32>;
+    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<OnContext<'_>>) -> Option<u32>;
 }

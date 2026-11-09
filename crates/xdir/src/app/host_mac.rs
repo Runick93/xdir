@@ -395,7 +395,7 @@ impl WindowHost for MacHost {
     }
 
     /// Menú nativo de AppKit. El clic derecho dentro del menú no llega: `on_context` no se usa.
-    fn popup_menu(&self, entries: &[shell::Entry], pos: MenuPos, dot: Option<(u32, Color)>, _on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32> {
+    fn popup_menu(&self, entries: &[shell::Entry], pos: MenuPos, dot: Option<(u32, Color)>, _on_context: Option<xdir_core::host::OnContext<'_>>) -> Option<u32> {
         let at = match pos {
             MenuPos::At(x, y) => MenuAt::Point(x, y),
             MenuPos::Above(x, y) => MenuAt::Above(x, y),

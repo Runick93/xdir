@@ -44,6 +44,12 @@ pub struct Fonts {
     pub ui_right: TextFormat,
     pub ui_center: TextFormat,
     pub ui_bold: TextFormat,
+    /// Títulos (16, seminegrita): barra superior y tarjeta de xtree.
+    pub title: TextFormat,
+    /// Texto chico (11,5): rótulos del mapa y de la barra de datos de xtree.
+    pub small: TextFormat,
+    /// Texto chico en seminegrita (12,5): carpetas de primer nivel del mapa de xtree.
+    pub small_bold: TextFormat,
     /// Íconos de interfaz (SF Symbols).
     pub glyphs: TextFormat,
     pub glyphs_small: TextFormat,
@@ -467,6 +473,9 @@ impl Fonts {
             ui_right: make(13.0, false, NSTextAlignment::Right, false, false),
             ui_center: make(13.0, false, NSTextAlignment::Center, false, false),
             ui_bold: make(13.0, true, NSTextAlignment::Left, false, false),
+            title: make(16.0, true, NSTextAlignment::Left, false, false),
+            small: make(11.5, false, NSTextAlignment::Left, false, false),
+            small_bold: make(12.5, true, NSTextAlignment::Left, false, false),
             glyphs: make(13.0, false, NSTextAlignment::Center, false, true),
             glyphs_small: make(10.0, false, NSTextAlignment::Center, false, true),
             label: make(12.0, false, NSTextAlignment::Center, true, false),
@@ -508,12 +517,12 @@ fn symbol_name(ch: char) -> Option<&'static str> {
         0xE7F4 => "desktopcomputer",
         0xE7F8 => "laptopcomputer",
         0xE80F => "house",
-        0xE838 => "folder",
+        0xE838 => "sidebar.left",
         0xE839 => "network",
         0xE840 => "pin.fill",
         0xE896 => "arrow.down.circle",
         0xE8A5 => "doc",
-        0xE8A7 => "macwindow.on.rectangle",
+        0xE8A7 => "arrow.right",
         0xE8A9 => "square.grid.2x2",
         0xE8AD => "arrow.left.arrow.right",
         0xE8B7 => "folder",

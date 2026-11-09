@@ -37,6 +37,7 @@ mod tests;
 use events::CursorKind;
 
 use crate::{about, anim, config, fs, icons, jump, list, ops, palette, pane, render, session, shell, theme, typed, ui};
+use crate::xtree::view::{self as xtree_view, Xtree};
 #[cfg(windows)]
 use crate::drop;
 #[cfg(feature = "arbol")]
@@ -149,8 +150,10 @@ enum Hit {
     Gear,
     /// Botón de grupos guardados de la barra de estado.
     Groups,
-    /// Botón que abre xtree, el mapa de uso de disco.
+    /// Botón que abre y cierra xtree, el mapa de uso de disco.
     Xtree,
+    /// La vista de xtree abierta, sobre el área de los paneles.
+    XtreeView,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
@@ -336,6 +339,10 @@ struct App {
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
     term_ctx: Option<(usize, Console)>,
+    /// Mapa de uso de disco: se crea al abrirlo y sigue vivo (con su escaneo) al cerrarlo.
+    xtree: Option<Xtree>,
+    /// La vista de xtree tapa los paneles.
+    xtree_open: bool,
     /// Tamaño de la ventana en DIPs fijado por las pruebas (sin ventana real no hay `GetClientRect`).
     #[cfg(test)]
     client: Option<(f32, f32)>,
@@ -481,6 +488,8 @@ impl App {
             about_open: false,
             term_menu: None,
             term_ctx: None,
+            xtree: None,
+            xtree_open: false,
             #[cfg(test)]
             client: Some((1280.0, 800.0)),
         };

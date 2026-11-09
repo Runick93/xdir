@@ -29,6 +29,7 @@ mod toml;
 mod tree;
 mod typed;
 mod ui;
+mod xtree;
 mod app;
 
 #[cfg(windows)]

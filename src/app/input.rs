@@ -49,6 +49,13 @@ impl App {
         if contains(&ui::xtree_rect(w, h), x, y) {
             return Hit::Xtree;
         }
+        // La vista de xtree tapa los paneles, la franja de grupos y el árbol.
+        if self.xtree_open {
+            if let Some(l) = ui::layout_at(w, h, x, y) {
+                return Hit::Layout(l);
+            }
+            return if contains(&ui::xtree_area(w, h), x, y) { Hit::XtreeView } else { Hit::None };
+        }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
             return Hit::None;
@@ -111,7 +118,7 @@ impl App {
             return;
         }
         #[cfg(feature = "arbol")]
-        {
+        if !self.xtree_open {
             if self.tree.edge_at(x, y) {
                 capture_mouse(self.hwnd);
                 self.drag = Drag::TreeEdge;
@@ -126,7 +133,7 @@ impl App {
             }
         }
         #[cfg(feature = "arbol")]
-        if self.on_tree_click(x, y) {
+        if !self.xtree_open && self.on_tree_click(x, y) {
             return;
         }
         // Un clic fuera del panel de colores lo cierra (y sigue su curso).
@@ -149,7 +156,12 @@ impl App {
             // clic): no hay que volver a abrirlo.
             Hit::Groups if self.groups_menu_closed.is_some_and(|t| t.elapsed().as_millis() < 300) => self.groups_menu_closed = None,
             Hit::Groups => self.show_groups_menu(),
-            Hit::Xtree => self.open_xtree(),
+            Hit::Xtree => self.toggle_xtree(),
+            Hit::XtreeView => {
+                let area = self.xtree_area();
+                let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_click(area, x, y, double));
+                self.xtree_action(action);
+            }
             Hit::GroupBar(ui::GroupHit::Tab(i)) if double => {
                 if let Some(name) = self.groups.items.get(i).map(|g| g.name.clone()) {
                     self.open_palette(PaletteMode::GroupName);
@@ -184,7 +196,11 @@ impl App {
                 capture_mouse(self.hwnd);
                 self.drag = Drag::Splitter(s);
             }
-            Hit::Layout(l) => self.set_layout(l),
+            Hit::Layout(l) => {
+                // Con la vista de xtree abierta el cambio no se vería: se cierra.
+                self.close_xtree();
+                self.set_layout(l);
+            }
             Hit::Pane(i, ph) => {
                 self.set_active(i);
                 match ph {
@@ -418,6 +434,18 @@ impl App {
 
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
+        // Con xtree abierto el mouse es de la vista: los paneles y el árbol de abajo no se resaltan.
+        if self.xtree_open {
+            let area = self.xtree_area();
+            if let Some(v) = &mut self.xtree {
+                redraw |= v.on_mouse_move(area, x, y);
+            }
+            self.hover = hover;
+            if redraw {
+                self.redraw();
+            }
+            return;
+        }
         #[cfg(feature = "arbol")]
         {
             redraw |= self.tree.on_mouse_move(x, y, !matches!(self.drag, Drag::None));

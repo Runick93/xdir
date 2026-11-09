@@ -7,6 +7,8 @@ impl App {
     /// que había quedan entre las cerradas (Ctrl+Shift+T las recupera).
     pub(super) fn apply_group(&mut self, index: usize) {
         let Some(g) = self.groups.items.get(index).cloned() else { return };
+        // Los paneles cambian: la vista de xtree no debe taparlos.
+        self.close_xtree();
         // Lo que se cambió en el grupo que se deja queda guardado en él.
         self.autosave_group();
         self.end_edit(false);
@@ -96,18 +98,6 @@ impl App {
     pub(super) fn switch_group(&mut self, index: usize) {
         if self.group_name.as_deref().and_then(|n| self.groups.find(n)) != Some(index) {
             self.apply_group(index);
-        }
-    }
-
-    /// Abre xtree (junto a xdir.exe) en la carpeta del panel activo, o en la unidad del sistema.
-    pub(super) fn open_xtree(&mut self) {
-        let Some(exe) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("xtree.exe"))) else { return };
-        let mut cmd = std::process::Command::new(exe);
-        if let Location::Path(p) = &self.panes[self.active].tab().location {
-            cmd.arg(p);
-        }
-        if cmd.spawn().is_err() {
-            self.notice = Some("No se pudo abrir xtree.exe (tiene que estar junto a xdir.exe)".into());
         }
     }
 

@@ -72,6 +72,11 @@ impl App {
                 }
                 self.redraw();
             }
+            crate::xtree::scan::WM_APP_XTREE => {
+                if self.xtree.as_mut().is_some_and(|v| v.on_message(wparam, lparam)) && self.xtree_open {
+                    self.redraw();
+                }
+            }
             WM_APP_OP_DONE => {
                 while let Ok(result) = self.ops_rx.try_recv() {
                     self.on_op_done(result);
@@ -135,7 +140,7 @@ impl App {
             _ => false,
         };
         #[cfg(feature = "arbol")]
-        let tree_edge = matches!(self.drag, Drag::TreeEdge) || (matches!(self.drag, Drag::None) && self.tree.edge_at(x, y));
+        let tree_edge = !self.xtree_open && (matches!(self.drag, Drag::TreeEdge) || (matches!(self.drag, Drag::None) && self.tree.edge_at(x, y)));
         #[cfg(not(feature = "arbol"))]
         let tree_edge = false;
         match splitter {
@@ -152,6 +157,14 @@ impl App {
         self.fav_ctx = None;
         self.header_ctx = None;
         self.term_ctx = None;
+        // Clic derecho en la vista de xtree: sube a la carpeta superior (no hay menú).
+        if self.xtree_open {
+            if self.hit(x, y) == Hit::XtreeView {
+                let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_right_click());
+                self.xtree_action(action);
+            }
+            return;
+        }
         #[cfg(feature = "arbol")]
         {
             self.tree_ctx = self.tree.contains(x, y).then(|| self.tree.path_at(x, y));
@@ -180,6 +193,10 @@ impl App {
     /// Pedido de menú contextual: `at` es el punto del clic derecho (None: tecla de menú o
     /// Shift+F10, se abre sobre la fila con foco).
     pub(super) fn on_context_menu_request(&mut self, at: Option<(f32, f32)>) {
+        // Con xtree abierto no hay menú contextual: los paneles están tapados.
+        if self.xtree_open {
+            return;
+        }
         if let Some(pane) = self.header_ctx.take().filter(|_| at.is_some()) {
             self.show_columns_menu(pane, at.unwrap());
             return;
@@ -219,7 +236,7 @@ impl App {
 
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub(super) fn on_char(&mut self, c: char) {
-        if !c.is_control() && !key_down(VK_CONTROL) {
+        if !c.is_control() && !key_down(VK_CONTROL) && !self.xtree_open {
             let action = self.tab_mut().list.on_char(c);
             self.apply(self.active, action);
         }
@@ -242,6 +259,16 @@ impl App {
     /// hacia arriba); `lines` es cuántas filas mueve cada clic. Va al panel bajo el mouse, aunque
     /// no sea el activo.
     pub(super) fn on_wheel(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
+        // Con xtree abierto la rueda mueve su tabla; los paneles tapados no se mueven.
+        if self.xtree_open {
+            if self.hit(x, y) == Hit::XtreeView {
+                let area = self.xtree_area();
+                if self.xtree.as_mut().is_some_and(|v| v.on_wheel(area, delta * lines)) {
+                    self.redraw();
+                }
+            }
+            return;
+        }
         let pane = match self.hit(x, y) {
             Hit::Palette(_) => {
                 if let Some((pal, _)) = &mut self.palette {
@@ -283,7 +310,7 @@ impl App {
     /// `delta` positivo: hacia la derecha.
     pub(super) fn on_wheel_h(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
         #[cfg(feature = "arbol")]
-        if self.tree.contains(x, y) {
+        if !self.xtree_open && self.tree.contains(x, y) {
             self.tree.on_wheel_h(-delta * lines);
             self.redraw();
         }
@@ -323,6 +350,10 @@ impl App {
 
     /// La ventana se va a cerrar: se guardan la sesión y el historial.
     pub(super) fn on_closing(&mut self) {
+        // El escaneo de xtree (abierto o en segundo plano) no sigue después de cerrar xdir.
+        if let Some(v) = &self.xtree {
+            v.cancel();
+        }
         if self.probe.is_none() {
             self.autosave_group();
             let _ = session::save(&self.session());

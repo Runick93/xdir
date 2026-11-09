@@ -476,3 +476,8 @@ impl Watcher {
         Some(Self { _watcher: watcher })
     }
 }
+
+// ---------- xtree (escáner de uso de disco) ----------
+
+mod xtree;
+pub use self::xtree::*;

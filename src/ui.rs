@@ -250,18 +250,22 @@ pub fn groups_rect(w: f32, h: f32) -> Rect {
 /// Botón que abre xtree (mapa de uso de disco), a la izquierda del de grupos.
 pub fn xtree_rect(w: f32, h: f32) -> Rect {
     let g = groups_rect(w, h);
-    // Sin la feature `xtree`, o fuera de Windows (xtree aún no existe ahí), el botón no existe: queda de ancho cero y no se dibuja ni responde.
-    let width = if cfg!(all(windows, feature = "xtree")) { XTREE_W } else { 0.0 };
-    rect(g.left - 10.0 - width, g.top, g.left - 10.0, g.bottom)
+    rect(g.left - 10.0 - XTREE_W, g.top, g.left - 10.0, g.bottom)
+}
+
+/// Área de la vista de xtree: todo lo que está arriba de la barra de estado (los paneles, la
+/// franja de grupos y el lugar del árbol). La vista pone sus propios márgenes.
+pub fn xtree_area(w: f32, h: f32) -> Rect {
+    rect(0.0, 0.0, w, h - STATUSBAR_H)
 }
 
 pub fn layout_at(w: f32, h: f32, x: f32, y: f32) -> Option<Layout> {
     layout_buttons(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(l, _)| l)
 }
 
+/// `xtree_on`: la vista de xtree está abierta (el botón queda encendido).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool, xtree_hot: bool) {
+pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool, xtree_hot: bool, xtree_on: bool) {
     let th = p.theme;
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
@@ -276,14 +280,14 @@ pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hov
     p.text(&p.fonts.glyphs_small, "\u{E8A9}", rect(groups.left + 6.0, groups.top, groups.left + 26.0, groups.bottom), color);
     p.text(&p.fonts.ui, "Grupos", rect(groups.left + 30.0, groups.top, groups.right - 4.0, groups.bottom), color);
 
-    if cfg!(all(windows, feature = "xtree")) {
-        if xtree_hot {
-            p.round_fill(xtree, 4.0, th.hover);
-        }
-        let color = if xtree_hot { th.text } else { th.text_dim };
-        p.text(&p.fonts.glyphs_small, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
-        p.text(&p.fonts.ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
+    if xtree_on {
+        p.round_fill(xtree, 4.0, th.selection);
+    } else if xtree_hot {
+        p.round_fill(xtree, 4.0, th.hover);
     }
+    let color = if xtree_on { th.accent } else if xtree_hot { th.text } else { th.text_dim };
+    p.text(&p.fonts.glyphs_small, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
+    p.text(&p.fonts.ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
 
     let gear = gear_rect(w, h);
     if gear_hot {

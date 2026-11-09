@@ -1,9 +1,6 @@
 # Salida de compilación
 /target/
 
-# Documentación y material no fuente
-/docs/
-
 # Editores e IDE
 .vscode/
 .idea/

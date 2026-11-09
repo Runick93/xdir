@@ -65,6 +65,8 @@ pub enum Command {
     ToggleTreePin,
     /// Anclar la carpeta del panel activo al Acceso rápido de Windows, o desanclarla.
     ToggleQuickPin,
+    /// Abrir o cerrar xtree, el mapa de uso de disco.
+    Xtree,
 }
 
 /// ¿La acción existe en esta compilación? (las experimentales dependen de una feature).
@@ -184,6 +186,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),
     spec(Command::ToggleGroupBar, "barra_grupos", "Mostrar u ocultar la barra de grupos", &[]),
     spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
+    spec(Command::Xtree, "xtree", "Mapa de uso de disco (xtree)", &[]),
     spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),
     spec(Command::View(1), "vista_iconos", "Vista: íconos medianos", &["Ctrl+Shift+2"]),

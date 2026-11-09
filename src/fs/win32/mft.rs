@@ -11,9 +11,8 @@
 //! 4. Se unen los registros de extensión a su registro base, se cuenta una vez cada archivo con
 //!    enlaces duros y se arma el árbol desde la carpeta raíz (registro 5).
 
-use super::{
-    BYTES, FILES, MAX_FILES_PER_DIR, MFT_DONE, MFT_TOTAL, NO_PARENT, Node, PHASE,
-};
+use crate::xtree::scan::{MAX_FILES_PER_DIR, Progress};
+use crate::xtree::tree::{NO_PARENT, Node};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -257,7 +256,7 @@ struct Parsed {
     arena: Vec<u16>,
 }
 
-fn parse_record(rec: &[u8], idx: u32, out: &mut Parsed) {
+fn parse_record(rec: &[u8], idx: u32, out: &mut Parsed, progress: &Progress) {
     let flags = u16_at(rec, 22);
     if flags & REC_IN_USE == 0 {
         return;
@@ -305,16 +304,16 @@ fn parse_record(rec: &[u8], idx: u32, out: &mut Parsed) {
     let name_count = (out.names.len() - name_start) as u16;
     if base == 0 || name_count > 0 || size > 0 {
         if base == 0 && flags & REC_DIR == 0 {
-            FILES.fetch_add(1, Ordering::Relaxed);
+            progress.files.fetch_add(1, Ordering::Relaxed);
         }
         if size > 0 {
-            BYTES.fetch_add(size, Ordering::Relaxed);
+            progress.bytes.fetch_add(size, Ordering::Relaxed);
         }
         out.recs.push(Rec { idx, base, dir: flags & REC_DIR != 0, attrs, size, name_start: name_start as u32, name_count });
     }
 }
 
-fn worker(drive: &str, chunks: &[Chunk], next: &AtomicUsize, rec_size: usize, cancel: &AtomicBool) -> Option<Parsed> {
+fn worker(drive: &str, chunks: &[Chunk], next: &AtomicUsize, rec_size: usize, progress: &Progress, cancel: &AtomicBool) -> Option<Parsed> {
     let vol = open_volume(drive).ok()?;
     let mut buf = vec![0u8; CHUNK];
     let mut out = Parsed::default();
@@ -330,10 +329,10 @@ fn worker(drive: &str, chunks: &[Chunk], next: &AtomicUsize, rec_size: usize, ca
         for r in 0..c.len / rec_size {
             let rec = &mut buf[r * rec_size..(r + 1) * rec_size];
             if apply_fixup(rec) {
-                parse_record(rec, (c.first_rec + r as u64) as u32, &mut out);
+                parse_record(rec, (c.first_rec + r as u64) as u32, &mut out, progress);
             }
         }
-        MFT_DONE.fetch_add(c.len as u64, Ordering::Relaxed);
+        progress.mft_done.fetch_add(c.len as u64, Ordering::Relaxed);
     }
     Some(out)
 }
@@ -347,27 +346,27 @@ struct Link {
 }
 
 /// Escanea el volumen `drive` (por ejemplo `C:`). `label` es el nombre de la raíz.
-pub fn scan(drive: &str, label: &str, cancel: &AtomicBool) -> Result<Vec<Node>, Fail> {
+pub fn scan(drive: &str, label: &str, progress: &Progress, cancel: &AtomicBool) -> Result<Vec<Node>, Fail> {
     let vol = open_volume(drive)?;
     let info = volume_info(vol.0).ok_or(Fail::Other)?;
     let (chunks, total) = mft_chunks(vol.0, &info).ok_or(Fail::Other)?;
     let total = total.min(u32::MAX as u64 - 1) as usize;
-    MFT_TOTAL.store(chunks.iter().map(|c| c.len as u64).sum(), Ordering::Relaxed);
-    MFT_DONE.store(0, Ordering::Relaxed);
+    progress.mft_total.store(chunks.iter().map(|c| c.len as u64).sum(), Ordering::Relaxed);
+    progress.mft_done.store(0, Ordering::Relaxed);
     drop(vol);
 
     // Lectura e interpretación en paralelo.
     let next = AtomicUsize::new(0);
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8);
     let parts: Vec<Option<Parsed>> = std::thread::scope(|s| {
-        let hs: Vec<_> = (0..threads).map(|_| s.spawn(|| worker(drive, &chunks, &next, info.rec_size as usize, cancel))).collect();
+        let hs: Vec<_> = (0..threads).map(|_| s.spawn(|| worker(drive, &chunks, &next, info.rec_size as usize, progress, cancel))).collect();
         hs.into_iter().map(|h| h.join().ok().flatten()).collect()
     });
     if cancel.load(Ordering::Relaxed) {
         return Err(Fail::Other);
     }
     let parts: Vec<Parsed> = parts.into_iter().collect::<Option<_>>().ok_or(Fail::Other)?;
-    PHASE.store(2, Ordering::Relaxed);
+    progress.phase.store(2, Ordering::Relaxed);
 
     // Tamaño y tipo de cada registro base; los registros de extensión suman al suyo.
     let mut size = vec![0u64; total];
@@ -556,7 +555,7 @@ mod tests {
         assert!(apply_fixup(&mut r));
         assert_eq!(&r[510..512], &[0x11, 0x22]);
         let mut out = Parsed::default();
-        parse_record(&r, 40, &mut out);
+        parse_record(&r, 40, &mut out, &Progress::default());
         assert_eq!(out.recs.len(), 1);
         let rec = &out.recs[0];
         assert_eq!((rec.idx, rec.base, rec.size, rec.name_count), (40, 0, 8192, 1));

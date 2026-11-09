@@ -11,6 +11,8 @@ impl App {
             VK_ESCAPE if self.about_open => self.about_open = false,
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
+            // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
+            _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
             _ => match self.config.keymap.lookup(vk, ctrl, shift, false) {
                 Some(c) => self.run_command(c),
@@ -29,6 +31,10 @@ impl App {
 
     /// Ejecuta una acción sobre el panel activo (atajo de teclado o paleta de comandos).
     pub(super) fn run_command(&mut self, c: Command) {
+        // La vista de xtree tapa los paneles: lo que los cambia la cierra para que se vea el efecto.
+        if self.xtree_open && !keeps_xtree(c) {
+            self.close_xtree();
+        }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
         match c {
@@ -173,6 +179,7 @@ impl App {
                     self.toggle_quick_pin(p);
                 }
             }
+            Command::Xtree => self.toggle_xtree(),
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {
@@ -185,6 +192,83 @@ impl App {
         self.redraw();
     }
 
+
+    /// Tecla con la vista de xtree abierta: primero la vista (T, F5, Retroceso, Esc, A); después
+    /// solo los atajos de la ventana que no tocan los paneles tapados.
+    fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool) -> bool {
+        if !ctrl {
+            let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_key(vk));
+            if action != xtree_view::Action::None {
+                self.xtree_action(action);
+                return true;
+            }
+        }
+        match self.config.keymap.lookup(vk, ctrl, shift, false) {
+            Some(c @ (Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)) => {
+                self.run_command(c);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Abre la vista de xtree (o la cierra si estaba abierta). La primera vez analiza la carpeta
+    /// del panel activo; después se reabre con lo que ya tenía, sin volver a analizar.
+    pub(super) fn toggle_xtree(&mut self) {
+        if self.xtree_open {
+            self.close_xtree();
+        } else {
+            if self.xtree.is_none() {
+                let root = match &self.panes[self.active].tab().location {
+                    Location::Path(p) => p.clone(),
+                    _ => fs::xtree_default_root(),
+                };
+                self.xtree = Some(Xtree::new(self.hwnd, root));
+            }
+            // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
+            self.picker_open = false;
+            self.term_menu = None;
+            self.end_edit(false);
+            self.end_filter(true);
+            self.xtree_open = true;
+        }
+        self.hover = Hit::None;
+        self.redraw();
+    }
+
+    /// Cierra la vista de xtree (el escaneo sigue) y su menú de discos.
+    pub(super) fn close_xtree(&mut self) {
+        self.xtree_open = false;
+        if let Some(x) = &mut self.xtree {
+            x.close_menu();
+        }
+        self.hover = Hit::None;
+    }
+
+    /// Lo que pide la vista de xtree después de un evento.
+    pub(super) fn xtree_action(&mut self, action: xtree_view::Action) {
+        match action {
+            xtree_view::Action::None => return,
+            xtree_view::Action::Redraw => {}
+            xtree_view::Action::Close => self.close_xtree(),
+            xtree_view::Action::OpenInPanel { folder, select } => {
+                self.close_xtree();
+                let (hwnd, tx) = (self.hwnd, self.tx.clone());
+                let tab = self.tab_mut();
+                tab.navigate(hwnd, &tx, Location::Path(folder));
+                if let Some(name) = select {
+                    tab.focus_after_load(name);
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// Área de la vista de xtree en la ventana.
+    pub(super) fn xtree_area(&self) -> render::Rect {
+        let (w, h) = self.client_dips();
+        ui::xtree_area(w, h)
+    }
 
     pub(super) fn on_button(&mut self, pane: usize, b: Button) {
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
@@ -230,4 +314,19 @@ impl App {
     pub(super) fn cursor_pos(&self) -> (f32, f32) {
         cursor_dips(self.hwnd, self.dpi)
     }
+}
+
+/// Comandos que se pueden usar con la vista de xtree abierta sin cerrarla: no tocan los paneles
+/// (o solo abren la paleta, y lo que se elija ahí decide).
+fn keeps_xtree(c: Command) -> bool {
+    matches!(
+        c,
+        Command::Palette
+            | Command::JumpTo
+            | Command::SaveGroup
+            | Command::Xtree
+            | Command::ToggleDarkMode
+            | Command::About
+            | Command::OpenConfig
+    )
 }

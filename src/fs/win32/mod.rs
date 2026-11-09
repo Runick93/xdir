@@ -1017,3 +1017,9 @@ mod tests {
         assert_eq!(true_case(Path::new(r"C:\no\EXISTE")), Path::new(r"C:\no\EXISTE"));
     }
 }
+
+// ---------- xtree (escáner de uso de disco) ----------
+
+mod mft;
+mod xtree;
+pub use self::xtree::*;

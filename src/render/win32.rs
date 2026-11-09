@@ -79,6 +79,12 @@ pub struct Fonts {
     pub ui_right: IDWriteTextFormat,
     pub ui_center: IDWriteTextFormat,
     pub ui_bold: IDWriteTextFormat,
+    /// Títulos (16, seminegrita): barra superior y tarjeta de xtree.
+    pub title: IDWriteTextFormat,
+    /// Texto chico (11,5): rótulos del mapa y de la barra de datos de xtree.
+    pub small: IDWriteTextFormat,
+    /// Texto chico en seminegrita (12,5): carpetas de primer nivel del mapa de xtree.
+    pub small_bold: IDWriteTextFormat,
     /// Íconos de interfaz (Segoe Fluent Icons en Windows 11, MDL2 Assets en Windows 10).
     pub glyphs: IDWriteTextFormat,
     pub glyphs_small: IDWriteTextFormat,
@@ -464,6 +470,9 @@ impl Fonts {
             ui_right: make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
             ui_center: make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
             ui_bold: make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            title: make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 16.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            small: make(family, DWRITE_FONT_WEIGHT_NORMAL, 11.5, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            small_bold: make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.5, DWRITE_TEXT_ALIGNMENT_LEADING)?,
             glyphs: make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 14.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
             glyphs_small: make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 10.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
             label: label_format(dwrite, family)?,

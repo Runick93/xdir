@@ -228,9 +228,8 @@ fn status_bar_buttons_are_hit() {
     assert_eq!(a.hit(x, y), Hit::Gear);
     let (x, y) = center(&ui::groups_rect(w, h));
     assert_eq!(a.hit(x, y), Hit::Groups);
-    // Sin la feature `xtree`, o fuera de Windows, el botón no existe y no responde.
     let (x, y) = center(&ui::xtree_rect(w, h));
-    assert_eq!(a.hit(x, y) == Hit::Xtree, cfg!(all(windows, feature = "xtree")));
+    assert_eq!(a.hit(x, y), Hit::Xtree);
     for (layout, r) in ui::layout_buttons(w, h) {
         let (x, y) = center(&r);
         assert_eq!(a.hit(x, y), Hit::Layout(layout));
@@ -710,4 +709,139 @@ fn op_done_with_a_new_folder_asks_for_the_rename() {
     let mut c = app();
     c.on_op_done(result(None, None, true, None));
     assert_eq!(c.pending_rename, None);
+}
+
+// ---------- xtree ----------
+
+/// Carpeta temporal propia de una prueba (así la vista no analiza el disco del usuario).
+fn xtree_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("xdir-xtree-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// App con el panel activo en una carpeta temporal.
+fn app_in(name: &str) -> (App, PathBuf) {
+    let mut a = app();
+    let dir = xtree_dir(name);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir.clone()));
+    (a, dir)
+}
+
+fn click_xtree_button(a: &mut App) {
+    let (w, h) = a.client_dips();
+    let (x, y) = center(&ui::xtree_rect(w, h));
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+}
+
+#[test]
+fn xtree_button_toggles_view() {
+    let (mut a, _) = app_in("toggle");
+    click_xtree_button(&mut a);
+    assert!(a.xtree.is_some() && a.xtree_open);
+    click_xtree_button(&mut a);
+    assert!(!a.xtree_open);
+    let x = a.xtree.as_ref().expect("la vista cerrada no se destruye");
+    assert!(!x.cancelled(), "cerrar la vista no cancela el escaneo");
+    a.on_closing();
+}
+
+/// Cerrar la vista con el botón o con el comando también cierra el menú de discos: al volver a
+/// abrirla no debe aparecer desplegado.
+#[test]
+fn closing_xtree_closes_drive_menu() {
+    let (mut a, _) = app_in("menu");
+    click_xtree_button(&mut a);
+    a.xtree.as_mut().unwrap().open_menu();
+    click_xtree_button(&mut a);
+    assert!(!a.xtree_open);
+    assert!(!a.xtree.as_ref().unwrap().menu_is_open(), "botón");
+    a.run_command(Command::Xtree);
+    a.xtree.as_mut().unwrap().open_menu();
+    a.run_command(Command::Xtree);
+    assert!(!a.xtree_open);
+    assert!(!a.xtree.as_ref().unwrap().menu_is_open(), "comando");
+    a.on_closing();
+}
+
+/// Lo que cambia los paneles con la vista abierta (botones de layout, grupos, comandos de la
+/// paleta) cierra la vista para que se vea el efecto; lo que no los toca la deja abierta.
+#[test]
+fn pane_actions_close_xtree() {
+    let (mut a, _) = app_in("paneles");
+    let (w, h) = a.client_dips();
+    click_xtree_button(&mut a);
+    let (layout, r) = ui::layout_buttons(w, h).into_iter().find(|(l, _)| *l != a.layout).unwrap();
+    let (x, y) = center(&r);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(a.layout, layout);
+    assert!(!a.xtree_open, "botón de layout");
+
+    a.run_command(Command::Xtree);
+    a.run_command(Command::ToggleDarkMode);
+    assert!(a.xtree_open, "el modo oscuro no toca los paneles");
+    a.run_command(Command::Layout(0));
+    assert!(!a.xtree_open, "comando de layout");
+
+    a.save_group("g");
+    a.run_command(Command::Xtree);
+    a.apply_group(0);
+    assert!(!a.xtree_open, "grupo");
+
+    a.run_command(Command::Xtree);
+    a.run_command(Command::NewTab);
+    assert!(!a.xtree_open, "pestaña nueva");
+    a.on_closing();
+}
+
+#[test]
+fn closing_xdir_cancels_scan() {
+    let (mut a, _) = app_in("closing");
+    click_xtree_button(&mut a);
+    a.on_closing();
+    assert!(a.xtree.as_ref().unwrap().cancelled());
+}
+
+#[test]
+fn xtree_view_swallows_pane_clicks() {
+    let (mut a, _) = app_in("swallow");
+    a.set_active(1);
+    a.panes[0].rect = render::rect(100.0, 100.0, 500.0, 400.0);
+    // La tira de pestañas: sin la vista, un clic ahí activa el panel 0.
+    let (x, y) = (300.0, 101.0);
+    assert!(matches!(a.hit(x, y), Hit::Pane(0, _)), "sin la vista el clic es del panel 0: {:?}", a.hit(x, y));
+    click_xtree_button(&mut a);
+    let before = a.panes[0].tab().list.focused_index();
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(a.active, 1);
+    assert_eq!(a.panes[0].tab().list.focused_index(), before);
+    assert!(a.xtree_open);
+    a.on_closing();
+}
+
+#[test]
+fn open_in_panel_navigates_active_pane() {
+    // Se abre desde una carpeta temporal: desde "Este equipo" analizaría el disco del usuario.
+    let (mut a, from) = app_in("open-desde");
+    let tmp = xtree_dir("open");
+    assert_eq!(a.panes[a.active].tab().location, Location::Path(from));
+    a.run_command(Command::Xtree);
+    assert!(a.xtree_open);
+    a.xtree_action(crate::xtree::view::Action::OpenInPanel { folder: tmp.clone(), select: None });
+    assert!(!a.xtree_open);
+    let Location::Path(p) = &a.panes[a.active].tab().location else { panic!("no es una carpeta") };
+    assert_eq!(p, &tmp);
+    a.on_closing();
+}
+
+#[test]
+fn command_xtree_is_listed() {
+    let spec = crate::commands::ALL.iter().find(|s| s.command == Command::Xtree).expect("falta el comando");
+    assert_eq!(spec.id, "xtree");
+    assert_eq!(spec.name, "Mapa de uso de disco (xtree)");
+    assert!(spec.default_keys.is_empty());
 }

@@ -97,6 +97,21 @@ pub fn copy_text(_owner: Handle, text: &str) -> Result<()> {
     }
 }
 
+/// Diálogo del sistema para elegir una carpeta (`NSOpenPanel` solo con carpetas).
+pub fn pick_folder(_owner: Handle, title: &str) -> Option<PathBuf> {
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    let mtm = objc2_foundation::MainThreadMarker::new()?;
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setMessage(Some(&NSString::from_str(title)));
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    panel.URLs().firstObject()?.path().map(|p| PathBuf::from(p.to_string()))
+}
+
 // ---------- abrir y propiedades ----------
 
 /// Abre un elemento con su programa (las apps se ejecutan).

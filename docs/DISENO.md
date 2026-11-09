@@ -9,9 +9,9 @@ el nombre de la función de Rust que lo dibuja.
 | Página de FigCraft | Módulo | Qué hay |
 |---|---|---|
 | **Tokens** | `crates/xdir-core/src/theme.rs`, `crates/xdir-core/src/xtree/colors.rs` | Colecciones de variables: **Tema** (modos Oscuro y Claro: background, surface, surface_alt, border, text, text_dim, text_secondary, accent, focus_fill, hover, selection, scrollbar, advertencia (ámbar #FAC74D en oscuro, #B7791F en claro), carpeta (amarillo fijo), ok/peligro y tres neutros del mapa), **Acentos** (los 12 `PRESETS`), **Mapa** (`WHEEL` y `CATS`) y **Medidas** (constantes de `crates/xdir-core/src/xtree/view.rs` y `crates/xdir-core/src/ui.rs`). Estilos de texto `Texto/ui`, `ui_bold`, `title`, `small`, `small_bold`: los `FontId::{Ui, UiBold, Title, Small, SmallBold}` de `crates/xdir-core/src/paint.rs`. |
-| **Componentes** | `crates/xdir-core/src/ui.rs` y la vista de xtree | De xtree: `xtree::view::top_bar`, `table_row`, `folder_block`, `file_block`, `card`, `drive_menu`, `disk_bar` y `legend`. De xdir: `ui::draw_status` (10 variantes: xtree encendido o apagado y los 5 layouts), `ui::draw_group_bar` (píldora de grupo en 5 estados y botón «+»), `pane::Pane::draw_tabs`, `pane::Pane::draw_search`, `pane::Pane::draw_favs`, `list::FileList::draw` (fila en 6 estados y encabezado), `list::FileList::draw_cell` (cuadrícula), `tree::Tree::draw` (fijado y colapsado), `palette::Palette::draw` (comandos, carpetas, nombre de grupo), `typed::Suggest::draw`, `about::draw`, `ui::draw_picker` y `ui::draw_terminal_menu`. Las variantes (estado, tipo, sistema) son propiedades del componente. |
+| **Componentes** | `crates/xdir-core/src/ui.rs` y la vista de xtree | De xtree: `xtree::view::top_bar`, `table_row`, `folder_block`, `file_block`, `card`, `drive_menu`, `disk_bar` y `legend`. De xdir: `ui::draw_status` (10 variantes: xtree encendido o apagado y los 5 layouts), `ui::draw_group_bar` (píldora de grupo en 5 estados y botón «+»), `pane::Pane::draw_tabs`, `pane::Pane::draw_search`, `pane::Pane::draw_favs`, `list::FileList::draw` (fila en 6 estados y encabezado), `list::FileList::draw_cell` (cuadrícula), `tree::Tree::draw` (fijado y colapsado), `palette::Palette::draw` (comandos, carpetas, nombre de grupo), `typed::Suggest::draw`, `about::draw`, `ui::draw_picker` y `ui::draw_terminal_menu`. De la tanda B (sección «Tanda B: organizar la lista»): `list::FileList::draw_group_header` (encabezado de grupo expandido, plegado y con foco), `list::FileList::draw_checkbox` (casilla vacía, marcada y parcial), `list::FileList::draw_filter_menu` (desplegable del filtro de columna), `list::FileList::draw_content_row` (fila de la vista Contenido en 5 variantes) y `list::FileList::draw_list_cell` (celda de la vista Lista en 5 variantes). Las variantes (estado, tipo, sistema) son propiedades del componente. |
 | **Pantallas · xtree** | la vista de xtree dentro de xdir | 7 pantallas de 1400×820, cada una en tema oscuro (izquierda) y claro (derecha): T01 escaneando con mapa en vivo, T02 fase MFT con %, T03 completo (color por carpeta), T04 color por tipo con leyenda, T05 menú de discos abierto, T06 aviso de carpetas sin permiso (macOS), T07 aviso de administrador (Windows). |
-| **Pantallas · xdir** | `crates/xdir-core/src/app/paint.rs` y lo que dibuja | 31 pantallas X01–X31 de la ventana principal que xdir ya tiene hoy, en oscuro y claro (ver el inventario). |
+| **Pantallas · xdir** | `crates/xdir-core/src/app/paint.rs` y lo que dibuja | 31 pantallas X01–X31 de la ventana principal que xdir ya tiene hoy y 6 pantallas X32–X37 de la tanda B (todavía sin programar), en oscuro y claro (ver los inventarios). |
 
 Las pantallas usan **instancias** de los componentes (barra de estado, píldoras de grupo, filas y celdas de la lista, favoritos, árbol, paleta, desplegable de rutas, acerca de, panel de acento, menú de consola; en xtree, barra superior, filas, tarjeta, menú, barra de datos, leyenda). Los bloques del mapa se dibujan a medida con la misma receta que
 `folder_block` y `file_block`; el marco del panel (pestañas, barra de dirección con migas, caja de búsqueda, pie) y las filas con columnas distintas de las de fábrica también se dibujan a medida con la receta de `pane::Pane::draw` y `list::FileList::draw`, porque dependen del ancho. El tema se elige con el modo de la variable en el marco de cada pantalla.
@@ -64,6 +64,28 @@ Leído de `crates/xdir-core/src/app/paint.rs` (orden de dibujo), `ui.rs`, `pane.
 | X29 | Aviso (notice) | «Agregado a favoritos…» delante del estado | — | `app/paint.rs::paint` |
 | X30 | Renombrar en línea | Control de edición sobre el nombre, sin la extensión seleccionada | F2, Enter, Esc | `app/edit.rs::begin_rename` |
 | X31 | Variante macOS | Ventana principal con `/`, «Macintosh HD», fechas y tamaños de macOS | — | `fs::Location::crumbs`, `format.rs` |
+
+## Inventario de pantallas de la tanda B (X32–X37)
+
+Diseñadas antes de programar (spec `docs/superpowers/specs/2026-11-09-explorador-tanda-b-design.md`): fijan el layout de los
+encabezados de grupo, el desplegable de filtros, las vistas Lista y Contenido y las casillas. Van debajo de X31, con la base
+de X02 (un panel) y en oscuro y claro.
+
+| N.º | Pantalla | Qué muestra | Qué se hace | Rust |
+|---|---|---|---|---|
+| X32 | Agrupar por fecha (Detalles) | Descargas agrupada por fecha de modificación: «Hoy (3)», «Ayer (2)», «La semana pasada (5)» expandidos y «Hace mucho (12)» plegado; chevron ▾/▸, nombre en `text_secondary` seminegrita y línea fina; fila seleccionada con foco y fila bajo el mouse | Clic en el encabezado o ←/→ para plegar | `list::FileList::draw_group_header`, `list::FileList::draw` |
+| X33 | Filtro por columna | Mouse sobre «Tipo»: flecha a la derecha del encabezado y desplegable abierto con «Carpeta de archivos (4)», «Imagen JPEG (12)» ✓, «Imagen PNG (3)» ✓, «Documento PDF (2)», separador y «Quitar el filtro»; la lista muestra solo JPEG y PNG, embudo junto a «Tipo» y «(filtrado)» al final del estado | Tildar grupos, quitar el filtro | `list::FileList::draw_filter_menu`, `tab::Tab::status` |
+| X34 | Vista Lista | Ícono de 16 y nombre en columnas de 240 que se llenan de arriba abajo; selección, foco, hover y barra de desplazamiento horizontal | Rueda desplaza en horizontal; Ctrl+Shift+5 | `list::FileList::draw_list_cell` |
+| X35 | Vista Contenido | Filas de 56: ícono de 32 o miniatura, nombre y tipo (`text_dim`) a la izquierda; fecha de modificación y tamaño a la derecha; línea entre filas | Ctrl+Shift+6 | `list::FileList::draw_content_row` |
+| X36 | Casillas de selección | Columna de casillas: la del encabezado parcial, 3 filas seleccionadas con la casilla marcada, la fila bajo el mouse con la casilla vacía y el resto sin casilla | Clic en la casilla suma o quita (como Ctrl+clic) | `list::FileList::draw_checkbox` |
+| X37 | Más columnas, menú «Agrupar por» y casillas en la rueda dentada | Columnas Dimensiones («4032 × 3024»), Duración («0:03:21»), Autor y Etiquetas, lista agrupada por fecha; menú del fondo con «Vista ▸», «Ordenar por ▸» y «Agrupar por ▸» abierto (Nombre, Fecha de modificación ✓, Fecha de creación, Tipo, Tamaño, Dimensiones, Duración, «(Ninguno)»); rueda dentada con el switch nuevo «Casillas de selección» | Agrupar desde el menú; prender las casillas | `list::FileList::draw`, `ui::draw_picker` |
+
+Notas de X32–X37:
+- El menú contextual de X37 es nativo (ver abajo): se dibuja con aspecto aproximado, como los controles de X08; el submenú
+  sube para entrar en la ventana como hace el del sistema.
+- El panel de la rueda dentada de X37 es una copia desacoplada de `ui::draw_picker` con la fila nueva, para no cambiar el
+  componente (y la X19, que muestra lo que hay hoy) hasta que se programe.
+- Las filas de X36 y X37 se dibujan a medida (columnas distintas de las de fábrica), como en X12.
 
 ### Lo nativo, que no se dibuja
 

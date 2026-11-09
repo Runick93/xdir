@@ -16,8 +16,8 @@ impl App {
     pub(super) fn make_tab(&mut self, location: Location) -> Tab {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
+        // La vista la toma de su carpeta en la próxima `sync_folder_views`.
         let mut tab = Tab::new(id, location, self.show_hidden);
-        tab.list.columns = self.columns.clone();
         tab.list.show_extensions = self.show_extensions;
         tab
     }
@@ -130,11 +130,10 @@ impl App {
         true
     }
 
-    /// Vista de un panel: se aplica a todas sus pestañas (y la toman las nuevas).
+    /// Vista de la pestaña activa del panel (queda guardada para su carpeta).
     pub(super) fn set_view(&mut self, pane: usize, view: list::View) {
-        for tab in &mut self.panes[pane].tabs {
-            tab.list.set_view(view);
-        }
+        self.panes[pane].tab_mut().list.set_view(view);
+        self.sync_folder_views();
         self.notice = Some(format!("Vista: {}", view.name().to_lowercase()));
         self.redraw();
     }
@@ -148,20 +147,75 @@ impl App {
         }
     }
 
-    /// Las columnas son las mismas en todas las listas (y se guardan en la sesión).
-    pub(super) fn set_columns(&mut self, columns: Vec<ColumnSpec>) {
-        // La columna de carpeta es solo de las búsquedas: no se guarda ni pasa a otras listas.
-        let folder = columns.iter().position(|c| c.col == list::Column::Folder).map(|i| (i, columns[i]));
-        let columns: Vec<ColumnSpec> = columns.into_iter().filter(|c| c.col != list::Column::Folder).collect();
+    // ---------- vista por carpeta ----------
+
+    /// Cada lista toma la vista de su carpeta al cambiar de ubicación, y lo que el usuario cambia
+    /// (vista, orden, columnas, anchos) se guarda para la carpeta que muestra (`Tab::sync_view`).
+    /// Se llama antes de cada cuadro, antes de entregar los lotes de carga y después de cada
+    /// cambio de vista; si cambió algo, `carpetas.toml` se guarda un segundo después.
+    pub(super) fn sync_folder_views(&mut self) {
+        let views = &mut self.folder_views;
+        let mut changed = false;
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
-            tab.list.columns = columns.clone();
-            if tab.search.is_some() {
-                let (at, spec) = folder.unwrap_or((1, list::ColumnSpec { col: list::Column::Folder, width: list::COLUMNS[7].3 }));
-                tab.list.columns.insert(at.min(tab.list.columns.len()), spec);
-            }
+            changed |= tab.sync_view(views);
         }
-        self.columns = columns;
-        self.redraw();
+        if changed {
+            self.schedule_views_save();
+        }
+    }
+
+    /// Guardado diferido de `carpetas.toml`: un segundo después del último cambio (un solo aviso
+    /// en camino, con el mismo patrón que la pausa del buscador) y al cerrar.
+    pub(super) fn schedule_views_save(&mut self) {
+        self.views_changed_at = Some(Instant::now());
+        if !self.views_save_posted {
+            self.views_save_posted = true;
+            post_after(self.hwnd, VIEWS_SAVE_DELAY_MS);
+        }
+    }
+
+    /// Llegó el aviso de guardado: si hubo cambios después de pedirlo, se espera lo que falta.
+    pub(super) fn on_views_save_due(&mut self) {
+        self.views_save_posted = false;
+        let Some(at) = self.views_changed_at else { return };
+        let waited = at.elapsed().as_millis() as u64;
+        if waited < VIEWS_SAVE_DELAY_MS {
+            self.views_save_posted = true;
+            post_after(self.hwnd, VIEWS_SAVE_DELAY_MS - waited);
+            return;
+        }
+        self.views_changed_at = None;
+        self.folder_views.save_if_dirty();
+    }
+
+    /// «Usar esta vista en todas las carpetas»: con confirmación, la vista de la carpeta del panel
+    /// activo pasa a ser la por defecto y se borran las de las demás; las listas abiertas la toman.
+    pub(super) fn apply_view_to_all(&mut self) {
+        let question = "¿Usar esta vista en todas las carpetas? Se pierden las vistas guardadas de cada carpeta.";
+        if self.host.ask_yes_no_cancel("Usar esta vista en todas las carpetas", question) != Some(true) {
+            return;
+        }
+        let mut v = self.panes[self.active].tab().list.view_settings();
+        // La columna de carpeta es solo de las búsquedas.
+        v.columns.retain(|c| c.col != list::Column::Folder);
+        self.folder_views.apply_to_all(v);
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            tab.reload_view();
+        }
+        self.sync_folder_views();
+        self.schedule_views_save();
+    }
+
+    /// «Restablecer la vista de esta carpeta»: vuelve a la por defecto (también en las otras
+    /// pestañas que la muestran).
+    pub(super) fn reset_folder_view(&mut self) {
+        let key = self.panes[self.active].tab().view_key();
+        self.folder_views.reset(&key);
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).filter(|t| t.view_key() == key) {
+            tab.reload_view();
+        }
+        self.sync_folder_views();
+        self.schedule_views_save();
     }
 
     /// Menú del clic derecho en el encabezado: mostrar u ocultar columnas.
@@ -184,21 +238,22 @@ impl App {
         entries.push(shell::Entry::Sep);
         entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
         let cmd = self.host.popup_menu(&entries, MenuPos::At(at.0, at.1), None, None).map_or(0, |c| c as usize);
+        let list = &mut self.panes[pane].tab_mut().list;
         match cmd {
             RESET => {
-                for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
-                    tab.list.reset_name_width();
+                // La columna de carpeta de una búsqueda se queda donde está.
+                let folder = list.columns.iter().position(|c| c.col == list::Column::Folder).map(|i| (i, list.columns[i]));
+                list.reset_name_width();
+                list.columns = list::default_columns();
+                if let Some((at, spec)) = folder {
+                    list.columns.insert(at.min(list.columns.len()), spec);
                 }
-                self.set_columns(list::default_columns());
             }
-            i if (1..=list::COLUMNS.len()).contains(&i) => {
-                let list = &mut self.panes[pane].tab_mut().list;
-                list.toggle_column(list::COLUMNS[i - 1].0);
-                let cols = list.columns.clone();
-                self.set_columns(cols);
-            }
-            _ => {}
+            i if (1..=list::COLUMNS.len()).contains(&i) => list.toggle_column(list::COLUMNS[i - 1].0),
+            _ => return,
         }
+        self.sync_folder_views();
+        self.redraw();
     }
 
     pub(super) fn restore_panes(&mut self, s: &Session, start_path: Option<PathBuf>) {
@@ -206,15 +261,7 @@ impl App {
         for i in 0..PANES {
             let state = s.panes.get(i).or(fallback.panes.get(i)).cloned().unwrap_or_default();
             let locations = if state.tabs.is_empty() { vec![Location::Computer] } else { state.tabs };
-            let view = s.views.get(i).copied().unwrap_or(list::View::Details);
-            let tabs: Vec<Tab> = locations
-                .into_iter()
-                .map(|l| {
-                    let mut t = self.make_tab(l);
-                    t.list.view = view;
-                    t
-                })
-                .collect();
+            let tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
             self.panes.push(Pane::new(tabs, state.active));
         }
         self.active = s.active_pane.min(self.layout.panes() - 1);
@@ -242,7 +289,8 @@ impl App {
             accent: self.accent,
             dark_mode: self.dark_mode,
             group: self.group_name.clone(),
-            columns: self.columns.clone(),
+            // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
+            columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),
             panes: self
                 .panes
@@ -392,10 +440,10 @@ impl App {
     }
 
     pub(super) fn new_tab(&mut self, pane: usize, location: Location, activate: bool) {
-        let mut tab = self.make_tab(location);
-        tab.list.view = self.panes[pane].tab().list.view;
+        let tab = self.make_tab(location);
         self.panes[pane].add_tab(tab, activate);
         self.sync_visibility();
+        self.sync_folder_views();
         self.redraw();
     }
 
@@ -433,4 +481,12 @@ impl App {
         self.sync_visibility();
         self.redraw();
     }
+}
+
+/// Manda `WM_APP_VIEWS_SAVE` a la ventana dentro de `ms` milisegundos.
+fn post_after(hwnd: Handle, ms: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        hwnd.post(WM_APP_VIEWS_SAVE, 0, 0);
+    });
 }

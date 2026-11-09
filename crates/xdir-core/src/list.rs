@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
 use crate::a11y::ItemInfo;
+use crate::folder_views::ViewSettings;
 use crate::format;
 use crate::fs::Entry;
 use crate::geom::{Color, Rect, contains, rect};
@@ -252,6 +253,11 @@ pub struct FileList {
     /// en el Explorador, y lo que no se usa queda en blanco a la derecha.
     name_width: Option<f32>,
     pub view: View,
+    /// Agrupación, grupos plegados y filtros de la carpeta: se guardan con su vista
+    /// (`folder_views`); los usan las tareas de agrupar y filtrar.
+    pub group_by: Option<Column>,
+    pub collapsed: Vec<String>,
+    pub filters: Vec<(Column, Vec<String>)>,
     /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
     pub folder: Option<std::path::PathBuf>,
     /// Carpeta en la que se busca, mientras la lista muestra resultados de una búsqueda.
@@ -336,6 +342,9 @@ impl Default for FileList {
             columns: default_columns(),
             name_width: None,
             view: View::Details,
+            group_by: None,
+            collapsed: Vec::new(),
+            filters: Vec::new(),
             folder: None,
             search_root: None,
             header_drag: None,
@@ -374,16 +383,63 @@ impl FileList {
 
     /// Vacía la lista (navegación a otra carpeta).
     pub fn clear(&mut self) {
-        let (columns, view) = (std::mem::take(&mut self.columns), self.view);
+        // La vista queda como estaba hasta que la pestaña aplique la de la carpeta nueva.
+        let (columns, collapsed, filters) = (std::mem::take(&mut self.columns), std::mem::take(&mut self.collapsed), std::mem::take(&mut self.filters));
         *self = Self {
             sort: self.sort,
             descending: self.descending,
             show_hidden: self.show_hidden,
             show_extensions: self.show_extensions,
             columns,
-            view,
+            name_width: self.name_width,
+            view: self.view,
+            group_by: self.group_by,
+            collapsed,
+            filters,
             ..Default::default()
         };
+    }
+
+    /// Cómo se ve la lista, para guardarlo como vista de su carpeta. El nombre lleva el ancho
+    /// fijado a mano, o 0 si ocupa lo que sobra.
+    pub fn view_settings(&self) -> ViewSettings {
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| if c.col == Column::Name { ColumnSpec { col: Column::Name, width: self.name_width.unwrap_or(0.0) } } else { *c })
+            .collect();
+        ViewSettings {
+            view: self.view,
+            sort: self.sort,
+            descending: self.descending,
+            columns,
+            group_by: self.group_by,
+            collapsed: self.collapsed.clone(),
+            filters: self.filters.clone(),
+        }
+    }
+
+    /// Aplica la vista de una carpeta, conservando el elemento con foco a la vista.
+    pub fn apply_view_settings(&mut self, v: &ViewSettings) {
+        let resort = self.sort != v.sort || self.descending != v.descending;
+        self.sort = v.sort;
+        self.descending = v.descending;
+        self.columns = v.columns.clone();
+        self.name_width = v.columns.iter().find(|c| c.col == Column::Name).map(|c| c.width).filter(|w| *w > 0.0);
+        self.group_by = v.group_by;
+        self.collapsed = v.collapsed.clone();
+        self.filters = v.filters.clone();
+        self.header_drag = None;
+        if self.view != v.view {
+            self.set_view(v.view);
+        }
+        if resort && !self.entries.is_empty() {
+            let focus = self.focused_index();
+            self.rebuild(focus);
+            if let Some(f) = self.focus {
+                self.ensure_visible(f);
+            }
+        }
     }
 
     /// Agrega un lote durante la carga progresiva. Solo se ordena el lote nuevo y se mezcla

@@ -13,6 +13,7 @@ impl App {
         if self.drag == Drag::None {
             self.autosave_group();
         }
+        self.sync_folder_views();
         let title = match &self.group_name {
             Some(name) => format!("xdir - {name}"),
             None => "xdir".to_string(),

@@ -211,13 +211,16 @@ fn only_visible_panes_have_visible_tabs() {
     assert_eq!(vis, vec![true, true, false, false]);
 }
 
+/// La vista es de la carpeta: cambiarla en un panel no toca a los otros que ya la muestran (la
+/// toman al volver a abrirla), y una pestaña nueva en esa carpeta nace con ella.
 #[test]
-fn view_applies_to_all_tabs_of_a_pane_and_cycles_within_bounds() {
+fn view_is_per_folder_and_cycles_within_bounds() {
     let mut a = app();
-    a.new_tab(0, Location::Computer, false);
     a.set_view(0, list::View::Icons);
-    assert!(a.panes[0].tabs.iter().all(|t| t.list.view == list::View::Icons));
+    assert_eq!(a.panes[0].tab().list.view, list::View::Icons);
     assert_eq!(a.panes[1].tab().list.view, list::View::Details);
+    a.new_tab(2, Location::Computer, true);
+    assert_eq!(a.panes[2].tab().list.view, list::View::Icons);
     for _ in 0..list::VIEWS.len() + 2 {
         a.cycle_view(1, true);
     }
@@ -228,18 +231,21 @@ fn view_applies_to_all_tabs_of_a_pane_and_cycles_within_bounds() {
     assert_eq!(a.panes[1].tab().list.view.index(), 0);
 }
 
+/// Las columnas también son de la carpeta: las toma una pestaña nueva en la misma carpeta, no una
+/// en otra.
 #[test]
-fn columns_are_shared_by_every_tab() {
+fn columns_are_per_folder() {
     let mut a = app();
-    a.new_tab(1, Location::Computer, false);
-    let mut cols = list::default_columns();
-    cols.pop();
-    a.set_columns(cols.clone());
-    assert_eq!(a.columns, cols);
-    assert!(a.panes.iter().flat_map(|p| p.tabs.iter()).all(|t| t.list.columns == cols));
-    // Las pestañas nuevas las heredan.
+    let other = fixture("columnas-otra");
+    let list = &mut a.panes[1].tab_mut().list;
+    list.toggle_column(list::Column::Size);
+    let cols = list.columns.clone();
+    assert_ne!(cols, list::default_columns());
+    a.apply(1, Action::ColumnsChanged);
     a.new_tab(3, Location::Computer, false);
     assert_eq!(a.panes[3].tabs[1].list.columns, cols);
+    a.new_tab(3, Location::Path(other), true);
+    assert_eq!(a.panes[3].tab().list.columns, a.folder_views.default_view().columns);
 }
 
 #[test]
@@ -1583,4 +1589,126 @@ fn tree_follow_option() {
         a.paint();
         assert_eq!(a.tree.revealing().is_some(), follow, "sigue al panel: {follow}");
     }
+}
+
+// ---------- tanda B: memoria de vista por carpeta ----------
+
+/// Entrega a la `App` los mensajes de carga de la pestaña activa del panel hasta que termina (lo
+/// que hace `WM_APP_LOAD` en la ventana, incluida la vista de la carpeta).
+fn pump(a: &mut App, pane: usize) {
+    while a.panes[pane].tab().loading {
+        let ev = a.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la carga termina");
+        a.on_load_event(ev);
+    }
+}
+
+fn go(a: &mut App, pane: usize, loc: Location) {
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[pane].tab_mut().navigate(hwnd, &tx, loc);
+    pump(a, pane);
+}
+
+fn view_key(a: &App, pane: usize) -> String {
+    a.panes[pane].tab().view_key()
+}
+
+/// Cada carpeta recupera su vista al volver (también con Atrás y Adelante), y al volver con Atrás
+/// el foco queda en la subcarpeta por la que se había entrado, a la vista, como siempre.
+#[test]
+fn navigating_restores_folder_view() {
+    let root = fixture("vista-por-carpeta");
+    for i in 0..60 {
+        std::fs::create_dir_all(root.join(format!("d{i:02}"))).unwrap();
+    }
+    let mut a = app();
+    a.set_active(0);
+    a.paint();
+    go(&mut a, 0, Location::Path(root.clone()));
+    assert_eq!(a.panes[0].tab().list.view, list::View::Details);
+    go(&mut a, 0, Location::Path(root.join("d50")));
+    a.run_command(Command::View(1));
+    assert_eq!(a.panes[0].tab().list.view, list::View::Icons);
+    a.run_command(Command::Back);
+    // Como en la ventana: se dibuja mientras carga (la lista conoce su área).
+    a.paint();
+    pump(&mut a, 0);
+    a.paint();
+    let list = &a.panes[0].tab().list;
+    assert_eq!(list.view, list::View::Details, "la carpeta de arriba sigue en Detalles");
+    let focus = list.focused_index().map(|i| list.entries[i].name.to_string_lossy().into_owned());
+    assert_eq!(focus.as_deref(), Some("d50"), "el foco vuelve a la subcarpeta");
+    let (x, y) = list.focus_point().unwrap();
+    assert_eq!(list.pos_at_point(x, y - 1.0), list.focus_pos(), "la subcarpeta queda a la vista");
+    a.run_command(Command::Forward);
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.view, list::View::Icons, "la subcarpeta recuerda Íconos");
+    // Una pestaña nueva en esa carpeta (en otro panel) la ve igual; la de arriba, en Detalles.
+    a.new_tab(1, Location::Path(root.join("d50")), true);
+    pump(&mut a, 1);
+    assert_eq!(a.panes[1].tab().list.view, list::View::Icons);
+    a.new_tab(1, Location::Path(root.clone()), true);
+    pump(&mut a, 1);
+    assert_eq!(a.panes[1].tab().list.view, list::View::Details);
+    // Ordenar también se recuerda por carpeta.
+    a.set_active(1);
+    a.run_command(Command::SortBy(5));
+    let key = view_key(&a, 1);
+    assert_eq!(a.folder_views.get(&key).sort, list::Column::Size);
+    assert_eq!(a.folder_views.get(&view_key(&a, 0)).sort, list::Column::Name);
+}
+
+/// «Usar esta vista en todas las carpetas» pregunta; con «Sí» la vista actual pasa a ser la por
+/// defecto, se borran las de las carpetas y las listas abiertas la toman; con «No», nada.
+#[test]
+fn apply_view_to_all_confirms_and_clears() {
+    let (x, y) = (fixture("todas-x"), fixture("todas-y"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(x));
+    a.set_view(0, list::View::Thumbnails);
+    go(&mut a, 1, Location::Path(y));
+    a.set_view(1, list::View::Icons);
+    a.set_active(1);
+    assert_eq!(a.folder_views.len(), 2);
+    host.set_answer(Some(false));
+    a.run_command(Command::ApplyViewToAll);
+    assert_eq!(a.folder_views.len(), 2);
+    assert_eq!(a.folder_views.default_view().view, list::View::Details);
+    host.set_answer(Some(true));
+    a.run_command(Command::ApplyViewToAll);
+    assert!(a.folder_views.is_empty());
+    assert_eq!(a.folder_views.default_view(), &a.panes[1].tab().list.view_settings());
+    assert_eq!(a.folder_views.default_view().view, list::View::Icons);
+    assert_eq!(a.panes[0].tab().list.view, list::View::Icons, "las listas abiertas toman la nueva");
+    assert!(a.folder_views.is_dirty());
+}
+
+/// «Restablecer la vista de esta carpeta» borra su vista: vuelve a la por defecto.
+#[test]
+fn reset_folder_view_uses_default() {
+    let mut a = app();
+    go(&mut a, 0, Location::Path(fixture("restablecer")));
+    a.set_view(0, list::View::LargeIcons);
+    let key = view_key(&a, 0);
+    assert!(a.folder_views.contains(&key));
+    a.run_command(Command::ResetFolderView);
+    assert!(!a.folder_views.contains(&key));
+    assert_eq!(a.panes[0].tab().list.view, list::View::Details);
+    assert_eq!(a.panes[0].tab().list.view_settings(), *a.folder_views.default_view());
+}
+
+/// La primera vez (sin `carpetas.toml`) la vista y las columnas de la sesión de antes pasan a ser
+/// la vista por defecto, y las listas arrancan así.
+#[test]
+fn app_migrates_session_view() {
+    let mut init = Init::blank();
+    let mut cols = list::default_columns();
+    cols.pop();
+    init.session.columns = cols.clone();
+    init.session.views = vec![list::View::Icons; PANES];
+    let a = app_with(init);
+    assert_eq!(a.folder_views.default_view().view, list::View::Icons);
+    assert_eq!(a.folder_views.default_view().columns[1..], cols[1..]);
+    assert!(a.panes.iter().all(|p| p.tab().list.view == list::View::Icons));
+    assert_eq!(a.session().columns[1..], cols[1..]);
 }

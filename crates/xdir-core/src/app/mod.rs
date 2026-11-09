@@ -45,7 +45,8 @@ use crate::drop::{DragEvent, DragKind, Effect};
 use crate::favorites::{Fav, FavPath, Favorites};
 use crate::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use crate::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
-use crate::list::{Action, ColumnSpec};
+use crate::folder_views::FolderViews;
+use crate::list::Action;
 use crate::pane::{Button, FavDrop, Pane, PaneHit, SearchView};
 use crate::session::{PaneState, Session};
 use crate::tab::Tab;
@@ -70,6 +71,10 @@ const PANES: usize = 4;
 const WM_APP_SEARCH: u32 = WM_APP + 17;
 /// Cuánto se espera después de la última tecla para empezar a buscar.
 const SEARCH_DELAY_MS: u64 = 300;
+/// Pasó la pausa después del último cambio de vista de una carpeta: se guarda `carpetas.toml`.
+const WM_APP_VIEWS_SAVE: u32 = WM_APP + 18;
+/// Cuánto se espera después del último cambio de vista para guardar `carpetas.toml`.
+const VIEWS_SAVE_DELAY_MS: u64 = 1000;
 
 /// Qué muestra un menú desplegable de favoritos.
 enum FavMenuSource {
@@ -308,8 +313,12 @@ pub struct App {
     fav_ctx: Option<(usize, Option<FavPath>)>,
     /// Clic derecho en el encabezado de la lista de ese panel: menú de columnas.
     header_ctx: Option<usize>,
-    /// Columnas de las listas (las mismas en todas).
-    columns: Vec<ColumnSpec>,
+    /// Vista recordada de cada carpeta (`carpetas.toml`) y la vista por defecto.
+    folder_views: FolderViews,
+    /// Último cambio de vista de una carpeta sin guardar todavía (se guarda un segundo después).
+    views_changed_at: Option<Instant>,
+    /// Hay un aviso de guardado en camino (`WM_APP_VIEWS_SAVE`).
+    views_save_posted: bool,
     accent: Accent,
     /// Modo fijado con el switch; None sigue al modo de Windows.
     dark_mode: Option<bool>,
@@ -360,6 +369,8 @@ pub struct Init {
     pub config: Config,
     pub favorites: Favorites,
     pub groups: Groups,
+    /// Vista de cada carpeta (`carpetas.toml`).
+    pub folder_views: FolderViews,
     pub probe: Option<String>,
     pub start_path: Option<PathBuf>,
     pub started: Instant,
@@ -376,7 +387,9 @@ impl Init {
         let config = if probe.is_none() { Config::load() } else { Config::default() };
         anim::set_enabled(config.animations.unwrap_or_else(anim::system_allows));
         anim::set_off_by_config(config.animations == Some(false));
-        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), probe, start_path, started, marks }
+        // `--probe` tampoco lee ni escribe la vista de las carpetas.
+        let folder_views = if probe.is_none() { FolderViews::load() } else { FolderViews::default() };
+        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, probe, start_path, started, marks }
     }
 
     /// Datos vacíos y sesión por defecto: nada del disco.
@@ -390,6 +403,7 @@ impl Init {
             config: Config::default(),
             favorites: Favorites::default(),
             groups: Groups::default(),
+            folder_views: FolderViews::default(),
             probe: None,
             start_path: None,
             started: Instant::now(),
@@ -402,11 +416,17 @@ impl App {
     /// Arma la aplicación (sin ventana: la plataforma la fija después con `App::attach`, que se la
     /// pasa al host) y abre sus paneles.
     pub fn new(init: Init, host: Rc<dyn WindowHost>) -> App {
-        let Init { session, history, config, favorites, groups, probe, start_path, started, marks } = init;
+        let Init { session, history, config, favorites, groups, mut folder_views, probe, start_path, started, marks } = init;
+        // Primera vez con memoria por carpeta: la vista y las columnas de la sesión pasan a ser
+        // la vista por defecto.
+        if folder_views.is_fresh() {
+            folder_views.migrate(&session);
+        }
         let theme = Theme::from_system(session.accent, session.dark_mode);
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
+        let config_errors = config_errors.or_else(|| folder_views.errors.first().map(|e| format!("carpetas.toml, {e}")));
         let mut app = App {
             hwnd: Handle::default(),
             host,
@@ -472,7 +492,9 @@ impl App {
             search_token: 0,
             fav_ctx: None,
             header_ctx: None,
-            columns: session.columns.clone(),
+            folder_views,
+            views_changed_at: None,
+            views_save_posted: false,
             accent: session.accent,
             dark_mode: session.dark_mode,
             picker_open: false,
@@ -484,6 +506,7 @@ impl App {
             xtree_open: false,
         };
         app.restore_panes(&session, start_path);
+        app.sync_folder_views();
         app.ensure_group();
         #[cfg(feature = "arbol")]
         {

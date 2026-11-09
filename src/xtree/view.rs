@@ -349,7 +349,8 @@ impl Xtree {
     /// Tecla A: vuelve a analizar con permisos (administrador en Windows; en macOS abre el ajuste
     /// de Acceso total al disco). Solo si faltaron permisos.
     fn elevate(&mut self) -> Action {
-        self.elevate_with(fs::xtree_elevate)
+        let hwnd = self.hwnd;
+        self.elevate_with(move |root, progress, cancel| fs::xtree_elevate(hwnd, root, progress, cancel))
     }
 
     /// `elevate` con el escaneo elevado como parámetro (las pruebas pasan uno falso).

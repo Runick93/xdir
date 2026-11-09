@@ -6,20 +6,25 @@ use std::cell::RefCell;
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, SetLastError, WAIT_TIMEOUT, WIN32_ERROR};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, HANDLE, SetLastError, WAIT_TIMEOUT, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetCompressedFileSizeW,
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, OPEN_EXISTING,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
-use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+};
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{PCWSTR, w};
 
 use super::mft;
+use crate::fs::xtree_temp::{helper_file_name, is_helper_file};
+use crate::platform::Handle;
 use crate::xtree::colors::fmt_size;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::{Node, decode, encode};
@@ -40,6 +45,8 @@ const LIST_BUF_WORDS: usize = 128 * 1024 / 8;
 
 /// Argumento con el que xdir se relanza como administrador para leer la MFT (tecla A).
 pub const XTREE_HELPER_ARG: &str = "--xtree-mft";
+/// Pedidos al ayudante elevado de este proceso: cada uno usa su propio archivo temporal.
+static NEXT_HELPER_FILE: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct IoStatus {
@@ -240,20 +247,26 @@ pub fn xtree_fast_scan(root: &Path, progress: &Progress, cancel: &AtomicBool) ->
 
 // ---------- ayudante elevado (tecla A) ----------
 
-/// Tecla A: relanza xdir como administrador (Windows pide confirmación) con
-/// `--xtree-mft C: %TEMP%\xdir-xtree-<pid>.bin`; ese proceso lee la MFT, deja el árbol en el
-/// archivo y termina. Acá se espera, se lee el árbol y se borra el archivo.
-pub fn xtree_elevate(root: &Path, _progress: &Progress, cancel: &AtomicBool) -> Option<Vec<Node>> {
+/// Tecla A: relanza xdir como administrador (Windows pide confirmación, delante de la ventana de
+/// xdir) con `--xtree-mft C: %TEMP%\xdir-xtree-<pid>-<n>.bin <pid>`; ese proceso lee la MFT, deja
+/// el árbol en el archivo y termina. Acá se espera, se lee el árbol y se borra el archivo.
+/// Si se cancela (F5, otro análisis o xdir se cierra) se termina el ayudante; si Windows no lo
+/// deja, el ayudante igual se corta solo cuando xdir se cierra (vigila el `<pid>`).
+pub fn xtree_elevate(hwnd: Handle, root: &Path, _progress: &Progress, cancel: &AtomicBool) -> Option<Vec<Node>> {
     let drive = root_drive(root)?;
     let exe = std::env::current_exe().ok()?;
-    let file = std::env::temp_dir().join(format!("xdir-xtree-{}.bin", std::process::id()));
+    let pid = std::process::id();
+    let n = NEXT_HELPER_FILE.fetch_add(1, Ordering::Relaxed);
+    let file = std::env::temp_dir().join(helper_file_name(pid, n));
     let _ = std::fs::remove_file(&file);
-    let params = format!("{XTREE_HELPER_ARG} {drive} \"{}\"", file.display());
+    let params = format!("{XTREE_HELPER_ARG} {drive} \"{}\" {pid}", file.display());
     let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
     let params_w: Vec<u16> = params.encode_utf16().chain(Some(0)).collect();
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        // Con la ventana de xdir como dueña, la confirmación de Windows sale adelante.
+        hwnd: hwnd.hwnd(),
         lpVerb: w!("runas"),
         lpFile: PCWSTR(exe_w.as_ptr()),
         lpParameters: PCWSTR(params_w.as_ptr()),
@@ -279,10 +292,20 @@ pub fn xtree_elevate(root: &Path, _progress: &Progress, cancel: &AtomicBool) -> 
             break unsafe { GetExitCodeProcess(info.hProcess, &mut code) }.is_ok();
         }
     };
-    let _ = unsafe { CloseHandle(info.hProcess) };
     if !finished {
-        return None; // xdir se cierra o se reemplazó el escaneo: el archivo queda en %TEMP%
+        // Ya no hace falta: se termina el ayudante (si Windows no lo permite, el error se ignora).
+        // Un hilo aparte espera a que salga y borra el archivo que haya podido dejar.
+        let _ = unsafe { TerminateProcess(info.hProcess, 1) };
+        let process = info.hProcess.0 as usize;
+        let _ = std::thread::Builder::new().spawn(move || {
+            let process = HANDLE(process as *mut c_void);
+            unsafe { WaitForSingleObject(process, INFINITE) };
+            let _ = unsafe { CloseHandle(process) };
+            let _ = std::fs::remove_file(&file);
+        });
+        return None;
     }
+    let _ = unsafe { CloseHandle(info.hProcess) };
     let bytes = std::fs::read(&file).ok();
     let _ = std::fs::remove_file(&file);
     if code != 0 {
@@ -291,14 +314,32 @@ pub fn xtree_elevate(root: &Path, _progress: &Progress, cancel: &AtomicBool) -> 
     decode(&bytes?)
 }
 
-/// Proceso elevado (`xdir --xtree-mft <unidad> <archivo>`): lee la MFT de la unidad y guarda el
-/// árbol en el archivo. `args` son los argumentos que siguen a `--xtree-mft`. Devuelve el código
-/// de salida: 0 bien, 2 sin permisos, 1 cualquier otro error.
+/// Proceso elevado (`xdir --xtree-mft <unidad> <archivo> <pid>`): lee la MFT de la unidad y guarda
+/// el árbol en el archivo. `args` son los argumentos que siguen a `--xtree-mft`; `<pid>` es el xdir
+/// que lo pidió: si se cierra, la lectura se corta y no se escribe nada. El archivo solo puede
+/// llamarse `xdir-xtree-<dígitos>[-<dígitos>].bin`. Devuelve el código de salida: 0 bien, 2 sin
+/// permisos, 1 cualquier otro error (o xdir se cerró).
 pub fn xtree_helper_main(args: &[String]) -> i32 {
-    let [drive, file] = args else { return 1 };
+    let [drive, file, pid] = args else { return 1 };
+    // Proceso de administrador: no escribe donde se le pida, solo el temporal de xtree.
+    if !is_helper_file(file) {
+        return 1;
+    }
+    let Ok(pid) = pid.parse::<u32>() else { return 1 };
     let Some(drive) = volume_drive(drive.trim_end_matches('\\')).filter(|d| is_ntfs(d)) else { return 1 };
+    // Si xdir ya no existe no hay a quién devolverle nada.
+    let Ok(parent) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else { return 1 };
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let (cancel, parent) = (cancel.clone(), parent.0 as usize);
+        let _ = std::thread::Builder::new().spawn(move || {
+            unsafe { WaitForSingleObject(HANDLE(parent as *mut c_void), INFINITE) };
+            cancel.store(true, Ordering::Relaxed);
+        });
+    }
     let progress = Progress::default();
-    match mft::scan(&drive, &format!("{drive}\\"), &progress, &AtomicBool::new(false)) {
+    match mft::scan(&drive, &format!("{drive}\\"), &progress, &cancel) {
+        Ok(_) if cancel.load(Ordering::Relaxed) => 1,
         Ok(arena) => {
             // Proceso de administrador escribiendo en %TEMP% del usuario: solo un archivo nuevo.
             // Si ya existe algo con ese nombre (archivo o enlace puesto mientras se esperaba el

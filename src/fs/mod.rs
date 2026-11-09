@@ -16,6 +16,10 @@ mod win32;
 #[cfg(windows)]
 pub use self::win32::*;
 
+// Nombre del temporal del ayudante elevado de xtree: lo usa Windows; las pruebas, en todos.
+#[cfg(any(windows, test))]
+mod xtree_temp;
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

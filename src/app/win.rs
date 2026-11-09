@@ -97,7 +97,7 @@ unsafe fn build_fav_menu(menu: &mut FavMenu, hmenu: HMENU, entries: &[(FavPath, 
 // ---------- arranque ----------
 
 pub fn run() -> windows::core::Result<()> {
-    // `xdir --xtree-mft <unidad> <archivo>`: proceso elevado de xtree (tecla A). Lee la MFT, deja
+    // `xdir --xtree-mft <unidad> <archivo> <pid>`: proceso elevado de xtree (tecla A). Lee la MFT, deja
     // el árbol en el archivo y sale, sin ventana, sesión ni configuración.
     let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     if args.first().is_some_and(|a| a == crate::fs::XTREE_HELPER_ARG) {

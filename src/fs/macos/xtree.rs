@@ -12,6 +12,7 @@ use objc2_app_kit::NSWorkspace;
 use objc2_foundation::{NSString, NSURL};
 
 use super::{UF_HIDDEN, drive_label, drive_name, drives};
+use crate::platform::Handle;
 use crate::xtree::colors::fmt_size;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::Node;
@@ -295,7 +296,7 @@ pub fn xtree_fast_scan(_root: &Path, _progress: &Progress, _cancel: &AtomicBool)
 /// Tecla A: abre Ajustes en Privacidad y seguridad > Acceso total al disco para que el usuario le
 /// dé permiso a xdir. No hay escaneo elevado: devuelve `None` y el aviso sigue; el permiso nuevo
 /// recién vale al reabrir xdir. NSWorkspace se usa en el hilo principal (la vista llama desde un hilo propio).
-pub fn xtree_elevate(_root: &Path, _progress: &Progress, _cancel: &AtomicBool) -> Option<Vec<Node>> {
+pub fn xtree_elevate(_hwnd: Handle, _root: &Path, _progress: &Progress, _cancel: &AtomicBool) -> Option<Vec<Node>> {
     dispatch2::DispatchQueue::main().exec_async(|| {
         if let Some(url) = NSURL::URLWithString(&NSString::from_str(FULL_DISK_ACCESS_URL)) {
             NSWorkspace::sharedWorkspace().openURL(&url);

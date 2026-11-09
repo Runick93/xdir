@@ -4,17 +4,50 @@ use xdir_core::sys::SystemEnv;
 // Las pruebas con el sistema real solo corren en Windows; la de la tabla contra el entorno falso
 // corre en todos (fuera de Windows, `main.rs` incluye este archivo suelto).
 #[cfg(windows)]
-use super::{platform_env, platform_file_system};
+use super::{find_wt, platform_env, platform_file_system, windows_consoles, wt_params};
 
-/// El menú de terminales muestra lo mismo que antes.
+/// El menú de terminales empieza como antes (PowerShell, CMD); después Windows Terminal si está
+/// instalada en esta máquina.
 #[test]
 #[cfg(windows)]
 fn consoles_menu_same_entries() {
     let env = platform_env();
     let labels: Vec<&str> = env.consoles().iter().map(|c| c.label).collect();
     let verbs = env.console_alt_verbs();
-    assert_eq!(labels, ["PowerShell", "CMD"]);
+    assert_eq!(labels[..2], ["PowerShell", "CMD"]);
+    assert!(labels[2..].iter().all(|l| *l == "Windows Terminal"), "{labels:?}");
     assert_eq!(verbs, [("runas", "Ejecutar como administrador"), ("runasuser", "Ejecutar como otro usuario")]);
+}
+
+/// Windows Terminal aparece si `wt.exe` está en el PATH o en `%LOCALAPPDATA%\Microsoft\WindowsApps`.
+#[test]
+#[cfg(windows)]
+fn windows_terminal_listed_when_present() {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    let path = OsStr::new(r"C:\Windows\System32;C:\Herramientas");
+    let local = Path::new(r"C:\Users\ana\AppData\Local");
+    let labels = |exists: &dyn Fn(&Path) -> bool| {
+        windows_consoles(Some(path), Some(local), exists).iter().map(|c| c.label).collect::<Vec<_>>()
+    };
+    assert_eq!(labels(&|p| p == Path::new(r"C:\Herramientas\wt.exe")), ["PowerShell", "CMD", "Windows Terminal"]);
+    let alias = Path::new(r"C:\Users\ana\AppData\Local\Microsoft\WindowsApps\wt.exe");
+    assert_eq!(labels(&|p| p == alias), ["PowerShell", "CMD", "Windows Terminal"]);
+    // El del PATH gana.
+    assert_eq!(find_wt(Some(path), Some(local), &|_| true), Some(PathBuf::from(r"C:\Windows\System32\wt.exe")));
+    // La carpeta se pasa con -d entre comillas; la barra final se duplica para no escapar la comilla.
+    assert_eq!(wt_params(Path::new(r"C:\Mis cosas")), r#"-d "C:\Mis cosas""#);
+    assert_eq!(wt_params(Path::new(r"C:\")), r#"-d "C:\\""#);
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_terminal_not_listed_when_absent() {
+    use std::ffi::OsStr;
+    use std::path::Path;
+    let labels: Vec<_> = windows_consoles(Some(OsStr::new(r"C:\Windows")), Some(Path::new(r"C:\L")), &|_| false).iter().map(|c| c.label).collect();
+    assert_eq!(labels, ["PowerShell", "CMD"]);
+    assert_eq!(windows_consoles(None, None, &|_| true).len(), 2);
 }
 
 /// Foto de la tabla completa de comandos con el entorno real: id, atajos, título, cómo se ven los

@@ -1,16 +1,31 @@
 use xdir_core::commands::{ALL, Command, available_in, combo_label_in, parse_combo};
 use xdir_core::sys::SystemEnv;
 
-use super::{platform_env, platform_file_system};
+use super::{mac_consoles, platform_env, platform_file_system};
 
-/// El menú de terminales muestra lo mismo que antes.
+/// El menú de terminales empieza con Terminal, como antes; después iTerm si está instalada en
+/// esta máquina.
 #[test]
 fn consoles_menu_same_entries() {
     let env = platform_env();
     let labels: Vec<&str> = env.consoles().iter().map(|c| c.label).collect();
     let verbs = env.console_alt_verbs();
-    assert_eq!(labels, ["Terminal"]);
+    assert_eq!(labels[0], "Terminal");
+    assert!(labels[1..].iter().all(|l| *l == "iTerm"), "{labels:?}");
     assert!(verbs.is_empty());
+}
+
+/// iTerm aparece después de Terminal si está en /Applications o en ~/Applications.
+#[test]
+fn iterm_listed_when_present() {
+    use std::path::Path;
+    let home = Path::new("/Users/ana");
+    let labels = |exists: &dyn Fn(&Path) -> bool| mac_consoles(Some(home), exists).iter().map(|c| c.label).collect::<Vec<_>>();
+    assert_eq!(labels(&|p| p == Path::new("/Applications/iTerm.app")), ["Terminal", "iTerm"]);
+    assert_eq!(labels(&|p| p == Path::new("/Users/ana/Applications/iTerm.app")), ["Terminal", "iTerm"]);
+    assert_eq!(labels(&|_| false), ["Terminal"]);
+    // Sin HOME solo se mira /Applications.
+    assert_eq!(mac_consoles(None, &|p| p == Path::new("/Users/ana/Applications/iTerm.app")).len(), 1);
 }
 
 /// Foto de la tabla completa de comandos con el entorno real: id, atajos, título, cómo se ven los

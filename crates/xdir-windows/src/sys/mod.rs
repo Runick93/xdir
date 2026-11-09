@@ -4,7 +4,7 @@
 mod win32;
 pub use self::win32::install;
 #[cfg(test)]
-use self::win32::{platform_env, platform_file_system};
+use self::win32::{find_wt, platform_env, platform_file_system, windows_consoles, wt_params};
 
 #[cfg(test)]
 mod tests;

@@ -46,9 +46,10 @@ impl Waker for Win32Waker {
 /// la más antigua, hasta 25), así una ruta escrita en uno aparece en el otro.
 const TYPED_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\TypedPaths");
 
-/// Consolas: PowerShell (7 si está instalado) y CMD.
+/// Consolas: PowerShell (7 si está instalado), CMD y Windows Terminal (si está instalada).
 const POWERSHELL: u8 = 0;
 const CMD: u8 = 1;
+const WINDOWS_TERMINAL: u8 = 2;
 
 /// Entorno de Windows: registro, configuración regional del usuario y el Shell.
 struct Win32Env;
@@ -159,7 +160,8 @@ impl SystemEnv for Win32Env {
     }
 
     fn consoles(&self) -> Vec<ConsoleInfo> {
-        vec![ConsoleInfo { id: POWERSHELL, label: "PowerShell" }, ConsoleInfo { id: CMD, label: "CMD" }]
+        let (path, local) = (std::env::var_os("PATH"), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
+        windows_consoles(path.as_deref(), local.as_deref(), &|p| p.exists())
     }
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {
@@ -168,16 +170,53 @@ impl SystemEnv for Win32Env {
 
     /// Abre la consola con `dir` como carpeta de trabajo, con un verbo del Shell: `open`, `runas`
     /// (administrador, pide confirmación de UAC) o `runasuser` (pide usuario y contraseña de otra
-    /// cuenta). Si la terminal predeterminada de Windows es Windows Terminal, se abre ahí.
+    /// cuenta). Si la terminal predeterminada de Windows es Windows Terminal, PowerShell y CMD se
+    /// abren ahí. Windows Terminal se abre con `wt.exe -d "<carpeta>"` y los mismos verbos (con
+    /// `runas`, la carpeta va en `-d` porque un proceso elevado no hereda la de trabajo).
     fn open_console(&self, owner: Handle, id: u8, dir: &Path, verb: &str) -> bool {
         let hwnd = owner.hwnd();
-        let program = HSTRING::from(console_program(id).as_os_str());
+        let (program, params) = if id == WINDOWS_TERMINAL {
+            let (path, local) = (std::env::var_os("PATH"), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
+            let wt = find_wt(path.as_deref(), local.as_deref(), &|p| p.exists()).unwrap_or_else(|| PathBuf::from("wt.exe"));
+            (wt, Some(HSTRING::from(wt_params(dir))))
+        } else {
+            (console_program(id), None)
+        };
+        let program = HSTRING::from(program.as_os_str());
+        let params = params.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr()));
         let verb = HSTRING::from(verb);
         let dir = wide_path(dir);
-        let r = unsafe { ShellExecuteW(Some(hwnd), &verb, &program, PCWSTR::null(), PCWSTR(dir.as_ptr()), SW_SHOWNORMAL) };
+        let r = unsafe { ShellExecuteW(Some(hwnd), &verb, &program, params, PCWSTR(dir.as_ptr()), SW_SHOWNORMAL) };
         // ShellExecute devuelve un valor mayor que 32 si salió bien.
         r.0 as usize > 32
     }
+}
+
+/// Consolas en el orden del menú: PowerShell, CMD y, si se encuentra `wt.exe`, Windows Terminal.
+/// Recibe el PATH, `%LOCALAPPDATA%` y `exists` (¿existe el archivo?) en vez de mirar el sistema,
+/// así se prueba sin depender de lo instalado.
+pub(super) fn windows_consoles(path: Option<&OsStr>, local_app_data: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Vec<ConsoleInfo> {
+    let mut list = vec![ConsoleInfo { id: POWERSHELL, label: "PowerShell" }, ConsoleInfo { id: CMD, label: "CMD" }];
+    if find_wt(path, local_app_data, exists).is_some() {
+        list.push(ConsoleInfo { id: WINDOWS_TERMINAL, label: "Windows Terminal" });
+    }
+    list
+}
+
+/// `wt.exe`: el primero de las carpetas del PATH, si no el alias de la Tienda en
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps`.
+pub(super) fn find_wt(path: Option<&OsStr>, local_app_data: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    let in_path = path.into_iter().flat_map(std::env::split_paths).filter(|d| !d.as_os_str().is_empty()).map(|d| d.join("wt.exe"));
+    let alias = local_app_data.map(|l| l.join(r"Microsoft\WindowsApps\wt.exe"));
+    in_path.chain(alias).find(|p| exists(p))
+}
+
+/// Parámetros de `wt.exe` para abrir en `dir`: `-d "<dir>"`. Las barras al final se duplican
+/// (`C:\` → `"C:\\"`) para que no escapen la comilla de cierre al separar los argumentos.
+pub(super) fn wt_params(dir: &Path) -> String {
+    let d = dir.to_string_lossy();
+    let trailing = d.len() - d.trim_end_matches('\\').len();
+    format!("-d \"{d}{}\"", "\\".repeat(trailing))
 }
 
 /// Ejecutable de la consola: PowerShell 7 si está instalado, si no el de Windows.

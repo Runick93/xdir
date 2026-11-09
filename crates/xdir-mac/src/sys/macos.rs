@@ -167,9 +167,10 @@ impl SystemEnv for MacEnv {
         let _ = std::fs::write(file, list.join("\n") + "\n");
     }
 
-    /// Una sola: Terminal.
+    /// Terminal, y iTerm si está instalada.
     fn consoles(&self) -> Vec<ConsoleInfo> {
-        vec![ConsoleInfo { id: 0, label: "Terminal" }]
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        mac_consoles(home.as_deref(), &|p| p.exists())
     }
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {
@@ -188,15 +189,34 @@ impl SystemEnv for MacEnv {
         NAMES.iter().find(|(k, _)| *k == c).map(|(_, name)| *name)
     }
 
-    /// En macOS hay una sola consola (Terminal) y no existe el Acceso rápido de Windows.
+    /// En macOS no hay CMD (el comando abre la consola principal, Terminal) y no existe el Acceso
+    /// rápido de Windows.
     fn command_available(&self, c: Command) -> bool {
         !matches!(c, Command::Cmd | Command::ToggleQuickPin)
     }
 
-    /// Abre Terminal en la carpeta (el verbo no aplica).
-    fn open_console(&self, _owner: Handle, _id: u8, dir: &Path, _verb: &str) -> bool {
-        std::process::Command::new("open").args(["-a", "Terminal"]).arg(dir).status().is_ok_and(|s| s.success())
+    /// Abre Terminal o iTerm en la carpeta con `open -a` (el verbo no aplica).
+    fn open_console(&self, _owner: Handle, id: u8, dir: &Path, _verb: &str) -> bool {
+        let app = if id == ITERM { "iTerm" } else { "Terminal" };
+        std::process::Command::new("open").args(["-a", app]).arg(dir).status().is_ok_and(|s| s.success())
     }
+}
+
+/// Consolas de macOS: Terminal siempre; iTerm si existe.
+const TERMINAL: u8 = 0;
+const ITERM: u8 = 1;
+
+/// Consolas en el orden del menú: Terminal, y después iTerm si está en `/Applications` o en
+/// `~/Applications`. `exists` dice si una ruta existe (el sistema de archivos real, o uno
+/// simulado en las pruebas).
+pub(super) fn mac_consoles(home: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Vec<ConsoleInfo> {
+    let mut list = vec![ConsoleInfo { id: TERMINAL, label: "Terminal" }];
+    let system = PathBuf::from("/Applications/iTerm.app");
+    let user = home.map(|h| h.join("Applications/iTerm.app"));
+    if exists(&system) || user.is_some_and(|u| exists(&u)) {
+        list.push(ConsoleInfo { id: ITERM, label: "iTerm" });
+    }
+    list
 }
 
 /// El entorno real de macOS (lo que instala `install`).

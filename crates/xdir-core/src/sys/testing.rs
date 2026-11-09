@@ -64,11 +64,20 @@ thread_local! {
     /// Historial de rutas escritas del falso: en memoria y por hilo, para que los tests no se
     /// pisen.
     static TYPED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Teclas que el falso informa como apretadas (por hilo).
+    static KEYS_DOWN: RefCell<Vec<Key>> = const { RefCell::new(Vec::new()) };
 }
 
-/// `SystemEnv` falso: tema claro, sin animaciones ni teclas apretadas, una carpeta de
+/// `SystemEnv` falso: tema claro, sin animaciones, sin teclas apretadas salvo las de `hold_keys`, una carpeta de
 /// configuración temporal por hilo, formatos deterministas y una sola consola.
 pub struct FakeEnv;
+
+impl FakeEnv {
+    /// Desde ahora (en este hilo) `key_down` informa como apretadas solo estas teclas; `&[]` las suelta.
+    pub fn hold_keys(keys: &[Key]) {
+        KEYS_DOWN.with(|k| *k.borrow_mut() = keys.to_vec());
+    }
+}
 
 impl SystemEnv for FakeEnv {
     fn system_dark(&self) -> bool {
@@ -83,8 +92,8 @@ impl SystemEnv for FakeEnv {
         false
     }
 
-    fn key_down(&self, _k: Key) -> bool {
-        false
+    fn key_down(&self, k: Key) -> bool {
+        KEYS_DOWN.with(|d| d.borrow().contains(&k))
     }
 
     /// En pruebas la configuración nunca es la real: cada hilo de prueba tiene su propia carpeta

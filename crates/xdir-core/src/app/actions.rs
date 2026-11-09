@@ -6,6 +6,9 @@ impl App {
     /// Atajos de la ventana. Devuelve si la tecla se usó.
     pub fn on_key(&mut self, vk: Key) -> bool {
         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
+        // Ctrl+Alt (y AltGr) en Windows y ⌥⌘ en macOS llegan acá, no a `on_alt_key`: sin mirar
+        // Alt, Ctrl+Alt+N se buscaba como Ctrl+N.
+        let alt = key_down(VK_MENU);
         let active = self.active;
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
@@ -14,7 +17,7 @@ impl App {
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
-            _ => match self.config.keymap.lookup(vk, ctrl, shift, false) {
+            _ => match self.config.keymap.lookup(vk, ctrl, shift, alt) {
                 Some(c) => self.run_command(c),
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
                     Some(action) => {

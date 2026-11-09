@@ -818,6 +818,37 @@ fn new_text_file_sends_op() {
     assert_eq!(FakeFileOps::take_ops(), []);
 }
 
+/// Ctrl+Alt+N (⌥⌘N en macOS) llega por `on_key` con Alt apretado y crea el archivo de texto.
+#[test]
+fn ctrl_alt_n_creates_text_file() {
+    use crate::keys::keys::{VK_CONTROL, VK_MENU};
+    use crate::sys::testing::{FakeEnv, FakeFileOps};
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp.clone()), true);
+    FakeFileOps::take_ops();
+    FakeEnv::hold_keys(&[VK_CONTROL, VK_MENU]);
+    let used = a.on_key(Key(b'N' as u16));
+    FakeEnv::hold_keys(&[]);
+    assert!(used);
+    assert_eq!(FakeFileOps::take_ops(), [Op::NewFile { parent: tmp }]);
+}
+
+/// Solo Ctrl+N (sin Alt) no es «Archivo de texto nuevo».
+#[test]
+fn ctrl_n_without_alt_does_not_create_text_file() {
+    use crate::keys::keys::VK_CONTROL;
+    use crate::sys::testing::{FakeEnv, FakeFileOps};
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp), true);
+    FakeFileOps::take_ops();
+    FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_key(Key(b'N' as u16));
+    FakeEnv::hold_keys(&[]);
+    assert_eq!(FakeFileOps::take_ops(), []);
+}
+
 // ---------- cajas de texto y menús del host ----------
 
 /// Perder el foco de la barra de dirección (`WM_APP_EDIT_DONE` con 0) cancela: no navega aunque

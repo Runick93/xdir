@@ -31,7 +31,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use crate::geom::{self, contains};
-use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
+use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
 use crate::sys::{self, Handle};
 use crate::{WM_APP, fs, shell};
 

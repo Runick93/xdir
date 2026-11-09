@@ -717,7 +717,9 @@ fn op_done_with_a_new_folder_asks_for_the_rename() {
 fn xtree_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("xdir-xtree-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    // La ruta como la guarda la pestaña: en Windows la carpeta temporal puede venir con nombre
+    // corto (`RUNNER~1`) y la navegación la pasa al largo.
+    crate::fs::true_case(&dir)
 }
 
 /// App con el panel activo en una carpeta temporal.

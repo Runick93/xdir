@@ -506,6 +506,7 @@ impl FileList {
         let resort = self.sort != v.sort || self.descending != v.descending;
         let regroup = self.group_by != v.group_by || self.collapsed != v.collapsed;
         let refilter = self.filters != v.filters;
+        let was_horizontal = self.horizontal();
         self.sort = v.sort;
         self.descending = v.descending;
         self.columns = v.columns.clone();
@@ -516,6 +517,12 @@ impl FileList {
         self.header_drag = None;
         if self.view != v.view {
             self.set_view(v.view);
+        }
+        // Cambió el eje del desplazamiento (la Lista se agrupó o se desagrupó): lo que estaba
+        // desplazado en un eje no vale en el otro.
+        if self.horizontal() != was_horizontal {
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
         }
         if (resort || refilter) && !self.entries.is_empty() {
             let focus = self.focused_index();
@@ -839,12 +846,13 @@ impl FileList {
         }
     }
 
-    /// Largo del contenido en el eje del desplazamiento. Hacia abajo, más dos líneas vacías al
-    /// final, para poder hacer clic derecho en la carpeta aunque la lista llene el panel.
+    /// Largo del contenido en el eje del desplazamiento, más fondo libre al final (dos líneas
+    /// vacías hacia abajo; una columna en la Lista), para poder hacer clic derecho en la carpeta
+    /// o arrancar un rectángulo aunque los elementos llenen el panel.
     fn content_len(&self) -> f32 {
         if self.horizontal() {
             let cols = self.visible.len().div_ceil(self.rows_per_col());
-            return cols as f32 * LIST_COL_W + LIST_PAD * 2.0;
+            return (cols + 1) as f32 * LIST_COL_W + LIST_PAD * 2.0;
         }
         if let Some(l) = &self.layout {
             return l.bottom + self.top_pad() + self.line_h() * 2.0;
@@ -2492,7 +2500,8 @@ mod column_tests {
         assert_eq!((moved.left, moved.top), (r0.left - LIST_COL_W, r0.top), "se mueve a los costados, no hacia arriba");
         // No se pasa del final: la última columna queda contra el borde derecho.
         l.on_wheel(-100.0);
-        let content = 3.0 * LIST_COL_W + LIST_PAD * 2.0;
+        // 3 columnas más una libre al final (ver `content_len`).
+        let content = 4.0 * LIST_COL_W + LIST_PAD * 2.0;
         assert_eq!(l.scroll_target, content - 400.0);
         let (track, thumb) = l.scrollbar().expect("hay barra: no entran las 3 columnas");
         assert_eq!((track.top, track.bottom), (l.area.bottom - SCROLLBAR_W, l.area.bottom));
@@ -2509,6 +2518,44 @@ mod column_tests {
         l.on_mouse_move(l.area.right + 50.0, y);
         l.on_mouse_up();
         assert_eq!(l.scroll, content - 400.0);
+    }
+
+    /// Lista: al final siempre queda fondo libre (una columna), para hacer clic derecho en la
+    /// carpeta o arrancar un rectángulo aunque los elementos llenen el panel.
+    #[test]
+    fn list_view_has_background_at_end() {
+        let mut l = list_view(400.0);
+        l.on_wheel(-100.0);
+        while l.tick(1.0 / 60.0) {}
+        let last = l.item_rect(29);
+        assert!(l.area.right - last.right >= LIST_COL_W - 1.0, "una columna libre después de la última: {last:?}");
+        let (x, y) = (last.right + LIST_COL_W / 2.0, (last.top + last.bottom) / 2.0);
+        assert_eq!(l.pos_at(x, y), None);
+        assert!(!l.on_right_down(x, y), "clic derecho en el fondo: menú de la carpeta");
+        // Un rectángulo desde el fondo selecciona lo que toca.
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_move(last.left + 10.0, y + 1.0);
+        assert_eq!(l.selected_positions(), vec![29]);
+        l.on_mouse_up();
+    }
+
+    /// Cambiar el eje del desplazamiento (agrupar o desagrupar la Lista con la vista de la
+    /// carpeta) arranca desde el principio: el desplazamiento horizontal no sirve como vertical.
+    #[test]
+    fn scroll_resets_when_axis_changes() {
+        let mut l = list_view(400.0);
+        l.on_wheel(-3.0);
+        assert!(l.scroll_target > 0.0);
+        let mut v = l.view_settings();
+        v.group_by = Some(Column::Type);
+        l.apply_view_settings(&v);
+        assert_eq!((l.scroll, l.scroll_target), (0.0, 0.0), "agrupada: hacia abajo, desde arriba");
+        l.on_wheel(-3.0);
+        while l.tick(1.0 / 60.0) {}
+        assert!(l.scroll > 0.0);
+        v.group_by = None;
+        l.apply_view_settings(&v);
+        assert_eq!((l.scroll, l.scroll_target), (0.0, 0.0), "sin agrupar: a los costados, desde la izquierda");
     }
 
     /// Vista Contenido: fila alta con el nombre y el tipo a la izquierda, la fecha y el tamaño a

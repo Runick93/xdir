@@ -87,6 +87,14 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::CopyPaths, &["Ctrl+Alt+C"]),
     // ⌘⌥N: archivo de texto nuevo.
     (Command::NewTextFile, &["Ctrl+Alt+N"]),
+    // Vistas con ⌥⌘1…⌥⌘6 (en el orden de `Command::View`): ⇧⌘3, ⇧⌘4 y ⇧⌘5 son las capturas de
+    // pantalla del sistema y nunca llegan a la app.
+    (Command::View(0), &["Ctrl+Alt+1"]),
+    (Command::View(1), &["Ctrl+Alt+2"]),
+    (Command::View(2), &["Ctrl+Alt+3"]),
+    (Command::View(3), &["Ctrl+Alt+4"]),
+    (Command::View(4), &["Ctrl+Alt+5"]),
+    (Command::View(5), &["Ctrl+Alt+6"]),
 ];
 
 /// macOS: nombres distintos a los de Windows.

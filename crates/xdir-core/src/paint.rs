@@ -33,6 +33,9 @@ impl FontId {
     pub const COUNT: usize = 10;
 }
 
+// `Label` es el último formato: si se agrega uno, hay que actualizar `COUNT`.
+const _: () = assert!(FontId::Label as usize + 1 == FontId::COUNT);
+
 /// Píxeles BGRA premultiplicados.
 pub struct Pixels {
     pub width: u32,

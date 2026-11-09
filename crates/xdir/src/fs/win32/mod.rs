@@ -374,7 +374,7 @@ pub fn shell_place_exists(parsing: &str) -> bool {
 /// Linux), para el árbol lateral: (nombre, ruta). Ordenadas por nombre.
 pub fn shell_subfolders(parsing: &str) -> Vec<(String, PathBuf)> {
     let mut out = shell_subfolders_unsorted(parsing);
-    out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
+    out.sort_by(|a, b| xdir_core::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
     out
 }
 

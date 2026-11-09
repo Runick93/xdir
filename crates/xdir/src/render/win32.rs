@@ -418,7 +418,7 @@ impl paint::Painter for Painter<'_> {
     fn logo(&self, r: Rect) {
         let mut icons = self.icons.borrow_mut();
         if icons.logo.is_none() {
-            icons.logo = crate::about::logo_pixels().and_then(|px| bitmap_from(self.ctx, &px));
+            icons.logo = xdir_core::about::logo_pixels().and_then(|px| bitmap_from(self.ctx, &px));
         }
         let Some(bitmap) = icons.logo.clone() else { return };
         drop(icons);

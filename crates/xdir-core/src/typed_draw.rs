@@ -1,17 +1,13 @@
 //! Dibujo del desplegable de rutas bajo la barra de dirección.
 
-use xdir_core::typed::{MAX_ROWS, Suggest};
-
-use crate::render::{FontId, Painter, rect};
+use crate::geom::rect;
+use crate::paint::{FontId, Painter};
 use crate::theme::alpha;
+use crate::typed::{MAX_ROWS, Suggest};
 
-/// `Suggest::draw`: el desplegable se dibuja con el `Painter` de la ventana.
-pub trait SuggestDraw {
-    fn draw(&self, p: &dyn Painter);
-}
-
-impl SuggestDraw for Suggest {
-    fn draw(&self, p: &dyn Painter) {
+impl Suggest {
+    /// El desplegable se dibuja con el `Painter` de la ventana.
+    pub fn draw(&self, p: &dyn Painter) {
         if self.items.is_empty() {
             return;
         }

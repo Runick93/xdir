@@ -10,7 +10,8 @@ use crate::favorites::{Fav, Favorites};
 use crate::fs::Location;
 use crate::groups::Groups;
 use crate::jump::{self, History};
-use crate::render::{FontId, Painter, Rect, contains, rect};
+use crate::geom::{Rect, contains, rect};
+use crate::paint::{FontId, Painter};
 use crate::theme::alpha;
 
 const WIDTH: f32 = 640.0;
@@ -104,7 +105,7 @@ fn typed_path(query: &str, expand: impl Fn(&str) -> String) -> Option<PathBuf> {
     if p.as_os_str().len() == 2 && p.to_string_lossy().ends_with(':') {
         p.push("\\");
     }
-    p.is_dir().then(|| crate::fs::true_case(&p))
+    p.is_dir().then(|| crate::sys::file_system().true_case(&p))
 }
 
 /// Grupos guardados que coinciden con lo escrito, para abrir (o, al guardar, reemplazar).
@@ -381,6 +382,8 @@ impl Palette {
 mod tests {
     use super::*;
 
+    // Solo lo usan las pruebas con rutas de Windows.
+    #[cfg(windows)]
     fn names(items: &[Item]) -> Vec<String> {
         items.iter().map(|i| i.title.clone()).collect()
     }
@@ -394,7 +397,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn folders_by_frecency_and_favorites() {
-        xdir_core::sys::testing::install_fakes();
+        crate::sys::testing::install_fakes();
         let now = jump::now();
         let mut h = History::default();
         h.record(std::path::Path::new(r"C:\proyectos\viejo"), now - 40 * 86_400);
@@ -415,7 +418,7 @@ mod tests {
 
     #[test]
     fn commands_in_all_mode() {
-        xdir_core::sys::testing::install_fakes();
+        crate::sys::testing::install_fakes();
         let (h, favs, groups) = (History::default(), Favorites { items: Vec::new() }, Groups::default());
         let mut keymap = Keymap::default();
         keymap.set(Command::NewTab, &[commands::parse_combo("Ctrl+K").unwrap()]);
@@ -431,7 +434,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn groups_open_and_save() {
-        xdir_core::sys::testing::install_fakes();
+        crate::sys::testing::install_fakes();
         use crate::groups::Group;
         use crate::session::PaneState;
         let (h, favs, keymap) = (History::default(), Favorites { items: Vec::new() }, Keymap::default());

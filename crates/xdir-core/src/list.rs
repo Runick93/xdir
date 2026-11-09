@@ -2,14 +2,14 @@
 //! frame no depende de cuántos archivos tenga la carpeta. En detalles (filas con columnas) o en
 //! cuadrícula de íconos y miniaturas.
 
-use crate::platform::Color;
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
 use crate::format;
 use crate::fs::Entry;
-use crate::render::{FontId, Painter, Rect, contains, rect};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter};
 use crate::theme::alpha;
 use crate::thumbs;
 
@@ -84,7 +84,6 @@ pub fn default_columns() -> Vec<ColumnSpec> {
         .collect()
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
 /// Un elemento de la lista visto desde afuera (lectores de pantalla).
 pub struct ItemInfo {
     pub name: String,
@@ -288,7 +287,7 @@ fn filter_matches(parts: &[String], name: &str) -> bool {
         || parts.iter().any(|p| if p.contains(['*', '?']) { wildcard(p, name) } else { name.contains(p.as_str()) })
 }
 
-pub use xdir_core::config::wildcard;
+pub use crate::config::wildcard;
 
 impl Default for FileList {
     fn default() -> Self {
@@ -474,13 +473,11 @@ impl FileList {
     // ---------- accesibilidad (UI Automation, ver uia.rs) ----------
 
     /// Posición con foco (en los elementos a la vista).
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn focus_pos(&self) -> Option<usize> {
         self.focus
     }
 
     /// Lo que un lector de pantalla necesita saber del elemento en la posición `pos`.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn item_info(&self, pos: usize) -> Option<ItemInfo> {
         let idx = *self.visible.get(pos)? as usize;
         let e = &self.entries[idx];
@@ -504,7 +501,6 @@ impl FileList {
     }
 
     /// Selecciona solo ese elemento y lo trae a la vista (patrón de selección de UI Automation).
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn select_pos(&mut self, pos: usize) {
         if pos < self.visible.len() {
             self.select_only(pos);
@@ -513,7 +509,6 @@ impl FileList {
     }
 
     /// Agrega (o saca) el elemento de la selección sin tocar el resto.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_selected_pos(&mut self, pos: usize, on: bool) {
         if let Some(&idx) = self.visible.get(pos) {
             self.auto_focus = false;
@@ -524,39 +519,32 @@ impl FileList {
     }
 
     /// Posiciones seleccionadas, en orden.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn selected_positions(&self) -> Vec<usize> {
         self.visible.iter().enumerate().filter(|(_, idx)| self.selected[**idx as usize]).map(|(pos, _)| pos).collect()
     }
 
     /// Elemento (posición) bajo un punto de la ventana, en DIPs.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn pos_at_point(&self, x: f32, y: f32) -> Option<usize> {
         self.pos_at(x, y)
     }
 
     /// Índice en `entries` del elemento de esa posición (para abrirlo).
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn entry_of_pos(&self, pos: usize) -> Option<usize> {
         self.visible.get(pos).map(|&i| i as usize)
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn count(&self) -> usize {
         self.visible.len()
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
         self.selected.iter().enumerate().filter(|(_, s)| **s).map(|(i, _)| i)
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn selected_entries(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter().zip(&self.selected).filter(|(_, s)| **s).map(|(e, _)| e)
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn focused_index(&self) -> Option<usize> {
         self.focus.and_then(|p| self.visible.get(p)).map(|&i| i as usize)
     }
@@ -1051,8 +1039,8 @@ impl FileList {
 
     /// Teclas de navegación. Devuelve None si la tecla no es de la lista.
     pub fn on_key(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
-        use crate::platform::Key;
-        use crate::platform::keys::*;
+        use crate::keys::Key;
+        use crate::keys::keys::*;
         let n = self.visible.len();
         if n == 0 {
             return None;
@@ -1601,7 +1589,7 @@ mod column_tests {
 
     #[test]
     fn grid_geometry_and_keys() {
-        use crate::platform::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
+        use crate::keys::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
         let mut l = list(800.0);
         l.append((0..25).map(|i| entry(&format!("f{i:02}"))).collect());
         l.set_view(View::LargeIcons);
@@ -1694,7 +1682,7 @@ mod column_tests {
         l.on_mouse_up();
         assert!(l.selected_positions().is_empty());
         assert!(!l.focus_visible, "no debe parecer seleccionada la fila que tenía el foco");
-        l.on_key(crate::platform::keys::VK_DOWN.0, false, false);
+        l.on_key(crate::keys::keys::VK_DOWN.0, false, false);
         assert!(l.focus_visible);
     }
 
@@ -1765,8 +1753,8 @@ mod column_tests {
     /// La columna Tamaño va alineada a la derecha: su texto usa `FontId::UiRight`.
     #[test]
     fn list_size_column_is_right_aligned() {
-        use xdir_core::sys::testing::RecordingPainter;
-        xdir_core::sys::testing::install_fakes();
+        use crate::sys::testing::RecordingPainter;
+        crate::sys::testing::install_fakes();
         let mut l = list(800.0);
         let mut e = entry("datos.bin");
         e.size = 2048;

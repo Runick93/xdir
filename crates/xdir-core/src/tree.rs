@@ -7,19 +7,19 @@
 //!
 //! La barra se puede fijar (expandida, al lado de los paneles) o soltar: suelta queda una franja
 //! angosta con solo los íconos y, al asomar el mouse, se expande encima de los paneles. La sección
-//! "Acceso rápido" se lee del propio Shell (`fs::quick_access`) y se vuelve a leer en un hilo
+//! "Acceso rápido" se lee del propio Shell (`sys::file_system().quick_access()`) y se vuelve a leer en un hilo
 //! cuando cambia (`WM_APP_QUICK`).
 
-use crate::platform::Handle;
-use crate::platform::Color;
+use crate::sys::Handle;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use crate::platform::WM_APP;
+use crate::WM_APP;
 
 use crate::anim;
 use crate::fs::{Location, QuickItem};
-use crate::render::{FontId, Painter, Rect, contains, rect};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter};
 use crate::theme::{Theme, alpha};
 
 /// Terminó de leerse una carpeta del árbol.
@@ -268,7 +268,7 @@ impl Tree {
         t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
         // Carpetas del usuario, como en el Explorador.
         for (i, (name, ..)) in PINNED.iter().enumerate() {
-            if let Some(path) = crate::fs::user_folder(i) {
+            if let Some(path) = crate::sys::file_system().user_folder(i) {
                 t.known.push(path.clone());
                 t.add_root(Kind::Pinned, path, (*name).to_string(), i);
             }
@@ -287,11 +287,11 @@ impl Tree {
         t.refresh_drives();
         // Como en el Explorador: Red y, si hay WSL, Linux. Sus hijos se leen al expandir.
         // La Red del Explorador (en macOS no hay).
-        if !crate::fs::network_place().is_empty() {
-            t.add_root(Kind::Network, PathBuf::from(crate::fs::network_place()), "Red".to_string(), 0);
+        if !crate::sys::file_system().network_place().is_empty() {
+            t.add_root(Kind::Network, PathBuf::from(crate::sys::file_system().network_place()), "Red".to_string(), 0);
         }
-        if crate::fs::shell_place_exists(crate::fs::linux_place()) {
-            t.add_root(Kind::Linux, PathBuf::from(crate::fs::linux_place()), "Linux".to_string(), 0);
+        if crate::sys::file_system().shell_place_exists(crate::sys::file_system().linux_place()) {
+            t.add_root(Kind::Linux, PathBuf::from(crate::sys::file_system().linux_place()), "Linux".to_string(), 0);
         }
         t
     }
@@ -308,7 +308,7 @@ impl Tree {
         self.quick_loading = true;
         let tx = self.qtx.clone();
         std::thread::spawn(move || {
-            let items = crate::fs::quick_access();
+            let items = crate::sys::file_system().quick_access();
             if tx.send(items).is_ok() {
                 hwnd.post(WM_APP_QUICK, 1, 0);
             }
@@ -336,7 +336,7 @@ impl Tree {
         let Some(&quick) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::QuickAccess) else { return };
         let old = self.nodes[quick].children.clone().unwrap_or_default();
         let mut ids = Vec::new();
-        let shown = items.into_iter().filter(|i| !self.known.iter().any(|k| crate::fs::same_path(k, &i.path))).take(QUICK_MAX);
+        let shown = items.into_iter().filter(|i| !self.known.iter().any(|k| crate::sys::file_system().same_path(k, &i.path))).take(QUICK_MAX);
         for (n, item) in shown.enumerate() {
             let mut node = Node::new(Kind::Folder, item.path, item.name, 1);
             node.pinned = item.pinned;
@@ -366,7 +366,7 @@ impl Tree {
 
     /// ¿Está esa carpeta anclada al Acceso rápido de Windows (según la última lectura)?
     pub fn is_pinned(&self, path: &Path) -> bool {
-        self.pinned_paths.iter().any(|p| crate::fs::same_path(p, path))
+        self.pinned_paths.iter().any(|p| crate::sys::file_system().same_path(p, path))
     }
 
     // ---------- unidades ----------
@@ -377,8 +377,8 @@ impl Tree {
         let Some(&computer) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::Computer) else { return };
         let old = self.nodes[computer].children.clone().unwrap_or_default();
         let mut ids = Vec::new();
-        for path in crate::fs::drives() {
-            let name = crate::fs::drive_label(&crate::fs::drive_name(&path));
+        for path in crate::sys::file_system().drives() {
+            let name = crate::sys::file_system().drive_label(&crate::sys::file_system().drive_name(&path));
             if let Some(&id) = old.iter().find(|&&id| self.nodes[id].path == path) {
                 self.nodes[id].name = name;
                 self.nodes[id].text_w = 0.0;
@@ -506,7 +506,7 @@ impl Tree {
         n.loading = true;
         let (tx, path, virt) = (self.tx.clone(), n.path.clone(), matches!(n.kind, Kind::Network | Kind::Linux));
         std::thread::spawn(move || {
-            let dirs = if virt { crate::fs::shell_subfolders(&path.to_string_lossy()) } else { subfolders(&path, show_hidden) };
+            let dirs = if virt { crate::sys::file_system().shell_subfolders(&path.to_string_lossy()) } else { subfolders(&path, show_hidden) };
             if tx.send((id, dirs)).is_ok() {
                 hwnd.post(WM_APP_TREE, 0, 0);
             }
@@ -768,7 +768,7 @@ impl Tree {
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
                 let is_current = !matches!(n.kind, Kind::Computer | Kind::Home | Kind::Network | Kind::Linux | Kind::QuickAccess)
-                    && current.is_some_and(|c| crate::fs::same_path(c, &n.path));
+                    && current.is_some_and(|c| crate::sys::file_system().same_path(c, &n.path));
                 if is_current {
                     p.round_fill(row, 5.0, alpha(th.text, 0.11));
                 } else if self.hover == Some(id) {
@@ -853,9 +853,32 @@ fn subfolders(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
     let Ok(reader) = std::fs::read_dir(path) else { return Vec::new() };
     let mut out: Vec<(String, PathBuf)> = reader
         .flatten()
-        .filter(|e| e.metadata().is_ok_and(|m| m.is_dir() && (show_hidden || !crate::fs::is_hidden(&m, &e.file_name()))))
+        .filter(|e| e.metadata().is_ok_and(|m| m.is_dir() && (show_hidden || !crate::sys::file_system().is_hidden(&m, &e.file_name()))))
         .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
         .collect();
     out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sys::testing::{FakeFileSystem, install_fakes};
+
+    #[test]
+    fn tree_lists_fake_drives() {
+        install_fakes();
+        FakeFileSystem::set_drives(&[(Path::new("/unidad-a"), "Disco A"), (Path::new("/unidad-b"), "Disco B")]);
+        let t = Tree::new();
+        FakeFileSystem::set_drives(&[]);
+        // "Este equipo" arranca abierto: sus hijos son las unidades del falso, con sus nombres.
+        let drives: Vec<(&str, &Path)> = t
+            .rows()
+            .into_iter()
+            .map(|id| &t.nodes[id])
+            .filter(|n| n.kind == Kind::Drive)
+            .map(|n| (n.name.as_str(), n.path.as_path()))
+            .collect();
+        assert_eq!(drives, [("Disco A", Path::new("/unidad-a")), ("Disco B", Path::new("/unidad-b"))]);
+    }
 }

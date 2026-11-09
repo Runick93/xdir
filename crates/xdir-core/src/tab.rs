@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use crate::fs::{self, Entry, LoadEvent, LoadMsg, Location, WM_APP_CHANGED, Watch};
+use crate::fs::{self, Entry, LoadEvent, LoadMsg, Location, WM_APP_CHANGED};
 use crate::list::{self, Column, ColumnSpec, FileList};
-use crate::platform::Handle;
+use crate::sys::{self, Handle, Watch};
 
 /// Búsqueda en la carpeta de la pestaña y todas sus subcarpetas (en curso o terminada).
 pub struct Search {
@@ -56,8 +56,8 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// Si la pestaña está a la vista (carga y vigila su carpeta).
-    #[cfg(test)]
+    /// Si la pestaña está a la vista (carga y vigila su carpeta). Lo usan las pruebas de `App`
+    /// (crates/xdir).
     pub fn is_visible(&self) -> bool {
         self.visible
     }
@@ -78,7 +78,7 @@ impl Tab {
             return;
         }
         if let Location::Path(p) = &self.location {
-            self.watcher = fs::watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p);
+            self.watcher = sys::file_system().watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p);
         }
         if !self.loading {
             self.reload(hwnd, tx, true);
@@ -91,7 +91,7 @@ impl Tab {
 
     pub fn new(id: usize, location: Location, show_hidden: bool) -> Self {
         let location = match location {
-            Location::Path(p) => Location::Path(fs::long_path(&p)),
+            Location::Path(p) => Location::Path(sys::file_system().long_path(&p)),
             other => other,
         };
         let mut list = FileList::default();
@@ -132,7 +132,7 @@ impl Tab {
     pub fn navigate(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, to: Location) {
         // Rutas cortas 8.3 (LEANDR~1) a su forma larga, para mostrarlas y compararlas bien.
         let to = match to {
-            Location::Path(p) => Location::Path(fs::long_path(&p)),
+            Location::Path(p) => Location::Path(sys::file_system().long_path(&p)),
             other => other,
         };
         if to == self.location && self.nav_id != 0 {
@@ -188,7 +188,7 @@ impl Tab {
         if silent {
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
             self.reload_buf = Some(Vec::new());
-            fs::spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
+            sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
         } else {
             self.focus_after_load = self.list.focused_index().map(|i| self.list.entries[i].name.clone());
             self.start(hwnd, tx);
@@ -210,7 +210,7 @@ impl Tab {
         }
         let (roots, root) = match &self.location {
             Location::Path(p) => (vec![p.clone()], Some(p.clone())),
-            Location::Computer => (fs::drives(), None),
+            Location::Computer => (sys::file_system().drives(), None),
             // Las carpetas virtuales no se recorren.
             Location::Shell { .. } => return,
         };
@@ -260,10 +260,10 @@ impl Tab {
         self.error = None;
         self.reload_buf = None;
         self.watcher = match &self.location {
-            Location::Path(p) if self.visible => fs::watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p),
+            Location::Path(p) if self.visible => sys::file_system().watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p),
             _ => None,
         };
-        fs::spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
+        sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
     }
 
     /// Aviso del vigilante: recarga silenciosa si sigue siendo la misma navegación.
@@ -359,7 +359,7 @@ impl Tab {
             return;
         }
         let items = idxs.into_iter().map(|i| (i as u32, self.entry_path(i))).collect();
-        crate::icons::request_overlays(crate::icons::OverlayRequest {
+        sys::overlays().request(crate::fs::OverlayRequest {
             hwnd,
             tx: tx.clone(),
             panel: self.id,
@@ -402,14 +402,14 @@ impl Tab {
         }
         if !path.exists() {
             // Archivo virtual (en un teléfono, dentro de un ZIP): lo abre el Shell.
-            crate::shell::open_item(hwnd, &self.entry_item(idx));
+            sys::shell().open_item(hwnd, &self.entry_item(idx));
             return;
         }
         let dir = match &self.location {
             Location::Path(p) => Some(p.as_path()),
             _ => None,
         };
-        crate::shell::open_file(hwnd, &path, dir);
+        sys::shell().open_file(hwnd, &path, dir);
     }
 
     /// Si la carpeta de red falló por credenciales (usuario o contraseña incorrectos, acceso
@@ -422,7 +422,7 @@ impl Tab {
             return;
         }
         self.auth_nav = self.nav_id;
-        if fs::connect_share(hwnd, &path.clone()) {
+        if sys::file_system().connect_share(hwnd, &path.clone()) {
             self.reload(hwnd, tx, false);
             self.auth_nav = self.nav_id;
         }
@@ -488,7 +488,7 @@ fn child_name(parent: &Location, descendant: &Location) -> Option<OsString> {
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
-    use xdir_core::sys::testing::{FakeFileSystem, install_fakes};
+    use crate::sys::testing::{FakeFileSystem, install_fakes};
 
     /// Carpeta temporal propia de una prueba, con el nombre que le da el sistema de archivos
     /// instalado (en Windows el runner da nombres cortos `RUNNER~1`).
@@ -496,7 +496,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("xdir-tab-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        fs::true_case(&dir)
+        sys::file_system().true_case(&dir)
     }
 
     /// Una pestaña que se muestra en una carpeta la lee con el `FileSystem` instalado y recibe

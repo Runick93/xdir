@@ -1,9 +1,8 @@
 //! Diálogo "Acerca de": logo, versión y enlaces para reportar un problema. Es un panel dibujado
 //! como el resto de la interfaz (sin ventana de Windows aparte); un clic fuera o Esc lo cierra.
 
-use crate::platform::Color;
-use crate::icons::Pixels;
-use crate::render::{FontId, Painter, Rect, contains, rect};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter, Pixels};
 use crate::theme::alpha;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,12 +86,12 @@ pub fn draw(p: &dyn Painter, w: f32, h: f32, hover: Option<AboutHit>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xdir_core::sys::testing::RecordingPainter;
+    use crate::sys::testing::RecordingPainter;
 
     /// El nombre «xdir» con la versión va en la fuente de interfaz en seminegrita (como hoy).
     #[test]
     fn about_title_uses_bold_font() {
-        xdir_core::sys::testing::install_fakes();
+        crate::sys::testing::install_fakes();
         let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
         draw(&p, 800.0, 600.0, None);
         let title = format!("xdir {VERSION}");

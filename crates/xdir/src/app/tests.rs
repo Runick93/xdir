@@ -4,9 +4,14 @@
 use super::*;
 
 fn app() -> App {
-    // Servicios del sistema falsos (el `Waker` solo cuenta los mensajes).
+    app_with(Init::blank())
+}
+
+/// Toda `App` de prueba sale de acá: primero los servicios del sistema falsos (el `Waker` solo
+/// cuenta los mensajes), así ningún hilo de trabajo los pide sin instalar.
+fn app_with(init: Init) -> App {
     xdir_core::sys::testing::install_fakes();
-    App::new(Init::blank()).expect("App sin ventana")
+    App::new(init).expect("App sin ventana")
 }
 
 fn count(a: &App, pane: usize) -> usize {
@@ -40,7 +45,7 @@ fn start_path_opens_a_new_active_tab_in_the_active_pane() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut init = Init::blank();
     init.start_path = Some(dir.clone());
-    let a = App::new(init).unwrap();
+    let a = app_with(init);
     assert_eq!(count(&a, 0), 2);
     // Windows puede normalizar la ruta (nombres cortos 8.3): se compara el último componente.
     let Location::Path(p) = &a.panes[0].tab().location else { panic!("no es una carpeta") };

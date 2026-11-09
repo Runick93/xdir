@@ -30,104 +30,17 @@ pub const WM_APP_LOAD: u32 = WM_APP + 1;
 /// Cambió algo en la carpeta vigilada. `wparam` = panel, `lparam` = generación.
 pub const WM_APP_CHANGED: u32 = WM_APP + 2;
 
-/// Lugar que muestra un panel.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Location {
-    /// "Este equipo": carpetas del usuario, unidades, dispositivos, Red y Papelera.
-    Computer,
-    Path(PathBuf),
-    /// Carpeta virtual del Shell sin ruta de disco: Papelera, Red, un teléfono (MTP)...
-    Shell {
-        /// Nombre de análisis del Shell ("::{645FF040-...}" para la Papelera).
-        parsing: String,
-        name: String,
-        /// De dónde se llegó, para "subir"; sin él, se sube a "Este equipo".
-        parent: Option<Box<Location>>,
-    },
-}
+pub use xdir_core::fs::Location;
 
-impl Location {
-    pub fn parent(&self) -> Option<Location> {
-        match self {
-            Location::Computer => None,
-            Location::Path(p) => Some(match p.parent() {
-                Some(parent) => Location::Path(parent.to_path_buf()),
-                None => Location::Computer,
-            }),
-            Location::Shell { parent, .. } => Some(parent.as_deref().cloned().unwrap_or(Location::Computer)),
-        }
-    }
-
-    pub fn title(&self) -> String {
-        match self {
-            Location::Computer => "Este equipo".into(),
-            Location::Path(p) => match p.file_name() {
-                Some(name) => name.to_string_lossy().into_owned(),
-                // macOS: la raíz es el disco de arranque ("Macintosh HD").
-                #[cfg(not(windows))]
-                None => drive_label(&p.to_string_lossy()),
-                #[cfg(windows)]
-                None => {
-                    let root = p.to_string_lossy().trim_end_matches('\\').to_string();
-                    // Una unidad se titula como en el Explorador: "Disco local (C:)".
-                    if root.len() == 2 && root.ends_with(':') { drive_label(&root) } else { root }
-                }
-            },
-            Location::Shell { name, .. } => name.clone(),
-        }
-    }
-
-    /// Segmentos de la barra de dirección: (texto, destino).
-    pub fn crumbs(&self) -> Vec<(String, Location)> {
-        let mut out = vec![("Este equipo".to_string(), Location::Computer)];
-        match self {
-            Location::Computer => {}
-            Location::Path(p) => {
-                let mut acc = PathBuf::new();
-                for comp in p.components() {
-                    acc.push(comp.as_os_str());
-                    // "C:" y "\" llegan como dos componentes; el segundo se pega al primero.
-                    if matches!(comp, std::path::Component::RootDir) {
-                        // macOS: "/" es el disco de arranque, un tramo propio.
-                        #[cfg(not(windows))]
-                        out.push((drive_label("/"), Location::Path(acc.clone())));
-                        #[cfg(windows)]
-                        {
-                            out.last_mut().unwrap().1 = Location::Path(acc.clone());
-                        }
-                        continue;
-                    }
-                    let mut label = comp.as_os_str().to_string_lossy().into_owned();
-                    // Una unidad se muestra como en el Explorador: "Disco local (C:)".
-                    if matches!(comp, std::path::Component::Prefix(_)) && label.len() == 2 && label.ends_with(':') {
-                        label = drive_label(&label);
-                    }
-                    out.push((label, Location::Path(acc.clone())));
-                }
-            }
-            Location::Shell { name, parent, .. } => {
-                if let Some(parent) = parent {
-                    out = parent.crumbs();
-                }
-                out.push((name.clone(), self.clone()));
-            }
-        }
-        out
-    }
-
-    /// Ruta o nombre de análisis que entiende `IFileOperation` como destino (pegar, soltar).
-    pub fn target(&self) -> Option<PathBuf> {
-        match self {
-            Location::Computer => None,
-            Location::Path(p) => Some(p.clone()),
-            Location::Shell { parsing, .. } => Some(PathBuf::from(parsing)),
-        }
-    }
-}
-
-impl Location {
+/// `Location::is_path`: compara con `same_path` del sistema (sin distinguir mayúsculas ni
+/// separador final), que todavía vive en `fs`.
+pub trait LocationExt {
     /// ¿Esta ubicación es la carpeta `p`?
-    pub fn is_path(&self, p: &Path) -> bool {
+    fn is_path(&self, p: &Path) -> bool;
+}
+
+impl LocationExt for Location {
+    fn is_path(&self, p: &Path) -> bool {
         matches!(self, Location::Path(own) if same_path(own, p))
     }
 }

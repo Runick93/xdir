@@ -794,7 +794,7 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let obj = match shell::data_object(&items) {
+        let obj = match shell::win32::data_object(&items) {
             Ok(o) => o,
             Err(e) => {
                 self.notice = Some(format!("No se pudo arrastrar: {e}"));

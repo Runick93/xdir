@@ -126,7 +126,7 @@ impl App {
                     LRESULT(0)
                 }
                 WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR => {
-                    match shell::handle_menu_message(msg, wparam, lparam) {
+                    match shell::win32::handle_menu_message(msg, wparam, lparam) {
                         Some(r) => r,
                         None => DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam),
                     }

@@ -1,6 +1,7 @@
 //! Operaciones de archivos: portapapeles, borrar, arrastrar y soltar, menú contextual.
 
 use super::*;
+use crate::fs::LocationExt;
 
 impl App {
     // ---------- operaciones de archivos ----------
@@ -21,7 +22,7 @@ impl App {
         let items = self.selection_items(self.active);
         if !items.is_empty() {
             if let Err(e) = shell::copy_files(&items, cut) {
-                self.notice = Some(format!("No se pudo copiar: {}", e.message()));
+                self.notice = Some(format!("No se pudo copiar: {e}"));
             }
         }
     }
@@ -33,7 +34,7 @@ impl App {
             match shell::paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
                 Ok(true) => self.reload_shell_tabs(),
                 Ok(false) => {}
-                Err(e) => self.notice = Some(format!("No se pudo pegar: {}", e.message())),
+                Err(e) => self.notice = Some(format!("No se pudo pegar: {e}")),
             }
             return;
         };
@@ -316,6 +317,8 @@ mod tests {
     use super::*;
 
     fn effect(sources: &[&str], dest: &str, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
+        // `volume_of` pasa por el `Shell` del registro (el falso compara el primer tramo, como Windows).
+        xdir_core::sys::testing::install_fakes();
         let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
         drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed)
     }

@@ -1,5 +1,6 @@
 //! Servicios del sistema en Windows.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -17,13 +18,16 @@ use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, Services, SystemEnv, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, Shell, Services, SystemEnv, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
+use xdir_core::fs::Location;
+use xdir_core::shell::{Entry, Item};
 use xdir_core::typed::MAX as TYPED_MAX;
 
 use crate::fs::wide_path;
 use crate::platform::HandleExt;
+use crate::shell::win32 as sh;
 
 /// Despierta a la ventana con `PostMessageW` (la cola de mensajes de Windows).
 struct Win32Waker;
@@ -172,6 +176,14 @@ impl SystemEnv for Win32Env {
         // ShellExecute devuelve un valor mayor que 32 si salió bien.
         r.0 as usize > 32
     }
+
+    /// Una unidad ("C:", "C:\\") se titula como en el Explorador: "Disco local (C:)". Las demás
+    /// raíces (`\\servidor\recurso`, "\\") muestran su texto.
+    fn root_title(&self, path: &Path) -> Option<String> {
+        let root = path.to_string_lossy();
+        let root = root.trim_end_matches('\\');
+        (root.len() == 2 && root.ends_with(':')).then(|| crate::fs::drive_label(root))
+    }
 }
 
 /// Ejecutable de la consola: PowerShell 7 si está instalado, si no el de Windows.
@@ -280,6 +292,82 @@ impl DiskScan for Win32DiskScan {
     }
 }
 
+/// Shell: delega en `crate::shell::win32`; los errores pasan a texto con el mismo mensaje que
+/// se mostraba antes (`message()` del HRESULT).
+struct Win32Shell;
+
+impl Shell for Win32Shell {
+    fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
+        sh::copy_files(items, cut).map_err(|e| e.message())
+    }
+
+    fn clipboard_files(&self) -> Option<(Vec<PathBuf>, bool)> {
+        sh::clipboard_files()
+    }
+
+    fn paste_virtual(&self, owner: Handle, dest: &Location) -> Result<bool, String> {
+        sh::paste_virtual(owner, dest).map_err(|e| e.message())
+    }
+
+    fn clear_clipboard(&self) {
+        sh::clear_clipboard()
+    }
+
+    fn copy_text(&self, owner: Handle, text: &str) -> Result<(), String> {
+        sh::copy_text(owner, text).map_err(|e| e.message())
+    }
+
+    fn pick_folder(&self, owner: Handle, title: &str) -> Option<PathBuf> {
+        sh::pick_folder(owner, title)
+    }
+
+    fn open_item(&self, owner: Handle, item: &Item) {
+        sh::open_item(owner, item)
+    }
+
+    fn open_file(&self, owner: Handle, file: &Path, dir: Option<&Path>) {
+        sh::open_file(owner, file, dir)
+    }
+
+    fn properties(&self, owner: Handle, items: &[Item]) {
+        sh::properties(owner, items)
+    }
+
+    fn context_menu(
+        &self,
+        owner: Handle,
+        folder: &Location,
+        items: &[Item],
+        at: (f32, f32),
+        extended: bool,
+        intercept: bool,
+        own: &[Entry],
+        pinned: bool,
+    ) -> Option<String> {
+        sh::context_menu(owner, folder, items, at, extended, intercept, own, pinned)
+    }
+
+    fn invoke_verb(&self, owner: Handle, folder: &Location, items: &[Item], verb: &str) -> Result<(), String> {
+        sh::invoke_verb(owner, folder, items, verb).map_err(|e| e.message())
+    }
+
+    fn pin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String> {
+        sh::pin_quick_access(owner, path).map_err(|e| e.message())
+    }
+
+    fn unpin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String> {
+        sh::unpin_quick_access(owner, path).map_err(|e| e.message())
+    }
+
+    fn set_menu_mode(&self, dark: Option<bool>) {
+        sh::set_menu_mode(dark)
+    }
+
+    fn volume_of(&self, path: &Path) -> Option<OsString> {
+        sh::volume_of(path)
+    }
+}
+
 /// Instala los servicios de Windows en el registro del núcleo. El ayudante elevado de xtree
 /// (`--xtree-mft`) sale antes de llegar acá: no usa servicios.
 pub fn install() {
@@ -288,5 +376,6 @@ pub fn install() {
         env: platform_env(),
         file_ops: Box::new(Win32FileOps),
         disk_scan: Box::new(Win32DiskScan),
+        shell: Box::new(Win32Shell),
     });
 }

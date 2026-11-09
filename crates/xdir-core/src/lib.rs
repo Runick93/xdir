@@ -4,10 +4,12 @@
 pub mod commands;
 pub mod console;
 pub mod format;
+pub mod fs;
 pub mod geom;
 pub mod keys;
 pub mod ops;
 pub mod session;
+pub mod shell;
 pub mod sys;
 pub mod toml;
 pub mod typed;

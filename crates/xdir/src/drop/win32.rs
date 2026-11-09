@@ -78,7 +78,7 @@ impl DropTarget_Impl {
 impl IDropTarget_Impl for DropTarget_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let data = data.cloned();
-        *self.paths.borrow_mut() = data.as_ref().and_then(shell::hdrop_paths);
+        *self.paths.borrow_mut() = data.as_ref().and_then(shell::win32::hdrop_paths);
         *self.data.borrow_mut() = data.clone();
         let result = self.dispatch(DragKind::Enter, keys, pt, effect);
         if let (Some(h), Some(d)) = (self.helper(), &data) {

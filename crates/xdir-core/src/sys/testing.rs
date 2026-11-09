@@ -10,10 +10,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, Handle, Services, SystemEnv, Waker};
+use super::{ConsoleInfo, DiskScan, FileOps, Handle, Services, Shell, SystemEnv, Waker};
+use crate::fs::Location;
 use crate::format::thousands;
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
+use crate::shell::{Entry, Item};
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::Node;
 
@@ -25,6 +27,7 @@ pub fn install_fakes() {
         env: Box::new(FakeEnv),
         file_ops: Box::new(FakeFileOps),
         disk_scan: Box::new(FakeDiskScan),
+        shell: Box::new(FakeShell),
     });
 }
 
@@ -136,6 +139,11 @@ impl SystemEnv for FakeEnv {
 
     fn open_console(&self, _owner: Handle, _id: u8, _dir: &Path, _verb: &str) -> bool {
         false
+    }
+
+    /// Ninguna raíz tiene nombre propio: se muestra el texto de la ruta.
+    fn root_title(&self, _path: &Path) -> Option<String> {
+        None
     }
 }
 
@@ -274,5 +282,174 @@ impl DiskScan for FakeDiskScan {
 
     fn elevating_text(&self) -> &'static str {
         "Analizando con permisos\u{2026}"
+    }
+}
+
+/// Una llamada recibida por el `FakeShell` (rutas en lugar de `Item`, salvo en el menú).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShellCall {
+    CopyFiles { paths: Vec<PathBuf>, cut: bool },
+    PasteVirtual(Location),
+    ClearClipboard,
+    CopyText(String),
+    PickFolder(String),
+    OpenItem(PathBuf),
+    OpenFile(PathBuf, Option<PathBuf>),
+    Properties(Vec<PathBuf>),
+    ContextMenu { folder: Location, items: Vec<Item>, at: (f32, f32), extended: bool, intercept: bool, own: Vec<Entry>, pinned: bool },
+    InvokeVerb { folder: Location, items: Vec<PathBuf>, verb: String },
+    PinQuickAccess(PathBuf),
+    UnpinQuickAccess(PathBuf),
+    SetMenuMode(Option<bool>),
+}
+
+/// Respuestas configurables del `FakeShell`.
+#[derive(Default)]
+struct ShellState {
+    calls: Vec<ShellCall>,
+    /// Portapapeles de archivos: lo llena `copy_files` (o `FakeShell::set_clipboard`).
+    clipboard: Option<(Vec<PathBuf>, bool)>,
+    /// Lo que devuelve el próximo `context_menu`.
+    menu_choice: Option<String>,
+    /// Si hay, las operaciones que pueden fallar fallan con este texto.
+    error: Option<String>,
+    /// Carpeta que devuelve `pick_folder`.
+    picked: Option<PathBuf>,
+}
+
+thread_local! {
+    /// Estado del falso por hilo: los tests corren en paralelo, cada uno en su hilo, y el Shell se
+    /// usa desde el hilo de interfaz (el del test).
+    static SHELL: RefCell<ShellState> = RefCell::new(ShellState::default());
+}
+
+fn shell_state<T>(f: impl FnOnce(&mut ShellState) -> T) -> T {
+    SHELL.with(|s| f(&mut s.borrow_mut()))
+}
+
+fn record(call: ShellCall) {
+    shell_state(|s| s.calls.push(call));
+}
+
+fn paths(items: &[Item]) -> Vec<PathBuf> {
+    items.iter().map(|i| i.path.clone()).collect()
+}
+
+/// `Shell` falso: no toca el sistema. Anota cada llamada (por hilo), guarda los archivos copiados
+/// en un portapapeles en memoria y responde lo configurado: el menú no elige nada, no hay errores
+/// ni carpeta elegida. El volumen de una ruta es su primer tramo en minúsculas (como Windows).
+pub struct FakeShell;
+
+impl FakeShell {
+    /// Las llamadas hechas desde este hilo hasta ahora (y vacía el registro).
+    pub fn take_calls() -> Vec<ShellCall> {
+        shell_state(|s| std::mem::take(&mut s.calls))
+    }
+
+    /// Contenido del portapapeles de archivos de este hilo.
+    pub fn set_clipboard(files: Option<(Vec<PathBuf>, bool)>) {
+        shell_state(|s| s.clipboard = files);
+    }
+
+    /// Lo que devuelven los próximos menús contextuales de este hilo.
+    pub fn choose(choice: Option<&str>) {
+        shell_state(|s| s.menu_choice = choice.map(String::from));
+    }
+
+    /// Hace fallar (o no) las operaciones de este hilo que devuelven `Result`.
+    pub fn fail_with(error: Option<&str>) {
+        shell_state(|s| s.error = error.map(String::from));
+    }
+
+    /// Carpeta que devuelve `pick_folder` en este hilo.
+    pub fn pick(folder: Option<PathBuf>) {
+        shell_state(|s| s.picked = folder);
+    }
+}
+
+fn outcome() -> Result<(), String> {
+    shell_state(|s| s.error.clone()).map_or(Ok(()), Err)
+}
+
+impl Shell for FakeShell {
+    fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
+        record(ShellCall::CopyFiles { paths: paths(items), cut });
+        outcome()?;
+        shell_state(|s| s.clipboard = Some((paths(items), cut)));
+        Ok(())
+    }
+
+    fn clipboard_files(&self) -> Option<(Vec<PathBuf>, bool)> {
+        shell_state(|s| s.clipboard.clone())
+    }
+
+    fn paste_virtual(&self, _owner: Handle, dest: &Location) -> Result<bool, String> {
+        record(ShellCall::PasteVirtual(dest.clone()));
+        outcome().map(|()| false)
+    }
+
+    fn clear_clipboard(&self) {
+        record(ShellCall::ClearClipboard);
+        shell_state(|s| s.clipboard = None);
+    }
+
+    fn copy_text(&self, _owner: Handle, text: &str) -> Result<(), String> {
+        record(ShellCall::CopyText(text.to_string()));
+        outcome()
+    }
+
+    fn pick_folder(&self, _owner: Handle, title: &str) -> Option<PathBuf> {
+        record(ShellCall::PickFolder(title.to_string()));
+        shell_state(|s| s.picked.clone())
+    }
+
+    fn open_item(&self, _owner: Handle, item: &Item) {
+        record(ShellCall::OpenItem(item.path.clone()));
+    }
+
+    fn open_file(&self, _owner: Handle, file: &Path, dir: Option<&Path>) {
+        record(ShellCall::OpenFile(file.to_path_buf(), dir.map(Path::to_path_buf)));
+    }
+
+    fn properties(&self, _owner: Handle, items: &[Item]) {
+        record(ShellCall::Properties(paths(items)));
+    }
+
+    fn context_menu(
+        &self,
+        _owner: Handle,
+        folder: &Location,
+        items: &[Item],
+        at: (f32, f32),
+        extended: bool,
+        intercept: bool,
+        own: &[Entry],
+        pinned: bool,
+    ) -> Option<String> {
+        record(ShellCall::ContextMenu { folder: folder.clone(), items: items.to_vec(), at, extended, intercept, own: own.to_vec(), pinned });
+        shell_state(|s| s.menu_choice.clone())
+    }
+
+    fn invoke_verb(&self, _owner: Handle, folder: &Location, items: &[Item], verb: &str) -> Result<(), String> {
+        record(ShellCall::InvokeVerb { folder: folder.clone(), items: paths(items), verb: verb.to_string() });
+        outcome()
+    }
+
+    fn pin_quick_access(&self, _owner: Handle, path: &Path) -> Result<(), String> {
+        record(ShellCall::PinQuickAccess(path.to_path_buf()));
+        outcome()
+    }
+
+    fn unpin_quick_access(&self, _owner: Handle, path: &Path) -> Result<(), String> {
+        record(ShellCall::UnpinQuickAccess(path.to_path_buf()));
+        outcome()
+    }
+
+    fn set_menu_mode(&self, dark: Option<bool>) {
+        record(ShellCall::SetMenuMode(dark));
+    }
+
+    fn volume_of(&self, path: &Path) -> Option<OsString> {
+        path.components().next().map(|c| c.as_os_str().to_ascii_lowercase())
     }
 }

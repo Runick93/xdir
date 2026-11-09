@@ -6,6 +6,8 @@
 #[cfg(target_os = "linux")]
 mod env;
 #[cfg(target_os = "linux")]
+mod fs;
+#[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
 mod sys;

@@ -92,7 +92,8 @@ El proyecto es un workspace de cuatro crates:
 - `crates/xdir-mac`: el binario `xdir-mac`. AppKit, Core Graphics, `getattrlistbulk` y `notify`.
 - `crates/xdir-linux`: el binario `xdir-linux`. Hoy trae solo los servicios del sistema (archivos con vigilancia por
   inotify, papelera de freedesktop, `xdg-open` y el escaneo de disco de xtree) y arma la aplicación sin ventana; la
-  interfaz de Linux es un proyecto aparte. Para probarla, en Linux: `cargo run -p xdir-linux`.
+  interfaz de Linux es un proyecto aparte. Para probarla, en Linux: `cargo run -p xdir-linux`
+  arranca el núcleo y sale con un aviso de que la interfaz todavía no está hecha.
 
 Las crates de plataforma son adaptadores finos: implementan los traits del núcleo y arman la ventana, nada más.
 Cada una compila vacía (un `main` que avisa y sale) fuera de su sistema, así `cargo build` y `cargo test` andan

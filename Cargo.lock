@@ -531,6 +531,15 @@ name = "xdir-core"
 version = "0.1.23"
 
 [[package]]
+name = "xdir-linux"
+version = "0.1.23"
+dependencies = [
+ "libc",
+ "notify",
+ "xdir-core",
+]
+
+[[package]]
 name = "xdir-mac"
 version = "0.1.23"
 dependencies = [

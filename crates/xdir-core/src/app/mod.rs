@@ -140,6 +140,8 @@ enum Hit {
     Palette(Option<usize>),
     /// Desplegable de la barra de dirección: una ruta, o el panel sin nada debajo.
     Suggest(Option<usize>),
+    /// Desplegable de filtros de la lista de un panel: una opción, o el desplegable sin nada debajo.
+    FilterMenu(usize, Option<list::ListHit>),
 }
 
 /// Lo que se está arrastrando con el botón izquierdo.

@@ -713,11 +713,20 @@ impl Overlays for FakeOverlays {
 pub struct RecordingPainter {
     theme: Theme,
     texts: RefCell<Vec<(FontId, String, Rect)>>,
+    paths: RefCell<Vec<RecordedPath>>,
 }
+
+/// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
+pub type RecordedPath = (Vec<(f32, f32)>, bool, Option<Color>);
 
 impl RecordingPainter {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, texts: RefCell::new(Vec::new()) }
+        Self { theme, texts: RefCell::new(Vec::new()), paths: RefCell::new(Vec::new()) }
+    }
+
+    /// Los trazos dibujados con `rounded_path`, en orden.
+    pub fn paths(&self) -> Vec<RecordedPath> {
+        self.paths.borrow().clone()
     }
 
     /// Los textos dibujados, en orden.
@@ -729,7 +738,9 @@ impl RecordingPainter {
 impl Painter for RecordingPainter {
     fn fill(&self, _r: Rect, _c: Color) {}
     fn round_fill(&self, _r: Rect, _radius: f32, _c: Color) {}
-    fn rounded_path(&self, _pts: &[(f32, f32, f32)], _closed: bool, _fill: Option<Color>, _stroke: Option<(Color, f32)>) {}
+    fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, _stroke: Option<(Color, f32)>) {
+        self.paths.borrow_mut().push((pts.iter().map(|&(x, y, _)| (x, y)).collect(), closed, fill));
+    }
     fn circle(&self, _cx: f32, _cy: f32, _radius: f32, _fill: Color) {}
     fn circle_stroke(&self, _cx: f32, _cy: f32, _radius: f32, _c: Color, _width: f32) {}
     fn round_stroke_w(&self, _r: Rect, _radius: f32, _c: Color, _width: f32) {}

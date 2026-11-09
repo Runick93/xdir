@@ -163,6 +163,10 @@ impl App {
                 Hit::Layout(l) => Some(l),
                 _ => None,
             };
+            // Desplegable de filtros de una lista: encima de los paneles (puede pasarse del suyo).
+            for &(i, _) in rects {
+                panes[i].tab().list.draw_filter_menu(p);
+            }
             ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups, hover == Hit::Xtree, xtree_open);
             if let Some(pane) = term_menu {
                 let term_hover = match hover {

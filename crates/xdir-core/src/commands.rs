@@ -80,6 +80,8 @@ pub enum Command {
     ApplyViewToAll,
     /// La carpeta actual vuelve a la vista por defecto.
     ResetFolderView,
+    /// Quita los filtros por columna de la lista activa.
+    ClearFilters,
 }
 
 /// ¿La acción existe en esta compilación y en este sistema? (las experimentales dependen de una
@@ -201,6 +203,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::GroupBy(5), "no_agrupar", "No agrupar", &[]),
     spec(Command::ApplyViewToAll, "vista_en_todas", "Usar esta vista en todas las carpetas", &[]),
     spec(Command::ResetFolderView, "restablecer_vista", "Restablecer la vista de esta carpeta", &[]),
+    spec(Command::ClearFilters, "quitar_filtros", "Quitar los filtros", &[]),
     spec(Command::ToggleTree, "arbol", "Mostrar u ocultar el árbol de carpetas (experimental)", &["Ctrl+Shift+E"]),
 ];
 

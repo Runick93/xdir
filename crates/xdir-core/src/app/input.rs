@@ -36,6 +36,11 @@ impl App {
                 return Hit::Picker(k);
             }
         }
+        if let Some(i) = self.filter_menu_pane() {
+            if let Some(h) = self.panes[i].tab().list.filter_menu_at(x, y) {
+                return Hit::FilterMenu(i, h);
+            }
+        }
         if contains(&ui::gear_rect(w, h), x, y) {
             return Hit::Gear;
         }
@@ -111,6 +116,20 @@ impl App {
                 }
                 _ => self.close_palette(),
             }
+            return;
+        }
+        // Desplegable de filtros: una opción se tilda o destilda (sigue abierto); un clic afuera
+        // lo cierra sin llegar a lo de abajo, como un menú.
+        if let Hit::FilterMenu(i, h) = hit {
+            if let Some(h) = h {
+                self.panes[i].tab_mut().list.click_filter_menu(h);
+                self.sync_folder_views();
+            }
+            self.redraw();
+            return;
+        }
+        if self.close_filter_menus() {
+            self.redraw();
             return;
         }
         #[cfg(feature = "arbol")]
@@ -269,7 +288,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) => {}
+            Hit::None | Hit::About(_) | Hit::FilterMenu(..) => {}
         }
         self.redraw();
     }
@@ -466,6 +485,13 @@ impl App {
                 pal.hover = h;
                 redraw = true;
             }
+        }
+        if let Some(i) = self.filter_menu_pane() {
+            let h = match hover {
+                Hit::FilterMenu(_, h) => h,
+                _ => None,
+            };
+            redraw |= self.panes[i].tab_mut().list.set_filter_hover(h);
         }
         // La fila resaltada solo en el panel bajo el mouse.
         for (i, pane) in self.panes.iter_mut().enumerate() {

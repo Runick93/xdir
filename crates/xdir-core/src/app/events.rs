@@ -306,6 +306,12 @@ impl App {
                 }
                 return;
             }
+            Hit::FilterMenu(i, _) => {
+                if self.panes[i].tab_mut().list.filter_menu_wheel(delta * lines) {
+                    self.redraw();
+                }
+                return;
+            }
             Hit::Pane(i, _) => i,
             _ => self.active,
         };

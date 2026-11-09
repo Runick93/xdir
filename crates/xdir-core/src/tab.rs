@@ -137,8 +137,13 @@ impl Tab {
     }
 
     /// La vista guardada, como se ve en esta ubicación: con una búsqueda, con la columna de la
-    /// carpeta de cada resultado (después del nombre si no la tenía); sin búsqueda, sin ella.
+    /// carpeta de cada resultado (después del nombre si no la tenía) y los filtros por columna de
+    /// la carpeta buscada (el filtro rápido se aplica sobre lo que dejan pasar); sin búsqueda, sin
+    /// esa columna.
     fn view_here(&self, mut v: ViewSettings) -> ViewSettings {
+        if self.search.is_some() {
+            v.filters = self.list.filters.clone();
+        }
         let folder = v.columns.iter().position(|c| c.col == Column::Folder);
         match (self.search.is_some(), folder) {
             (true, None) => {
@@ -550,12 +555,16 @@ impl Tab {
             let found = self.list.total();
             let found = if found == 1 { "1 encontrado".to_string() } else { format!("{found} encontrados") };
             let scanned = crate::format::thousands(s.scanned);
-            return if s.done {
+            let mut text = if s.done {
                 let secs = s.finished.unwrap_or(s.started).duration_since(s.started).as_secs_f32();
                 format!("Búsqueda «{}»: {found} · {scanned} elementos revisados en {secs:.1} s", s.query)
             } else {
                 format!("Buscando «{}»…   {:.0} %   ·   {found} · {scanned} elementos revisados", s.query, (s.progress * 100.0).floor().min(99.0))
             };
+            if self.list.is_filtered() {
+                text.push_str(" (filtrado)");
+            }
+            return text;
         }
         if let Some(e) = &self.error {
             return format!("No se pudo abrir: {e}");
@@ -577,6 +586,10 @@ impl Tab {
         if count > 0 {
             s.push_str("   ·   ");
             s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
+        }
+        // Solo los filtros por columna (no el filtro rápido, que ya se ve en el buscador).
+        if self.list.is_filtered() {
+            s.push_str(" (filtrado)");
         }
         s
     }
@@ -735,5 +748,37 @@ mod tests {
         assert_eq!(FakeFileSystem::watches(&other), (1, 1));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// La barra de estado termina en « (filtrado)» solo con filtros de columna.
+    #[test]
+    fn status_says_filtered() {
+        install_fakes();
+        let mut tab = Tab::new(9, Location::Path(PathBuf::from("/filtrado")), false);
+        let entry = |name: &str| Entry {
+            name: name.into(),
+            full: None,
+            group: 0,
+            pidl: None,
+            display: name.into(),
+            sort_key: name.to_lowercase(),
+            is_dir: false,
+            size: 0,
+            modified: 0,
+            created: 0,
+            attrs: 0,
+            type_name: Arc::from("Archivo"),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+        };
+        tab.list.append(vec![entry("a.jpg"), entry("b.png"), entry("c.png")]);
+        assert_eq!(tab.status(), "3 elementos");
+        tab.list.set_filter(Column::Extension, vec!["PNG".into()]);
+        assert_eq!(tab.status(), "2 elementos (filtrado)");
+        tab.list.select_all();
+        assert!(tab.status().ends_with(" (filtrado)"), "{}", tab.status());
+        tab.list.set_filter(Column::Extension, Vec::new());
+        assert!(!tab.status().contains("filtrado"));
     }
 }

@@ -89,6 +89,16 @@ begin
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM xdir.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
+// Antes de instalar: un xtree.exe de una versión anterior que siga abierto no se podría borrar
+// (ver [InstallDelete]); se lo termina. Si no está corriendo, taskkill no hace nada.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM xtree.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Result := '';
+end;
+
 function InitializeUninstall(): Boolean;
 begin
   CloseXdir();

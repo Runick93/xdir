@@ -118,6 +118,10 @@ pub fn run() -> windows::core::Result<()> {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        // La `App` (y su copia del host) ya se soltó en `WM_NCDESTROY`: se sueltan la de acá y la
+        // del `thread_local`, y con ellas el renderizador, en este hilo y antes de salir.
+        drop(host);
+        Win32Host::uninstall();
     }
     Ok(())
 }

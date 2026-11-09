@@ -251,6 +251,7 @@ impl App {
                     );
                     let _ = RevokeDragDrop(self.hwnd.hwnd());
                     if let Some(host) = Win32Host::current() {
+                        host.release_drop_target();
                         host.release_edit_resources();
                     }
                     PostQuitMessage(0);

@@ -29,6 +29,8 @@ pub(super) struct Win32Host {
     /// Destino de arrastre de la ventana: se mantiene vivo mientras ella exista.
     drop_target: RefCell<Option<IDropTarget>>,
     /// Direct2D / DirectWrite: fábricas, fuentes y el destino de dibujo de la ventana.
+    /// Nunca se presta a través de una llamada que pueda bombear mensajes: un `WM_SIZE` o
+    /// `WM_DPICHANGED` anidado durante `draw` lo pediría otra vez y entraría en pánico.
     renderer: RefCell<Renderer>,
     /// Fuente, fondo y colores (texto, fondo) de los controles de edición: siguen el DPI y el tema
     /// (los arma `text_restyle`).
@@ -81,9 +83,19 @@ impl Win32Host {
         Ok(host)
     }
 
-    /// El host instalado con `install`.
+    /// El host instalado con `install`; `None` antes de instalarlo o después de `uninstall` (un
+    /// mensaje tardío no hace nada).
     pub(super) fn current() -> Option<Rc<Win32Host>> {
         HOST.with(|h| h.borrow().clone())
+    }
+
+    /// Saca el host del `thread_local` y lo suelta, en el hilo de la ventana y antes de que
+    /// termine `run`: así el renderizador (D3D/DXGI/DComp/D2D) no queda para los destructores de
+    /// `ExitProcess`. Se llama cuando la `App` ya se soltó (`WM_NCDESTROY`) y no queda otra copia.
+    pub(super) fn uninstall() {
+        let host = HOST.with(|h| h.borrow_mut().take());
+        debug_assert!(host.as_ref().is_none_or(|h| Rc::strong_count(h) == 1), "queda otra copia del host");
+        drop(host);
     }
 
     fn hwnd(&self) -> HWND {
@@ -101,6 +113,11 @@ impl Win32Host {
     /// Registra la ventana como destino de arrastrar y soltar.
     pub(super) fn register_drop_target(&self) {
         *self.drop_target.borrow_mut() = drop::register(self.hwnd()).ok();
+    }
+
+    /// `WM_DESTROY`, después de `RevokeDragDrop`: suelta el destino de arrastre.
+    pub(super) fn release_drop_target(&self) {
+        self.drop_target.borrow_mut().take();
     }
 
     /// Llegó `WM_MOUSELEAVE`: el próximo movimiento tiene que volver a pedir el aviso.
@@ -562,7 +579,7 @@ impl WindowHost for Win32Host {
 
     /// Menú emergente modal (`TrackPopupMenuEx`). Con `on_context`, el clic derecho dentro del
     /// menú llega por `WM_MENURBUTTONUP` a `on_menu_right_click`.
-    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32> {
+    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<xdir_core::host::OnContext<'_>>) -> Option<u32> {
         /// Agrega las entradas a `hmenu`. `path`: camino del submenú; `positions`: dónde anotar
         /// el camino de cada elemento (solo si hace falta para el clic derecho). En los menús, "&"
         /// marca el atajo: se duplica.

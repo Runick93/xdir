@@ -335,7 +335,7 @@ impl App {
     /// La ventana volvió a primer plano: se releen los favoritos y la configuración (por si se
     /// editaron los archivos) y el lector de pantalla vuelve a leer el elemento con foco.
     pub(super) fn on_app_activated(&mut self) {
-        self.uia_focus = None;
+        self.a11y_focus = None;
         #[cfg(feature = "arbol")]
         self.tree.request_quick(self.hwnd);
         let fresh = Favorites::load();

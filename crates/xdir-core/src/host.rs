@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use crate::WM_APP;
+use crate::a11y::El;
 use crate::config::ColorRule;
 use crate::geom::{Color, Rect};
 use crate::paint::Painter;
@@ -83,6 +84,19 @@ pub enum MenuPos {
 /// La respuesta al clic derecho dentro de un menú de `WindowHost::popup_menu`: recibe el camino
 /// de posiciones del elemento y devuelve `true` para cerrar el menú.
 pub type OnContext<'a> = &'a mut dyn FnMut(&[usize]) -> bool;
+
+/// Los lectores de pantalla del sistema (UI Automation en Windows). La aplicación avisa cuando
+/// cambia el elemento con foco; el resto (el árbol, sus datos y las acciones) lo pregunta el
+/// sistema a través de `a11y::A11yView`.
+pub trait Accessibility {
+    /// Hay algún lector escuchando. Mientras no haya, la aplicación no lleva la cuenta del foco
+    /// avisado (así, cuando un lector empieza a escuchar, se le avisa el foco actual).
+    fn listening(&self) -> bool {
+        true
+    }
+    /// Cambió el elemento con el foco del teclado.
+    fn notify_focus(&self, el: El);
+}
 
 /// La ventana principal. Los tamaños y posiciones están en DIPs: el host lee el DPI de su ventana.
 pub trait WindowHost {
@@ -161,4 +175,9 @@ pub trait WindowHost {
     /// entrada) al hacer clic derecho sobre un elemento; si devuelve `true`, el menú se cierra y
     /// el resultado es `None`. Donde el sistema no avisa ese clic (macOS), no se llama.
     fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<OnContext<'_>>) -> Option<u32>;
+
+    /// Los lectores de pantalla, donde el sistema los soporta (por ahora solo Windows).
+    fn accessibility(&self) -> Option<&dyn Accessibility> {
+        None
+    }
 }

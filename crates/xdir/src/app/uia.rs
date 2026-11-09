@@ -1,15 +1,9 @@
 //! Accesibilidad (NF-8): UI Automation básica para lectores de pantalla (Narrator, NVDA, JAWS).
 //!
-//! La ventana expone este árbol:
-//!
-//! ```text
-//! ventana (la raíz, con los datos de la ventana que da Windows)
-//! ├─ Panel N                        (uno por cada panel a la vista)
-//! │  ├─ barra de dirección          (texto con la ruta)
-//! │  └─ lista de archivos
-//! │     └─ elemento…                (nombre, tipo, tamaño y fecha; selección e invocación)
-//! └─ barra de estado
-//! ```
+//! El árbol (ventana → paneles → barra de dirección y lista → elementos, más la barra de estado),
+//! los datos de cada elemento y las acciones están en `xdir_core::a11y`, sobre `App` como
+//! `A11yView`. Acá queda el pegamento de COM: los proveedores, `VARIANT` / `SAFEARRAY`, los ids
+//! de propiedades y de tipos de control, las coordenadas de pantalla y los RuntimeId.
 //!
 //! Los elementos de la lista soportan los patrones Selection / SelectionItem (seleccionar y leer
 //! qué está seleccionado) e Invoke (abrir). Cuando cambia el elemento con foco se avisa con el
@@ -23,20 +17,20 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{SafeArrayCreateVector, SafeArrayPutElement};
 use windows::Win32::System::Variant::{VARIANT, VT_I4, VT_UNKNOWN};
 use windows::Win32::UI::Accessibility::*;
-use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows::Win32::UI::WindowsAndMessaging::{GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW};
 use windows::core::{BOOL, Error, HRESULT, IUnknown, IUnknownImpl, Interface, Result, implement};
 
-use crate::list::Action;
+use xdir_core::a11y::{self, A11yAction, A11yView, El, Nav, Role};
+
 use crate::platform::HandleExt;
-use crate::render::{self, contains, rect};
+use crate::render;
 use super::App;
-use crate::ui;
 
 /// "El elemento ya no existe" (la carpeta cambió, el panel se ocultó…).
 const UIA_E_ELEMENTNOTAVAILABLE: HRESULT = HRESULT(0x8004_0201_u32 as i32);
@@ -49,18 +43,6 @@ static ALIVE: AtomicBool = AtomicBool::new(true);
 /// Se cierra la ventana: de ahora en más los proveedores responden "no disponible".
 pub fn shutdown() {
     ALIVE.store(false, Ordering::Relaxed);
-}
-
-/// Un elemento del árbol. Los paneles se identifican por su índice (0..3) y los elementos de
-/// la lista por su posición entre los que se ven (después de filtrar y ordenar).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum El {
-    Root,
-    Pane(usize),
-    Address(usize),
-    List(usize),
-    Item(usize, usize),
-    Status,
 }
 
 /// Puntero a la aplicación. Solo se usa desde el hilo de la interfaz (ver arriba).
@@ -82,146 +64,30 @@ fn none<T>() -> Result<T> {
     Err(Error::empty())
 }
 
-// ---------- el árbol ----------
-
-fn exists(app: &App, el: El) -> bool {
-    let shown = app.shown_panes();
-    match el {
-        El::Root | El::Status => true,
-        El::Pane(p) | El::Address(p) | El::List(p) => shown.contains(&p),
-        El::Item(p, pos) => shown.contains(&p) && pos < app.panes[p].tab().list.count(),
-    }
-}
-
-fn parent(el: El) -> Option<El> {
-    match el {
-        El::Root => None,
-        El::Pane(_) | El::Status => Some(El::Root),
-        El::Address(p) | El::List(p) => Some(El::Pane(p)),
-        El::Item(p, _) => Some(El::List(p)),
-    }
-}
-
-/// Hijos de un elemento que no sea la lista (esa tiene tantos como elementos).
-fn kids(app: &App, el: El) -> Vec<El> {
-    match el {
-        El::Root => app.shown_panes().into_iter().map(El::Pane).chain([El::Status]).collect(),
-        El::Pane(p) => vec![El::Address(p), El::List(p)],
-        _ => Vec::new(),
-    }
-}
-
-fn navigate(app: &App, el: El, dir: NavigateDirection) -> Option<El> {
-    if dir == NavigateDirection_Parent {
-        return parent(el);
-    }
-    if dir == NavigateDirection_FirstChild || dir == NavigateDirection_LastChild {
-        let first = dir == NavigateDirection_FirstChild;
-        return match el {
-            El::List(p) => {
-                let n = app.panes[p].tab().list.count();
-                (n > 0).then(|| El::Item(p, if first { 0 } else { n - 1 }))
-            }
-            _ => {
-                let k = kids(app, el);
-                if first { k.first().copied() } else { k.last().copied() }
-            }
-        };
-    }
-    let next = dir == NavigateDirection_NextSibling;
-    if let El::Item(p, pos) = el {
-        let n = app.panes[p].tab().list.count();
-        return if next { (pos + 1 < n).then_some(El::Item(p, pos + 1)) } else { pos.checked_sub(1).map(|q| El::Item(p, q)) };
-    }
-    let siblings = kids(app, parent(el)?);
-    let i = siblings.iter().position(|&s| s == el)?;
-    if next { siblings.get(i + 1).copied() } else { i.checked_sub(1).and_then(|j| siblings.get(j).copied()) }
-}
-
-/// Elemento con el foco del teclado: el de la lista del panel activo.
-fn focus_el(app: &App) -> El {
-    let p = app.active;
-    match app.panes[p].tab().list.focus_pos() {
-        Some(pos) if pos < app.panes[p].tab().list.count() => El::Item(p, pos),
-        _ => El::List(p),
-    }
-}
-
-fn pane_of(el: El) -> Option<usize> {
-    match el {
-        El::Pane(p) | El::Address(p) | El::List(p) | El::Item(p, _) => Some(p),
-        _ => None,
-    }
-}
-
 // ---------- datos de cada elemento ----------
 
-fn pane_title(app: &App, p: usize) -> String {
-    let pane = &app.panes[p];
-    let title = pane.tab().location.title();
-    if pane.tabs.len() > 1 {
-        format!("Panel {}, pestaña {} de {}: {}", p + 1, pane.active + 1, pane.tabs.len(), title)
+fn nav(dir: NavigateDirection) -> Nav {
+    if dir == NavigateDirection_Parent {
+        Nav::Parent
+    } else if dir == NavigateDirection_NextSibling {
+        Nav::Next
+    } else if dir == NavigateDirection_FirstChild {
+        Nav::FirstChild
+    } else if dir == NavigateDirection_LastChild {
+        Nav::LastChild
     } else {
-        format!("Panel {}: {}", p + 1, title)
+        Nav::Previous
     }
 }
 
-/// Lo que se le cuenta a un lector de pantalla de un elemento.
-struct Info {
-    name: Option<String>,
-    /// Frase extra (tipo, tamaño, fecha).
-    help: Option<String>,
-    control: Option<UIA_CONTROLTYPE_ID>,
-    /// "carpeta", "archivo"…: cómo se llama el tipo de control cuando es más específico.
-    kind: Option<&'static str>,
-    id: String,
-    focusable: bool,
-    offscreen: bool,
-}
-
-fn info(app: &App, el: El) -> Info {
-    let mut i = Info { name: None, help: None, control: None, kind: None, id: String::new(), focusable: false, offscreen: false };
-    match el {
-        El::Root => {}
-        El::Pane(p) => {
-            i.name = Some(pane_title(app, p));
-            i.control = Some(UIA_PaneControlTypeId);
-            i.id = format!("panel{}", p + 1);
-        }
-        El::Address(p) => {
-            let path = match app.panes[p].tab().location.target() {
-                Some(t) => t.display().to_string(),
-                None => app.panes[p].tab().location.title(),
-            };
-            i.name = Some(format!("Ruta: {path}"));
-            i.control = Some(UIA_TextControlTypeId);
-            i.id = format!("panel{}.ruta", p + 1);
-        }
-        El::List(p) => {
-            let tab = app.panes[p].tab();
-            i.name = Some(format!("Archivos de {}, {} elementos", tab.location.title(), tab.list.count()));
-            i.control = Some(UIA_ListControlTypeId);
-            i.id = format!("panel{}.lista", p + 1);
-            i.focusable = true;
-        }
-        El::Item(p, pos) => {
-            if let Some(it) = app.panes[p].tab().list.item_info(pos) {
-                i.name = Some(it.name);
-                i.help = Some(it.help);
-                i.kind = Some(if it.is_dir { "carpeta" } else { "archivo" });
-                i.offscreen = it.offscreen;
-            }
-            i.control = Some(UIA_ListItemControlTypeId);
-            i.id = format!("panel{}.elemento{}", p + 1, pos);
-            i.focusable = true;
-        }
-        El::Status => {
-            i.name = Some(app.panes[app.active].tab().status());
-            i.control = Some(UIA_StatusBarControlTypeId);
-            i.id = "estado".into();
-        }
+fn control_type(role: Role) -> UIA_CONTROLTYPE_ID {
+    match role {
+        Role::Pane => UIA_PaneControlTypeId,
+        Role::Text => UIA_TextControlTypeId,
+        Role::List => UIA_ListControlTypeId,
+        Role::ListItem => UIA_ListItemControlTypeId,
+        Role::StatusBar => UIA_StatusBarControlTypeId,
     }
-    i
 }
 
 fn property(app: &App, el: El, id: UIA_PROPERTY_ID) -> VARIANT {
@@ -229,12 +95,12 @@ fn property(app: &App, el: El, id: UIA_PROPERTY_ID) -> VARIANT {
     if el == El::Root {
         return VARIANT::default();
     }
-    let i = info(app, el);
+    let i = a11y::info(app, el);
     if id == UIA_NamePropertyId {
         return i.name.as_deref().map(VARIANT::from).unwrap_or_default();
     }
     if id == UIA_ControlTypePropertyId {
-        return i.control.map(|c| VARIANT::from(c.0)).unwrap_or_default();
+        return i.role.map(|r| VARIANT::from(control_type(r).0)).unwrap_or_default();
     }
     if id == UIA_LocalizedControlTypePropertyId {
         return i.kind.map(VARIANT::from).unwrap_or_default();
@@ -252,7 +118,7 @@ fn property(app: &App, el: El, id: UIA_PROPERTY_ID) -> VARIANT {
         return VARIANT::from(i.focusable);
     }
     if id == UIA_HasKeyboardFocusPropertyId {
-        let focused = unsafe { GetForegroundWindow() } == app.hwnd.hwnd() && focus_el(app) == el;
+        let focused = unsafe { GetForegroundWindow() } == app.hwnd.hwnd() && a11y::focus_el(app) == el;
         return VARIANT::from(focused);
     }
     if id == UIA_IsOffscreenPropertyId {
@@ -262,18 +128,6 @@ fn property(app: &App, el: El, id: UIA_PROPERTY_ID) -> VARIANT {
 }
 
 // ---------- geometría ----------
-
-fn bounds(app: &App, el: El) -> render::Rect {
-    let (w, h) = app.client_dips();
-    match el {
-        El::Root => rect(0.0, 0.0, w, h),
-        El::Pane(p) => app.panes[p].rect,
-        El::Address(p) => app.panes[p].address,
-        El::List(p) => app.panes[p].list,
-        El::Item(p, pos) => app.panes[p].tab().list.item_info(pos).map(|i| i.rect).unwrap_or_default(),
-        El::Status => rect(0.0, h - ui::STATUSBAR_H, w, h),
-    }
-}
 
 /// DIPs de la ventana → píxeles de pantalla.
 fn screen_rect(app: &App, r: render::Rect) -> UiaRect {
@@ -339,10 +193,10 @@ macro_rules! fragment_impl {
         impl IRawElementProviderFragment_Impl for $t {
             fn Navigate(&self, direction: NavigateDirection) -> Result<IRawElementProviderFragment> {
                 let app = self.app.get()?;
-                if !exists(app, self.el) {
+                if !a11y::exists(app, self.el) {
                     return gone();
                 }
-                match navigate(app, self.el, direction) {
+                match a11y::navigate(app, self.el, nav(direction)) {
                     Some(el) => Ok(fragment(self.app, el)),
                     None => none(),
                 }
@@ -357,10 +211,10 @@ macro_rules! fragment_impl {
 
             fn BoundingRectangle(&self) -> Result<UiaRect> {
                 let app = self.app.get()?;
-                if !exists(app, self.el) {
+                if !a11y::exists(app, self.el) {
                     return gone();
                 }
-                Ok(screen_rect(app, bounds(app, self.el)))
+                Ok(screen_rect(app, a11y::bounds(app, self.el)))
             }
 
             fn GetEmbeddedFragmentRoots(&self) -> Result<*mut SAFEARRAY> {
@@ -369,16 +223,10 @@ macro_rules! fragment_impl {
 
             fn SetFocus(&self) -> Result<()> {
                 let app = self.app.get()?;
-                if !exists(app, self.el) {
+                if !a11y::exists(app, self.el) {
                     return gone();
                 }
-                if let Some(p) = pane_of(self.el) {
-                    app.set_active(p);
-                }
-                if let El::Item(p, pos) = self.el {
-                    app.panes[p].tab_mut().list.select_pos(pos);
-                }
-                app.redraw();
+                app.a11y_apply(A11yAction::Focus(self.el));
                 Ok(())
             }
 
@@ -421,35 +269,16 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
             let _ = ScreenToClient(app.hwnd.hwnd(), &mut pt);
         }
         let k = 96.0 / app.dpi as f32;
-        let (cx, cy) = (pt.x as f32 * k, pt.y as f32 * k);
-        let (_, h) = app.client_dips();
-        if cy >= h - ui::STATUSBAR_H {
-            return Ok(fragment(self.app, El::Status));
+        match a11y::element_at(app, pt.x as f32 * k, pt.y as f32 * k) {
+            Some(el) => Ok(fragment(self.app, el)),
+            // Nada propio ahí: que responda la ventana.
+            None => none(),
         }
-        for p in app.shown_panes() {
-            let pane = &app.panes[p];
-            if !contains(&pane.rect, cx, cy) {
-                continue;
-            }
-            let el = if contains(&pane.address, cx, cy) {
-                El::Address(p)
-            } else if contains(&pane.list, cx, cy) {
-                match pane.tab().list.pos_at_point(cx, cy) {
-                    Some(pos) => El::Item(p, pos),
-                    None => El::List(p),
-                }
-            } else {
-                El::Pane(p)
-            };
-            return Ok(fragment(self.app, el));
-        }
-        // Nada propio ahí: que responda la ventana.
-        none()
     }
 
     fn GetFocus(&self) -> Result<IRawElementProviderFragment> {
         let app = self.app.get()?;
-        Ok(fragment(self.app, focus_el(app)))
+        Ok(fragment(self.app, a11y::focus_el(app)))
     }
 }
 
@@ -460,7 +289,7 @@ impl IRawElementProviderSimple_Impl for Elem_Impl {
 
     fn GetPatternProvider(&self, id: UIA_PATTERN_ID) -> Result<IUnknown> {
         let app = self.app.get()?;
-        if !exists(app, self.el) {
+        if !a11y::exists(app, self.el) {
             return gone();
         }
         match self.el {
@@ -473,7 +302,7 @@ impl IRawElementProviderSimple_Impl for Elem_Impl {
 
     fn GetPropertyValue(&self, id: UIA_PROPERTY_ID) -> Result<VARIANT> {
         let app = self.app.get()?;
-        if !exists(app, self.el) {
+        if !a11y::exists(app, self.el) {
             return gone();
         }
         Ok(property(app, self.el, id))
@@ -488,10 +317,10 @@ impl ISelectionProvider_Impl for Elem_Impl {
     fn GetSelection(&self) -> Result<*mut SAFEARRAY> {
         let app = self.app.get()?;
         let El::List(p) = self.el else { return gone() };
-        if !exists(app, self.el) {
+        if !a11y::exists(app, self.el) {
             return gone();
         }
-        let selected = app.panes[p].tab().list.selected_positions();
+        let selected = app.selected_positions(p);
         unsafe {
             let sa = SafeArrayCreateVector(VT_UNKNOWN, 0, selected.len() as u32);
             if sa.is_null() {
@@ -519,41 +348,37 @@ impl ISelectionItemProvider_Impl for Elem_Impl {
     fn Select(&self) -> Result<()> {
         let app = self.app.get()?;
         let El::Item(p, pos) = self.el else { return gone() };
-        if !exists(app, self.el) {
+        if !a11y::exists(app, self.el) {
             return gone();
         }
-        app.set_active(p);
-        app.panes[p].tab_mut().list.select_pos(pos);
-        app.redraw();
+        app.a11y_apply(A11yAction::Select(p, pos));
         Ok(())
     }
 
     fn AddToSelection(&self) -> Result<()> {
         let app = self.app.get()?;
         let El::Item(p, pos) = self.el else { return gone() };
-        if !exists(app, self.el) {
+        if !a11y::exists(app, self.el) {
             return gone();
         }
-        app.panes[p].tab_mut().list.set_selected_pos(pos, true);
-        app.redraw();
+        app.a11y_apply(A11yAction::AddToSelection(p, pos));
         Ok(())
     }
 
     fn RemoveFromSelection(&self) -> Result<()> {
         let app = self.app.get()?;
         let El::Item(p, pos) = self.el else { return gone() };
-        if !exists(app, self.el) {
+        if !a11y::exists(app, self.el) {
             return gone();
         }
-        app.panes[p].tab_mut().list.set_selected_pos(pos, false);
-        app.redraw();
+        app.a11y_apply(A11yAction::RemoveFromSelection(p, pos));
         Ok(())
     }
 
     fn IsSelected(&self) -> Result<BOOL> {
         let app = self.app.get()?;
         let El::Item(p, pos) = self.el else { return gone() };
-        match app.panes[p].tab().list.item_info(pos) {
+        match app.item_info(p, pos) {
             Some(it) => Ok(it.selected.into()),
             None => gone(),
         }
@@ -570,9 +395,11 @@ impl IInvokeProvider_Impl for Elem_Impl {
     fn Invoke(&self) -> Result<()> {
         let app = self.app.get()?;
         let El::Item(p, pos) = self.el else { return gone() };
-        let Some(entry) = app.panes[p].tab().list.entry_of_pos(pos) else { return gone() };
-        app.set_active(p);
-        app.apply(p, Action::Open(entry));
+        // Como antes: alcanza con que el elemento esté en la lista (aunque el panel no se vea).
+        if pos >= app.item_count(p) {
+            return gone();
+        }
+        app.a11y_apply(A11yAction::Invoke(p, pos));
         Ok(())
     }
 }
@@ -584,23 +411,26 @@ pub fn root_provider(app: &mut App) -> IRawElementProviderSimple {
     Root { app: AppPtr(app as *mut App), el: El::Root }.into()
 }
 
-/// Avisa a los lectores de pantalla cuando cambia el elemento con foco. Se llama después de
-/// cada frame: es una comparación barata, y solo hace algo si hay un lector escuchando.
-pub fn notify_focus(app: &mut App) {
-    if !unsafe { UiaClientsAreListening() }.as_bool() {
-        return;
-    }
-    let now = (app.active, app.panes[app.active].tab().list.focus_pos());
-    if app.uia_focus == Some(now) {
-        return;
-    }
-    app.uia_focus = Some(now);
-    if unsafe { GetForegroundWindow() } != app.hwnd.hwnd() {
-        return;
-    }
-    let el = focus_el(app);
-    let provider: IRawElementProviderSimple = Elem { app: AppPtr(app as *mut App), el }.into();
+/// ¿Hay algún lector de pantalla (o cliente de UI Automation) escuchando?
+pub fn listening() -> bool {
+    unsafe { UiaClientsAreListening() }.as_bool()
+}
+
+/// Avisa a los lectores que cambió el elemento con foco (lo llama `Win32Host`, que hace de
+/// `Accessibility`). Solo si la ventana está en primer plano.
+pub fn notify_focus(hwnd: HWND, el: El) {
     unsafe {
+        if GetForegroundWindow() != hwnd {
+            return;
+        }
+        // La `App` es la de la ventana (la deja `wndproc` al crearla). Aliasing: se lee por el
+        // puntero de la ventana mientras `App::paint` tiene `&mut self`, el mismo patrón que el
+        // `wndproc`. El puntero vale de `WM_NCCREATE` a `WM_NCDESTROY` y `ALIVE` lo resguarda.
+        let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+        if app.is_null() {
+            return;
+        }
+        let provider: IRawElementProviderSimple = Elem { app: AppPtr(app), el }.into();
         let _ = UiaRaiseAutomationEvent(&provider, UIA_AutomationFocusChangedEventId);
     }
 }
@@ -624,15 +454,15 @@ mod tests {
         for &e in &els {
             let mut cur = e;
             let mut steps = 0;
-            while let Some(p) = parent(cur) {
+            while let Some(p) = a11y::parent(cur) {
                 cur = p;
                 steps += 1;
                 assert!(steps < 5);
             }
             assert_eq!(cur, El::Root);
         }
-        assert_eq!(pane_of(El::Item(2, 7)), Some(2));
-        assert_eq!(pane_of(El::Status), None);
+        assert_eq!(a11y::pane_of(El::Item(2, 7)), Some(2));
+        assert_eq!(a11y::pane_of(El::Status), None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Tipos de las operaciones de archivos (copiar, mover, borrar, renombrar, carpeta nueva y
-//! deshacer). Cada operación corre en su propio hilo (la implementa cada sistema detrás de
+//! Tipos de las operaciones de archivos (copiar, mover, borrar, renombrar, carpeta nueva, archivo
+//! de texto nuevo y deshacer). Cada operación corre en su propio hilo (la implementa cada sistema detrás de
 //! `sys::FileOps`) y al terminar avisa a la ventana con `WM_APP_OP_DONE`.
 
 use std::path::PathBuf;
@@ -16,6 +16,8 @@ pub enum Op {
     Delete { paths: Vec<PathBuf>, recycle: bool },
     Rename { path: PathBuf, new_name: String },
     NewFolder { parent: PathBuf },
+    /// Archivo de texto vacío «Nuevo documento de texto.txt» (« (2)», « (3)»… si ya existe).
+    NewFile { parent: PathBuf },
     Undo(Undo),
 }
 
@@ -24,7 +26,7 @@ pub enum Op {
 pub enum Undo {
     /// Volver a llamar `path` como `old_name`.
     Rename { path: PathBuf, old_name: String },
-    /// Copias o carpetas nuevas: se mandan a la papelera.
+    /// Copias, carpetas o archivos nuevos: se mandan a la papelera.
     Created(Vec<PathBuf>),
     /// (dónde quedó, dónde estaba).
     Moved(Vec<(PathBuf, PathBuf)>),
@@ -37,7 +39,7 @@ pub struct OpResult {
     pub undo: Option<Undo>,
     /// Elemento a enfocar al terminar (renombrado o carpeta nueva).
     pub focus: Option<PathBuf>,
-    /// Carpeta nueva: se abre el renombrado en línea sobre ella.
+    /// Carpeta o archivo nuevo: se abre el renombrado en línea sobre él.
     pub rename_after: bool,
     pub error: Option<String>,
 }

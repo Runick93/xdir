@@ -85,6 +85,8 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::Recycle, &["Ctrl+Retroceso", "Supr"]),
     (Command::Delete, &["Ctrl+Alt+Retroceso", "Shift+Supr"]),
     (Command::CopyPaths, &["Ctrl+Alt+C"]),
+    // ⌘⌥N: archivo de texto nuevo.
+    (Command::NewTextFile, &["Ctrl+Alt+N"]),
 ];
 
 /// macOS: nombres distintos a los de Windows.

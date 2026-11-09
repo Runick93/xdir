@@ -801,6 +801,23 @@ fn undo_after_new_folder_sends_undo() {
     assert!(a.undo.is_empty());
 }
 
+/// «Archivo de texto nuevo» manda `Op::NewFile` con la carpeta del panel; en «Este equipo» no
+/// hay carpeta donde crearlo y no manda nada.
+#[test]
+fn new_text_file_sends_op() {
+    use crate::sys::testing::FakeFileOps;
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp.clone()), true);
+    FakeFileOps::take_ops();
+    a.run_command(Command::NewTextFile);
+    assert_eq!(FakeFileOps::take_ops(), [Op::NewFile { parent: tmp }]);
+    a.new_tab(0, Location::Computer, true);
+    FakeFileOps::take_ops();
+    a.run_command(Command::NewTextFile);
+    assert_eq!(FakeFileOps::take_ops(), []);
+}
+
 // ---------- cajas de texto y menús del host ----------
 
 /// Perder el foco de la barra de dirección (`WM_APP_EDIT_DONE` con 0) cancela: no navega aunque

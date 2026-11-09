@@ -124,6 +124,11 @@ impl App {
                     sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::NewFolder { parent });
                 }
             }
+            Command::NewTextFile => {
+                if let Some(parent) = self.panes[active].tab().location.target() {
+                    sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::NewFile { parent });
+                }
+            }
             Command::Recycle => self.delete_selection(true),
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.begin_rename(active),

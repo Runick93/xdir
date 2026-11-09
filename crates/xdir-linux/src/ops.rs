@@ -1,5 +1,6 @@
 //! Operaciones de archivos de Linux (`xdir_core::sys::FileOps`): copiar, mover, borrar (a la
-//! papelera de `crate::trash` o definitivamente), renombrar, carpeta nueva y deshacer. Cada
+//! papelera de `crate::trash` o definitivamente), renombrar, carpeta nueva, archivo de texto nuevo
+//! y deshacer. Cada
 //! operación corre en su propio hilo y avisa con `WM_APP_OP_DONE`. Los nombres repetidos se
 //! resuelven como en macOS ("informe copia.txt", "informe copia 2.txt").
 
@@ -123,12 +124,34 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
             std::fs::create_dir(&target).map_err(|e| e.to_string())?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
+        Op::NewFile { parent } => {
+            let target = create_new_file(&parent).map_err(|e| err_at(&parent, e))?;
+            ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
+        }
         Op::Undo(undo) => undo_op(undo, trash),
     }
 }
 
 /// Nombre de una carpeta nueva (con " (2)", " (3)"... si ya existe, como en Windows).
 const NEW_FOLDER: &str = "Nueva carpeta";
+
+/// Nombre de un archivo de texto nuevo, sin la extensión (`.txt`).
+const NEW_FILE: &str = "Nuevo documento de texto";
+
+/// Crea un archivo vacío «Nuevo documento de texto.txt» en `parent` («… (2).txt», «… (3).txt»… si
+/// ya existe). `create_new` no pisa nada aunque otro lo cree al mismo tiempo.
+fn create_new_file(parent: &Path) -> io::Result<PathBuf> {
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { format!("{NEW_FILE}.txt") } else { format!("{NEW_FILE} ({n}).txt") };
+        let target = parent.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(_) => return Ok(target),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
     let mut errors = Vec::new();
@@ -407,6 +430,37 @@ mod tests {
         assert_eq!(r.undo, Some(Undo::Created(vec![dir.join("Nueva carpeta")])));
         let r = run(Op::NewFolder { parent: dir.clone() }, None).unwrap();
         assert_eq!(r.focus, Some(dir.join("Nueva carpeta (2)")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_file_creates_and_renames_on_conflict() {
+        let dir = tmp("archivo-nuevo");
+        let first = dir.join("Nuevo documento de texto.txt");
+        let second = dir.join("Nuevo documento de texto (2).txt");
+        let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None });
+        let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None });
+        assert_eq!(std::fs::read(&first).unwrap(), b"");
+        assert_eq!(std::fs::read(&second).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_file_error_without_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("new_file_error_without_permission: se saltea como root (los permisos no aplican)");
+            return;
+        }
+        let dir = tmp("archivo-sin-permiso");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = run(Op::NewFile { parent: dir.clone() }, None);
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        let e = r.expect_err("sin permiso de escritura no se puede crear");
+        assert!(!e.is_empty());
+        assert!(!dir.join("Nuevo documento de texto.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -47,6 +47,8 @@ pub enum Command {
     CopyPaths,
     Undo,
     NewFolder,
+    /// Archivo de texto vacío en la carpeta del panel, con el renombrado en línea abierto.
+    NewTextFile,
     Recycle,
     Delete,
     Rename,
@@ -160,6 +162,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::CopyPaths, "copiar_rutas", "Copiar las rutas como texto", &["Ctrl+Shift+C"]),
     spec(Command::Undo, "deshacer", "Deshacer", &["Ctrl+Z"]),
     spec(Command::NewFolder, "carpeta_nueva", "Carpeta nueva", &["Ctrl+Shift+N"]),
+    spec(Command::NewTextFile, "archivo_texto_nuevo", "Archivo de texto nuevo", &["Ctrl+Alt+N"]),
     spec(Command::Recycle, "papelera", "Enviar a la papelera", &["Supr"]),
     spec(Command::Delete, "eliminar", "Eliminar definitivamente", &["Shift+Supr"]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),

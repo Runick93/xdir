@@ -121,6 +121,10 @@ fn run(op: Op) -> Result<OpResult> {
             std::fs::create_dir(&target).map_err(|e| e.to_string())?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
+        Op::NewFile { parent } => {
+            let target = create_new_file(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
+        }
         Op::Undo(undo) => undo_op(undo),
     }
 }
@@ -180,6 +184,21 @@ fn free_name(dest: &Path, src: &Path, always_copy: bool) -> PathBuf {
     }
 }
 
+/// Crea un archivo vacío «Nuevo documento de texto.txt» en `parent` («… (2).txt», «… (3).txt»… si
+/// ya existe, como en Windows). `create_new` no pisa nada aunque otro lo cree al mismo tiempo.
+fn create_new_file(parent: &Path) -> std::io::Result<PathBuf> {
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { "Nuevo documento de texto.txt".to_string() } else { format!("Nuevo documento de texto ({n}).txt") };
+        let target = parent.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(_) => return Ok(target),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn c_path(p: &Path) -> Result<CString> {
     CString::new(p.as_os_str().as_bytes()).map_err(|_| format!("ruta inválida: {}", p.display()))
 }
@@ -215,4 +234,48 @@ fn trash(p: &Path) -> Result<PathBuf> {
     let mut resulting: Option<Retained<NSURL>> = None;
     fm.trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting)).map_err(|e| format!("{}: {}", p.display(), e.localizedDescription()))?;
     Ok(resulting.and_then(|u| u.path()).map(|s| PathBuf::from(s.to_string())).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Carpeta temporal propia de la prueba.
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdir-mac-ops-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn new_file_creates_and_renames_on_conflict() {
+        let dir = tmp("archivo-nuevo");
+        let first = dir.join("Nuevo documento de texto.txt");
+        let second = dir.join("Nuevo documento de texto (2).txt");
+        let r = run(Op::NewFile { parent: dir.clone() }).unwrap();
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None });
+        let r = run(Op::NewFile { parent: dir.clone() }).unwrap();
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None });
+        assert_eq!(std::fs::read(&first).unwrap(), b"");
+        assert_eq!(std::fs::read(&second).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_file_error_without_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("new_file_error_without_permission: se saltea como root (los permisos no aplican)");
+            return;
+        }
+        let dir = tmp("archivo-sin-permiso");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = run(Op::NewFile { parent: dir.clone() });
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        let e = r.expect_err("sin permiso de escritura no se puede crear");
+        assert!(!e.is_empty());
+        assert!(!dir.join("Nuevo documento de texto.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

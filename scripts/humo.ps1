@@ -11,7 +11,14 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.Drawing
-Add-Type -TypeDefinition @'
+# En pwsh 7 Bitmap/Graphics están en System.Drawing.Common y Color en System.Drawing.Primitives:
+# se referencian por la ruta real de cada ensamblado cargado.
+$refs = @(
+    [System.Drawing.Bitmap].Assembly.Location,
+    [System.Drawing.Graphics].Assembly.Location,
+    [System.Drawing.Color].Assembly.Location
+) | Select-Object -Unique
+Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -28,7 +35,8 @@ public static class Humo {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern IntPtr FindWindowW(string cls, string title);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr wp, ref COPYDATASTRUCT lp);
+    static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, IntPtr wp, ref COPYDATASTRUCT lp,
+        uint flags, uint timeoutMs, out IntPtr result);
     [DllImport("user32.dll")]
     static extern bool PostMessageW(IntPtr h, uint msg, IntPtr wp, IntPtr lp);
     [DllImport("user32.dll")]
@@ -38,10 +46,12 @@ public static class Humo {
 
     const uint WM_COPYDATA = 0x004A;
     const uint WM_CLOSE = 0x0010;
+    const uint SMTO_ABORTIFHUNG = 0x0002;
 
     public static IntPtr Find() { return FindWindowW("xdir.main", null); }
 
-    // Manda `text` por WM_COPYDATA (UTF-16 con NUL final) y devuelve lo que contesta la ventana.
+    // Manda `text` por WM_COPYDATA (UTF-16 con NUL final) y devuelve lo que contesta la ventana,
+    // o -1 si no contestó en 10 s (ventana colgada).
     public static long Send(IntPtr hwnd, string text) {
         IntPtr buf = Marshal.StringToHGlobalUni(text + "\0");
         try {
@@ -49,7 +59,10 @@ public static class Humo {
             cds.dwData = IntPtr.Zero;
             cds.cbData = (text.Length + 1) * 2;
             cds.lpData = buf;
-            return SendMessageW(hwnd, WM_COPYDATA, IntPtr.Zero, ref cds).ToInt64();
+            IntPtr res;
+            IntPtr ok = SendMessageTimeoutW(hwnd, WM_COPYDATA, IntPtr.Zero, ref cds, SMTO_ABORTIFHUNG, 10000, out res);
+            if (ok == IntPtr.Zero) return -1;
+            return res.ToInt64();
         } finally {
             Marshal.FreeHGlobal(buf);
         }
@@ -113,12 +126,20 @@ if ($hwnd -eq [IntPtr]::Zero) {
 Write-Host "ventana encontrada: $hwnd"
 Start-Sleep -Milliseconds 500
 
+$script:primero = 'cmd layout_4'
 function Mandar([string]$texto) {
     $r = [Humo]::Send($hwnd, $texto)
+    if ($texto -eq $script:primero) {
+        # El primer comando puede llegar antes de que la ventana procese mensajes: hasta 5 intentos.
+        for ($i = 1; $i -lt 5 -and $r -ne 1; $i++) {
+            Start-Sleep -Milliseconds 500
+            $r = [Humo]::Send($hwnd, $texto)
+        }
+    }
     Write-Host "mandado '$texto' -> $r"
     if ($r -ne 1) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        Fallar "sin respuesta a '$texto' (devolvió $r)"
+        Fallar "no responde a '$texto' (devolvió $r; -1 = sin respuesta en 10 s)"
     }
     if ($proc.HasExited) { Fallar "el proceso murió después de '$texto' (código $($proc.ExitCode))" }
     Start-Sleep -Milliseconds 500
@@ -138,7 +159,10 @@ Mandar 'notice humo'
 $png = Join-Path $Out 'humo.png'
 $colores = [Humo]::Capture($hwnd, (Join-Path (Resolve-Path $Out).Path 'humo.png'))
 Write-Host "captura: $png ($colores colores distintos)"
-if ($colores -lt 8) { Write-Warning 'la captura salió vacía' }
+if ($colores -lt 8) {
+    Write-Warning 'la captura salió vacía'
+    Write-Host '::warning::la captura salió vacía'
+}
 
 # Cierre limpio.
 [Humo]::Close($hwnd)

@@ -82,7 +82,7 @@ sh scripts/package-mac.sh        # xdir.app universal y el .dmg en dist/
 Desde una Mac también se puede verificar que la versión de Windows compile:
 `rustup target add x86_64-pc-windows-msvc && cargo check --target x86_64-pc-windows-msvc`.
 
-El proyecto es un workspace de tres crates:
+El proyecto es un workspace de cuatro crates:
 
 - `crates/xdir-core`: todo lo que no depende del sistema (la aplicación, el dibujo, la lista, los paneles, las pestañas,
   el árbol, la paleta, xtree, la configuración y la sesión). No tiene dependencias ni código de sistema en producción: pide
@@ -90,6 +90,9 @@ El proyecto es un workspace de tres crates:
 - `crates/xdir-windows`: el binario `xdir-windows`. Ventana Win32, Direct2D, Shell, MFT, accesibilidad (UIA) y los
   recursos de `build.rs`.
 - `crates/xdir-mac`: el binario `xdir-mac`. AppKit, Core Graphics, `getattrlistbulk` y `notify`.
+- `crates/xdir-linux`: el binario `xdir-linux`. Hoy trae solo los servicios del sistema (archivos con vigilancia por
+  inotify, papelera de freedesktop, `xdg-open` y el escaneo de disco de xtree) y arma la aplicación sin ventana; la
+  interfaz de Linux es un proyecto aparte. Para probarla, en Linux: `cargo run -p xdir-linux`.
 
 Las crates de plataforma son adaptadores finos: implementan los traits del núcleo y arman la ventana, nada más.
 Cada una compila vacía (un `main` que avisa y sale) fuera de su sistema, así `cargo build` y `cargo test` andan

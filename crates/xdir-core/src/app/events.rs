@@ -48,6 +48,7 @@ impl App {
             WM_APP_TEXT_CHANGED => self.on_text_changed(lparam),
             WM_APP_SEARCH => self.on_search_due(lparam as u64),
             WM_APP_VIEWS_SAVE => self.on_views_save_due(),
+            WM_APP_TOOLTIP => self.on_tooltip_due(lparam as u64),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {
                 self.tree.on_loaded();
@@ -166,6 +167,7 @@ impl App {
 
     /// Botón derecho apretado: prepara el menú contextual que llega al soltarlo.
     pub fn on_right_down(&mut self, x: f32, y: f32) {
+        self.dismiss_tooltip();
         self.host.focus_main();
         self.fav_ctx = None;
         self.header_ctx = None;
@@ -215,6 +217,7 @@ impl App {
     /// Pedido de menú contextual: `at` es el punto del clic derecho (None: tecla de menú o
     /// Shift+F10, se abre sobre la fila con foco).
     pub fn on_context_menu_request(&mut self, at: Option<(f32, f32)>) {
+        self.dismiss_tooltip();
         // Con xtree abierto no hay menú contextual: los paneles están tapados.
         if self.xtree_open {
             return;
@@ -251,6 +254,7 @@ impl App {
     /// Tecla con Alt (Windows) u Opción (macOS): solo los atajos que la usan; el resto sigue de
     /// largo (Alt+F4, Alt+Espacio). Devuelve si se usó.
     pub fn on_alt_key(&mut self, vk: Key) -> bool {
+        self.dismiss_tooltip();
         match self.config.keymap.lookup(vk, key_down(VK_CONTROL), key_down(VK_SHIFT), true) {
             Some(c) => {
                 self.run_command(c);
@@ -262,6 +266,7 @@ impl App {
 
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
+        self.dismiss_tooltip();
         if !c.is_control() && !key_down(VK_CONTROL) && !self.xtree_open {
             let action = self.tab_mut().list.on_char(c);
             self.apply(self.active, action);
@@ -271,6 +276,7 @@ impl App {
     /// El mouse salió de la ventana.
     pub fn on_mouse_left(&mut self) {
         self.hover = Hit::None;
+        self.hide_tooltip();
         #[cfg(feature = "arbol")]
         if matches!(self.drag, Drag::None) {
             self.tree.on_mouse_leave();
@@ -285,6 +291,7 @@ impl App {
     /// hacia arriba); `lines` es cuántas filas mueve cada clic. Va al panel bajo el mouse, aunque
     /// no sea el activo.
     pub fn on_wheel(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
+        self.dismiss_tooltip();
         // Con xtree abierto la rueda mueve su tabla; los paneles tapados no se mueven.
         if self.xtree_open {
             if self.hit(x, y) == Hit::XtreeView {
@@ -383,7 +390,7 @@ impl App {
     /// La ventana se va a cerrar: se guardan la sesión y el historial.
     pub fn on_closing(&mut self) {
         // El escaneo de xtree (abierto o en segundo plano) no sigue después de cerrar xdir.
-        if let Some(v) = &self.xtree {
+        if let Some(v) = &mut self.xtree {
             v.cancel();
         }
         if self.probe.is_none() {

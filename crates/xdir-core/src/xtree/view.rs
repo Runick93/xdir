@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on};
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
@@ -35,6 +36,9 @@ const LEGEND_H: f32 = 40.0;
 const GAP: f32 = 6.0;
 const MENU_ROW: f32 = 34.0;
 const MENU_W: f32 = 400.0;
+/// Ancho del estado del análisis, a la derecha de la barra superior («Análisis completado en
+/// 1:02:15»).
+const STATE_W: f32 = 220.0;
 
 const VK_A: Key = Key(0x41);
 const VK_T: Key = Key(0x54);
@@ -127,6 +131,23 @@ fn fmt_count(n: u64) -> String {
     out
 }
 
+/// Duración del escaneo: «0:42», «1:23»; desde una hora, «1:02:15».
+pub fn fmt_elapsed(d: Duration) -> String {
+    let t = d.as_secs();
+    let (h, m, s) = (t / 3600, t / 60 % 60, t % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// Avance del escaneo de un volumen entero: bytes leídos sobre el espacio usado, entero y con tope
+/// en 99 % (APFS con clones, hardlinks o archivos que cambian pueden pasarse). Sin espacio usado,
+/// no hay porcentaje.
+fn scan_percent(read: u64, used: u64) -> Option<u8> {
+    if used == 0 {
+        return None;
+    }
+    Some((read as u128 * 100 / used as u128).min(99) as u8)
+}
+
 fn pct(v: u64, of: u64) -> String {
     format!("{:.1} %", v as f64 / of.max(1) as f64 * 100.0).replace('.', ",")
 }
@@ -165,6 +186,19 @@ pub struct Xtree {
     by_type: bool,
     /// Espacio del volumen que contiene la carpeta: (total, libre).
     vol: Option<(u64, u64)>,
+    /// La raíz es un volumen entero: se muestra el porcentaje de avance.
+    whole: bool,
+    /// Inicio del escaneo en curso (o del último).
+    scan_started: Option<Instant>,
+    /// Duración fija del escaneo: al terminar o al cortarse.
+    scan_elapsed: Option<Duration>,
+    /// El escaneo se cortó antes de terminar (`cancel`).
+    scan_stopped: bool,
+    /// Reescaneo con permisos (tecla A) después de un análisis terminado: cronómetro del análisis
+    /// anterior (inicio, duración), para volver a él si el escaneo elevado no trae árbol.
+    before_elevate: Option<(Option<Instant>, Option<Duration>)>,
+    /// Mayor porcentaje mostrado en este escaneo: no retrocede.
+    pct_max: std::cell::Cell<u8>,
     /// Disco o carpeta elegida en el desplegable; se analiza al pulsar «Analizar».
     pick: PathBuf,
     drives: Vec<DriveEntry>,
@@ -181,7 +215,7 @@ impl Xtree {
         let scan = scan::start(hwnd, id, root.clone());
         let mut x = Xtree::with_scan(hwnd, root, scan);
         x.scanning = true;
-        x.vol = disk_scan().volume_space(&x.root);
+        x.start_clock();
         x
     }
 
@@ -203,6 +237,12 @@ impl Xtree {
             scroll: 0.0,
             by_type: false,
             vol: None,
+            whole: false,
+            scan_started: None,
+            scan_elapsed: None,
+            scan_stopped: false,
+            before_elevate: None,
+            pct_max: std::cell::Cell::new(0),
             drives: Vec::new(),
             menu_open: false,
             menu_hover: None,
@@ -242,9 +282,15 @@ impl Xtree {
         self.menu_open
     }
 
-    /// Cancela el escaneo en curso (al cerrar xdir).
-    pub fn cancel(&self) {
+    /// Cancela el escaneo en curso (al cerrar xdir o al cambiar de raíz). Si no había terminado,
+    /// el cronómetro queda fijo y el estado dice «Detenido a los …».
+    pub fn cancel(&mut self) {
         self.scan.cancel.store(true, Ordering::Relaxed);
+        if (self.scanning || self.elevated_pending()) && self.scan_elapsed.is_none() {
+            self.scan_elapsed = Some(self.elapsed());
+            self.scan_stopped = true;
+            self.before_elevate = None;
+        }
     }
 
     /// Carpeta analizada.
@@ -260,14 +306,78 @@ impl Xtree {
     /// Texto para la barra de estado de xdir mientras la vista está abierta.
     pub fn status_text(&self) -> String {
         if self.elevating.load(Ordering::Relaxed) {
-            format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), disk_scan().elevating_text())
+            if self.elevated_pending() {
+                format!("xtree \u{B7} {} \u{B7} {} \u{B7} {}", self.root.display(), disk_scan().elevating_text(), self.state_text())
+            } else {
+                format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), disk_scan().elevating_text())
+            }
         } else if self.scanning {
-            format!("xtree \u{B7} {} \u{B7} escaneando\u{2026}", self.root.display())
+            format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), self.state_text())
         } else if self.arena.is_empty() {
             format!("xtree \u{B7} {}", self.root.display())
         } else {
-            format!("xtree \u{B7} {} \u{B7} análisis completado", self.path_of(&self.arena, self.current).display())
+            format!("xtree \u{B7} {} \u{B7} {}", self.path_of(&self.arena, self.current).display(), self.state_text())
         }
+    }
+
+    /// Estado del análisis con el cronómetro: «Escaneando… 0:42», «Escaneando… 37 % · 0:42»,
+    /// «Análisis completado en 1:23» o «Detenido a los 0:37».
+    fn state_text(&self) -> String {
+        let t = fmt_elapsed(self.elapsed());
+        if self.scan_stopped {
+            format!("Detenido a los {t}")
+        } else if self.elevated_pending() {
+            // El ayudante elevado no informa bytes leídos: solo el cronómetro.
+            format!("Escaneando\u{2026} {t}")
+        } else if self.scanning {
+            match self.percent() {
+                Some(p) => format!("Escaneando\u{2026} {p} % \u{B7} {t}"),
+                None => format!("Escaneando\u{2026} {t}"),
+            }
+        } else if self.scan_elapsed.is_some() {
+            format!("Análisis completado en {t}")
+        } else if self.arena.is_empty() {
+            "Escaneando\u{2026}".to_string()
+        } else {
+            "Análisis completado".to_string()
+        }
+    }
+
+    /// Hay un reescaneo con permisos en curso que empezó con el análisis ya terminado: cuenta como
+    /// un escaneo nuevo (el árbol anterior se sigue viendo hasta que llegue el nuevo).
+    fn elevated_pending(&self) -> bool {
+        !self.scanning && self.scan_elapsed.is_none() && self.before_elevate.is_some()
+    }
+
+    /// Tiempo del escaneo: fijo si terminó o se cortó; si no, el que lleva.
+    fn elapsed(&self) -> Duration {
+        self.scan_elapsed.or_else(|| self.scan_started.map(|t| t.elapsed())).unwrap_or_default()
+    }
+
+    /// Porcentaje de avance mientras se escanea un volumen entero (bytes leídos sobre el espacio
+    /// usado). Nunca baja dentro del mismo escaneo.
+    fn percent(&self) -> Option<u8> {
+        if !self.whole {
+            return None;
+        }
+        let (total, free) = self.vol?;
+        // En Windows, si el escaneo rápido (MFT) pide administrador, el escáner vuelve a empezar
+        // con el recorrido normal y los bytes leídos vuelven a 0: el porcentaje queda en `pct_max`
+        // hasta que el recorrido lo alcanza (no retrocede).
+        let p = scan_percent(self.progress().bytes.load(Ordering::Relaxed), total - free.min(total))?;
+        let p = p.max(self.pct_max.get());
+        self.pct_max.set(p);
+        Some(p)
+    }
+
+    /// Arranca el cronómetro de un escaneo nuevo (de 0) y toma los datos del volumen.
+    fn start_clock(&mut self) {
+        self.scan_started = Some(Instant::now());
+        self.scan_elapsed = None;
+        self.scan_stopped = false;
+        self.pct_max.set(0);
+        self.vol = disk_scan().volume_space(&self.root);
+        self.whole = disk_scan().whole_volume(&self.root);
     }
 
     /// Aviso de la barra de datos: escaneo elevado en curso o permisos que faltan (tecla A).
@@ -321,7 +431,7 @@ impl Xtree {
         self.selected = None;
         self.scroll = 0.0;
         self.scanning = true;
-        self.vol = disk_scan().volume_space(&self.root);
+        self.start_clock();
     }
 
     /// Toma el árbol terminado, si ya llegó. Devuelve si cambió algo.
@@ -330,6 +440,12 @@ impl Xtree {
         self.arena = arena;
         // El espacio libre cambió mientras se escaneaba.
         self.vol = disk_scan().volume_space(&self.root);
+        // Primer árbol de este escaneo: queda fijo el tiempo total. Un árbol elevado que llega
+        // durante el recorrido normal lo reemplaza sin cambiar el tiempo; el de un reescaneo con
+        // permisos (análisis ya terminado) siempre fija el tiempo de ese reescaneo.
+        if self.before_elevate.take().is_some() || self.scan_elapsed.is_none() {
+            self.scan_elapsed = Some(self.elapsed());
+        }
         self.scanning = false;
         self.go(0);
         true
@@ -342,6 +458,17 @@ impl Xtree {
         }
         if lparam == 1 {
             return self.take_result();
+        }
+        // El reescaneo con permisos terminó sin árbol (permiso rechazado o error): vuelve el
+        // cronómetro del análisis anterior. Si dejó un árbol, su aviso de entrega puede llegar
+        // después de un aviso de repintado: no se restaura nada y `take_result` fija el tiempo.
+        if !self.elevating.load(Ordering::Relaxed)
+            && self.elevated_pending()
+            && self.scan.result.lock().unwrap().is_none()
+            && let Some((started, elapsed)) = self.before_elevate.take()
+        {
+            self.scan_started = started;
+            self.scan_elapsed = elapsed;
         }
         // Avance: el mapa en vivo se recalcula con lo que lleva descubierto el escáner. También
         // llega cuando termina el escaneo elevado sin árbol: hay que repintar su aviso.
@@ -367,6 +494,21 @@ impl Xtree {
             return Action::None;
         }
         let (root, hwnd, id) = (self.root.clone(), self.hwnd, self.scan.id);
+        // Con el análisis ya terminado es un escaneo nuevo: el cronómetro arranca de 0 (incluye el
+        // pedido de permisos) y, como el escáner ya no avisa, un hilo pide repintar cada 250 ms
+        // mientras dure. Si el recorrido normal sigue, su tiempo ya incluye al ayudante.
+        if !self.scanning && !self.scan_stopped && self.scan_elapsed.is_some() {
+            self.before_elevate = Some((self.scan_started, self.scan_elapsed));
+            self.start_clock();
+            let (elevating, cancel) = (self.elevating.clone(), self.scan.cancel.clone());
+            let _ = std::thread::Builder::new().spawn(move || {
+                // También se corta al cancelar (cerrar xdir o cambiar de raíz).
+                while elevating.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
+                    hwnd.post(WM_APP_XTREE, id, 0);
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            });
+        }
         let (progress, cancel, result, elevating) =
             (self.scan.progress.clone(), self.scan.cancel.clone(), self.scan.result.clone(), self.elevating.clone());
         let _ = std::thread::Builder::new().spawn(move || {
@@ -697,7 +839,15 @@ impl Xtree {
                 fmt_size(progress.bytes.load(Ordering::Relaxed))
             )
         };
-        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - 220.0, t0 + TOP_H), th.text);
+        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - STATE_W - 60.0, t0 + TOP_H), th.text);
+        // Barra de avance (volumen entero) sobre el borde inferior de la barra superior.
+        if self.scanning && !self.scan_stopped
+            && let Some(pc) = self.percent()
+        {
+            let (y0, y1) = (t0 + TOP_H - 3.0, t0 + TOP_H);
+            p.fill(rect(l0, y0, r0, y1), th.border);
+            p.fill(rect(l0, y0, l0 + (r0 - l0) * pc as f32 / 100.0, y1), th.accent);
+        }
         let cb = ui.combo;
         p.round_fill(cb, 6.0, th.surface_alt);
         p.round_stroke_w(cb, 6.0, if self.menu_open { th.accent } else { th.border }, 1.0);
@@ -705,12 +855,15 @@ impl Xtree {
         p.text(FontId::GlyphsSmall, "\u{E70D}", rect(cb.right - 26.0, cb.top, cb.right - 6.0, cb.bottom), th.text_dim);
         p.round_fill(ui.scan_btn, 6.0, th.accent);
         p.text(FontId::UiCenter, "Analizar", ui.scan_btn, white);
-        let state = if done { "Análisis completado" } else { "Escaneando\u{2026}" };
-        p.circle(r0 - 178.0, t0 + TOP_H / 2.0, 9.0, if done { rgb(GREEN) } else { warning });
-        if done {
-            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - 187.0, t0, r0 - 169.0, t0 + TOP_H), white);
+        let state = self.state_text();
+        // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
+        // es de escaneo.
+        let done_state = done && !self.elevated_pending();
+        p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
+        if done_state {
+            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
         }
-        p.text(FontId::Ui, state, rect(r0 - 160.0, t0, r0 - MARGIN, t0 + TOP_H), th.text);
+        p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
 
         if arena.is_empty() {
             p.round_fill(ui.map, 8.0, th.surface);
@@ -724,6 +877,7 @@ impl Xtree {
                     format!("Leyendo la tabla de archivos (MFT)\u{2026} {pct} %")
                 }
                 2 => "Armando el árbol de carpetas\u{2026}".to_string(),
+                _ if self.scan_stopped => self.state_text(),
                 _ if self.scanning => "Escaneando el disco\u{2026}".to_string(),
                 _ => "No hay nada que mostrar".to_string(),
             };
@@ -974,6 +1128,7 @@ mod tests {
     use crate::keys::keys::{VK_BACK, VK_ESCAPE};
     use crate::geom::rect;
     use crate::xtree::tree::{NO_PARENT, Node};
+    use std::time::{Duration, Instant};
 
     fn node(name: &str, parent: u32, size: u64, is_dir: bool, children: Vec<u32>) -> Node {
         Node { name: name.into(), parent, size, is_dir, small: false, children }
@@ -1117,5 +1272,181 @@ mod tests {
         assert_eq!(x.on_key(VK_ESCAPE), Action::Redraw);
         assert!(!x.menu_open);
         assert_eq!(x.on_key(VK_ESCAPE), Action::Close);
+    }
+
+    // ---------- cronómetro y porcentaje ----------
+
+    #[test]
+    fn fmt_elapsed_formats() {
+        let s = Duration::from_secs;
+        assert_eq!(fmt_elapsed(s(0)), "0:00");
+        assert_eq!(fmt_elapsed(s(42)), "0:42");
+        assert_eq!(fmt_elapsed(s(83)), "1:23");
+        assert_eq!(fmt_elapsed(s(3735)), "1:02:15");
+        assert_eq!(fmt_elapsed(Duration::from_millis(42_900)), "0:42");
+    }
+
+    #[test]
+    fn scan_percent_caps_and_handles_zero() {
+        assert_eq!(scan_percent(50, 100), Some(50));
+        assert_eq!(scan_percent(150, 100), Some(99));
+        assert_eq!(scan_percent(100, 100), Some(99));
+        assert_eq!(scan_percent(1, 0), None);
+        assert_eq!(scan_percent(u64::MAX, u64::MAX / 2), Some(99));
+    }
+
+    /// Vista escaneando `root` desde hace `secs` segundos (sin escáner real).
+    fn scanning_since(root: &str, secs: u64) -> Xtree {
+        let mut x = Xtree::idle(PathBuf::from(root));
+        x.scanning = true;
+        x.start_clock();
+        x.scan_started = Instant::now().checked_sub(Duration::from_secs(secs));
+        x
+    }
+
+    /// Texto de estado que se dibujó en la barra superior.
+    fn painted(x: &mut Xtree) -> Vec<String> {
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, rect(0.0, 0.0, 1400.0, 790.0));
+        p.texts().into_iter().map(|(_, s, _)| s).collect()
+    }
+
+    #[test]
+    fn status_shows_elapsed_while_scanning() {
+        let mut x = scanning_since("raiz-crono", 42);
+        assert!(x.status_text().contains("Escaneando\u{2026} 0:42"), "{}", x.status_text());
+        assert!(painted(&mut x).iter().any(|t| t == "Escaneando\u{2026} 0:42"));
+    }
+
+    #[test]
+    fn status_shows_total_when_done() {
+        let mut x = scanning_since("raiz-total", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-total", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        assert!(x.status_text().contains("Análisis completado en 1:23"), "{}", x.status_text());
+        assert!(painted(&mut x).iter().any(|t| t == "Análisis completado en 1:23"));
+        // El tiempo total queda fijo.
+        x.scan_started = Instant::now().checked_sub(Duration::from_secs(500));
+        assert!(x.status_text().contains("Análisis completado en 1:23"));
+    }
+
+    #[test]
+    fn percent_only_for_whole_volume() {
+        // Volumen entero: 400 de 1000 usados; leídos 148 → 37 %.
+        crate::sys::testing::install_fakes();
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 600)), true);
+        let mut x = scanning_since("disco", 42);
+        x.scan.progress.bytes.store(148, Ordering::Relaxed);
+        assert!(x.status_text().contains("Escaneando\u{2026} 37 % \u{B7} 0:42"), "{}", x.status_text());
+        assert!(painted(&mut x).iter().any(|t| t == "Escaneando\u{2026} 37 % \u{B7} 0:42"));
+        // Más leído que usado (APFS, hardlinks): tope 99 %; y no retrocede.
+        x.scan.progress.bytes.store(5000, Ordering::Relaxed);
+        assert!(x.status_text().contains(" 99 % \u{B7} "), "{}", x.status_text());
+        x.scan.progress.bytes.store(10, Ordering::Relaxed);
+        assert!(x.status_text().contains(" 99 % \u{B7} "), "{}", x.status_text());
+        // Volumen con espacio usado 0: sin porcentaje.
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 1000)), true);
+        let x = scanning_since("disco-vacio", 42);
+        assert!(!x.status_text().contains(" % \u{B7} "), "{}", x.status_text());
+        // Una carpeta (no es un volumen entero): solo el cronómetro.
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 600)), false);
+        let x = scanning_since("carpeta", 42);
+        x.scan.progress.bytes.store(148, Ordering::Relaxed);
+        assert!(!x.status_text().contains(" % \u{B7} "), "{}", x.status_text());
+        assert!(x.status_text().contains("Escaneando\u{2026} 0:42"), "{}", x.status_text());
+        crate::sys::testing::FakeDiskScan::set_volume(None, false);
+    }
+
+    #[test]
+    fn restart_resets_timer() {
+        let mut x = scanning_since("raiz-a", 42);
+        x.cancel();
+        x.pick = PathBuf::from("raiz-b");
+        x.scan_pick();
+        let status = x.status_text();
+        assert!(status.contains("Escaneando\u{2026} 0:00"), "{status}");
+        assert!(!status.contains("Detenido"), "{status}");
+        x.cancel();
+    }
+
+    /// Tecla A con el análisis terminado: escaneo nuevo con el cronómetro desde 0; al llegar el
+    /// árbol elevado, «Análisis completado en» con la duración nueva.
+    #[test]
+    fn elevate_after_done_restarts_clock() {
+        let mut x = scanning_since("raiz-elev", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-elev", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        assert!(x.state_text().contains("Análisis completado en 1:23"));
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let elevated = vec![node("raiz-elev", NO_PARENT, 99, true, vec![])];
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); Some(elevated) }), Action::Redraw);
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 0:00");
+        assert!(x.status_text().contains("Escaneando\u{2026} 0:00"), "{}", x.status_text());
+        assert!(painted(&mut x).iter().any(|t| t == "Escaneando\u{2026} 0:00"));
+        // Simula 7 s de escaneo elevado.
+        x.scan_started = Instant::now().checked_sub(Duration::from_secs(7));
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        assert!(x.on_message(x.scan.id, 1));
+        assert_eq!(x.arena[0].size, 99);
+        assert_eq!(x.state_text(), "Análisis completado en 0:07");
+    }
+
+    /// Un aviso del hilo de repintado que llega después de que el escaneo elevado dejó su árbol
+    /// (pero antes del aviso de entrega) no devuelve el tiempo anterior.
+    #[test]
+    fn late_tick_does_not_restore_old_time() {
+        let mut x = scanning_since("raiz-elev-tick", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-elev-tick", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        lacking_permissions(&x);
+        let elevated = vec![node("raiz-elev-tick", NO_PARENT, 99, true, vec![])];
+        assert_eq!(x.elevate_with(move |_, _, _| Some(elevated)), Action::Redraw);
+        x.scan_started = Instant::now().checked_sub(Duration::from_secs(7));
+        wait_elevated(&x);
+        assert!(x.scan.result.lock().unwrap().is_some());
+        assert!(x.on_message(x.scan.id, 0));
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 0:07");
+        assert!(x.on_message(x.scan.id, 1));
+        assert_eq!(x.state_text(), "Análisis completado en 0:07");
+    }
+
+    /// Si el reescaneo con permisos falla, vuelve el tiempo del análisis anterior.
+    #[test]
+    fn elevate_failure_restores_previous_time() {
+        let mut x = scanning_since("raiz-elev-falla", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-elev-falla", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        lacking_permissions(&x);
+        assert_eq!(x.elevate_with(|_, _, _| None), Action::Redraw);
+        wait_elevated(&x);
+        assert!(x.on_message(x.scan.id, 0));
+        assert_eq!(x.state_text(), "Análisis completado en 1:23");
+    }
+
+    /// El estado más largo entra en su lugar de la barra superior.
+    #[test]
+    fn longest_state_fits() {
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        assert!(p.measure(FontId::Ui, "Análisis completado en 1:02:15") <= STATE_W - MARGIN);
+        assert!(p.measure(FontId::Ui, "Escaneando\u{2026} 99 % \u{B7} 1:02:15") <= STATE_W - MARGIN);
+    }
+
+    #[test]
+    fn cancel_says_stopped() {
+        let mut x = scanning_since("raiz-corte", 37);
+        x.cancel();
+        assert!(x.status_text().contains("Detenido a los 0:37"), "{}", x.status_text());
+        // El tiempo queda fijo al cortarse.
+        x.scan_started = Instant::now().checked_sub(Duration::from_secs(500));
+        assert!(x.status_text().contains("Detenido a los 0:37"));
+        assert!(painted(&mut x).iter().any(|t| t == "Detenido a los 0:37"));
+        // Cancelar (al cerrar xdir) un análisis ya terminado no lo marca como detenido.
+        let mut x = scanning_since("raiz-hecha", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-hecha", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        x.cancel();
+        assert!(x.status_text().contains("Análisis completado en 1:23"), "{}", x.status_text());
     }
 }

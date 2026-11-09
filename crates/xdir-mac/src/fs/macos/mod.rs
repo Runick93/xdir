@@ -123,7 +123,7 @@ fn type_name(ext: Option<&str>, is_dir: bool, package: bool) -> Arc<str> {
     } else {
         let described = ext.and_then(|e| {
             let t = objc2_uniform_type_identifiers::UTType::typeWithFilenameExtension(&NSString::from_str(e))?;
-            t.localizedDescription().map(|d| d.to_string())
+            t.localizedDescription().map(|d| capitalize_first(&d.to_string()))
         });
         Arc::from(described.unwrap_or_else(|| match ext {
             Some(e) => format!("Archivo {}", e.to_uppercase()),
@@ -132,6 +132,16 @@ fn type_name(ext: Option<&str>, is_dir: bool, package: bool) -> Arc<str> {
     };
     cache.lock().unwrap().insert(key, name.clone());
     name
+}
+
+/// Primera letra en mayúscula: el sistema describe algunos tipos en minúscula («texto») y otros
+/// no («Documento PDF»); en la columna Tipo van todos igual.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// Entrada de la lista para un elemento de disco.
@@ -479,3 +489,16 @@ impl Watcher {
 
 mod xtree;
 pub use self::xtree::*;
+
+#[cfg(test)]
+mod type_name_tests {
+    use super::capitalize_first;
+
+    #[test]
+    fn type_names_start_with_capital() {
+        assert_eq!(capitalize_first("texto"), "Texto");
+        assert_eq!(capitalize_first("Documento PDF"), "Documento PDF");
+        assert_eq!(capitalize_first("ícono"), "Ícono");
+        assert_eq!(capitalize_first(""), "");
+    }
+}

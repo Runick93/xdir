@@ -1273,14 +1273,13 @@ fn status_shows_selection_size() {
     assert_eq!(list.count(), 3);
     list.select_all();
     let status = a.panes[0].tab().status();
-    assert!(status.starts_with("3 elementos seleccionados"), "{status}");
-    assert!(status.contains(&crate::format::size_short(4000)), "{status}");
+    assert_eq!(status, format!("3 elementos   ·   {}", crate::tab::selection_summary(3, Some(4000))));
+    assert!(status.contains(&format!("3 elementos seleccionados · {}", crate::format::size_short(4000))), "{status}");
     let list = &mut a.panes[0].tab_mut().list;
     let sub = list.entries.iter().position(|e| e.is_dir).unwrap();
     list.select_index(sub);
     let status = a.panes[0].tab().status();
-    assert!(status.starts_with("1 elemento seleccionado"), "{status}");
-    assert!(!status.contains(" · "), "{status}");
+    assert_eq!(status, "3 elementos   ·   1 elemento seleccionado");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -449,16 +449,16 @@ impl Tab {
             .list
             .selected_entries()
             .fold((0usize, 0u64, 0usize), |(c, b, f), e| (c + 1, b + if e.is_dir { 0 } else { e.size }, f + !e.is_dir as usize));
-        let mut s = if count > 0 {
-            selection_summary(count, (files > 0).then_some(bytes))
-        } else {
-            match self.list.count() {
-                1 => "1 elemento".to_string(),
-                n => format!("{n} elementos"),
-            }
+        let mut s = match self.list.count() {
+            1 => "1 elemento".to_string(),
+            n => format!("{n} elementos"),
         };
         if self.loading {
             s.push_str("   ·   cargando…");
+        }
+        if count > 0 {
+            s.push_str("   ·   ");
+            s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
         }
         s
     }

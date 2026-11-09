@@ -423,7 +423,9 @@ pub fn notify_focus(hwnd: HWND, el: El) {
         if GetForegroundWindow() != hwnd {
             return;
         }
-        // La `App` es la de la ventana (la deja `wndproc` al crearla).
+        // La `App` es la de la ventana (la deja `wndproc` al crearla). Aliasing: se lee por el
+        // puntero de la ventana mientras `App::paint` tiene `&mut self`, el mismo patrón que el
+        // `wndproc`. El puntero vale de `WM_NCCREATE` a `WM_NCDESTROY` y `ALIVE` lo resguarda.
         let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
         if app.is_null() {
             return;

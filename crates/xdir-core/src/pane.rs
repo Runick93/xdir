@@ -357,6 +357,11 @@ impl Pane {
         self.tab_slots.first().map_or(TAB_MIN_W, |r| r.right - r.left)
     }
 
+    /// Dónde se dibujó un botón de navegación en el último cuadro.
+    pub fn button_rect(&self, b: Button) -> Option<Rect> {
+        self.buttons.iter().find(|(x, _)| *x == b).map(|(_, r)| *r)
+    }
+
     pub fn hit(&self, x: f32, y: f32) -> PaneHit {
         if !contains(&self.rect, x, y) {
             return PaneHit::None;

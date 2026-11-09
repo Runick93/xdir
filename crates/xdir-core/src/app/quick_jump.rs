@@ -81,6 +81,16 @@ impl App {
             Target::Command(c) => self.run_command(c),
             Target::Group(i) => self.apply_group(i),
             Target::SaveGroup(name) => self.save_group(&name),
+            Target::Pattern { pattern, select } => {
+                if self.tab_mut().list.select_matching(&pattern, select) == 0 {
+                    // Sin cambios no hay nada que ver en la lista: se avisa.
+                    self.notice = Some(if select {
+                        format!("Ningún elemento coincide con «{pattern}»")
+                    } else {
+                        format!("Ningún elemento seleccionado coincide con «{pattern}»")
+                    });
+                }
+            }
             Target::Folder(loc) => {
                 if let Location::Path(p) = &loc {
                     if !p.is_dir() {

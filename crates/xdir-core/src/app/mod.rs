@@ -18,6 +18,7 @@ mod panes;
 mod tests;
 
 pub use events::CursorKind;
+pub use fileops::quoted_paths;
 
 use crate::{about, anim, config, jump, list, palette, pane, session, theme, typed, ui};
 use crate::xtree::view::{self as xtree_view, Xtree};
@@ -30,7 +31,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use crate::geom::{self, contains};
-use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
+use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
 use crate::sys::{self, Handle};
 use crate::{WM_APP, fs, shell};
 
@@ -272,6 +273,9 @@ pub struct App {
     // Solo lo usa el árbol (feature `arbol`).
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     tree_ctx: Option<Option<PathBuf>>,
+    /// Carpeta del panel activo que el árbol ya siguió (`follow_tree`); None: ninguna todavía.
+    #[cfg(feature = "arbol")]
+    tree_followed: Option<Location>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
@@ -284,6 +288,8 @@ pub struct App {
     show_group_bar: bool,
     /// Colores por tipo de archivo encendidos (switch de la rueda dentada).
     file_colors: bool,
+    /// Nombres de archivo con su extensión (switch «Mostrar extensiones» de la rueda dentada).
+    show_extensions: bool,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
     /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
@@ -315,6 +321,8 @@ pub struct App {
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
     term_ctx: Option<(usize, Console)>,
+    /// Clic derecho sobre Atrás (false) o Adelante (true) de este panel: su menú del historial.
+    history_ctx: Option<(usize, bool)>,
     /// Mapa de uso de disco: se crea al abrirlo y sigue vivo (con su escaneo) al cerrarlo.
     xtree: Option<Xtree>,
     /// La vista de xtree tapa los paneles.
@@ -445,6 +453,8 @@ impl App {
             group_rename: None,
             quick_watch: None,
             tree_ctx: None,
+            #[cfg(feature = "arbol")]
+            tree_followed: None,
             groups_menu_closed: None,
             palette: None,
             #[cfg(feature = "arbol")]
@@ -452,6 +462,7 @@ impl App {
             show_favorites: session.show_favorites,
             show_group_bar: session.group_bar,
             file_colors: session.file_colors,
+            show_extensions: session.show_extensions,
             fav_drop: None,
             tab_drop: None,
             ghost: None,
@@ -468,6 +479,7 @@ impl App {
             about_open: false,
             term_menu: None,
             term_ctx: None,
+            history_ctx: None,
             xtree: None,
             xtree_open: false,
         };

@@ -248,6 +248,13 @@ impl App {
         entries
     }
 
+    /// Entradas propias del menú de los elementos seleccionados; `cmds` recibe el comando de cada id.
+    pub(super) fn item_entries(&self, cmds: &mut Vec<Command>) -> Vec<shell::Entry> {
+        // Las mismas comillas y saltos de línea que «Copiar las rutas como texto» (`quoted_paths`).
+        cmds.push(Command::CopyPaths);
+        vec![shell::Entry::Item { id: cmds.len() as u32 - 1, label: "Copiar como ruta de acceso".into(), enabled: true, checked: false }]
+    }
+
     /// Menú contextual de la lista en `at` (DIPs del área de la ventana). Sin punto (tecla de
     /// menú o Shift+F10) se abre sobre la fila con foco.
     pub(super) fn on_context_menu(&mut self, at: Option<(f32, f32)>) {
@@ -260,7 +267,11 @@ impl App {
         // El menú del fondo del Shell solo trae las extensiones: Ver, Ordenar, Actualizar, Pegar y
         // Deshacer los pone la vista del Explorador, así que se agregan acá.
         let mut cmds = Vec::new();
-        let own = if items.is_empty() && intercept { self.background_entries(pane, &mut cmds) } else { Vec::new() };
+        let own = match (items.is_empty(), intercept) {
+            (true, true) => self.background_entries(pane, &mut cmds),
+            (false, true) => self.item_entries(&mut cmds),
+            _ => Vec::new(),
+        };
         let before: Option<std::collections::HashSet<String>> = (items.is_empty() && matches!(location, Location::Path(_)))
             .then(|| self.panes[pane].tab().list.entries.iter().map(|e| e.display.to_lowercase()).collect());
         // Una sola carpeta anclada: su menú dice "Desanclar de Acceso rápido".
@@ -303,6 +314,12 @@ impl App {
         }
         self.redraw();
     }
+}
+
+/// Rutas entre comillas dobles, una por línea, como «Copiar como ruta de acceso» del Explorador
+/// (y «Copiar las rutas como texto», que usa lo mismo).
+pub fn quoted_paths(paths: &[PathBuf]) -> String {
+    paths.iter().map(|p| format!("\"{}\"", p.display())).collect::<Vec<_>>().join("\r\n")
 }
 
 /// Efecto al soltar como en el Explorador: Ctrl copia, Shift mueve; sin teclas, mueve dentro

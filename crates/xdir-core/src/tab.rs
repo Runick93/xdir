@@ -149,22 +149,53 @@ impl Tab {
     }
 
     pub fn go_back(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
-        if let Some(prev) = self.back.pop() {
-            let from = std::mem::replace(&mut self.location, prev);
-            self.focus_after_load = child_name(&self.location, &from);
-            self.forward.push(from);
-            self.start(hwnd, tx);
-            self.counts_as_visit = true;
-        }
+        self.go_back_n(1, hwnd, tx);
     }
 
     pub fn go_forward(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
-        if let Some(next) = self.forward.pop() {
+        self.go_forward_n(1, hwnd, tx);
+    }
+
+    /// Carpetas a las que lleva Atrás, la más cercana primero (como mucho `max`).
+    pub fn back_list(&self, max: usize) -> Vec<Location> {
+        self.back.iter().rev().take(max).cloned().collect()
+    }
+
+    /// Carpetas a las que lleva Adelante, la más cercana primero (como mucho `max`).
+    pub fn forward_list(&self, max: usize) -> Vec<Location> {
+        self.forward.iter().rev().take(max).cloned().collect()
+    }
+
+    /// `n` veces Atrás (las salteadas quedan en Adelante), leyendo la carpeta una sola vez.
+    pub fn go_back_n(&mut self, n: usize, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        let n = n.min(self.back.len());
+        if n == 0 {
+            return;
+        }
+        for _ in 0..n {
+            let prev = self.back.pop().expect("hay n lugares atrás");
+            let from = std::mem::replace(&mut self.location, prev);
+            self.forward.push(from);
+        }
+        // Al volver a una carpeta superior se enfoca la subcarpeta por la que se había entrado.
+        self.focus_after_load = self.forward.last().and_then(|next| child_name(&self.location, next));
+        self.start(hwnd, tx);
+        self.counts_as_visit = true;
+    }
+
+    /// `n` veces Adelante (las salteadas quedan en Atrás), leyendo la carpeta una sola vez.
+    pub fn go_forward_n(&mut self, n: usize, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        let n = n.min(self.forward.len());
+        if n == 0 {
+            return;
+        }
+        for _ in 0..n {
+            let next = self.forward.pop().expect("hay n lugares adelante");
             let from = std::mem::replace(&mut self.location, next);
             self.back.push(from);
-            self.start(hwnd, tx);
-            self.counts_as_visit = true;
         }
+        self.start(hwnd, tx);
+        self.counts_as_visit = true;
     }
 
     pub fn go_up(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
@@ -443,26 +474,36 @@ impl Tab {
         if let Some(e) = &self.error {
             return format!("No se pudo abrir: {e}");
         }
-        let n = self.list.count();
-        let mut s = match n {
-            1 => "1 elemento".to_string(),
-            _ => format!("{n} elementos"),
-        };
-        if self.loading {
-            s.push_str("   ·   cargando…");
-        }
+        // Con selección, como el Explorador: cuántos y cuánto pesan los archivos (las carpetas no
+        // suman; si solo hay carpetas, no hay tamaño).
         let (count, bytes, files) = self
             .list
             .selected_entries()
             .fold((0usize, 0u64, 0usize), |(c, b, f), e| (c + 1, b + if e.is_dir { 0 } else { e.size }, f + !e.is_dir as usize));
+        let mut s = match self.list.count() {
+            1 => "1 elemento".to_string(),
+            n => format!("{n} elementos"),
+        };
+        if self.loading {
+            s.push_str("   ·   cargando…");
+        }
         if count > 0 {
-            s.push_str(&format!("   ·   {count} seleccionado{}", if count == 1 { "" } else { "s" }));
-            if files > 0 {
-                s.push_str(&format!("   ·   {}", crate::format::size_short(bytes)));
-            }
+            s.push_str("   ·   ");
+            s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
         }
         s
     }
+}
+
+/// Texto de la barra de estado con elementos seleccionados: «3 elementos seleccionados · 4,2 MB».
+/// `file_bytes` es lo que suman los archivos (`None` si solo hay carpetas: no se muestra tamaño).
+pub fn selection_summary(count: usize, file_bytes: Option<u64>) -> String {
+    let mut s = if count == 1 { "1 elemento seleccionado".to_string() } else { format!("{count} elementos seleccionados") };
+    if let Some(b) = file_bytes {
+        s.push_str(" · ");
+        s.push_str(&crate::format::size_short(b));
+    }
+    s
 }
 
 /// Nombre del hijo directo de `parent` en el camino hacia `descendant`.
@@ -489,6 +530,7 @@ mod tests {
     use super::*;
     use std::sync::mpsc::channel;
     use crate::sys::testing::{FakeFileSystem, install_fakes};
+    use std::path::Path;
 
     /// Carpeta temporal propia de una prueba, con el nombre que le da el sistema de archivos
     /// instalado (en Windows el runner da nombres cortos `RUNNER~1`).
@@ -497,6 +539,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         sys::file_system().true_case(&dir)
+    }
+
+    /// Texto de la selección en la barra de estado: singular o plural y, si hay archivos, su tamaño.
+    #[test]
+    fn selection_summary_texts() {
+        install_fakes();
+        assert_eq!(selection_summary(1, Some(2048)), format!("1 elemento seleccionado · {}", crate::format::size_short(2048)));
+        assert_eq!(selection_summary(3, None), "3 elementos seleccionados");
     }
 
     /// Una pestaña que se muestra en una carpeta la lee con el `FileSystem` instalado y recibe
@@ -522,6 +572,51 @@ mod tests {
         assert_eq!(names, ["sub", "uno.txt"]);
         assert!(tab.list.entries.iter().any(|e| e.is_dir && e.name == "sub"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pestaña a la vista que ya pasó por `paths` en orden (cada una, una navegación).
+    fn tab_through(paths: &[&str]) -> (Tab, Sender<LoadEvent>) {
+        let (tx, _rx) = channel();
+        let mut tab = Tab::new(7, Location::Path(PathBuf::from(paths[0])), false);
+        tab.set_visible(Handle(0), &tx, true);
+        for p in &paths[1..] {
+            tab.navigate(Handle(0), &tx, Location::Path(PathBuf::from(p)));
+        }
+        (tab, tx)
+    }
+
+    /// Con 20 navegaciones, la lista de Atrás tiene como máximo lo pedido y empieza por la
+    /// carpeta anterior.
+    #[test]
+    fn back_list_is_capped_and_nearest_first() {
+        install_fakes();
+        let names: Vec<String> = (0..21).map(|i| format!("/historial/c{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let (tab, _tx) = tab_through(&refs);
+        let back = tab.back_list(15);
+        assert_eq!(back.len(), 15);
+        assert_eq!(back[0], Location::Path(PathBuf::from("/historial/c19")));
+        assert_eq!(back[14], Location::Path(PathBuf::from("/historial/c5")));
+        assert!(tab.forward_list(15).is_empty());
+    }
+
+    /// Ir dos lugares atrás de una vez equivale a dos «Atrás»: Adelante queda con las salteadas,
+    /// la más cercana primero, y se lee la carpeta una sola vez.
+    #[test]
+    fn go_back_n_keeps_forward() {
+        install_fakes();
+        let (mut tab, tx) = tab_through(&["/hist-n/A", "/hist-n/B", "/hist-n/C", "/hist-n/D"]);
+        let before = FakeFileSystem::loads(Path::new("/hist-n/B"));
+        tab.go_back_n(2, Handle(0), &tx);
+        assert_eq!(tab.location, Location::Path(PathBuf::from("/hist-n/B")));
+        assert_eq!(FakeFileSystem::loads(Path::new("/hist-n/B")) - before, 1);
+        assert_eq!(tab.forward_list(15), [Location::Path(PathBuf::from("/hist-n/C")), Location::Path(PathBuf::from("/hist-n/D"))]);
+        assert_eq!(tab.back_list(15), [Location::Path(PathBuf::from("/hist-n/A"))]);
+        // Adelante dos lugares vuelve a D; pedir más de los que hay se queda en el último.
+        tab.go_forward_n(5, Handle(0), &tx);
+        assert_eq!(tab.location, Location::Path(PathBuf::from("/hist-n/D")));
+        assert_eq!(tab.back_list(15).len(), 3);
+        assert!(!tab.can_forward());
     }
 
     /// Cada guardián de carpeta se suelta: al ocultar la pestaña, al navegar a otra carpeta y al

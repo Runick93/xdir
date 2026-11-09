@@ -801,6 +801,54 @@ fn undo_after_new_folder_sends_undo() {
     assert!(a.undo.is_empty());
 }
 
+/// «Archivo de texto nuevo» manda `Op::NewFile` con la carpeta del panel; en «Este equipo» no
+/// hay carpeta donde crearlo y no manda nada.
+#[test]
+fn new_text_file_sends_op() {
+    use crate::sys::testing::FakeFileOps;
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp.clone()), true);
+    FakeFileOps::take_ops();
+    a.run_command(Command::NewTextFile);
+    assert_eq!(FakeFileOps::take_ops(), [Op::NewFile { parent: tmp }]);
+    a.new_tab(0, Location::Computer, true);
+    FakeFileOps::take_ops();
+    a.run_command(Command::NewTextFile);
+    assert_eq!(FakeFileOps::take_ops(), []);
+}
+
+/// Ctrl+Alt+N (⌥⌘N en macOS) llega por `on_key` con Alt apretado y crea el archivo de texto.
+#[test]
+fn ctrl_alt_n_creates_text_file() {
+    use crate::keys::keys::{VK_CONTROL, VK_MENU};
+    use crate::sys::testing::{FakeEnv, FakeFileOps};
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp.clone()), true);
+    FakeFileOps::take_ops();
+    FakeEnv::hold_keys(&[VK_CONTROL, VK_MENU]);
+    let used = a.on_key(Key(b'N' as u16));
+    FakeEnv::hold_keys(&[]);
+    assert!(used);
+    assert_eq!(FakeFileOps::take_ops(), [Op::NewFile { parent: tmp }]);
+}
+
+/// Solo Ctrl+N (sin Alt) no es «Archivo de texto nuevo».
+#[test]
+fn ctrl_n_without_alt_does_not_create_text_file() {
+    use crate::keys::keys::VK_CONTROL;
+    use crate::sys::testing::{FakeEnv, FakeFileOps};
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp), true);
+    FakeFileOps::take_ops();
+    FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_key(Key(b'N' as u16));
+    FakeEnv::hold_keys(&[]);
+    assert_eq!(FakeFileOps::take_ops(), []);
+}
+
 // ---------- cajas de texto y menús del host ----------
 
 /// Perder el foco de la barra de dirección (`WM_APP_EDIT_DONE` con 0) cancela: no navega aunque
@@ -1242,4 +1290,297 @@ fn startup_args_folder_only() {
     let missing = tmp.join("no-existe");
     assert_eq!(parse_args(&args(&[&missing.to_string_lossy()])), (false, None, None));
     assert_eq!(parse_args(&[]), (false, None, None));
+}
+
+// ---------- tanda A: selección, copiar como ruta, extensiones ----------
+
+/// Espera a que la pestaña activa del panel 0 termine de leer su carpeta (lo que haría el
+/// `WM_APP_LOAD` en la ventana).
+fn wait_loaded(a: &mut App) {
+    while a.panes[0].tab().loading {
+        let ev = a.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la carga termina");
+        if let Some(tab) = a.tab_by_id(ev.panel) {
+            tab.on_load(ev);
+        }
+    }
+}
+
+/// Con algo seleccionado la barra de estado dice cuántos y cuánto pesan los archivos; las
+/// carpetas no suman y, si solo hay carpetas, no hay tamaño.
+#[test]
+fn status_shows_selection_size() {
+    let (mut a, dir) = app_in("seleccion-tamano");
+    std::fs::write(dir.join("uno.bin"), vec![0u8; 1000]).unwrap();
+    std::fs::write(dir.join("tres.bin"), vec![0u8; 3000]).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().reload(hwnd, &tx, true);
+    wait_loaded(&mut a);
+    a.set_active(0);
+    let list = &mut a.panes[0].tab_mut().list;
+    assert_eq!(list.count(), 3);
+    list.select_all();
+    let status = a.panes[0].tab().status();
+    assert_eq!(status, format!("3 elementos   ·   {}", crate::tab::selection_summary(3, Some(4000))));
+    assert!(status.contains(&format!("3 elementos seleccionados · {}", crate::format::size_short(4000))), "{status}");
+    let list = &mut a.panes[0].tab_mut().list;
+    let sub = list.entries.iter().position(|e| e.is_dir).unwrap();
+    list.select_index(sub);
+    let status = a.panes[0].tab().status();
+    assert_eq!(status, "3 elementos   ·   1 elemento seleccionado");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// «Copiar como ruta de acceso» del menú contextual de los elementos copia la selección entre
+/// comillas, una ruta por línea.
+#[test]
+fn copy_as_path_quotes() {
+    use crate::sys::testing::{FakeShell, ShellCall};
+    let mut a = app();
+    let dir = std::env::temp_dir().join("xdir-tests").join("copiar-como-ruta");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    let list = &mut a.panes[0].tab_mut().list;
+    list.append(vec![file_entry("a.txt"), file_entry("b.txt")]);
+    list.select_all();
+    // Primer menú: se mira qué entradas propias trae y no se elige nada.
+    FakeShell::choose(None);
+    FakeShell::take_calls();
+    a.on_context_menu(Some((10.0, 20.0)));
+    let calls = FakeShell::take_calls();
+    let [ShellCall::ContextMenu { items, own, .. }] = calls.as_slice() else { panic!("se esperaba un menú: {calls:?}") };
+    assert_eq!(items.len(), 2);
+    let id = own
+        .iter()
+        .find_map(|e| match e {
+            shell::Entry::Item { id, label, .. } if label == "Copiar como ruta de acceso" => Some(*id),
+            _ => None,
+        })
+        .expect("falta «Copiar como ruta de acceso»");
+    // Segundo menú: se elige la entrada.
+    FakeShell::choose(Some(&format!("own:{id}")));
+    a.on_context_menu(Some((10.0, 20.0)));
+    FakeShell::choose(None);
+    let copied: Vec<String> = FakeShell::take_calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            ShellCall::CopyText(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let [text] = copied.as_slice() else { panic!("se esperaba una copia: {copied:?}") };
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, [format!("\"{}\"", dir.join("a.txt").display()), format!("\"{}\"", dir.join("b.txt").display())]);
+    assert_eq!(*text, quoted_paths(&[dir.join("a.txt"), dir.join("b.txt")]));
+}
+
+/// Punto del panel de la rueda dentada sobre un elemento.
+fn picker_point(a: &App, want: ui::PickerHit) -> (f32, f32) {
+    let (w, h) = a.client_dips();
+    let r = ui::picker_rect(w, h);
+    let x = (r.left + r.right) / 2.0;
+    let mut y = r.top;
+    while y < r.bottom {
+        if ui::picker_at(w, h, x, y) == Some(want) {
+            return (x, y);
+        }
+        y += 1.0;
+    }
+    panic!("no se encontró {want:?}");
+}
+
+/// El switch «Mostrar extensiones» se apaga desde la rueda dentada, se guarda en la sesión y, apagado,
+/// la lista dibuja los nombres de archivo sin la extensión.
+#[test]
+fn extensions_switch_persists() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    assert!(a.show_extensions, "prendido por defecto");
+    a.picker_open = true;
+    a.paint();
+    assert!(host.drawn_texts().iter().any(|(_, s, _)| s == "Mostrar extensiones"));
+    let at = picker_point(&a, ui::PickerHit::Extensions);
+    click(&mut a, at);
+    assert!(!a.show_extensions);
+    assert!(a.panes.iter().flat_map(|p| p.tabs.iter()).all(|t| !t.list.show_extensions));
+    let s = a.session();
+    assert!(!s.show_extensions);
+    session::save(&s).unwrap();
+    let loaded = session::load().expect("sesión guardada");
+    assert!(!loaded.show_extensions);
+    let mut init = Init::blank();
+    init.session = loaded;
+    let host = FakeHost::new();
+    let mut b = app_with_host(init, host.clone());
+    assert!(!b.show_extensions);
+    // Las pestañas nuevas también nacen sin extensiones.
+    b.new_tab(0, Location::Computer, true);
+    assert!(!b.panes[0].tab().list.show_extensions);
+    let dir = xtree_dir("extensiones");
+    let (hwnd, tx) = (b.hwnd, b.tx.clone());
+    b.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
+    b.set_active(0);
+    b.panes[0].tab_mut().list.replace(vec![file_entry("foto.jpg")]);
+    b.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|s| s == "foto"), "{texts:?}");
+    assert!(!texts.iter().any(|s| s == "foto.jpg"), "{texts:?}");
+}
+
+/// «Seleccionar por patrón…» abre la paleta en modo patrón: lo escrito es la única fila, Enter
+/// suma a la selección los que coinciden y cierra; Esc cierra sin cambios.
+#[test]
+fn palette_pattern_mode_selects_on_enter() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("seleccion-patron");
+    a.new_tab(0, Location::Path(dir), true);
+    a.set_active(0);
+    a.panes[0].tab_mut().list.append(vec![file_entry("a.jpg"), file_entry("B.JPG"), file_entry("c.png")]);
+    let selected = |a: &App| a.panes[0].tab().list.selected_entries().map(|e| e.name.to_string_lossy().into_owned()).collect::<Vec<_>>();
+
+    // Esc: se cierra sin tocar la selección.
+    a.run_command(Command::SelectPattern);
+    let (pal, edit) = a.palette.as_ref().expect("se abrió la paleta");
+    assert_eq!(pal.mode, PaletteMode::Pattern { select: true });
+    let edit = *edit;
+    host.text_set(edit, "*.jpg");
+    a.on_text_changed(edit.0 as isize);
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_ESCAPE.0 as usize, 0));
+    assert!(a.palette.is_none());
+    assert!(selected(&a).is_empty());
+
+    // Enter: aplica y cierra.
+    a.run_command(Command::SelectPattern);
+    let edit = a.palette.as_ref().unwrap().1;
+    host.text_set(edit, "*.jpg");
+    a.on_text_changed(edit.0 as isize);
+    let titles: Vec<String> = a.palette.as_ref().unwrap().0.items.iter().map(|i| i.title.clone()).collect();
+    assert_eq!(titles, ["Seleccionar los que coinciden con «*.jpg»"]);
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+    assert!(a.palette.is_none());
+    assert_eq!(host.text_of(TextKind::Palette), None);
+    assert_eq!(selected(&a), ["a.jpg", "B.JPG"]);
+
+    // Deseleccionar.
+    a.run_command(Command::DeselectPattern);
+    let edit = a.palette.as_ref().unwrap().1;
+    host.text_set(edit, "b.*");
+    a.on_text_changed(edit.0 as isize);
+    let titles: Vec<String> = a.palette.as_ref().unwrap().0.items.iter().map(|i| i.title.clone()).collect();
+    assert_eq!(titles, ["Deseleccionar los que coinciden con «b.*»"]);
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+    assert_eq!(selected(&a), ["a.jpg"]);
+    assert_eq!(a.notice, None);
+}
+
+/// Si el patrón no cambia nada, un aviso lo dice (al seleccionar y al deseleccionar).
+#[test]
+fn palette_pattern_without_matches_shows_notice() {
+    use crate::host::WM_APP_PALETTE_KEY;
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("seleccion-patron-vacia");
+    a.new_tab(0, Location::Path(dir), true);
+    a.set_active(0);
+    a.panes[0].tab_mut().list.append(vec![file_entry("a.jpg"), file_entry("c.png")]);
+    let run = |a: &mut App, cmd: Command, pattern: &str| {
+        a.notice = None;
+        a.run_command(cmd);
+        let edit = a.palette.as_ref().unwrap().1;
+        host.text_set(edit, pattern);
+        a.on_text_changed(edit.0 as isize);
+        assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+        a.notice.clone()
+    };
+    assert_eq!(run(&mut a, Command::SelectPattern, "*.txt").as_deref(), Some("Ningún elemento coincide con «*.txt»"));
+    // a.jpg no está seleccionado: deseleccionarlo no cambia nada.
+    assert_eq!(run(&mut a, Command::DeselectPattern, "*.jpg").as_deref(), Some("Ningún elemento seleccionado coincide con «*.jpg»"));
+    assert_eq!(run(&mut a, Command::SelectPattern, "*.jpg"), None);
+    assert_eq!(run(&mut a, Command::DeselectPattern, "*.jpg"), None);
+}
+
+// ---------- historial de Atrás y Adelante ----------
+
+/// Clic derecho sobre Atrás: menú con las carpetas anteriores de la pestaña (la más cercana
+/// primero); elegir la segunda equivale a dos «Atrás».
+#[test]
+fn back_button_right_click_shows_history() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    for p in ["/hist-app/A", "/hist-app/B", "/hist-app/C"] {
+        a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(PathBuf::from(p)));
+    }
+    a.paint();
+    let (x, y) = center(&a.panes[0].button_rect(Button::Back).expect("se dibujó el botón Atrás"));
+    host.set_menu_choice(None);
+    a.on_right_down(x, y);
+    a.on_context_menu_request(Some((x, y)));
+    let menus = host.menus();
+    let menu = menus.last().expect("se mostró el menú del historial");
+    let items: Vec<(u32, String)> = menu
+        .iter()
+        .filter_map(|e| match e {
+            shell::Entry::Item { id, label, .. } => Some((*id, label.clone())),
+            _ => None,
+        })
+        .collect();
+    let labels: Vec<&str> = items.iter().map(|(_, l)| l.as_str()).collect();
+    assert_eq!(labels[..2], ["B", "A"], "{labels:?}");
+    assert_eq!(a.panes[0].tab().location, Location::Path(PathBuf::from("/hist-app/C")), "cerrar el menú no navega");
+
+    host.set_menu_choice(Some(items[1].0));
+    a.on_right_down(x, y);
+    a.on_context_menu_request(Some((x, y)));
+    let tab = a.panes[0].tab();
+    assert_eq!(tab.location, Location::Path(PathBuf::from("/hist-app/A")));
+    assert_eq!(tab.forward_list(15), [Location::Path(PathBuf::from("/hist-app/B")), Location::Path(PathBuf::from("/hist-app/C"))]);
+
+    // Adelante: el menú lista B y C; elegir la primera va a B.
+    let (x, y) = center(&a.panes[0].button_rect(Button::Forward).expect("se dibujó el botón Adelante"));
+    let first = 1;
+    host.set_menu_choice(Some(first));
+    a.on_right_down(x, y);
+    a.on_context_menu_request(Some((x, y)));
+    let menus = host.menus();
+    let labels: Vec<String> = menus
+        .last()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            shell::Entry::Item { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, ["B", "C"]);
+    assert_eq!(a.panes[0].tab().location, Location::Path(PathBuf::from("/hist-app/B")));
+}
+
+/// `arbol_sigue_panel`: prendido (por defecto), al cambiar la carpeta del panel activo el árbol
+/// empieza a revelarla; apagado, el árbol no se mueve.
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_follow_option() {
+    use crate::sys::testing::FakeFileSystem;
+    assert!(Config::parse("").tree_follows_pane);
+    let off = Config::parse("[opciones]\narbol_sigue_panel = false\n");
+    assert!(!off.tree_follows_pane && off.errors.is_empty(), "{:?}", off.errors);
+    for follow in [true, false] {
+        crate::sys::testing::install_fakes();
+        let root = xtree_dir(&format!("sigue-{follow}"));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        FakeFileSystem::set_drives(&[(root.as_path(), "Disco")]);
+        let mut init = Init::blank();
+        init.config = Config::parse(if follow { "" } else { "[opciones]\narbol_sigue_panel = false\n" });
+        let mut a = app_with(init);
+        FakeFileSystem::set_drives(&[]);
+        a.tree.visible = true;
+        a.paint();
+        let (hwnd, tx) = (a.hwnd, a.tx.clone());
+        let active = a.active;
+        a.panes[active].tab_mut().navigate(hwnd, &tx, Location::Path(root.join("sub")));
+        a.paint();
+        assert_eq!(a.tree.revealing().is_some(), follow, "sigue al panel: {follow}");
+    }
 }

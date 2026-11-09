@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
@@ -93,6 +93,14 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                 fo.NewItem(&item(parent)?, FILE_ATTRIBUTE_DIRECTORY.0, w!("Nueva carpeta"), PCWSTR::null(), None)?;
             }
         }
+        Op::NewFile { parent } => {
+            // Con FOF_RENAMEONCOLLISION el Shell lo llama «Nuevo documento de texto (2).txt» si ya existe.
+            flags |= FOF_RENAMEONCOLLISION;
+            rename_after = true;
+            unsafe {
+                fo.NewItem(&item(parent)?, FILE_ATTRIBUTE_NORMAL.0, w!("Nuevo documento de texto.txt"), PCWSTR::null(), None)?;
+            }
+        }
         Op::Undo(undo) => return run_undo(&fo, undo),
     }
 
@@ -127,7 +135,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                 _ => None,
             }
         }
-        Op::NewFolder { .. } => {
+        Op::NewFolder { .. } | Op::NewFile { .. } => {
             let created: Vec<PathBuf> = log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect();
             focus = created.first().cloned();
             Some(Undo::Created(created))

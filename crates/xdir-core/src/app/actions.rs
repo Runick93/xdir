@@ -6,6 +6,9 @@ impl App {
     /// Atajos de la ventana. Devuelve si la tecla se usó.
     pub fn on_key(&mut self, vk: Key) -> bool {
         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
+        // Ctrl+Alt (y AltGr) en Windows y ⌥⌘ en macOS llegan acá, no a `on_alt_key`: sin mirar
+        // Alt, Ctrl+Alt+N se buscaba como Ctrl+N.
+        let alt = key_down(VK_MENU);
         let active = self.active;
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
@@ -14,7 +17,7 @@ impl App {
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
-            _ => match self.config.keymap.lookup(vk, ctrl, shift, false) {
+            _ => match self.config.keymap.lookup(vk, ctrl, shift, alt) {
                 Some(c) => self.run_command(c),
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
                     Some(action) => {
@@ -103,13 +106,15 @@ impl App {
             }
             Command::SelectAll => self.tab_mut().list.select_all(),
             Command::InvertSelection => self.tab_mut().list.invert_selection(),
+            Command::SelectPattern => self.open_palette(PaletteMode::Pattern { select: true }),
+            Command::DeselectPattern => self.open_palette(PaletteMode::Pattern { select: false }),
             Command::Copy => self.copy_selection(false),
             Command::Cut => self.copy_selection(true),
             Command::Paste => self.paste(),
             Command::CopyPaths => {
-                let text: Vec<String> = self.selection(active).iter().map(|p| format!("\"{}\"", p.display())).collect();
-                if !text.is_empty() {
-                    let _ = sys::shell().copy_text(hwnd, &text.join("\r\n"));
+                let paths = self.selection(active);
+                if !paths.is_empty() {
+                    let _ = sys::shell().copy_text(hwnd, &fileops::quoted_paths(&paths));
                 }
             }
             Command::Undo => {
@@ -120,6 +125,11 @@ impl App {
             Command::NewFolder => {
                 if let Some(parent) = self.panes[active].tab().location.target() {
                     sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::NewFolder { parent });
+                }
+            }
+            Command::NewTextFile => {
+                if let Some(parent) = self.panes[active].tab().location.target() {
+                    sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::NewFile { parent });
                 }
             }
             Command::Recycle => self.delete_selection(true),
@@ -281,6 +291,35 @@ impl App {
         }
     }
 
+    /// Menú del historial de Atrás (o Adelante) de la pestaña activa del panel: hasta
+    /// `HISTORY_MENU_MAX` carpetas, la más cercana primero. Elegir la i-ésima equivale a apretar
+    /// el botón i veces.
+    pub(super) fn history_menu(&mut self, pane: usize, forward: bool) {
+        let tab = self.panes[pane].tab();
+        let list = if forward { tab.forward_list(HISTORY_MENU_MAX) } else { tab.back_list(HISTORY_MENU_MAX) };
+        if list.is_empty() {
+            return;
+        }
+        let entries: Vec<shell::Entry> = list
+            .iter()
+            .enumerate()
+            .map(|(i, loc)| shell::Entry::Item { id: i as u32 + 1, label: loc.title(), enabled: true, checked: false })
+            .collect();
+        let Some(id) = self.host.popup_menu(&entries, MenuPos::Cursor, None, None) else { return };
+        let n = id as usize;
+        if n == 0 || n > list.len() {
+            return;
+        }
+        let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        let tab = self.panes[pane].tab_mut();
+        if forward {
+            tab.go_forward_n(n, hwnd, &tx);
+        } else {
+            tab.go_back_n(n, hwnd, &tx);
+        }
+        self.redraw();
+    }
+
     pub(super) fn apply(&mut self, pane: usize, action: Action) {
         match action {
             Action::None => return,
@@ -310,6 +349,9 @@ impl App {
         self.host.cursor_dips()
     }
 }
+
+/// Máximo de carpetas en el menú del historial de Atrás y Adelante.
+const HISTORY_MENU_MAX: usize = 15;
 
 /// Comandos que se pueden usar con la vista de xtree abierta sin cerrarla: no tocan los paneles
 /// (o solo abren la paleta, y lo que se elija ahí decide).

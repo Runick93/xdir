@@ -304,6 +304,9 @@ pub const OWN_VERBS: [&str; 5] = ["rename", "delete", "cut", "copy", "paste"];
 /// Identificadores propios: por encima de los que el Shell recibe (1..=0x7FFF).
 const OWN_BASE: u32 = 0x8000;
 
+/// Texto de la entrada propia que se omite si el Shell ya trae el verbo `copyaspath`.
+const COPY_AS_PATH: &str = "Copiar como ruta de acceso";
+
 fn append_entries(hmenu: HMENU, entries: &[Entry]) {
     for e in entries {
         unsafe {
@@ -336,7 +339,8 @@ fn append_entries(hmenu: HMENU, entries: &[Entry]) {
 /// Muestra el menú contextual del Shell. Sin `items`, es el menú del fondo de la carpeta.
 /// Con `intercept`, devuelve el verbo elegido si es uno de `OWN_VERBS` para que lo resuelva
 /// la aplicación; el resto (y todo, en carpetas virtuales) lo ejecuta el Shell y devuelve
-/// `"shell"`. Las `own` van arriba y, si se elige una, devuelve `own:<id>`. Con `pinned` (la carpeta
+/// `"shell"`. Las `own` van arriba en el fondo y al final (tras un separador) en los elementos; si
+/// se elige una, devuelve `own:<id>`. Con `pinned` (la carpeta
 /// única ya está anclada al Acceso rápido) el verbo "Anclar a Acceso rápido" del Shell se muestra
 /// como "Desanclar de Acceso rápido" y, si se elige, devuelve `UNPIN_QUICK`.
 #[allow(clippy::too_many_arguments)]
@@ -365,14 +369,33 @@ pub fn context_menu(
         if extended {
             flags |= CMF_EXTENDEDVERBS;
         }
-        append_entries(hmenu, own);
-        if !own.is_empty() {
-            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+        // En el fondo, las entradas propias van arriba; en los elementos, después de las del Shell
+        // para que «Abrir» siga primero. Los ids propios no dependen de la posición (`OWN_BASE`).
+        let background = items.is_empty();
+        if background {
+            append_entries(hmenu, own);
+            if !own.is_empty() {
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
         }
-        let first = own.len() as u32 + u32::from(!own.is_empty());
+        let first = GetMenuItemCount(Some(hmenu)).max(0) as u32;
         if menu.QueryContextMenu(hmenu, first, 1, 0x7FFF, flags).is_err() {
             let _ = DestroyMenu(hmenu);
             return None;
+        }
+        if !background {
+            // Si el Shell ya trae su «Copiar como ruta de acceso» (verbo `copyaspath`), el propio
+            // sobra.
+            let shell_copy = find_verb(&menu, hmenu, "copyaspath").is_some();
+            let own: Vec<Entry> = own
+                .iter()
+                .filter(|e| !(shell_copy && matches!(e, Entry::Item { label, .. } if label == COPY_AS_PATH)))
+                .cloned()
+                .collect();
+            if own.iter().any(|e| !matches!(e, Entry::Sep)) {
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+                append_entries(hmenu, &own);
+            }
         }
         let unpin_id = if pinned { relabel_pin(&menu, hmenu) } else { None };
         OPEN_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
@@ -418,15 +441,24 @@ pub fn context_menu(
 /// Cambia el texto del verbo "pintohome" del menú a "Desanclar de Acceso rápido" y devuelve su
 /// número de comando.
 unsafe fn relabel_pin(menu: &IContextMenu, hmenu: HMENU) -> Option<usize> {
+    let (pos, id) = find_verb(menu, hmenu, "pintohome")?;
+    unsafe {
+        let _ = ModifyMenuW(hmenu, pos, MF_BYPOSITION | MF_STRING, id as usize, w!("Desanclar de &Acceso rápido"));
+    }
+    Some((id - 1) as usize)
+}
+
+/// Posición y número de comando del verbo `verb` del Shell en el primer nivel del menú.
+fn find_verb(menu: &IContextMenu, hmenu: HMENU, verb: &str) -> Option<(u32, u32)> {
     unsafe {
         for pos in 0..GetMenuItemCount(Some(hmenu)).max(0) {
             let id = GetMenuItemID(hmenu, pos);
-            if id == 0 || id == u32::MAX {
+            // Separadores, submenús y entradas propias no son comandos del Shell.
+            if id == 0 || id == u32::MAX || id >= OWN_BASE {
                 continue;
             }
-            if command_verb(menu, (id - 1) as usize).as_deref() == Some("pintohome") {
-                let _ = ModifyMenuW(hmenu, pos as u32, MF_BYPOSITION | MF_STRING, id as usize, w!("Desanclar de &Acceso rápido"));
-                return Some((id - 1) as usize);
+            if command_verb(menu, (id - 1) as usize).as_deref() == Some(verb) {
+                return Some((pos as u32, id));
             }
         }
         None

@@ -4,7 +4,7 @@
 mod macos;
 pub use self::macos::{install, set_message_handler};
 #[cfg(test)]
-use self::macos::{platform_env, platform_file_system};
+use self::macos::{mac_consoles, platform_env, platform_file_system};
 
 #[cfg(test)]
 mod tests;

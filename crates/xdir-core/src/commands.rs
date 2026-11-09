@@ -37,12 +37,18 @@ pub enum Command {
     ToggleHidden,
     SelectAll,
     InvertSelection,
+    /// Sumar a la selección los que coinciden con un patrón (`*.jpg;*.png`), escrito en la paleta.
+    SelectPattern,
+    /// Quitar de la selección los que coinciden con un patrón.
+    DeselectPattern,
     Copy,
     Cut,
     Paste,
     CopyPaths,
     Undo,
     NewFolder,
+    /// Archivo de texto vacío en la carpeta del panel, con el renombrado en línea abierto.
+    NewTextFile,
     Recycle,
     Delete,
     Rename,
@@ -148,12 +154,15 @@ pub const ALL: &[Spec] = &[
     spec(Command::ToggleHidden, "mostrar_ocultos", "Mostrar u ocultar archivos ocultos", &["Ctrl+H"]),
     spec(Command::SelectAll, "seleccionar_todo", "Seleccionar todo", &["Ctrl+A"]),
     spec(Command::InvertSelection, "invertir_seleccion", "Invertir selección", &["Ctrl+I"]),
+    spec(Command::SelectPattern, "seleccionar_patron", "Seleccionar por patrón…", &["Ctrl+Más", "Ctrl+MásNum"]),
+    spec(Command::DeselectPattern, "deseleccionar_patron", "Deseleccionar por patrón…", &["Ctrl+Menos", "Ctrl+MenosNum"]),
     spec(Command::Copy, "copiar", "Copiar", &["Ctrl+C"]),
     spec(Command::Cut, "cortar", "Cortar", &["Ctrl+X"]),
     spec(Command::Paste, "pegar", "Pegar", &["Ctrl+V"]),
     spec(Command::CopyPaths, "copiar_rutas", "Copiar las rutas como texto", &["Ctrl+Shift+C"]),
     spec(Command::Undo, "deshacer", "Deshacer", &["Ctrl+Z"]),
     spec(Command::NewFolder, "carpeta_nueva", "Carpeta nueva", &["Ctrl+Shift+N"]),
+    spec(Command::NewTextFile, "archivo_texto_nuevo", "Archivo de texto nuevo", &["Ctrl+Alt+N"]),
     spec(Command::Recycle, "papelera", "Enviar a la papelera", &["Supr"]),
     spec(Command::Delete, "eliminar", "Eliminar definitivamente", &["Shift+Supr"]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
@@ -214,6 +223,11 @@ const KEY_NAMES: &[(&[&str], Key, &str)] = &[
     (&["coma", ","], Key(0xBC), ","),
     (&["["], Key(0xDB), "["),
     (&["]"], Key(0xDD), "]"),
+    // «+» y «-» del teclado principal y del numérico.
+    (&["más", "mas", "plus"], Key(0xBB), "Más"),
+    (&["menos", "minus"], Key(0xBD), "Menos"),
+    (&["másnum", "masnum", "numplus", "add"], Key(0x6B), "Más (teclado numérico)"),
+    (&["menosnum", "numminus", "subtract"], Key(0x6D), "Menos (teclado numérico)"),
 ];
 
 /// Estilo Apple: símbolos, en el orden de Apple (⌥⇧⌘).
@@ -228,6 +242,8 @@ fn mac_key_label(vk: u16) -> Option<&'static str> {
         0x22 => "⇟",
         0x24 => "↖",
         0x23 => "↘",
+        0xBB | 0x6B => "+",
+        0xBD | 0x6D => "-",
         _ => return None,
     })
 }
@@ -416,5 +432,29 @@ mod tests {
         assert_eq!(km.label(Command::CloseTab), "");
         km.set(Command::NewTab, &[]);
         assert_eq!(km.label(Command::NewTab), "");
+    }
+
+    /// Selección por patrón: Ctrl+Más / Ctrl+Menos (también los del teclado numérico), que en
+    /// macOS se ven ⌘+ / ⌘-.
+    #[test]
+    fn pattern_commands_have_keys() {
+        install_fakes();
+        let km = Keymap::default();
+        for (text, command) in [
+            ("Ctrl+Más", Command::SelectPattern),
+            ("Ctrl+MásNum", Command::SelectPattern),
+            ("Ctrl+Menos", Command::DeselectPattern),
+            ("Ctrl+MenosNum", Command::DeselectPattern),
+        ] {
+            let c = parse_combo(text).unwrap();
+            assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(command), "{text}");
+        }
+        assert_eq!(km.label(Command::SelectPattern), "Ctrl+Más");
+        assert_eq!(km.label(Command::DeselectPattern), "Ctrl+Menos");
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Más").unwrap()), "⌘+");
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Menos").unwrap()), "⌘-");
+        let spec = |c| ALL.iter().find(|s| s.command == c).unwrap();
+        assert_eq!((spec(Command::SelectPattern).id, spec(Command::SelectPattern).name), ("seleccionar_patron", "Seleccionar por patrón…"));
+        assert_eq!((spec(Command::DeselectPattern).id, spec(Command::DeselectPattern).name), ("deseleccionar_patron", "Deseleccionar por patrón…"));
     }
 }

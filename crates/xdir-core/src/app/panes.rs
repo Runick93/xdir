@@ -18,6 +18,7 @@ impl App {
         self.next_tab_id += 1;
         let mut tab = Tab::new(id, location, self.show_hidden);
         tab.list.columns = self.columns.clone();
+        tab.list.show_extensions = self.show_extensions;
         tab
     }
 
@@ -85,6 +86,26 @@ impl App {
             return self.tree.layout_width() + ui::GAP;
         }
         0.0
+    }
+
+    /// El árbol sigue al panel activo (`arbol_sigue_panel`): cuando cambia la carpeta que muestra
+    /// (navegar, cambiar de pestaña o de panel, mostrar el árbol), despliega sus carpetas padre y
+    /// la deja a la vista. Se llama antes de cada cuadro: todo cambio de carpeta pide redibujar.
+    #[cfg(feature = "arbol")]
+    pub(super) fn follow_tree(&mut self) {
+        if !self.config.tree_follows_pane || !self.tree.visible || self.xtree_open {
+            return;
+        }
+        let current = &self.panes[self.active].tab().location;
+        if self.tree_followed.as_ref() == Some(current) {
+            return;
+        }
+        self.tree_followed = Some(current.clone());
+        // Solo carpetas de disco: "Este equipo" y las ubicaciones del Shell no están en el árbol.
+        if let Location::Path(p) = current {
+            let p = p.clone();
+            self.tree.reveal(self.hwnd, &p, self.show_hidden);
+        }
     }
 
     /// Clic en el árbol: expandir/contraer o abrir la carpeta en el panel activo. Devuelve si
@@ -214,6 +235,7 @@ impl App {
             show_favorites: self.show_favorites,
             group_bar: self.show_group_bar,
             file_colors: self.file_colors,
+            show_extensions: self.show_extensions,
             show_tree: self.tree_visible(),
             tree_pinned: self.tree_pinned(),
             quick_open: self.tree_quick_open(),

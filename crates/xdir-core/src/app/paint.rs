@@ -40,6 +40,8 @@ impl App {
         let now = Instant::now();
         let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
         #[cfg(feature = "arbol")]
+        self.follow_tree();
+        #[cfg(feature = "arbol")]
         let tree_animating = self.tree.tick(dt);
         #[cfg(not(feature = "arbol"))]
         let tree_animating = false;
@@ -72,7 +74,7 @@ impl App {
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
         let about_open = self.about_open;
-        let file_colors = self.file_colors;
+        let (file_colors, show_extensions) = (self.file_colors, self.show_extensions);
         let (groups, group_name, show_group_bar) = (&self.groups, &self.group_name, self.show_group_bar);
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
@@ -173,7 +175,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, show_group_bar, tree_on);
+                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, show_extensions, show_group_bar, tree_on);
             }
             if let Some(sg) = suggest {
                 sg.draw(p);

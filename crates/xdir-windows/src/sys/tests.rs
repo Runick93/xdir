@@ -4,17 +4,52 @@ use xdir_core::sys::SystemEnv;
 // Las pruebas con el sistema real solo corren en Windows; la de la tabla contra el entorno falso
 // corre en todos (fuera de Windows, `main.rs` incluye este archivo suelto).
 #[cfg(windows)]
-use super::{platform_env, platform_file_system};
+use super::{find_wt, platform_env, platform_file_system, windows_consoles, wt_params};
 
-/// El menú de terminales muestra lo mismo que antes.
+/// El menú de terminales empieza como antes (PowerShell, CMD); después Windows Terminal si está
+/// instalada en esta máquina.
 #[test]
 #[cfg(windows)]
 fn consoles_menu_same_entries() {
     let env = platform_env();
     let labels: Vec<&str> = env.consoles().iter().map(|c| c.label).collect();
     let verbs = env.console_alt_verbs();
-    assert_eq!(labels, ["PowerShell", "CMD"]);
+    assert_eq!(labels[..2], ["PowerShell", "CMD"]);
+    assert!(labels[2..].iter().all(|l| *l == "Windows Terminal"), "{labels:?}");
     assert_eq!(verbs, [("runas", "Ejecutar como administrador"), ("runasuser", "Ejecutar como otro usuario")]);
+}
+
+/// Windows Terminal aparece si `wt.exe` está en el PATH o en `%LOCALAPPDATA%\Microsoft\WindowsApps`.
+#[test]
+#[cfg(windows)]
+fn windows_terminal_listed_when_present() {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    let path = OsStr::new(r"C:\Windows\System32;C:\Herramientas");
+    let local = Path::new(r"C:\Users\ana\AppData\Local");
+    let labels = |exists: &dyn Fn(&Path) -> bool| {
+        windows_consoles(Some(path), Some(local), exists).iter().map(|c| c.label).collect::<Vec<_>>()
+    };
+    assert_eq!(labels(&|p| p == Path::new(r"C:\Herramientas\wt.exe")), ["PowerShell", "CMD", "Windows Terminal"]);
+    let alias = Path::new(r"C:\Users\ana\AppData\Local\Microsoft\WindowsApps\wt.exe");
+    assert_eq!(labels(&|p| p == alias), ["PowerShell", "CMD", "Windows Terminal"]);
+    // El del PATH gana.
+    assert_eq!(find_wt(Some(path), Some(local), &|_| true), Some(PathBuf::from(r"C:\Windows\System32\wt.exe")));
+    // La carpeta se pasa con -d entre comillas; la barra final se duplica para no escapar la comilla.
+    assert_eq!(wt_params(Path::new(r"C:\Mis cosas")), r#"-d "C:\Mis cosas""#);
+    assert_eq!(wt_params(Path::new(r"C:\")), r#"-d "C:\\""#);
+    // El ; separa comandos de wt: se escapa con \;.
+    assert_eq!(wt_params(Path::new(r"C:\a;b")), r#"-d "C:\a\;b""#);
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_terminal_not_listed_when_absent() {
+    use std::ffi::OsStr;
+    use std::path::Path;
+    let labels: Vec<_> = windows_consoles(Some(OsStr::new(r"C:\Windows")), Some(Path::new(r"C:\L")), &|_| false).iter().map(|c| c.label).collect();
+    assert_eq!(labels, ["PowerShell", "CMD"]);
+    assert_eq!(windows_consoles(None, None, &|_| true).len(), 2);
 }
 
 /// Foto de la tabla completa de comandos con el entorno real: id, atajos, título, cómo se ven los
@@ -43,7 +78,7 @@ fn windows_table_matches_the_fake_env() {
     assert_eq!(table(&xdir_core::sys::testing::FakeEnv), WINDOWS_TABLE);
 }
 
-const WINDOWS_TABLE: &str = "ir_a_carpeta|Ctrl+P|Ir a una carpeta…|Ctrl+P|true\npaleta|Ctrl+Shift+P|Paleta de comandos|Ctrl+Shift+P|true\npestana_nueva|Ctrl+T|Pestaña nueva|Ctrl+T|true\ncerrar_pestana|Ctrl+W|Cerrar pestaña|Ctrl+W|true\nreabrir_pestana|Ctrl+Shift+T|Reabrir la última pestaña cerrada|Ctrl+Shift+T|true\npestana_siguiente|Ctrl+AvPag|Pestaña siguiente|Ctrl+AvPág|true\npestana_anterior|Ctrl+RePag|Pestaña anterior|Ctrl+RePág|true\ngrupo_siguiente|Ctrl+Tab|Grupo siguiente|Ctrl+Tab|true\ngrupo_anterior|Ctrl+Shift+Tab|Grupo anterior|Ctrl+Shift+Tab|true\npanel_siguiente|Tab|Panel siguiente|Tab|true\npanel_anterior|Shift+Tab|Panel anterior|Shift+Tab|true\npanel_1|Alt+1|Ir al panel 1|Alt+1|true\npanel_2|Alt+2|Ir al panel 2|Alt+2|true\npanel_3|Alt+3|Ir al panel 3|Alt+3|true\npanel_4|Alt+4|Ir al panel 4|Alt+4|true\nlayout_1|Ctrl+1|Layout: 1 panel|Ctrl+1|true\nlayout_2_lado_a_lado|Ctrl+2|Layout: 2 paneles lado a lado|Ctrl+2|true\nlayout_2_apilados|Ctrl+3|Layout: 2 paneles apilados|Ctrl+3|true\nlayout_3|Ctrl+4|Layout: 3 paneles|Ctrl+4|true\nlayout_4|Ctrl+5|Layout: 4 paneles|Ctrl+5|true\nmaximizar_panel|Ctrl+M|Maximizar o restaurar el panel|Ctrl+M|true\natras|Alt+Izquierda,NavegadorAtras|Atrás|Alt+←,Botón atrás del mouse|true\nadelante|Alt+Derecha,NavegadorAdelante|Adelante|Alt+→,Botón adelante del mouse|true\nsubir|Alt+Arriba,Retroceso|Subir a la carpeta superior|Alt+↑,Retroceso|true\nrecargar|F5|Recargar|F5|true\nescribir_ruta|Ctrl+L,F4,Alt+D|Escribir una ruta|Ctrl+L,F4,Alt+D|true\nfiltrar|Ctrl+F|Buscar en la carpeta y sus subcarpetas|Ctrl+F|true\neste_equipo||Ir a Este equipo||true\nmostrar_ocultos|Ctrl+H|Mostrar u ocultar archivos ocultos|Ctrl+H|true\nseleccionar_todo|Ctrl+A|Seleccionar todo|Ctrl+A|true\ninvertir_seleccion|Ctrl+I|Invertir selección|Ctrl+I|true\ncopiar|Ctrl+C|Copiar|Ctrl+C|true\ncortar|Ctrl+X|Cortar|Ctrl+X|true\npegar|Ctrl+V|Pegar|Ctrl+V|true\ncopiar_rutas|Ctrl+Shift+C|Copiar las rutas como texto|Ctrl+Shift+C|true\ndeshacer|Ctrl+Z|Deshacer|Ctrl+Z|true\ncarpeta_nueva|Ctrl+Shift+N|Carpeta nueva|Ctrl+Shift+N|true\npapelera|Supr|Enviar a la papelera|Supr|true\neliminar|Shift+Supr|Eliminar definitivamente|Shift+Supr|true\nrenombrar|F2|Renombrar|F2|true\npropiedades|Alt+Enter|Propiedades|Alt+Enter|true\nfavorito|Ctrl+D|Agregar o quitar de favoritos|Ctrl+D|true\nbarra_favoritos|Ctrl+Shift+B|Mostrar u ocultar la barra de favoritos|Ctrl+Shift+B|true\npowershell||Abrir PowerShell en la carpeta||true\ncmd||Abrir CMD en la carpeta||true\nmodo_oscuro||Cambiar entre modo claro y oscuro||true\nguardar_grupo||Guardar paneles y carpetas como grupo…||true\nbarra_grupos||Mostrar u ocultar la barra de grupos||true\nabrir_configuracion||Abrir la configuración (config.toml)||true\nxtree||Mapa de uso de disco (xtree)||true\nacerca_de||Acerca de xdir (versión y reportar un problema)||true\nvista_detalles|Ctrl+Shift+1|Vista: detalles|Ctrl+Shift+1|true\nvista_iconos|Ctrl+Shift+2|Vista: íconos medianos|Ctrl+Shift+2|true\nvista_iconos_grandes|Ctrl+Shift+3|Vista: íconos grandes|Ctrl+Shift+3|true\nvista_miniaturas|Ctrl+Shift+4|Vista: miniaturas|Ctrl+Shift+4|true\nordenar_nombre||Ordenar por nombre||true\nordenar_modificado||Ordenar por fecha de modificación||true\nordenar_creado||Ordenar por fecha de creación||true\nordenar_tipo||Ordenar por tipo||true\nordenar_extension||Ordenar por extensión||true\nordenar_tamano||Ordenar por tamaño||true\narbol|Ctrl+Shift+E|Mostrar u ocultar el árbol de carpetas (experimental)|Ctrl+Shift+E|true\n";
+const WINDOWS_TABLE: &str = "ir_a_carpeta|Ctrl+P|Ir a una carpeta…|Ctrl+P|true\npaleta|Ctrl+Shift+P|Paleta de comandos|Ctrl+Shift+P|true\npestana_nueva|Ctrl+T|Pestaña nueva|Ctrl+T|true\ncerrar_pestana|Ctrl+W|Cerrar pestaña|Ctrl+W|true\nreabrir_pestana|Ctrl+Shift+T|Reabrir la última pestaña cerrada|Ctrl+Shift+T|true\npestana_siguiente|Ctrl+AvPag|Pestaña siguiente|Ctrl+AvPág|true\npestana_anterior|Ctrl+RePag|Pestaña anterior|Ctrl+RePág|true\ngrupo_siguiente|Ctrl+Tab|Grupo siguiente|Ctrl+Tab|true\ngrupo_anterior|Ctrl+Shift+Tab|Grupo anterior|Ctrl+Shift+Tab|true\npanel_siguiente|Tab|Panel siguiente|Tab|true\npanel_anterior|Shift+Tab|Panel anterior|Shift+Tab|true\npanel_1|Alt+1|Ir al panel 1|Alt+1|true\npanel_2|Alt+2|Ir al panel 2|Alt+2|true\npanel_3|Alt+3|Ir al panel 3|Alt+3|true\npanel_4|Alt+4|Ir al panel 4|Alt+4|true\nlayout_1|Ctrl+1|Layout: 1 panel|Ctrl+1|true\nlayout_2_lado_a_lado|Ctrl+2|Layout: 2 paneles lado a lado|Ctrl+2|true\nlayout_2_apilados|Ctrl+3|Layout: 2 paneles apilados|Ctrl+3|true\nlayout_3|Ctrl+4|Layout: 3 paneles|Ctrl+4|true\nlayout_4|Ctrl+5|Layout: 4 paneles|Ctrl+5|true\nmaximizar_panel|Ctrl+M|Maximizar o restaurar el panel|Ctrl+M|true\natras|Alt+Izquierda,NavegadorAtras|Atrás|Alt+←,Botón atrás del mouse|true\nadelante|Alt+Derecha,NavegadorAdelante|Adelante|Alt+→,Botón adelante del mouse|true\nsubir|Alt+Arriba,Retroceso|Subir a la carpeta superior|Alt+↑,Retroceso|true\nrecargar|F5|Recargar|F5|true\nescribir_ruta|Ctrl+L,F4,Alt+D|Escribir una ruta|Ctrl+L,F4,Alt+D|true\nfiltrar|Ctrl+F|Buscar en la carpeta y sus subcarpetas|Ctrl+F|true\neste_equipo||Ir a Este equipo||true\nmostrar_ocultos|Ctrl+H|Mostrar u ocultar archivos ocultos|Ctrl+H|true\nseleccionar_todo|Ctrl+A|Seleccionar todo|Ctrl+A|true\ninvertir_seleccion|Ctrl+I|Invertir selección|Ctrl+I|true\nseleccionar_patron|Ctrl+Más,Ctrl+MásNum|Seleccionar por patrón…|Ctrl+Más,Ctrl+Más (teclado numérico)|true\ndeseleccionar_patron|Ctrl+Menos,Ctrl+MenosNum|Deseleccionar por patrón…|Ctrl+Menos,Ctrl+Menos (teclado numérico)|true\ncopiar|Ctrl+C|Copiar|Ctrl+C|true\ncortar|Ctrl+X|Cortar|Ctrl+X|true\npegar|Ctrl+V|Pegar|Ctrl+V|true\ncopiar_rutas|Ctrl+Shift+C|Copiar las rutas como texto|Ctrl+Shift+C|true\ndeshacer|Ctrl+Z|Deshacer|Ctrl+Z|true\ncarpeta_nueva|Ctrl+Shift+N|Carpeta nueva|Ctrl+Shift+N|true\narchivo_texto_nuevo|Ctrl+Alt+N|Archivo de texto nuevo|Ctrl+Alt+N|true\npapelera|Supr|Enviar a la papelera|Supr|true\neliminar|Shift+Supr|Eliminar definitivamente|Shift+Supr|true\nrenombrar|F2|Renombrar|F2|true\npropiedades|Alt+Enter|Propiedades|Alt+Enter|true\nfavorito|Ctrl+D|Agregar o quitar de favoritos|Ctrl+D|true\nbarra_favoritos|Ctrl+Shift+B|Mostrar u ocultar la barra de favoritos|Ctrl+Shift+B|true\npowershell||Abrir PowerShell en la carpeta||true\ncmd||Abrir CMD en la carpeta||true\nmodo_oscuro||Cambiar entre modo claro y oscuro||true\nguardar_grupo||Guardar paneles y carpetas como grupo…||true\nbarra_grupos||Mostrar u ocultar la barra de grupos||true\nabrir_configuracion||Abrir la configuración (config.toml)||true\nxtree||Mapa de uso de disco (xtree)||true\nacerca_de||Acerca de xdir (versión y reportar un problema)||true\nvista_detalles|Ctrl+Shift+1|Vista: detalles|Ctrl+Shift+1|true\nvista_iconos|Ctrl+Shift+2|Vista: íconos medianos|Ctrl+Shift+2|true\nvista_iconos_grandes|Ctrl+Shift+3|Vista: íconos grandes|Ctrl+Shift+3|true\nvista_miniaturas|Ctrl+Shift+4|Vista: miniaturas|Ctrl+Shift+4|true\nordenar_nombre||Ordenar por nombre||true\nordenar_modificado||Ordenar por fecha de modificación||true\nordenar_creado||Ordenar por fecha de creación||true\nordenar_tipo||Ordenar por tipo||true\nordenar_extension||Ordenar por extensión||true\nordenar_tamano||Ordenar por tamaño||true\narbol|Ctrl+Shift+E|Mostrar u ocultar el árbol de carpetas (experimental)|Ctrl+Shift+E|true\n";
 
 
 /// Título y migas de la raíz y de una carpeta con el sistema de archivos real: la unidad se nombra

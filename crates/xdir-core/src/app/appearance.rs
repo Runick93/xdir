@@ -44,6 +44,16 @@ impl App {
         self.host.text_restyle(&self.theme);
     }
 
+    /// Switch «Mostrar extensiones» de la rueda dentada: en todas las pestañas a la vez (las nuevas
+    /// lo toman en `make_tab`).
+    pub(super) fn set_show_extensions(&mut self, on: bool) {
+        self.show_extensions = on;
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            tab.list.show_extensions = on;
+        }
+        self.redraw();
+    }
+
     /// Switch del panel de la rueda dentada: fija oscuro o claro (deja de seguir a Windows).
     pub(super) fn set_dark_mode(&mut self, dark: bool) {
         self.dark_mode = Some(dark);

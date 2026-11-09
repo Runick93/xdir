@@ -213,47 +213,12 @@ pub fn context_menu(
     own: &[Entry],
     _pinned: bool,
 ) -> Option<String> {
-    let item = |a: Act, label: &str| Entry::Item { id: a as u32, label: label.to_string(), enabled: true, checked: false };
-    let mut entries = Vec::new();
-    // Apps que pueden abrir el primer elemento ("Abrir con").
-    let mut apps: Vec<PathBuf> = Vec::new();
-    if items.is_empty() {
-        entries.extend(offset_own(own));
-        entries.push(Entry::Sep);
-        entries.push(item(Act::Terminal, "Abrir en Terminal"));
-        entries.push(item(Act::Reveal, "Mostrar en el Finder"));
-        entries.push(item(Act::Info, "Obtener información"));
-    } else {
-        entries.push(item(Act::Open, "Abrir"));
-        if let [one] = items {
-            apps = open_with_apps(&one.path);
-            if !apps.is_empty() {
-                let subs = apps
-                    .iter()
-                    .enumerate()
-                    .map(|(i, app)| Entry::Item {
-                        id: Act::OpenWith as u32 * 1000 + i as u32,
-                        label: app.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-                        enabled: true,
-                        checked: false,
-                    })
-                    .collect();
-                entries.push(Entry::Sub("Abrir con".into(), subs));
-            }
-        }
-        entries.push(item(Act::Reveal, "Mostrar en el Finder"));
-        entries.push(Entry::Sep);
-        entries.push(item(Act::Cut, "Cortar"));
-        entries.push(item(Act::Copy, "Copiar"));
-        entries.push(item(Act::CopyPath, "Copiar la ruta"));
-        entries.push(item(Act::Paste, "Pegar"));
-        entries.push(Entry::Sep);
-        entries.push(item(Act::Rename, "Renombrar"));
-        entries.push(item(Act::Compress, "Comprimir"));
-        entries.push(item(Act::Trash, "Trasladar a la Papelera"));
-        entries.push(Entry::Sep);
-        entries.push(item(Act::Info, "Obtener información"));
-    }
+    // Apps que pueden abrir el elemento ("Abrir con"), solo con uno.
+    let apps: Vec<PathBuf> = match items {
+        [one] => open_with_apps(&one.path),
+        _ => Vec::new(),
+    };
+    let entries = menu_entries(items, own, &apps);
     let chosen = popup_menu(&entries, MenuAt::Point(at.0, at.1), None)?;
     if chosen >= OWN_BASE {
         return Some(format!("own:{}", chosen - OWN_BASE));
@@ -309,6 +274,51 @@ pub fn context_menu(
     Some(verb.to_string())
 }
 
+/// Entradas del menú contextual propio: las de la Mac y las de la aplicación (`own`, con
+/// identificadores corridos), arriba en el menú del fondo (sin `items`) y después de «Copiar la
+/// ruta» en el de los elementos. `apps` son las de "Abrir con".
+fn menu_entries(items: &[Item], own: &[Entry], apps: &[PathBuf]) -> Vec<Entry> {
+    let item = |a: Act, label: &str| Entry::Item { id: a as u32, label: label.to_string(), enabled: true, checked: false };
+    let mut entries = Vec::new();
+    if items.is_empty() {
+        entries.extend(offset_own(own));
+        entries.push(Entry::Sep);
+        entries.push(item(Act::Terminal, "Abrir en Terminal"));
+        entries.push(item(Act::Reveal, "Mostrar en el Finder"));
+        entries.push(item(Act::Info, "Obtener información"));
+        return entries;
+    }
+    entries.push(item(Act::Open, "Abrir"));
+    if !apps.is_empty() {
+        let subs = apps
+            .iter()
+            .enumerate()
+            .map(|(i, app)| Entry::Item {
+                id: Act::OpenWith as u32 * 1000 + i as u32,
+                label: app.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                enabled: true,
+                checked: false,
+            })
+            .collect();
+        entries.push(Entry::Sub("Abrir con".into(), subs));
+    }
+    entries.push(item(Act::Reveal, "Mostrar en el Finder"));
+    entries.push(Entry::Sep);
+    entries.push(item(Act::Cut, "Cortar"));
+    entries.push(item(Act::Copy, "Copiar"));
+    entries.push(item(Act::CopyPath, "Copiar la ruta"));
+    // Entradas propias de la aplicación («Copiar como ruta de acceso»...), junto a «Copiar la ruta».
+    entries.extend(offset_own(own));
+    entries.push(item(Act::Paste, "Pegar"));
+    entries.push(Entry::Sep);
+    entries.push(item(Act::Rename, "Renombrar"));
+    entries.push(item(Act::Compress, "Comprimir"));
+    entries.push(item(Act::Trash, "Trasladar a la Papelera"));
+    entries.push(Entry::Sep);
+    entries.push(item(Act::Info, "Obtener información"));
+    entries
+}
+
 /// Las entradas propias de la aplicación, con identificadores corridos para no chocar.
 fn offset_own(own: &[Entry]) -> Vec<Entry> {
     own.iter()
@@ -356,4 +366,38 @@ fn compress(items: &[Item]) {
     std::thread::spawn(move || {
         let _ = std::process::Command::new("zip").arg("-qry").arg(&zip).args(&names).current_dir(&parent).status();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(entries: &[Entry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| match e {
+                Entry::Item { label, .. } | Entry::Sub(label, _) => label.clone(),
+                Entry::Sep => "-".into(),
+            })
+            .collect()
+    }
+
+    /// Las entradas propias de la aplicación aparecen también en el menú de los elementos, justo
+    /// después del «Copiar la ruta» de la Mac; «Abrir» sigue primero.
+    #[test]
+    fn item_menu_includes_own_entries() {
+        let own = [Entry::Item { id: 0, label: "Copiar como ruta de acceso".into(), enabled: true, checked: false }];
+        let items = [Item::from(PathBuf::from("/tmp/a.txt")), Item::from(PathBuf::from("/tmp/b.txt"))];
+        let entries = menu_entries(&items, &own, &[]);
+        let l = labels(&entries);
+        assert_eq!(l[0], "Abrir");
+        let at = l.iter().position(|s| s == "Copiar la ruta").expect("falta «Copiar la ruta»");
+        assert_eq!(l[at + 1], "Copiar como ruta de acceso");
+        let Entry::Item { id, .. } = &entries[at + 1] else { panic!() };
+        assert_eq!(*id, OWN_BASE);
+        // Sin entradas propias, el menú de siempre.
+        let plain = labels(&menu_entries(&items, &[], &[]));
+        assert_eq!(plain[0], "Abrir");
+        assert_eq!(plain.len(), l.len() - 1);
+    }
 }

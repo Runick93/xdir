@@ -6,9 +6,4 @@ mod win32;
 #[cfg(windows)]
 pub use self::win32::*;
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-pub use self::macos::*;
-
 pub use xdir_core::thumbs::{Key, Source};

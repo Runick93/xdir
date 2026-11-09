@@ -530,6 +530,20 @@ dependencies = [
 name = "xdir"
 version = "0.1.23"
 dependencies = [
+ "windows",
+ "windows-core",
+ "windows-numerics",
+ "xdir-core",
+]
+
+[[package]]
+name = "xdir-core"
+version = "0.1.23"
+
+[[package]]
+name = "xdir-mac"
+version = "0.1.23"
+dependencies = [
  "block2",
  "dispatch2",
  "libc",
@@ -542,12 +556,5 @@ dependencies = [
  "objc2-foundation",
  "objc2-quick-look-thumbnailing",
  "objc2-uniform-type-identifiers",
- "windows",
- "windows-core",
- "windows-numerics",
  "xdir-core",
 ]
-
-[[package]]
-name = "xdir-core"
-version = "0.1.23"

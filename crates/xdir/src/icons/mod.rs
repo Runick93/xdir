@@ -6,11 +6,6 @@ mod win32;
 #[cfg(windows)]
 pub use self::win32::*;
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-pub use self::macos::*;
-
 /// Hay íconos nuevos listos para dibujar (vive en el núcleo, junto al `Painter`).
 pub use xdir_core::paint::WM_APP_ICONS;
 

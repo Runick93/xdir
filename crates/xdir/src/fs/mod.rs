@@ -361,6 +361,9 @@ mod search_tests {
         for file in ["informe.txt", "a/b/c/Informe final.pdf", "a/nada.txt", "informes/2024/foto.jpg", ".oculta/informe.txt"] {
             std::fs::write(root.join(file), "x").unwrap();
         }
+        // En macOS lo que empieza con punto ya está oculto; en Windows se oculta con el atributo.
+        #[cfg(windows)]
+        assert!(std::process::Command::new("attrib").arg("+h").arg(root.join(".oculta")).status().unwrap().success());
 
         let (names, progress) = run(&root, "informe", false);
         // La carpeta "informes" también coincide; lo de la carpeta oculta no se ve.

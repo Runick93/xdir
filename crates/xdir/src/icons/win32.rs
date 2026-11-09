@@ -24,6 +24,7 @@ use windows::core::PCWSTR;
 
 use crate::platform::Handle;
 use crate::fs::{LoadEvent, LoadMsg, WM_APP_LOAD, wide_path};
+use xdir_core::fs::OverlayRequest;
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW};
 
 use super::*;
@@ -147,20 +148,10 @@ fn run(rx: Receiver<(Key, usize)>) {
     }
 }
 
-/// Pedido de superposiciones (flecha de acceso directo, estado de OneDrive, Git...) para
-/// elementos de una pestaña. El resultado vuelve como `LoadMsg::Overlays` por el canal de carga.
-pub struct OverlayRequest {
-    pub hwnd: Handle,
-    pub tx: Sender<LoadEvent>,
-    pub panel: usize,
-    pub generation: u64,
-    /// (posición del elemento, ruta).
-    pub items: Vec<(u32, PathBuf)>,
-}
-
-/// Encola un pedido. Corre en un hilo aparte del de íconos: los handlers de superposición de
-/// otros programas pueden ser lentos y no deben demorar los íconos comunes.
-pub fn request_overlays(req: OverlayRequest) {
+/// Encola un pedido de superposiciones (`sys::Overlays` de Windows). Corre en un hilo aparte del
+/// de íconos: los handlers de superposición de otros programas pueden ser lentos y no deben
+/// demorar los íconos comunes.
+pub fn queue_overlays(req: OverlayRequest) {
     struct Job(usize, Sender<LoadEvent>, usize, u64, Vec<(u32, PathBuf)>);
     static W: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
     let worker = W.get_or_init(|| {

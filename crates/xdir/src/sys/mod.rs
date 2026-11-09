@@ -6,14 +6,14 @@ mod win32;
 #[cfg(windows)]
 pub use self::win32::install;
 #[cfg(all(windows, test))]
-use self::win32::platform_env;
+use self::win32::{platform_env, platform_file_system};
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 pub use self::macos::{install, set_message_handler};
 #[cfg(all(target_os = "macos", test))]
-use self::macos::platform_env;
+use self::macos::{platform_env, platform_file_system};
 
 #[cfg(test)]
 mod tests;

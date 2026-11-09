@@ -287,11 +287,11 @@ impl Tree {
         t.refresh_drives();
         // Como en el Explorador: Red y, si hay WSL, Linux. Sus hijos se leen al expandir.
         // La Red del Explorador (en macOS no hay).
-        if !crate::fs::NETWORK_PLACE.is_empty() {
-            t.add_root(Kind::Network, PathBuf::from(crate::fs::NETWORK_PLACE), "Red".to_string(), 0);
+        if !crate::fs::network_place().is_empty() {
+            t.add_root(Kind::Network, PathBuf::from(crate::fs::network_place()), "Red".to_string(), 0);
         }
-        if crate::fs::shell_place_exists(crate::fs::LINUX_PLACE) {
-            t.add_root(Kind::Linux, PathBuf::from(crate::fs::LINUX_PLACE), "Linux".to_string(), 0);
+        if crate::fs::shell_place_exists(crate::fs::linux_place()) {
+            t.add_root(Kind::Linux, PathBuf::from(crate::fs::linux_place()), "Linux".to_string(), 0);
         }
         t
     }

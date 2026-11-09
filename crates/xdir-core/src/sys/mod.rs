@@ -1,16 +1,17 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
 //! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
-//! `disk_scan()` y `shell()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! `disk_scan()`, `shell()`, `file_system()` y `overlays()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs::{DirEntry, Metadata};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, OnceLock};
 
 use crate::commands::Command;
-use crate::fs::Location;
+use crate::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult};
 use crate::shell::{Entry, Item};
@@ -91,10 +92,6 @@ pub trait SystemEnv: Send + Sync {
     /// Abre la consola `id` con `dir` como carpeta de trabajo. `verb`: "open" o uno de
     /// `console_alt_verbs`.
     fn open_console(&self, owner: Handle, id: u8, dir: &Path, verb: &str) -> bool;
-    /// Nombre que el sistema le da a una raíz (una ruta sin último tramo: `C:`, `C:\`, `/`), para
-    /// títulos y migas: "Disco local (C:)" en Windows, el nombre del disco en macOS. `None` = se
-    /// muestra el texto de la ruta (y, en las migas, la raíz sola se pega al tramo anterior).
-    fn root_title(&self, path: &Path) -> Option<String>;
     /// Cómo se muestran los atajos. Por defecto, al estilo de Windows.
     fn key_style(&self) -> KeyStyle {
         KeyStyle::Windows
@@ -199,6 +196,91 @@ pub trait Shell: Send + Sync {
     fn volume_of(&self, path: &Path) -> Option<OsString>;
 }
 
+/// El sistema de archivos: leer carpetas (en otro hilo), lo propio de cada sistema que necesita
+/// la búsqueda, unidades y lugares especiales, rutas y vigilancia de cambios.
+///
+/// La lectura y la búsqueda corren en hilos de trabajo: lo que una implementación necesite por
+/// hilo (COM en Windows, cachés de AppKit en macOS) se crea en ese hilo, no se guarda acá.
+pub trait FileSystem: Send + Sync {
+    /// Lanza la lectura de `location` en un hilo: manda `LoadEvent`s por `tx` y avisa a `hwnd`
+    /// con `WM_APP_LOAD`. Se abandona si `current` deja de valer `generation`.
+    fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location);
+
+    // Ganchos de la búsqueda (`fs::spawn_search`), que corre en su propio hilo.
+
+    /// Prepara el hilo de una búsqueda (COM e íconos en Windows) y corre `f` en él.
+    fn with_search_thread(&self, f: Box<dyn FnOnce() + Send>);
+    /// Datos de un elemento encontrado (los enlaces simbólicos, de lo que apuntan en macOS).
+    fn search_metadata(&self, item: &DirEntry, path: &Path) -> Option<Metadata>;
+    /// ¿Está oculto? (atributo en Windows; punto o marca del Finder en macOS).
+    fn is_hidden(&self, meta: &Metadata, name: &OsStr) -> bool;
+    /// ¿La búsqueda entra en esta carpeta? (en macOS, no en paquetes como las apps).
+    fn searchable_dir(&self, name: &OsStr) -> bool;
+    /// ¿Es la raíz de otro disco montado adentro? (la búsqueda no cruza).
+    fn is_mount_point(&self, path: &Path) -> bool;
+    /// Elemento de la lista para un resultado de búsqueda, con su ruta completa en `full`.
+    fn disk_entry(&self, path: &Path, name: OsString, meta: &Metadata) -> FsEntry;
+
+    /// Carpeta del usuario `i` (0..6: Escritorio, Descargas, Documentos, Imágenes, Música,
+    /// Vídeos), si existe.
+    fn user_folder(&self, i: usize) -> Option<PathBuf>;
+    /// Raíces de las unidades o discos montados.
+    fn drives(&self) -> Vec<PathBuf>;
+    /// Identificador de una unidad para `drive_label` ("C:\" → "C:"; en macOS, la ruta).
+    fn drive_name(&self, root: &Path) -> String;
+    /// Nombre de una unidad ("Disco local (C:)", "Macintosh HD"), cacheado.
+    fn drive_label(&self, drive: &str) -> String;
+    /// Olvida los nombres de unidad guardados (cambió el conjunto de unidades).
+    fn forget_drive_labels(&self);
+    /// ¿Es una ruta de una unidad que ya no está (se quitó el pendrive)?
+    fn drive_missing(&self, path: &Path) -> bool;
+    /// Nombre que el sistema le da a una raíz (una ruta sin último tramo: `C:`, `C:\`, `/`), para
+    /// títulos y migas: "Disco local (C:)" en Windows, el nombre del disco en macOS. `None` = se
+    /// muestra el texto de la ruta (y, en las migas, la raíz sola se pega al tramo anterior).
+    fn root_title(&self, path: &Path) -> Option<String>;
+    /// Subcarpetas de un lugar, para el menú de las flechas de la barra de dirección.
+    fn subfolders(&self, loc: &Location) -> Vec<(String, Location)>;
+    /// Ícono genérico de carpeta.
+    fn folder_icon(&self) -> Option<i32>;
+    /// Lo escrito en la barra de dirección como lugar especial del Shell ("shell:RecycleBinFolder").
+    fn shell_location(&self, text: &str) -> Option<Location>;
+    /// Nombre de análisis de la Red del Explorador (vacío si no existe en el sistema).
+    fn network_place(&self) -> &'static str;
+    /// Nombre de análisis de la carpeta de Linux (WSL) del Explorador (vacío si no existe).
+    fn linux_place(&self) -> &'static str;
+    /// ¿Existe esa carpeta virtual en este equipo?
+    fn shell_place_exists(&self, parsing: &str) -> bool;
+    /// Subcarpetas con ruta de disco de una carpeta virtual: (nombre, ruta), por nombre.
+    fn shell_subfolders(&self, parsing: &str) -> Vec<(String, PathBuf)>;
+    /// Carpetas del Acceso rápido de Windows (vacío donde no existe).
+    fn quick_access(&self) -> Vec<QuickItem>;
+    /// ¿Está anclada ahora mismo al Acceso rápido?
+    fn is_quick_pinned(&self, path: &Path) -> bool;
+    /// Carpeta cuyos cambios indican que el Acceso rápido se modificó.
+    fn quick_access_watch_dir(&self) -> Option<PathBuf>;
+    /// Forma larga de una ruta ("C:\Users\LEANDR~1" → "C:\Users\Leandro-Dev").
+    fn long_path(&self, path: &Path) -> PathBuf;
+    /// Ruta escrita a mano con las mayúsculas reales del disco.
+    fn true_case(&self, path: &Path) -> PathBuf;
+    /// Conecta con el recurso de red de `path` pidiendo credenciales si hace falta.
+    fn connect_share(&self, owner: Handle, path: &Path) -> bool;
+    /// ¿Es la misma ruta? (sin distinguir mayúsculas ni separador final).
+    fn same_path(&self, a: &Path, b: &Path) -> bool;
+    /// Vigila la carpeta `path` y avisa a `hwnd` con `msg` (`wparam` = `panel`, `lparam`) cuando
+    /// cambia algo. Deja de vigilar al soltar el guardián. `None` si no se puede vigilar.
+    fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>>;
+}
+
+/// Un guardián de carpeta (ver `FileSystem::watch`): vigila mientras viva y al soltarlo
+/// (`Drop`) termina su hilo.
+pub trait Watch: Send {}
+
+/// Superposiciones de íconos (flecha de acceso directo, OneDrive, Git...): se resuelven en un
+/// hilo aparte y vuelven como `LoadMsg::Overlays` por el canal del pedido.
+pub trait Overlays: Send + Sync {
+    fn request(&self, req: OverlayRequest);
+}
+
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {
     pub waker: Box<dyn Waker>,
@@ -206,6 +288,8 @@ pub struct Services {
     pub file_ops: Box<dyn FileOps>,
     pub disk_scan: Box<dyn DiskScan>,
     pub shell: Box<dyn Shell>,
+    pub file_system: Box<dyn FileSystem>,
+    pub overlays: Box<dyn Overlays>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -248,4 +332,12 @@ pub fn disk_scan() -> &'static dyn DiskScan {
 
 pub fn shell() -> &'static dyn Shell {
     &*services().shell
+}
+
+pub fn file_system() -> &'static dyn FileSystem {
+    &*services().file_system
+}
+
+pub fn overlays() -> &'static dyn Overlays {
+    &*services().overlays
 }

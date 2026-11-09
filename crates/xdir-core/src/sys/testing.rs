@@ -5,13 +5,13 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::collections::BTreeSet;
-use std::ffi::OsString;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ffi::{OsStr, OsString};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, Handle, Services, Shell, SystemEnv, Waker};
-use crate::fs::Location;
+use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::format::thousands;
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
@@ -28,6 +28,8 @@ pub fn install_fakes() {
         file_ops: Box::new(FakeFileOps),
         disk_scan: Box::new(FakeDiskScan),
         shell: Box::new(FakeShell),
+        file_system: Box::new(FakeFileSystem),
+        overlays: Box::new(FakeOverlays),
     });
 }
 
@@ -139,11 +141,6 @@ impl SystemEnv for FakeEnv {
 
     fn open_console(&self, _owner: Handle, _id: u8, _dir: &Path, _verb: &str) -> bool {
         false
-    }
-
-    /// Ninguna raíz tiene nombre propio: se muestra el texto de la ruta.
-    fn root_title(&self, _path: &Path) -> Option<String> {
-        None
     }
 }
 
@@ -452,4 +449,249 @@ impl Shell for FakeShell {
     fn volume_of(&self, path: &Path) -> Option<OsString> {
         path.components().next().map(|c| c.as_os_str().to_ascii_lowercase())
     }
+}
+
+/// Lecturas pedidas al `FileSystem` falso y guardianes creados y soltados, por ruta. Son de todo
+/// el proceso (las lecturas corren en sus propios hilos): cada test usa rutas propias.
+static LOADS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+static WATCHES: Mutex<BTreeMap<PathBuf, (usize, usize)>> = Mutex::new(BTreeMap::new());
+
+/// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
+/// íconos ni tipos del sistema, sin unidades, sin carpetas del usuario ni lugares del Shell. Lo
+/// que empieza con punto está oculto; las rutas se comparan sin distinguir mayúsculas ni
+/// separador final, y quedan como se escribieron (`long_path` y `true_case` no las cambian).
+pub struct FakeFileSystem;
+
+impl FakeFileSystem {
+    /// Cuántas lecturas de `path` se pidieron (en todo el proceso).
+    pub fn loads(path: &Path) -> usize {
+        LOADS.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied().unwrap_or(0)
+    }
+
+    /// (creados, soltados) de los guardianes de `path` (en todo el proceso).
+    pub fn watches(path: &Path) -> (usize, usize) {
+        WATCHES.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied().unwrap_or((0, 0))
+    }
+
+    /// Elemento de la lista para un elemento de disco: carpeta o archivo, sin ícono.
+    fn entry(name: OsString, meta: &std::fs::Metadata) -> FsEntry {
+        const ATTR_HIDDEN: u32 = 0x2;
+        const ATTR_DIRECTORY: u32 = 0x10;
+        let display = name.to_string_lossy().into_owned();
+        let is_dir = meta.is_dir();
+        let mut attrs = if is_dir { ATTR_DIRECTORY } else { 0 };
+        if display.starts_with('.') {
+            attrs |= ATTR_HIDDEN;
+        }
+        FsEntry {
+            sort_key: display.to_lowercase(),
+            display,
+            name,
+            full: None,
+            group: 0,
+            pidl: None,
+            is_dir,
+            size: if is_dir { 0 } else { meta.len() },
+            modified: 0,
+            created: 0,
+            attrs,
+            type_name: Arc::from(if is_dir { "Carpeta" } else { "Archivo" }),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+        }
+    }
+}
+
+/// Lee `path` y manda todo en un lote, y después `Listed` (o el error al abrirla).
+fn fake_list(path: &Path, cancelled: impl Fn() -> bool, send: impl Fn(LoadMsg)) {
+    let reader = match std::fs::read_dir(path) {
+        Ok(r) => r,
+        Err(e) => return send(LoadMsg::Listed(Err(e.to_string()))),
+    };
+    let mut batch = Vec::new();
+    for item in reader.flatten() {
+        if cancelled() {
+            return;
+        }
+        let Ok(meta) = std::fs::metadata(item.path()).or_else(|_| item.metadata()) else { continue };
+        batch.push(FakeFileSystem::entry(item.file_name(), &meta));
+    }
+    if !batch.is_empty() {
+        send(LoadMsg::Entries(batch));
+    }
+    send(LoadMsg::Listed(Ok(())));
+}
+
+impl FileSystem for FakeFileSystem {
+    fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
+        if let Location::Path(p) = &location {
+            *LOADS.lock().unwrap_or_else(|e| e.into_inner()).entry(p.clone()).or_insert(0) += 1;
+        }
+        std::thread::spawn(move || {
+            let send = |msg: LoadMsg| {
+                if tx.send(LoadEvent { panel, generation, msg }).is_ok() {
+                    hwnd.post(WM_APP_LOAD, panel, 0);
+                }
+            };
+            match &location {
+                Location::Path(p) => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
+                // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
+                Location::Computer => send(LoadMsg::Listed(Ok(()))),
+                Location::Shell { .. } => send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
+            }
+        });
+    }
+
+    fn with_search_thread(&self, f: Box<dyn FnOnce() + Send>) {
+        f();
+    }
+
+    fn search_metadata(&self, item: &std::fs::DirEntry, path: &Path) -> Option<std::fs::Metadata> {
+        std::fs::metadata(path).or_else(|_| item.metadata()).ok()
+    }
+
+    fn is_hidden(&self, _meta: &std::fs::Metadata, name: &OsStr) -> bool {
+        name.to_string_lossy().starts_with('.')
+    }
+
+    fn searchable_dir(&self, _name: &OsStr) -> bool {
+        true
+    }
+
+    fn is_mount_point(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
+        let mut e = FakeFileSystem::entry(name, meta);
+        e.full = Some(path.as_os_str().to_os_string());
+        e
+    }
+
+    fn user_folder(&self, _i: usize) -> Option<PathBuf> {
+        None
+    }
+
+    fn drives(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn drive_name(&self, root: &Path) -> String {
+        root.to_string_lossy().into_owned()
+    }
+
+    fn drive_label(&self, drive: &str) -> String {
+        drive.to_string()
+    }
+
+    fn forget_drive_labels(&self) {}
+
+    fn drive_missing(&self, _path: &Path) -> bool {
+        false
+    }
+
+    /// Ninguna raíz tiene nombre propio: se muestra el texto de la ruta.
+    fn root_title(&self, _path: &Path) -> Option<String> {
+        None
+    }
+
+    fn subfolders(&self, loc: &Location) -> Vec<(String, Location)> {
+        let Location::Path(dir) = loc else { return Vec::new() };
+        let mut out: Vec<(String, Location)> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .map(|name| (name.clone(), Location::Path(dir.join(name))))
+            .collect();
+        out.sort_by_key(|(n, _)| n.to_lowercase());
+        out
+    }
+
+    fn folder_icon(&self) -> Option<i32> {
+        None
+    }
+
+    fn shell_location(&self, _text: &str) -> Option<Location> {
+        None
+    }
+
+    fn network_place(&self) -> &'static str {
+        ""
+    }
+
+    fn linux_place(&self) -> &'static str {
+        ""
+    }
+
+    fn shell_place_exists(&self, _parsing: &str) -> bool {
+        false
+    }
+
+    fn shell_subfolders(&self, _parsing: &str) -> Vec<(String, PathBuf)> {
+        Vec::new()
+    }
+
+    fn quick_access(&self) -> Vec<QuickItem> {
+        Vec::new()
+    }
+
+    fn is_quick_pinned(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn quick_access_watch_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn long_path(&self, path: &Path) -> PathBuf {
+        path.to_path_buf()
+    }
+
+    fn true_case(&self, path: &Path) -> PathBuf {
+        path.to_path_buf()
+    }
+
+    fn connect_share(&self, _owner: Handle, _path: &Path) -> bool {
+        false
+    }
+
+    fn same_path(&self, a: &Path, b: &Path) -> bool {
+        let norm = |p: &Path| {
+            let s = p.to_string_lossy();
+            let t = s.trim_end_matches(['/', '\\']);
+            if t.is_empty() { s.chars().take(1).collect() } else { t.to_lowercase() }
+        };
+        norm(a) == norm(b)
+    }
+
+    /// Un guardián que no vigila nada: solo cuenta altas y bajas por ruta. `None` si la carpeta
+    /// no existe (como los reales).
+    fn watch(&self, _hwnd: Handle, _msg: u32, _panel: usize, _lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
+        if !path.is_dir() {
+            return None;
+        }
+        WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(path.to_path_buf()).or_insert((0, 0)).0 += 1;
+        Some(Box::new(FakeWatch(path.to_path_buf())))
+    }
+}
+
+/// Guardián del `FileSystem` falso: al soltarlo, cuenta una baja para su carpeta.
+pub struct FakeWatch(PathBuf);
+
+impl Watch for FakeWatch {}
+
+impl Drop for FakeWatch {
+    fn drop(&mut self) {
+        WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(self.0.clone()).or_insert((0, 0)).1 += 1;
+    }
+}
+
+/// `Overlays` falso: no hay superposiciones (no responde nada).
+pub struct FakeOverlays;
+
+impl Overlays for FakeOverlays {
+    fn request(&self, _req: OverlayRequest) {}
 }

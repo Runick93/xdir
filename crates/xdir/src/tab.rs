@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use crate::fs::{self, Entry, LoadEvent, LoadMsg, Location, Watcher};
+use crate::fs::{self, Entry, LoadEvent, LoadMsg, Location, WM_APP_CHANGED, Watch};
 use crate::list::{self, Column, ColumnSpec, FileList};
 use crate::platform::Handle;
 
@@ -42,7 +42,7 @@ pub struct Tab {
     reload_buf: Option<Vec<Entry>>,
     /// Elemento a enfocar cuando termine la carga (al subir, la carpeta de la que se vino).
     focus_after_load: Option<OsString>,
-    watcher: Option<Watcher>,
+    watcher: Option<Box<dyn Watch>>,
     /// Solo las pestañas a la vista vigilan su carpeta (un hilo por pestaña no escala).
     visible: bool,
     /// La carga en curso es una visita (navegar, atrás, adelante, subir), no una recarga.
@@ -78,7 +78,7 @@ impl Tab {
             return;
         }
         if let Location::Path(p) = &self.location {
-            self.watcher = Watcher::new(hwnd, self.id, self.nav_id, p);
+            self.watcher = fs::watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p);
         }
         if !self.loading {
             self.reload(hwnd, tx, true);
@@ -260,7 +260,7 @@ impl Tab {
         self.error = None;
         self.reload_buf = None;
         self.watcher = match &self.location {
-            Location::Path(p) if self.visible => Watcher::new(hwnd, self.id, self.nav_id, p),
+            Location::Path(p) if self.visible => fs::watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p),
             _ => None,
         };
         fs::spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
@@ -481,5 +481,77 @@ fn child_name(parent: &Location, descendant: &Location) -> Option<OsString> {
             s
         }),
         Location::Path(p) => d.strip_prefix(p).ok()?.components().next().map(|c| c.as_os_str().to_os_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use xdir_core::sys::testing::{FakeFileSystem, install_fakes};
+
+    /// Carpeta temporal propia de una prueba, con el nombre que le da el sistema de archivos
+    /// instalado (en Windows el runner da nombres cortos `RUNNER~1`).
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdir-tab-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        fs::true_case(&dir)
+    }
+
+    /// Una pestaña que se muestra en una carpeta la lee con el `FileSystem` instalado y recibe
+    /// sus elementos por el canal de carga.
+    #[test]
+    fn tab_loads_through_file_system() {
+        install_fakes();
+        let dir = temp_dir("carga");
+        std::fs::write(dir.join("uno.txt"), "1").unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let (tx, rx) = channel();
+        let mut tab = Tab::new(3, Location::Path(dir.clone()), false);
+        tab.set_visible(Handle(0), &tx, true);
+        while tab.loading {
+            let ev = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la carga termina");
+            assert_eq!(ev.panel, 3);
+            tab.on_load(ev);
+        }
+        assert_eq!(FakeFileSystem::loads(&dir), 1);
+        assert_eq!(tab.error, None);
+        let mut names: Vec<String> = tab.list.entries.iter().map(|e| e.name.to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["sub", "uno.txt"]);
+        assert!(tab.list.entries.iter().any(|e| e.is_dir && e.name == "sub"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cada guardián de carpeta se suelta: al ocultar la pestaña, al navegar a otra carpeta y al
+    /// cerrarla. 50 pestañas que vigilan y se cierran → 50 bajas en el falso.
+    #[test]
+    fn watchers_are_released() {
+        install_fakes();
+        let dir = temp_dir("guardianes");
+        let other = temp_dir("guardianes-otra");
+        let (tx, _rx) = channel();
+        let tabs: Vec<Tab> = (0..50)
+            .map(|i| {
+                let mut t = Tab::new(100 + i, Location::Path(dir.clone()), false);
+                t.set_visible(Handle(0), &tx, true);
+                t
+            })
+            .collect();
+        assert_eq!(FakeFileSystem::watches(&dir), (50, 0));
+        drop(tabs);
+        assert_eq!(FakeFileSystem::watches(&dir), (50, 50));
+
+        // Navegar suelta el guardián de la carpeta anterior; ocultar, el de la actual.
+        let mut t = Tab::new(200, Location::Path(dir.clone()), false);
+        t.set_visible(Handle(0), &tx, true);
+        t.navigate(Handle(0), &tx, Location::Path(other.clone()));
+        assert_eq!(FakeFileSystem::watches(&dir), (51, 51));
+        assert_eq!(FakeFileSystem::watches(&other), (1, 0));
+        t.set_visible(Handle(0), &tx, false);
+        assert_eq!(FakeFileSystem::watches(&other), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 }

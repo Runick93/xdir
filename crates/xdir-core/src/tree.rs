@@ -551,18 +551,34 @@ impl Tree {
     /// despliega nada). Una revelación nueva reemplaza a la pendiente.
     pub fn reveal(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
         self.reveal = None;
-        // Ya hay una fila a la vista con esa carpeta (una del usuario, una del Acceso rápido, la
-        // que se acaba de tocar): solo se desplaza hasta ella, sin desplegar otra rama.
+        // Ya hay una fila con esa carpeta (una del usuario, una del Acceso rápido, la que se acaba
+        // de tocar): si alguna está dentro del área visible no se mueve nada; si no, se desplaza
+        // hasta la primera, sin desplegar otra rama.
         let fs = crate::sys::file_system();
-        let shown = self.rows().into_iter().find(|&id| {
-            matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path)
-        });
-        if let Some(id) = shown {
-            self.scroll_to = Some(id);
+        let shown: Vec<(usize, usize)> = self
+            .rows()
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, id)| {
+                matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path)
+            })
+            .collect();
+        if let Some(&(_, id)) = shown.first() {
+            if !shown.iter().any(|&(i, _)| self.row_in_view(i)) {
+                self.scroll_to = Some(id);
+            }
             return;
         }
         self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden });
         self.advance_reveal();
+    }
+
+    /// ¿La fila `i` (posición en `rows`) se ve entera con el desplazamiento y el alto del último
+    /// cuadro?
+    fn row_in_view(&self, i: usize) -> bool {
+        let top = i as f32 * ROW_H;
+        let rows_h = self.view_h - TOP_PAD;
+        top >= self.scroll && top + ROW_H <= self.scroll + rows_h
     }
 
     /// Carpeta que se está revelando (esperando lecturas), si hay una.
@@ -1064,6 +1080,56 @@ mod tests {
         t.reveal(Handle(0), &root.join("alfa"), false);
         assert!(t.revealing().is_none());
         assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Si la carpeta tiene dos filas (la de la unidad y una anclada) y una ya está a la vista, el
+    /// árbol no se desplaza hasta la otra ni despliega nada.
+    #[test]
+    fn tree_reveal_keeps_scroll_when_a_row_is_visible() {
+        install_fakes();
+        let root = temp_root("revelar-visible");
+        for i in 0..30 {
+            std::fs::create_dir_all(root.join(format!("c{i:02}"))).unwrap();
+        }
+        let target = root.join("c29");
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        let area = rect(0.0, 0.0, 240.0, 200.0);
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, Some(&target));
+        let scroll = t.scroll;
+        assert!(scroll > 0.0, "se desplazó hasta c29");
+
+        // Una fila anclada con la misma carpeta, arriba de todo (fuera de la vista).
+        t.nodes.push(Node::new(Kind::Pinned, target.clone(), "c29".into(), 0));
+        t.roots.insert(0, t.nodes.len() - 1);
+        // La fila de la unidad sigue a la vista (la anclada corrió todo una fila).
+        let rows = t.rows();
+        let c29_row = rows.iter().position(|&id| t.nodes[id].kind == Kind::Folder && t.nodes[id].path == target).unwrap();
+        t.scroll_to = Some(rows[c29_row]);
+        t.draw(&p, area, Some(&target));
+        let scroll = t.scroll;
+        assert!(scroll > 0.0 && t.row_in_view(c29_row));
+        let pinned_row = rows.iter().position(|&id| t.nodes[id].kind == Kind::Pinned && t.nodes[id].path == target).unwrap();
+        assert!(!t.row_in_view(pinned_row), "la anclada no se ve");
+
+        let flags = expanded_flags(&t);
+        t.reveal(Handle(0), &target, false);
+        assert!(t.revealing().is_none());
+        t.draw(&p, area, Some(&target));
+        assert_eq!(t.scroll, scroll, "no saltó a la fila anclada");
+        assert_eq!(expanded_flags(&t), flags);
+
+        // Si ninguna se ve (desplazado a la mitad), se desplaza hasta la primera (la anclada).
+        t.scroll = (scroll / 2.0).floor();
+        t.draw(&p, area, Some(&target));
+        assert!(!t.row_in_view(pinned_row) && !t.row_in_view(c29_row));
+        t.reveal(Handle(0), &target, false);
+        t.draw(&p, area, Some(&target));
+        assert_eq!(t.scroll, 0.0);
+        assert!(t.row_in_view(pinned_row));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -24,13 +24,13 @@ mod shell;
 mod tab;
 mod theme;
 mod thumbs;
-mod toml;
 #[cfg(feature = "arbol")]
 mod tree;
 mod typed;
 mod ui;
 mod xtree;
 mod app;
+pub(crate) use xdir_core::toml;
 
 #[cfg(windows)]
 fn main() -> windows::core::Result<()> {

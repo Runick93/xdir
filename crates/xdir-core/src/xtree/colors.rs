@@ -1,6 +1,6 @@
 //! Colores y textos del treemap: categorías de archivo, rueda de matices y formato de tamaños.
 
-use crate::platform::Color;
+use crate::geom::Color;
 
 fn color(r: f32, g: f32, b: f32) -> Color {
     Color { r, g, b, a: 1.0 }

@@ -1,4 +1,4 @@
-# Tests en Windows y macOS en cada PR, y una prueba de humo en Windows que abre la app compilada
+# Tests en Windows, macOS y (solo el núcleo) Linux en cada PR, y una prueba de humo en Windows que abre la app compilada
 # con `--features pruebas` y la maneja por WM_COPYDATA (scripts/humo.ps1).
 name: CI
 
@@ -67,6 +67,22 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests del núcleo
+        run: cargo test --locked -p xdir-core
+
   estilo:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -75,8 +91,11 @@ jobs:
 
       - name: Rust estable
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
 
       - name: Formato
         run: cargo fmt --check || echo "::warning::cargo fmt --check encontró diferencias"
+
+      - name: Clippy del núcleo
+        run: cargo clippy -p xdir-core -- -D warnings || echo "::warning::cargo clippy encontró avisos"

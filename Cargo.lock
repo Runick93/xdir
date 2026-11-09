@@ -545,4 +545,9 @@ dependencies = [
  "windows",
  "windows-core",
  "windows-numerics",
+ "xdir-core",
 ]
+
+[[package]]
+name = "xdir-core"
+version = "0.1.23"

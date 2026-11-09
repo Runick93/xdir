@@ -15,7 +15,7 @@ fn consoles_menu_same_entries() {
 
 /// Foto de la tabla completa de comandos con el entorno real: id, atajos, título, cómo se ven los
 /// atajos y si existe. Protege la tabla de atajos y nombres de macOS (la de Windows se prueba en
-/// `crates/xdir`).
+/// `crates/xdir-windows`).
 fn table(env: &dyn SystemEnv) -> String {
     ALL.iter()
         .map(|s| {

@@ -1,8 +1,6 @@
-//! Tipos y servicios que no dependen del sistema operativo: color, rectángulo, teclas y el
-//! "buzón" de la ventana (mensajes que los hilos de trabajo le mandan al hilo de interfaz).
-//!
-//! Lo propio de Windows está en `win32` y se reexporta acá; el resto del programa solo usa lo de
-//! este módulo.
+//! Tipos y servicios que no dependen del sistema operativo (color, rectángulo, teclas y el
+//! "buzón" de la ventana) y lo propio de Windows (`win32`), que se reexporta acá; el resto del
+//! programa solo usa lo de este módulo.
 
 mod win32;
 pub use self::win32::*;

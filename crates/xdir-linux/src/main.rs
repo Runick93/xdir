@@ -10,7 +10,15 @@ mod fs;
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
+mod ops;
+#[cfg(target_os = "linux")]
+mod scan;
+#[cfg(target_os = "linux")]
+mod shell;
+#[cfg(target_os = "linux")]
 mod sys;
+#[cfg(target_os = "linux")]
+mod trash;
 
 #[cfg(target_os = "linux")]
 fn main() {

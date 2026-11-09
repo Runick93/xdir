@@ -4,7 +4,7 @@
 //! recursos de red) no existe en Linux y devuelve vacío.
 
 mod load;
-mod places;
+pub(crate) mod places;
 mod watch;
 
 #[cfg(test)]

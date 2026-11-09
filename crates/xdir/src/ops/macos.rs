@@ -11,7 +11,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle};
 use objc2_foundation::{MainThreadMarker, NSFileManager, NSString, NSURL};
 
-use super::*;
+use super::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use crate::platform::Handle;
 
 type Result<T> = std::result::Result<T, String>;

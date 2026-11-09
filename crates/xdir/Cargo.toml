@@ -31,7 +31,7 @@ libc = "0.2"
 # enciende (switch de la rueda dentada o Ctrl+Shift+E). Para quitarlo del programa:
 # scripts\build.cmd build --release --no-default-features
 default = ["arbol"]
-arbol = []
+arbol = ["xdir-core/arbol"]
 # Gancho de pruebas: deja manejar la ventana por WM_COPYDATA desde otro proceso (capturas y
 # pruebas automáticas sin mouse real). Nunca se compila en la versión normal.
 pruebas = []

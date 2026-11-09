@@ -48,3 +48,36 @@ fn missing_install_panics_with_message() {
     let empty: OnceLock<Services> = OnceLock::new();
     let _ = get_or_panic(&empty);
 }
+
+#[test]
+fn fake_config_dir_is_per_thread() {
+    install_fakes();
+    let here = env().config_dir().expect("carpeta del falso");
+    assert_eq!(env().config_dir(), Some(here.clone()), "el mismo hilo siempre ve la misma carpeta");
+    let other = std::thread::spawn(|| {
+        install_fakes();
+        env().config_dir().expect("carpeta del falso")
+    })
+    .join()
+    .unwrap();
+    assert_ne!(here, other, "cada hilo tiene su carpeta");
+    // Igual que el `config_dir` de pruebas de antes: temp/xdir-tests/<pid>-<id del hilo>.
+    let name = format!("{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], "");
+    assert_eq!(here, std::env::temp_dir().join("xdir-tests").join(name));
+}
+
+#[test]
+fn fake_formats_are_deterministic() {
+    install_fakes();
+    let e = env();
+    assert_eq!(e.format_date(0), "");
+    assert_eq!(e.format_date(116_444_736_000_000_000), "1970-01-01");
+    assert_eq!(e.format_date(133_000_000_000_000_000), "2022-06-18");
+    assert_eq!(e.format_size_kb(0), "0 KB");
+    assert_eq!(e.format_size_kb(1), "1 KB");
+    assert_eq!(e.format_size_kb(1_500_000), "1.465 KB");
+    assert_eq!(e.format_size_short(1023), "1023 bytes");
+    assert_eq!(e.format_size_short(1_234_567_890), "1,14 GB");
+    assert_eq!(e.format_size_short(12_900_000), "12,3 MB");
+    assert_eq!(e.format_size_short(476 * 1024 * 1024 * 1024), "476 GB");
+}

@@ -396,6 +396,8 @@ impl Init {
     /// Datos vacíos y sesión por defecto: nada del disco.
     #[cfg(test)]
     pub fn blank() -> Init {
+        // `Config::default()` arma el `Keymap`, que consulta el entorno del sistema.
+        xdir_core::sys::testing::install_fakes();
         Init {
             session: default_session(),
             history: History::default(),

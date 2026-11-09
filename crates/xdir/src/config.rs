@@ -282,6 +282,7 @@ mod tests {
 
     #[test]
     fn template_parses_clean_and_keeps_defaults() {
+        xdir_core::sys::testing::install_fakes();
         let c = Config::parse(&template());
         assert!(c.errors.is_empty(), "{:?}", c.errors);
         // Sin reglas propias quedan solo las de fábrica.
@@ -307,6 +308,7 @@ mod tests {
 
     #[test]
     fn animations_option() {
+        xdir_core::sys::testing::install_fakes();
         assert_eq!(Config::parse("").animations, None, "sin la opción se sigue a Windows");
         let off = Config::parse("[opciones]\nanimaciones = false\n");
         assert!(off.animations == Some(false) && off.errors.is_empty());
@@ -318,6 +320,7 @@ mod tests {
 
     #[test]
     fn user_changes_and_errors() {
+        xdir_core::sys::testing::install_fakes();
         let c = Config::parse(
             "[atajos]\npestana_nueva = \"Ctrl+K\"\ninexistente = \"Ctrl+J\"\nrecargar = \"Ctrl+Hiper\"\n\
              [colores]\n\"*.PDF; *.ps\" = \"#FF0000\"\n'@oculto' = \"#00FF00\"\n'@raro' = \"#000000\"\n\"*.x\" = \"rojo\"\n[otra]\n",

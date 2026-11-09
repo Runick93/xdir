@@ -494,10 +494,10 @@ const TERM_MENU_W: f32 = 210.0;
 fn terminal_menu_rows(anchor: Rect, w: f32) -> Vec<(Console, Rect)> {
     let left = (anchor.left - 8.0).min(w - GAP - TERM_MENU_W);
     let top = anchor.bottom + 6.0;
-    Console::ALL
-        .iter()
+    Console::all()
+        .into_iter()
         .enumerate()
-        .map(|(i, &c)| {
+        .map(|(i, c)| {
             let y = top + 6.0 + i as f32 * TERM_ROW_H;
             (c, rect(left + 6.0, y, left + TERM_MENU_W - 6.0, y + TERM_ROW_H))
         })

@@ -2,3 +2,7 @@
 name = "xdir-core"
 version.workspace = true
 edition.workspace = true
+
+[features]
+# Árbol de carpetas lateral (lo enciende la feature `arbol` de xdir).
+arbol = []

@@ -1,6 +1,24 @@
-//! Formato neutro: miles y orden de nombres.
+//! Formato de textos: fechas y tamaños según la configuración regional del sistema (por
+//! `sys::env()`), miles y orden natural de nombres.
 
 use std::cmp::Ordering;
+
+/// Fecha y hora local corta del usuario, p. ej. "24/10/2026 14:05". Vacío si `ft` (un FILETIME)
+/// es 0.
+pub fn date(ft: u64) -> String {
+    crate::sys::env().format_date(ft)
+}
+
+/// Tamaño de archivo como lo muestra el explorador del sistema: "1.234 KB" (Windows), "1,2 MB"
+/// (macOS).
+pub fn size_kb(bytes: u64) -> String {
+    crate::sys::env().format_size_kb(bytes)
+}
+
+/// Tamaño abreviado: "476 GB", "1,2 MB".
+pub fn size_short(bytes: u64) -> String {
+    crate::sys::env().format_size_short(bytes)
+}
 
 /// Número con separador de miles: 12345 → "12.345".
 pub fn thousands(n: u64) -> String {

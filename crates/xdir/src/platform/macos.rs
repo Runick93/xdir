@@ -1,39 +1,7 @@
 //! Parte de `platform` propia de macOS.
 
-use objc2_app_kit::{NSColor, NSColorSpace, NSEvent, NSEventModifierFlags, NSWorkspace};
-use objc2_foundation::{NSString, NSUserDefaults};
-
-use super::Key;
-
-/// ¿La tecla está apretada ahora? En macOS, Ctrl de los atajos es ⌘ (como Ctrl+C → ⌘C) y Alt es ⌥.
-pub fn key_down(k: Key) -> bool {
-    let flags = NSEvent::modifierFlags_class();
-    match k.0 {
-        0x10 => flags.contains(NSEventModifierFlags::Shift),
-        0x11 => flags.contains(NSEventModifierFlags::Command),
-        0x12 => flags.contains(NSEventModifierFlags::Option),
-        _ => false,
-    }
-}
-
-/// ¿El sistema está en modo oscuro?
-pub fn system_dark() -> bool {
-    let defaults = NSUserDefaults::standardUserDefaults();
-    defaults.stringForKey(&NSString::from_str("AppleInterfaceStyle")).is_some_and(|s| s.to_string().eq_ignore_ascii_case("dark"))
-}
-
-/// Color de acento del sistema (Configuración del Sistema > Apariencia), 0xRRGGBB.
-pub fn system_accent() -> Option<u32> {
-    let color = NSColor::controlAccentColor();
-    let rgb = color.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
-    let ch = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-    Some(ch(rgb.redComponent()) << 16 | ch(rgb.greenComponent()) << 8 | ch(rgb.blueComponent()))
-}
-
-/// ¿El sistema permite animaciones? ("Reducir movimiento" en Accesibilidad las apaga.)
-pub fn animations_allowed() -> bool {
-    !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
-}
+use objc2_app_kit::NSColor;
+use objc2_foundation::NSString;
 
 // ---------- vista principal y menús emergentes ----------
 

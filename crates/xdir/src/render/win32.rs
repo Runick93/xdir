@@ -212,7 +212,7 @@ impl Renderer {
 
         // Con fondo translúcido se limpia a transparente: ahí se ve Mica.
         // Con Mica el fondo se pinta casi opaco: el diseño manda, Mica apenas tiñe los huecos.
-        let clear = if t.composition.is_some() { theme_alpha(theme.background, 0.88) } else { theme.background.into() };
+        let clear = if t.composition.is_some() { theme_alpha(theme.background, 0.88) } else { d2c(theme.background) };
         unsafe {
             ctx.BeginDraw();
             ctx.Clear(Some(&clear));
@@ -260,7 +260,7 @@ pub struct Painter<'a> {
 
 impl Painter<'_> {
     fn color(&self, c: Color) {
-        let c: D2D1_COLOR_F = c.into();
+        let c = d2c(c);
         unsafe { self.brush.SetColor(&c) };
     }
 
@@ -723,10 +723,15 @@ fn v2(x: f32, y: f32) -> Vector2 {
 }
 
 fn theme_alpha(c: Color, a: f32) -> D2D1_COLOR_F {
-    Color { a, ..c }.into()
+    d2c(Color { a, ..c })
 }
 
 /// Rectángulo propio → el de Direct2D.
 fn d2r(r: Rect) -> D2D_RECT_F {
-    r.into()
+    D2D_RECT_F { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
+/// Color propio → el de Direct2D (no puede ser un `From`: ambos tipos son ajenos a esta crate).
+fn d2c(c: Color) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r: c.r, g: c.g, b: c.b, a: c.a }
 }

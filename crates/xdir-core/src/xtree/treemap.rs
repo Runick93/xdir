@@ -1,7 +1,7 @@
 //! Diseño del treemap: reparto "squarified" de las carpetas anidadas en bloques.
 
 use super::tree::Node;
-use crate::platform::{Rect, rect};
+use crate::geom::{Rect, rect};
 
 pub struct Cell {
     pub r: Rect,

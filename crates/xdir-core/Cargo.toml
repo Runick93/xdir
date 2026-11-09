@@ -1,0 +1,4 @@
+[package]
+name = "xdir-core"
+version.workspace = true
+edition.workspace = true

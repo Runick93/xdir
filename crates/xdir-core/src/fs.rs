@@ -252,8 +252,24 @@ pub fn spawn_search(
     show_hidden: bool,
     matches: impl Fn(&str) -> bool + Send + 'static,
 ) {
+    search_with(sys::file_system(), hwnd, tx, panel, generation, current, roots, show_hidden, matches);
+}
+
+/// `spawn_search` con un sistema de archivos dado (el instalado, o el real de una plataforma en
+/// sus pruebas).
+#[allow(clippy::too_many_arguments)]
+pub fn search_with(
+    fs: &'static dyn FileSystem,
+    hwnd: Handle,
+    tx: Sender<LoadEvent>,
+    panel: usize,
+    generation: u64,
+    current: Arc<AtomicU64>,
+    roots: Vec<PathBuf>,
+    show_hidden: bool,
+    matches: impl Fn(&str) -> bool + Send + 'static,
+) {
     std::thread::spawn(move || {
-        let fs = sys::file_system();
         fs.with_search_thread(Box::new(move || {
             let cancelled = || current.load(Ordering::Relaxed) != generation;
             let send = |msg: LoadMsg| {

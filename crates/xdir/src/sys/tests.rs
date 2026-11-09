@@ -82,3 +82,61 @@ fn location_titles_per_os() {
         assert!(!drive.is_empty() && drive != "/", "{drive}");
     }
 }
+
+/// Corre una búsqueda con el sistema de archivos real de la plataforma y junta lo encontrado
+/// (rutas relativas a `root`, ordenadas) y el último avance.
+fn search_real(root: &std::path::Path, query: &str, show_hidden: bool) -> (Vec<String>, f32) {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use xdir_core::fs::{LoadMsg, search_with};
+    // La búsqueda avisa a la ventana con `Handle::post`: el `Waker` falso solo cuenta.
+    xdir_core::sys::testing::install_fakes();
+    let fs: &'static dyn xdir_core::sys::FileSystem = Box::leak(platform_file_system());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let current = Arc::new(AtomicU64::new(7));
+    search_with(fs, crate::platform::Handle(0), tx, 1, 7, current, vec![root.to_path_buf()], show_hidden, crate::list::name_matcher(query));
+    let (mut names, mut progress) = (Vec::new(), 0.0);
+    while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        match ev.msg {
+            LoadMsg::Entries(batch) => {
+                for e in batch {
+                    let full = std::path::PathBuf::from(e.full.expect("con ruta completa"));
+                    names.push(full.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+            LoadMsg::Progress { done, .. } => progress = done,
+            LoadMsg::Listed(_) => break,
+            _ => {}
+        }
+    }
+    names.sort();
+    (names, progress)
+}
+
+/// La búsqueda en subcarpetas con los ganchos reales de cada sistema: ocultos por atributo en
+/// Windows y por punto en macOS, enlaces y paquetes, y las entradas con ruta completa.
+#[test]
+fn search_finds_matches_with_the_real_file_system() {
+    let root = std::env::temp_dir().join(format!("xdir-busqueda-real-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for dir in ["a/b/c", "informes/2024", ".oculta"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    for file in ["informe.txt", "a/b/c/Informe final.pdf", "a/nada.txt", "informes/2024/foto.jpg", ".oculta/informe.txt"] {
+        std::fs::write(root.join(file), "x").unwrap();
+    }
+    // En macOS lo que empieza con punto ya está oculto; en Windows se oculta con el atributo.
+    #[cfg(windows)]
+    assert!(std::process::Command::new("attrib").arg("+h").arg(root.join(".oculta")).status().unwrap().success());
+
+    let (names, progress) = search_real(&root, "informe", false);
+    // La carpeta "informes" también coincide; lo de la carpeta oculta no se ve.
+    assert_eq!(names, ["a/b/c/Informe final.pdf", "informe.txt", "informes"]);
+    assert_eq!(progress, 1.0);
+
+    // Con patrones y mostrando ocultos.
+    let (names, _) = search_real(&root, "*.txt", true);
+    assert_eq!(names, [".oculta/informe.txt", "a/nada.txt", "informe.txt"]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}

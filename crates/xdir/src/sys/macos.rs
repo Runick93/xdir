@@ -1,9 +1,9 @@
 //! Servicios del sistema en macOS.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, OnceLock};
 
 use objc2::rc::Retained;
 use objc2_app_kit::{NSColor, NSColorSpace, NSEvent, NSEventModifierFlags, NSWorkspace};
@@ -14,12 +14,13 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, Shell, KeyStyle, Services, SystemEnv, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
-use xdir_core::fs::Location;
+use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
 use xdir_core::shell::{Entry, Item};
 
+use crate::fs::macos as fsp;
 use crate::shell::macos as sh;
 
 /// Quién atiende los mensajes de la aplicación en el hilo principal (lo fija la ventana al
@@ -191,11 +192,6 @@ impl SystemEnv for MacEnv {
     fn open_console(&self, _owner: Handle, _id: u8, dir: &Path, _verb: &str) -> bool {
         std::process::Command::new("open").args(["-a", "Terminal"]).arg(dir).status().is_ok_and(|s| s.success())
     }
-
-    /// Cualquier raíz es un disco: su nombre ("/" → "Macintosh HD").
-    fn root_title(&self, path: &Path) -> Option<String> {
-        Some(crate::fs::drive_label(&path.to_string_lossy()))
-    }
 }
 
 /// El entorno real de macOS (lo que instala `install`).
@@ -215,43 +211,43 @@ struct MacDiskScan;
 
 impl DiskScan for MacDiskScan {
     fn lister(&self, root: &Path) -> Box<dyn Lister> {
-        Box::new(crate::fs::xtree_lister(root))
+        Box::new(fsp::xtree_lister(root))
     }
 
     fn fast_scan(&self, root: &Path, p: &Progress, cancel: &AtomicBool) -> FastScan {
-        crate::fs::xtree_fast_scan(root, p, cancel)
+        fsp::xtree_fast_scan(root, p, cancel)
     }
 
     fn elevate(&self, owner: Handle, root: &Path, p: &Progress, cancel: &AtomicBool) -> Option<Vec<Node>> {
-        crate::fs::xtree_elevate(owner, root, p, cancel)
+        fsp::xtree_elevate(owner, root, p, cancel)
     }
 
     fn drives(&self) -> Vec<DriveEntry> {
-        crate::fs::xtree_drives()
+        fsp::xtree_drives()
     }
 
     fn volume_space(&self, path: &Path) -> Option<(u64, u64)> {
-        crate::fs::volume_space(path)
+        fsp::volume_space(path)
     }
 
     fn whole_volume(&self, path: &Path) -> bool {
-        crate::fs::whole_volume(path)
+        fsp::whole_volume(path)
     }
 
     fn default_root(&self) -> PathBuf {
-        crate::fs::xtree_default_root()
+        fsp::xtree_default_root()
     }
 
     fn permission_issue(&self, p: &Progress) -> bool {
-        crate::fs::xtree_permission_issue(p)
+        fsp::xtree_permission_issue(p)
     }
 
     fn permission_hint(&self) -> &'static str {
-        crate::fs::XTREE_PERMISSION_HINT
+        fsp::XTREE_PERMISSION_HINT
     }
 
     fn elevating_text(&self) -> &'static str {
-        crate::fs::XTREE_ELEVATING_TEXT
+        fsp::XTREE_ELEVATING_TEXT
     }
 }
 
@@ -331,6 +327,143 @@ impl Shell for MacShell {
     }
 }
 
+/// Sistema de archivos: delega en `crate::fs::macos`. No guarda nada: las cachés de AppKit son
+/// por hilo y se crean en el hilo que las usa (el de cada lectura o búsqueda).
+struct MacFileSystem;
+
+impl FileSystem for MacFileSystem {
+    fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
+        fsp::spawn_load(hwnd, tx, panel, generation, current, location)
+    }
+
+    fn with_search_thread(&self, f: Box<dyn FnOnce() + Send>) {
+        fsp::with_search_thread(f)
+    }
+
+    fn search_metadata(&self, item: &std::fs::DirEntry, path: &Path) -> Option<std::fs::Metadata> {
+        fsp::search_metadata(item, path)
+    }
+
+    fn is_hidden(&self, meta: &std::fs::Metadata, name: &OsStr) -> bool {
+        fsp::is_hidden(meta, name)
+    }
+
+    fn searchable_dir(&self, name: &OsStr) -> bool {
+        fsp::searchable_dir(name)
+    }
+
+    fn is_mount_point(&self, path: &Path) -> bool {
+        fsp::is_mount_point(path)
+    }
+
+    fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
+        fsp::disk_entry(path, name, meta)
+    }
+
+    fn user_folder(&self, i: usize) -> Option<PathBuf> {
+        fsp::user_folder(i)
+    }
+
+    fn drives(&self) -> Vec<PathBuf> {
+        fsp::drives()
+    }
+
+    fn drive_name(&self, root: &Path) -> String {
+        fsp::drive_name(root)
+    }
+
+    fn drive_label(&self, drive: &str) -> String {
+        fsp::drive_label(drive)
+    }
+
+    fn forget_drive_labels(&self) {
+        fsp::forget_drive_labels()
+    }
+
+    fn drive_missing(&self, path: &Path) -> bool {
+        fsp::drive_missing(path)
+    }
+
+    /// Cualquier raíz es un disco: su nombre ("/" → "Macintosh HD").
+    fn root_title(&self, path: &Path) -> Option<String> {
+        Some(fsp::drive_label(&path.to_string_lossy()))
+    }
+
+    fn subfolders(&self, loc: &Location) -> Vec<(String, Location)> {
+        fsp::subfolders(loc)
+    }
+
+    fn folder_icon(&self) -> Option<i32> {
+        fsp::folder_icon()
+    }
+
+    fn shell_location(&self, text: &str) -> Option<Location> {
+        fsp::shell_location(text)
+    }
+
+    fn network_place(&self) -> &'static str {
+        fsp::NETWORK_PLACE
+    }
+
+    fn linux_place(&self) -> &'static str {
+        fsp::LINUX_PLACE
+    }
+
+    fn shell_place_exists(&self, parsing: &str) -> bool {
+        fsp::shell_place_exists(parsing)
+    }
+
+    fn shell_subfolders(&self, parsing: &str) -> Vec<(String, PathBuf)> {
+        fsp::shell_subfolders(parsing)
+    }
+
+    fn quick_access(&self) -> Vec<QuickItem> {
+        fsp::quick_access()
+    }
+
+    fn is_quick_pinned(&self, path: &Path) -> bool {
+        fsp::is_quick_pinned(path)
+    }
+
+    fn quick_access_watch_dir(&self) -> Option<PathBuf> {
+        fsp::quick_access_watch_dir()
+    }
+
+    fn long_path(&self, path: &Path) -> PathBuf {
+        fsp::long_path(path)
+    }
+
+    fn true_case(&self, path: &Path) -> PathBuf {
+        fsp::true_case(path)
+    }
+
+    fn connect_share(&self, owner: Handle, path: &Path) -> bool {
+        fsp::connect_share(owner, path)
+    }
+
+    fn same_path(&self, a: &Path, b: &Path) -> bool {
+        fsp::same_path(a, b)
+    }
+
+    fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
+        fsp::Watcher::with_message(hwnd, msg, panel, lparam, path).map(|w| Box::new(w) as Box<dyn Watch>)
+    }
+}
+
+/// El sistema de archivos real de macOS (lo que instala `install`).
+#[cfg(test)]
+pub fn platform_file_system() -> Box<dyn FileSystem> {
+    Box::new(MacFileSystem)
+}
+
+/// Superposiciones de íconos: en macOS no hay (las etiquetas de color del Finder van aparte),
+/// así que el pedido no se responde.
+struct MacOverlays;
+
+impl Overlays for MacOverlays {
+    fn request(&self, _req: OverlayRequest) {}
+}
+
 /// Instala los servicios de macOS en el registro del núcleo.
 pub fn install() {
     xdir_core::sys::install(Services {
@@ -339,5 +472,7 @@ pub fn install() {
         file_ops: Box::new(MacFileOps),
         disk_scan: Box::new(MacDiskScan),
         shell: Box::new(MacShell),
+        file_system: Box::new(MacFileSystem),
+        overlays: Box::new(MacOverlays),
     });
 }

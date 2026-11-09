@@ -5,15 +5,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
 use objc2::rc::Retained;
 use objc2_app_kit::{NSImage, NSWorkspace};
 use objc2_foundation::NSString;
-
-use crate::fs::LoadEvent;
-use crate::platform::Handle;
 
 /// De dónde sale un ícono.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -71,17 +67,3 @@ pub fn image(index: i32) -> Option<Retained<NSImage>> {
     IMAGES.with(|m| m.borrow_mut().insert(index, img.clone()));
     img
 }
-
-/// Pedido de superposiciones de íconos: en macOS no hay (las etiquetas de color del Finder van
-/// aparte), así que no se hace nada.
-#[allow(dead_code)]
-pub struct OverlayRequest {
-    pub hwnd: Handle,
-    pub tx: Sender<LoadEvent>,
-    pub panel: usize,
-    pub generation: u64,
-    /// (posición del elemento, ruta).
-    pub items: Vec<(u32, PathBuf)>,
-}
-
-pub fn request_overlays(_req: OverlayRequest) {}

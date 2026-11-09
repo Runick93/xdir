@@ -443,16 +443,14 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
-/// Vigila una carpeta y avisa con `WM_APP_CHANGED`. Se detiene al soltarlo.
+/// Vigila una carpeta y avisa a la ventana con un mensaje (`FileSystem::watch`). Se detiene al soltarlo.
 pub struct Watcher {
     _watcher: notify::RecommendedWatcher,
 }
 
-impl Watcher {
-    pub fn new(hwnd: Handle, panel: usize, generation: u64, path: &Path) -> Option<Self> {
-        Self::with_message(hwnd, WM_APP_CHANGED, panel, generation as isize, path)
-    }
+impl xdir_core::sys::Watch for Watcher {}
 
+impl Watcher {
     /// Vigila una carpeta y avisa a la ventana con el mensaje `msg` (y estos `wparam`/`lparam`).
     pub fn with_message(hwnd: Handle, msg: u32, panel: usize, generation: isize, path: &Path) -> Option<Self> {
         use notify::Watcher as _;

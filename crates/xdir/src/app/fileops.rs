@@ -1,7 +1,6 @@
 //! Operaciones de archivos: portapapeles, borrar, arrastrar y soltar, menú contextual.
 
 use super::*;
-use crate::fs::LocationExt;
 
 impl App {
     // ---------- operaciones de archivos ----------

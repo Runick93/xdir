@@ -1,8 +1,9 @@
 //! Servicios del sistema en Windows.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, LPARAM, SYSTEMTIME, WPARAM};
 use windows::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS};
@@ -18,13 +19,14 @@ use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, Handle, Shell, Services, SystemEnv, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
-use xdir_core::fs::Location;
+use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
 use xdir_core::shell::{Entry, Item};
 use xdir_core::typed::MAX as TYPED_MAX;
 
+use crate::fs::win32 as fsp;
 use crate::fs::wide_path;
 use crate::platform::HandleExt;
 use crate::shell::win32 as sh;
@@ -176,14 +178,6 @@ impl SystemEnv for Win32Env {
         // ShellExecute devuelve un valor mayor que 32 si salió bien.
         r.0 as usize > 32
     }
-
-    /// Una unidad ("C:", "C:\\") se titula como en el Explorador: "Disco local (C:)". Las demás
-    /// raíces (`\\servidor\recurso`, "\\") muestran su texto.
-    fn root_title(&self, path: &Path) -> Option<String> {
-        let root = path.to_string_lossy();
-        let root = root.trim_end_matches('\\');
-        (root.len() == 2 && root.ends_with(':')).then(|| crate::fs::drive_label(root))
-    }
 }
 
 /// Ejecutable de la consola: PowerShell 7 si está instalado, si no el de Windows.
@@ -252,43 +246,43 @@ struct Win32DiskScan;
 
 impl DiskScan for Win32DiskScan {
     fn lister(&self, root: &Path) -> Box<dyn Lister> {
-        Box::new(crate::fs::xtree_lister(root))
+        Box::new(fsp::xtree_lister(root))
     }
 
     fn fast_scan(&self, root: &Path, p: &Progress, cancel: &AtomicBool) -> FastScan {
-        crate::fs::xtree_fast_scan(root, p, cancel)
+        fsp::xtree_fast_scan(root, p, cancel)
     }
 
     fn elevate(&self, owner: Handle, root: &Path, p: &Progress, cancel: &AtomicBool) -> Option<Vec<Node>> {
-        crate::fs::xtree_elevate(owner, root, p, cancel)
+        fsp::xtree_elevate(owner, root, p, cancel)
     }
 
     fn drives(&self) -> Vec<DriveEntry> {
-        crate::fs::xtree_drives()
+        fsp::xtree_drives()
     }
 
     fn volume_space(&self, path: &Path) -> Option<(u64, u64)> {
-        crate::fs::volume_space(path)
+        fsp::volume_space(path)
     }
 
     fn whole_volume(&self, path: &Path) -> bool {
-        crate::fs::whole_volume(path)
+        fsp::whole_volume(path)
     }
 
     fn default_root(&self) -> PathBuf {
-        crate::fs::xtree_default_root()
+        fsp::xtree_default_root()
     }
 
     fn permission_issue(&self, p: &Progress) -> bool {
-        crate::fs::xtree_permission_issue(p)
+        fsp::xtree_permission_issue(p)
     }
 
     fn permission_hint(&self) -> &'static str {
-        crate::fs::XTREE_PERMISSION_HINT
+        fsp::XTREE_PERMISSION_HINT
     }
 
     fn elevating_text(&self) -> &'static str {
-        crate::fs::XTREE_ELEVATING_TEXT
+        fsp::XTREE_ELEVATING_TEXT
     }
 }
 
@@ -368,6 +362,147 @@ impl Shell for Win32Shell {
     }
 }
 
+/// Sistema de archivos: delega en `crate::fs::win32`. No guarda nada: COM se inicializa en el
+/// hilo de cada lectura o búsqueda, y las cachés (nombres de unidad, tipos) son estáticas.
+struct Win32FileSystem;
+
+impl FileSystem for Win32FileSystem {
+    fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
+        fsp::spawn_load(hwnd, tx, panel, generation, current, location)
+    }
+
+    fn with_search_thread(&self, f: Box<dyn FnOnce() + Send>) {
+        fsp::with_search_thread(f)
+    }
+
+    fn search_metadata(&self, item: &std::fs::DirEntry, path: &Path) -> Option<std::fs::Metadata> {
+        fsp::search_metadata(item, path)
+    }
+
+    fn is_hidden(&self, meta: &std::fs::Metadata, name: &OsStr) -> bool {
+        fsp::is_hidden(meta, name)
+    }
+
+    fn searchable_dir(&self, name: &OsStr) -> bool {
+        fsp::searchable_dir(name)
+    }
+
+    fn is_mount_point(&self, path: &Path) -> bool {
+        fsp::is_mount_point(path)
+    }
+
+    fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
+        fsp::disk_entry(path, name, meta)
+    }
+
+    fn user_folder(&self, i: usize) -> Option<PathBuf> {
+        fsp::user_folder(i)
+    }
+
+    fn drives(&self) -> Vec<PathBuf> {
+        fsp::drives()
+    }
+
+    fn drive_name(&self, root: &Path) -> String {
+        fsp::drive_name(root)
+    }
+
+    fn drive_label(&self, drive: &str) -> String {
+        fsp::drive_label(drive)
+    }
+
+    fn forget_drive_labels(&self) {
+        fsp::forget_drive_labels()
+    }
+
+    fn drive_missing(&self, path: &Path) -> bool {
+        fsp::drive_missing(path)
+    }
+
+    /// Una unidad ("C:", "C:\\") se titula como en el Explorador: "Disco local (C:)". Las demás
+    /// raíces (`\\servidor\recurso`, "\\") muestran su texto.
+    fn root_title(&self, path: &Path) -> Option<String> {
+        let root = path.to_string_lossy();
+        let root = root.trim_end_matches('\\');
+        (root.len() == 2 && root.ends_with(':')).then(|| fsp::drive_label(root))
+    }
+
+    fn subfolders(&self, loc: &Location) -> Vec<(String, Location)> {
+        fsp::subfolders(loc)
+    }
+
+    fn folder_icon(&self) -> Option<i32> {
+        fsp::folder_icon()
+    }
+
+    fn shell_location(&self, text: &str) -> Option<Location> {
+        fsp::shell_location(text)
+    }
+
+    fn network_place(&self) -> &'static str {
+        fsp::NETWORK_PLACE
+    }
+
+    fn linux_place(&self) -> &'static str {
+        fsp::LINUX_PLACE
+    }
+
+    fn shell_place_exists(&self, parsing: &str) -> bool {
+        fsp::shell_place_exists(parsing)
+    }
+
+    fn shell_subfolders(&self, parsing: &str) -> Vec<(String, PathBuf)> {
+        fsp::shell_subfolders(parsing)
+    }
+
+    fn quick_access(&self) -> Vec<QuickItem> {
+        fsp::quick_access()
+    }
+
+    fn is_quick_pinned(&self, path: &Path) -> bool {
+        fsp::is_quick_pinned(path)
+    }
+
+    fn quick_access_watch_dir(&self) -> Option<PathBuf> {
+        fsp::quick_access_watch_dir()
+    }
+
+    fn long_path(&self, path: &Path) -> PathBuf {
+        fsp::long_path(path)
+    }
+
+    fn true_case(&self, path: &Path) -> PathBuf {
+        fsp::true_case(path)
+    }
+
+    fn connect_share(&self, owner: Handle, path: &Path) -> bool {
+        fsp::connect_share(owner, path)
+    }
+
+    fn same_path(&self, a: &Path, b: &Path) -> bool {
+        fsp::same_path(a, b)
+    }
+
+    fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
+        fsp::Watcher::with_message(hwnd, msg, panel, lparam, path).map(|w| Box::new(w) as Box<dyn Watch>)
+    }
+}
+
+/// El sistema de archivos real de Windows (lo que instala `install`).
+#[cfg(test)]
+pub fn platform_file_system() -> Box<dyn FileSystem> {
+    Box::new(Win32FileSystem)
+}
+
+/// Superposiciones de íconos: las resuelve el hilo propio de `crate::icons` (con COM).
+struct Win32Overlays;
+
+impl Overlays for Win32Overlays {
+    fn request(&self, req: OverlayRequest) {
+        crate::icons::queue_overlays(req)
+    }
+}
+
 /// Instala los servicios de Windows en el registro del núcleo. El ayudante elevado de xtree
 /// (`--xtree-mft`) sale antes de llegar acá: no usa servicios.
 pub fn install() {
@@ -377,5 +512,7 @@ pub fn install() {
         file_ops: Box::new(Win32FileOps),
         disk_scan: Box::new(Win32DiskScan),
         shell: Box::new(Win32Shell),
+        file_system: Box::new(Win32FileSystem),
+        overlays: Box::new(Win32Overlays),
     });
 }

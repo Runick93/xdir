@@ -295,7 +295,7 @@ struct App {
     /// Grupo al que el nombre que se escriba en la paleta le cambia el nombre (en vez de guardar uno).
     group_rename: Option<String>,
     /// Vigila los cambios del Acceso rápido de Windows para releerlo en el árbol.
-    quick_watch: Option<fs::Watcher>,
+    quick_watch: Option<Box<dyn fs::Watch>>,
     /// El último clic derecho fue sobre el árbol: la carpeta (si tiene ruta de disco).
     tree_ctx: Option<Option<PathBuf>>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).

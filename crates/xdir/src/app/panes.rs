@@ -46,7 +46,7 @@ impl App {
     #[cfg(feature = "arbol")]
     pub(super) fn start_quick_access(&mut self) {
         self.tree.request_quick(self.hwnd);
-        self.quick_watch = fs::quick_access_watch_dir().and_then(|dir| fs::Watcher::with_message(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
+        self.quick_watch = fs::quick_access_watch_dir().and_then(|dir| fs::watch(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
     }
 
     /// Menú contextual nativo de una carpeta del árbol (incluye "Anclar a Acceso rápido" /

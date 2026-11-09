@@ -1,7 +1,7 @@
 use xdir_core::commands::{ALL, Command, available_in, combo_label_in, parse_combo};
 use xdir_core::sys::SystemEnv;
 
-use super::platform_env;
+use super::{platform_env, platform_file_system};
 
 /// El menú de terminales muestra lo mismo que antes en cada sistema.
 #[test]
@@ -58,15 +58,15 @@ const MAC_TABLE: &str = "ir_a_carpeta|Ctrl+P|Ir a una carpeta…|⌘P|true\npale
 const WINDOWS_TABLE: &str = "ir_a_carpeta|Ctrl+P|Ir a una carpeta…|Ctrl+P|true\npaleta|Ctrl+Shift+P|Paleta de comandos|Ctrl+Shift+P|true\npestana_nueva|Ctrl+T|Pestaña nueva|Ctrl+T|true\ncerrar_pestana|Ctrl+W|Cerrar pestaña|Ctrl+W|true\nreabrir_pestana|Ctrl+Shift+T|Reabrir la última pestaña cerrada|Ctrl+Shift+T|true\npestana_siguiente|Ctrl+AvPag|Pestaña siguiente|Ctrl+AvPág|true\npestana_anterior|Ctrl+RePag|Pestaña anterior|Ctrl+RePág|true\ngrupo_siguiente|Ctrl+Tab|Grupo siguiente|Ctrl+Tab|true\ngrupo_anterior|Ctrl+Shift+Tab|Grupo anterior|Ctrl+Shift+Tab|true\npanel_siguiente|Tab|Panel siguiente|Tab|true\npanel_anterior|Shift+Tab|Panel anterior|Shift+Tab|true\npanel_1|Alt+1|Ir al panel 1|Alt+1|true\npanel_2|Alt+2|Ir al panel 2|Alt+2|true\npanel_3|Alt+3|Ir al panel 3|Alt+3|true\npanel_4|Alt+4|Ir al panel 4|Alt+4|true\nlayout_1|Ctrl+1|Layout: 1 panel|Ctrl+1|true\nlayout_2_lado_a_lado|Ctrl+2|Layout: 2 paneles lado a lado|Ctrl+2|true\nlayout_2_apilados|Ctrl+3|Layout: 2 paneles apilados|Ctrl+3|true\nlayout_3|Ctrl+4|Layout: 3 paneles|Ctrl+4|true\nlayout_4|Ctrl+5|Layout: 4 paneles|Ctrl+5|true\nmaximizar_panel|Ctrl+M|Maximizar o restaurar el panel|Ctrl+M|true\natras|Alt+Izquierda,NavegadorAtras|Atrás|Alt+←,Botón atrás del mouse|true\nadelante|Alt+Derecha,NavegadorAdelante|Adelante|Alt+→,Botón adelante del mouse|true\nsubir|Alt+Arriba,Retroceso|Subir a la carpeta superior|Alt+↑,Retroceso|true\nrecargar|F5|Recargar|F5|true\nescribir_ruta|Ctrl+L,F4,Alt+D|Escribir una ruta|Ctrl+L,F4,Alt+D|true\nfiltrar|Ctrl+F|Buscar en la carpeta y sus subcarpetas|Ctrl+F|true\neste_equipo||Ir a Este equipo||true\nmostrar_ocultos|Ctrl+H|Mostrar u ocultar archivos ocultos|Ctrl+H|true\nseleccionar_todo|Ctrl+A|Seleccionar todo|Ctrl+A|true\ninvertir_seleccion|Ctrl+I|Invertir selección|Ctrl+I|true\ncopiar|Ctrl+C|Copiar|Ctrl+C|true\ncortar|Ctrl+X|Cortar|Ctrl+X|true\npegar|Ctrl+V|Pegar|Ctrl+V|true\ncopiar_rutas|Ctrl+Shift+C|Copiar las rutas como texto|Ctrl+Shift+C|true\ndeshacer|Ctrl+Z|Deshacer|Ctrl+Z|true\ncarpeta_nueva|Ctrl+Shift+N|Carpeta nueva|Ctrl+Shift+N|true\npapelera|Supr|Enviar a la papelera|Supr|true\neliminar|Shift+Supr|Eliminar definitivamente|Shift+Supr|true\nrenombrar|F2|Renombrar|F2|true\npropiedades|Alt+Enter|Propiedades|Alt+Enter|true\nfavorito|Ctrl+D|Agregar o quitar de favoritos|Ctrl+D|true\nbarra_favoritos|Ctrl+Shift+B|Mostrar u ocultar la barra de favoritos|Ctrl+Shift+B|true\npowershell||Abrir PowerShell en la carpeta||true\ncmd||Abrir CMD en la carpeta||true\nmodo_oscuro||Cambiar entre modo claro y oscuro||true\nguardar_grupo||Guardar paneles y carpetas como grupo…||true\nbarra_grupos||Mostrar u ocultar la barra de grupos||true\nabrir_configuracion||Abrir la configuración (config.toml)||true\nxtree||Mapa de uso de disco (xtree)||true\nacerca_de||Acerca de xdir (versión y reportar un problema)||true\nvista_detalles|Ctrl+Shift+1|Vista: detalles|Ctrl+Shift+1|true\nvista_iconos|Ctrl+Shift+2|Vista: íconos medianos|Ctrl+Shift+2|true\nvista_iconos_grandes|Ctrl+Shift+3|Vista: íconos grandes|Ctrl+Shift+3|true\nvista_miniaturas|Ctrl+Shift+4|Vista: miniaturas|Ctrl+Shift+4|true\nordenar_nombre||Ordenar por nombre||true\nordenar_modificado||Ordenar por fecha de modificación||true\nordenar_creado||Ordenar por fecha de creación||true\nordenar_tipo||Ordenar por tipo||true\nordenar_extension||Ordenar por extensión||true\nordenar_tamano||Ordenar por tamaño||true\narbol|Ctrl+Shift+E|Mostrar u ocultar el árbol de carpetas (experimental)|Ctrl+Shift+E|true\n";
 
 
-/// Título y migas de la raíz y de una carpeta con el entorno real: la unidad se nombra como hoy
-/// («Disco local (C:)» en Windows, el disco de arranque en macOS).
+/// Título y migas de la raíz y de una carpeta con el sistema de archivos real: la unidad se nombra
+/// como hoy («Disco local (C:)» en Windows, el disco de arranque en macOS).
 #[test]
 fn location_titles_per_os() {
     use crate::fs::Location;
     use std::path::PathBuf;
-    let env = platform_env();
+    let env = platform_file_system();
     let (root, users, drive) =
-        if cfg!(windows) { (r"C:\", r"C:\Users", crate::fs::drive_label("C:")) } else { ("/", "/Users", crate::fs::drive_label("/")) };
+        if cfg!(windows) { (r"C:\", r"C:\Users", env.drive_label("C:")) } else { ("/", "/Users", env.drive_label("/")) };
     let root = Location::Path(PathBuf::from(root));
     let users = Location::Path(PathBuf::from(users));
     assert_eq!(root.title_in(&*env), drive);
@@ -81,4 +81,62 @@ fn location_titles_per_os() {
     } else {
         assert!(!drive.is_empty() && drive != "/", "{drive}");
     }
+}
+
+/// Corre una búsqueda con el sistema de archivos real de la plataforma y junta lo encontrado
+/// (rutas relativas a `root`, ordenadas) y el último avance.
+fn search_real(root: &std::path::Path, query: &str, show_hidden: bool) -> (Vec<String>, f32) {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use xdir_core::fs::{LoadMsg, search_with};
+    // La búsqueda avisa a la ventana con `Handle::post`: el `Waker` falso solo cuenta.
+    xdir_core::sys::testing::install_fakes();
+    let fs: &'static dyn xdir_core::sys::FileSystem = Box::leak(platform_file_system());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let current = Arc::new(AtomicU64::new(7));
+    search_with(fs, crate::platform::Handle(0), tx, 1, 7, current, vec![root.to_path_buf()], show_hidden, crate::list::name_matcher(query));
+    let (mut names, mut progress) = (Vec::new(), 0.0);
+    while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        match ev.msg {
+            LoadMsg::Entries(batch) => {
+                for e in batch {
+                    let full = std::path::PathBuf::from(e.full.expect("con ruta completa"));
+                    names.push(full.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+            LoadMsg::Progress { done, .. } => progress = done,
+            LoadMsg::Listed(_) => break,
+            _ => {}
+        }
+    }
+    names.sort();
+    (names, progress)
+}
+
+/// La búsqueda en subcarpetas con los ganchos reales de cada sistema: ocultos por atributo en
+/// Windows y por punto en macOS, enlaces y paquetes, y las entradas con ruta completa.
+#[test]
+fn search_finds_matches_with_the_real_file_system() {
+    let root = std::env::temp_dir().join(format!("xdir-busqueda-real-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for dir in ["a/b/c", "informes/2024", ".oculta"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    for file in ["informe.txt", "a/b/c/Informe final.pdf", "a/nada.txt", "informes/2024/foto.jpg", ".oculta/informe.txt"] {
+        std::fs::write(root.join(file), "x").unwrap();
+    }
+    // En macOS lo que empieza con punto ya está oculto; en Windows se oculta con el atributo.
+    #[cfg(windows)]
+    assert!(std::process::Command::new("attrib").arg("+h").arg(root.join(".oculta")).status().unwrap().success());
+
+    let (names, progress) = search_real(&root, "informe", false);
+    // La carpeta "informes" también coincide; lo de la carpeta oculta no se ve.
+    assert_eq!(names, ["a/b/c/Informe final.pdf", "informe.txt", "informes"]);
+    assert_eq!(progress, 1.0);
+
+    // Con patrones y mostrando ocultos.
+    let (names, _) = search_real(&root, "*.txt", true);
+    assert_eq!(names, [".oculta/informe.txt", "a/nada.txt", "informe.txt"]);
+
+    let _ = std::fs::remove_dir_all(&root);
 }

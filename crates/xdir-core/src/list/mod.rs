@@ -92,26 +92,41 @@ pub fn default_columns() -> Vec<ColumnSpec> {
         .collect()
 }
 
-/// Cómo se muestran los elementos: filas con columnas, o una cuadrícula de íconos/miniaturas.
+/// Cómo se muestran los elementos: filas con columnas, una cuadrícula de íconos/miniaturas, la
+/// Lista (columnas de nombres que se llenan de arriba abajo) o Contenido (una fila alta por elemento).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
     Details,
     Icons,
     LargeIcons,
     Thumbnails,
+    List,
+    Content,
 }
 
-/// (vista, nombre, identificador para la sesión, lado del ícono en DIPs).
-pub const VIEWS: [(View, &str, &str, f32); 4] = [
+/// (vista, nombre, identificador para la sesión, lado del ícono en DIPs). El índice es el de
+/// `Command::View`: las vistas nuevas van al final para no cambiar los de antes.
+pub const VIEWS: [(View, &str, &str, f32); 6] = [
     (View::Details, "Detalles", "detalles", 16.0),
     (View::Icons, "Íconos medianos", "iconos", 48.0),
     (View::LargeIcons, "Íconos grandes", "iconos_grandes", 96.0),
     (View::Thumbnails, "Miniaturas", "miniaturas", 160.0),
+    (View::List, "Lista", "lista", 16.0),
+    (View::Content, "Contenido", "contenido", 32.0),
 ];
+
+/// Orden de las vistas en el menú, con Ctrl+rueda y con el botón del pie del panel: de lo más
+/// compacto a lo más grande.
+pub const CYCLE: [View; 6] = [View::Details, View::List, View::Content, View::Icons, View::LargeIcons, View::Thumbnails];
 
 impl View {
     pub fn index(self) -> usize {
         VIEWS.iter().position(|v| v.0 == self).unwrap()
+    }
+
+    /// Posición en `CYCLE`.
+    pub fn cycle_index(self) -> usize {
+        CYCLE.iter().position(|&v| v == self).unwrap()
     }
 
     pub fn id(self) -> &'static str {
@@ -130,10 +145,35 @@ impl View {
         VIEWS[self.index()].3
     }
 
+    /// Cuadrícula de íconos o miniaturas (el nombre debajo del ícono).
     pub fn is_grid(self) -> bool {
-        self != View::Details
+        matches!(self, View::Icons | View::LargeIcons | View::Thumbnails)
+    }
+
+    /// Solo Detalles tiene encabezado de columnas (ordenar, filtros, anchos).
+    pub fn has_header(self) -> bool {
+        self == View::Details
+    }
+
+    /// Un elemento por línea, de lado a lado (Detalles y Contenido).
+    pub fn is_row(self) -> bool {
+        matches!(self, View::Details | View::Content)
     }
 }
+
+/// Lista: ancho de cada columna y margen de arriba y de la izquierda (diseño
+/// `list::FileList::draw_list_cell`, pantalla X34).
+pub const LIST_COL_W: f32 = 240.0;
+pub const LIST_PAD: f32 = 4.0;
+/// Contenido: alto de cada fila (diseño `list::FileList::draw_content_row`, pantalla X35); el
+/// margen de arriba es `LIST_PAD`.
+pub const CONTENT_H: f32 = 56.0;
+/// Contenido: ancho de la columna de la derecha (fecha y tamaño) y márgenes de la fila.
+const CONTENT_RIGHT_W: f32 = 160.0;
+const CONTENT_EDGE: f32 = 12.0;
+const CONTENT_TEXT_X: f32 = 58.0;
+/// Lista: dónde arranca el nombre en la celda (después del ícono de 16).
+const LIST_TEXT_X: f32 = 32.0;
 
 /// Alto del nombre debajo de una miniatura (dos líneas) y márgenes de la cuadrícula.
 const LABEL_H: f32 = 34.0;
@@ -466,6 +506,7 @@ impl FileList {
         let resort = self.sort != v.sort || self.descending != v.descending;
         let regroup = self.group_by != v.group_by || self.collapsed != v.collapsed;
         let refilter = self.filters != v.filters;
+        let was_horizontal = self.horizontal();
         self.sort = v.sort;
         self.descending = v.descending;
         self.columns = v.columns.clone();
@@ -476,6 +517,12 @@ impl FileList {
         self.header_drag = None;
         if self.view != v.view {
             self.set_view(v.view);
+        }
+        // Cambió el eje del desplazamiento (la Lista se agrupó o se desagrupó): lo que estaba
+        // desplazado en un eje no vale en el otro.
+        if self.horizontal() != was_horizontal {
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
         }
         if (resort || refilter) && !self.entries.is_empty() {
             let focus = self.focused_index();
@@ -556,7 +603,7 @@ impl FileList {
     /// Elementos visibles en el último frame cuya superposición no se consultó todavía.
     /// Quedan marcados como consultados.
     pub fn take_unchecked_visible(&mut self) -> Vec<usize> {
-        if self.visible.is_empty() || self.view_h() <= 0.0 {
+        if self.visible.is_empty() || self.view_len() <= 0.0 {
             return Vec::new();
         }
         let (first, last) = self.visible_range();
@@ -634,7 +681,7 @@ impl FileList {
             is_dir: e.is_dir,
             selected: self.selected[idx],
             rect,
-            offscreen: rect.bottom <= rows.top || rect.top >= rows.bottom,
+            offscreen: rect.bottom <= rows.top || rect.top >= rows.bottom || rect.right <= rows.left || rect.left >= rows.right,
         })
     }
 
@@ -722,48 +769,91 @@ impl FileList {
 
     // ---------- geometría ----------
 
-    // En detalles cada "línea" es una fila; en las cuadrículas, una fila de celdas. Todo lo que
-    // ubica elementos pasa por `line_h`, `per_line` e `item_rect`.
+    // En detalles y contenido cada "línea" es una fila; en las cuadrículas, una fila de celdas.
+    // Todo lo que ubica elementos pasa por `line_h`, `per_line` e `item_rect`. La Lista sin
+    // agrupar es la excepción: columnas que se llenan de arriba abajo y se desplazan a los
+    // costados (`horizontal`); ahí `scroll` es el desplazamiento horizontal.
 
     fn header_h(&self) -> f32 {
-        if self.view.is_grid() { 0.0 } else { HEADER_H }
+        if self.view.has_header() { HEADER_H } else { 0.0 }
     }
 
     fn rows_area(&self) -> Rect {
         rect(self.area.left, self.area.top + self.header_h(), self.area.right, self.area.bottom)
     }
 
-    fn view_h(&self) -> f32 {
+    /// Lista sin agrupar: columnas de arriba abajo y desplazamiento horizontal. Agrupada, la
+    /// Lista es una cuadrícula de celdas chicas que se desplaza hacia abajo (los encabezados de
+    /// grupo ocupan una fila entera, como en las demás vistas).
+    fn horizontal(&self) -> bool {
+        self.view == View::List && self.group_by.is_none()
+    }
+
+    /// Varios elementos por línea, de izquierda a derecha (cuadrículas y Lista agrupada).
+    fn flows(&self) -> bool {
+        self.view.is_grid() || self.view == View::List
+    }
+
+    /// Largo a la vista en el eje del desplazamiento: el alto, o el ancho en la Lista.
+    fn view_len(&self) -> f32 {
+        if self.horizontal() {
+            return (self.area.right - self.area.left).max(0.0);
+        }
         (self.area.bottom - self.area.top - self.header_h()).max(0.0)
     }
 
     /// Alto de una línea.
     fn line_h(&self) -> f32 {
-        if self.view.is_grid() { self.view.icon() + LABEL_H + 14.0 } else { ROW_H }
+        match self.view {
+            v if v.is_grid() => v.icon() + LABEL_H + 14.0,
+            View::Content => CONTENT_H,
+            _ => ROW_H,
+        }
     }
 
-    /// Ancho de una celda de la cuadrícula.
+    /// Ancho de una celda de la cuadrícula (en la Lista, el de una columna).
     fn cell_w(&self) -> f32 {
-        (self.view.icon() + 40.0).max(96.0)
+        if self.view == View::List { LIST_COL_W } else { (self.view.icon() + 40.0).max(96.0) }
+    }
+
+    /// Margen izquierdo de las celdas.
+    fn cell_pad(&self) -> f32 {
+        if self.view.is_grid() { GRID_PAD } else { LIST_PAD }
     }
 
     /// Elementos por línea.
     fn per_line(&self) -> usize {
-        if !self.view.is_grid() {
+        if !self.flows() || self.horizontal() {
             return 1;
         }
-        let usable = self.area.right - self.area.left - SCROLLBAR_W - GRID_PAD * 2.0;
+        let usable = self.area.right - self.area.left - SCROLLBAR_W - self.cell_pad() * 2.0;
         ((usable / self.cell_w()).floor() as usize).max(1)
     }
 
-    /// Margen de arriba del contenido (la cuadrícula no arranca pegada al borde).
-    fn top_pad(&self) -> f32 {
-        if self.view.is_grid() { GRID_PAD } else { 0.0 }
+    /// Lista: filas por columna (lo que entra arriba de la barra horizontal).
+    fn rows_per_col(&self) -> usize {
+        let h = self.area.bottom - self.area.top - LIST_PAD - SCROLLBAR_W;
+        ((h / ROW_H).floor() as usize).max(1)
     }
 
-    /// Alto del contenido más dos líneas vacías al final, para poder hacer clic derecho en la
-    /// carpeta aunque la lista llene el panel.
-    fn content_h(&self) -> f32 {
+    /// Margen de arriba del contenido (la cuadrícula no arranca pegada al borde); en la Lista,
+    /// también el de la izquierda.
+    fn top_pad(&self) -> f32 {
+        match self.view {
+            v if v.is_grid() => GRID_PAD,
+            View::List | View::Content => LIST_PAD,
+            _ => 0.0,
+        }
+    }
+
+    /// Largo del contenido en el eje del desplazamiento, más fondo libre al final (dos líneas
+    /// vacías hacia abajo; una columna en la Lista), para poder hacer clic derecho en la carpeta
+    /// o arrancar un rectángulo aunque los elementos llenen el panel.
+    fn content_len(&self) -> f32 {
+        if self.horizontal() {
+            let cols = self.visible.len().div_ceil(self.rows_per_col());
+            return (cols + 1) as f32 * LIST_COL_W + LIST_PAD * 2.0;
+        }
         if let Some(l) = &self.layout {
             return l.bottom + self.top_pad() + self.line_h() * 2.0;
         }
@@ -773,14 +863,17 @@ impl FileList {
 
     /// Elementos que entran en una página (Re Pág / Av Pág).
     fn page_rows(&self) -> usize {
-        ((self.view_h() / self.line_h()).floor() as usize).max(1) * self.per_line()
+        if self.horizontal() {
+            return ((self.view_len() / LIST_COL_W).floor() as usize).max(1) * self.rows_per_col();
+        }
+        ((self.view_len() / self.line_h()).floor() as usize).max(1) * self.per_line()
     }
 
     /// Posiciones (en `visible`) a la vista: [primera, última).
     fn visible_range(&self) -> (usize, usize) {
         if let Some(layout) = &self.layout {
             let mut range: Option<(usize, usize)> = None;
-            for l in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_h())] {
+            for l in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_len())] {
                 if l.header.is_none() {
                     let end = (l.first + l.count) as usize;
                     range = Some(range.map_or((l.first as usize, end), |(f, _)| (f, end)));
@@ -788,59 +881,93 @@ impl FileList {
             }
             return range.unwrap_or((0, 0));
         }
+        let n = self.visible.len();
+        if self.horizontal() {
+            let per = self.rows_per_col();
+            let first_col = ((self.scroll - LIST_PAD).max(0.0) / LIST_COL_W).floor() as usize;
+            let cols = (self.view_len() / LIST_COL_W).ceil() as usize + 1;
+            return ((first_col * per).min(n), ((first_col + cols) * per).min(n));
+        }
         let (lh, per) = (self.line_h(), self.per_line());
         let first_line = ((self.scroll - self.top_pad()).max(0.0) / lh).floor() as usize;
-        let lines = (self.view_h() / lh).ceil() as usize + 1;
-        ((first_line * per).min(self.visible.len()), ((first_line + lines) * per).min(self.visible.len()))
+        let lines = (self.view_len() / lh).ceil() as usize + 1;
+        ((first_line * per).min(n), ((first_line + lines) * per).min(n))
     }
 
-    /// Rectángulo de un elemento (fila en detalles, celda en las cuadrículas).
+    /// Rectángulo de un elemento (fila en detalles y contenido, celda en las cuadrículas y en la
+    /// Lista).
     fn item_rect(&self, pos: usize) -> Rect {
         let rows = self.rows_area();
+        if self.horizontal() {
+            let per = self.rows_per_col();
+            let x = rows.left + LIST_PAD + (pos / per) as f32 * LIST_COL_W - self.scroll;
+            let y = rows.top + LIST_PAD + (pos % per) as f32 * ROW_H;
+            return rect(x, y, x + LIST_COL_W, y + ROW_H);
+        }
         // Con grupos, la línea y la columna salen de la geometría agrupada.
         let placed = self.layout.as_ref().and_then(|l| {
             let line = l.lines[*l.pos_line.get(pos)? as usize];
             Some((line.top, pos - line.first as usize))
         });
-        if !self.view.is_grid() {
-            let top = placed.map_or(pos as f32 * ROW_H, |(top, _)| top);
+        let lh = self.line_h();
+        if self.view.is_row() {
+            let top = placed.map_or(self.top_pad() + pos as f32 * lh, |(top, _)| top);
             let y = rows.top + top - self.scroll;
-            return rect(rows.left, y, rows.right - SCROLLBAR_W, y + ROW_H);
+            return rect(rows.left, y, rows.right - SCROLLBAR_W, y + lh);
         }
         let per = self.per_line();
         let (line, col) = (pos / per, pos % per);
         let col = placed.map_or(col, |(_, c)| c);
-        // Las celdas se reparten el ancho sobrante, para no dejar un hueco a la derecha.
-        let usable = rows.right - rows.left - SCROLLBAR_W - GRID_PAD * 2.0;
-        let w = (usable / per as f32).max(self.cell_w());
-        let x = rows.left + GRID_PAD + col as f32 * w;
-        let top = placed.map_or(self.top_pad() + line as f32 * self.line_h(), |(top, _)| top);
+        let w = self.flow_cell_w();
+        let x = rows.left + self.cell_pad() + col as f32 * w;
+        let top = placed.map_or(self.top_pad() + line as f32 * lh, |(top, _)| top);
         let y = rows.top + top - self.scroll;
-        rect(x, y, x + w, y + self.line_h())
+        rect(x, y, x + w, y + lh)
+    }
+
+    /// Ancho de cada celda cuando van varias por línea: en las cuadrículas se reparten el ancho
+    /// sobrante, para no dejar un hueco a la derecha; en la Lista, el ancho fijo del diseño.
+    fn flow_cell_w(&self) -> f32 {
+        if !self.view.is_grid() {
+            return self.cell_w();
+        }
+        let usable = self.area.right - self.area.left - SCROLLBAR_W - GRID_PAD * 2.0;
+        (usable / self.per_line() as f32).max(self.cell_w())
     }
 
     /// Elemento bajo el punto (posición en `visible`).
     fn pos_at(&self, x: f32, y: f32) -> Option<usize> {
         let rows = self.rows_area();
+        if self.horizontal() {
+            // La barra horizontal está abajo; las columnas, corridas por el desplazamiento.
+            if y < rows.top || y >= rows.bottom - SCROLLBAR_W || x < rows.left || x >= rows.right {
+                return None;
+            }
+            let per = self.rows_per_col();
+            let col = ((x - rows.left - LIST_PAD + self.scroll) / LIST_COL_W).floor();
+            let row = ((y - rows.top - LIST_PAD) / ROW_H).floor();
+            if col < 0.0 || row < 0.0 || row as usize >= per {
+                return None;
+            }
+            let pos = col as usize * per + row as usize;
+            return (pos < self.visible.len()).then_some(pos);
+        }
         if y < rows.top || y >= rows.bottom || x >= rows.right - SCROLLBAR_W {
             return None;
         }
         let per = self.per_line();
-        let usable = rows.right - rows.left - SCROLLBAR_W - GRID_PAD * 2.0;
-        let w = (usable / per as f32).max(self.cell_w());
+        let w = self.flow_cell_w();
+        let col_at = |x: f32| if self.flows() { ((x - rows.left - self.cell_pad()) / w).floor() } else { 0.0 };
         if let Some(layout) = &self.layout {
             // Con grupos: la línea bajo el punto; los encabezados no son elementos.
             let line = layout.lines[layout.line_at(y - rows.top + self.scroll)?];
             if line.header.is_some() {
                 return None;
             }
-            let col = if self.view.is_grid() { ((x - rows.left - GRID_PAD) / w).floor() } else { 0.0 };
+            let col = col_at(x);
             return (col >= 0.0 && (col as u32) < line.count).then_some(line.first as usize + col as usize);
         }
-        if !self.view.is_grid() {
-            return self.row_at(y);
-        }
-        let col = ((x - rows.left - GRID_PAD) / w).floor();
+        let col = col_at(x);
         let line = ((y - rows.top - self.top_pad() + self.scroll) / self.line_h()).floor();
         if col < 0.0 || line < 0.0 || col as usize >= per {
             return None;
@@ -850,7 +977,7 @@ impl FileList {
     }
 
     fn clamp_scroll(&mut self) {
-        let max = (self.content_h() - self.view_h()).max(0.0);
+        let max = (self.content_len() - self.view_len()).max(0.0);
         self.scroll = self.scroll.clamp(0.0, max);
         self.scroll_target = self.scroll_target.clamp(0.0, max);
     }
@@ -862,6 +989,11 @@ impl FileList {
 
     /// Lleva el elemento a la vista (el destino del scroll; se llega suave, ver `tick`).
     fn ensure_visible(&mut self, pos: usize) {
+        if self.horizontal() {
+            let left = LIST_PAD + (pos / self.rows_per_col()) as f32 * LIST_COL_W;
+            self.ensure_span(left, LIST_COL_W);
+            return;
+        }
         let mut lh = self.line_h();
         let mut top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
         if let Some(l) = self.layout.as_ref().and_then(|l| Some(l.lines[*l.pos_line.get(pos)? as usize])) {
@@ -870,12 +1002,12 @@ impl FileList {
         self.ensure_span(top, lh);
     }
 
-    /// Lleva a la vista el tramo [top, top + lh) del contenido.
+    /// Lleva a la vista el tramo [top, top + lh) del contenido (en la Lista, [izquierda, + ancho)).
     fn ensure_span(&mut self, top: f32, lh: f32) {
         if top < self.scroll_target {
             self.scroll_target = (top - self.top_pad()).max(0.0);
-        } else if top + lh > self.scroll_target + self.view_h() {
-            self.scroll_target = top + lh - self.view_h() + self.top_pad();
+        } else if top + lh > self.scroll_target + self.view_len() {
+            self.scroll_target = top + lh - self.view_len() + self.top_pad();
         }
         self.clamp_scroll();
         if !crate::anim::enabled() {
@@ -897,7 +1029,7 @@ impl FileList {
         self.view = view;
         self.name_ends.clear();
         self.header_drag = None;
-        // Las cuadrículas no tienen encabezado: ni flecha ni desplegable.
+        // Solo Detalles tiene encabezado: ni flecha ni desplegable en las demás.
         self.menu = None;
         self.header_hover = None;
         self.hover = None;
@@ -948,7 +1080,7 @@ impl FileList {
 
     /// ¿El punto está en el encabezado de la lista?
     pub fn in_header(&self, x: f32, y: f32) -> bool {
-        !self.view.is_grid() && y >= self.area.top && y < self.area.top + HEADER_H && x >= self.area.left && x < self.area.right
+        self.view.has_header() && y >= self.area.top && y < self.area.top + HEADER_H && x >= self.area.left && x < self.area.right
     }
 
     /// Borde de encabezado bajo el mouse, para cambiar un ancho: índice (en `columns`) de la
@@ -1074,22 +1206,20 @@ impl FileList {
         self.pos_at(x, y).map(|pos| self.visible[pos] as usize)
     }
 
-    fn row_at(&self, y: f32) -> Option<usize> {
-        let rows = self.rows_area();
-        if y < rows.top || y >= rows.bottom {
-            return None;
-        }
-        let pos = ((y - rows.top + self.scroll) / ROW_H).floor() as usize;
-        (pos < self.visible.len()).then_some(pos)
-    }
-
-    /// Barra de desplazamiento: (riel, pulgar), o None si todo entra.
+    /// Barra de desplazamiento: (riel, pulgar), o None si todo entra. En la Lista va abajo,
+    /// horizontal, con los mismos colores y grosor que la vertical.
     fn scrollbar(&self) -> Option<(Rect, Rect)> {
-        let (view, content) = (self.view_h(), self.content_h());
+        let (view, content) = (self.view_len(), self.content_len());
         if content <= view || view <= 0.0 {
             return None;
         }
         let rows = self.rows_area();
+        if self.horizontal() {
+            let track = rect(rows.left, rows.bottom - SCROLLBAR_W, rows.right, rows.bottom);
+            let thumb_w = (view * view / content).max(24.0).min(view);
+            let left = track.left + (view - thumb_w) * (self.scroll / (content - view));
+            return Some((track, rect(left, track.top + 3.0, left + thumb_w, track.bottom - 3.0)));
+        }
         let track = rect(rows.right - SCROLLBAR_W, rows.top, rows.right, rows.bottom);
         let thumb_h = (view * view / content).max(24.0).min(view);
         let max_scroll = content - view;
@@ -1097,11 +1227,17 @@ impl FileList {
         Some((track, rect(track.left + 3.0, top, track.right - 3.0, top + thumb_h)))
     }
 
+    /// El punto y un rectángulo de la barra medidos en el eje del desplazamiento: (punto,
+    /// principio, fin); y en la barra vertical, x en la horizontal de la Lista.
+    fn along(&self, x: f32, y: f32, r: &Rect) -> (f32, f32, f32) {
+        if self.horizontal() { (x, r.left, r.right) } else { (y, r.top, r.bottom) }
+    }
+
     // ---------- selección ----------
 
     /// ¿El punto está pasado el ícono y el nombre de esa fila (en cualquier columna)?
     fn past_name(&self, pos: usize, x: f32) -> bool {
-        if self.view.is_grid() {
+        if self.view != View::Details {
             return false;
         }
         pos.checked_sub(self.name_ends_first).and_then(|i| self.name_ends.get(i)).is_some_and(|&end| x > end)
@@ -1109,7 +1245,7 @@ impl FileList {
 
     /// ¿El punto está en la columna del nombre pero a la derecha de donde termina el texto?
     fn in_name_blank(&self, pos: usize, x: f32) -> bool {
-        if self.view.is_grid() {
+        if self.view != View::Details {
             return false;
         }
         let Some(&end) = pos.checked_sub(self.name_ends_first).and_then(|i| self.name_ends.get(i)) else { return false };
@@ -1117,18 +1253,36 @@ impl FileList {
     }
 
     /// Punto del mouse para el rectángulo: x de la ventana (sin salirse de la lista) e y del
-    /// contenido, para que siga pegado a los elementos aunque se mueva el scroll.
+    /// contenido, para que siga pegado a los elementos aunque se mueva el scroll. En la Lista,
+    /// al revés: x del contenido e y de la ventana.
     fn band_point(&self, x: f32, y: f32) -> (f32, f32) {
         let rows = self.rows_area();
+        if self.horizontal() {
+            let x = x.clamp(rows.left, rows.right) - rows.left + self.scroll;
+            return (x, y.clamp(rows.top, rows.bottom - SCROLLBAR_W));
+        }
         let x = x.clamp(rows.left, rows.right - SCROLLBAR_W);
         (x, y.clamp(rows.top, rows.bottom) - rows.top + self.scroll)
     }
 
-    /// El mouse se movió con el rectángulo armándose: scroll si se sale por arriba o por abajo,
-    /// y la selección pasa a ser lo que toca el rectángulo.
+    /// Rectángulo de selección en coordenadas de la ventana.
+    fn band_rect(&self, b: &Band) -> Rect {
+        let rows = self.rows_area();
+        let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
+        let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
+        if self.horizontal() {
+            let dx = rows.left - self.scroll;
+            return rect(x0 + dx, y0, x1 + dx, y1);
+        }
+        rect(x0, y0 + rows.top - self.scroll, x1, y1 + rows.top - self.scroll)
+    }
+
+    /// El mouse se movió con el rectángulo armándose: scroll si se sale por arriba o por abajo
+    /// (en la Lista, por los costados), y la selección pasa a ser lo que toca el rectángulo.
     fn move_band(&mut self, x: f32, y: f32) {
         let rows = self.rows_area();
-        let beyond = if y < rows.top { y - rows.top } else if y > rows.bottom { y - rows.bottom } else { 0.0 };
+        let (at, lo, hi) = if self.horizontal() { (x, rows.left, rows.right) } else { (y, rows.top, rows.bottom) };
+        let beyond = if at < lo { at - lo } else if at > hi { at - hi } else { 0.0 };
         if beyond != 0.0 {
             self.scroll_target += beyond.clamp(-60.0, 60.0) * 0.5;
             self.clamp_scroll();
@@ -1145,31 +1299,39 @@ impl FileList {
     /// Selección = lo que había (con Ctrl) más los elementos que toca el rectángulo.
     fn apply_band(&mut self) {
         let Some(b) = &self.band else { return };
-        let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
-        let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
+        let r = self.band_rect(b);
         let mut sel = b.base.clone();
-        let (lh, per, pad) = (self.line_h(), self.per_line(), self.top_pad());
-        let (first, last) = match &self.layout {
-            // Con grupos: los elementos de las líneas que toca el rectángulo.
-            Some(layout) => {
-                let lines = &layout.lines[layout.lines_between(y0, y1.max(y0 + 0.01))];
-                let items = || lines.iter().filter(|l| l.header.is_none());
-                (items().next().map_or(0, |l| l.first as usize), items().last().map_or(0, |l| (l.first + l.count) as usize))
-            }
-            None => {
-                let first_line = ((y0 - pad) / lh).floor().max(0.0) as usize;
-                let last_line = ((y1 - pad) / lh).floor().max(0.0) as usize;
-                ((first_line * per).min(self.visible.len()), ((last_line + 1) * per).min(self.visible.len()))
+        let n = self.visible.len();
+        let (first, last) = if self.horizontal() {
+            // Las columnas que toca el rectángulo.
+            let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
+            let per = self.rows_per_col();
+            let c0 = ((x0 - LIST_PAD) / LIST_COL_W).floor().max(0.0) as usize;
+            let c1 = ((x1 - LIST_PAD) / LIST_COL_W).floor().max(0.0) as usize;
+            ((c0 * per).min(n), ((c1 + 1) * per).min(n))
+        } else {
+            let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
+            let (lh, per, pad) = (self.line_h(), self.per_line(), self.top_pad());
+            match &self.layout {
+                // Con grupos: los elementos de las líneas que toca el rectángulo.
+                Some(layout) => {
+                    let lines = &layout.lines[layout.lines_between(y0, y1.max(y0 + 0.01))];
+                    let items = || lines.iter().filter(|l| l.header.is_none());
+                    (items().next().map_or(0, |l| l.first as usize), items().last().map_or(0, |l| (l.first + l.count) as usize))
+                }
+                None => {
+                    let first_line = ((y0 - pad) / lh).floor().max(0.0) as usize;
+                    let last_line = ((y1 - pad) / lh).floor().max(0.0) as usize;
+                    ((first_line * per).min(n), ((last_line + 1) * per).min(n))
+                }
             }
         };
-        let rows_top = self.rows_area().top;
         let mut hit = None;
         for pos in first..last {
-            let r = self.item_rect(pos);
-            let line_top = r.top - rows_top + self.scroll;
-            // Detalles: la fila ocupa todo el ancho; en las cuadrículas también cuenta la x.
-            let across = !self.view.is_grid() || (r.left < x1 && r.right > x0);
-            if across && line_top < y1 && line_top + lh > y0 {
+            let item = self.item_rect(pos);
+            // Detalles y Contenido: la fila ocupa todo el ancho; en las demás también cuenta la x.
+            let across = self.view.is_row() || (item.left < r.right && item.right > r.left);
+            if across && item.top < r.bottom && item.bottom > r.top {
                 sel[self.visible[pos] as usize] = true;
                 hit = Some(pos);
             }
@@ -1267,15 +1429,17 @@ impl FileList {
         // Sin selección, la primera flecha selecciona la fila con foco en vez de saltearla.
         let step = usize::from(self.selected.iter().any(|&s| s));
         // En la cuadrícula arriba/abajo saltan una fila de celdas y izquierda/derecha, una celda.
-        let per = self.per_line();
-        let grid = self.view.is_grid();
+        // En la Lista (columnas de arriba abajo), al revés: arriba/abajo, un elemento;
+        // izquierda/derecha, una columna.
+        let (vert, horiz) = if self.horizontal() { (1, self.rows_per_col()) } else { (self.per_line(), 1) };
+        let sideways = self.flows();
         let target = match Key(vk) {
-            VK_UP => cur.saturating_sub(step * per),
-            VK_DOWN if cur + step * per < n => cur + step * per,
+            VK_UP => cur.saturating_sub(step * vert),
+            VK_DOWN if cur + step * vert < n => cur + step * vert,
             // Abajo desde la última fila incompleta: el último elemento.
             VK_DOWN => n - 1,
-            VK_LEFT if grid => cur.saturating_sub(step),
-            VK_RIGHT if grid => (cur + step).min(n - 1),
+            VK_LEFT if sideways => cur.saturating_sub(step * horiz),
+            VK_RIGHT if sideways => (cur + step * horiz).min(n - 1),
             VK_PRIOR => cur.saturating_sub(page),
             VK_NEXT => (cur + page).min(n - 1),
             VK_HOME => 0,
@@ -1317,7 +1481,7 @@ impl FileList {
             return None;
         }
         let n = self.visible.len();
-        let grid = self.view.is_grid();
+        let grid = self.flows();
         let header = self.focused_header();
         // Línea con foco: la del encabezado o la del elemento.
         let header_line = header.and_then(|r| layout.lines.iter().position(|l| l.header == Some(r as u32)));
@@ -1372,7 +1536,7 @@ impl FileList {
                     None => To::Pos(pos),
                 }
             }
-            // Detalles: ← desde un elemento va al encabezado de su grupo.
+            // Detalles y Contenido: ← desde un elemento va al encabezado de su grupo.
             (VK_LEFT, None, Some(pos)) if !grid => {
                 let li = line_of(pos);
                 let r = layout.lines[..li].iter().rev().find_map(|l| l.header)?;
@@ -1480,6 +1644,16 @@ impl FileList {
             let y = cell.top + 6.0 + self.view.icon() + 4.0;
             return Some(rect(cell.left + 4.0, y, cell.right - 4.0, y + 22.0));
         }
+        let cell = self.item_rect(pos);
+        match self.view {
+            // Donde va el nombre en la celda (`draw_list_cell`) y en la fila (`draw_content_row`).
+            View::List => return Some(rect(cell.left + LIST_TEXT_X - 4.0, cell.top + 1.0, cell.right - 4.0, cell.bottom - 1.0)),
+            View::Content => {
+                let right = (cell.right - CONTENT_EDGE - CONTENT_RIGHT_W - CONTENT_EDGE).max(cell.left + CONTENT_TEXT_X + 40.0);
+                return Some(rect(cell.left + CONTENT_TEXT_X - 4.0, cell.top + 7.0, right, cell.top + 29.0));
+            }
+            _ => {}
+        }
         let (_, left, right) = self.columns().into_iter().find(|c| c.0 == Column::Name)?;
         let row = self.item_rect(pos);
         Some(rect(left + PAD + ICON + 4.0, row.top + 1.0, right - PAD, row.bottom - 1.0))
@@ -1493,14 +1667,21 @@ impl FileList {
             return Some((self.area.left + 40.0, r.bottom.clamp(self.area.top, self.area.bottom)));
         }
         let r = self.item_rect(self.focus?);
-        let x = if self.view.is_grid() { (r.left + r.right) / 2.0 } else { self.area.left + 40.0 };
+        let x = if self.view.is_grid() { (r.left + r.right) / 2.0 } else { r.left.max(self.area.left) + 40.0 };
         Some((x, r.bottom.clamp(self.area.top, self.area.bottom)))
     }
 
     pub fn on_wheel(&mut self, rows: f32) -> Action {
         let before = self.scroll_target;
-        // En la cuadrícula, una muesca de la rueda mueve media celda por "línea" de la rueda.
-        let step = if self.view.is_grid() { self.line_h() / 3.0 } else { ROW_H };
+        // En la cuadrícula, una muesca de la rueda mueve media celda por "línea" de la rueda; en
+        // la Lista la rueda vertical desplaza a los costados, una columna por muesca (3 líneas).
+        let step = if self.horizontal() {
+            LIST_COL_W / 3.0
+        } else if self.view.is_grid() || self.view == View::Content {
+            self.line_h() / 3.0
+        } else {
+            ROW_H
+        };
         self.scroll_target -= rows * step;
         self.clamp_scroll();
         if !crate::anim::enabled() {
@@ -1532,13 +1713,16 @@ impl FileList {
         }
         if let Some((track, thumb)) = self.scrollbar() {
             if contains(&track, x, y) {
-                if y >= thumb.top && y < thumb.bottom {
-                    self.thumb_drag = Some(y - thumb.top);
+                // En la Lista la barra es horizontal: todo se mide en x.
+                let (at, start, end) = self.along(x, y, &thumb);
+                if at >= start && at < end {
+                    self.thumb_drag = Some(at - start);
                     return (Action::Redraw, true);
                 }
                 // Clic en el riel: avanza una página hacia ese lado.
-                let page = (self.view_h() / self.line_h()).floor().max(1.0) * self.line_h();
-                self.scroll_target += if y < thumb.top { -page } else { page };
+                let unit = if self.horizontal() { LIST_COL_W } else { self.line_h() };
+                let page = (self.view_len() / unit).floor().max(1.0) * unit;
+                self.scroll_target += if at < start { -page } else { page };
                 self.clamp_scroll();
                 if !crate::anim::enabled() {
                     self.snap_scroll();
@@ -1682,11 +1866,12 @@ impl FileList {
         }
         if let Some(grab) = self.thumb_drag {
             if let Some((track, thumb)) = self.scrollbar() {
-                let thumb_h = thumb.bottom - thumb.top;
-                let travel = (track.bottom - track.top - thumb_h).max(1.0);
-                let frac = ((y - grab - track.top) / travel).clamp(0.0, 1.0);
+                let (at, start, end) = self.along(x, y, &thumb);
+                let (track_start, track_end) = (self.along(x, y, &track).1, self.along(x, y, &track).2);
+                let travel = (track_end - track_start - (end - start)).max(1.0);
+                let frac = ((at - grab - track_start) / travel).clamp(0.0, 1.0);
                 // Arrastrar el pulgar sigue al mouse sin demora.
-                self.scroll = frac * (self.content_h() - self.view_h());
+                self.scroll = frac * (self.content_len() - self.view_len());
                 self.scroll_target = self.scroll;
                 return Action::Redraw;
             }
@@ -1733,11 +1918,11 @@ impl FileList {
             Some(HeaderDrag::Press { index, moved: true, .. }) => self.columns.get(index).map(|c| c.col),
             _ => None,
         };
-        if !self.view.is_grid() {
+        if self.view.has_header() {
             p.fill(header, th.surface_alt);
             p.fill(rect(header.left, header.bottom - 1.0, header.right, header.bottom), th.border);
         }
-        for &(col, left, right) in cols.iter().filter(|_| !self.view.is_grid()) {
+        for &(col, left, right) in cols.iter().filter(|_| self.view.has_header()) {
             if dragging == Some(col) {
                 p.fill(rect(left, header.top, right, header.bottom - 1.0), alpha(th.accent, 0.18));
             }
@@ -1769,7 +1954,6 @@ impl FileList {
         }
 
         let (first, last) = self.visible_range();
-        let grid = self.view.is_grid();
         let header_focus = self.focused_header();
         let item_focus = if header_focus.is_none() { self.focus } else { None };
 
@@ -1780,10 +1964,11 @@ impl FileList {
                 let e = &self.entries[idx];
                 let item = self.item_rect(pos);
                 let y = item.top;
-                let row = if grid {
-                    rect(item.left + 3.0, item.top + 3.0, item.right - 3.0, item.bottom - 3.0)
-                } else {
-                    rect(item.left + 4.0, y + 1.0, item.right, y + ROW_H - 1.0)
+                // Banda de selección/foco/resaltado de cada vista (según el diseño de cada una).
+                let row = match self.view {
+                    v if v.is_grid() => rect(item.left + 3.0, item.top + 3.0, item.right - 3.0, item.bottom - 3.0),
+                    View::List => rect(item.left + 2.0, item.top + 1.0, item.right - 2.0, item.bottom - 1.0),
+                    _ => rect(item.left + 4.0, item.top + 1.0, item.right, item.bottom - 1.0),
                 };
 
                 if self.drop_target == Some(idx) {
@@ -1805,9 +1990,20 @@ impl FileList {
                 // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
                 let color = crate::config::color_for(p.file_colors(), &e.sort_key, e.is_dir, e.attrs)
                     .unwrap_or(if e.is_hidden() { th.text_dim } else { th.text });
-                if grid {
-                    self.draw_cell(p, e, row, color);
-                    continue;
+                match self.view {
+                    v if v.is_grid() => {
+                        self.draw_cell(p, e, row, color);
+                        continue;
+                    }
+                    View::List => {
+                        self.draw_list_cell(p, e, item, color);
+                        continue;
+                    }
+                    View::Content => {
+                        self.draw_content_row(p, e, item, color);
+                        continue;
+                    }
+                    _ => {}
                 }
                 for &(col, left, right) in &cols {
                     let cell = rect(left + PAD, y, right - PAD, y + ROW_H);
@@ -1841,7 +2037,7 @@ impl FileList {
 
             // Encabezados de los grupos a la vista.
             if let Some(layout) = &self.layout {
-                for line in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_h())] {
+                for line in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_len())] {
                     let Some(r) = line.header else { continue };
                     let Some(Row::Header { key, count, collapsed }) = self.rows.get(r as usize) else { continue };
                     let focused = active && self.focus_visible && header_focus == Some(r as usize);
@@ -1850,9 +2046,7 @@ impl FileList {
             }
 
             if let Some(b) = &self.band {
-                let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
-                let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
-                let r = rect(x0, y0 + rows.top - self.scroll, x1, y1 + rows.top - self.scroll);
+                let r = self.band_rect(b);
                 if r.right - r.left > 1.0 || r.bottom - r.top > 1.0 {
                     p.fill(r, alpha(th.accent, 0.16));
                     p.round_stroke(r, 0.0, alpha(th.accent, 0.8));
@@ -1874,13 +2068,7 @@ impl FileList {
         let size = self.view.icon();
         let cx = (cell.left + cell.right) / 2.0;
         let image = rect(cx - size / 2.0, cell.top + 6.0, cx + size / 2.0, cell.top + 6.0 + size);
-        let source = match (&e.pidl, &e.full, &self.folder) {
-            (Some(pidl), _, _) => Some(thumbs::Source::Pidl(pidl.clone())),
-            (_, Some(full), _) => Some(thumbs::Source::Path(full.into())),
-            (_, _, Some(folder)) => Some(thumbs::Source::Path(folder.join(&e.name))),
-            _ => None,
-        };
-        let drawn = source.is_some_and(|s| p.thumbnail(&(s, p.thumb_px(size)), image));
+        let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(size)), image));
         if !drawn {
             // Mientras llega la miniatura: el ícono chico, centrado.
             let small = 32.0_f32.min(size);
@@ -1889,6 +2077,51 @@ impl FileList {
         }
         let label = rect(cell.left + 4.0, image.bottom + 4.0, cell.right - 4.0, cell.bottom - 2.0);
         p.text(FontId::Label, shown_name(e, self.show_extensions), label, color);
+    }
+
+    /// De dónde sale la miniatura de un elemento (por PIDL o por ruta).
+    fn thumb_source(&self, e: &Entry) -> Option<thumbs::Source> {
+        match (&e.pidl, &e.full, &self.folder) {
+            (Some(pidl), _, _) => Some(thumbs::Source::Pidl(pidl.clone())),
+            (_, Some(full), _) => Some(thumbs::Source::Path(full.into())),
+            (_, _, Some(folder)) => Some(thumbs::Source::Path(folder.join(&e.name))),
+            _ => None,
+        }
+    }
+
+    /// Celda de la Lista (diseño `list::FileList::draw_list_cell`): ícono de 16 y el nombre.
+    fn draw_list_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color) {
+        p.shell_icon(e.icon, e.overlay, cell.left + 8.0, cell.top + (ROW_H - ICON) / 2.0, ICON);
+        let text = rect(cell.left + LIST_TEXT_X, cell.top, cell.right - 8.0, cell.bottom);
+        p.text(FontId::Ui, shown_name(e, self.show_extensions), text, color);
+    }
+
+    /// Fila de Contenido (diseño `list::FileList::draw_content_row`): ícono de 32 o miniatura,
+    /// el nombre y debajo el tipo; a la derecha la fecha de modificación y debajo el tamaño; una
+    /// línea separa cada fila de la siguiente.
+    fn draw_content_row(&self, p: &dyn Painter, e: &Entry, row: Rect, color: Color) {
+        let th = p.theme();
+        p.fill(rect(row.left + CONTENT_EDGE, row.bottom - 1.0, row.right - CONTENT_EDGE, row.bottom), th.border);
+        const SIZE: f32 = 32.0;
+        let (ix, iy) = (row.left + 14.0, row.top + (CONTENT_H - SIZE) / 2.0);
+        let image = rect(ix, iy, ix + SIZE, iy + SIZE);
+        let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(SIZE)), image));
+        if !drawn {
+            p.shell_icon(e.icon, e.overlay, ix, iy, SIZE);
+        }
+        // Dos líneas de texto de 13: arriba centrada en y+18, abajo en y+38.
+        let (top, bottom) = ((row.top + 9.0, row.top + 27.0), (row.top + 29.0, row.top + 47.0));
+        let right = row.right - CONTENT_EDGE;
+        let data_left = right - CONTENT_RIGHT_W;
+        let text_right = (data_left - CONTENT_EDGE).max(row.left + CONTENT_TEXT_X + 40.0);
+        let text_left = row.left + CONTENT_TEXT_X;
+        p.text(FontId::Ui, shown_name(e, self.show_extensions), rect(text_left, top.0, text_right, top.1), color);
+        p.text(FontId::Ui, &e.type_name, rect(text_left, bottom.0, text_right, bottom.1), th.text_dim);
+        let root = self.search_root.as_deref();
+        let date = Self::cell_text(Column::Modified, e, root, true);
+        let size = Self::cell_text(Column::Size, e, root, true);
+        p.text(FontId::UiRight, &date, rect(data_left, top.0, right, top.1), th.text_secondary);
+        p.text(FontId::UiRight, &size, rect(data_left, bottom.0, right, bottom.1), th.text_dim);
     }
 }
 
@@ -2197,6 +2430,163 @@ mod column_tests {
         let found: Vec<_> = texts.iter().filter(|(_, s, _)| *s == size).collect();
         assert_eq!(found.len(), 1, "{texts:?}");
         assert_eq!(found[0].0, FontId::UiRight);
+    }
+
+    /// Lista con 30 elementos y alto para 10 filas (más la barra horizontal de abajo).
+    fn list_view(width: f32) -> FileList {
+        let mut l = FileList::default();
+        l.area = rect(0.0, 0.0, width, LIST_PAD + 10.0 * ROW_H + SCROLLBAR_W + 5.0);
+        l.append((0..30).map(|i| entry(&format!("f{i:02}"))).collect());
+        l.set_view(View::List);
+        l
+    }
+
+    /// Vista Lista: las columnas se llenan de arriba abajo; con 10 filas, 30 elementos son 3
+    /// columnas y el elemento 11 queda arriba de la segunda.
+    #[test]
+    fn list_view_fills_columns_top_to_bottom() {
+        let l = list_view(1000.0);
+        assert!(!l.in_header(10.0, 10.0), "la Lista no tiene encabezado");
+        assert_eq!(l.rows_per_col(), 10);
+        let (r0, r9, r10) = (l.item_rect(0), l.item_rect(9), l.item_rect(10));
+        assert_eq!((r0.left, r0.top), (l.area.left + LIST_PAD, l.area.top + LIST_PAD));
+        assert_eq!((r0.right - r0.left, r0.bottom - r0.top), (LIST_COL_W, ROW_H));
+        assert_eq!((r9.left, r9.top), (r0.left, r0.top + 9.0 * ROW_H));
+        assert_eq!((r10.left, r10.top), (r0.left + LIST_COL_W, r0.top), "el 11 está arriba de la 2.ª columna");
+        assert_eq!(l.item_rect(29).left, r0.left + 2.0 * LIST_COL_W, "3 columnas");
+        // El centro de cada celda la devuelve; debajo de la última fila no hay nada.
+        for pos in [0, 9, 10, 25, 29] {
+            let r = l.item_rect(pos);
+            assert_eq!(l.pos_at((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0), Some(pos));
+        }
+        assert_eq!(l.pos_at(r0.left + 10.0, r9.bottom + 2.0), None);
+        assert_eq!(l.pos_at(r0.left + 3.0 * LIST_COL_W + 10.0, r0.top + 5.0), None, "pasada la última columna");
+    }
+
+    /// Teclado en Lista: ←/→ cambian de columna, ↑/↓ de fila.
+    #[test]
+    fn list_view_keyboard() {
+        use crate::keys::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
+        let mut l = list_view(1000.0);
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus, Some(10), "→ desde el 1 va al 11");
+        l.on_key(VK_LEFT.0, false, false);
+        assert_eq!(l.focus, Some(0));
+        l.on_key(VK_DOWN.0, false, false);
+        assert_eq!(l.focus, Some(1), "↓ va al 2");
+        l.on_key(VK_UP.0, false, false);
+        assert_eq!(l.focus, Some(0));
+        // → desde la última columna incompleta: el último elemento.
+        l.select_index(l.visible[25] as usize);
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus, Some(29));
+        // Shift+→ selecciona el rango (una columna entera).
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_RIGHT.0, false, true);
+        assert_eq!(l.selected_positions(), (0..=10).collect::<Vec<_>>());
+    }
+
+    /// En Lista la rueda vertical desplaza en horizontal (una columna por muesca), y la barra de
+    /// desplazamiento va abajo.
+    #[test]
+    fn list_view_wheel_scrolls_horizontally() {
+        let mut l = list_view(400.0);
+        let r0 = l.item_rect(0);
+        assert_eq!(l.on_wheel(-3.0), Action::Redraw);
+        assert_eq!(l.scroll_target, LIST_COL_W);
+        while l.tick(1.0 / 60.0) {}
+        let moved = l.item_rect(0);
+        assert_eq!((moved.left, moved.top), (r0.left - LIST_COL_W, r0.top), "se mueve a los costados, no hacia arriba");
+        // No se pasa del final: la última columna queda contra el borde derecho.
+        l.on_wheel(-100.0);
+        // 3 columnas más una libre al final (ver `content_len`).
+        let content = 4.0 * LIST_COL_W + LIST_PAD * 2.0;
+        assert_eq!(l.scroll_target, content - 400.0);
+        let (track, thumb) = l.scrollbar().expect("hay barra: no entran las 3 columnas");
+        assert_eq!((track.top, track.bottom), (l.area.bottom - SCROLLBAR_W, l.area.bottom));
+        assert_eq!((track.left, track.right), (l.area.left, l.area.right));
+        assert!(thumb.right - thumb.left < track.right - track.left);
+        // Llevar un elemento a la vista también es horizontal.
+        l.select_index(l.visible[0] as usize);
+        assert_eq!(l.scroll_target, 0.0);
+        // Arrastrar el pulgar hasta el final.
+        while l.tick(1.0 / 60.0) {}
+        let (_, thumb) = l.scrollbar().unwrap();
+        let y = (thumb.top + thumb.bottom) / 2.0;
+        assert_eq!(l.on_mouse_down(thumb.left + 2.0, y, false, false).1, true);
+        l.on_mouse_move(l.area.right + 50.0, y);
+        l.on_mouse_up();
+        assert_eq!(l.scroll, content - 400.0);
+    }
+
+    /// Lista: al final siempre queda fondo libre (una columna), para hacer clic derecho en la
+    /// carpeta o arrancar un rectángulo aunque los elementos llenen el panel.
+    #[test]
+    fn list_view_has_background_at_end() {
+        let mut l = list_view(400.0);
+        l.on_wheel(-100.0);
+        while l.tick(1.0 / 60.0) {}
+        let last = l.item_rect(29);
+        assert!(l.area.right - last.right >= LIST_COL_W - 1.0, "una columna libre después de la última: {last:?}");
+        let (x, y) = (last.right + LIST_COL_W / 2.0, (last.top + last.bottom) / 2.0);
+        assert_eq!(l.pos_at(x, y), None);
+        assert!(!l.on_right_down(x, y), "clic derecho en el fondo: menú de la carpeta");
+        // Un rectángulo desde el fondo selecciona lo que toca.
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_move(last.left + 10.0, y + 1.0);
+        assert_eq!(l.selected_positions(), vec![29]);
+        l.on_mouse_up();
+    }
+
+    /// Cambiar el eje del desplazamiento (agrupar o desagrupar la Lista con la vista de la
+    /// carpeta) arranca desde el principio: el desplazamiento horizontal no sirve como vertical.
+    #[test]
+    fn scroll_resets_when_axis_changes() {
+        let mut l = list_view(400.0);
+        l.on_wheel(-3.0);
+        assert!(l.scroll_target > 0.0);
+        let mut v = l.view_settings();
+        v.group_by = Some(Column::Type);
+        l.apply_view_settings(&v);
+        assert_eq!((l.scroll, l.scroll_target), (0.0, 0.0), "agrupada: hacia abajo, desde arriba");
+        l.on_wheel(-3.0);
+        while l.tick(1.0 / 60.0) {}
+        assert!(l.scroll > 0.0);
+        v.group_by = None;
+        l.apply_view_settings(&v);
+        assert_eq!((l.scroll, l.scroll_target), (0.0, 0.0), "sin agrupar: a los costados, desde la izquierda");
+    }
+
+    /// Vista Contenido: fila alta con el nombre y el tipo a la izquierda, la fecha y el tamaño a
+    /// la derecha, en las posiciones del diseño (`draw_content_row`).
+    #[test]
+    fn content_view_row_texts() {
+        use crate::sys::testing::RecordingPainter;
+        crate::sys::testing::install_fakes();
+        let mut l = list(800.0);
+        let mut e = entry("informe.pdf");
+        e.size = 2048;
+        e.modified = 134_000_000_000_000_000;
+        e.type_name = std::sync::Arc::from("Documento PDF");
+        l.append(vec![e]);
+        l.set_view(View::Content);
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        l.draw(&p, rect(0.0, 0.0, 800.0, 400.0), true);
+        let item = l.item_rect(0);
+        assert_eq!((item.top, item.bottom - item.top), (l.area.top + 4.0, CONTENT_H));
+        let texts = p.texts();
+        let find = |s: &str| texts.iter().find(|t| t.1 == s).cloned().unwrap_or_else(|| panic!("falta «{s}»: {texts:?}"));
+        let name = find("informe.pdf");
+        let kind = find("Documento PDF");
+        let date = find(&format::date(134_000_000_000_000_000));
+        let size = find(&format::size_kb(2048));
+        assert_eq!((name.0, name.2.left), (FontId::Ui, item.left + 58.0));
+        assert_eq!((kind.0, kind.2.left), (FontId::Ui, item.left + 58.0));
+        assert!(kind.2.top >= name.2.bottom - 1.0, "el tipo debajo del nombre");
+        assert_eq!((date.0, date.2.right, date.2.top), (FontId::UiRight, item.right - 12.0, name.2.top));
+        assert_eq!((size.0, size.2.right, size.2.top), (FontId::UiRight, item.right - 12.0, kind.2.top));
+        assert!(!texts.iter().any(|t| t.1 == "Nombre"), "sin encabezado de columnas");
     }
 }
 

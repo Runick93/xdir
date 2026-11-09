@@ -434,6 +434,29 @@ mod tests {
         assert!(parse("layout = 2\n").show_extensions);
     }
 
+    /// Las vistas Lista y Contenido se guardan con sus ids («lista», «contenido») y vuelven igual,
+    /// tanto en la sesión como en la vista de una carpeta (`carpetas.toml`).
+    #[test]
+    fn view_ids_roundtrip_session_and_folders() {
+        assert_eq!((View::List.id(), View::Content.id()), ("lista", "contenido"));
+        assert_eq!((View::List.name(), View::Content.name()), ("Lista", "Contenido"));
+        let s = Session { views: vec![View::List, View::Content, View::Details], ..Session::default() };
+        let text = write(&s);
+        assert!(text.contains("vistas = [\"lista\", \"contenido\", \"detalles\"]"), "{text}");
+        assert_eq!(parse(&text).views, s.views);
+
+        use crate::folder_views::{FolderViews, ViewSettings};
+        let mut fv = FolderViews::default();
+        fv.apply_to_all(ViewSettings { view: View::Content, ..ViewSettings::default() });
+        fv.set("/a", ViewSettings { view: View::List, ..ViewSettings::default() });
+        let text = crate::folder_views::write(&fv);
+        let (back, errors) = crate::folder_views::parse(&text);
+        assert!(errors.is_empty(), "{errors:?}\n{text}");
+        assert_eq!(back.default_view().view, View::Content);
+        assert_eq!(back.get("/a").view, View::List);
+        assert!(text.contains("\"lista\"") && text.contains("\"contenido\""), "{text}");
+    }
+
     #[test]
     fn tolerates_garbage() {
         let s = parse("esto no es toml\nlayout = 99\n[[panel]]\npestanas = []\n");

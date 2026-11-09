@@ -210,6 +210,11 @@ impl FileList {
         if self.group_by == col {
             return;
         }
+        // En la Lista, agrupar pasa de desplazarse a los costados a hacia abajo (y al revés).
+        if self.view == View::List {
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
+        }
         self.group_by = col;
         self.collapsed.clear();
         self.header_focus = None;
@@ -370,7 +375,7 @@ impl FileList {
             self.layout = None;
             return;
         }
-        let (per, lh, grid) = (self.per_line(), self.line_h(), self.view.is_grid());
+        let (per, lh, grid) = (self.per_line(), self.line_h(), self.flows());
         let mut lines: Vec<Line> = Vec::new();
         let mut pos_line = Vec::with_capacity(self.visible.len());
         let mut y = self.top_pad();
@@ -790,5 +795,33 @@ mod list_tests {
         assert!(texts.iter().any(|(f, s, _)| *f == FontId::GlyphsSmall && s == "\u{E70D}"), "flecha abajo: {texts:?}");
         assert!(texts.iter().any(|(f, s, _)| *f == FontId::GlyphsSmall && s == "\u{E76C}"), "flecha a la derecha (plegado)");
         assert!(texts.iter().any(|(_, s, _)| s == "Hace mucho (1)"));
+    }
+
+    /// Agrupar en Contenido: encabezados de fila completa entre las filas altas de cada grupo.
+    #[test]
+    fn content_view_groups_headers() {
+        install_fakes();
+        let mut l = grouped();
+        l.set_view(View::Content);
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        l.draw(&p, rect(0.0, 0.0, 800.0, 600.0), true);
+        let texts = p.texts();
+        for h in ["Vacío (3)", "Diminuto (0–16 KB) (2)"] {
+            assert!(texts.iter().any(|(f, s, _)| *f == FontId::UiBold && s == h), "{h}: {texts:?}");
+        }
+        let rows = l.rows_area();
+        let layout = l.layout.as_ref().unwrap();
+        let header = layout.lines[0];
+        assert!(header.header.is_some());
+        let r = l.line_rect(&header);
+        assert_eq!((r.left, r.right), (rows.left, rows.right - SCROLLBAR_W), "de lado a lado");
+        // Un elemento por línea, de alto de Contenido; el grupo siguiente arranca debajo de su encabezado.
+        let (i0, i2, i3) = (l.item_rect(0), l.item_rect(2), l.item_rect(3));
+        assert_eq!(i0.top, rows.top + 4.0 + GROUP_H);
+        assert_eq!(i0.bottom - i0.top, super::super::CONTENT_H);
+        assert_eq!((i0.left, i0.right), (rows.left, rows.right - SCROLLBAR_W));
+        assert_eq!(i3.top, i2.bottom + GROUP_GAP + GROUP_H);
+        assert_eq!(l.header_at(100.0, rows.top + 4.0 + GROUP_H / 2.0), Some(0));
+        assert_eq!(l.pos_at(100.0, (i3.top + i3.bottom) / 2.0), Some(3));
     }
 }

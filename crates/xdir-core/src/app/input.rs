@@ -234,8 +234,8 @@ impl App {
                     }
                     PaneHit::Maximize => self.toggle_maximize(i),
                     PaneHit::ViewButton => {
-                        let next = (self.panes[i].tab().list.view.index() + 1) % list::VIEWS.len();
-                        self.set_view(i, list::VIEWS[next].0);
+                        let next = (self.panes[i].tab().list.view.cycle_index() + 1) % list::CYCLE.len();
+                        self.set_view(i, list::CYCLE[next]);
                     }
                     PaneHit::NewFolderButton => self.run_command(Command::NewFolder),
                     PaneHit::Search => self.begin_filter(i),

@@ -139,8 +139,8 @@ impl App {
                 self.show_group_bar = !self.show_group_bar;
                 self.ensure_group();
             }
-            Command::PowerShell => self.open_console(active, Console::PowerShell),
-            Command::Cmd => self.open_console(active, Console::Cmd),
+            Command::PowerShell => self.open_console(active, Console::nth(0)),
+            Command::Cmd => self.open_console(active, Console::nth(1)),
             Command::ToggleDarkMode => self.set_dark_mode(!self.theme.dark),
             Command::SaveGroup => self.open_palette(PaletteMode::GroupName),
             Command::View(i) => {

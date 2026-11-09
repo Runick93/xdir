@@ -14,6 +14,19 @@ fn app_with(init: Init) -> App {
     App::new(init).expect("App sin ventana")
 }
 
+/// La `App` de prueba usa el entorno falso: configuración en la carpeta temporal del hilo, una
+/// consola y formatos deterministas.
+#[test]
+fn test_app_uses_the_fake_env() {
+    let _a = app();
+    let name = format!("{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], "");
+    assert_eq!(crate::session::config_dir(), Some(std::env::temp_dir().join("xdir-tests").join(name)));
+    let labels: Vec<_> = Console::all().iter().map(|c| c.label()).collect();
+    assert_eq!(labels, ["Terminal"]);
+    assert_eq!(crate::format::date(116_444_736_000_000_000), "1970-01-01");
+    assert_eq!(crate::format::size_kb(2048), "2 KB");
+}
+
 fn count(a: &App, pane: usize) -> usize {
     a.panes[pane].tabs.len()
 }

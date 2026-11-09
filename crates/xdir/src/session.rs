@@ -80,27 +80,9 @@ impl Default for Session {
     }
 }
 
-/// En pruebas la configuración nunca es la real: cada hilo de prueba tiene su propia carpeta temporal.
-#[cfg(test)]
-pub fn config_dir() -> Option<PathBuf> {
-    let name = format!("{}-{:?}", std::process::id(), std::thread::current().id());
-    Some(std::env::temp_dir().join("xdir-tests").join(name.replace(['(', ')'], "")))
-}
-
-/// Carpeta de configuración: junto al .exe en modo portable, si no `%APPDATA%\xdir`.
-#[cfg(not(test))]
-pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
-        if dir.join("xdir.portable").exists() {
-            return Some(dir);
-        }
-    }
-    #[cfg(windows)]
-    return std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("xdir"));
-    // macOS: ~/Library/Application Support/xdir
-    #[cfg(not(windows))]
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/xdir"))
-}
+/// Carpeta de configuración: junto al .exe en modo portable, si no la del usuario (la resuelve
+/// el núcleo; en pruebas, una carpeta temporal por hilo).
+pub use xdir_core::session::config_dir;
 
 pub fn load() -> Option<Session> {
     let text = std::fs::read_to_string(config_dir()?.join(FILE_NAME)).ok()?;

@@ -4,16 +4,12 @@
 use xdir_core::commands;
 
 mod about;
-mod anim;
 mod config;
 mod console;
 mod drop;
-mod favorites;
 mod format;
 mod fs;
-mod groups;
 mod icons;
-mod jump;
 mod list;
 mod ops;
 mod pane;
@@ -32,7 +28,7 @@ mod typed;
 mod ui;
 mod xtree;
 mod app;
-pub(crate) use xdir_core::toml;
+pub(crate) use xdir_core::{anim, favorites, groups, jump, toml};
 
 #[cfg(windows)]
 fn main() -> windows::core::Result<()> {

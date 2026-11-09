@@ -1,11 +1,15 @@
 //! Núcleo neutro de xdir: todo lo que no depende del sistema operativo (geometría, teclas,
 //! configuración TOML, formato de textos y datos de xtree). Sin dependencias externas.
 
+pub mod anim;
 pub mod commands;
 pub mod console;
+pub mod favorites;
 pub mod format;
 pub mod fs;
 pub mod geom;
+pub mod groups;
+pub mod jump;
 pub mod keys;
 pub mod ops;
 pub mod session;

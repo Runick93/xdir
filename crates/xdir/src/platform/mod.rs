@@ -33,12 +33,6 @@ pub fn system_accent() -> Option<u32> {
     xdir_core::sys::env().system_accent()
 }
 
-/// ¿El sistema permite animaciones? ("Reducir movimiento" o las animaciones de Windows apagadas
-/// las niegan.)
-pub fn animations_allowed() -> bool {
-    xdir_core::sys::env().animations_allowed()
-}
-
 /// ¿La tecla está apretada ahora? (Ctrl, Shift, Alt…; en macOS Ctrl de los atajos es ⌘ y Alt es ⌥.)
 pub fn key_down(k: Key) -> bool {
     xdir_core::sys::env().key_down(k)

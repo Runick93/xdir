@@ -80,7 +80,7 @@ impl History {
 
     /// Anota una visita a la carpeta.
     pub fn record(&mut self, path: &Path, now: u64) {
-        match self.visits.iter_mut().find(|v| crate::fs::same_path(&v.path, path)) {
+        match self.visits.iter_mut().find(|v| crate::sys::file_system().same_path(&v.path, path)) {
             Some(v) => {
                 v.count += 1.0;
                 v.last = now;
@@ -102,7 +102,7 @@ impl History {
 
     /// Saca una carpeta (ya no existe).
     pub fn forget(&mut self, path: &Path) {
-        self.visits.retain(|v| !crate::fs::same_path(&v.path, path));
+        self.visits.retain(|v| !crate::sys::file_system().same_path(&v.path, path));
     }
 }
 
@@ -139,9 +139,11 @@ pub fn query_words(query: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::testing::install_fakes;
 
     #[test]
     fn round_trip() {
+        install_fakes();
         let mut h = History::default();
         h.record(Path::new(r"C:\a b\c"), 100);
         h.record(Path::new(r"C:\a b\c"), 200);
@@ -162,6 +164,7 @@ mod tests {
 
     #[test]
     fn recent_beats_old() {
+        install_fakes();
         let now = 10_000_000;
         let old = Visit { path: "a".into(), count: 10.0, last: now - 30 * 86_400 };
         let recent = Visit { path: "b".into(), count: 2.0, last: now - 60 };
@@ -170,6 +173,7 @@ mod tests {
 
     #[test]
     fn matching() {
+        install_fakes();
         let q = |s: &str| query_words(s);
         assert_eq!(match_path(&q(""), r"c:\x"), Some(1.0));
         assert_eq!(match_path(&q("doc"), r"c:\users\yo\documents"), Some(4.0));

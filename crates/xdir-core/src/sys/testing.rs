@@ -1008,3 +1008,125 @@ impl WindowHost for FakeHost {
         self.menu_choice.get()
     }
 }
+
+// ---------- accesibilidad ----------
+
+/// Un elemento de la lista de `FakeA11y`.
+pub struct FakeA11yItem {
+    pub name: String,
+    pub is_dir: bool,
+    pub selected: bool,
+}
+
+/// Un panel de `FakeA11y`: elementos, filtro rápido y foco.
+pub struct FakeA11yPane {
+    pub title: String,
+    pub items: Vec<FakeA11yItem>,
+    /// Filtro rápido: solo se ven los elementos cuyo nombre lo contiene.
+    pub filter: String,
+    /// Posición con foco, entre los que se ven.
+    pub focus: Option<usize>,
+}
+
+/// Lado de cada panel (todos uno al lado del otro) y alto de las filas de la lista.
+const A11Y_PANE_W: f32 = 200.0;
+const A11Y_ROW_H: f32 = 24.0;
+const A11Y_LIST_TOP: f32 = 30.0;
+
+/// Una vista de accesibilidad en memoria: `n` paneles, todos a la vista, uno al lado del otro,
+/// cada uno con los mismos elementos (en orden).
+pub struct FakeA11y {
+    pub panes: Vec<FakeA11yPane>,
+    pub shown: Vec<usize>,
+    pub active: usize,
+    pub status: String,
+    pub size: (f32, f32),
+}
+
+impl FakeA11y {
+    pub fn new(panes: usize, items: &[&str]) -> FakeA11y {
+        let panes = (0..panes)
+            .map(|p| FakeA11yPane {
+                title: format!("Carpeta {}", p + 1),
+                items: items.iter().map(|n| FakeA11yItem { name: n.to_string(), is_dir: false, selected: false }).collect(),
+                filter: String::new(),
+                focus: None,
+            })
+            .collect::<Vec<_>>();
+        let n = panes.len();
+        FakeA11y { panes, shown: (0..n).collect(), active: 0, status: "Listo".into(), size: (A11Y_PANE_W * n.max(1) as f32, 600.0) }
+    }
+
+    /// Aplica el filtro rápido al panel (como al tipear en la lista).
+    pub fn filter(&mut self, pane: usize, text: &str) {
+        self.panes[pane].filter = text.to_string();
+    }
+
+    /// Índices (en `items`) de los elementos que se ven, en orden.
+    fn visible(&self, pane: usize) -> Vec<usize> {
+        let p = &self.panes[pane];
+        (0..p.items.len()).filter(|&i| p.items[i].name.contains(&p.filter)).collect()
+    }
+}
+
+impl crate::a11y::A11yView for FakeA11y {
+    fn shown_panes(&self) -> Vec<usize> {
+        self.shown.clone()
+    }
+    fn active(&self) -> usize {
+        self.active
+    }
+    fn item_count(&self, pane: usize) -> usize {
+        self.visible(pane).len()
+    }
+    fn focus_pos(&self, pane: usize) -> Option<usize> {
+        self.panes[pane].focus
+    }
+    fn item_info(&self, pane: usize, pos: usize) -> Option<crate::a11y::ItemInfo> {
+        let it = &self.panes[pane].items[*self.visible(pane).get(pos)?];
+        let (_, _, list) = self.pane_rects(pane);
+        let top = list.top + pos as f32 * A11Y_ROW_H;
+        Some(crate::a11y::ItemInfo {
+            name: it.name.clone(),
+            kind: if it.is_dir { "Carpeta de archivos".into() } else { "Documento".into() },
+            size: if it.is_dir { String::new() } else { "1 KB".into() },
+            date: "01/01/2026".into(),
+            is_dir: it.is_dir,
+            selected: it.selected,
+            rect: Rect { left: list.left, top, right: list.right, bottom: top + A11Y_ROW_H },
+            offscreen: false,
+        })
+    }
+    fn pane_title(&self, pane: usize) -> String {
+        self.panes[pane].title.clone()
+    }
+    fn tab_pos(&self, _pane: usize) -> (usize, usize) {
+        (0, 1)
+    }
+    fn address_text(&self, pane: usize) -> String {
+        format!("/{}", self.panes[pane].title)
+    }
+    fn status(&self) -> String {
+        self.status.clone()
+    }
+    fn pane_rects(&self, pane: usize) -> (Rect, Rect, Rect) {
+        let (left, right) = (pane as f32 * A11Y_PANE_W, (pane + 1) as f32 * A11Y_PANE_W);
+        let bottom = self.size.1 - crate::ui::STATUSBAR_H;
+        (
+            Rect { left, top: 0.0, right, bottom },
+            Rect { left, top: 0.0, right, bottom: A11Y_LIST_TOP },
+            Rect { left, top: A11Y_LIST_TOP, right, bottom },
+        )
+    }
+    fn client(&self) -> (f32, f32) {
+        self.size
+    }
+    fn selected_positions(&self, pane: usize) -> Vec<usize> {
+        let items = &self.panes[pane].items;
+        self.visible(pane).iter().enumerate().filter(|(_, i)| items[**i].selected).map(|(pos, _)| pos).collect()
+    }
+    fn item_at(&self, pane: usize, _x: f32, y: f32) -> Option<usize> {
+        let pos = ((y - A11Y_LIST_TOP) / A11Y_ROW_H).floor();
+        (pos >= 0.0 && (pos as usize) < self.item_count(pane)).then_some(pos as usize)
+    }
+}

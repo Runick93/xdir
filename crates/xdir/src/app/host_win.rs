@@ -4,7 +4,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use xdir_core::host::WindowHost;
+use xdir_core::a11y::El;
+use xdir_core::host::{Accessibility, WindowHost};
 use xdir_core::shell::Entry;
 use xdir_core::paint::Painter;
 
@@ -672,6 +673,21 @@ impl WindowHost for Win32Host {
             }
             (cmd > 0).then_some(cmd as u32)
         }
+    }
+
+    fn accessibility(&self) -> Option<&dyn Accessibility> {
+        Some(self)
+    }
+}
+
+/// Los lectores de pantalla de Windows: UI Automation (ver `uia.rs`).
+impl Accessibility for Win32Host {
+    fn listening(&self) -> bool {
+        uia::listening()
+    }
+
+    fn notify_focus(&self, el: El) {
+        uia::notify_focus(self.hwnd(), el);
     }
 }
 

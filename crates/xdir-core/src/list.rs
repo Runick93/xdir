@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
+use crate::a11y::ItemInfo;
 use crate::format;
 use crate::fs::Entry;
 use crate::geom::{Color, Rect, contains, rect};
@@ -82,19 +83,6 @@ pub fn default_columns() -> Vec<ColumnSpec> {
         .into_iter()
         .map(|col| ColumnSpec { col, width: col.default_width() })
         .collect()
-}
-
-/// Un elemento de la lista visto desde afuera (lectores de pantalla).
-pub struct ItemInfo {
-    pub name: String,
-    /// Tipo, tamaño y fecha en una frase.
-    pub help: String,
-    pub is_dir: bool,
-    pub selected: bool,
-    /// En DIPs, relativo a la ventana.
-    pub rect: Rect,
-    /// Fuera del área visible (scrolleado).
-    pub offscreen: bool,
 }
 
 /// Cómo se muestran los elementos: filas con columnas, o una cuadrícula de íconos/miniaturas.
@@ -470,7 +458,7 @@ impl FileList {
         }
     }
 
-    // ---------- accesibilidad (UI Automation, ver uia.rs) ----------
+    // ---------- accesibilidad (ver a11y.rs) ----------
 
     /// Posición con foco (en los elementos a la vista).
     pub fn focus_pos(&self) -> Option<usize> {
@@ -481,18 +469,13 @@ impl FileList {
     pub fn item_info(&self, pos: usize) -> Option<ItemInfo> {
         let idx = *self.visible.get(pos)? as usize;
         let e = &self.entries[idx];
-        let mut help = vec![e.type_name.to_string()];
-        if !e.is_dir {
-            help.push(format::size_kb(e.size));
-        }
-        if e.modified != 0 {
-            help.push(format!("modificado {}", format::date(e.modified)));
-        }
         let rect = self.item_rect(pos);
         let rows = self.rows_area();
         Some(ItemInfo {
             name: e.display.clone(),
-            help: help.join(", "),
+            kind: e.type_name.to_string(),
+            size: if e.is_dir { String::new() } else { format::size_kb(e.size) },
+            date: if e.modified != 0 { format::date(e.modified) } else { String::new() },
             is_dir: e.is_dir,
             selected: self.selected[idx],
             rect,

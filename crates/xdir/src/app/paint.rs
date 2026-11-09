@@ -201,8 +201,7 @@ impl App {
         if animating {
             self.redraw();
         }
-        #[cfg(windows)]
-        uia::notify_focus(self);
+        self.notify_a11y_focus();
         // Superposiciones de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for i in self.shown_panes() {

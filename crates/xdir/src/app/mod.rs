@@ -79,6 +79,7 @@ use crate::session::{PaneState, Session};
 use crate::tab::Tab;
 use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
+use xdir_core::a11y::{self, A11yAction, A11yView, ItemInfo};
 use xdir_core::host::{
     MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
     WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED, WindowHost,
@@ -236,7 +237,7 @@ struct App {
     /// Cuándo fue el último frame de una animación (None: no hay ninguna en curso).
     last_frame: Option<Instant>,
     /// Último elemento con foco que se avisó a los lectores de pantalla: (panel, posición).
-    uia_focus: Option<(usize, Option<usize>)>,
+    a11y_focus: Option<(usize, Option<usize>)>,
     /// Panel activo: recibe el teclado.
     active: usize,
     show_hidden: bool,
@@ -418,7 +419,7 @@ impl App {
             displayed: [None; PANES],
             layout_anim: None,
             last_frame: None,
-            uia_focus: None,
+            a11y_focus: None,
             active: 0,
             show_hidden: session.show_hidden,
             next_tab_id: 1,
@@ -487,6 +488,107 @@ impl App {
             app.tree.set_quick_open(session.quick_open);
         }
         app
+    }
+}
+
+// ---------- accesibilidad ----------
+
+/// La aplicación vista por los lectores de pantalla (ver `xdir_core::a11y`).
+impl A11yView for App {
+    fn shown_panes(&self) -> Vec<usize> {
+        App::shown_panes(self)
+    }
+    fn active(&self) -> usize {
+        self.active
+    }
+    fn item_count(&self, pane: usize) -> usize {
+        self.panes[pane].tab().list.count()
+    }
+    fn focus_pos(&self, pane: usize) -> Option<usize> {
+        self.panes[pane].tab().list.focus_pos()
+    }
+    fn item_info(&self, pane: usize, pos: usize) -> Option<ItemInfo> {
+        self.panes[pane].tab().list.item_info(pos)
+    }
+    fn pane_title(&self, pane: usize) -> String {
+        self.panes[pane].tab().location.title()
+    }
+    fn tab_pos(&self, pane: usize) -> (usize, usize) {
+        let pane = &self.panes[pane];
+        (pane.active, pane.tabs.len())
+    }
+    fn address_text(&self, pane: usize) -> String {
+        let location = &self.panes[pane].tab().location;
+        match location.target() {
+            Some(t) => t.display().to_string(),
+            None => location.title(),
+        }
+    }
+    fn status(&self) -> String {
+        self.panes[self.active].tab().status()
+    }
+    fn pane_rects(&self, pane: usize) -> (render::Rect, render::Rect, render::Rect) {
+        let pane = &self.panes[pane];
+        (pane.rect, pane.address, pane.list)
+    }
+    fn client(&self) -> (f32, f32) {
+        self.client_dips()
+    }
+    fn selected_positions(&self, pane: usize) -> Vec<usize> {
+        self.panes[pane].tab().list.selected_positions()
+    }
+    fn item_at(&self, pane: usize, x: f32, y: f32) -> Option<usize> {
+        self.panes[pane].tab().list.pos_at_point(x, y)
+    }
+}
+
+impl App {
+    /// Lo que pide un lector de pantalla (seleccionar, abrir, mover el foco). Quien llama ya
+    /// comprobó que el elemento existe.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(super) fn a11y_apply(&mut self, a: A11yAction) {
+        match a {
+            A11yAction::Focus(el) => {
+                if let Some(p) = a11y::pane_of(el) {
+                    self.set_active(p);
+                }
+                if let a11y::El::Item(p, pos) = el {
+                    self.panes[p].tab_mut().list.select_pos(pos);
+                }
+                self.redraw();
+            }
+            A11yAction::Select(p, pos) => {
+                self.set_active(p);
+                self.panes[p].tab_mut().list.select_pos(pos);
+                self.redraw();
+            }
+            A11yAction::AddToSelection(p, pos) | A11yAction::RemoveFromSelection(p, pos) => {
+                let on = matches!(a, A11yAction::AddToSelection(..));
+                self.panes[p].tab_mut().list.set_selected_pos(pos, on);
+                self.redraw();
+            }
+            A11yAction::Invoke(p, pos) => {
+                let Some(entry) = self.panes[p].tab().list.entry_of_pos(pos) else { return };
+                self.set_active(p);
+                self.apply(p, Action::Open(entry));
+            }
+        }
+    }
+
+    /// Avisa a los lectores de pantalla cuando cambia el elemento con foco. Se llama después de
+    /// cada frame: es una comparación barata, y solo hace algo si hay un lector escuchando.
+    pub(super) fn notify_a11y_focus(&mut self) {
+        let host = self.host.clone();
+        let Some(acc) = host.accessibility() else { return };
+        if !acc.listening() {
+            return;
+        }
+        let now = (self.active, self.panes[self.active].tab().list.focus_pos());
+        if self.a11y_focus == Some(now) {
+            return;
+        }
+        self.a11y_focus = Some(now);
+        acc.notify_focus(a11y::focus_el(self));
     }
 }
 

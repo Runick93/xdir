@@ -103,7 +103,7 @@ impl App {
     /// Menú desplegable de una carpeta de favoritos o del desborde "»". Donde el sistema lo
     /// avisa (Windows), se puede hacer clic derecho sobre un favorito del menú: su menú
     /// contextual se abre encima y, si se elige algo, eso manda sobre el menú de favoritos.
-    pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: render::Rect) {
+    pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: geom::Rect) {
         if self.fav_menu_entries(&source).is_none() {
             return;
         }
@@ -231,7 +231,7 @@ impl App {
                 // Se guarda antes para que exista; al volver a la ventana se relee.
                 self.save_favorites();
                 if let Some(file) = Favorites::file_path() {
-                    shell::open_file(self.hwnd, &file, None);
+                    sys::shell().open_file(self.hwnd, &file, None);
                 }
             }
             (FavAct::HideBar, _) => {
@@ -256,7 +256,7 @@ impl App {
             [i] => pane_ref.fav_rect(*i).unwrap_or(bar),
             _ => bar,
         };
-        let r = render::rect(r.left, r.top, r.right.max(r.left + 200.0).min(bar.right), r.bottom);
+        let r = geom::rect(r.left, r.top, r.right.max(r.left + 200.0).min(bar.right), r.bottom);
         let Some(edit) = self.host.text_create(TextKind::FavRename, r, &name, &self.theme) else { return };
         self.host.text_select(edit, 0, -1);
         self.host.text_focus(edit);

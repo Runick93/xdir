@@ -3,7 +3,7 @@
 
 use super::*;
 use std::rc::Rc;
-use xdir_core::sys::testing::FakeHost;
+use crate::sys::testing::FakeHost;
 
 fn app() -> App {
     app_with(Init::blank())
@@ -17,7 +17,7 @@ fn app_with(init: Init) -> App {
 
 /// Igual que `app_with`, con una ventana falsa propia para mirar qué le pidió la `App`.
 fn app_with_host(init: Init, host: Rc<FakeHost>) -> App {
-    xdir_core::sys::testing::install_fakes();
+    crate::sys::testing::install_fakes();
     App::new(init, host)
 }
 
@@ -30,8 +30,20 @@ fn test_app_uses_the_fake_env() {
     assert_eq!(crate::session::config_dir(), Some(std::env::temp_dir().join("xdir-tests").join(name)));
     let labels: Vec<_> = Console::all().iter().map(|c| c.label()).collect();
     assert_eq!(labels, ["Terminal"]);
-    assert_eq!(xdir_core::format::date(116_444_736_000_000_000), "1970-01-01");
-    assert_eq!(xdir_core::format::size_kb(2048), "2 KB");
+    assert_eq!(crate::format::date(116_444_736_000_000_000), "1970-01-01");
+    assert_eq!(crate::format::size_kb(2048), "2 KB");
+}
+
+/// La plataforma le pasa la ventana y su DPI con `attach`: la `App` los guarda y le pasa la
+/// ventana al host.
+#[test]
+fn attach_sets_window_and_dpi() {
+    let host = FakeHost::new();
+    let mut app = App::new(Init::blank(), host.clone());
+    app.attach(Handle(7), 144);
+    assert_eq!(app.window(), Handle(7));
+    assert_eq!(app.dpi(), 144);
+    assert_eq!(host.attached(), Some(Handle(7)));
 }
 
 fn count(a: &App, pane: usize) -> usize {
@@ -40,9 +52,9 @@ fn count(a: &App, pane: usize) -> usize {
 
 #[test]
 fn test_app_posts_through_the_fake_waker() {
-    use xdir_core::sys::testing::FakeWaker;
+    use crate::sys::testing::FakeWaker;
     // Número propio de este test, para que los demás (en paralelo) no lo cuenten.
-    const MSG: u32 = crate::platform::WM_APP + 0x7B01;
+    const MSG: u32 = WM_APP + 0x7B01;
     let a = app();
     let before = FakeWaker::count(MSG);
     a.hwnd.post(MSG, 0, 0);
@@ -254,7 +266,7 @@ fn fav_act_ids_round_trip() {
 
 // ---------- hit-testing ----------
 
-fn center(r: &render::Rect) -> (f32, f32) {
+fn center(r: &geom::Rect) -> (f32, f32) {
     ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
 }
 
@@ -299,7 +311,7 @@ fn about_dialog_is_modal() {
 #[test]
 fn pane_hit_follows_the_pane_rect() {
     let mut a = app();
-    a.panes[1].rect = render::rect(100.0, 100.0, 500.0, 400.0);
+    a.panes[1].rect = geom::rect(100.0, 100.0, 500.0, 400.0);
     assert_eq!(a.hit(300.0, 101.0), Hit::Pane(1, PaneHit::TabStrip));
     // Un panel fuera del layout no responde aunque tenga rectángulo.
     a.set_layout(Layout::One);
@@ -675,14 +687,16 @@ fn go_to_text_accepts_quotes_relative_paths_and_variables() {
         a.go_to_text(0, r"hijo\..\hijo");
         assert_eq!(leaf(&a, 0), "hijo");
         a.go_to_text(1, "%TEMP%");
+        assert_eq!(leaf(&a, 1), leaf_of(&std::env::temp_dir()));
     }
     #[cfg(not(windows))]
     {
         a.go_to_text(0, "hijo/../hijo");
         assert_eq!(leaf(&a, 0), "hijo");
-        a.go_to_text(1, "$TMPDIR");
+        // $HOME siempre está definida (TMPDIR suele faltar en Linux).
+        a.go_to_text(1, "$HOME");
+        assert_eq!(leaf(&a, 1), leaf_of(std::path::Path::new(&std::env::var("HOME").unwrap())));
     }
-    assert_eq!(leaf(&a, 1), leaf_of(&std::env::temp_dir()));
 }
 
 fn leaf_of(p: &std::path::Path) -> String {
@@ -710,7 +724,7 @@ fn go_to_text_with_a_file_opens_its_folder() {
 
 // ---------- operaciones terminadas ----------
 
-fn result(undo: Option<ops::Undo>, focus: Option<PathBuf>, rename_after: bool, error: Option<&str>) -> OpResult {
+fn result(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, error: Option<&str>) -> OpResult {
     OpResult { undo, focus, rename_after, error: error.map(String::from) }
 }
 
@@ -727,11 +741,11 @@ fn op_done_reports_errors_and_clears_the_notice() {
 fn op_done_stacks_undo_with_a_cap() {
     let mut a = app();
     for i in 0..UNDO_MAX + 10 {
-        a.on_op_done(result(Some(ops::Undo::Created(vec![PathBuf::from(format!("C:\\x{i}"))])), None, false, None));
+        a.on_op_done(result(Some(Undo::Created(vec![PathBuf::from(format!("C:\\x{i}"))])), None, false, None));
     }
     assert_eq!(a.undo.len(), UNDO_MAX);
     // Se descartan las más viejas: la última sigue siendo la más reciente.
-    let ops::Undo::Created(last) = a.undo.last().unwrap() else { panic!() };
+    let Undo::Created(last) = a.undo.last().unwrap() else { panic!() };
     assert_eq!(last[0], PathBuf::from(format!("C:\\x{}", UNDO_MAX + 9)));
 }
 
@@ -759,31 +773,31 @@ fn drain_op_results(a: &mut App) {
 
 #[test]
 fn rename_sends_rename_op() {
-    use xdir_core::sys::testing::FakeFileOps;
+    use crate::sys::testing::FakeFileOps;
     let mut a = app();
     FakeFileOps::take_ops();
     let path = std::env::temp_dir().join("viejo.txt");
     a.commit_rename(path.clone(), "nuevo.txt".into());
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Rename { path, new_name: "nuevo.txt".into() }]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Rename { path, new_name: "nuevo.txt".into() }]);
 }
 
 #[test]
 fn undo_after_new_folder_sends_undo() {
-    use xdir_core::sys::testing::FakeFileOps;
+    use crate::sys::testing::FakeFileOps;
     let mut a = app();
     // La ruta como la guarda la pestaña: en Windows la carpeta temporal puede venir con nombre
     // corto (`RUNNER~1`) y la navegación la pasa al largo.
-    let tmp = crate::fs::true_case(&std::env::temp_dir());
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
     a.new_tab(0, Location::Path(tmp.clone()), true);
     FakeFileOps::take_ops();
     let created = vec![tmp.join("Nueva carpeta")];
-    FakeFileOps::respond_with(OpResult { undo: Some(ops::Undo::Created(created.clone())), ..OpResult::default() });
+    FakeFileOps::respond_with(OpResult { undo: Some(Undo::Created(created.clone())), ..OpResult::default() });
     a.run_command(Command::NewFolder);
     drain_op_results(&mut a);
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::NewFolder { parent: tmp }]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::NewFolder { parent: tmp }]);
     FakeFileOps::respond_with(OpResult::default());
     a.run_command(Command::Undo);
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Undo(ops::Undo::Created(created))]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Undo(Undo::Created(created))]);
     assert!(a.undo.is_empty());
 }
 
@@ -793,7 +807,7 @@ fn undo_after_new_folder_sends_undo() {
 /// se haya escrito otra ruta, y la caja se cierra.
 #[test]
 fn address_edit_cancel_on_focus_loss() {
-    use xdir_core::host::TextKind;
+    use crate::host::TextKind;
     let host = FakeHost::new();
     let mut a = app_with_host(Init::blank(), host.clone());
     let from = fixture("barra-desde");
@@ -813,8 +827,8 @@ fn address_edit_cancel_on_focus_loss() {
 /// El renombrado en línea: lo escrito en la caja se aplica al terminar (`WM_APP_RENAME_DONE` con 1).
 #[test]
 fn rename_applies_on_done() {
-    use xdir_core::host::TextKind;
-    use xdir_core::sys::testing::FakeFileOps;
+    use crate::host::TextKind;
+    use crate::sys::testing::FakeFileOps;
     let host = FakeHost::new();
     let mut a = app_with_host(Init::blank(), host.clone());
     let dir = std::env::temp_dir().join("xdir-tests").join("renombrar-caja");
@@ -828,7 +842,7 @@ fn rename_applies_on_done() {
     host.text_set(edit, "nuevo.txt");
     FakeFileOps::take_ops();
     assert!(a.on_app_message(WM_APP_RENAME_DONE, 1, 0));
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Rename { path: dir.join("viejo.txt"), new_name: "nuevo.txt".into() }]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Rename { path: dir.join("viejo.txt"), new_name: "nuevo.txt".into() }]);
     assert_eq!(host.text_of(TextKind::Rename), None);
 }
 
@@ -859,7 +873,7 @@ fn xtree_dir(name: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     // La ruta como la guarda la pestaña: en Windows la carpeta temporal puede venir con nombre
     // corto (`RUNNER~1`) y la navegación la pasa al largo.
-    crate::fs::true_case(&dir)
+    sys::file_system().true_case(&dir)
 }
 
 /// App con el panel activo en una carpeta temporal.
@@ -951,7 +965,7 @@ fn closing_xdir_cancels_scan() {
 fn xtree_view_swallows_pane_clicks() {
     let (mut a, _) = app_in("swallow");
     a.set_active(1);
-    a.panes[0].rect = render::rect(100.0, 100.0, 500.0, 400.0);
+    a.panes[0].rect = geom::rect(100.0, 100.0, 500.0, 400.0);
     // La tira de pestañas: sin la vista, un clic ahí activa el panel 0.
     let (x, y) = (300.0, 101.0);
     assert!(matches!(a.hit(x, y), Hit::Pane(0, _)), "sin la vista el clic es del panel 0: {:?}", a.hit(x, y));
@@ -984,7 +998,7 @@ fn open_in_panel_navigates_active_pane() {
 /// falsos, una carpeta temporal servida por el listador en memoria, nunca el disco real.
 #[test]
 fn view_default_root_comes_from_disk_scan() {
-    use xdir_core::sys::testing::FakeDiskScan;
+    use crate::sys::testing::FakeDiskScan;
     let mut a = app();
     assert!(!matches!(a.panes[a.active].tab().location, Location::Path(_)), "la App en blanco arranca en «Este equipo»");
     a.run_command(Command::Xtree);
@@ -1010,8 +1024,8 @@ fn command_xtree_is_listed() {
 // ---------- shell ----------
 
 /// Una fila de archivo para cargar a mano en la lista (sin leer el disco).
-fn file_entry(name: &str) -> crate::fs::Entry {
-    crate::fs::Entry {
+fn file_entry(name: &str) -> fs::Entry {
+    fs::Entry {
         name: name.into(),
         full: None,
         group: 0,
@@ -1034,7 +1048,7 @@ fn file_entry(name: &str) -> crate::fs::Entry {
 /// por línea.
 #[test]
 fn copy_paths_uses_shell() {
-    use xdir_core::sys::testing::{FakeShell, ShellCall};
+    use crate::sys::testing::{FakeShell, ShellCall};
     let mut a = app();
     let dir = std::env::temp_dir().join("xdir-tests").join("copiar-rutas");
     a.new_tab(0, Location::Path(dir.clone()), true);
@@ -1051,7 +1065,7 @@ fn copy_paths_uses_shell() {
 /// por, Actualizar, Pegar, Deshacer) y la carpeta del panel.
 #[test]
 fn context_menu_own_entries_reach_shell() {
-    use xdir_core::sys::testing::{FakeShell, ShellCall};
+    use crate::sys::testing::{FakeShell, ShellCall};
     let mut a = app();
     let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo");
     a.new_tab(0, Location::Path(dir.clone()), true);
@@ -1204,4 +1218,28 @@ fn double_click_header_fits_column_with_host_width() {
     a.paint();
     b.paint();
     assert_eq!(host_a.drawn_texts(), host_b.drawn_texts());
+}
+
+fn args(a: &[&str]) -> Vec<String> {
+    a.iter().map(|s| s.to_string()).collect()
+}
+
+/// `--probe <archivo>` pide sesión limpia y el archivo donde dejar las medidas; la carpeta se abre.
+#[test]
+fn startup_args_reads_probe_and_folder() {
+    let tmp = fixture("args-probe");
+    let t = tmp.to_string_lossy().to_string();
+    assert_eq!(parse_args(&args(&["--probe", "p.txt", &t])), (true, Some("p.txt".to_string()), Some(tmp.clone())));
+    // Sin carpeta: solo la medición.
+    assert_eq!(parse_args(&args(&["--probe", "p.txt"])), (true, Some("p.txt".to_string()), None));
+}
+
+/// Solo una carpeta: se abre (si existe) y la sesión es la guardada.
+#[test]
+fn startup_args_folder_only() {
+    let tmp = fixture("args-folder");
+    assert_eq!(parse_args(&args(&[&tmp.to_string_lossy()])), (false, None, Some(tmp.clone())));
+    let missing = tmp.join("no-existe");
+    assert_eq!(parse_args(&args(&[&missing.to_string_lossy()])), (false, None, None));
+    assert_eq!(parse_args(&[]), (false, None, None));
 }

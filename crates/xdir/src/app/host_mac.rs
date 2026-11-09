@@ -22,7 +22,13 @@ use xdir_core::paint::Painter;
 use crate::config::ColorRule;
 use crate::render::Renderer;
 
-use super::*;
+use std::collections::HashMap;
+
+use super::INITIAL_SIZE;
+use crate::platform::{Color, Handle};
+use crate::theme::Theme;
+use crate::{render, shell};
+use xdir_core::host::{MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_PALETTE_KEY, WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED};
 use super::mac::{DRAWING, KEEP, LAST_MOUSE, MSG_ACCENT, MSG_CLOSE, view, window};
 use crate::platform::{MenuAt, keys};
 

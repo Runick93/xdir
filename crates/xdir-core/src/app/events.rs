@@ -6,7 +6,7 @@ use super::*;
 
 /// Cursor del mouse que corresponde a un punto.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum CursorKind {
+pub enum CursorKind {
     Arrow,
     /// Redimensionar a lo ancho (separador vertical, borde de columna o del árbol).
     SizeWE,
@@ -17,7 +17,7 @@ pub(super) enum CursorKind {
 impl App {
     /// Mensajes de la aplicación (`WM_APP + n`) que mandan los hilos de trabajo y los controles.
     /// Devuelve false si no es uno de ellos.
-    pub(super) fn on_app_message(&mut self, msg: u32, wparam: usize, lparam: isize) -> bool {
+    pub fn on_app_message(&mut self, msg: u32, wparam: usize, lparam: isize) -> bool {
         match msg {
             WM_APP_LOAD => {
                 let t0 = Instant::now();
@@ -39,7 +39,7 @@ impl App {
                     self.redraw();
                 }
             }
-            icons::WM_APP_ICONS => self.redraw(),
+            crate::paint::WM_APP_ICONS => self.redraw(),
             WM_APP_CHANGED => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 if let Some(tab) = self.tab_by_id(wparam) {
@@ -90,7 +90,7 @@ impl App {
 
     /// Cambió el texto de una caja de edición: el filtro y la paleta se actualizan con cada tecla,
     /// y la barra de dirección actualiza el desplegable de rutas.
-    pub(super) fn on_text_changed(&mut self, id: isize) {
+    pub fn on_text_changed(&mut self, id: isize) {
         if let Some((edit, pane)) = self.filter_edit {
             if edit.0 as isize == id {
                 let text = self.host.text_get(edit);
@@ -112,21 +112,21 @@ impl App {
     }
 
     /// Cambió el tamaño (o la escala) del área de la ventana: los controles flotantes se cierran.
-    pub(super) fn on_resized(&mut self) {
+    pub fn on_resized(&mut self) {
         self.end_edit(false);
         self.end_filter(true);
         self.close_palette();
     }
 
     /// Cambió el modo claro/oscuro del sistema.
-    pub(super) fn on_system_theme_changed(&mut self) {
+    pub fn on_system_theme_changed(&mut self) {
         self.theme = Theme::from_system(self.accent, self.dark_mode);
         self.apply_window_theme();
         self.redraw();
     }
 
     /// Qué cursor mostrar sobre un punto.
-    pub(super) fn cursor_at(&self, x: f32, y: f32) -> CursorKind {
+    pub fn cursor_at(&self, x: f32, y: f32) -> CursorKind {
         let splitter = match self.drag {
             Drag::Splitter(s) => Some(s),
             _ => match self.hit(x, y) {
@@ -152,7 +152,7 @@ impl App {
     }
 
     /// Botón derecho apretado: prepara el menú contextual que llega al soltarlo.
-    pub(super) fn on_right_down(&mut self, x: f32, y: f32) {
+    pub fn on_right_down(&mut self, x: f32, y: f32) {
         self.host.focus_main();
         self.fav_ctx = None;
         self.header_ctx = None;
@@ -192,7 +192,7 @@ impl App {
 
     /// Pedido de menú contextual: `at` es el punto del clic derecho (None: tecla de menú o
     /// Shift+F10, se abre sobre la fila con foco).
-    pub(super) fn on_context_menu_request(&mut self, at: Option<(f32, f32)>) {
+    pub fn on_context_menu_request(&mut self, at: Option<(f32, f32)>) {
         // Con xtree abierto no hay menú contextual: los paneles están tapados.
         if self.xtree_open {
             return;
@@ -224,7 +224,7 @@ impl App {
 
     /// Tecla con Alt (Windows) u Opción (macOS): solo los atajos que la usan; el resto sigue de
     /// largo (Alt+F4, Alt+Espacio). Devuelve si se usó.
-    pub(super) fn on_alt_key(&mut self, vk: Key) -> bool {
+    pub fn on_alt_key(&mut self, vk: Key) -> bool {
         match self.config.keymap.lookup(vk, key_down(VK_CONTROL), key_down(VK_SHIFT), true) {
             Some(c) => {
                 self.run_command(c);
@@ -235,7 +235,7 @@ impl App {
     }
 
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
-    pub(super) fn on_char(&mut self, c: char) {
+    pub fn on_char(&mut self, c: char) {
         if !c.is_control() && !key_down(VK_CONTROL) && !self.xtree_open {
             let action = self.tab_mut().list.on_char(c);
             self.apply(self.active, action);
@@ -243,7 +243,7 @@ impl App {
     }
 
     /// El mouse salió de la ventana.
-    pub(super) fn on_mouse_left(&mut self) {
+    pub fn on_mouse_left(&mut self) {
         self.hover = Hit::None;
         #[cfg(feature = "arbol")]
         if matches!(self.drag, Drag::None) {
@@ -258,7 +258,7 @@ impl App {
     /// Rueda del mouse (o desplazamiento del touchpad) en `x, y`. `delta` en "clics" (positivo:
     /// hacia arriba); `lines` es cuántas filas mueve cada clic. Va al panel bajo el mouse, aunque
     /// no sea el activo.
-    pub(super) fn on_wheel(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
+    pub fn on_wheel(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
         // Con xtree abierto la rueda mueve su tabla; los paneles tapados no se mueven.
         if self.xtree_open {
             if self.hit(x, y) == Hit::XtreeView {
@@ -308,7 +308,7 @@ impl App {
 
     /// Rueda horizontal (touchpad, mouse con inclinación): el árbol se mueve a los costados.
     /// `delta` positivo: hacia la derecha.
-    pub(super) fn on_wheel_h(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
+    pub fn on_wheel_h(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
         #[cfg(feature = "arbol")]
         if !self.xtree_open && self.tree.contains(x, y) {
             self.tree.on_wheel_h(-delta * lines);
@@ -319,7 +319,7 @@ impl App {
 
     /// Botones laterales del mouse (o deslizar con dos dedos en macOS): atrás y adelante en el
     /// panel bajo el mouse.
-    pub(super) fn on_back_forward(&mut self, x: f32, y: f32, forward: bool) {
+    pub fn on_back_forward(&mut self, x: f32, y: f32, forward: bool) {
         if let Hit::Pane(i, _) = self.hit(x, y) {
             self.set_active(i);
         }
@@ -334,7 +334,7 @@ impl App {
 
     /// La ventana volvió a primer plano: se releen los favoritos y la configuración (por si se
     /// editaron los archivos) y el lector de pantalla vuelve a leer el elemento con foco.
-    pub(super) fn on_app_activated(&mut self) {
+    pub fn on_app_activated(&mut self) {
         self.a11y_focus = None;
         #[cfg(feature = "arbol")]
         self.tree.request_quick(self.hwnd);
@@ -349,7 +349,7 @@ impl App {
     }
 
     /// La ventana se va a cerrar: se guardan la sesión y el historial.
-    pub(super) fn on_closing(&mut self) {
+    pub fn on_closing(&mut self) {
         // El escaneo de xtree (abierto o en segundo plano) no sigue después de cerrar xdir.
         if let Some(v) = &self.xtree {
             v.cancel();

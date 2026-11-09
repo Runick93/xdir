@@ -34,4 +34,4 @@ default = ["arbol"]
 arbol = ["xdir-core/arbol"]
 # Gancho de pruebas: deja manejar la ventana por WM_COPYDATA desde otro proceso (capturas y
 # pruebas automáticas sin mouse real). Nunca se compila en la versión normal.
-pruebas = []
+pruebas = ["xdir-core/pruebas"]

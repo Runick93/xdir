@@ -22,7 +22,7 @@ impl App {
         let pal = Palette::new(mode, items);
         let r = pal.input_rect(w);
         let y = (r.top + r.bottom) / 2.0 - 10.0;
-        let Some(edit) = self.host.text_create(TextKind::Palette, render::rect(r.left, y, r.right, y + 20.0), "", &self.theme) else { return };
+        let Some(edit) = self.host.text_create(TextKind::Palette, geom::rect(r.left, y, r.right, y + 20.0), "", &self.theme) else { return };
         self.host.text_focus(edit);
         self.palette = Some((pal, edit));
         self.redraw();

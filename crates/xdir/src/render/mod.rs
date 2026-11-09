@@ -2,7 +2,7 @@
 //! 1 punto en macOS). Cada sistema implementa `Renderer` con la misma interfaz y su pintor
 //! implementa el trait `Painter` del núcleo (`xdir_core::paint`), que es lo que recibe la interfaz.
 
-pub use crate::platform::{Color, Rect, contains, rect};
+pub use crate::platform::{Color, Rect, rect};
 
 #[cfg(windows)]
 mod win32;

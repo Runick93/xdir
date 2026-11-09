@@ -6,6 +6,10 @@ use crate::geom::{Color, Rect};
 use crate::theme::Theme;
 use crate::thumbs;
 
+/// Hay íconos nuevos listos para dibujar: lo mandan los hilos de íconos y miniaturas, y la `App`
+/// repinta.
+pub const WM_APP_ICONS: u32 = crate::WM_APP + 3;
+
 /// Formatos de texto de la interfaz; cada plataforma tiene uno por valor (misma fuente, tamaño,
 /// peso y alineación en las dos). El orden es el índice en la tabla de formatos.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]

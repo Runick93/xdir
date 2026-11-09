@@ -36,7 +36,7 @@ impl App {
     pub(super) fn copy_selection(&mut self, cut: bool) {
         let items = self.selection_items(self.active);
         if !items.is_empty() {
-            if let Err(e) = shell::copy_files(&items, cut) {
+            if let Err(e) = sys::shell().copy_files(&items, cut) {
                 self.notice = Some(format!("No se pudo copiar: {e}"));
             }
         }
@@ -44,9 +44,9 @@ impl App {
 
     pub(super) fn paste(&mut self) {
         let Some(dest) = self.panes[self.active].tab().location.target() else { return };
-        let Some((sources, cut)) = shell::clipboard_files() else {
+        let Some((sources, cut)) = sys::shell().clipboard_files() else {
             // Sin rutas de disco (copiado por RDP, desde un zip...): pega la carpeta destino.
-            match shell::paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
+            match sys::shell().paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
                 Ok(true) => self.reload_shell_tabs(),
                 Ok(false) => {}
                 Err(e) => self.notice = Some(format!("No se pudo pegar: {e}")),
@@ -54,10 +54,10 @@ impl App {
             return;
         };
         let op = if cut { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
-        ops::spawn(self.hwnd, self.ops_tx.clone(), op);
+        sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op);
         // Lo cortado se pega una sola vez, como en el Explorador.
         if cut {
-            shell::clear_clipboard();
+            sys::shell().clear_clipboard();
         }
     }
 
@@ -67,14 +67,14 @@ impl App {
         if let Location::Shell { .. } = location {
             let items = self.selection_items(self.active);
             if !items.is_empty() {
-                let _ = shell::invoke_verb(self.hwnd, &location, &items, "delete");
+                let _ = sys::shell().invoke_verb(self.hwnd, &location, &items, "delete");
                 self.reload_shell_tabs();
             }
             return;
         }
         let paths = self.selection(self.active);
         if !paths.is_empty() && self.panes[self.active].tab().location.target().is_some() {
-            ops::spawn(self.hwnd, self.ops_tx.clone(), Op::Delete { paths, recycle });
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Delete { paths, recycle });
         }
     }
 
@@ -163,7 +163,7 @@ impl App {
         tab.location.target().map(|t| (i, None, t))
     }
 
-    pub(super) fn on_drag(&mut self, ev: &mut DragEvent) {
+    pub fn on_drag(&mut self, ev: &mut DragEvent) {
         let (x, y) = ev.point;
         if self.on_drag_favbar(ev, x, y) {
             return;
@@ -200,7 +200,7 @@ impl App {
             if let (Some((pane, _, dest)), Some(paths)) = (target, ev.paths) {
                 let sources = paths.to_vec();
                 let op = if ev.effect == Effect::MOVE { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
-                ops::spawn(self.hwnd, self.ops_tx.clone(), op);
+                sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op);
                 self.set_active(pane);
             }
         }
@@ -225,6 +225,8 @@ impl App {
             .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
             .collect();
         let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
+        // Sin el árbol no se agrega nada después.
+        #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
         let mut entries = vec![
             Entry::Sub("Ver".into(), views),
             Entry::Sub("Ordenar por".into(), sorts),
@@ -269,7 +271,7 @@ impl App {
         };
         #[cfg(not(feature = "arbol"))]
         let pinned_one: Option<PathBuf> = None;
-        let chosen = shell::context_menu(self.hwnd, &location, &items, at, key_down(VK_SHIFT), intercept, &own, pinned_one.is_some());
+        let chosen = sys::shell().context_menu(self.hwnd, &location, &items, at, key_down(VK_SHIFT), intercept, &own, pinned_one.is_some());
         #[cfg(feature = "arbol")]
         if let (Some(shell::UNPIN_QUICK), Some(path)) = (chosen.as_deref(), pinned_one) {
             self.toggle_quick_pin(path);
@@ -310,7 +312,7 @@ pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool,
     if paths.iter().any(|p| p.parent() == Some(dest) || dest.starts_with(p)) {
         return Effect::NONE;
     }
-    let same_volume = paths.first().and_then(|p| shell::volume_of(p)) == shell::volume_of(dest);
+    let same_volume = paths.first().and_then(|p| sys::shell().volume_of(p)) == sys::shell().volume_of(dest);
     let want = if ctrl {
         Effect::COPY
     } else if shift || same_volume {
@@ -333,7 +335,7 @@ mod tests {
 
     fn effect(sources: &[&str], dest: &str, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
         // `volume_of` pasa por el `Shell` del registro (el falso compara el primer tramo, como Windows).
-        xdir_core::sys::testing::install_fakes();
+        crate::sys::testing::install_fakes();
         let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
         drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed)
     }

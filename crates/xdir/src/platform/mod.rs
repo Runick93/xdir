@@ -15,16 +15,8 @@ pub mod macos;
 pub use self::macos::*;
 
 pub use xdir_core::WM_APP;
-pub use xdir_core::geom::{Color, Rect, contains, rect};
+pub use xdir_core::geom::{Color, Rect, rect};
 pub use xdir_core::keys::{Key, keys};
 
 /// La ventana principal; vive en el núcleo (`xdir_core::sys`) y `post` usa el `Waker` instalado.
 pub use xdir_core::sys::Handle;
-
-// Teclado: lo da la plataforma instalada (`sys::env()`). El modo oscuro y el acento los lee el
-// tema directo desde el núcleo (`xdir_core::theme`).
-
-/// ¿La tecla está apretada ahora? (Ctrl, Shift, Alt…; en macOS Ctrl de los atajos es ⌘ y Alt es ⌥.)
-pub fn key_down(k: Key) -> bool {
-    xdir_core::sys::env().key_down(k)
-}

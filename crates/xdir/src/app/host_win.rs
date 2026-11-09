@@ -12,7 +12,17 @@ use xdir_core::paint::Painter;
 use crate::config::ColorRule;
 use crate::render::Renderer;
 
-use super::*;
+use std::collections::HashMap;
+
+use super::INITIAL_SIZE;
+use super::win::*;
+use crate::drop;
+use crate::platform::keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_UP};
+use crate::platform::{Color, Handle, HandleExt, Key};
+use crate::theme::Theme;
+use crate::{render, shell};
+use super::uia;
+use xdir_core::host::{MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_PALETTE_KEY, WM_APP_SUGGEST_KEY};
 
 thread_local! {
     /// El host de la ventana, para el código de Win32 que necesita el tipo concreto (`wndproc`,
@@ -734,7 +744,7 @@ unsafe extern "system" fn edit_proc(
 unsafe extern "system" fn palette_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
     unsafe {
         let parent = GetParent(hwnd).unwrap_or_default();
-        let ctrl = key_down(VK_CONTROL);
+        let ctrl = xdir_core::sys::env().key_down(VK_CONTROL);
         let post = |vk: usize| {
             let _ = PostMessageW(Some(parent), WM_APP_PALETTE_KEY, WPARAM(vk), LPARAM(ctrl as isize));
         };

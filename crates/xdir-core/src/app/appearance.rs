@@ -17,7 +17,7 @@ impl App {
 
     // ---------- color de acento ----------
 
-    pub(super) fn set_accent(&mut self, accent: Accent) {
+    pub fn set_accent(&mut self, accent: Accent) {
         self.accent = accent;
         self.theme = Theme::from_system(accent, self.dark_mode);
         self.host.text_restyle(&self.theme);
@@ -37,7 +37,7 @@ impl App {
     }
 
     /// Ajusta la ventana al tema (barra de título, fondo Mica en Windows) y los controles de edición.
-    pub(super) fn apply_window_theme(&mut self) {
+    pub fn apply_window_theme(&mut self) {
         // El host también pasa el renderizador a fondo translúcido si quedó Mica.
         let mica = self.host.apply_theme(&self.theme, self.dark_mode.is_none());
         self.transparent = mica;
@@ -50,7 +50,7 @@ impl App {
         self.theme = Theme::from_system(self.accent, self.dark_mode);
         // Barra de título y menús nativos al mismo modo.
         self.apply_window_theme();
-        shell::set_menu_mode(self.dark_mode);
+        sys::shell().set_menu_mode(self.dark_mode);
         self.redraw();
     }
 }

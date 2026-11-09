@@ -1,7 +1,12 @@
 //! Windows: arranque y ventana Win32 (los controles de edición nativos y los menús emergentes
 //! están en el host, `host_win.rs`). macOS tiene lo mismo en `mac.rs`.
 
-use super::*;
+use std::time::Instant;
+
+use super::host_win::Win32Host;
+use super::{App, Init, ms_since, startup_args};
+use crate::platform::{Color, HandleExt};
+use xdir_core::host::WindowHost;
 
 pub(super) use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 pub(super) use windows::Win32::Graphics::Gdi::{
@@ -68,7 +73,7 @@ pub fn run() -> windows::core::Result<()> {
 
         let marks = vec![("init", ms_since(started))];
         let mut init = Init::load(session, probe, start_path, started, marks);
-        shell::set_menu_mode(init.session.dark_mode);
+        xdir_core::sys::shell().set_menu_mode(init.session.dark_mode);
         // El renderizador vive en el host: crear sus fábricas es lo que mide esta marca.
         let host = Win32Host::install()?;
         init.marks.push(("fabricas d2d/dwrite", ms_since(started)));
@@ -98,7 +103,7 @@ pub fn run() -> windows::core::Result<()> {
             dwMask: windows::Win32::UI::Controls::WTNCA_NODRAWICON,
         };
         let _ = windows::Win32::UI::Controls::SetWindowThemeAttribute(
-            (*app).hwnd.hwnd(),
+            (*app).window().hwnd(),
             windows::Win32::UI::Controls::WTA_NONCLIENT,
             &no_icon as *const _ as *const std::ffi::c_void,
             size_of::<windows::Win32::UI::Controls::WTA_OPTIONS>() as u32,
@@ -109,8 +114,8 @@ pub fn run() -> windows::core::Result<()> {
         host.register_drop_target();
         #[cfg(feature = "arbol")]
         (*app).start_quick_access();
-        (*app).marks.push(("ventana creada", ms_since(started)));
-        let saved = (*app).window_state.take();
+        (*app).mark("ventana creada");
+        let saved = (*app).take_window_state();
         host.show(saved);
 
         let mut msg = MSG::default();
@@ -131,9 +136,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         if msg == WM_NCCREATE {
             let cs = &*(lparam.0 as *const CREATESTRUCTW);
             let app = cs.lpCreateParams as *mut App;
-            (*app).hwnd = crate::platform::handle_from_hwnd(hwnd);
-            (*app).dpi = GetDpiForWindow(hwnd);
-            (*app).host.attach((*app).hwnd);
+            (*app).attach(crate::platform::handle_from_hwnd(hwnd), GetDpiForWindow(hwnd));
             (*app).apply_window_theme();
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
             return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -150,7 +153,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
 
-        (*app).handle(msg, wparam, lparam)
+        super::messages::handle(&mut *app, hwnd, msg, wparam, lparam)
     }
 }
 

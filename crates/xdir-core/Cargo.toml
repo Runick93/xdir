@@ -6,3 +6,5 @@ edition.workspace = true
 [features]
 # Árbol de carpetas lateral (lo enciende la feature `arbol` de xdir).
 arbol = []
+# Gancho de pruebas de la App (`App::test_hook`; lo enciende la feature `pruebas` de xdir).
+pruebas = []

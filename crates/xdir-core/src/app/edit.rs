@@ -46,7 +46,7 @@ impl App {
     pub(super) fn commit_rename(&mut self, path: PathBuf, new_name: String) {
         let old_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if !new_name.is_empty() && new_name != old_name {
-            ops::spawn(self.hwnd, self.ops_tx.clone(), Op::Rename { path, new_name });
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Rename { path, new_name });
         }
     }
 
@@ -65,7 +65,7 @@ impl App {
         let r = self.panes[pane].address;
         let (x, w) = (r.left + 10.0, r.right - r.left - 20.0 - pane::ADDRESS_CLEAR_W);
         let y = (r.top + r.bottom) / 2.0 - 10.0;
-        let Some(edit) = self.host.text_create(TextKind::Address, render::rect(x, y, x + w, y + 20.0), &text, &self.theme) else { return };
+        let Some(edit) = self.host.text_create(TextKind::Address, geom::rect(x, y, x + w, y + 20.0), &text, &self.theme) else { return };
         self.host.text_select(edit, 0, -1);
         self.host.text_focus(edit);
         self.edit = Some((edit, pane));
@@ -78,7 +78,7 @@ impl App {
     /// si es "Este equipo"); elegir una navega a ella.
     pub(super) fn show_subfolder_menu(&mut self, pane: usize, k: usize) {
         let Some((r, loc)) = self.panes[pane].chevron(k) else { return };
-        let items = fs::subfolders(&loc);
+        let items = sys::file_system().subfolders(&loc);
         self.set_active(pane);
         self.panes[pane].open_chevron = Some(k);
         self.redraw();
@@ -171,7 +171,7 @@ impl App {
         let r = self.panes[pane].search_text_rect();
         let y = (r.top + r.bottom) / 2.0 - 10.0;
         let text = self.panes[pane].tab().search_query().to_string();
-        let Some(edit) = self.host.text_create(TextKind::Filter, render::rect(r.left, y, r.right, y + 20.0), &text, &self.theme) else { return };
+        let Some(edit) = self.host.text_create(TextKind::Filter, geom::rect(r.left, y, r.right, y + 20.0), &text, &self.theme) else { return };
         self.host.text_select(edit, 0, -1);
         self.host.text_focus(edit);
         self.filter_edit = Some((edit, pane));
@@ -253,7 +253,7 @@ impl App {
         }
         // "shell:RecycleBinFolder", "::{GUID}": lugares del Shell.
         if text.starts_with("shell:") || text.starts_with("::") {
-            match fs::shell_location(text) {
+            match sys::file_system().shell_location(text) {
                 Some(loc) => tab.navigate(hwnd, &tx, loc),
                 None => self.host.beep(),
             }
@@ -274,7 +274,7 @@ impl App {
         // Un recurso de red que pide usuario y contraseña (o que no se verifica): se muestra el
         // diálogo de Windows. Si igual no se puede ver, se navega y la barra de estado dice por qué.
         if fs::is_unc(&path) && !path.exists() {
-            fs::connect_share(hwnd, &path);
+            sys::file_system().connect_share(hwnd, &path);
             if !path.exists() {
                 tab.navigate(hwnd, &tx, Location::Path(path));
                 return;
@@ -282,7 +282,7 @@ impl App {
         }
         if path.is_dir() {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).
-            tab.navigate(hwnd, &tx, Location::Path(fs::true_case(&path)));
+            tab.navigate(hwnd, &tx, Location::Path(sys::file_system().true_case(&path)));
         } else if fs::is_zip(&path) && path.is_file() {
             // Un .zip escrito en la barra: se entra como carpeta.
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

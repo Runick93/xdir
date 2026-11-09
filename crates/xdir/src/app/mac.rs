@@ -21,8 +21,18 @@ use objc2_foundation::{
     MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 
-use super::*;
-use crate::platform::keys;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use super::host_mac::MacHost;
+use super::{App, CursorKind, INITIAL_SIZE, Init, ms_since, startup_args};
+use xdir_core::commands::Command;
+use crate::drop::{DragEvent, DragKind, Effect};
+use crate::platform::{Handle, Key, WM_APP, keys};
+use crate::theme::Accent;
+use xdir_core::host::WindowHost;
+#[cfg(feature = "pruebas")]
+use xdir_core::host::WM_APP_TEXT_CHANGED;
 
 /// Mensajes propios de la ventana de macOS (por encima de los de la aplicación).
 pub(super) const MSG_CLOSE: u32 = WM_APP + 90;
@@ -100,9 +110,7 @@ pub fn run() -> Result<(), String> {
     WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
     VIEW.with(|v| *v.borrow_mut() = Some(view.clone()));
 
-    app.hwnd = Handle(1);
-    host.attach(app.hwnd);
-    app.dpi = 96;
+    app.attach(Handle(1), 96);
     let scale = window.backingScaleFactor() as f32;
     host.set_size(INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32, scale);
     let ptr = Box::into_raw(app);
@@ -124,9 +132,9 @@ pub fn run() -> Result<(), String> {
         app.sync_visibility();
         #[cfg(feature = "arbol")]
         app.start_quick_access();
-        app.marks.push(("ventana creada", ms_since(started)));
-        let saved = app.window_state.take();
-        app.host.show(saved);
+        app.mark("ventana creada");
+        let saved = app.take_window_state();
+        host.show(saved);
     });
     #[cfg(feature = "pruebas")]
     pruebas::start();
@@ -330,7 +338,7 @@ define_class!(
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn appearance_changed(&self) {
             with_app(|app| {
-                if app.dark_mode.is_none() {
+                if app.dark_mode().is_none() {
                     app.on_system_theme_changed();
                 }
             });
@@ -358,9 +366,7 @@ define_class!(
             let (x, y) = self.point(event);
             with_app(|app| {
                 // El desplegable de la barra de dirección no le quita el foco a la caja.
-                if !matches!(app.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
-                    app.host.focus_main();
-                }
+                app.focus_for_click(x, y);
                 app.on_left_down(x, y, event.clickCount() >= 2);
             });
         }
@@ -667,7 +673,11 @@ mod pruebas {
         let nums: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
         match (verb, nums.as_slice()) {
             ("captura", _) => capture(Path::new(rest)),
-            ("salir", _) => with_app(|app| app.host.request_close()),
+            ("salir", _) => {
+                if let Some(host) = MacHost::current() {
+                    host.request_close();
+                }
+            }
             ("clic", [x, y]) => with_app(|app| {
                 app.on_left_down(*x, *y, false);
                 app.on_left_up(*x, *y);

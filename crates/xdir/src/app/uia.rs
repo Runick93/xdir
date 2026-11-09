@@ -118,7 +118,7 @@ fn property(app: &App, el: El, id: UIA_PROPERTY_ID) -> VARIANT {
         return VARIANT::from(i.focusable);
     }
     if id == UIA_HasKeyboardFocusPropertyId {
-        let focused = unsafe { GetForegroundWindow() } == app.hwnd.hwnd() && a11y::focus_el(app) == el;
+        let focused = unsafe { GetForegroundWindow() } == app.window().hwnd() && a11y::focus_el(app) == el;
         return VARIANT::from(focused);
     }
     if id == UIA_IsOffscreenPropertyId {
@@ -131,10 +131,10 @@ fn property(app: &App, el: El, id: UIA_PROPERTY_ID) -> VARIANT {
 
 /// DIPs de la ventana → píxeles de pantalla.
 fn screen_rect(app: &App, r: render::Rect) -> UiaRect {
-    let k = app.dpi as f64 / 96.0;
+    let k = app.dpi() as f64 / 96.0;
     let mut pt = POINT { x: (r.left as f64 * k).round() as i32, y: (r.top as f64 * k).round() as i32 };
     unsafe {
-        let _ = ClientToScreen(app.hwnd.hwnd(), &mut pt);
+        let _ = ClientToScreen(app.window().hwnd(), &mut pt);
     }
     UiaRect { left: pt.x as f64, top: pt.y as f64, width: (r.right - r.left) as f64 * k, height: (r.bottom - r.top) as f64 * k }
 }
@@ -257,7 +257,7 @@ impl IRawElementProviderSimple_Impl for Root_Impl {
 
     fn HostRawElementProvider(&self) -> Result<IRawElementProviderSimple> {
         let app = self.app.get()?;
-        unsafe { UiaHostProviderFromHwnd(app.hwnd.hwnd()) }
+        unsafe { UiaHostProviderFromHwnd(app.window().hwnd()) }
     }
 }
 
@@ -266,9 +266,9 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
         let app = self.app.get()?;
         let mut pt = POINT { x: x.round() as i32, y: y.round() as i32 };
         unsafe {
-            let _ = ScreenToClient(app.hwnd.hwnd(), &mut pt);
+            let _ = ScreenToClient(app.window().hwnd(), &mut pt);
         }
-        let k = 96.0 / app.dpi as f32;
+        let k = 96.0 / app.dpi() as f32;
         match a11y::element_at(app, pt.x as f32 * k, pt.y as f32 * k) {
             Some(el) => Ok(fragment(self.app, el)),
             // Nada propio ahí: que responda la ventana.

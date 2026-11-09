@@ -586,10 +586,34 @@ fn dragged_paths(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<Vec<Path
     (!paths.is_empty()).then_some(paths)
 }
 
-/// Tecla del evento con la numeración de `platform::Key` (la de Windows): letras y números por
-/// lo que escriben (respeta la distribución del teclado), el resto por su código físico.
+/// Tecla del evento con la numeración de `platform::Key` (la de Windows).
 fn translate_key(event: &NSEvent) -> Option<Key> {
-    let code = event.keyCode();
+    let chars = event.charactersIgnoringModifiers().map(|s| s.to_string());
+    key_from(event.keyCode(), chars.as_deref())
+}
+
+/// Código físico de la tecla y lo que escribe (sin modificadores) → tecla: letras, números, «+» y
+/// «-» por lo que escriben (respeta la distribución del teclado: en la española la tecla «+» es la
+/// que en ANSI es «]»), el resto por su código físico.
+fn key_from(code: u16, chars: Option<&str>) -> Option<Key> {
+    let single = chars.and_then(|s| {
+        let mut it = s.chars();
+        match (it.next(), it.next()) {
+            (Some(c), None) => Some(c),
+            _ => None,
+        }
+    });
+    // El teclado numérico va primero: su «+» y su «-» son teclas propias.
+    match code {
+        69 => return Some(Key(0x6B)),
+        78 => return Some(Key(0x6D)),
+        _ => {}
+    }
+    match single {
+        Some('+') => return Some(Key(0xBB)),
+        Some('-') => return Some(Key(0xBD)),
+        _ => {}
+    }
     let special = match code {
         36 | 76 => Some(keys::VK_RETURN),
         48 => Some(keys::VK_TAB),
@@ -623,20 +647,36 @@ fn translate_key(event: &NSEvent) -> Option<Key> {
         43 => Some(Key(0xBC)),
         33 => Some(Key(0xDB)),
         30 => Some(Key(0xDD)),
-        // «=» / «+» y «-» del teclado principal, y «+» y «-» del numérico.
+        // «=» (con ⇧ es «+») y «-» de la distribución ANSI.
         24 => Some(Key(0xBB)),
         27 => Some(Key(0xBD)),
-        69 => Some(Key(0x6B)),
-        78 => Some(Key(0x6D)),
         _ => None,
     };
     if special.is_some() {
         return special;
     }
-    let chars = event.charactersIgnoringModifiers()?.to_string();
-    let mut it = chars.chars();
-    let (Some(c), None) = (it.next(), it.next()) else { return None };
-    c.is_ascii_alphanumeric().then(|| Key(c.to_ascii_uppercase() as u16))
+    single.filter(|c| c.is_ascii_alphanumeric()).map(|c| Key(c.to_ascii_uppercase() as u16))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    /// En un teclado ISO español la tecla «+» (código 30, «]» en ANSI) y la «-» (código 44) van
+    /// por el carácter; «]» y «[» siguen por posición.
+    #[test]
+    fn plus_minus_by_character_on_iso() {
+        assert_eq!(key_from(30, Some("+")), Some(Key(0xBB)));
+        assert_eq!(key_from(44, Some("-")), Some(Key(0xBD)));
+        assert_eq!(key_from(30, Some("]")), Some(Key(0xDD)));
+        assert_eq!(key_from(33, Some("[")), Some(Key(0xDB)));
+        // ANSI y teclado numérico.
+        assert_eq!(key_from(24, Some("=")), Some(Key(0xBB)));
+        assert_eq!(key_from(69, Some("+")), Some(Key(0x6B)));
+        assert_eq!(key_from(78, Some("-")), Some(Key(0x6D)));
+        assert_eq!(key_from(0, Some("a")), Some(Key(b'A' as u16)));
+        assert_eq!(key_from(0, None), None);
+    }
 }
 
 /// Solo con `--features pruebas`: la app se maneja con comandos de texto escritos (uno por línea)

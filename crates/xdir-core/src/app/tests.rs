@@ -1437,6 +1437,145 @@ fn extensions_switch_persists() {
     assert!(!texts.iter().any(|s| s == "foto.jpg"), "{texts:?}");
 }
 
+/// Fila (y del centro) donde se dibujó un texto del panel de la rueda dentada.
+fn drawn_y(host: &FakeHost, text: &str) -> f32 {
+    let (_, _, r) = host.drawn_texts().into_iter().find(|t| t.1 == text).unwrap_or_else(|| panic!("no se dibujó «{text}»"));
+    (r.top + r.bottom) / 2.0
+}
+
+/// El switch «Casillas de selección» va debajo de «Mostrar extensiones» (y los otros dos nuevos
+/// debajo, en orden), está apagado por defecto, se prende en todas las pestañas y se guarda en
+/// la sesión.
+#[test]
+fn checkboxes_switch_persists() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    assert!(!a.checkboxes, "apagado por defecto");
+    a.picker_open = true;
+    a.paint();
+    let mut order = vec!["Mostrar extensiones", "Casillas de selección"];
+    if cfg!(feature = "arbol") {
+        order.push("El árbol sigue al panel");
+    }
+    order.extend(["Mostrar archivos ocultos", "Barra de grupos"]);
+    let ys: Vec<f32> = order.iter().map(|t| drawn_y(&host, t)).collect();
+    assert!(ys.windows(2).all(|w| w[1] > w[0]), "{order:?} {ys:?}");
+    let at = picker_point(&a, ui::PickerHit::Checkboxes);
+    click(&mut a, at);
+    assert!(a.checkboxes);
+    assert!(a.panes.iter().flat_map(|p| p.tabs.iter()).all(|t| t.list.checkboxes));
+    let s = a.session();
+    assert!(s.checkboxes);
+    session::save(&s).unwrap();
+    let loaded = session::load().expect("sesión guardada");
+    assert!(loaded.checkboxes);
+    let mut init = Init::blank();
+    init.session = loaded;
+    let mut b = app_with_host(init, FakeHost::new());
+    assert!(b.checkboxes);
+    // Las pestañas nuevas también nacen con casillas.
+    b.new_tab(0, Location::Computer, true);
+    assert!(b.panes[0].tab().list.checkboxes);
+    // Otro clic las apaga.
+    b.picker_open = true;
+    let at = picker_point(&b, ui::PickerHit::Checkboxes);
+    click(&mut b, at);
+    assert!(!b.checkboxes && b.panes.iter().flat_map(|p| p.tabs.iter()).all(|t| !t.list.checkboxes));
+}
+
+/// El switch «Mostrar archivos ocultos» y el comando `mostrar_ocultos` (Ctrl+H) son el mismo
+/// estado: el switch corre el comando y el comando mueve el switch.
+#[test]
+fn hidden_switch_matches_command() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    assert!(!a.show_hidden && !a.picker_switches().hidden);
+    a.picker_open = true;
+    a.paint();
+    let at = picker_point(&a, ui::PickerHit::Hidden);
+    click(&mut a, at);
+    assert!(a.show_hidden);
+    assert!(a.panes.iter().flat_map(|p| p.tabs.iter()).all(|t| t.list.show_hidden), "todas las pestañas");
+    assert!(a.picker_switches().hidden);
+    a.run_command(Command::ToggleHidden);
+    assert!(!a.show_hidden && !a.picker_switches().hidden);
+    a.run_command(Command::ToggleHidden);
+    assert!(a.picker_switches().hidden);
+    assert!(a.session().show_hidden, "se guarda como siempre");
+}
+
+/// Navega el panel activo a `dir` con el árbol visible y dice si el árbol empezó a revelarla.
+#[cfg(feature = "arbol")]
+fn tree_reveals(a: &mut App, dir: &std::path::Path) -> bool {
+    a.tree.visible = true;
+    a.paint();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    let active = a.active;
+    a.panes[active].tab_mut().navigate(hwnd, &tx, Location::Path(dir.to_path_buf()));
+    a.paint();
+    a.tree.revealing().is_some()
+}
+
+/// El switch «El árbol sigue al panel» viene prendido, apagado deja quieto al árbol y lo elegido
+/// se guarda en la sesión (manda sobre `config.toml`).
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_follow_switch_persists() {
+    use crate::sys::testing::FakeFileSystem;
+    crate::sys::testing::install_fakes();
+    let root = xtree_dir("sigue-switch");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    FakeFileSystem::set_drives(&[(root.as_path(), "Disco")]);
+    let mut a = app_with(Init::blank());
+    FakeFileSystem::set_drives(&[]);
+    assert!(a.picker_switches().tree_follow, "prendido por defecto");
+    assert_eq!(a.session().tree_follow, None, "sin tocarlo no se guarda");
+    a.picker_open = true;
+    a.paint();
+    let at = picker_point(&a, ui::PickerHit::TreeFollow);
+    click(&mut a, at);
+    assert!(!a.picker_switches().tree_follow);
+    a.picker_open = false;
+    assert!(!tree_reveals(&mut a, &root.join("sub")), "apagado: el árbol no se mueve");
+    let s = a.session();
+    assert_eq!(s.tree_follow, Some(false));
+    session::save(&s).unwrap();
+    let loaded = session::load().expect("sesión guardada");
+    assert_eq!(loaded.tree_follow, Some(false));
+    // Con la sesión guardada, `arbol_sigue_panel = true` de config.toml ya no lo prende.
+    let mut init = Init::blank();
+    init.session = loaded;
+    init.config = Config::parse("[opciones]\narbol_sigue_panel = true\n");
+    let b = app_with(init);
+    assert!(!b.picker_switches().tree_follow);
+}
+
+/// Sin la clave en la sesión, `arbol_sigue_panel = false` de config.toml hace que el switch
+/// arranque apagado; al prenderlo, el árbol vuelve a seguir al panel y eso se guarda.
+#[cfg(feature = "arbol")]
+#[test]
+fn config_false_starts_switch_off() {
+    use crate::sys::testing::FakeFileSystem;
+    crate::sys::testing::install_fakes();
+    let root = xtree_dir("sigue-config");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    FakeFileSystem::set_drives(&[(root.as_path(), "Disco")]);
+    let mut init = Init::blank();
+    init.config = Config::parse("[opciones]\narbol_sigue_panel = false\n");
+    let mut a = app_with(init);
+    FakeFileSystem::set_drives(&[]);
+    assert!(!a.picker_switches().tree_follow, "arranca apagado");
+    assert_eq!(a.session().tree_follow, None);
+    a.picker_open = true;
+    a.paint();
+    let at = picker_point(&a, ui::PickerHit::TreeFollow);
+    click(&mut a, at);
+    assert!(a.picker_switches().tree_follow);
+    assert_eq!(a.session().tree_follow, Some(true));
+    a.picker_open = false;
+    assert!(tree_reveals(&mut a, &root.join("sub")), "prendido: el árbol sigue al panel");
+}
+
 /// «Seleccionar por patrón…» abre la paleta en modo patrón: lo escrito es la única fila, Enter
 /// suma a la selección los que coinciden y cierra; Esc cierra sin cambios.
 #[test]

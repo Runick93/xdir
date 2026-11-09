@@ -327,6 +327,12 @@ pub enum PickerHit {
     FileColors,
     /// Switch «Mostrar extensiones» (nombres de archivo con su extensión).
     Extensions,
+    /// Switch «Casillas de selección» de las listas.
+    Checkboxes,
+    /// Switch «El árbol sigue al panel» (solo con la feature `arbol`).
+    TreeFollow,
+    /// Switch «Mostrar archivos ocultos» (el mismo estado que el comando `mostrar_ocultos`).
+    Hidden,
     /// Switch de la barra de pestañas de grupos.
     GroupBar,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
@@ -344,10 +350,35 @@ const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
 const PICKER_SEP_H: f32 = 13.0;
 
-/// Switches del panel: modo oscuro, colores por tipo, extensiones, barra de grupos y, si se
-/// compiló, el árbol.
+/// Estado de los switches del panel de la rueda dentada (el modo oscuro sale del tema).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PickerSwitches {
+    pub file_colors: bool,
+    pub extensions: bool,
+    pub checkboxes: bool,
+    pub tree_follow: bool,
+    pub hidden: bool,
+    pub group_bar: bool,
+    pub tree: bool,
+}
+
+/// Switches del panel, de arriba abajo: modo oscuro, colores por tipo, extensiones, casillas,
+/// el árbol sigue al panel (si se compiló el árbol), archivos ocultos, barra de grupos y el árbol.
+fn switch_kinds() -> Vec<PickerHit> {
+    let arbol = cfg!(feature = "arbol");
+    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors, PickerHit::Extensions, PickerHit::Checkboxes];
+    if arbol {
+        kinds.push(PickerHit::TreeFollow);
+    }
+    kinds.extend([PickerHit::Hidden, PickerHit::GroupBar]);
+    if arbol {
+        kinds.push(PickerHit::Tree);
+    }
+    kinds
+}
+
 fn switch_rows() -> usize {
-    4 + usize::from(cfg!(feature = "arbol"))
+    switch_kinds().len()
 }
 
 /// Panel flotante sobre la rueda dentada.
@@ -376,11 +407,7 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     out.push((PickerHit::System, rect(l, y, r, y + PICKER_BTN_H)));
     out.push((PickerHit::Custom, rect(l, y + PICKER_BTN_H, r, y + PICKER_BTN_H * 2.0)));
     let y = y + PICKER_BTN_H * 2.0 + PICKER_SEP_H;
-    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors, PickerHit::Extensions, PickerHit::GroupBar];
-    if cfg!(feature = "arbol") {
-        kinds.push(PickerHit::Tree);
-    }
-    for (i, kind) in kinds.into_iter().enumerate() {
+    for (i, kind) in switch_kinds().into_iter().enumerate() {
         let top = y + PICKER_BTN_H * i as f32;
         out.push((kind, rect(l, top, r, top + PICKER_BTN_H)));
     }
@@ -396,8 +423,7 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
     Some(picker_items(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(k, _)| k).unwrap_or(PickerHit::Panel))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, extensions: bool, group_bar: bool, tree: bool) {
+pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, sw: PickerSwitches) {
     let th = p.theme();
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
@@ -445,16 +471,26 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                     p.text(FontId::GlyphsSmall, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
                 }
             }
-            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::Extensions | PickerHit::GroupBar | PickerHit::Tree => {
+            PickerHit::DarkMode
+            | PickerHit::FileColors
+            | PickerHit::Extensions
+            | PickerHit::Checkboxes
+            | PickerHit::TreeFollow
+            | PickerHit::Hidden
+            | PickerHit::GroupBar
+            | PickerHit::Tree => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
                 let (glyph, label, on) = match kind {
                     PickerHit::DarkMode => ("\u{E708}", "Modo oscuro", th.dark),
-                    PickerHit::FileColors => ("\u{E790}", "Colores por tipo", file_colors),
-                    PickerHit::Extensions => ("\u{E8EC}", "Mostrar extensiones", extensions),
-                    PickerHit::GroupBar => ("\u{E8A9}", "Barra de grupos", group_bar),
-                    _ => ("\u{E8B7}", "Árbol de carpetas", tree),
+                    PickerHit::FileColors => ("\u{E790}", "Colores por tipo", sw.file_colors),
+                    PickerHit::Extensions => ("\u{E8EC}", "Mostrar extensiones", sw.extensions),
+                    PickerHit::Checkboxes => ("\u{E739}", "Casillas de selección", sw.checkboxes),
+                    PickerHit::TreeFollow => ("\u{E71B}", "El árbol sigue al panel", sw.tree_follow),
+                    PickerHit::Hidden => ("\u{E7B3}", "Mostrar archivos ocultos", sw.hidden),
+                    PickerHit::GroupBar => ("\u{E8A9}", "Barra de grupos", sw.group_bar),
+                    _ => ("\u{E8B7}", "Árbol de carpetas", sw.tree),
                 };
                 if kind == PickerHit::DarkMode {
                     // Separador sobre la primera fila de switches.

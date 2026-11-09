@@ -19,6 +19,7 @@ impl App {
         // La vista la toma de su carpeta en la próxima `sync_folder_views`.
         let mut tab = Tab::new(id, location, self.show_hidden);
         tab.list.show_extensions = self.show_extensions;
+        tab.list.checkboxes = self.checkboxes;
         tab
     }
 
@@ -93,7 +94,7 @@ impl App {
     /// la deja a la vista. Se llama antes de cada cuadro: todo cambio de carpeta pide redibujar.
     #[cfg(feature = "arbol")]
     pub(super) fn follow_tree(&mut self) {
-        if !self.config.tree_follows_pane || !self.tree.visible || self.xtree_open {
+        if !self.tree_follows() || !self.tree.visible || self.xtree_open {
             return;
         }
         let current = &self.panes[self.active].tab().location;
@@ -301,6 +302,8 @@ impl App {
             group_bar: self.show_group_bar,
             file_colors: self.file_colors,
             show_extensions: self.show_extensions,
+            checkboxes: self.checkboxes,
+            tree_follow: self.tree_follow,
             show_tree: self.tree_visible(),
             tree_pinned: self.tree_pinned(),
             quick_open: self.tree_quick_open(),
@@ -368,8 +371,8 @@ impl App {
 
     /// Comandos de prueba (feature `pruebas`): `cmd <id>` ejecuta una acción de `commands::ALL`;
     /// `picker`, `term <panel>`, `tabdrop <panel> <pos>`, `droptarget <panel> <pos>`,
-    /// `select <panel> <pos>`, `active <panel>` y `notice <texto>` dejan la interfaz en un estado
-    /// que se quiere mostrar.
+    /// `select <panel> <pos>`, `addsel <panel> <pos>`, `hover <panel> <x> <y>`, `casillas`,
+    /// `active <panel>` y `notice <texto>` dejan la interfaz en un estado que se quiere mostrar.
     #[cfg(feature = "pruebas")]
     pub fn test_hook(&mut self, text: &str) {
         let mut it = text.splitn(3, ' ');
@@ -397,6 +400,14 @@ impl App {
             "tabdrop" => self.tab_drop = Some((na, nb)),
             "droptarget" => self.panes[na].tab_mut().list.drop_target = Some(nb),
             "select" => self.panes[na].tab_mut().list.select_pos(nb),
+            "addsel" => self.panes[na].tab_mut().list.set_selected_pos(nb, true),
+            "casillas" => self.set_checkboxes(true),
+            "hover" => {
+                let n: Vec<f32> = text.split_whitespace().skip(2).filter_map(|v| v.parse().ok()).collect();
+                if let [x, y] = n[..] {
+                    self.panes[na].tab_mut().list.on_mouse_move(x, y);
+                }
+            }
             "active" => self.set_active(na),
             "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
             "close" => self.close_palette(),

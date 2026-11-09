@@ -1,12 +1,12 @@
 ; Instalador de xdir (Inno Setup 6).
-; Uso: ISCC.exe /DAppVersion=0.1.6 /DSourceExe=..\target\release\xdir.exe /DOutputDir=..\dist installer\xdir.iss
+; Uso: ISCC.exe /DAppVersion=0.1.6 /DSourceExe=..\target\release\xdir-windows.exe /DOutputDir=..\dist installer\xdir.iss
 ; Lo invoca scripts\package.ps1; las rutas relativas son respecto de este archivo.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
 #ifndef SourceExe
-  #define SourceExe "..\target\release\xdir.exe"
+  #define SourceExe "..\target\release\xdir-windows.exe"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\dist"
@@ -49,7 +49,8 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
+; El exe compilado se llama xdir-windows.exe; se instala con el nombre de siempre.
+Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "xdir.exe"; Flags: ignoreversion
 
 [InstallDelete]
 ; xtree ahora es parte de xdir: se borra el programa aparte que dejaron las versiones anteriores.
@@ -72,7 +73,7 @@ Filename: "{app}\xdir.exe"; Description: "{cm:LaunchProgram,xdir}"; Flags: nowai
 const
   WM_CLOSE = $0010;
 
-// Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en crates/xdir/src/app/win.rs) para que
+// Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en crates/xdir-windows/src/app/win.rs) para que
 // el desinstalador pueda borrar el exe. WM_CLOSE deja que la app guarde la sesión; si a los 5 s
 // sigue abierta, se la termina.
 procedure CloseXdir();

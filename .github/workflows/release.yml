@@ -44,8 +44,9 @@ jobs:
           if [ "$new" != "$current" ]; then
             # Solo la primera línea "version" (la de [workspace.package]); Cargo.lock también la lleva y el build usa --locked.
             sed -i "0,/^version *= *\"$current\"/s//version = \"$new\"/" Cargo.toml
-            sed -i "/^name = \"xdir\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
+            sed -i "/^name = \"xdir-windows\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
             sed -i "/^name = \"xdir-core\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
+            sed -i "/^name = \"xdir-mac\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
           fi
           echo "version=$new" >> "$GITHUB_OUTPUT"
           echo "changed=$([ "$new" != "$current" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -80,7 +81,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Compilar
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p xdir-windows
 
       - name: Inno Setup
         shell: pwsh
@@ -91,7 +92,7 @@ jobs:
 
       - name: Empaquetar
         shell: pwsh
-        run: scripts\package.ps1 -Exe target\x86_64-pc-windows-msvc\release\xdir.exe -OutDir dist
+        run: scripts\package.ps1 -Exe target\x86_64-pc-windows-msvc\release\xdir-windows.exe -OutDir dist
 
       - uses: actions/upload-artifact@v4
         with:

@@ -18,16 +18,17 @@ export MACOSX_DEPLOYMENT_TARGET=12.0
 
 if [ "$1" != "--sin-compilar" ]; then
     rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
-    cargo build --release --locked --target aarch64-apple-darwin
-    cargo build --release --locked --target x86_64-apple-darwin
+    cargo build --release --locked -p xdir-mac --target aarch64-apple-darwin
+    cargo build --release --locked -p xdir-mac --target x86_64-apple-darwin
 fi
 
 out=dist
 app="$out/xdir.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+# El binario de la crate se llama xdir-mac; dentro de la app queda como xdir.
 lipo -create -output "$app/Contents/MacOS/xdir" \
-    target/aarch64-apple-darwin/release/xdir target/x86_64-apple-darwin/release/xdir
+    target/aarch64-apple-darwin/release/xdir-mac target/x86_64-apple-darwin/release/xdir-mac
 cp assets/xdir.icns "$app/Contents/Resources/xdir.icns"
 
 cat > "$app/Contents/Info.plist" <<PLIST

@@ -1,8 +1,8 @@
-# Empaqueta xdir.exe ya compilado: zip portable e instalador (Inno Setup).
-# Uso: pwsh scripts\package.ps1 [-Exe target\release\xdir.exe] [-OutDir dist] [-NoInstaller]
+# Empaqueta el exe ya compilado (xdir-windows.exe) como xdir.exe: zip portable e instalador (Inno Setup).
+# Uso: pwsh scripts\package.ps1 [-Exe target\release\xdir-windows.exe] [-OutDir dist] [-NoInstaller]
 # Deja en OutDir: xdir-<version>-portable.zip y xdir-<version>-setup.exe.
 param(
-    [string]$Exe = "target\release\xdir.exe",
+    [string]$Exe = "target\release\xdir-windows.exe",
     [string]$OutDir = "dist",
     [switch]$NoInstaller
 )
@@ -20,11 +20,12 @@ if (-not $version) { throw "No se encontró la versión en Cargo.toml" }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
 
-# Zip portable: el exe más xdir.portable, que hace que la sesión se guarde junto al exe.
+# Zip portable: el exe, copiado como xdir.exe, más xdir.portable, que hace que la sesión se guarde
+# junto al exe.
 $stage = Join-Path $OutDir "xdir-$version-portable"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory $stage | Out-Null
-Copy-Item $Exe $stage
+Copy-Item $Exe (Join-Path $stage "xdir.exe")
 New-Item -ItemType File (Join-Path $stage "xdir.portable") | Out-Null
 $zip = "$stage.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

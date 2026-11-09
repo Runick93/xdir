@@ -1,6 +1,6 @@
 @echo off
 rem Compila usando el entorno de Visual Studio Build Tools (tiene las librerias de escritorio x64).
-rem Uso: scripts\build.cmd [argumentos de cargo]   ej: scripts\build.cmd run --release
+rem Uso: scripts\build.cmd [argumentos de cargo]   ej: scripts\build.cmd run --release -p xdir-windows
 setlocal
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "TMPF=%TEMP%\xdir_vs_path.txt"

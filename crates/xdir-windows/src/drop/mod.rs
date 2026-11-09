@@ -4,5 +4,4 @@
 mod win32;
 pub use self::win32::*;
 
-#[cfg_attr(not(windows), allow(unused_imports))]
 pub use xdir_core::drop::{DragEvent, DragKind, Effect, WM_APP_DRAG};

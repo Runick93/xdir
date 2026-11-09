@@ -82,8 +82,15 @@ sh scripts/package-mac.sh        # xdir.app universal y el .dmg en dist/
 Desde una Mac también se puede verificar que la versión de Windows compile:
 `rustup target add x86_64-pc-windows-msvc && cargo check --target x86_64-pc-windows-msvc`.
 
-El código propio de cada sistema está separado: `crates/xdir-windows/src/platform`, y en `fs`, `shell`, `ops`, `icons`,
-`thumbs`, `render` y `drop` un `win32.rs` y un `macos.rs` con la misma interfaz; la ventana está en
-`crates/xdir-windows/src/app/host_win.rs` (Windows) y `crates/xdir-mac/src/app/host_mac.rs` (macOS), con el arranque
-y los mensajes en `app/win.rs` y `app/mac.rs`. El dibujo, la lista, los paneles, las pestañas, el árbol,
-la paleta, xtree, la configuración y la sesión viven en `crates/xdir-core`, sin código de ningún sistema.
+El proyecto es un workspace de tres crates:
+
+- `crates/xdir-core`: todo lo que no depende del sistema (la aplicación, el dibujo, la lista, los paneles, las pestañas,
+  el árbol, la paleta, xtree, la configuración y la sesión). No tiene dependencias ni código de ningún sistema: pide lo
+  que necesita (ventana, dibujo, archivos, shell, íconos, miniaturas…) mediante traits.
+- `crates/xdir-windows`: el binario `xdir-windows`. Ventana Win32, Direct2D, Shell, MFT, accesibilidad (UIA) y los
+  recursos de `build.rs`.
+- `crates/xdir-mac`: el binario `xdir-mac`. AppKit, Core Graphics, `getattrlistbulk` y `notify`.
+
+Las crates de plataforma son adaptadores finos: implementan los traits del núcleo y arman la ventana, nada más.
+Cada una compila vacía (un `main` que avisa y sale) fuera de su sistema, así `cargo build` y `cargo test` andan
+en Windows, macOS y Linux.

@@ -9,17 +9,13 @@
 //! elemento del Acceso rápido, el ayudante elevado de xtree) se reexporta acá tal cual. Lo que
 //! solo usa el árbol lateral queda sin usar sin la feature `arbol` (de ahí los `allow`).
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::mpsc::Sender;
 
 use crate::platform::Handle;
 use xdir_core::sys::{self, FileSystem};
 
 pub use xdir_core::fs::{
-    Entry, LoadEvent, LoadMsg, Location, QuickItem, WM_APP_CHANGED, WM_APP_LOAD, is_unc, is_zip, normalize_lexical, spawn_search,
+    Entry, LoadEvent, LoadMsg, Location, QuickItem, WM_APP_CHANGED, WM_APP_LOAD, is_unc, is_zip, normalize_lexical,
 };
 pub use xdir_core::sys::Watch;
 
@@ -39,41 +35,6 @@ fn fsys() -> &'static dyn FileSystem {
     sys::file_system()
 }
 
-/// Lanza la lectura de `location` en un hilo. Se abandona si `current` deja de valer `generation`.
-pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
-    fsys().spawn_load(hwnd, tx, panel, generation, current, location)
-}
-
-/// ¿Está oculto? (atributo de Windows; punto o marca del Finder en macOS).
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn is_hidden(meta: &std::fs::Metadata, name: &OsStr) -> bool {
-    fsys().is_hidden(meta, name)
-}
-
-/// Ruta de la carpeta del usuario `i` (Escritorio, Descargas, Documentos, Imágenes, Música,
-/// Vídeos), si existe.
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn user_folder(i: usize) -> Option<PathBuf> {
-    fsys().user_folder(i)
-}
-
-/// Raíces de las unidades o discos montados.
-pub fn drives() -> Vec<PathBuf> {
-    fsys().drives()
-}
-
-/// Identificador de una unidad para `drive_label`.
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn drive_name(root: &Path) -> String {
-    fsys().drive_name(root)
-}
-
-/// Nombre de una unidad ("Disco local (C:)", "Macintosh HD"), cacheado.
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn drive_label(drive: &str) -> String {
-    fsys().drive_label(drive)
-}
-
 /// Olvida los nombres de unidad guardados (cambió el conjunto de unidades).
 pub fn forget_drive_labels() {
     fsys().forget_drive_labels()
@@ -89,44 +50,9 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
     fsys().subfolders(loc)
 }
 
-/// Ícono genérico de carpeta.
-pub fn folder_icon() -> Option<i32> {
-    fsys().folder_icon()
-}
-
 /// Lo escrito en la barra de dirección como lugar especial del Shell.
 pub fn shell_location(text: &str) -> Option<Location> {
     fsys().shell_location(text)
-}
-
-/// Red del Explorador (vacío donde no existe).
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn network_place() -> &'static str {
-    fsys().network_place()
-}
-
-/// Carpeta de Linux (WSL) del Explorador (vacío donde no existe).
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn linux_place() -> &'static str {
-    fsys().linux_place()
-}
-
-/// ¿Existe esa carpeta virtual en este equipo?
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn shell_place_exists(parsing: &str) -> bool {
-    fsys().shell_place_exists(parsing)
-}
-
-/// Subcarpetas con ruta de disco de una carpeta virtual, para el árbol lateral.
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn shell_subfolders(parsing: &str) -> Vec<(String, PathBuf)> {
-    fsys().shell_subfolders(parsing)
-}
-
-/// Carpetas del Acceso rápido de Windows.
-#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
-pub fn quick_access() -> Vec<QuickItem> {
-    fsys().quick_access()
 }
 
 /// ¿Está anclada ahora mismo al Acceso rápido?
@@ -141,11 +67,6 @@ pub fn quick_access_watch_dir() -> Option<PathBuf> {
     fsys().quick_access_watch_dir()
 }
 
-/// Forma larga de una ruta (sin nombres cortos 8.3).
-pub fn long_path(path: &Path) -> PathBuf {
-    fsys().long_path(path)
-}
-
 /// Ruta escrita a mano con las mayúsculas reales del disco.
 pub fn true_case(path: &Path) -> PathBuf {
     fsys().true_case(path)
@@ -157,12 +78,16 @@ pub fn connect_share(owner: Handle, path: &Path) -> bool {
 }
 
 /// ¿Es la misma ruta? (sin distinguir mayúsculas ni separador final).
+// Fuera del núcleo solo la usan las operaciones de macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn same_path(a: &Path, b: &Path) -> bool {
     fsys().same_path(a, b)
 }
 
 /// Vigila la carpeta `path` y avisa a `hwnd` con `msg` (`wparam` = `panel`, `lparam`). Se
-/// detiene al soltar el guardián.
+/// detiene al soltar el guardián. Sin la feature `arbol` no lo usa nadie (las pestañas van
+/// directo a `sys::file_system()`).
+#[cfg_attr(not(feature = "arbol"), allow(dead_code))]
 pub fn watch(hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
     fsys().watch(hwnd, msg, panel, lparam, path)
 }

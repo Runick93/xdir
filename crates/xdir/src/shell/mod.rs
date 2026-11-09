@@ -44,14 +44,6 @@ pub fn copy_text(owner: Handle, text: &str) -> Result<(), String> {
     sys::shell().copy_text(owner, text)
 }
 
-pub fn pick_folder(owner: Handle, title: &str) -> Option<PathBuf> {
-    sys::shell().pick_folder(owner, title)
-}
-
-pub fn open_item(owner: Handle, item: &Item) {
-    sys::shell().open_item(owner, item)
-}
-
 pub fn open_file(owner: Handle, file: &Path, dir: Option<&Path>) {
     sys::shell().open_file(owner, file, dir)
 }

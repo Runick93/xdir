@@ -15,12 +15,13 @@ use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
 use super::tree::{NO_PARENT, Node, node_path, rows_of};
 use super::treemap::{Cell, header_h, layout};
-use crate::platform::keys::{VK_BACK, VK_ESCAPE};
-use crate::platform::{Color, Handle, Key, Rect, contains, rect};
-use crate::render::{FontId, Painter};
-use crate::shell;
+use crate::keys::keys::{VK_BACK, VK_ESCAPE};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::keys::Key;
+use crate::sys::Handle;
+use crate::paint::{FontId, Painter};
 use crate::theme::alpha;
-use xdir_core::sys::disk_scan;
+use crate::sys::disk_scan;
 
 // Medidas (DIPs).
 const MARGIN: f32 = 8.0;
@@ -213,7 +214,7 @@ impl Xtree {
     #[cfg(test)]
     pub fn idle(root: PathBuf) -> Xtree {
         // La vista avisa a la ventana con `Handle::post`: en las pruebas, al `Waker` falso.
-        xdir_core::sys::testing::install_fakes();
+        crate::sys::testing::install_fakes();
         Xtree::with_scan(Handle::default(), root, idle_scan())
     }
 
@@ -232,13 +233,11 @@ impl Xtree {
     }
 
     /// Abre el menú de discos sin pasar por el clic (pruebas).
-    #[cfg(test)]
     pub fn open_menu(&mut self) {
         self.menu_open = true;
     }
 
     /// ¿Está abierto el menú de discos? (pruebas).
-    #[cfg(test)]
     pub fn menu_is_open(&self) -> bool {
         self.menu_open
     }
@@ -456,7 +455,7 @@ impl Xtree {
     fn choose(&mut self, i: usize) {
         if let Some(d) = self.drives.get(i) {
             self.pick = d.path.clone();
-        } else if let Some(p) = shell::pick_folder(self.hwnd, "Elige la carpeta a analizar") {
+        } else if let Some(p) = crate::sys::shell().pick_folder(self.hwnd, "Elige la carpeta a analizar") {
             self.pick = p;
         }
     }
@@ -554,7 +553,7 @@ impl Xtree {
                     }
                 }
                 1 => {
-                    let _ = shell::copy_text(self.hwnd, &self.path_of(&self.arena, t).to_string_lossy());
+                    let _ = crate::sys::shell().copy_text(self.hwnd, &self.path_of(&self.arena, t).to_string_lossy());
                     Action::None
                 }
                 _ if n.is_dir && t != self.current => {
@@ -974,8 +973,8 @@ impl Xtree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::keys::{VK_BACK, VK_ESCAPE};
-    use crate::platform::rect;
+    use crate::keys::keys::{VK_BACK, VK_ESCAPE};
+    use crate::geom::rect;
     use crate::xtree::tree::{NO_PARENT, Node};
 
     fn node(name: &str, parent: u32, size: u64, is_dir: bool, children: Vec<u32>) -> Node {

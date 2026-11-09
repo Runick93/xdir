@@ -3,7 +3,6 @@
 //! implementa el trait `Painter` del núcleo (`xdir_core::paint`), que es lo que recibe la interfaz.
 
 pub use crate::platform::{Color, Rect, contains, rect};
-pub use xdir_core::paint::{FontId, Painter};
 
 #[cfg(windows)]
 mod win32;

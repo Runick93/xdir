@@ -13,14 +13,6 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use self::macos::*;
 
-pub use xdir_core::fs::OverlayRequest;
-
-/// Pide las superposiciones de íconos de unos elementos (`sys::overlays()`): vuelven como
-/// `LoadMsg::Overlays` por el canal del pedido.
-pub fn request_overlays(req: OverlayRequest) {
-    xdir_core::sys::overlays().request(req)
-}
-
 /// Hay íconos nuevos listos para dibujar.
 pub const WM_APP_ICONS: u32 = WM_APP + 3;
 

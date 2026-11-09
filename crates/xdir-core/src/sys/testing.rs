@@ -461,13 +461,25 @@ impl Shell for FakeShell {
 static LOADS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
 static WATCHES: Mutex<BTreeMap<PathBuf, (usize, usize)>> = Mutex::new(BTreeMap::new());
 
+thread_local! {
+    /// Unidades del falso en este hilo (ruta y nombre); vacío salvo `FakeFileSystem::set_drives`.
+    static DRIVES: RefCell<Vec<(PathBuf, String)>> = const { RefCell::new(Vec::new()) };
+}
+
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
-/// íconos ni tipos del sistema, sin unidades, sin carpetas del usuario ni lugares del Shell. Lo
+/// íconos ni tipos del sistema, sin unidades (salvo las de `set_drives`, por hilo), sin carpetas
+/// del usuario ni lugares del Shell. Lo
 /// que empieza con punto está oculto; las rutas se comparan sin distinguir mayúsculas ni
 /// separador final, y quedan como se escribieron (`long_path` y `true_case` no las cambian).
 pub struct FakeFileSystem;
 
 impl FakeFileSystem {
+    /// Unidades (ruta y nombre) que ve este hilo: `drives` da las rutas y `drive_label`, los
+    /// nombres. Con una lista vacía vuelve a no haber unidades.
+    pub fn set_drives(drives: &[(&Path, &str)]) {
+        DRIVES.with(|d| *d.borrow_mut() = drives.iter().map(|(p, n)| (p.to_path_buf(), n.to_string())).collect());
+    }
+
     /// Cuántas lecturas de `path` se pidieron (en todo el proceso).
     pub fn loads(path: &Path) -> usize {
         LOADS.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied().unwrap_or(0)
@@ -579,15 +591,17 @@ impl FileSystem for FakeFileSystem {
     }
 
     fn drives(&self) -> Vec<PathBuf> {
-        Vec::new()
+        DRIVES.with(|d| d.borrow().iter().map(|(p, _)| p.clone()).collect())
     }
 
     fn drive_name(&self, root: &Path) -> String {
         root.to_string_lossy().into_owned()
     }
 
+    /// El nombre de `set_drives` (si la unidad es de este hilo); si no, el mismo texto.
     fn drive_label(&self, drive: &str) -> String {
-        drive.to_string()
+        DRIVES.with(|d| d.borrow().iter().find(|(p, _)| p.to_string_lossy() == drive).map(|(_, n)| n.clone()))
+            .unwrap_or_else(|| drive.to_string())
     }
 
     fn forget_drive_labels(&self) {}

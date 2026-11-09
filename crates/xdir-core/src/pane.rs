@@ -1,10 +1,10 @@
 //! Un panel: tira de pestañas, barra de navegación con dirección y la lista de la pestaña activa.
 //! Guarda las áreas del último frame para resolver clics.
 
-use crate::platform::Color;
 use crate::favorites::{Fav, Favorites};
 use crate::fs::Location;
-use crate::render::{FontId, Painter, Rect, contains, rect};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter};
 use crate::tab::Tab;
 use crate::theme::alpha;
 
@@ -840,7 +840,7 @@ impl Pane {
             }
             return;
         }
-        let folder_icon = crate::fs::folder_icon();
+        let folder_icon = crate::sys::file_system().folder_icon();
         let mut x = bar.left + 6.0;
         for (i, fav) in f.items.iter().enumerate() {
             let text_w = p.measure(FontId::Ui, fav.name()).min(FAV_MAX_W);
@@ -963,7 +963,7 @@ impl Pane {
 }
 
 /// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
-fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::platform::Color) {
+fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();

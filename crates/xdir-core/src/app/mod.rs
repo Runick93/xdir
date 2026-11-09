@@ -13,12 +13,16 @@ mod input;
 mod paint;
 mod quick_jump;
 mod panes;
+mod tooltip;
 
 #[cfg(test)]
 mod tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
+use tooltip::{Tip, WM_APP_TOOLTIP};
+#[cfg(test)]
+use tooltip::{tooltip_for, tooltip_rect};
 
 use crate::{about, anim, config, jump, list, palette, pane, session, theme, typed, ui};
 use crate::xtree::view::{self as xtree_view, Xtree};
@@ -140,6 +144,11 @@ enum Hit {
     Palette(Option<usize>),
     /// Desplegable de la barra de dirección: una ruta, o el panel sin nada debajo.
     Suggest(Option<usize>),
+    /// La chincheta de arriba del árbol (fijarlo o soltarlo). El resto del árbol es `None`: lo
+    /// maneja el árbol.
+    // Solo existe con el árbol (feature `arbol`).
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    TreePin,
 }
 
 /// Lo que se está arrastrando con el botón izquierdo.
@@ -236,6 +245,10 @@ pub struct App {
     /// Desplegable de rutas de la barra de dirección (vive mientras `edit`).
     suggest: Option<typed::Suggest>,
     hover: Hit,
+    /// Cartel de ayuda del botón bajo el mouse (esperando, a la vista o descartado).
+    tip: Option<Tip>,
+    /// Turno del último cartel pedido: los avisos de espera viejos se descartan.
+    tip_token: u64,
     drag: Drag,
     title: String,
     started: Instant,
@@ -448,6 +461,8 @@ impl App {
             edit: None,
             suggest: None,
             hover: Hit::None,
+            tip: None,
+            tip_token: 0,
             drag: Drag::None,
             title: String::new(),
             started,

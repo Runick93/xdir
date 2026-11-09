@@ -1471,6 +1471,33 @@ fn palette_pattern_mode_selects_on_enter() {
     assert_eq!(titles, ["Deseleccionar los que coinciden con «b.*»"]);
     assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
     assert_eq!(selected(&a), ["a.jpg"]);
+    assert_eq!(a.notice, None);
+}
+
+/// Si el patrón no cambia nada, un aviso lo dice (al seleccionar y al deseleccionar).
+#[test]
+fn palette_pattern_without_matches_shows_notice() {
+    use crate::host::WM_APP_PALETTE_KEY;
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("seleccion-patron-vacia");
+    a.new_tab(0, Location::Path(dir), true);
+    a.set_active(0);
+    a.panes[0].tab_mut().list.append(vec![file_entry("a.jpg"), file_entry("c.png")]);
+    let run = |a: &mut App, cmd: Command, pattern: &str| {
+        a.notice = None;
+        a.run_command(cmd);
+        let edit = a.palette.as_ref().unwrap().1;
+        host.text_set(edit, pattern);
+        a.on_text_changed(edit.0 as isize);
+        assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+        a.notice.clone()
+    };
+    assert_eq!(run(&mut a, Command::SelectPattern, "*.txt").as_deref(), Some("Ningún elemento coincide con «*.txt»"));
+    // a.jpg no está seleccionado: deseleccionarlo no cambia nada.
+    assert_eq!(run(&mut a, Command::DeselectPattern, "*.jpg").as_deref(), Some("Ningún elemento seleccionado coincide con «*.jpg»"));
+    assert_eq!(run(&mut a, Command::SelectPattern, "*.jpg"), None);
+    assert_eq!(run(&mut a, Command::DeselectPattern, "*.jpg"), None);
 }
 
 // ---------- historial de Atrás y Adelante ----------

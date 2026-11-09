@@ -168,6 +168,16 @@ pub fn display_name(name: &str, is_dir: bool, show_ext: bool) -> &str {
     }
 }
 
+/// Nombre que se muestra de `e`: a los elementos de disco se les aplica `display_name`; los del
+/// Shell (con PIDL) ya traen el nombre como lo muestra el Shell, con o sin extensión según su
+/// propia configuración, y no se tocan.
+fn shown_name(e: &Entry, show_ext: bool) -> &str {
+    if e.pidl.is_some() {
+        return &e.display;
+    }
+    display_name(&e.display, e.is_dir, show_ext)
+}
+
 /// Extensión en minúsculas (sin punto); vacía para carpetas.
 fn extension_of(e: &Entry) -> &str {
     if e.is_dir {
@@ -832,7 +842,7 @@ impl FileList {
     /// Texto de una celda de una columna que no es el nombre (para medirla).
     fn cell_text(col: Column, e: &Entry, root: Option<&std::path::Path>, show_ext: bool) -> String {
         match col {
-            Column::Name => display_name(&e.display, e.is_dir, show_ext).to_string(),
+            Column::Name => shown_name(e, show_ext).to_string(),
             Column::Modified => format::date(e.modified),
             Column::Created => format::date(e.created),
             Column::Type => e.type_name.to_string(),
@@ -1474,7 +1484,7 @@ impl FileList {
                             let iy = y + (ROW_H - ICON) / 2.0;
                             p.shell_icon(e.icon, e.overlay, cell.left, iy, ICON);
                             let text = rect(cell.left + ICON + 8.0, y, cell.right, y + ROW_H);
-                            let name = display_name(&e.display, e.is_dir, self.show_extensions);
+                            let name = shown_name(e, self.show_extensions);
                             p.text(FontId::Ui, name, text, color);
                             ends.push(text.left + p.measure(FontId::Ui, name) + 6.0);
                         }
@@ -1536,7 +1546,7 @@ impl FileList {
             p.shell_icon(e.icon, e.overlay, ix, iy, small);
         }
         let label = rect(cell.left + 4.0, image.bottom + 4.0, cell.right - 4.0, cell.bottom - 2.0);
-        p.text(FontId::Label, display_name(&e.display, e.is_dir, self.show_extensions), label, color);
+        p.text(FontId::Label, shown_name(e, self.show_extensions), label, color);
     }
 }
 
@@ -1811,6 +1821,21 @@ mod column_tests {
         for (name, is_dir) in [("foto.jpg", false), ("a.tar.gz", false), (".gitignore", false), ("archivo.", false), ("sin", false), ("x.d", true)] {
             assert_eq!(display_name(name, is_dir, true), name);
         }
+    }
+
+    /// Los elementos del Shell (con PIDL) se muestran como los da el Shell aunque las extensiones
+    /// estén ocultas: el Shell ya las quitó según su configuración y no se recorta otra vez.
+    #[test]
+    fn shell_items_keep_their_display_name() {
+        let mut disk = entry("informe.final.pdf");
+        disk.display = "informe.final.pdf".into();
+        assert_eq!(shown_name(&disk, false), "informe.final");
+        let mut shell = entry("informe.final.pdf");
+        shell.display = "informe.final".into();
+        shell.pidl = Some(std::sync::Arc::from(&[1u8, 2, 3][..]));
+        assert_eq!(shown_name(&shell, false), "informe.final");
+        assert_eq!(shown_name(&shell, true), "informe.final");
+        assert_eq!(FileList::cell_text(Column::Name, &shell, None, false), "informe.final");
     }
 
     /// La columna Tamaño va alineada a la derecha: su texto usa `FontId::UiRight`.

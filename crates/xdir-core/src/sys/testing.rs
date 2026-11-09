@@ -4,13 +4,18 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, FileOps, Handle, Services, SystemEnv, Waker};
+use super::{ConsoleInfo, DiskScan, FileOps, Handle, Services, SystemEnv, Waker};
 use crate::format::thousands;
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
+use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
+use crate::xtree::tree::Node;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
 /// instala, y si ya había servicios instalados no hace nada.
@@ -19,6 +24,7 @@ pub fn install_fakes() {
         waker: Box::new(FakeWaker),
         env: Box::new(FakeEnv),
         file_ops: Box::new(FakeFileOps),
+        disk_scan: Box::new(FakeDiskScan),
     });
 }
 
@@ -180,5 +186,93 @@ impl FileOps for FakeFileOps {
         OPS.with(|o| o.borrow_mut().push(op));
         let _ = tx.send(RESPONSE.with(|r| r.borrow().clone()));
         owner.post(WM_APP_OP_DONE, 0, 0);
+    }
+}
+
+/// Una carpeta servida por el `FakeDiskScan`: subcarpetas y archivos (nombre, tamaño).
+type FakeDir = (Vec<String>, Vec<(String, u64)>);
+
+/// Carpetas del disco falso y carpetas que se listaron, por ruta completa. Son de todo el proceso
+/// (el escáner lista desde sus propios hilos, no desde el del test): cada test usa rutas propias.
+static FAKE_DIRS: Mutex<BTreeMap<PathBuf, FakeDir>> = Mutex::new(BTreeMap::new());
+static LISTED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// `DiskScan` falso: nunca toca el disco. El listador sirve las carpetas cargadas con `serve` (las
+/// demás, vacías); sin escaneo rápido ni elevado, sin discos ni datos de volumen, y la raíz por
+/// defecto es una carpeta temporal. Faltan permisos solo si el `Progress` lo dice (como en
+/// Windows y macOS juntos: `need_admin` o carpetas denegadas).
+pub struct FakeDiskScan;
+
+impl FakeDiskScan {
+    /// Carga en el disco falso la carpeta `path` con sus subcarpetas y archivos (nombre, tamaño).
+    pub fn serve(path: &Path, dirs: &[&str], files: &[(&str, u64)]) {
+        let dir = (dirs.iter().map(|d| d.to_string()).collect(), files.iter().map(|(n, s)| (n.to_string(), *s)).collect());
+        FAKE_DIRS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), dir);
+    }
+
+    /// ¿El listador falso listó `path`?
+    pub fn was_listed(path: &Path) -> bool {
+        LISTED.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
+    }
+
+    /// La raíz por defecto del falso (una carpeta temporal; no hace falta que exista).
+    pub fn root() -> PathBuf {
+        std::env::temp_dir().join("xdir-tests").join("xtree-raiz")
+    }
+}
+
+struct FakeLister;
+
+impl Lister for FakeLister {
+    fn list(&self, path: &Path) -> Result<DirListing, ListError> {
+        LISTED.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf());
+        let dirs = FAKE_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((sub, files)) = dirs.get(path) else { return Ok(DirListing::default()) };
+        Ok(DirListing {
+            dirs: sub.iter().map(OsString::from).collect(),
+            files: files.iter().map(|(n, s)| FileEntry { name: n.as_str().into(), size: *s, id: None }).collect(),
+        })
+    }
+}
+
+impl DiskScan for FakeDiskScan {
+    fn lister(&self, _root: &Path) -> Box<dyn Lister> {
+        Box::new(FakeLister)
+    }
+
+    fn fast_scan(&self, _root: &Path, _p: &Progress, _cancel: &AtomicBool) -> FastScan {
+        FastScan::NotApplicable
+    }
+
+    fn elevate(&self, _owner: Handle, _root: &Path, _p: &Progress, _cancel: &AtomicBool) -> Option<Vec<Node>> {
+        None
+    }
+
+    fn drives(&self) -> Vec<DriveEntry> {
+        Vec::new()
+    }
+
+    fn volume_space(&self, _path: &Path) -> Option<(u64, u64)> {
+        None
+    }
+
+    fn whole_volume(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn default_root(&self) -> PathBuf {
+        FakeDiskScan::root()
+    }
+
+    fn permission_issue(&self, p: &Progress) -> bool {
+        p.need_admin.load(Ordering::Relaxed) || p.denied.load(Ordering::Relaxed) > 0
+    }
+
+    fn permission_hint(&self) -> &'static str {
+        "{n} carpetas sin permiso (tecla A)"
+    }
+
+    fn elevating_text(&self) -> &'static str {
+        "Analizando con permisos\u{2026}"
     }
 }

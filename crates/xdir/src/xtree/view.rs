@@ -15,12 +15,12 @@ use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
 use super::tree::{NO_PARENT, Node, node_path, rows_of};
 use super::treemap::{Cell, header_h, layout};
-use crate::fs;
 use crate::platform::keys::{VK_BACK, VK_ESCAPE};
 use crate::platform::{Color, Handle, Key, Rect, contains, rect};
 use crate::render::Painter;
 use crate::shell;
 use crate::theme::alpha;
+use xdir_core::sys::disk_scan;
 
 // Medidas (DIPs).
 const MARGIN: f32 = 8.0;
@@ -180,7 +180,7 @@ impl Xtree {
         let scan = scan::start(hwnd, id, root.clone());
         let mut x = Xtree::with_scan(hwnd, root, scan);
         x.scanning = true;
-        x.vol = fs::volume_space(&x.root);
+        x.vol = disk_scan().volume_space(&x.root);
         x
     }
 
@@ -248,6 +248,12 @@ impl Xtree {
         self.scan.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// Carpeta analizada.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// ¿Se canceló el escaneo?
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn cancelled(&self) -> bool {
@@ -257,7 +263,7 @@ impl Xtree {
     /// Texto para la barra de estado de xdir mientras la vista está abierta.
     pub fn status_text(&self) -> String {
         if self.elevating.load(Ordering::Relaxed) {
-            format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), fs::XTREE_ELEVATING_TEXT)
+            format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), disk_scan().elevating_text())
         } else if self.scanning {
             format!("xtree \u{B7} {} \u{B7} escaneando\u{2026}", self.root.display())
         } else if self.arena.is_empty() {
@@ -271,9 +277,9 @@ impl Xtree {
     fn data_hint(&self) -> String {
         let progress = self.progress();
         if self.elevating.load(Ordering::Relaxed) {
-            fs::XTREE_ELEVATING_TEXT.to_string()
-        } else if fs::xtree_permission_issue(progress) {
-            fs::XTREE_PERMISSION_HINT.replace("{n}", &fmt_count(progress.denied.load(Ordering::Relaxed)))
+            disk_scan().elevating_text().to_string()
+        } else if disk_scan().permission_issue(progress) {
+            disk_scan().permission_hint().replace("{n}", &fmt_count(progress.denied.load(Ordering::Relaxed)))
         } else {
             String::new()
         }
@@ -318,7 +324,7 @@ impl Xtree {
         self.selected = None;
         self.scroll = 0.0;
         self.scanning = true;
-        self.vol = fs::volume_space(&self.root);
+        self.vol = disk_scan().volume_space(&self.root);
     }
 
     /// Toma el árbol terminado, si ya llegó. Devuelve si cambió algo.
@@ -326,7 +332,7 @@ impl Xtree {
         let Some(arena) = self.scan.result.lock().unwrap().take() else { return false };
         self.arena = arena;
         // El espacio libre cambió mientras se escaneaba.
-        self.vol = fs::volume_space(&self.root);
+        self.vol = disk_scan().volume_space(&self.root);
         self.scanning = false;
         self.go(0);
         true
@@ -352,7 +358,7 @@ impl Xtree {
     /// de Acceso total al disco). Solo si faltaron permisos.
     fn elevate(&mut self) -> Action {
         let hwnd = self.hwnd;
-        self.elevate_with(move |root, progress, cancel| fs::xtree_elevate(hwnd, root, progress, cancel))
+        self.elevate_with(move |root, progress, cancel| disk_scan().elevate(hwnd, root, progress, cancel))
     }
 
     /// `elevate` con el escaneo elevado como parámetro (las pruebas pasan uno falso).
@@ -360,7 +366,7 @@ impl Xtree {
     where
         F: FnOnce(&Path, &Progress, &AtomicBool) -> Option<Vec<Node>> + Send + 'static,
     {
-        if !fs::xtree_permission_issue(self.progress()) || self.elevating.swap(true, Ordering::Relaxed) {
+        if !disk_scan().permission_issue(self.progress()) || self.elevating.swap(true, Ordering::Relaxed) {
             return Action::None;
         }
         let (root, hwnd, id) = (self.root.clone(), self.hwnd, self.scan.id);
@@ -523,7 +529,7 @@ impl Xtree {
         }
         let ui = layout_ui(area, self.legend_h());
         if contains(&ui.combo, x, y) {
-            self.drives = fs::xtree_drives();
+            self.drives = disk_scan().drives();
             self.menu_open = true;
             return Action::Redraw;
         }
@@ -912,7 +918,7 @@ impl Xtree {
             cols.push(("Libre", format!("{} ({})", fmt_size(free), pct(free, total))));
             if done {
                 let seen = arena[0].size;
-                if fs::whole_volume(&self.root) {
+                if disk_scan().whole_volume(&self.root) {
                     cols.push(("Sin analizar", fmt_size(used.saturating_sub(seen))));
                 } else {
                     cols.push(("Analizado", format!("{} ({} del uso)", fmt_size(seen), pct(seen, used))));
@@ -1070,7 +1076,7 @@ mod tests {
         assert!(x.take_result());
         assert_eq!(x.arena[0].size, 99);
         // Ya no faltan permisos: sin aviso y la tecla A no vuelve a lanzar nada.
-        assert!(!fs::xtree_permission_issue(&x.scan.progress));
+        assert!(!disk_scan().permission_issue(&x.scan.progress));
         assert_eq!(x.data_hint(), "");
         assert_eq!(x.elevate_with(|_, _, _| panic!("no debe relanzar")), Action::None);
     }
@@ -1084,13 +1090,13 @@ mod tests {
         lacking_permissions(&x);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); None }), Action::Redraw);
-        assert_eq!(x.data_hint(), fs::XTREE_ELEVATING_TEXT);
-        assert!(x.status_text().contains(fs::XTREE_ELEVATING_TEXT));
+        assert_eq!(x.data_hint(), disk_scan().elevating_text());
+        assert!(x.status_text().contains(disk_scan().elevating_text()));
         tx.send(()).unwrap();
         wait_elevated(&x);
-        assert!(fs::xtree_permission_issue(&x.scan.progress));
+        assert!(disk_scan().permission_issue(&x.scan.progress));
         assert!(x.data_hint().contains("(tecla A)"));
-        assert!(!x.status_text().contains(fs::XTREE_ELEVATING_TEXT));
+        assert!(!x.status_text().contains(disk_scan().elevating_text()));
         // El aviso del hilo elevado (sin árbol) repinta aunque el escaneo normal ya haya terminado.
         assert!(x.on_message(x.scan.id, 0));
     }

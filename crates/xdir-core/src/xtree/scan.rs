@@ -1,5 +1,6 @@
 //! Escáner neutro de xtree: cola de carpetas, hilos de trabajo y armado del árbol.
-//! El listado de cada carpeta (`Lister`) y el escaneo rápido los pone cada sistema (`fs`).
+//! El listado de cada carpeta (`Lister`) y el escaneo rápido los pone cada sistema
+//! (`sys::DiskScan`).
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
@@ -9,8 +10,8 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use super::tree::{NO_PARENT, Node, Tree, sort_children};
-use crate::fs;
-use crate::platform::{Handle, WM_APP};
+use crate::WM_APP;
+use crate::sys::{self, Handle};
 
 /// Avance del escaneo (`wparam` = id del escaneo, `lparam` = 1 si terminó, 0 si es solo avance).
 pub const WM_APP_XTREE: u32 = WM_APP + 22;
@@ -63,7 +64,8 @@ pub struct Scan {
     pub result: Arc<Mutex<Option<Vec<Node>>>>,
 }
 
-#[allow(dead_code)] // `Done` y `NeedsAdmin` solo los arma Windows (MFT); macOS siempre recorre.
+/// Resultado del escaneo rápido de un volumen entero (`Done` y `NeedsAdmin` solo los arma
+/// Windows, leyendo la MFT; macOS siempre recorre).
 pub enum FastScan {
     NotApplicable,
     Done(Vec<Node>),
@@ -260,7 +262,8 @@ pub fn start(hwnd: Handle, id: usize, root: PathBuf) -> Scan {
             let text = root.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
             let label = if text.is_empty() { "/".to_string() } else { text };
             progress.phase.store(0, Ordering::Relaxed);
-            let tree = match fs::xtree_fast_scan(&root, &progress, &cancel) {
+            let disk = sys::disk_scan();
+            let tree = match disk.fast_scan(&root, &progress, &cancel) {
                 FastScan::Done(arena) => Some(arena),
                 other => {
                     if matches!(other, FastScan::NeedsAdmin) {
@@ -272,7 +275,7 @@ pub fn start(hwnd: Handle, id: usize, root: PathBuf) -> Scan {
                     if cancel.load(Ordering::Relaxed) {
                         None
                     } else {
-                        walk(&root, &label, &fs::xtree_lister(&root), &live, &progress, &cancel)
+                        walk(&root, &label, &*disk.lister(&root), &live, &progress, &cancel)
                     }
                 }
             };
@@ -406,6 +409,30 @@ mod tests {
         });
         assert!(r.is_none());
         assert!(t0.elapsed() < Duration::from_secs(1));
+    }
+
+    /// `start` lista con el `Lister` del `DiskScan` registrado: con el falso, el árbol en memoria.
+    #[test]
+    fn scan_uses_registered_lister() {
+        use crate::sys::testing::{FakeDiskScan, install_fakes};
+        install_fakes();
+        let root = PathBuf::from("/falso/scan-uses-registered-lister");
+        FakeDiskScan::serve(&root, &["sub"], &[("a.bin", 7)]);
+        FakeDiskScan::serve(&root.join("sub"), &[], &[("b.bin", 30)]);
+        let scan = start(Handle(0), 1, root.clone());
+        let t0 = Instant::now();
+        let arena = loop {
+            if let Some(a) = scan.result.lock().unwrap().take() {
+                break a;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "el escaneo no terminó");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(&*arena[0].name, "/falso/scan-uses-registered-lister");
+        assert_eq!(arena[0].size, 37);
+        let names: Vec<&str> = arena[0].children.iter().map(|&c| &*arena[c as usize].name).collect();
+        assert_eq!(names, ["sub", "a.bin"]);
+        assert!(FakeDiskScan::was_listed(&root.join("sub")));
     }
 
     #[test]

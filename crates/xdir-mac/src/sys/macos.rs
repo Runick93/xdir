@@ -78,6 +78,9 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::EditAddress, &["Ctrl+L", "Ctrl+Shift+G", "F4"]),
     (Command::ToggleHidden, &["Ctrl+Shift+."]),
     (Command::InvertSelection, &["Ctrl+Alt+I"]),
+    // ⌘+ / ⌘- (también los del teclado numérico).
+    (Command::SelectPattern, &["Ctrl+Más", "Ctrl+MásNum"]),
+    (Command::DeselectPattern, &["Ctrl+Menos", "Ctrl+MenosNum"]),
     (Command::Properties, &["Ctrl+I"]),
     (Command::Recycle, &["Ctrl+Retroceso", "Supr"]),
     (Command::Delete, &["Ctrl+Alt+Retroceso", "Shift+Supr"]),

@@ -30,6 +30,8 @@ pub enum PaletteMode {
     All,
     /// Nombre para guardar los paneles como grupo (o un grupo existente para reemplazar).
     GroupName,
+    /// Patrón para sumar a la selección (`select`) o quitar de ella (`*.jpg;*.png`).
+    Pattern { select: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +42,8 @@ pub enum Target {
     Group(usize),
     /// Guardar los paneles actuales con ese nombre.
     SaveGroup(String),
+    /// Sumar a la selección (o quitar) los que coinciden con el patrón.
+    Pattern { pattern: String, select: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +141,22 @@ pub fn search(mode: PaletteMode, query: &str, src: &Sources, expand: impl Fn(&st
     let words = jump::query_words(query);
     let folded: Vec<String> = words.iter().map(|w| fold(w)).collect();
     let mut out = Vec::new();
+
+    if let PaletteMode::Pattern { select } = mode {
+        // Una sola fila: lo escrito.
+        let pattern = query.trim();
+        if pattern.split(';').any(|p| !p.trim().is_empty()) {
+            let verb = if select { "Seleccionar" } else { "Deseleccionar" };
+            out.push(Item {
+                title: format!("{verb} los que coinciden con «{pattern}»"),
+                detail: String::new(),
+                target: Target::Pattern { pattern: pattern.to_string(), select },
+                keys: String::new(),
+                glyph: "\u{E73E}",
+            });
+        }
+        return out;
+    }
 
     if mode == PaletteMode::GroupName {
         let name = query.trim();
@@ -325,12 +345,17 @@ impl Palette {
             PaletteMode::All => "{E756}",
             PaletteMode::Folders => "{E721}",
             PaletteMode::GroupName => "{E74E}",
+            PaletteMode::Pattern { .. } => "{E73E}",
         };
         p.text(FontId::GlyphsSmall, glyph, rect(field.left + 6.0, field.top, field.left + 30.0, field.bottom), th.accent);
 
         if self.items.is_empty() {
             let r = self.row_rect(w, 0);
-            let empty = if self.mode == PaletteMode::GroupName { "Escribí un nombre para el grupo" } else { "Sin resultados" };
+            let empty = match self.mode {
+                PaletteMode::GroupName => "Escribí un nombre para el grupo",
+                PaletteMode::Pattern { .. } => "Escribí un patrón, como *.jpg o *.jpg;*.png",
+                _ => "Sin resultados",
+            };
             p.text(FontId::Ui, empty, rect(r.left + 40.0, r.top, r.right, r.bottom), th.text_dim);
         }
         for (i, item) in self.items.iter().enumerate().skip(self.scroll).take(MAX_ROWS) {
@@ -369,6 +394,8 @@ impl Palette {
                 format!("↑↓ elegir · Enter ejecutar · {} carpetas en pestaña nueva · Esc cerrar", commands::shortcut_label("Ctrl+Enter"))
             }
             PaletteMode::GroupName => "Nombre del grupo nuevo, o elegí uno para reemplazarlo · Enter guardar · Esc cancelar".to_string(),
+            PaletteMode::Pattern { select: true } => "Varios patrones separados por ; · Enter seleccionar · Esc cancelar".to_string(),
+            PaletteMode::Pattern { select: false } => "Varios patrones separados por ; · Enter deseleccionar · Esc cancelar".to_string(),
         };
         p.text(FontId::Ui, &hint, foot, th.text_dim);
         if self.items.len() > MAX_ROWS {

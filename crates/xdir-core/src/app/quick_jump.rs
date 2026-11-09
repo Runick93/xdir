@@ -81,6 +81,9 @@ impl App {
             Target::Command(c) => self.run_command(c),
             Target::Group(i) => self.apply_group(i),
             Target::SaveGroup(name) => self.save_group(&name),
+            Target::Pattern { pattern, select } => {
+                self.tab_mut().list.select_matching(&pattern, select);
+            }
             Target::Folder(loc) => {
                 if let Location::Path(p) = &loc {
                     if !p.is_dir() {

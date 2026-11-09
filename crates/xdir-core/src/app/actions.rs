@@ -103,6 +103,8 @@ impl App {
             }
             Command::SelectAll => self.tab_mut().list.select_all(),
             Command::InvertSelection => self.tab_mut().list.invert_selection(),
+            Command::SelectPattern => self.open_palette(PaletteMode::Pattern { select: true }),
+            Command::DeselectPattern => self.open_palette(PaletteMode::Pattern { select: false }),
             Command::Copy => self.copy_selection(false),
             Command::Cut => self.copy_selection(true),
             Command::Paste => self.paste(),

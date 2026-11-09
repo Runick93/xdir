@@ -292,6 +292,14 @@ fn filter_matches(parts: &[String], name: &str) -> bool {
 
 pub use crate::config::wildcard;
 
+/// Selección por patrón: ¿el nombre coincide con alguna parte del patrón? Las partes van
+/// separadas por `;` (`*.jpg;*.png`), con `*` y `?`, sin distinguir mayúsculas; las vacías y los
+/// espacios alrededor no cuentan. Un patrón sin partes no coincide con nada.
+pub fn matches_pattern(name: &str, pattern: &str) -> bool {
+    let name = name.to_lowercase();
+    pattern.split(';').map(str::trim).filter(|p| !p.is_empty()).any(|p| wildcard(&p.to_lowercase(), &name))
+}
+
 impl Default for FileList {
     fn default() -> Self {
         Self {
@@ -1042,6 +1050,20 @@ impl FileList {
         }
     }
 
+    /// Suma a la selección (o quita, con `select` en falso) los visibles cuyo nombre coincide con
+    /// el patrón (ver `matches_pattern`). Devuelve cuántos cambiaron; sin partes no toca nada.
+    pub fn select_matching(&mut self, pattern: &str, select: bool) -> usize {
+        let mut changed = 0;
+        for &idx in &self.visible {
+            let idx = idx as usize;
+            if self.selected[idx] != select && matches_pattern(&self.entries[idx].name.to_string_lossy(), pattern) {
+                self.selected[idx] = select;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     // ---------- entrada ----------
 
     /// Teclas de navegación. Devuelve None si la tecla no es de la lista.
@@ -1630,6 +1652,24 @@ mod column_tests {
         assert_eq!(l.on_key(VK_RIGHT.0, false, false), None);
     }
 
+    /// Seleccionar por patrón suma los visibles que coinciden; deseleccionar los quita; un patrón
+    /// vacío no toca la selección.
+    #[test]
+    fn select_matching_adds_and_removes() {
+        let mut l = list(800.0);
+        l.append(vec![entry("a.jpg"), entry("b.png"), entry("c.txt")]);
+        let names = |l: &FileList| l.selected_entries().map(|e| e.name.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(l.select_matching("*.jpg;*.png", true), 2);
+        assert_eq!(names(&l), ["a.jpg", "b.png"]);
+        assert_eq!(l.select_matching("*.png", false), 1);
+        assert_eq!(names(&l), ["a.jpg"]);
+        // Volver a seleccionar lo ya seleccionado no cuenta como cambio.
+        assert_eq!(l.select_matching("*.JPG", true), 0);
+        assert_eq!(l.select_matching("", true), 0);
+        assert_eq!(l.select_matching(" ; ", false), 0);
+        assert_eq!(names(&l), ["a.jpg"]);
+    }
+
     /// Apretar sobre un archivo y mover unos píxeles pide empezar a arrastrar (y la app tiene que
     /// atenderlo: su `on_mouse_move` lo descartaba y el arrastre nunca arrancaba).
     #[test]
@@ -1795,7 +1835,7 @@ mod column_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_matches, wildcard};
+    use super::{filter_matches, matches_pattern, wildcard};
 
     #[test]
     fn wildcards() {
@@ -1817,5 +1857,19 @@ mod tests {
         assert!(filter_matches(&parts("*.jpg; *.png"), "foto.png"));
         assert!(!filter_matches(&parts("*.jpg;*.png"), "foto.gif"));
         assert!(filter_matches(&parts("año"), "resumen del año.txt"));
+    }
+
+    /// Selección por patrón: varias partes con `;`, sin distinguir mayúsculas, con espacios
+    /// alrededor y partes vacías ignoradas; sin partes no coincide nada.
+    #[test]
+    fn pattern_matches_several_and_ignores_case() {
+        assert!(matches_pattern("FOTO.JPG", "*.jpg;*.png"));
+        assert!(!matches_pattern("a.txt", "*.jpg;*.png"));
+        assert!(matches_pattern("nombre con espacios.jpg", " *.jpg ; "));
+        assert!(matches_pattern("sin", "*"));
+        for name in ["a.txt", "sin", "", "FOTO.JPG"] {
+            assert!(!matches_pattern(name, ""), "{name:?} con patrón vacío");
+            assert!(!matches_pattern(name, ";"), "{name:?} con «;»");
+        }
     }
 }

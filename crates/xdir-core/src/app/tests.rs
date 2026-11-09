@@ -1377,3 +1377,50 @@ fn extensions_switch_persists() {
     assert!(texts.iter().any(|s| s == "foto"), "{texts:?}");
     assert!(!texts.iter().any(|s| s == "foto.jpg"), "{texts:?}");
 }
+
+/// «Seleccionar por patrón…» abre la paleta en modo patrón: lo escrito es la única fila, Enter
+/// suma a la selección los que coinciden y cierra; Esc cierra sin cambios.
+#[test]
+fn palette_pattern_mode_selects_on_enter() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("seleccion-patron");
+    a.new_tab(0, Location::Path(dir), true);
+    a.set_active(0);
+    a.panes[0].tab_mut().list.append(vec![file_entry("a.jpg"), file_entry("B.JPG"), file_entry("c.png")]);
+    let selected = |a: &App| a.panes[0].tab().list.selected_entries().map(|e| e.name.to_string_lossy().into_owned()).collect::<Vec<_>>();
+
+    // Esc: se cierra sin tocar la selección.
+    a.run_command(Command::SelectPattern);
+    let (pal, edit) = a.palette.as_ref().expect("se abrió la paleta");
+    assert_eq!(pal.mode, PaletteMode::Pattern { select: true });
+    let edit = *edit;
+    host.text_set(edit, "*.jpg");
+    a.on_text_changed(edit.0 as isize);
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_ESCAPE.0 as usize, 0));
+    assert!(a.palette.is_none());
+    assert!(selected(&a).is_empty());
+
+    // Enter: aplica y cierra.
+    a.run_command(Command::SelectPattern);
+    let edit = a.palette.as_ref().unwrap().1;
+    host.text_set(edit, "*.jpg");
+    a.on_text_changed(edit.0 as isize);
+    let titles: Vec<String> = a.palette.as_ref().unwrap().0.items.iter().map(|i| i.title.clone()).collect();
+    assert_eq!(titles, ["Seleccionar los que coinciden con «*.jpg»"]);
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+    assert!(a.palette.is_none());
+    assert_eq!(host.text_of(TextKind::Palette), None);
+    assert_eq!(selected(&a), ["a.jpg", "B.JPG"]);
+
+    // Deseleccionar.
+    a.run_command(Command::DeselectPattern);
+    let edit = a.palette.as_ref().unwrap().1;
+    host.text_set(edit, "b.*");
+    a.on_text_changed(edit.0 as isize);
+    let titles: Vec<String> = a.palette.as_ref().unwrap().0.items.iter().map(|i| i.title.clone()).collect();
+    assert_eq!(titles, ["Deseleccionar los que coinciden con «b.*»"]);
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+    assert_eq!(selected(&a), ["a.jpg"]);
+}

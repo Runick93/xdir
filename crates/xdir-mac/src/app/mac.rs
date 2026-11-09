@@ -623,6 +623,11 @@ fn translate_key(event: &NSEvent) -> Option<Key> {
         43 => Some(Key(0xBC)),
         33 => Some(Key(0xDB)),
         30 => Some(Key(0xDD)),
+        // «=» / «+» y «-» del teclado principal, y «+» y «-» del numérico.
+        24 => Some(Key(0xBB)),
+        27 => Some(Key(0xBD)),
+        69 => Some(Key(0x6B)),
+        78 => Some(Key(0x6D)),
         _ => None,
     };
     if special.is_some() {

@@ -199,10 +199,16 @@ type FakeDir = (Vec<String>, Vec<(String, u64)>);
 static FAKE_DIRS: Mutex<BTreeMap<PathBuf, FakeDir>> = Mutex::new(BTreeMap::new());
 static LISTED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
+thread_local! {
+    /// Volumen del falso en este hilo: espacio (total, libre) y si la raíz es un volumen entero;
+    /// sin datos salvo `FakeDiskScan::set_volume`.
+    static VOLUME: Cell<(Option<(u64, u64)>, bool)> = const { Cell::new((None, false)) };
+}
+
 /// `DiskScan` falso: nunca toca el disco. El listador sirve las carpetas cargadas con `serve` (las
-/// demás, vacías); sin escaneo rápido ni elevado, sin discos ni datos de volumen, y la raíz por
-/// defecto es una carpeta temporal. Faltan permisos solo si el `Progress` lo dice (como en
-/// Windows y macOS juntos: `need_admin` o carpetas denegadas).
+/// demás, vacías); sin escaneo rápido ni elevado, sin discos ni datos de volumen (salvo los de
+/// `set_volume`, por hilo), y la raíz por defecto es una carpeta temporal. Faltan permisos solo si
+/// el `Progress` lo dice (como en Windows y macOS juntos: `need_admin` o carpetas denegadas).
 pub struct FakeDiskScan;
 
 impl FakeDiskScan {
@@ -215,6 +221,12 @@ impl FakeDiskScan {
     /// ¿El listador falso listó `path`?
     pub fn was_listed(path: &Path) -> bool {
         LISTED.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
+    }
+
+    /// Datos del volumen que ve este hilo para cualquier ruta: espacio (total, libre) y si la ruta
+    /// es un volumen entero. `set_volume(None, false)` vuelve a no haber datos.
+    pub fn set_volume(space: Option<(u64, u64)>, whole: bool) {
+        VOLUME.with(|v| v.set((space, whole)));
     }
 
     /// La raíz por defecto del falso (una carpeta temporal; no hace falta que exista).
@@ -255,11 +267,11 @@ impl DiskScan for FakeDiskScan {
     }
 
     fn volume_space(&self, _path: &Path) -> Option<(u64, u64)> {
-        None
+        VOLUME.with(|v| v.get().0)
     }
 
     fn whole_volume(&self, _path: &Path) -> bool {
-        false
+        VOLUME.with(|v| v.get().1)
     }
 
     fn default_root(&self) -> PathBuf {

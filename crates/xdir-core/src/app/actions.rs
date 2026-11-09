@@ -5,6 +5,7 @@ use super::*;
 impl App {
     /// Atajos de la ventana. Devuelve si la tecla se usó.
     pub fn on_key(&mut self, vk: Key) -> bool {
+        self.dismiss_tooltip();
         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
         // Ctrl+Alt (y AltGr) en Windows y ⌥⌘ en macOS llegan acá, no a `on_alt_key`: sin mirar
         // Alt, Ctrl+Alt+N se buscaba como Ctrl+N.

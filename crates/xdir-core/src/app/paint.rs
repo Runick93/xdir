@@ -68,6 +68,8 @@ impl App {
             animating |= g.step(dt);
         }
         let ghost = self.ghost.as_ref().map(|g| (g.title.clone(), geom::rect(g.x, g.y, g.x + g.w, g.y + pane::TABSTRIP_H - 3.0), g.detach));
+        // El texto del cartel de ayuda se arma antes de prestar los campos de `App` por separado.
+        let tooltip = self.visible_tooltip();
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
@@ -195,6 +197,10 @@ impl App {
                     _ => None,
                 };
                 about::draw(p, w, h, about_hover);
+            }
+            // El cartel de ayuda va último: encima de todo.
+            if let Some((text, x, y)) = &tooltip {
+                tooltip::draw_tooltip(p, w, h, *x, *y, text);
             }
         });
         if result.is_err() {

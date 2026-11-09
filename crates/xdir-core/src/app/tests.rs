@@ -1946,3 +1946,268 @@ fn filter_menu_closes_on_tab_switch_palette_and_context_menu() {
     a.on_right_down(10.0, 10.0);
     assert_eq!(a.panes[0].tab().list.filter_menu(), None);
 }
+
+// ---------- carteles de ayuda de los botones sin texto ----------
+
+/// Un punto de la ventana donde `hit` da `want` (recorre una grilla de 2 DIPs).
+fn point_of(a: &App, want: Hit) -> (f32, f32) {
+    let (w, h) = a.client_dips();
+    let mut y = 0.0;
+    while y < h {
+        let mut x = 0.0;
+        while x < w {
+            if a.hit(x, y) == want {
+                return (x, y);
+            }
+            x += 2.0;
+        }
+        y += 2.0;
+    }
+    panic!("no se encontró {want:?}");
+}
+
+/// Entrega el aviso de la espera del cartel que está pendiente (como lo haría su hilo).
+fn deliver_tip(a: &mut App) {
+    let token = a.tip.as_ref().expect("cartel pendiente").token;
+    assert!(a.on_app_message(WM_APP_TOOLTIP, 0, token as isize));
+}
+
+fn drawn(host: &FakeHost) -> Vec<String> {
+    host.drawn_texts().into_iter().map(|t| t.1).collect()
+}
+
+/// Cada botón sin texto tiene su cartel: el título del comando y su atajo (estilo de teclas del
+/// entorno falso: el de Windows), o un texto propio si no es un comando.
+#[test]
+fn tooltip_text_for_buttons() {
+    crate::sys::testing::install_fakes();
+    let km = crate::commands::Keymap::default();
+    let path = |p: usize, t: usize| Some(format!("/carpeta/{p}/{t}"));
+    let tip = |hit: Hit| tooltip_for(hit, &km, &path, false);
+    let pane = |ph: PaneHit| tip(Hit::Pane(1, ph));
+    let cases: Vec<(Option<String>, &str)> = vec![
+        (tip(Hit::Layout(Layout::One)), "Layout: 1 panel (Ctrl+1)"),
+        (tip(Hit::Layout(Layout::TwoSide)), "Layout: 2 paneles lado a lado (Ctrl+2)"),
+        (tip(Hit::Layout(Layout::TwoStack)), "Layout: 2 paneles apilados (Ctrl+3)"),
+        (tip(Hit::Layout(Layout::Three)), "Layout: 3 paneles (Ctrl+4)"),
+        (tip(Hit::Layout(Layout::Four)), "Layout: 4 paneles (Ctrl+5)"),
+        (tip(Hit::Gear), "Apariencia y opciones"),
+        (pane(PaneHit::NewTab), "Pestaña nueva (Ctrl+T)"),
+        (pane(PaneHit::TabClose(0)), "Cerrar pestaña (Ctrl+W)"),
+        (pane(PaneHit::Maximize), "Maximizar o restaurar el panel (Ctrl+M)"),
+        (pane(PaneHit::Tab(2)), "/carpeta/1/2"),
+        (pane(PaneHit::Button(Button::Back)), "Atrás (Alt+←)"),
+        (pane(PaneHit::Button(Button::Forward)), "Adelante (Alt+→)"),
+        (pane(PaneHit::Button(Button::Up)), "Subir a la carpeta superior (Alt+↑)"),
+        (pane(PaneHit::Button(Button::Refresh)), "Recargar (F5)"),
+        (pane(PaneHit::Star), "Agregar o quitar de favoritos (Ctrl+D)"),
+        (pane(PaneHit::Terminal), "Abrir una consola en la carpeta"),
+        (pane(PaneHit::AddressClear), "Borrar"),
+        (pane(PaneHit::SearchClear), "Terminar la búsqueda"),
+        (pane(PaneHit::FavOverflow), "Más favoritos"),
+        (pane(PaneHit::NewFolderButton), "Carpeta nueva (Ctrl+Shift+N)"),
+        (pane(PaneHit::ViewButton), "Cambiar la vista"),
+        (tip(Hit::GroupBar(ui::GroupHit::Add)), "Guardar los paneles como grupo"),
+        (tip(Hit::TreePin), "Fijar el árbol"),
+        (tooltip_for(Hit::TreePin, &km, &path, true), "Soltar el árbol"),
+    ];
+    for (got, want) in cases {
+        assert_eq!(got.as_deref(), Some(want));
+    }
+    // Un atajo cambiado en `config.toml` se ve en el cartel; sin atajo, va solo el título.
+    let mut km = km.clone();
+    km.set(Command::Back, &[crate::commands::parse_combo("Ctrl+B").unwrap()]);
+    km.set(Command::Refresh, &[]);
+    assert_eq!(tooltip_for(Hit::Pane(0, PaneHit::Button(Button::Back)), &km, &path, false).as_deref(), Some("Atrás (Ctrl+B)"));
+    assert_eq!(tooltip_for(Hit::Pane(0, PaneHit::Button(Button::Refresh)), &km, &path, false).as_deref(), Some("Recargar"));
+}
+
+/// Los botones que ya dicen qué hacen («xtree», «Grupos») y la lista no llevan cartel.
+#[test]
+fn tooltip_none_for_text_buttons() {
+    crate::sys::testing::install_fakes();
+    let km = crate::commands::Keymap::default();
+    let path = |_: usize, _: usize| Some(String::from("/x"));
+    for hit in [Hit::Xtree, Hit::Groups, Hit::Pane(0, PaneHit::List), Hit::None, Hit::Pane(0, PaneHit::Address)] {
+        assert_eq!(tooltip_for(hit, &km, &path, false), None, "{hit:?}");
+    }
+}
+
+/// El cartel aparece recién cuando llega el aviso de la espera, no al pasar el mouse.
+#[test]
+fn tooltip_appears_after_delay() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let (w, h) = a.client_dips();
+    let (x, y) = center(&ui::gear_rect(w, h));
+    let before = crate::sys::testing::FakeWaker::count(WM_APP_TOOLTIP);
+    a.on_mouse_move(x, y);
+    a.paint();
+    assert!(!drawn(&host).iter().any(|s| s == "Apariencia y opciones"));
+    // Se pidió el aviso de la espera.
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while crate::sys::testing::FakeWaker::count(WM_APP_TOOLTIP) == before && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(crate::sys::testing::FakeWaker::count(WM_APP_TOOLTIP) > before, "no llegó el aviso de la espera");
+    deliver_tip(&mut a);
+    a.paint();
+    let texts = host.drawn_texts();
+    let (font, _, _) = texts.iter().find(|t| t.1 == "Apariencia y opciones").expect("falta el cartel");
+    assert_eq!(*font, crate::paint::FontId::Small);
+    // El cartel va último: encima de todo lo demás.
+    assert_eq!(texts.last().unwrap().1, "Apariencia y opciones");
+}
+
+/// El cartel se va al hacer clic (y no vuelve mientras el mouse siga en el botón), al apretar una
+/// tecla, al salir del botón y al salir de la ventana.
+#[test]
+fn tooltip_hides_on_click_and_leave() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let (w, h) = a.client_dips();
+    let shown = |a: &mut App| {
+        a.paint();
+        drawn(&host).iter().any(|s| s.starts_with("Layout: 1 panel"))
+    };
+    let (x, y) = center(&ui::layout_buttons(w, h)[0].1);
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+    // Clic: se va y no vuelve moviéndose dentro del mismo botón.
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(!shown(&mut a));
+    a.on_mouse_move(x + 1.0, y);
+    assert!(!shown(&mut a));
+    // Salir de la ventana.
+    a.on_mouse_move(x, h / 2.0);
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+    a.on_mouse_left();
+    assert!(!shown(&mut a));
+    // Salir del botón a la lista.
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+    a.on_mouse_move(w / 4.0, h / 3.0);
+    assert!(!shown(&mut a));
+    // Una tecla.
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+    a.on_key(Key(b'Q' as u16));
+    assert!(!shown(&mut a));
+}
+
+/// Con un cartel a la vista, pasar a otro botón lo cambia enseguida, sin volver a esperar.
+#[test]
+fn tooltip_switches_immediately_when_visible() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let (w, h) = a.client_dips();
+    let (x, y) = center(&ui::gear_rect(w, h));
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    let (x, y) = center(&ui::layout_buttons(w, h)[4].1);
+    a.on_mouse_move(x, y);
+    a.paint();
+    let texts = drawn(&host);
+    assert!(texts.iter().any(|s| s == "Layout: 4 paneles (Ctrl+5)"), "{texts:?}");
+    assert!(!texts.iter().any(|s| s == "Apariencia y opciones"));
+}
+
+/// Un aviso de espera viejo (de un botón por el que el mouse ya pasó) no muestra nada.
+#[test]
+fn stale_delay_message_ignored() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let (w, h) = a.client_dips();
+    let (x, y) = center(&ui::gear_rect(w, h));
+    a.on_mouse_move(x, y);
+    let old = a.tip.as_ref().unwrap().token;
+    let (x, y) = center(&ui::layout_buttons(w, h)[0].1);
+    a.on_mouse_move(x, y);
+    assert!(a.on_app_message(WM_APP_TOOLTIP, 0, old as isize));
+    a.paint();
+    let texts = drawn(&host);
+    assert!(!texts.iter().any(|s| s == "Apariencia y opciones" || s.starts_with("Layout: 1 panel")), "{texts:?}");
+    // El aviso del botón actual sí lo muestra.
+    deliver_tip(&mut a);
+    a.paint();
+    assert!(drawn(&host).iter().any(|s| s.starts_with("Layout: 1 panel")));
+}
+
+/// Un botón en el borde de abajo a la derecha: el cartel queda entero dentro de la ventana.
+#[test]
+fn tooltip_stays_inside_window() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let (w, h) = a.client_dips();
+    let g = ui::gear_rect(w, h);
+    let (x, y) = (g.right - 1.0, g.bottom - 1.0);
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    a.paint();
+    let texts = host.drawn_texts();
+    let (_, _, r) = texts.iter().find(|t| t.1 == "Apariencia y opciones").expect("falta el cartel");
+    assert!(r.left >= 0.0 && r.top >= 0.0 && r.right <= w && r.bottom <= h, "{r:?} fuera de {w}×{h}");
+    // Arriba del cursor, porque abajo no entra.
+    assert!(r.bottom <= y);
+    // Y la cuenta pura, con un texto más ancho que la ventana.
+    let r = tooltip_rect(300.0, 200.0, 290.0, 195.0, 1000.0);
+    assert!(r.left >= 0.0 && r.top >= 0.0 && r.right <= 300.0 && r.bottom <= 200.0, "{r:?}");
+}
+
+/// El cartel de una pestaña es la ruta completa de su carpeta.
+#[test]
+fn tab_tooltip_is_full_path() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = xtree_dir("cartel-pestana");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir.clone()));
+    a.paint();
+    let (x, y) = point_of(&a, Hit::Pane(0, PaneHit::Tab(0)));
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    a.paint();
+    let want = dir.display().to_string();
+    assert!(drawn(&host).contains(&want), "falta «{want}»");
+}
+
+/// Un clic en Atrás con un movimiento mínimo mientras el botón está apretado (arrastre de botón):
+/// el cartel no vuelve hasta que el mouse sale del botón y regresa.
+#[test]
+fn tooltip_does_not_return_after_click() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.paint();
+    let back = Hit::Pane(0, PaneHit::Button(Button::Back));
+    let (x, y) = point_of(&a, back);
+    let shown = |a: &mut App| {
+        a.paint();
+        drawn(&host).iter().any(|s| s.starts_with("Atrás"))
+    };
+    a.on_mouse_move(x, y);
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+    a.on_left_down(x, y, false);
+    assert!(matches!(a.drag, Drag::Button(0, Button::Back)));
+    a.on_mouse_move(x + 1.0, y);
+    a.on_left_up(x + 1.0, y);
+    a.on_mouse_move(x, y);
+    // Cualquier aviso de espera que llegue no lo muestra.
+    if let Some(t) = a.tip {
+        a.on_app_message(WM_APP_TOOLTIP, 0, t.token as isize);
+    }
+    assert!(!shown(&mut a));
+    // Sale del botón y vuelve: aparece otra vez después de la espera.
+    let (w, h) = a.client_dips();
+    a.on_mouse_move(w / 4.0, h / 2.0);
+    a.on_mouse_move(x, y);
+    assert!(!shown(&mut a));
+    deliver_tip(&mut a);
+    assert!(shown(&mut a));
+}

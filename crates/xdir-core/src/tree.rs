@@ -684,6 +684,11 @@ impl Tree {
         self.visible && contains(&self.area, x, y)
     }
 
+    /// ¿El punto está sobre la chincheta de arriba (fijar o soltar el árbol)?
+    pub fn on_pin_button(&self, x: f32, y: f32) -> bool {
+        self.contains(x, y) && self.pin_btn_shown() && contains(&self.toggle_rect(), x, y)
+    }
+
     /// `keep_open`: hay un arrastre en curso (no se abre ni se cierra la franja).
     pub fn on_mouse_move(&mut self, x: f32, y: f32, keep_open: bool) -> bool {
         let inside = self.visible && contains(&self.area, x, y);

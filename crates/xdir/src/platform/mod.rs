@@ -18,18 +18,5 @@ pub use xdir_core::WM_APP;
 pub use xdir_core::geom::{Color, Rect, contains, rect};
 pub use xdir_core::keys::{Key, keys};
 
-/// La ventana principal, vista desde cualquier hilo: sirve para mandarle mensajes de la
-/// aplicación (`WM_APP + n`) que se procesan en el hilo de interfaz.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
-pub struct Handle(pub isize);
-
-impl Handle {
-    /// Encola un mensaje para el hilo de interfaz y vuelve enseguida.
-    pub fn post(self, msg: u32, wparam: usize, lparam: isize) {
-        post_message(self, msg, wparam, lparam);
-    }
-
-    pub fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
+/// La ventana principal; vive en el núcleo (`xdir_core::sys`) y `post` usa el `Waker` instalado.
+pub use xdir_core::sys::Handle;

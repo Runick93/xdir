@@ -52,7 +52,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{BOOL, HSTRING, Interface, PCWSTR, Result, w};
 
-use crate::platform::Handle;
+use crate::platform::{Handle, HandleExt};
 use crate::config::ColorRule;
 use crate::icons;
 use crate::thumbs;
@@ -181,7 +181,7 @@ impl Renderer {
                 None => create_gpu(&self.d2d)?,
             };
             self.target = Some(create_target(gpu, hwnd, dpi, self.transparent)?);
-            self.icons.borrow_mut().hwnd = hwnd.into();
+            self.icons.borrow_mut().hwnd = owner;
         }
         Ok(())
     }

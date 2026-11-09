@@ -23,6 +23,8 @@ mod win;
 #[cfg(windows)]
 use win::*;
 #[cfg(windows)]
+use crate::platform::HandleExt;
+#[cfg(windows)]
 pub use win::run;
 #[cfg(target_os = "macos")]
 mod mac;

@@ -23,7 +23,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, PostMessageW};
 use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s, w};
 
-use crate::platform::Handle;
+use crate::platform::{Handle, HandleExt};
 use crate::fs::wide_path;
 
 

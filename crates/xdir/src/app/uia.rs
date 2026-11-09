@@ -33,6 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::core::{BOOL, Error, HRESULT, IUnknown, IUnknownImpl, Interface, Result, implement};
 
 use crate::list::Action;
+use crate::platform::HandleExt;
 use crate::render::{self, contains, rect};
 use super::App;
 use crate::ui;

@@ -42,7 +42,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-use crate::platform::Handle;
+use crate::platform::{Handle, HandleExt};
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR};
 
 

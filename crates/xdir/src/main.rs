@@ -21,6 +21,7 @@ mod platform;
 mod render;
 mod session;
 mod shell;
+mod sys;
 mod tab;
 mod theme;
 mod thumbs;

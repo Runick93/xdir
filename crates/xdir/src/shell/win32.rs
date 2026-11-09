@@ -32,7 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{Interface, PCSTR, PCWSTR, PSTR, Result, w};
 
-use crate::platform::Handle;
+use crate::platform::{Handle, HandleExt};
 use crate::fs::{Location, wide_path};
 
 use super::*;

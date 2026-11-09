@@ -24,7 +24,7 @@ use windows::core::{PCWSTR, w};
 
 use super::mft;
 use crate::fs::xtree_temp::{helper_file_name, is_helper_file};
-use crate::platform::Handle;
+use crate::platform::{Handle, HandleExt};
 use crate::xtree::colors::fmt_size;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::{Node, decode, encode};

@@ -14,6 +14,8 @@ use windows::core::{HSTRING, PCWSTR};
 #[cfg(windows)]
 use crate::fs::wide_path;
 use crate::platform::Handle;
+#[cfg(windows)]
+use crate::platform::HandleExt;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Console {

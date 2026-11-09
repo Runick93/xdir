@@ -4,11 +4,29 @@
 use super::*;
 
 fn app() -> App {
-    App::new(Init::blank()).expect("App sin ventana")
+    app_with(Init::blank())
+}
+
+/// Toda `App` de prueba sale de acá: primero los servicios del sistema falsos (el `Waker` solo
+/// cuenta los mensajes), así ningún hilo de trabajo los pide sin instalar.
+fn app_with(init: Init) -> App {
+    xdir_core::sys::testing::install_fakes();
+    App::new(init).expect("App sin ventana")
 }
 
 fn count(a: &App, pane: usize) -> usize {
     a.panes[pane].tabs.len()
+}
+
+#[test]
+fn test_app_posts_through_the_fake_waker() {
+    use xdir_core::sys::testing::FakeWaker;
+    // Número propio de este test, para que los demás (en paralelo) no lo cuenten.
+    const MSG: u32 = crate::platform::WM_APP + 0x7B01;
+    let a = app();
+    let before = FakeWaker::count(MSG);
+    a.hwnd.post(MSG, 0, 0);
+    assert_eq!(FakeWaker::count(MSG) - before, 1);
 }
 
 #[test]
@@ -27,7 +45,7 @@ fn start_path_opens_a_new_active_tab_in_the_active_pane() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut init = Init::blank();
     init.start_path = Some(dir.clone());
-    let a = App::new(init).unwrap();
+    let a = app_with(init);
     assert_eq!(count(&a, 0), 2);
     // Windows puede normalizar la ruta (nombres cortos 8.3): se compara el último componente.
     let Location::Path(p) = &a.panes[0].tab().location else { panic!("no es una carpeta") };

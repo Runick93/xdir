@@ -37,14 +37,16 @@ fn xdg_var(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
-/// Deshace los escapes octales de `/proc/self/mounts` (`\040` es un espacio).
+/// Deshace los escapes octales de `/proc/self/mounts` (`\040` es un espacio). Solo `\000` a
+/// `\377` caben en un byte; lo demás queda tal cual.
 fn unescape_mount(s: &str) -> OsString {
     use std::os::unix::ffi::OsStringExt;
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+        if b[i] == b'\\' && i + 3 < b.len() && (b'0'..=b'3').contains(&b[i + 1])
+            && b[i + 2..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
             out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
             i += 4;
         } else {
@@ -56,7 +58,8 @@ fn unescape_mount(s: &str) -> OsString {
 }
 
 /// Puntos de montaje de discos externos en el texto de `/proc/self/mounts`: los que están dentro
-/// de `/media`, `/mnt` o `/run/media`, ordenados y sin repetir.
+/// de `/media`, `/mnt` o `/run/media`, ordenados y sin repetir. Los que están dentro de otro de la
+/// lista no son discos aparte (en WSL, `/mnt/wslg/distro` dentro de `/mnt/wslg`).
 pub fn mounts_from(text: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = text
         .lines()
@@ -66,7 +69,14 @@ pub fn mounts_from(text: &str) -> Vec<PathBuf> {
         .collect();
     out.sort();
     out.dedup();
-    out
+    // Ordenadas, un montaje anidado viene después del que lo contiene.
+    let mut kept: Vec<PathBuf> = Vec::with_capacity(out.len());
+    for m in out {
+        if !kept.iter().any(|k| m.starts_with(k)) {
+            kept.push(m);
+        }
+    }
+    kept
 }
 
 /// Discos montados: la raíz y los externos.
@@ -201,6 +211,25 @@ mod tests {
     #[test]
     fn mounts_from_unescapes_spaces() {
         assert_eq!(mounts_from("/dev/sdb1 /media/a/Mi\\040disco vfat rw 0 0\n"), [PathBuf::from("/media/a/Mi disco")]);
+    }
+
+    #[test]
+    fn unescape_mount_keeps_out_of_range_escapes() {
+        // `\440` no cabe en un byte: queda literal en vez de desbordar.
+        assert_eq!(unescape_mount("/media/a\\440b"), OsString::from("/media/a\\440b"));
+        assert_eq!(unescape_mount("/media/a\\134b"), OsString::from("/media/a\\b"));
+    }
+
+    #[test]
+    fn mounts_from_drops_nested_mounts() {
+        let text = "\
+none /mnt/wsl tmpfs rw,relatime 0 0
+none /mnt/wslg tmpfs rw,relatime 0 0
+/dev/sdc /mnt/wslg/distro ext4 ro,relatime 0 0
+none /mnt/wslg/versions.txt overlay rw,relatime 0 0
+C:\\134 /mnt/c 9p rw,noatime 0 0
+";
+        assert_eq!(mounts_from(text), [PathBuf::from("/mnt/c"), PathBuf::from("/mnt/wsl"), PathBuf::from("/mnt/wslg")]);
     }
 
     #[test]

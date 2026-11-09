@@ -45,8 +45,10 @@ impl Lister for LinuxLister {
             _ => ListError::Other,
         })?;
         let mut out = DirListing::default();
-        // Otro disco montado que se haya colado: no se recorre.
-        if !std::fs::symlink_metadata(path).is_ok_and(|m| self.allows(m.dev())) {
+        // Otro disco montado que se haya colado: no se recorre. Se sigue el enlace (`metadata`): la
+        // raíz puede ser un enlace a otro disco; las subcarpetas solo se encolan si `lstat` dice que
+        // son carpetas de verdad, así que no hay otros enlaces que seguir.
+        if !std::fs::metadata(path).is_ok_and(|m| self.allows(m.dev())) {
             return Ok(out);
         }
         for entry in rd.flatten() {
@@ -168,6 +170,20 @@ mod tests {
         assert!(top.files.is_empty(), "el enlace no cuenta como archivo");
         let t = walk_tmp(&dir, Arc::new(Progress::default()));
         assert_eq!(t.len(), 3, "raíz, sub y x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lister_follows_symlinked_root() {
+        let dir = tmp("raiz-enlace");
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::fs::create_dir(dir.join("real/sub")).unwrap();
+        std::fs::write(dir.join("real/a"), "a").unwrap();
+        std::os::unix::fs::symlink("real", dir.join("enlace")).unwrap();
+        let root = dir.join("enlace");
+        let top = LinuxLister::new(&root).list(&root).unwrap();
+        assert_eq!(top.dirs, ["sub"]);
+        assert_eq!(top.files.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

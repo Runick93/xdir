@@ -49,7 +49,8 @@ impl Batcher {
 
     fn push(&mut self, e: Entry) {
         self.pending.push(e);
-        // Primer lote enseguida para que la lista aparezca rápido; después cada ~40 ms.
+        // Se manda un lote cada ~40 ms (el primero también: `last` arranca al empezar la carga) o
+        // al juntar 4096 entradas, lo que pase antes.
         if self.pending.len() >= 4096 || self.last.elapsed() >= Duration::from_millis(40) {
             self.flush();
         }

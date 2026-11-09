@@ -15,15 +15,19 @@ use crate::fs::places;
 /// Lo que Linux todavía no puede hacer.
 pub const UNAVAILABLE: &str = "No disponible en Linux";
 
-/// Abre `path` con el programa asociado (`xdg-open`), en un proceso aparte y sin esperarlo. Si no
-/// se puede lanzar no pasa nada (como `open` en macOS).
+/// Abre `path` con el programa asociado (`xdg-open`), en un proceso aparte. Un hilo lo espera para
+/// que no quede zombi al terminar. Si no se puede lanzar no pasa nada (como `open` en macOS).
 fn xdg_open(path: &Path, dir: Option<&Path>) {
     let mut cmd = std::process::Command::new("xdg-open");
     cmd.arg(path);
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
-    let _ = cmd.spawn();
+    if let Ok(mut c) = cmd.spawn() {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
+    }
 }
 
 /// Punto de montaje de `drives` que contiene a `path` (el más largo).

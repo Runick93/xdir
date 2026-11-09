@@ -135,6 +135,10 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
     match undo {
         Undo::Rename { path, old_name } => {
             let target = path.with_file_name(&old_name);
+            // Lo que apareció después con el nombre de antes no se pisa (`rename` lo reemplazaría).
+            if std::fs::symlink_metadata(&target).is_ok() {
+                return Err(err_at(&target, "ya existe, no se pisa"));
+            }
             std::fs::rename(&path, &target).map_err(|e| e.to_string())?;
             return ok(None, Some(target), false, errors);
         }
@@ -194,7 +198,8 @@ fn free_name(dest: &Path, src: &Path, always_copy: bool) -> PathBuf {
 }
 
 /// Copia un archivo, un enlace simbólico (como enlace) o una carpeta entera. Los permisos de las
-/// carpetas se ponen al final, así una carpeta de solo lectura igual se llena.
+/// carpetas se ponen al final, así una carpeta de solo lectura igual se llena. Los archivos
+/// especiales (FIFO, sockets, dispositivos) no se copian: abrir una FIFO se queda esperando.
 fn copy_item(src: &Path, dst: &Path) -> io::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     let ft = meta.file_type();
@@ -207,8 +212,10 @@ fn copy_item(src: &Path, dst: &Path) -> io::Result<()> {
             copy_item(&entry.path(), &dst.join(entry.file_name()))?;
         }
         std::fs::set_permissions(dst, meta.permissions())
-    } else {
+    } else if ft.is_file() {
         std::fs::copy(src, dst).map(|_| ())
+    } else {
+        Err(io::Error::other("no se copian archivos especiales"))
     }
 }
 
@@ -354,6 +361,39 @@ mod tests {
         let r = run(Op::Undo(r.undo.unwrap()), None).unwrap();
         assert_eq!(r.focus, Some(path.clone()));
         assert!(path.exists() && !dir.join("nuevo.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_rename_does_not_overwrite() {
+        let dir = tmp("deshacer-renombrar");
+        let path = dir.join("viejo.txt");
+        std::fs::write(&path, "renombrado").unwrap();
+        let r = run(Op::Rename { path: path.clone(), new_name: "nuevo.txt".into() }, None).unwrap();
+        // Después aparece otro archivo con el nombre de antes: deshacer no lo pisa.
+        std::fs::write(&path, "otro").unwrap();
+        assert!(run(Op::Undo(r.undo.unwrap()), None).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "otro");
+        assert_eq!(std::fs::read_to_string(dir.join("nuevo.txt")).unwrap(), "renombrado");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_skips_fifo() {
+        let dir = tmp("fifo");
+        let fifo = dir.join("tubo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `c` es una cadena C válida.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        // En otro hilo: si se intentara copiar, abrir la FIFO se colgaría y el test fallaría a los 5 s.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (src, dst) = (fifo.clone(), dir.join("copia"));
+        std::thread::spawn(move || {
+            let _ = tx.send(copy_item(&src, &dst).is_err());
+        });
+        let failed = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("copiar la FIFO se colgó");
+        assert!(failed, "una FIFO no se copia");
+        assert!(std::fs::symlink_metadata(dir.join("copia")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

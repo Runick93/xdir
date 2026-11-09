@@ -232,12 +232,12 @@ impl Xtree {
         self.menu_hover = None;
     }
 
-    /// Abre el menú de discos sin pasar por el clic (pruebas).
+    /// Abre el menú de discos sin pasar por el clic. Lo usan las pruebas de `App` (crates/xdir).
     pub fn open_menu(&mut self) {
         self.menu_open = true;
     }
 
-    /// ¿Está abierto el menú de discos? (pruebas).
+    /// ¿Está abierto el menú de discos? Lo usan las pruebas de `App` (crates/xdir).
     pub fn menu_is_open(&self) -> bool {
         self.menu_open
     }
@@ -248,13 +248,11 @@ impl Xtree {
     }
 
     /// Carpeta analizada.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// ¿Se canceló el escaneo?
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cancelled(&self) -> bool {
         self.scan.cancel.load(Ordering::Relaxed)
     }

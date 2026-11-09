@@ -84,7 +84,6 @@ pub fn default_columns() -> Vec<ColumnSpec> {
         .collect()
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
 /// Un elemento de la lista visto desde afuera (lectores de pantalla).
 pub struct ItemInfo {
     pub name: String,
@@ -474,13 +473,11 @@ impl FileList {
     // ---------- accesibilidad (UI Automation, ver uia.rs) ----------
 
     /// Posición con foco (en los elementos a la vista).
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn focus_pos(&self) -> Option<usize> {
         self.focus
     }
 
     /// Lo que un lector de pantalla necesita saber del elemento en la posición `pos`.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn item_info(&self, pos: usize) -> Option<ItemInfo> {
         let idx = *self.visible.get(pos)? as usize;
         let e = &self.entries[idx];
@@ -504,7 +501,6 @@ impl FileList {
     }
 
     /// Selecciona solo ese elemento y lo trae a la vista (patrón de selección de UI Automation).
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn select_pos(&mut self, pos: usize) {
         if pos < self.visible.len() {
             self.select_only(pos);
@@ -513,7 +509,6 @@ impl FileList {
     }
 
     /// Agrega (o saca) el elemento de la selección sin tocar el resto.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_selected_pos(&mut self, pos: usize, on: bool) {
         if let Some(&idx) = self.visible.get(pos) {
             self.auto_focus = false;
@@ -524,39 +519,32 @@ impl FileList {
     }
 
     /// Posiciones seleccionadas, en orden.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn selected_positions(&self) -> Vec<usize> {
         self.visible.iter().enumerate().filter(|(_, idx)| self.selected[**idx as usize]).map(|(pos, _)| pos).collect()
     }
 
     /// Elemento (posición) bajo un punto de la ventana, en DIPs.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn pos_at_point(&self, x: f32, y: f32) -> Option<usize> {
         self.pos_at(x, y)
     }
 
     /// Índice en `entries` del elemento de esa posición (para abrirlo).
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn entry_of_pos(&self, pos: usize) -> Option<usize> {
         self.visible.get(pos).map(|&i| i as usize)
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn count(&self) -> usize {
         self.visible.len()
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
         self.selected.iter().enumerate().filter(|(_, s)| **s).map(|(i, _)| i)
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn selected_entries(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter().zip(&self.selected).filter(|(_, s)| **s).map(|(e, _)| e)
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn focused_index(&self) -> Option<usize> {
         self.focus.and_then(|p| self.visible.get(p)).map(|&i| i as usize)
     }

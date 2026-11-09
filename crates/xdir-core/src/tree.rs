@@ -7,7 +7,7 @@
 //!
 //! La barra se puede fijar (expandida, al lado de los paneles) o soltar: suelta queda una franja
 //! angosta con solo los íconos y, al asomar el mouse, se expande encima de los paneles. La sección
-//! "Acceso rápido" se lee del propio Shell (`fs::quick_access`) y se vuelve a leer en un hilo
+//! "Acceso rápido" se lee del propio Shell (`sys::file_system().quick_access()`) y se vuelve a leer en un hilo
 //! cuando cambia (`WM_APP_QUICK`).
 
 use crate::sys::Handle;

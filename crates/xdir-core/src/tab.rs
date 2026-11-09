@@ -56,7 +56,8 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// Si la pestaña está a la vista (carga y vigila su carpeta). Lo usan las pruebas.
+    /// Si la pestaña está a la vista (carga y vigila su carpeta). Lo usan las pruebas de `App`
+    /// (crates/xdir).
     pub fn is_visible(&self) -> bool {
         self.visible
     }

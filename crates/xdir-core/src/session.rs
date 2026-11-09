@@ -343,6 +343,9 @@ mod tests {
     fn session_roundtrip_in_core() {
         crate::sys::testing::install_fakes();
         let dir = config_dir().expect("carpeta de configuración del falso");
+        // El falso arma la carpeta con `temp_dir()` tal cual: si no cuelga de ahí (un
+        // `xdir.portable` junto al binario de pruebas), no se borra nada.
+        assert!(dir.starts_with(std::env::temp_dir()), "carpeta de configuración fuera de temp: {}", dir.display());
         let _ = std::fs::remove_dir_all(&dir);
         let s = Session {
             accent: Accent::Rgb(0xF85149),

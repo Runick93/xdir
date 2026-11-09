@@ -468,9 +468,9 @@ thread_local! {
 
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
 /// íconos ni tipos del sistema, sin unidades (salvo las de `set_drives`, por hilo), sin carpetas
-/// del usuario ni lugares del Shell. Lo
-/// que empieza con punto está oculto; las rutas se comparan sin distinguir mayúsculas ni
-/// separador final, y quedan como se escribieron (`long_path` y `true_case` no las cambian).
+/// del usuario ni lugares del Shell. Lo que empieza con punto está oculto; las rutas se comparan
+/// sin distinguir mayúsculas ni separador final, y quedan como se escribieron (`long_path` y
+/// `true_case` no las cambian).
 pub struct FakeFileSystem;
 
 impl FakeFileSystem {

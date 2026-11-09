@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows:
@@ -61,12 +61,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Compilar
+        run: cargo build --locked
+
       - name: Tests
         run: cargo test --locked
 
   estilo:
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -77,4 +79,4 @@ jobs:
           rustup default stable
 
       - name: Formato
-        run: cargo fmt --check
+        run: cargo fmt --check || echo "::warning::cargo fmt --check encontró diferencias"

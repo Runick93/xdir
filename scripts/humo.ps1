@@ -11,18 +11,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.Drawing
-# En pwsh 7 Bitmap/Graphics están en System.Drawing.Common y Color en System.Drawing.Primitives:
-# se referencian por la ruta real de cada ensamblado cargado.
-$refs = @(
-    [System.Drawing.Bitmap].Assembly.Location,
-    [System.Drawing.Graphics].Assembly.Location,
-    [System.Drawing.Color].Assembly.Location
-) | Select-Object -Unique
-Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
+Add-Type -TypeDefinition @'
 using System;
-using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 public static class Humo {
@@ -40,7 +30,7 @@ public static class Humo {
     [DllImport("user32.dll")]
     static extern bool PostMessageW(IntPtr h, uint msg, IntPtr wp, IntPtr lp);
     [DllImport("user32.dll")]
-    static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+    static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")]
     static extern bool GetWindowRect(IntPtr h, out RECT r);
 
@@ -70,27 +60,39 @@ public static class Humo {
 
     public static void Close(IntPtr hwnd) { PostMessageW(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero); }
 
-    // Guarda la ventana en `path` (PNG) y devuelve cuántos colores distintos tiene (hasta 64).
-    public static int Capture(IntPtr hwnd, string path) {
+    // Tamaño de la ventana {ancho, alto}, o {0, 0} si no se pudo leer.
+    public static int[] Size(IntPtr hwnd) {
         RECT r;
-        if (!GetWindowRect(hwnd, out r)) return 0;
-        int w = r.Right - r.Left, h = r.Bottom - r.Top;
-        if (w <= 0 || h <= 0) return 0;
-        using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
-            using (Graphics g = Graphics.FromImage(bmp)) {
-                IntPtr hdc = g.GetHdc();
-                try { PrintWindow(hwnd, hdc, 2); } finally { g.ReleaseHdc(hdc); }
-            }
-            bmp.Save(path, ImageFormat.Png);
-            HashSet<int> colors = new HashSet<int>();
-            for (int y = 0; y < h && colors.Count < 64; y += 3)
-                for (int x = 0; x < w && colors.Count < 64; x += 3)
-                    colors.Add(bmp.GetPixel(x, y).ToArgb());
-            return colors.Count;
-        }
+        if (!GetWindowRect(hwnd, out r)) return new int[] { 0, 0 };
+        return new int[] { r.Right - r.Left, r.Bottom - r.Top };
     }
+
+    public static bool Print(IntPtr hwnd, IntPtr hdc) { return PrintWindow(hwnd, hdc, 2); }
 }
 '@
+
+# Guarda la ventana en `$path` (PNG) y devuelve cuántos colores distintos tiene (hasta 64).
+function Capturar([IntPtr]$hwnd, [string]$path) {
+    $tam = [Humo]::Size($hwnd)
+    $w = $tam[0]; $h = $tam[1]
+    if ($w -le 0 -or $h -le 0) { return 0 }
+    $bmp = New-Object System.Drawing.Bitmap($w, $h, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $hdc = $g.GetHdc()
+            try { $null = [Humo]::Print($hwnd, $hdc) } finally { $g.ReleaseHdc($hdc) }
+        } finally { $g.Dispose() }
+        $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        $colores = New-Object 'System.Collections.Generic.HashSet[int]'
+        for ($y = 0; $y -lt $h -and $colores.Count -lt 64; $y += 3) {
+            for ($x = 0; $x -lt $w -and $colores.Count -lt 64; $x += 3) {
+                $null = $colores.Add($bmp.GetPixel($x, $y).ToArgb())
+            }
+        }
+        return $colores.Count
+    } finally { $bmp.Dispose() }
+}
 
 function Fallar([string]$msg) {
     Write-Error $msg -ErrorAction Continue
@@ -157,7 +159,7 @@ Mandar 'notice humo'
 
 # Captura.
 $png = Join-Path $Out 'humo.png'
-$colores = [Humo]::Capture($hwnd, (Join-Path (Resolve-Path $Out).Path 'humo.png'))
+$colores = Capturar $hwnd (Join-Path (Resolve-Path $Out).Path 'humo.png')
 Write-Host "captura: $png ($colores colores distintos)"
 if ($colores -lt 8) {
     Write-Warning 'la captura salió vacía'

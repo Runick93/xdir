@@ -72,7 +72,7 @@ Filename: "{app}\xdir.exe"; Description: "{cm:LaunchProgram,xdir}"; Flags: nowai
 const
   WM_CLOSE = $0010;
 
-// Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en src/main.rs) para que
+// Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en crates/xdir/src/app/win.rs) para que
 // el desinstalador pueda borrar el exe. WM_CLOSE deja que la app guarde la sesión; si a los 5 s
 // sigue abierta, se la termina.
 procedure CloseXdir();

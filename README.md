@@ -82,6 +82,6 @@ sh scripts/package-mac.sh        # xdir.app universal y el .dmg en dist/
 Desde una Mac también se puede verificar que la versión de Windows compile:
 `rustup target add x86_64-pc-windows-msvc && cargo check --target x86_64-pc-windows-msvc`.
 
-El código propio de cada sistema está separado: `src/platform`, y en `fs`, `shell`, `ops`, `icons`,
+El código propio de cada sistema está separado: `crates/xdir/src/platform`, y en `fs`, `shell`, `ops`, `icons`,
 `thumbs`, `render` y `drop` un `win32.rs` y un `macos.rs` con la misma interfaz; la ventana está en
-`src/app/win.rs` (Windows) y `src/app/mac.rs` (macOS).
+`crates/xdir/src/app/win.rs` (Windows) y `crates/xdir/src/app/mac.rs` (macOS).

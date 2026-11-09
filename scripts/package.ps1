@@ -13,7 +13,7 @@ Set-Location $root
 if (-not (Test-Path $Exe)) { throw "No existe $Exe; compilar antes con scripts\build.cmd" }
 $Exe = (Resolve-Path $Exe).Path
 
-# Versión: la de [package] en Cargo.toml.
+# Versión: la de [workspace.package] en Cargo.toml.
 $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 if (-not $version) { throw "No se encontró la versión en Cargo.toml" }
 

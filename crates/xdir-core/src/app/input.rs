@@ -54,7 +54,7 @@ impl App {
         }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
-            return Hit::None;
+            return if self.tree.on_pin_button(x, y) { Hit::TreePin } else { Hit::None };
         }
         let temps: Vec<bool> = self.groups.items.iter().map(|g| g.temp).collect();
         if let Some(g) = ui::group_bar_at(w, ui::GAP + self.tree_width(), &temps, x, y).filter(|_| self.groups_bar_h() > 0.0) {
@@ -81,6 +81,7 @@ impl App {
     }
 
     pub fn on_left_down(&mut self, x: f32, y: f32, double: bool) {
+        self.dismiss_tooltip();
         let hit = self.hit(x, y);
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         if self.about_open {
@@ -269,7 +270,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) => {}
+            Hit::None | Hit::About(_) | Hit::TreePin => {}
         }
         self.redraw();
     }
@@ -431,6 +432,7 @@ impl App {
 
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
+        redraw |= self.update_tooltip(hover, x, y);
         // Con xtree abierto el mouse es de la vista: los paneles y el árbol de abajo no se resaltan.
         if self.xtree_open {
             let area = self.xtree_area();

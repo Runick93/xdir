@@ -14,7 +14,7 @@ use std::sync::mpsc::Sender;
 use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
-use crate::format::thousands;
+use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
 use crate::geom::{Color, Rect};
 use crate::host::{MenuPos, TextBox, TextKind, WindowHost};
 use crate::keys::Key;
@@ -105,29 +105,12 @@ impl SystemEnv for FakeEnv {
 
     /// Como el Explorador de Windows: "1.234 KB" (redondea hacia arriba).
     fn format_size_kb(&self, bytes: u64) -> String {
-        format!("{} KB", thousands(bytes.div_ceil(1024)))
+        size_kb_text(bytes)
     }
 
     /// Como Windows: "123 bytes", "1,23 KB", "12,3 MB", "476 GB" (tres cifras, truncadas).
     fn format_size_short(&self, bytes: u64) -> String {
-        if bytes < 1024 {
-            return format!("{bytes} bytes");
-        }
-        let units = ["KB", "MB", "GB", "TB", "PB", "EB"];
-        let mut unit = 0;
-        let mut scale = 1024u128;
-        while (bytes as u128) >= scale * 1024 && unit + 1 < units.len() {
-            scale *= 1024;
-            unit += 1;
-        }
-        // Centésimas de la unidad, truncadas.
-        let hundredths = bytes as u128 * 100 / scale;
-        let text = match hundredths {
-            0..1000 => format!("{},{:02}", hundredths / 100, hundredths % 100),
-            1000..10000 => format!("{},{}", hundredths / 100, hundredths % 100 / 10),
-            _ => format!("{}", hundredths / 100),
-        };
-        format!("{text} {}", units[unit])
+        size_short_text(bytes)
     }
 
     fn typed_paths_load(&self) -> Vec<String> {
@@ -149,24 +132,6 @@ impl SystemEnv for FakeEnv {
     fn open_console(&self, _owner: Handle, _id: u8, _dir: &Path, _verb: &str) -> bool {
         false
     }
-}
-
-/// Días entre 1601-01-01 (época de FILETIME) y 1970-01-01.
-const DAYS_1601_TO_1970: i64 = 134_774;
-
-/// Fecha civil (año, mes, día) de un número de días desde 1970-01-01 (algoritmo de Howard
-/// Hinnant).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
 }
 
 thread_local! {

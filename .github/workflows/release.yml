@@ -47,6 +47,7 @@ jobs:
             sed -i "/^name = \"xdir-windows\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
             sed -i "/^name = \"xdir-core\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
             sed -i "/^name = \"xdir-mac\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
+            sed -i "/^name = \"xdir-linux\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
           fi
           echo "version=$new" >> "$GITHUB_OUTPUT"
           echo "changed=$([ "$new" != "$current" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,24 @@
+[package]
+name = "xdir-linux"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "xdir-linux"
+path = "src/main.rs"
+
+[dependencies]
+xdir-core = { path = "../xdir-core" }
+
+# Linux: llamadas al sistema y vigilancia de carpetas (inotify).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+notify = "8"
+
+[features]
+# Árbol de carpetas lateral (F-3.5), experimental: incluido por defecto, como en las otras crates.
+# Para quitarlo: cargo build --release -p xdir-linux --no-default-features
+default = ["arbol"]
+arbol = ["xdir-core/arbol"]
+# Gancho de pruebas de la App. Nunca se compila en la versión normal.
+pruebas = ["xdir-core/pruebas"]

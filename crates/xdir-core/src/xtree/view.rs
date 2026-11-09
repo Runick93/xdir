@@ -440,12 +440,12 @@ impl Xtree {
         self.arena = arena;
         // El espacio libre cambió mientras se escaneaba.
         self.vol = disk_scan().volume_space(&self.root);
-        // Primer árbol de este escaneo: queda fijo el tiempo total (un árbol elevado que llega
-        // después lo reemplaza sin cambiar el tiempo).
-        if self.scan_elapsed.is_none() {
+        // Primer árbol de este escaneo: queda fijo el tiempo total. Un árbol elevado que llega
+        // durante el recorrido normal lo reemplaza sin cambiar el tiempo; el de un reescaneo con
+        // permisos (análisis ya terminado) siempre fija el tiempo de ese reescaneo.
+        if self.before_elevate.take().is_some() || self.scan_elapsed.is_none() {
             self.scan_elapsed = Some(self.elapsed());
         }
-        self.before_elevate = None;
         self.scanning = false;
         self.go(0);
         true
@@ -460,9 +460,11 @@ impl Xtree {
             return self.take_result();
         }
         // El reescaneo con permisos terminó sin árbol (permiso rechazado o error): vuelve el
-        // cronómetro del análisis anterior.
+        // cronómetro del análisis anterior. Si dejó un árbol, su aviso de entrega puede llegar
+        // después de un aviso de repintado: no se restaura nada y `take_result` fija el tiempo.
         if !self.elevating.load(Ordering::Relaxed)
             && self.elevated_pending()
+            && self.scan.result.lock().unwrap().is_none()
             && let Some((started, elapsed)) = self.before_elevate.take()
         {
             self.scan_started = started;
@@ -498,9 +500,10 @@ impl Xtree {
         if !self.scanning && !self.scan_stopped && self.scan_elapsed.is_some() {
             self.before_elevate = Some((self.scan_started, self.scan_elapsed));
             self.start_clock();
-            let elevating = self.elevating.clone();
+            let (elevating, cancel) = (self.elevating.clone(), self.scan.cancel.clone());
             let _ = std::thread::Builder::new().spawn(move || {
-                while elevating.load(Ordering::Relaxed) {
+                // También se corta al cancelar (cerrar xdir o cambiar de raíz).
+                while elevating.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
                     hwnd.post(WM_APP_XTREE, id, 0);
                     std::thread::sleep(Duration::from_millis(250));
                 }
@@ -1387,6 +1390,25 @@ mod tests {
         wait_elevated(&x);
         assert!(x.on_message(x.scan.id, 1));
         assert_eq!(x.arena[0].size, 99);
+        assert_eq!(x.state_text(), "Análisis completado en 0:07");
+    }
+
+    /// Un aviso del hilo de repintado que llega después de que el escaneo elevado dejó su árbol
+    /// (pero antes del aviso de entrega) no devuelve el tiempo anterior.
+    #[test]
+    fn late_tick_does_not_restore_old_time() {
+        let mut x = scanning_since("raiz-elev-tick", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-elev-tick", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        lacking_permissions(&x);
+        let elevated = vec![node("raiz-elev-tick", NO_PARENT, 99, true, vec![])];
+        assert_eq!(x.elevate_with(move |_, _, _| Some(elevated)), Action::Redraw);
+        x.scan_started = Instant::now().checked_sub(Duration::from_secs(7));
+        wait_elevated(&x);
+        assert!(x.scan.result.lock().unwrap().is_some());
+        assert!(x.on_message(x.scan.id, 0));
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 0:07");
+        assert!(x.on_message(x.scan.id, 1));
         assert_eq!(x.state_text(), "Análisis completado en 0:07");
     }
 

@@ -31,6 +31,10 @@ impl App {
 
     /// Ejecuta una acción sobre el panel activo (atajo de teclado o paleta de comandos).
     pub(super) fn run_command(&mut self, c: Command) {
+        // La vista de xtree tapa los paneles: lo que los cambia la cierra para que se vea el efecto.
+        if self.xtree_open && !keeps_xtree(c) {
+            self.close_xtree();
+        }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
         match c {
@@ -212,7 +216,7 @@ impl App {
     /// del panel activo; después se reabre con lo que ya tenía, sin volver a analizar.
     pub(super) fn toggle_xtree(&mut self) {
         if self.xtree_open {
-            self.xtree_open = false;
+            self.close_xtree();
         } else {
             if self.xtree.is_none() {
                 let root = match &self.panes[self.active].tab().location {
@@ -232,14 +236,23 @@ impl App {
         self.redraw();
     }
 
+    /// Cierra la vista de xtree (el escaneo sigue) y su menú de discos.
+    pub(super) fn close_xtree(&mut self) {
+        self.xtree_open = false;
+        if let Some(x) = &mut self.xtree {
+            x.close_menu();
+        }
+        self.hover = Hit::None;
+    }
+
     /// Lo que pide la vista de xtree después de un evento.
     pub(super) fn xtree_action(&mut self, action: xtree_view::Action) {
         match action {
             xtree_view::Action::None => return,
             xtree_view::Action::Redraw => {}
-            xtree_view::Action::Close => self.xtree_open = false,
+            xtree_view::Action::Close => self.close_xtree(),
             xtree_view::Action::OpenInPanel { folder, select } => {
-                self.xtree_open = false;
+                self.close_xtree();
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 let tab = self.tab_mut();
                 tab.navigate(hwnd, &tx, Location::Path(folder));
@@ -301,4 +314,19 @@ impl App {
     pub(super) fn cursor_pos(&self) -> (f32, f32) {
         cursor_dips(self.hwnd, self.dpi)
     }
+}
+
+/// Comandos que se pueden usar con la vista de xtree abierta sin cerrarla: no tocan los paneles
+/// (o solo abren la paleta, y lo que se elija ahí decide).
+fn keeps_xtree(c: Command) -> bool {
+    matches!(
+        c,
+        Command::Palette
+            | Command::JumpTo
+            | Command::SaveGroup
+            | Command::Xtree
+            | Command::ToggleDarkMode
+            | Command::About
+            | Command::OpenConfig
+    )
 }

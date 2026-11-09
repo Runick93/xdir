@@ -748,6 +748,55 @@ fn xtree_button_toggles_view() {
     a.on_closing();
 }
 
+/// Cerrar la vista con el botón o con el comando también cierra el menú de discos: al volver a
+/// abrirla no debe aparecer desplegado.
+#[test]
+fn closing_xtree_closes_drive_menu() {
+    let (mut a, _) = app_in("menu");
+    click_xtree_button(&mut a);
+    a.xtree.as_mut().unwrap().open_menu();
+    click_xtree_button(&mut a);
+    assert!(!a.xtree_open);
+    assert!(!a.xtree.as_ref().unwrap().menu_is_open(), "botón");
+    a.run_command(Command::Xtree);
+    a.xtree.as_mut().unwrap().open_menu();
+    a.run_command(Command::Xtree);
+    assert!(!a.xtree_open);
+    assert!(!a.xtree.as_ref().unwrap().menu_is_open(), "comando");
+    a.on_closing();
+}
+
+/// Lo que cambia los paneles con la vista abierta (botones de layout, grupos, comandos de la
+/// paleta) cierra la vista para que se vea el efecto; lo que no los toca la deja abierta.
+#[test]
+fn pane_actions_close_xtree() {
+    let (mut a, _) = app_in("paneles");
+    let (w, h) = a.client_dips();
+    click_xtree_button(&mut a);
+    let (layout, r) = ui::layout_buttons(w, h).into_iter().find(|(l, _)| *l != a.layout).unwrap();
+    let (x, y) = center(&r);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(a.layout, layout);
+    assert!(!a.xtree_open, "botón de layout");
+
+    a.run_command(Command::Xtree);
+    a.run_command(Command::ToggleDarkMode);
+    assert!(a.xtree_open, "el modo oscuro no toca los paneles");
+    a.run_command(Command::Layout(0));
+    assert!(!a.xtree_open, "comando de layout");
+
+    a.save_group("g");
+    a.run_command(Command::Xtree);
+    a.apply_group(0);
+    assert!(!a.xtree_open, "grupo");
+
+    a.run_command(Command::Xtree);
+    a.run_command(Command::NewTab);
+    assert!(!a.xtree_open, "pestaña nueva");
+    a.on_closing();
+}
+
 #[test]
 fn closing_xdir_cancels_scan() {
     let (mut a, _) = app_in("closing");

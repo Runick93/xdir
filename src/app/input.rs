@@ -196,7 +196,11 @@ impl App {
                 capture_mouse(self.hwnd);
                 self.drag = Drag::Splitter(s);
             }
-            Hit::Layout(l) => self.set_layout(l),
+            Hit::Layout(l) => {
+                // Con la vista de xtree abierta el cambio no se vería: se cierra.
+                self.close_xtree();
+                self.set_layout(l);
+            }
             Hit::Pane(i, ph) => {
                 self.set_active(i);
                 match ph {

@@ -223,6 +223,24 @@ impl Xtree {
         self.go(0);
     }
 
+    /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).
+    pub fn close_menu(&mut self) {
+        self.menu_open = false;
+        self.menu_hover = None;
+    }
+
+    /// Abre el menú de discos sin pasar por el clic (pruebas).
+    #[cfg(test)]
+    pub fn open_menu(&mut self) {
+        self.menu_open = true;
+    }
+
+    /// ¿Está abierto el menú de discos? (pruebas).
+    #[cfg(test)]
+    pub fn menu_is_open(&self) -> bool {
+        self.menu_open
+    }
+
     /// Cancela el escaneo en curso (al cerrar xdir).
     pub fn cancel(&self) {
         self.scan.cancel.store(true, Ordering::Relaxed);

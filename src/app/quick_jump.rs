@@ -90,6 +90,8 @@ impl App {
                         return;
                     }
                 }
+                // La carpeta se abre en un panel: la vista de xtree no debe taparlo.
+                self.close_xtree();
                 let active = self.active;
                 if ctrl {
                     self.new_tab(active, loc, true);

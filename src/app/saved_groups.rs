@@ -7,6 +7,8 @@ impl App {
     /// que había quedan entre las cerradas (Ctrl+Shift+T las recupera).
     pub(super) fn apply_group(&mut self, index: usize) {
         let Some(g) = self.groups.items.get(index).cloned() else { return };
+        // Los paneles cambian: la vista de xtree no debe taparlos.
+        self.close_xtree();
         // Lo que se cambió en el grupo que se deja queda guardado en él.
         self.autosave_group();
         self.end_edit(false);

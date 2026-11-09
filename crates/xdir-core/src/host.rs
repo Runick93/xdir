@@ -9,11 +9,76 @@
 
 use std::path::Path;
 
+use crate::WM_APP;
 use crate::config::ColorRule;
+use crate::geom::{Color, Rect};
 use crate::paint::Painter;
-use crate::shell::Item;
+use crate::shell::{Entry, Item};
 use crate::sys::Handle;
 use crate::theme::Theme;
+
+// Mensajes que las cajas de texto del host le mandan a la ventana.
+
+/// La barra de dirección terminó de editarse. `wparam` = 1 si hay que navegar.
+pub const WM_APP_EDIT_DONE: u32 = WM_APP + 10;
+/// El renombrado en línea terminó. `wparam` = 1 si hay que aplicarlo.
+pub const WM_APP_RENAME_DONE: u32 = WM_APP + 11;
+/// Terminó el renombrado de un favorito. `wparam` = 1 si hay que aplicarlo.
+pub const WM_APP_FAVEDIT_DONE: u32 = WM_APP + 12;
+/// Terminó la edición del filtro rápido. `wparam` = 1 si se conserva, 0 si se quita (Escape).
+pub const WM_APP_FILTER_DONE: u32 = WM_APP + 13;
+/// Tecla de la paleta: `wparam` = tecla virtual (0: perdió el foco), `lparam` = 1 si con Ctrl.
+pub const WM_APP_PALETTE_KEY: u32 = WM_APP + 14;
+/// Flecha / Re Pág / Av Pág en la barra de dirección: recorren el desplegable de rutas.
+pub const WM_APP_SUGGEST_KEY: u32 = WM_APP + 15;
+/// Cambió el texto de una caja de edición. `lparam` = el número de la `TextBox`.
+pub const WM_APP_TEXT_CHANGED: u32 = WM_APP + 16;
+
+/// Para qué es una caja de edición: decide qué mensaje manda al terminar y qué teclas reenvía.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextKind {
+    /// Barra de dirección: las flechas recorren el desplegable de rutas; perder el foco cancela.
+    Address,
+    /// Renombrado en línea: perder el foco aplica (como en el Explorador).
+    Rename,
+    /// Renombrado de un favorito.
+    FavRename,
+    /// Filtro rápido.
+    Filter,
+    /// Paleta: flechas, Re Pág / Av Pág, Enter, Escape y Ctrl+P van a la ventana.
+    Palette,
+}
+
+impl TextKind {
+    /// El mensaje que la caja le manda a la ventana al terminar (Enter, Escape o perder el foco).
+    pub fn done_msg(self) -> u32 {
+        match self {
+            TextKind::Address => WM_APP_EDIT_DONE,
+            TextKind::Rename => WM_APP_RENAME_DONE,
+            TextKind::FavRename => WM_APP_FAVEDIT_DONE,
+            TextKind::Filter => WM_APP_FILTER_DONE,
+            TextKind::Palette => WM_APP_PALETTE_KEY,
+        }
+    }
+}
+
+/// Caja de texto nativa de una línea, creada por el host. El número es propio del host (es el
+/// `lparam` de `WM_APP_TEXT_CHANGED`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TextBox(pub u32);
+
+/// Dónde abrir un menú emergente.
+#[derive(Clone, Copy, Debug)]
+pub enum MenuPos {
+    /// Esquina superior izquierda en este punto (DIPs del área de la ventana).
+    At(f32, f32),
+    /// Esquina inferior izquierda en este punto: el menú crece hacia arriba.
+    Above(f32, f32),
+    /// Junto al mouse (menú de clic derecho).
+    Cursor,
+    /// Junto al mouse, abierto desde otro menú todavía abierto.
+    CursorNested,
+}
 
 /// La ventana principal. Los tamaños y posiciones están en DIPs: el host lee el DPI de su ventana.
 pub trait WindowHost {
@@ -70,4 +135,25 @@ pub trait WindowHost {
     /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
     /// necesitar un cuadro en curso.
     fn text_width(&self, s: &str, bold: bool) -> f32;
+
+    /// Crea una caja sobre `r` (DIPs del área de la ventana) con `text`, sin foco ni selección.
+    /// Al terminar le manda a la ventana `kind.done_msg()`; al cambiar el texto,
+    /// `WM_APP_TEXT_CHANGED`.
+    fn text_create(&self, kind: TextKind, r: Rect, text: &str, theme: &Theme) -> Option<TextBox>;
+    fn text_get(&self, b: TextBox) -> String;
+    fn text_set(&self, b: TextBox, text: &str);
+    /// Selecciona de `from` a `to` (en unidades UTF-16; `to` = -1: hasta el final).
+    fn text_select(&self, b: TextBox, from: usize, to: isize);
+    fn text_focus(&self, b: TextBox);
+    fn text_has_focus(&self, b: TextBox) -> bool;
+    /// Cierra la caja (sin volver a avisar que terminó).
+    fn text_destroy(&self, b: TextBox);
+    /// Las cajas siguen al tema y al DPI (cambió alguno de los dos).
+    fn text_restyle(&self, theme: &Theme);
+    /// Muestra un menú y espera la elección. `dot`: el ítem con ese id lleva un punto de ese
+    /// color. Devuelve el id elegido (None si se cerró sin elegir). `on_context` se llama con el
+    /// camino de posiciones dentro del menú (por ejemplo `[2, 0]`: primer elemento de la tercera
+    /// entrada) al hacer clic derecho sobre un elemento; si devuelve `true`, el menú se cierra y
+    /// el resultado es `None`. Donde el sistema no avisa ese clic (macOS), no se llama.
+    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32>;
 }

@@ -25,16 +25,16 @@ impl App {
         };
         self.redraw();
 
-        let Some(edit) = TextBox::create(self, TextKind::Rename, r, &name) else { return };
-        edit.select(0, stem_len as isize);
-        edit.focus();
+        let Some(edit) = self.host.text_create(TextKind::Rename, r, &name, &self.theme) else { return };
+        self.host.text_select(edit, 0, stem_len as isize);
+        self.host.text_focus(edit);
         self.rename = Some(Rename { edit, path });
     }
 
     pub(super) fn end_rename(&mut self, commit: bool) {
         let Some(Rename { edit, path }) = self.rename.take() else { return };
-        let text = edit.text();
-        edit.destroy();
+        let text = self.host.text_get(edit);
+        self.host.text_destroy(edit);
         self.host.focus_main();
         if commit {
             self.commit_rename(path, text.trim().to_string());
@@ -65,9 +65,9 @@ impl App {
         let r = self.panes[pane].address;
         let (x, w) = (r.left + 10.0, r.right - r.left - 20.0 - pane::ADDRESS_CLEAR_W);
         let y = (r.top + r.bottom) / 2.0 - 10.0;
-        let Some(edit) = TextBox::create(self, TextKind::Address, render::rect(x, y, x + w, y + 20.0), &text) else { return };
-        edit.select(0, -1);
-        edit.focus();
+        let Some(edit) = self.host.text_create(TextKind::Address, render::rect(x, y, x + w, y + 20.0), &text, &self.theme) else { return };
+        self.host.text_select(edit, 0, -1);
+        self.host.text_focus(edit);
         self.edit = Some((edit, pane));
         // Como el Explorador: al abrir, el historial de rutas escritas.
         self.suggest = Some(typed::Suggest::new(r, ""));
@@ -90,7 +90,7 @@ impl App {
         if items.is_empty() {
             entries.push(shell::Entry::Item { id: 0, label: "Sin subcarpetas".into(), enabled: false, checked: false });
         }
-        let cmd = popup_menu(self, &entries, MenuPos::At(r.left, r.bottom + 2.0), None);
+        let cmd = self.host.popup_menu(&entries, MenuPos::At(r.left, r.bottom + 2.0), None, None);
         self.panes[pane].open_chevron = None;
         if let Some((_, target)) = cmd.and_then(|c| (c as usize).checked_sub(1)).and_then(|i| items.get(i)) {
             let (hwnd, tx) = (self.hwnd, self.tx.clone());
@@ -102,8 +102,8 @@ impl App {
     /// Cruz de la barra de dirección: borra lo escrito y sigue editando (con el historial a la vista).
     pub(super) fn clear_edit(&mut self) {
         let Some((edit, _)) = self.edit else { return };
-        edit.set_text("");
-        edit.focus();
+        self.host.text_set(edit, "");
+        self.host.text_focus(edit);
         if let Some(sg) = &mut self.suggest {
             sg.set_query("");
         }
@@ -122,8 +122,8 @@ impl App {
         if let Some(text) = sg.move_by(delta) {
             // Cambiar el texto dispara EN_CHANGE: que no vuelva a buscar y pierda la elección.
             sg.quiet = true;
-            edit.set_text(&text);
-            edit.select(text.encode_utf16().count(), -1);
+            self.host.text_set(edit, &text);
+            self.host.text_select(edit, text.encode_utf16().count(), -1);
             sg.quiet = false;
             self.redraw();
         }
@@ -132,15 +132,15 @@ impl App {
     /// Clic en una ruta del desplegable: se navega a ella.
     pub(super) fn pick_suggestion(&mut self, index: usize) {
         let (Some((edit, _)), Some(path)) = (self.edit, self.suggest.as_ref().and_then(|s| s.items.get(index).cloned())) else { return };
-        edit.set_text(&path);
+        self.host.text_set(edit, &path);
         self.end_edit(true);
     }
 
     pub(super) fn end_edit(&mut self, commit: bool) {
         let Some((edit, pane)) = self.edit.take() else { return };
         self.suggest = None;
-        let text = edit.text();
-        edit.destroy();
+        let text = self.host.text_get(edit);
+        self.host.text_destroy(edit);
         self.host.focus_main();
         if commit {
             self.go_to_text(pane, &text);
@@ -157,7 +157,7 @@ impl App {
     pub(super) fn begin_filter(&mut self, pane: usize) {
         if let Some((edit, p)) = self.filter_edit {
             if p == pane {
-                edit.focus();
+                self.host.text_focus(edit);
                 return;
             }
             self.end_filter(true);
@@ -171,9 +171,9 @@ impl App {
         let r = self.panes[pane].search_text_rect();
         let y = (r.top + r.bottom) / 2.0 - 10.0;
         let text = self.panes[pane].tab().search_query().to_string();
-        let Some(edit) = TextBox::create(self, TextKind::Filter, render::rect(r.left, y, r.right, y + 20.0), &text) else { return };
-        edit.select(0, -1);
-        edit.focus();
+        let Some(edit) = self.host.text_create(TextKind::Filter, render::rect(r.left, y, r.right, y + 20.0), &text, &self.theme) else { return };
+        self.host.text_select(edit, 0, -1);
+        self.host.text_focus(edit);
         self.filter_edit = Some((edit, pane));
         self.redraw();
     }
@@ -182,8 +182,8 @@ impl App {
     /// ya si estaba esperando que se deje de escribir); Escape la termina y vuelve a la carpeta.
     pub(super) fn end_filter(&mut self, keep: bool) {
         let Some((edit, pane)) = self.filter_edit.take() else { return };
-        let text = edit.text();
-        edit.destroy();
+        let text = self.host.text_get(edit);
+        self.host.text_destroy(edit);
         self.host.focus_main_if_lost();
         self.pending_search = None;
         let (hwnd, tx) = (self.hwnd, self.tx.clone());

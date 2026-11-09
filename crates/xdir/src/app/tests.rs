@@ -787,6 +787,70 @@ fn undo_after_new_folder_sends_undo() {
     assert!(a.undo.is_empty());
 }
 
+// ---------- cajas de texto y menús del host ----------
+
+/// Perder el foco de la barra de dirección (`WM_APP_EDIT_DONE` con 0) cancela: no navega aunque
+/// se haya escrito otra ruta, y la caja se cierra.
+#[test]
+fn address_edit_cancel_on_focus_loss() {
+    use xdir_core::host::TextKind;
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let from = fixture("barra-desde");
+    let other = fixture("barra-otra");
+    a.new_tab(0, Location::Path(from.clone()), true);
+    a.begin_edit(0);
+    assert_eq!(host.text_of(TextKind::Address), Some(from.to_string_lossy().into_owned()));
+    let (edit, _) = a.edit.expect("la barra quedó abierta");
+    assert!(host.text_has_focus(edit));
+    host.text_set(edit, &other.to_string_lossy());
+    assert!(a.on_app_message(WM_APP_EDIT_DONE, 0, 0));
+    assert_eq!(a.panes[0].tab().location, Location::Path(from));
+    assert!(a.edit.is_none());
+    assert_eq!(host.text_of(TextKind::Address), None, "la caja se destruyó");
+}
+
+/// El renombrado en línea: lo escrito en la caja se aplica al terminar (`WM_APP_RENAME_DONE` con 1).
+#[test]
+fn rename_applies_on_done() {
+    use xdir_core::host::TextKind;
+    use xdir_core::sys::testing::FakeFileOps;
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("renombrar-caja");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    let list = &mut a.panes[0].tab_mut().list;
+    list.append(vec![file_entry("viejo.txt")]);
+    assert!(list.focus_name(&"viejo.txt".into()));
+    a.begin_rename(0);
+    assert_eq!(host.text_of(TextKind::Rename).as_deref(), Some("viejo.txt"));
+    let edit = a.rename.as_ref().expect("se abrió el renombrado").edit;
+    host.text_set(edit, "nuevo.txt");
+    FakeFileOps::take_ops();
+    assert!(a.on_app_message(WM_APP_RENAME_DONE, 1, 0));
+    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Rename { path: dir.join("viejo.txt"), new_name: "nuevo.txt".into() }]);
+    assert_eq!(host.text_of(TextKind::Rename), None);
+}
+
+/// El menú de una carpeta de favoritos con otra carpeta adentro lleva un submenú con su nombre.
+#[test]
+fn fav_folder_menu_is_nested() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.favorites.items.push(Fav::Group {
+        name: "Trabajo".into(),
+        items: vec![link("a", r"C:\a"), Fav::Group { name: "Clientes".into(), items: vec![link("b", r"C:\b")] }],
+    });
+    host.set_menu_choice(None);
+    a.activate_fav(0, &[0], false);
+    let menus = host.menus();
+    let menu = menus.last().expect("se mostró el menú");
+    assert!(
+        menu.iter().any(|e| matches!(e, shell::Entry::Sub(name, items) if name == "Clientes" && items.len() == 1)),
+        "{menu:?}"
+    );
+}
+
 // ---------- xtree ----------
 
 /// Carpeta temporal propia de una prueba (así la vista no analiza el disco del usuario).

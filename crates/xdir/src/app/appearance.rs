@@ -20,7 +20,7 @@ impl App {
     pub(super) fn set_accent(&mut self, accent: Accent) {
         self.accent = accent;
         self.theme = Theme::from_system(accent, self.dark_mode);
-        self.update_edit_resources();
+        self.host.text_restyle(&self.theme);
         self.redraw();
     }
 
@@ -42,7 +42,7 @@ impl App {
         // El host también pasa el renderizador a fondo translúcido si quedó Mica.
         let mica = self.host.apply_theme(&self.theme, self.dark_mode.is_none());
         self.transparent = mica;
-        self.update_edit_resources();
+        self.host.text_restyle(&self.theme);
     }
 
     /// Switch del panel de la rueda dentada: fija oscuro o claro (deja de seguir a Windows).

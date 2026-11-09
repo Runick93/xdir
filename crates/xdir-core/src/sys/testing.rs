@@ -3,7 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -16,7 +16,7 @@ use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, 
 use crate::config::ColorRule;
 use crate::format::thousands;
 use crate::geom::{Color, Rect};
-use crate::host::WindowHost;
+use crate::host::{MenuPos, TextBox, TextKind, WindowHost};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
 use crate::paint::{FontId, Painter};
@@ -782,7 +782,8 @@ impl Painter for RecordingPainter {
 /// cambiar con `client`), registra títulos, pedidos de repintar y pitidos, expande variables del
 /// entorno y responde lo que el test le fije a las preguntas, al selector de color y al arrastre.
 /// Dibuja con un `RecordingPainter` (guarda los textos del último cuadro) y mide 7 DIPs por
-/// carácter.
+/// carácter. Las cajas de texto son entradas de un mapa (tipo, texto y si tienen el foco); los
+/// menús se registran y devuelven lo que fije `set_menu_choice`.
 pub struct FakeHost {
     /// Tamaño del área de la ventana en DIPs.
     pub client: Cell<(f32, f32)>,
@@ -793,6 +794,11 @@ pub struct FakeHost {
     answer: Cell<Option<bool>>,
     drag_result: RefCell<Result<(), String>>,
     drawn: RefCell<Vec<(FontId, String, Rect)>>,
+    /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
+    text_boxes: RefCell<HashMap<u32, (TextKind, String, bool)>>,
+    next_text_box: Cell<u32>,
+    menu_choice: Cell<Option<u32>>,
+    menus: RefCell<Vec<Vec<Entry>>>,
 }
 
 impl FakeHost {
@@ -806,7 +812,26 @@ impl FakeHost {
             answer: Cell::new(None),
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
+            text_boxes: RefCell::new(HashMap::new()),
+            next_text_box: Cell::new(1),
+            menu_choice: Cell::new(None),
+            menus: RefCell::new(Vec::new()),
         })
+    }
+
+    /// El texto de la caja abierta de ese tipo (`None` si no hay ninguna).
+    pub fn text_of(&self, kind: TextKind) -> Option<String> {
+        self.text_boxes.borrow().values().find(|(k, _, _)| *k == kind).map(|(_, t, _)| t.clone())
+    }
+
+    /// Lo que devuelven los menús (`None`: se cerraron sin elegir).
+    pub fn set_menu_choice(&self, id: Option<u32>) {
+        self.menu_choice.set(id);
+    }
+
+    /// Los menús que se mostraron, en orden.
+    pub fn menus(&self) -> Vec<Vec<Entry>> {
+        self.menus.borrow().clone()
     }
 
     /// Los textos del último cuadro dibujado, en orden.
@@ -941,5 +966,45 @@ impl WindowHost for FakeHost {
 
     fn text_width(&self, s: &str, _bold: bool) -> f32 {
         7.0 * s.chars().count() as f32
+    }
+
+    fn text_create(&self, kind: TextKind, _r: Rect, text: &str, _theme: &Theme) -> Option<TextBox> {
+        let id = self.next_text_box.replace(self.next_text_box.get() + 1);
+        self.text_boxes.borrow_mut().insert(id, (kind, text.to_string(), false));
+        Some(TextBox(id))
+    }
+
+    fn text_get(&self, b: TextBox) -> String {
+        self.text_boxes.borrow().get(&b.0).map(|(_, t, _)| t.clone()).unwrap_or_default()
+    }
+
+    fn text_set(&self, b: TextBox, text: &str) {
+        if let Some((_, t, _)) = self.text_boxes.borrow_mut().get_mut(&b.0) {
+            *t = text.to_string();
+        }
+    }
+
+    fn text_select(&self, _b: TextBox, _from: usize, _to: isize) {}
+
+    /// El foco pasa a esta caja (las demás lo pierden).
+    fn text_focus(&self, b: TextBox) {
+        for (id, (_, _, focused)) in self.text_boxes.borrow_mut().iter_mut() {
+            *focused = *id == b.0;
+        }
+    }
+
+    fn text_has_focus(&self, b: TextBox) -> bool {
+        self.text_boxes.borrow().get(&b.0).is_some_and(|(_, _, f)| *f)
+    }
+
+    fn text_destroy(&self, b: TextBox) {
+        self.text_boxes.borrow_mut().remove(&b.0);
+    }
+
+    fn text_restyle(&self, _theme: &Theme) {}
+
+    fn popup_menu(&self, entries: &[Entry], _pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32> {
+        self.menus.borrow_mut().push(entries.to_vec());
+        self.menu_choice.get()
     }
 }

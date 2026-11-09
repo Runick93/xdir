@@ -1,5 +1,6 @@
 //! macOS: arranque con `NSApplication`, la ventana y su vista (dibujo, mouse, teclado y
-//! arrastrar y soltar), cajas de texto (`NSTextField`), menús emergentes y diálogos. Es la
+//! arrastrar y soltar) y el menú principal (las cajas de texto y los menús emergentes están en el
+//! host, `host_mac.rs`). Es la
 //! contraparte de `win.rs`: traduce los eventos de AppKit a los métodos neutros de `App`.
 //!
 //! Igual que en Windows, la aplicación vive detrás de un puntero que usan los eventos (que pueden
@@ -8,21 +9,20 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
-use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+use objc2::{AnyThread, ClassType, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply, NSBackingStoreType,
-    NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSDragOperation, NSDraggingContext, NSDraggingDestination,
-    NSDraggingInfo, NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSMenu,
-    NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea,
+    NSCursor, NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingSession, NSDraggingSource,
+    NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
+    MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 
 use super::*;
-use crate::platform::{MenuAt, keys};
+use crate::platform::keys;
 
 /// Mensajes propios de la ventana de macOS (por encima de los de la aplicación).
 pub(super) const MSG_CLOSE: u32 = WM_APP + 90;
@@ -42,8 +42,6 @@ thread_local! {
     pub(super) static LAST_MOUSE: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
     /// Rutas que se están arrastrando sobre la ventana.
     static DRAG_PATHS: RefCell<Option<Vec<PathBuf>>> = const { RefCell::new(None) };
-    static TEXT_BOXES: RefCell<HashMap<u32, TextBoxData>> = RefCell::new(HashMap::new());
-    static NEXT_TEXT_BOX: Cell<u32> = const { Cell::new(1) };
     static CLOSED: Cell<bool> = const { Cell::new(false) };
     /// Se está dibujando un cuadro (un pedido de repintar en ese momento AppKit lo descarta).
     pub(super) static DRAWING: Cell<bool> = const { Cell::new(false) };
@@ -630,311 +628,6 @@ fn translate_key(event: &NSEvent) -> Option<Key> {
     c.is_ascii_alphanumeric().then(|| Key(c.to_ascii_uppercase() as u16))
 }
 
-// ---------- cajas de texto ----------
-
-/// Para qué es una caja de edición: decide qué mensaje manda al terminar y qué teclas reenvía.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum TextKind {
-    /// Barra de dirección: las flechas recorren el desplegable de rutas; perder el foco cancela.
-    Address,
-    /// Renombrado en línea: perder el foco aplica (como en el Finder).
-    Rename,
-    /// Renombrado de un favorito.
-    FavRename,
-    /// Filtro rápido.
-    Filter,
-    /// Paleta: flechas, Re Pág / Av Pág, Enter y Escape van a la ventana.
-    Palette,
-}
-
-impl TextKind {
-    fn done_msg(self) -> u32 {
-        match self {
-            TextKind::Address => WM_APP_EDIT_DONE,
-            TextKind::Rename => WM_APP_RENAME_DONE,
-            TextKind::FavRename => WM_APP_FAVEDIT_DONE,
-            TextKind::Filter => WM_APP_FILTER_DONE,
-            TextKind::Palette => WM_APP_PALETTE_KEY,
-        }
-    }
-}
-
-struct TextBoxData {
-    field: Retained<NSTextField>,
-    delegate: Retained<TextDelegate>,
-    /// Selección pedida antes de tener el foco (se aplica al dárselo).
-    pending_select: Option<(usize, isize)>,
-}
-
-struct TextIvars {
-    kind: TextKind,
-    id: u32,
-    /// Ya avisó que terminó (no volver a avisar al perder el foco).
-    done: Cell<bool>,
-}
-
-define_class!(
-    /// Delegado de una caja de texto: Enter, Escape, las flechas y perder el foco se avisan a la
-    /// ventana con los mismos mensajes que en Windows.
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[ivars = TextIvars]
-    struct TextDelegate;
-
-    unsafe impl NSObjectProtocol for TextDelegate {}
-
-    unsafe impl NSControlTextEditingDelegate for TextDelegate {
-        #[unsafe(method(control:textView:doCommandBySelector:))]
-        fn do_command(&self, _control: &NSControl, _tv: &NSTextView, command: Sel) -> Bool {
-            Bool::new(self.handle_command(command))
-        }
-
-        #[unsafe(method(controlTextDidChange:))]
-        fn text_did_change(&self, _n: &NSNotification) {
-            Handle(1).post(WM_APP_TEXT_CHANGED, 0, self.ivars().id as isize);
-        }
-
-        #[unsafe(method(controlTextDidEndEditing:))]
-        fn text_did_end_editing(&self, _n: &NSNotification) {
-            let iv = self.ivars();
-            if iv.done.replace(true) {
-                return;
-            }
-            let h = Handle(1);
-            match iv.kind {
-                // Perder el foco: la dirección se cancela, el resto se aplica.
-                TextKind::Address => h.post(WM_APP_EDIT_DONE, 0, 0),
-                TextKind::Palette => h.post(WM_APP_PALETTE_KEY, 0, 0),
-                kind => h.post(kind.done_msg(), 1, 0),
-            }
-        }
-    }
-
-    unsafe impl NSTextFieldDelegate for TextDelegate {}
-);
-
-impl TextDelegate {
-    /// Enter, Escape y las flechas en la caja. Devuelve si se usó la tecla.
-    fn handle_command(&self, command: Sel) -> bool {
-        let iv = self.ivars();
-        let h = Handle(1);
-        let palette = iv.kind == TextKind::Palette;
-        let cmd = NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Command) as isize;
-        let nav = if command == sel!(moveUp:) {
-            Some(keys::VK_UP)
-        } else if command == sel!(moveDown:) {
-            Some(keys::VK_DOWN)
-        } else if command == sel!(scrollPageUp:) || command == sel!(pageUp:) {
-            Some(keys::VK_PRIOR)
-        } else if command == sel!(scrollPageDown:) || command == sel!(pageDown:) {
-            Some(keys::VK_NEXT)
-        } else {
-            None
-        };
-        if let Some(vk) = nav {
-            match iv.kind {
-                TextKind::Address => h.post(WM_APP_SUGGEST_KEY, vk.0 as usize, 0),
-                TextKind::Palette => h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd),
-                _ => return false,
-            }
-            return true;
-        }
-        let commit = if command == sel!(insertNewline:) {
-            true
-        } else if command == sel!(cancelOperation:) {
-            false
-        } else {
-            return false;
-        };
-        if palette {
-            let vk = if commit { keys::VK_RETURN } else { keys::VK_ESCAPE };
-            h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd);
-        } else {
-            iv.done.set(true);
-            h.post(iv.kind.done_msg(), commit as usize, 0);
-        }
-        true
-    }
-}
-
-impl TextDelegate {
-    fn new(mtm: MainThreadMarker, kind: TextKind, id: u32) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(TextIvars { kind, id, done: Cell::new(false) });
-        unsafe { msg_send![super(this), init] }
-    }
-}
-
-/// Caja de texto nativa de una línea sobre la vista (`NSTextField`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct TextBox(u32);
-
-impl TextBox {
-    /// Crea la caja sobre `r` (DIPs del área de la ventana) con `text`, sin foco ni selección.
-    pub(super) fn create(app: &App, kind: TextKind, r: render::Rect, text: &str) -> Option<TextBox> {
-        let mtm = MainThreadMarker::new()?;
-        let view = view()?;
-        let id = NEXT_TEXT_BOX.with(|n| n.replace(n.get() + 1));
-        let frame = NSRect::new(NSPoint::new(r.left as f64, r.top as f64), NSSize::new((r.right - r.left) as f64, (r.bottom - r.top) as f64));
-        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
-        field.setStringValue(&NSString::from_str(text));
-        field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename);
-        field.setBezeled(bordered);
-        field.setBordered(bordered);
-        field.setDrawsBackground(true);
-        field.setFocusRingType(NSFocusRingType::None);
-        style_field(&field, &app.theme);
-        if let Some(cell) = field.cell() {
-            cell.setScrollable(true);
-            cell.setWraps(false);
-        }
-        field.setUsesSingleLineMode(true);
-        let delegate = TextDelegate::new(mtm, kind, id);
-        unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
-        view.addSubview(&field);
-        TEXT_BOXES.with(|t| t.borrow_mut().insert(id, TextBoxData { field, delegate, pending_select: None }));
-        Some(TextBox(id))
-    }
-
-    /// El control (se clona para no tener el registro prestado mientras AppKit trabaja: sus
-    /// avisos pueden volver a entrar acá).
-    fn field(self) -> Option<Retained<NSTextField>> {
-        TEXT_BOXES.with(|t| t.borrow().get(&self.0).map(|d| d.field.clone()))
-    }
-
-    pub(super) fn id(self) -> isize {
-        self.0 as isize
-    }
-
-    pub(super) fn text(self) -> String {
-        self.field().map(|f| f.stringValue().to_string()).unwrap_or_default()
-    }
-
-    pub(super) fn set_text(self, text: &str) {
-        if let Some(f) = self.field() {
-            f.setStringValue(&NSString::from_str(text));
-        }
-    }
-
-    /// Selecciona de `from` a `to` (en unidades UTF-16; `to` = -1: hasta el final).
-    pub(super) fn select(self, from: usize, to: isize) {
-        let Some(field) = self.field() else { return };
-        match field.currentEditor() {
-            Some(editor) => {
-                let len = field.stringValue().length();
-                let end = if to < 0 { len } else { (to as usize).min(len) };
-                editor.setSelectedRange(NSRange::new(from.min(end), end - from.min(end)));
-            }
-            None => TEXT_BOXES.with(|t| {
-                if let Some(d) = t.borrow_mut().get_mut(&self.0) {
-                    d.pending_select = Some((from, to));
-                }
-            }),
-        }
-    }
-
-    pub(super) fn focus(self) {
-        let (Some(window), Some(field)) = (window(), self.field()) else { return };
-        window.makeFirstResponder(Some(&field));
-        let pending = TEXT_BOXES.with(|t| t.borrow_mut().get_mut(&self.0).and_then(|d| d.pending_select.take()));
-        if let Some((from, to)) = pending {
-            self.select(from, to);
-        }
-    }
-
-    pub(super) fn has_focus(self) -> bool {
-        self.field().is_some_and(|f| f.currentEditor().is_some())
-    }
-
-    pub(super) fn destroy(self) {
-        if let Some(d) = TEXT_BOXES.with(|t| t.borrow_mut().remove(&self.0)) {
-            // Que al perder el foco no avise de nuevo.
-            d.delegate.ivars().done.set(true);
-            unsafe { d.field.setDelegate(None) };
-            d.field.removeFromSuperview();
-        }
-    }
-}
-
-fn ns_color(c: Color) -> Retained<NSColor> {
-    NSColor::colorWithSRGBRed_green_blue_alpha(c.r as f64, c.g as f64, c.b as f64, c.a as f64)
-}
-
-fn style_field(field: &NSTextField, theme: &Theme) {
-    field.setBackgroundColor(Some(&ns_color(theme.surface_alt)));
-    field.setTextColor(Some(&ns_color(theme.text)));
-}
-
-// ---------- menús ----------
-
-/// Dónde abrir un menú emergente.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum MenuPos {
-    /// Esquina superior izquierda en este punto (DIPs del área de la ventana).
-    At(f32, f32),
-    /// Esquina inferior izquierda en este punto: el menú crece hacia arriba.
-    Above(f32, f32),
-    /// Junto al mouse (menú de clic derecho).
-    Cursor,
-    /// Junto al mouse, abierto desde otro menú todavía abierto.
-    #[allow(dead_code)]
-    CursorNested,
-}
-
-/// Muestra un menú y espera la elección. `dot`: el ítem con ese id lleva un punto de ese color.
-pub(super) fn popup_menu(_app: &App, entries: &[shell::Entry], pos: MenuPos, dot: Option<(u32, Color)>) -> Option<u32> {
-    let at = match pos {
-        MenuPos::At(x, y) => MenuAt::Point(x, y),
-        MenuPos::Above(x, y) => MenuAt::Above(x, y),
-        MenuPos::Cursor | MenuPos::CursorNested => MenuAt::Cursor,
-    };
-    crate::platform::popup_menu(entries, at, dot)
-}
-
-// ---------- métodos de App propios de macOS ----------
-
-impl App {
-    /// Colores de las cajas de texto abiertas según el tema.
-    pub(super) fn update_edit_resources(&mut self) {
-        let theme = self.theme;
-        let fields: Vec<Retained<NSTextField>> = TEXT_BOXES.with(|t| t.borrow().values().map(|d| d.field.clone()).collect());
-        for f in fields {
-            style_field(&f, &theme);
-        }
-    }
-
-    /// Menú desplegable de una carpeta de favoritos o del desborde "»".
-    pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: render::Rect) {
-        let Some(entries) = self.fav_menu_entries(&source) else { return };
-        let mut ids: Vec<FavPath> = Vec::new();
-        fn build(entries: &[(FavPath, Fav)], ids: &mut Vec<FavPath>) -> Vec<shell::Entry> {
-            entries
-                .iter()
-                .map(|(path, fav)| match fav {
-                    Fav::Link { .. } => {
-                        ids.push(path.clone());
-                        shell::Entry::Item { id: ids.len() as u32, label: fav.name().to_string(), enabled: true, checked: false }
-                    }
-                    Fav::Group { items, .. } => {
-                        let children: Vec<(FavPath, Fav)> =
-                            items.iter().enumerate().map(|(j, f)| ([path.as_slice(), &[j]].concat(), f.clone())).collect();
-                        let mut sub = build(&children, ids);
-                        if sub.is_empty() {
-                            sub.push(shell::Entry::Item { id: 0, label: "(vacía)".into(), enabled: false, checked: false });
-                        }
-                        shell::Entry::Sub(fav.name().to_string(), sub)
-                    }
-                })
-                .collect()
-        }
-        let menu = build(&entries, &mut ids);
-        let Some(cmd) = popup_menu(self, &menu, MenuPos::At(anchor.left, anchor.bottom), None) else { return };
-        if let Some(path) = ids.get(cmd as usize - 1).cloned() {
-            self.activate_fav(pane, &path, key_down(VK_CONTROL));
-        }
-    }
-}
-
 /// Solo con `--features pruebas`: la app se maneja con comandos de texto escritos (uno por línea)
 /// en el archivo de `XDIR_PRUEBAS`, igual que el gancho `WM_COPYDATA` de Windows. Además de los de
 /// `test_hook`: `captura <archivo.png>` guarda la vista, `clic <x> <y>`, `doble <x> <y>`,
@@ -994,21 +687,19 @@ mod pruebas {
                 app.on_key(Key(*vk as u16));
             }),
             ("escribir", _) => {
-                let ids: Vec<u32> = TEXT_BOXES.with(|t| t.borrow().keys().copied().collect());
-                let focused = ids.into_iter().find(|&id| TextBox(id).has_focus());
-                match focused {
-                    Some(id) => {
-                        let tb = TextBox(id);
-                        tb.set_text(&(tb.text() + rest));
-                        Handle(1).post(WM_APP_TEXT_CHANGED, 0, id as isize);
+                let host = MacHost::current();
+                match host.as_ref().and_then(|h| h.focused_text_box().map(|b| (h, b))) {
+                    Some((h, tb)) => {
+                        h.text_set(tb, &(h.text_get(tb) + rest));
+                        Handle(1).post(WM_APP_TEXT_CHANGED, 0, tb.0 as isize);
                     }
                     None => with_app(|app| rest.chars().for_each(|c| app.on_char(c))),
                 }
             }
             // Enter o Escape en la caja de texto con foco (pasan por su delegado, como al teclear).
             ("enter" | "escape", _) => {
-                let ids: Vec<u32> = TEXT_BOXES.with(|t| t.borrow().keys().copied().collect());
-                if let Some(field) = ids.into_iter().find(|&id| TextBox(id).has_focus()).and_then(|id| TextBox(id).field()) {
+                let host = MacHost::current();
+                if let Some(field) = host.as_ref().and_then(|h| h.focused_text_box().and_then(|b| h.text_field(b))) {
                     if let Some(editor) = field.currentEditor() {
                         let command = if verb == "enter" { sel!(insertNewline:) } else { sel!(cancelOperation:) };
                         unsafe { editor.doCommandBySelector(command) };

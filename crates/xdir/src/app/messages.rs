@@ -46,7 +46,7 @@ impl App {
                     if let Some(host) = Win32Host::current() {
                         host.set_dpi(self.dpi);
                     }
-                    self.update_edit_resources();
+                    self.host.text_restyle(&self.theme);
                     let r = &*(lparam.0 as *const RECT);
                     let _ = SetWindowPos(
                         self.hwnd.hwnd(),
@@ -94,15 +94,16 @@ impl App {
                     }
                     LRESULT(1)
                 }
-                WM_CTLCOLOREDIT => {
-                    let hdc = HDC(wparam.0 as *mut _);
-                    SetTextColor(hdc, colorref(self.theme.text));
-                    SetBkColor(hdc, colorref(self.theme.surface_alt));
-                    LRESULT(Win32Host::current().map_or(0, |h| h.edit_brush.get().0 as isize))
-                }
+                WM_CTLCOLOREDIT => match Win32Host::current() {
+                    Some(host) => host.ctl_color_edit(HDC(wparam.0 as *mut _)),
+                    None => LRESULT(0),
+                },
                 // El filtro y la paleta se actualizan con cada tecla.
                 WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == EN_CHANGE_CODE => {
-                    self.on_text_changed(lparam.0);
+                    let edit = HWND(lparam.0 as *mut _);
+                    if let Some(b) = Win32Host::current().and_then(|h| h.text_box_of(edit)) {
+                        self.on_text_changed(b.0 as isize);
+                    }
                     LRESULT(0)
                 }
                 // Solo con `--features pruebas`: otro proceso maneja la app por texto (capturas y
@@ -115,9 +116,13 @@ impl App {
                     self.test_hook(text.trim_end_matches('\0'));
                     LRESULT(1)
                 }
-                WM_MENURBUTTONUP if Win32Host::current().is_some_and(|h| h.fav_menu.borrow().is_some()) => {
-                    self.on_fav_menu_right_click(lparam.0, wparam.0 as u32);
-                    LRESULT(0)
+                // Clic derecho dentro de un menú emergente (el de favoritos abre ahí su menú contextual).
+                WM_MENURBUTTONUP => {
+                    if Win32Host::current().is_some_and(|h| h.on_menu_right_click(lparam.0, wparam.0 as u32)) {
+                        LRESULT(0)
+                    } else {
+                        DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam)
+                    }
                 }
                 // Al volver a la ventana se releen los favoritos (por si se editó el archivo).
                 WM_ACTIVATEAPP if wparam.0 != 0 => {
@@ -246,8 +251,7 @@ impl App {
                     );
                     let _ = RevokeDragDrop(self.hwnd.hwnd());
                     if let Some(host) = Win32Host::current() {
-                        let _ = DeleteObject(host.edit_font.get().into());
-                        let _ = DeleteObject(host.edit_brush.get().into());
+                        host.release_edit_resources();
                     }
                     PostQuitMessage(0);
                     LRESULT(0)

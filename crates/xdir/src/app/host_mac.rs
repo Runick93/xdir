@@ -5,13 +5,17 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, ClassType, MainThreadOnly, define_class, msg_send, sel};
+use objc2::runtime::{Bool, ProtocolObject, Sel};
+use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSAppearance, NSAppearanceCustomization,
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSColorPanel, NSDraggingItem, NSWindow, NSWorkspace,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSColorPanel, NSControl, NSControlTextEditingDelegate,
+    NSDraggingItem, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSTextField, NSTextFieldDelegate, NSTextView,
+    NSWindow, NSWorkspace,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{
+    MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
+};
 use xdir_core::host::WindowHost;
 use xdir_core::paint::Painter;
 
@@ -20,6 +24,7 @@ use crate::render::Renderer;
 
 use super::*;
 use super::mac::{DRAWING, KEEP, LAST_MOUSE, MSG_ACCENT, MSG_CLOSE, view, window};
+use crate::platform::{MenuAt, keys};
 
 thread_local! {
     /// Ya hay un cuadro programado para el próximo refresco de pantalla.
@@ -34,12 +39,21 @@ pub(super) struct MacHost {
     window: Cell<Handle>,
     /// Dibujo con Core Graphics (fuentes, imágenes y tamaño del área).
     renderer: RefCell<Renderer>,
+    /// Cajas de texto abiertas, por número. No se prestan mientras AppKit trabaja con un control:
+    /// sus avisos pueden volver a entrar acá.
+    text_boxes: RefCell<HashMap<u32, TextBoxData>>,
+    next_text_box: Cell<u32>,
 }
 
 impl MacHost {
     /// Crea el host (todavía sin ventana) con su renderizador y lo deja en el `thread_local`.
     pub(super) fn install() -> Result<Rc<MacHost>, String> {
-        let host = Rc::new(MacHost { window: Cell::new(Handle::default()), renderer: RefCell::new(Renderer::new()?) });
+        let host = Rc::new(MacHost {
+            window: Cell::new(Handle::default()),
+            renderer: RefCell::new(Renderer::new()?),
+            text_boxes: RefCell::new(HashMap::new()),
+            next_text_box: Cell::new(1),
+        });
         HOST.with(|h| *h.borrow_mut() = Some(host.clone()));
         Ok(host)
     }
@@ -53,6 +67,19 @@ impl MacHost {
     /// dibujar).
     pub(super) fn set_size(&self, width: f32, height: f32, scale: f32) {
         self.renderer.borrow_mut().set_size(width, height, scale);
+    }
+
+    /// El control de una caja (se clona para no tener el registro prestado mientras AppKit
+    /// trabaja: sus avisos pueden volver a entrar acá).
+    pub(super) fn text_field(&self, b: TextBox) -> Option<Retained<NSTextField>> {
+        self.text_boxes.borrow().get(&b.0).map(|d| d.field.clone())
+    }
+
+    /// La caja que tiene el foco (comandos de prueba).
+    #[cfg(feature = "pruebas")]
+    pub(super) fn focused_text_box(&self) -> Option<TextBox> {
+        let ids: Vec<u32> = self.text_boxes.borrow().keys().copied().collect();
+        ids.into_iter().map(TextBox).find(|&b| self.text_has_focus(b))
     }
 }
 
@@ -281,6 +308,215 @@ impl WindowHost for MacHost {
         }
         w.makeKeyAndOrderFront(None);
     }
+
+    /// Caja de texto nativa de una línea sobre la vista (`NSTextField`).
+    fn text_create(&self, kind: TextKind, r: render::Rect, text: &str, theme: &Theme) -> Option<TextBox> {
+        let mtm = MainThreadMarker::new()?;
+        let view = view()?;
+        let id = self.next_text_box.replace(self.next_text_box.get() + 1);
+        let frame = NSRect::new(NSPoint::new(r.left as f64, r.top as f64), NSSize::new((r.right - r.left) as f64, (r.bottom - r.top) as f64));
+        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
+        field.setStringValue(&NSString::from_str(text));
+        field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename);
+        field.setBezeled(bordered);
+        field.setBordered(bordered);
+        field.setDrawsBackground(true);
+        field.setFocusRingType(NSFocusRingType::None);
+        style_field(&field, theme);
+        if let Some(cell) = field.cell() {
+            cell.setScrollable(true);
+            cell.setWraps(false);
+        }
+        field.setUsesSingleLineMode(true);
+        let delegate = TextDelegate::new(mtm, kind, id);
+        unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
+        view.addSubview(&field);
+        self.text_boxes.borrow_mut().insert(id, TextBoxData { field, delegate, pending_select: None });
+        Some(TextBox(id))
+    }
+
+    fn text_get(&self, b: TextBox) -> String {
+        self.text_field(b).map(|f| f.stringValue().to_string()).unwrap_or_default()
+    }
+
+    fn text_set(&self, b: TextBox, text: &str) {
+        if let Some(f) = self.text_field(b) {
+            f.setStringValue(&NSString::from_str(text));
+        }
+    }
+
+    /// Sin foco todavía no hay editor: la selección se guarda y se aplica al dárselo.
+    fn text_select(&self, b: TextBox, from: usize, to: isize) {
+        let Some(field) = self.text_field(b) else { return };
+        match field.currentEditor() {
+            Some(editor) => {
+                let len = field.stringValue().length();
+                let end = if to < 0 { len } else { (to as usize).min(len) };
+                editor.setSelectedRange(NSRange::new(from.min(end), end - from.min(end)));
+            }
+            None => {
+                if let Some(d) = self.text_boxes.borrow_mut().get_mut(&b.0) {
+                    d.pending_select = Some((from, to));
+                }
+            }
+        }
+    }
+
+    fn text_focus(&self, b: TextBox) {
+        let (Some(window), Some(field)) = (window(), self.text_field(b)) else { return };
+        window.makeFirstResponder(Some(&field));
+        let pending = self.text_boxes.borrow_mut().get_mut(&b.0).and_then(|d| d.pending_select.take());
+        if let Some((from, to)) = pending {
+            self.text_select(b, from, to);
+        }
+    }
+
+    fn text_has_focus(&self, b: TextBox) -> bool {
+        self.text_field(b).is_some_and(|f| f.currentEditor().is_some())
+    }
+
+    fn text_destroy(&self, b: TextBox) {
+        let removed = self.text_boxes.borrow_mut().remove(&b.0);
+        if let Some(d) = removed {
+            // Que al perder el foco no avise de nuevo.
+            d.delegate.ivars().done.set(true);
+            unsafe { d.field.setDelegate(None) };
+            d.field.removeFromSuperview();
+        }
+    }
+
+    /// Colores de las cajas de texto abiertas según el tema (la fuente no depende de la escala).
+    fn text_restyle(&self, theme: &Theme) {
+        let fields: Vec<Retained<NSTextField>> = self.text_boxes.borrow().values().map(|d| d.field.clone()).collect();
+        for f in fields {
+            style_field(&f, theme);
+        }
+    }
+
+    /// Menú nativo de AppKit. El clic derecho dentro del menú no llega: `on_context` no se usa.
+    fn popup_menu(&self, entries: &[shell::Entry], pos: MenuPos, dot: Option<(u32, Color)>, _on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32> {
+        let at = match pos {
+            MenuPos::At(x, y) => MenuAt::Point(x, y),
+            MenuPos::Above(x, y) => MenuAt::Above(x, y),
+            MenuPos::Cursor | MenuPos::CursorNested => MenuAt::Cursor,
+        };
+        crate::platform::popup_menu(entries, at, dot)
+    }
+}
+
+// ---------- cajas de texto ----------
+
+struct TextBoxData {
+    field: Retained<NSTextField>,
+    delegate: Retained<TextDelegate>,
+    /// Selección pedida antes de tener el foco (se aplica al dárselo).
+    pending_select: Option<(usize, isize)>,
+}
+
+struct TextIvars {
+    kind: TextKind,
+    id: u32,
+    /// Ya avisó que terminó (no volver a avisar al perder el foco).
+    done: Cell<bool>,
+}
+
+define_class!(
+    /// Delegado de una caja de texto: Enter, Escape, las flechas y perder el foco se avisan a la
+    /// ventana con los mismos mensajes que en Windows.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = TextIvars]
+    struct TextDelegate;
+
+    unsafe impl NSObjectProtocol for TextDelegate {}
+
+    unsafe impl NSControlTextEditingDelegate for TextDelegate {
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn do_command(&self, _control: &NSControl, _tv: &NSTextView, command: Sel) -> Bool {
+            Bool::new(self.handle_command(command))
+        }
+
+        #[unsafe(method(controlTextDidChange:))]
+        fn text_did_change(&self, _n: &NSNotification) {
+            Handle(1).post(WM_APP_TEXT_CHANGED, 0, self.ivars().id as isize);
+        }
+
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn text_did_end_editing(&self, _n: &NSNotification) {
+            let iv = self.ivars();
+            if iv.done.replace(true) {
+                return;
+            }
+            let h = Handle(1);
+            match iv.kind {
+                // Perder el foco: la dirección se cancela, el resto se aplica.
+                TextKind::Address => h.post(WM_APP_EDIT_DONE, 0, 0),
+                TextKind::Palette => h.post(WM_APP_PALETTE_KEY, 0, 0),
+                kind => h.post(kind.done_msg(), 1, 0),
+            }
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for TextDelegate {}
+);
+
+impl TextDelegate {
+    fn new(mtm: MainThreadMarker, kind: TextKind, id: u32) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(TextIvars { kind, id, done: Cell::new(false) });
+        unsafe { msg_send![super(this), init] }
+    }
+
+    /// Enter, Escape y las flechas en la caja. Devuelve si se usó la tecla.
+    fn handle_command(&self, command: Sel) -> bool {
+        let iv = self.ivars();
+        let h = Handle(1);
+        let palette = iv.kind == TextKind::Palette;
+        let cmd = NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Command) as isize;
+        let nav = if command == sel!(moveUp:) {
+            Some(keys::VK_UP)
+        } else if command == sel!(moveDown:) {
+            Some(keys::VK_DOWN)
+        } else if command == sel!(scrollPageUp:) || command == sel!(pageUp:) {
+            Some(keys::VK_PRIOR)
+        } else if command == sel!(scrollPageDown:) || command == sel!(pageDown:) {
+            Some(keys::VK_NEXT)
+        } else {
+            None
+        };
+        if let Some(vk) = nav {
+            match iv.kind {
+                TextKind::Address => h.post(WM_APP_SUGGEST_KEY, vk.0 as usize, 0),
+                TextKind::Palette => h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd),
+                _ => return false,
+            }
+            return true;
+        }
+        let commit = if command == sel!(insertNewline:) {
+            true
+        } else if command == sel!(cancelOperation:) {
+            false
+        } else {
+            return false;
+        };
+        if palette {
+            let vk = if commit { keys::VK_RETURN } else { keys::VK_ESCAPE };
+            h.post(WM_APP_PALETTE_KEY, vk.0 as usize, cmd);
+        } else {
+            iv.done.set(true);
+            h.post(iv.kind.done_msg(), commit as usize, 0);
+        }
+        true
+    }
+}
+
+fn ns_color(c: Color) -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(c.r as f64, c.g as f64, c.b as f64, c.a as f64)
+}
+
+fn style_field(field: &NSTextField, theme: &Theme) {
+    field.setBackgroundColor(Some(&ns_color(theme.surface_alt)));
+    field.setTextColor(Some(&ns_color(theme.text)));
 }
 
 define_class!(

@@ -92,17 +92,17 @@ impl App {
     /// y la barra de dirección actualiza el desplegable de rutas.
     pub(super) fn on_text_changed(&mut self, id: isize) {
         if let Some((edit, pane)) = self.filter_edit {
-            if edit.id() == id {
-                let text = edit.text();
+            if edit.0 as isize == id {
+                let text = self.host.text_get(edit);
                 self.search_typed(pane, &text);
             }
         }
-        if self.palette.as_ref().is_some_and(|(_, e)| e.id() == id) {
+        if self.palette.as_ref().is_some_and(|(_, e)| e.0 as isize == id) {
             self.refresh_palette();
         }
         if let Some((edit, _)) = self.edit {
-            if edit.id() == id {
-                let text = edit.text();
+            if edit.0 as isize == id {
+                let text = self.host.text_get(edit);
                 if let Some(sg) = self.suggest.as_mut().filter(|sg| !sg.quiet) {
                     sg.set_query(&text);
                     self.redraw();

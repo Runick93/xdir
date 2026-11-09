@@ -106,7 +106,7 @@ impl App {
                 Hit::Palette(Some(i)) => self.activate_palette(i, key_down(VK_CONTROL)),
                 Hit::Palette(None) => {
                     if let Some((_, edit)) = &self.palette {
-                        edit.focus();
+                        self.host.text_focus(*edit);
                     }
                 }
                 _ => self.close_palette(),

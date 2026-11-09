@@ -162,7 +162,7 @@ impl App {
             .collect();
         entries.push(shell::Entry::Sep);
         entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
-        let cmd = popup_menu(self, &entries, MenuPos::At(at.0, at.1), None).map_or(0, |c| c as usize);
+        let cmd = self.host.popup_menu(&entries, MenuPos::At(at.0, at.1), None, None).map_or(0, |c| c as usize);
         match cmd {
             RESET => {
                 for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {

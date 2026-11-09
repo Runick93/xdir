@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use xdir_core::host::WindowHost;
+use xdir_core::shell::Entry;
 use xdir_core::paint::Painter;
 
 use crate::config::ColorRule;
@@ -29,13 +30,33 @@ pub(super) struct Win32Host {
     drop_target: RefCell<Option<IDropTarget>>,
     /// Direct2D / DirectWrite: fábricas, fuentes y el destino de dibujo de la ventana.
     renderer: RefCell<Renderer>,
-    /// Fuente y fondo de los controles de edición (siguen el DPI y el tema; los arma
-    /// `App::update_edit_resources`).
-    pub(super) edit_font: Cell<HFONT>,
-    pub(super) edit_brush: Cell<HBRUSH>,
-    /// Menú de favoritos abierto (para el clic derecho dentro del menú). No se presta mientras
-    /// el menú está abierto: el clic derecho llega anidado.
-    pub(super) fav_menu: RefCell<Option<FavMenu>>,
+    /// Fuente, fondo y colores (texto, fondo) de los controles de edición: siguen el DPI y el tema
+    /// (los arma `text_restyle`).
+    edit_font: Cell<HFONT>,
+    edit_brush: Cell<HBRUSH>,
+    edit_colors: Cell<(COLORREF, COLORREF)>,
+    /// Controles de edición abiertos, por número de `TextBox`.
+    text_boxes: RefCell<HashMap<u32, HWND>>,
+    next_text_box: Cell<u32>,
+    /// Menús emergentes abiertos (anidados: el último es el de más adentro). No se prestan
+    /// mientras un menú está abierto: el clic derecho y los menús anidados llegan adentro.
+    menus: RefCell<Vec<OpenMenu>>,
+    /// Se está atendiendo un clic derecho dentro de un menú (no se atiende otro adentro).
+    in_menu_context: Cell<bool>,
+}
+
+/// La respuesta al clic derecho dentro de un menú (la clausura de `popup_menu`, sin su tiempo de
+/// vida: vive mientras el menú esté en la pila de `menus`).
+type OnContext = *mut (dyn FnMut(&[usize]) -> bool + 'static);
+
+/// Un menú emergente abierto con `popup_menu`.
+struct OpenMenu {
+    /// Camino de posiciones de cada elemento, por (submenú, posición dentro de él). Solo si hay
+    /// `on_context`.
+    positions: HashMap<(isize, u32), Vec<usize>>,
+    on_context: Option<OnContext>,
+    /// `on_context` pidió cerrarlo: `popup_menu` devuelve `None`.
+    closed: bool,
 }
 
 impl Win32Host {
@@ -50,7 +71,11 @@ impl Win32Host {
             renderer: RefCell::new(Renderer::new()?),
             edit_font: Cell::new(HFONT::default()),
             edit_brush: Cell::new(HBRUSH::default()),
-            fav_menu: RefCell::new(None),
+            edit_colors: Cell::new((COLORREF(0), COLORREF(0x00FFFFFF))),
+            text_boxes: RefCell::new(HashMap::new()),
+            next_text_box: Cell::new(1),
+            menus: RefCell::new(Vec::new()),
+            in_menu_context: Cell::new(false),
         });
         HOST.with(|h| *h.borrow_mut() = Some(host.clone()));
         Ok(host)
@@ -91,6 +116,67 @@ impl Win32Host {
     /// `WM_DPICHANGED`: la ventana pasó a un monitor con otro DPI.
     pub(super) fn set_dpi(&self, dpi: u32) {
         self.renderer.borrow_mut().set_dpi(dpi);
+    }
+
+    /// El control de edición de una caja (copiado: el registro no queda prestado mientras
+    /// Windows manda mensajes del control).
+    fn edit_hwnd(&self, b: TextBox) -> Option<HWND> {
+        self.text_boxes.borrow().get(&b.0).copied()
+    }
+
+    /// La caja de un control de edición (`EN_CHANGE` llega con el `HWND` del control).
+    pub(super) fn text_box_of(&self, hwnd: HWND) -> Option<TextBox> {
+        self.text_boxes.borrow().iter().find(|(_, h)| **h == hwnd).map(|(id, _)| TextBox(*id))
+    }
+
+    /// `WM_CTLCOLOREDIT`: colores del tema en los controles de edición.
+    pub(super) fn ctl_color_edit(&self, hdc: HDC) -> LRESULT {
+        let (text, back) = self.edit_colors.get();
+        unsafe {
+            SetTextColor(hdc, text);
+            SetBkColor(hdc, back);
+        }
+        LRESULT(self.edit_brush.get().0 as isize)
+    }
+
+    /// `WM_DESTROY`: suelta la fuente y el fondo de los controles de edición.
+    pub(super) fn release_edit_resources(&self) {
+        unsafe {
+            let _ = DeleteObject(self.edit_font.get().into());
+            let _ = DeleteObject(self.edit_brush.get().into());
+        }
+    }
+
+    /// `WM_MENURBUTTONUP`: clic derecho sobre el elemento `pos` del menú `hmenu`. Si es de un menú
+    /// abierto con `on_context`, la llama con el camino del elemento y, si pide cerrar, cierra el
+    /// menú. Devuelve si el clic era para un menú así.
+    pub(super) fn on_menu_right_click(&self, hmenu: isize, pos: u32) -> bool {
+        if self.in_menu_context.get() {
+            return false;
+        }
+        let found = self
+            .menus
+            .borrow()
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, m)| Some((i, m.on_context?, m.positions.get(&(hmenu, pos))?.clone())));
+        let Some((i, on_context, path)) = found else { return false };
+        self.in_menu_context.set(true);
+        // SAFETY: la clausura vive en el marco de `popup_menu` que registró el menú, que sigue
+        // esperando en `TrackPopupMenuEx` (el menú todavía está en la pila); mientras tanto nadie
+        // más la usa (`in_menu_context` evita que se llame de nuevo desde adentro).
+        let close = unsafe { (*on_context)(&path) };
+        self.in_menu_context.set(false);
+        if close {
+            if let Some(m) = self.menus.borrow_mut().get_mut(i) {
+                m.closed = true;
+            }
+            unsafe {
+                let _ = EndMenu();
+            }
+        }
+        true
     }
 }
 
@@ -365,4 +451,316 @@ impl WindowHost for Win32Host {
             }
         }
     }
+
+    /// Control de edición nativo de una línea, hijo de la ventana.
+    fn text_create(&self, kind: TextKind, r: render::Rect, text: &str, _theme: &Theme) -> Option<TextBox> {
+        let k = self.dpi() as f32 / 96.0;
+        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let mut style = WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
+        if matches!(kind, TextKind::Rename | TextKind::FavRename) {
+            style |= WS_BORDER;
+        }
+        unsafe {
+            let edit = CreateWindowExW(
+                WS_EX_LAYERED,
+                w!("EDIT"),
+                PCWSTR(wide.as_ptr()),
+                style,
+                (r.left * k) as i32,
+                (r.top * k) as i32,
+                ((r.right - r.left) * k) as i32,
+                ((r.bottom - r.top) * k) as i32,
+                Some(self.hwnd()),
+                None,
+                None,
+                None,
+            )
+            .ok()?;
+            // Opaco: sin capa, el GDI del control deja ver el Mica de la ventana (fondo gris).
+            let _ = SetLayeredWindowAttributes(edit, COLORREF(0), 255, LWA_ALPHA);
+            SendMessageW(edit, WM_SETFONT, Some(WPARAM(self.edit_font.get().0 as usize)), Some(LPARAM(1)));
+            if kind == TextKind::Palette {
+                let _ = SetWindowSubclass(edit, Some(palette_proc), 2, 0);
+            } else {
+                let _ = SetWindowSubclass(edit, Some(edit_proc), 1, kind.done_msg() as usize);
+            }
+            let id = self.next_text_box.replace(self.next_text_box.get() + 1);
+            self.text_boxes.borrow_mut().insert(id, edit);
+            Some(TextBox(id))
+        }
+    }
+
+    fn text_get(&self, b: TextBox) -> String {
+        self.edit_hwnd(b).map(window_text).unwrap_or_default()
+    }
+
+    fn text_set(&self, b: TextBox, text: &str) {
+        let Some(edit) = self.edit_hwnd(b) else { return };
+        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
+        }
+    }
+
+    fn text_select(&self, b: TextBox, from: usize, to: isize) {
+        let Some(edit) = self.edit_hwnd(b) else { return };
+        unsafe {
+            SendMessageW(edit, EM_SETSEL, Some(WPARAM(from)), Some(LPARAM(to)));
+        }
+    }
+
+    fn text_focus(&self, b: TextBox) {
+        let Some(edit) = self.edit_hwnd(b) else { return };
+        unsafe {
+            let _ = SetFocus(Some(edit));
+        }
+    }
+
+    fn text_has_focus(&self, b: TextBox) -> bool {
+        self.edit_hwnd(b).is_some_and(|edit| unsafe { GetFocus() == edit })
+    }
+
+    fn text_destroy(&self, b: TextBox) {
+        let removed = self.text_boxes.borrow_mut().remove(&b.0);
+        if let Some(edit) = removed {
+            unsafe {
+                let _ = DestroyWindow(edit);
+            }
+        }
+    }
+
+    /// Fuente y fondo de los controles de edición según el DPI y el tema (los que ya están
+    /// abiertos conservan su fuente: se cierran al cambiar el tamaño).
+    fn text_restyle(&self, theme: &Theme) {
+        unsafe {
+            if !self.edit_font.get().is_invalid() {
+                let _ = DeleteObject(self.edit_font.get().into());
+            }
+            if !self.edit_brush.get().is_invalid() {
+                let _ = DeleteObject(self.edit_brush.get().into());
+            }
+            self.edit_font.set(CreateFontW(
+                -(13 * self.dpi() as i32 / 96),
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                w!("Segoe UI"),
+            ));
+            self.edit_brush.set(CreateSolidBrush(colorref(theme.surface_alt)));
+        }
+        self.edit_colors.set((colorref(theme.text), colorref(theme.surface_alt)));
+    }
+
+    /// Menú emergente modal (`TrackPopupMenuEx`). Con `on_context`, el clic derecho dentro del
+    /// menú llega por `WM_MENURBUTTONUP` a `on_menu_right_click`.
+    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<&mut dyn FnMut(&[usize]) -> bool>) -> Option<u32> {
+        /// Agrega las entradas a `hmenu`. `path`: camino del submenú; `positions`: dónde anotar
+        /// el camino de cada elemento (solo si hace falta para el clic derecho). En los menús, "&"
+        /// marca el atajo: se duplica.
+        unsafe fn append(hmenu: HMENU, entries: &[Entry], path: &mut Vec<usize>, positions: &mut Option<HashMap<(isize, u32), Vec<usize>>>) {
+            let mut pos = 0u32;
+            for (i, e) in entries.iter().enumerate() {
+                path.push(i);
+                let added = unsafe {
+                    match e {
+                        Entry::Sep => {
+                            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+                            true
+                        }
+                        Entry::Item { id, label, enabled, checked } => {
+                            let mut flags = MF_STRING;
+                            if !enabled {
+                                flags |= MF_GRAYED;
+                            }
+                            if *checked {
+                                flags |= MF_CHECKED;
+                            }
+                            let text: Vec<u16> = label.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
+                            let _ = AppendMenuW(hmenu, flags, *id as usize, PCWSTR(text.as_ptr()));
+                            true
+                        }
+                        Entry::Sub(label, children) => match CreatePopupMenu() {
+                            Ok(sub) => {
+                                append(sub, children, path, positions);
+                                let text: Vec<u16> = label.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
+                                let _ = AppendMenuW(hmenu, MF_POPUP, sub.0 as usize, PCWSTR(text.as_ptr()));
+                                true
+                            }
+                            Err(_) => false,
+                        },
+                    }
+                };
+                if added {
+                    if let (Some(p), false) = (positions.as_mut(), matches!(e, Entry::Sep)) {
+                        p.insert((hmenu.0 as isize, pos), path.clone());
+                    }
+                    pos += 1;
+                }
+                path.pop();
+            }
+        }
+        let hwnd = self.hwnd();
+        let dpi = self.dpi();
+        let k = dpi as f32 / 96.0;
+        unsafe {
+            // Que se vea lo que cambió antes del menú (la flecha abierta de la barra de dirección).
+            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
+            let hmenu = CreatePopupMenu().ok()?;
+            let mut positions = on_context.is_some().then(HashMap::new);
+            append(hmenu, entries, &mut Vec::new(), &mut positions);
+            let bitmap = dot.and_then(|(id, color)| {
+                let bitmap = accent_dot(color, dpi)?;
+                let mii = MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_BITMAP, hbmpItem: bitmap, ..Default::default() };
+                let _ = SetMenuItemInfoW(hmenu, id, false, &mii);
+                Some(bitmap)
+            });
+            let client = |x: f32, y: f32| {
+                let mut pt = POINT { x: (x * k) as i32, y: (y * k) as i32 };
+                let _ = ClientToScreen(hwnd, &mut pt);
+                pt
+            };
+            let cursor = || {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                pt
+            };
+            let (pt, flags) = match pos {
+                MenuPos::At(x, y) => (client(x, y), TPM_LEFTALIGN | TPM_TOPALIGN),
+                MenuPos::Above(x, y) => (client(x, y), TPM_LEFTALIGN | TPM_BOTTOMALIGN),
+                MenuPos::Cursor => (cursor(), TPM_RIGHTBUTTON),
+                MenuPos::CursorNested => (cursor(), TPM_RIGHTBUTTON | TPM_RECURSE),
+            };
+            // SAFETY: solo se le quita el tiempo de vida al puntero; se usa mientras este menú
+            // está en la pila, y se saca antes de volver (ver `on_menu_right_click`).
+            let on_context = on_context.map(|f| std::mem::transmute::<*mut (dyn FnMut(&[usize]) -> bool + '_), OnContext>(f as *mut _));
+            self.menus.borrow_mut().push(OpenMenu { positions: positions.unwrap_or_default(), on_context, closed: false });
+            let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | flags).0, pt.x, pt.y, hwnd, None).0;
+            let menu = self.menus.borrow_mut().pop();
+            let _ = DestroyMenu(hmenu);
+            if let Some(b) = bitmap {
+                let _ = DeleteObject(b.into());
+            }
+            // Si dentro del menú se eligió algo con clic derecho, el menú se cerró sin elección.
+            if menu.is_some_and(|m| m.closed) {
+                return None;
+            }
+            (cmd > 0).then_some(cmd as u32)
+        }
+    }
+}
+
+/// Subclase de los controles de edición (dirección y renombrado): Enter confirma, Escape
+/// cancela. `done_msg` es el mensaje que se le manda a la ventana al terminar.
+unsafe extern "system" fn edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    done_msg: usize,
+) -> LRESULT {
+    unsafe {
+        let parent = GetParent(hwnd).unwrap_or_default();
+        match msg {
+            WM_KEYDOWN
+                if done_msg as u32 == WM_APP_EDIT_DONE
+                    && matches!(Key(wparam.0 as u16), VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT) =>
+            {
+                let _ = PostMessageW(Some(parent), WM_APP_SUGGEST_KEY, wparam, LPARAM(0));
+                return LRESULT(0);
+            }
+            WM_KEYDOWN if wparam.0 == VK_RETURN.0 as usize || wparam.0 == VK_ESCAPE.0 as usize => {
+                let commit = wparam.0 == VK_RETURN.0 as usize;
+                let _ = PostMessageW(Some(parent), done_msg as u32, WPARAM(commit as usize), LPARAM(0));
+                return LRESULT(0);
+            }
+            // Evita el "ding" de Enter/Escape en un edit de una línea.
+            WM_CHAR if wparam.0 == '\r' as usize || wparam.0 == 0x1B => return LRESULT(0),
+            // Al perder el foco: el renombrado se aplica (como en el Explorador), la dirección no.
+            WM_KILLFOCUS => {
+                let commit = done_msg as u32 != WM_APP_EDIT_DONE;
+                let _ = PostMessageW(Some(parent), done_msg as u32, WPARAM(commit as usize), LPARAM(0));
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// Subclase del control de edición de la paleta: las flechas, Re Pág / Av Pág, Enter, Escape y
+/// Ctrl+P van a la ventana (que mueve la selección o abre el resultado); al perder el foco, avisa.
+unsafe extern "system" fn palette_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    unsafe {
+        let parent = GetParent(hwnd).unwrap_or_default();
+        let ctrl = key_down(VK_CONTROL);
+        let post = |vk: usize| {
+            let _ = PostMessageW(Some(parent), WM_APP_PALETTE_KEY, WPARAM(vk), LPARAM(ctrl as isize));
+        };
+        match msg {
+            WM_KEYDOWN => {
+                let vk = Key(wparam.0 as u16);
+                if matches!(vk, VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN | VK_ESCAPE) || (ctrl && vk == Key(0x50)) {
+                    post(wparam.0);
+                    return LRESULT(0);
+                }
+            }
+            // Evita el "ding" de Enter/Escape (y el carácter de Ctrl+P) en un edit de una línea.
+            WM_CHAR if wparam.0 == '\r' as usize || wparam.0 == 0x1B || wparam.0 == 0x10 => return LRESULT(0),
+            WM_KILLFOCUS => post(0),
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// Texto de un control de edición.
+fn window_text(hwnd: HWND) -> String {
+    let mut buf = vec![0u16; 32 * 1024];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    String::from_utf16_lossy(&buf[..len.max(0) as usize])
+}
+
+/// Punto de color para marcar un ítem de menú (bitmap de 32 bits con alfa).
+fn accent_dot(c: Color, dpi: u32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+    use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DIB_RGB_COLORS};
+    let size = (16.0 * dpi as f32 / 96.0).round().max(8.0) as i32;
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size,
+            biHeight: -size,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits = std::ptr::null_mut();
+    let bitmap = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
+    if bits.is_null() {
+        return None;
+    }
+    let px = unsafe { std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize) };
+    let (c_r, c_g, c_b) = ((c.r * 255.0) as u32, (c.g * 255.0) as u32, (c.b * 255.0) as u32);
+    let (center, radius) = (size as f32 / 2.0, size as f32 * 0.25);
+    for y in 0..size {
+        for x in 0..size {
+            let (dx, dy) = (x as f32 + 0.5 - center, y as f32 + 0.5 - center);
+            // Borde suave de un píxel; el color va premultiplicado por el alfa.
+            let cover = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            let a = (cover * 255.0) as u32;
+            px[(y * size + x) as usize] = (a << 24) | ((c_r * a / 255) << 16) | ((c_g * a / 255) << 8) | (c_b * a / 255);
+        }
+    }
+    Some(bitmap)
 }

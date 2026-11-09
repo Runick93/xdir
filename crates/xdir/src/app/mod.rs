@@ -13,7 +13,7 @@ mod paint;
 mod quick_jump;
 mod panes;
 
-// Lo propio de cada sistema: arranque, ventana, controles nativos y menús.
+// Lo propio de cada sistema: arranque, ventana, controles nativos y menús (en el host).
 #[cfg(windows)]
 mod host_win;
 #[cfg(windows)]
@@ -36,8 +36,6 @@ mod host_mac;
 use host_mac::MacHost;
 #[cfg(target_os = "macos")]
 mod mac;
-#[cfg(target_os = "macos")]
-use mac::*;
 #[cfg(target_os = "macos")]
 pub use mac::run;
 
@@ -81,27 +79,15 @@ use crate::session::{PaneState, Session};
 use crate::tab::Tab;
 use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
-use xdir_core::host::WindowHost;
+use xdir_core::host::{
+    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
+    WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED, WindowHost,
+};
 
 /// Tamaño inicial en DIPs; se escala según el DPI del monitor.
 const INITIAL_SIZE: (i32, i32) = (1280, 800);
 /// Siempre hay 4 paneles; el layout decide cuántos se ven. Los ocultos conservan sus pestañas.
 const PANES: usize = 4;
-/// La barra de dirección terminó de editarse. `wparam` = 1 si hay que navegar.
-const WM_APP_EDIT_DONE: u32 = WM_APP + 10;
-/// El renombrado en línea terminó. `wparam` = 1 si hay que aplicarlo.
-const WM_APP_RENAME_DONE: u32 = WM_APP + 11;
-/// Terminó el renombrado de un favorito. `wparam` = 1 si hay que aplicarlo.
-const WM_APP_FAVEDIT_DONE: u32 = WM_APP + 12;
-/// Terminó la edición del filtro rápido. `wparam` = 1 si se conserva, 0 si se quita (Escape).
-const WM_APP_FILTER_DONE: u32 = WM_APP + 13;
-/// Tecla de la paleta: `wparam` = tecla virtual (0: perdió el foco), `lparam` = 1 si con Ctrl.
-const WM_APP_PALETTE_KEY: u32 = WM_APP + 14;
-/// Flecha / Re Pág / Av Pág en la barra de dirección: recorren el desplegable de rutas.
-const WM_APP_SUGGEST_KEY: u32 = WM_APP + 15;
-/// Cambió el texto de una caja de edición. `lparam` = `TextBox::id`.
-#[cfg_attr(windows, allow(dead_code))]
-const WM_APP_TEXT_CHANGED: u32 = WM_APP + 16;
 /// Pasó la pausa después de escribir en el buscador. `lparam` = turno de la búsqueda pendiente.
 const WM_APP_SEARCH: u32 = WM_APP + 17;
 /// Cuánto se espera después de la última tecla para empezar a buscar.

@@ -190,7 +190,9 @@ fn worker(ctx: &Ctx) {
                 st = ctx.cv.wait_timeout(st, Duration::from_millis(100)).unwrap().0;
             }
         };
-        // Un fallo en una carpeta no debe colgar todo el análisis.
+        // Un pánico al listar una carpeta no debe colgar el análisis (el contador de trabajos en
+        // curso quedaría sin bajar). Solo protege donde los pánicos se desenrollan (pruebas y
+        // `dev`): en release (`panic = "abort"`) un pánico cierra xdir igual.
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.lister.list(&job.path))).unwrap_or(Err(ListError::Other));
         match res {
             Ok(l) => insert_listing(ctx, &job, l),

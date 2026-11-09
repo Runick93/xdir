@@ -158,7 +158,7 @@ impl FileList {
     }
 
     pub fn open_filter_menu(&mut self, col: Column) {
-        if self.view.is_grid() {
+        if !self.view.has_header() {
             return;
         }
         self.header_drag = None;
@@ -188,7 +188,7 @@ impl FileList {
 
     /// Botón de la flecha de la columna en el encabezado (Detalles).
     pub fn filter_button_rect(&self, col: Column) -> Option<Rect> {
-        if self.view.is_grid() {
+        if !self.view.has_header() {
             return None;
         }
         let (_, _, left, right) = self.layout_columns().into_iter().find(|c| c.1 == col)?;

@@ -138,12 +138,13 @@ impl App {
         self.redraw();
     }
 
-    /// Ctrl+rueda: vista siguiente (más grande) o anterior sobre el panel.
+    /// Ctrl+rueda: vista siguiente (más grande) o anterior sobre el panel, en el orden de
+    /// `list::CYCLE`.
     pub(super) fn cycle_view(&mut self, pane: usize, bigger: bool) {
-        let i = self.panes[pane].tab().list.view.index();
-        let j = if bigger { (i + 1).min(list::VIEWS.len() - 1) } else { i.saturating_sub(1) };
+        let i = self.panes[pane].tab().list.view.cycle_index();
+        let j = if bigger { (i + 1).min(list::CYCLE.len() - 1) } else { i.saturating_sub(1) };
         if i != j {
-            self.set_view(pane, list::VIEWS[j].0);
+            self.set_view(pane, list::CYCLE[j]);
         }
     }
 

@@ -189,6 +189,8 @@ pub const ALL: &[Spec] = &[
     spec(Command::View(1), "vista_iconos", "Vista: íconos medianos", &["Ctrl+Shift+2"]),
     spec(Command::View(2), "vista_iconos_grandes", "Vista: íconos grandes", &["Ctrl+Shift+3"]),
     spec(Command::View(3), "vista_miniaturas", "Vista: miniaturas", &["Ctrl+Shift+4"]),
+    spec(Command::View(4), "vista_lista", "Vista: lista", &["Ctrl+Shift+5"]),
+    spec(Command::View(5), "vista_contenido", "Vista: contenido", &["Ctrl+Shift+6"]),
     spec(Command::SortBy(0), "ordenar_nombre", "Ordenar por nombre", &[]),
     spec(Command::SortBy(1), "ordenar_modificado", "Ordenar por fecha de modificación", &[]),
     spec(Command::SortBy(2), "ordenar_creado", "Ordenar por fecha de creación", &[]),
@@ -473,5 +475,25 @@ mod tests {
         let spec = |c| ALL.iter().find(|s| s.command == c).unwrap();
         assert_eq!((spec(Command::SelectPattern).id, spec(Command::SelectPattern).name), ("seleccionar_patron", "Seleccionar por patrón…"));
         assert_eq!((spec(Command::DeselectPattern).id, spec(Command::DeselectPattern).name), ("deseleccionar_patron", "Deseleccionar por patrón…"));
+    }
+
+    /// Vistas Lista y Contenido: `Command::View(4)` y `(5)` (índices de `list::VIEWS`), con sus
+    /// ids, títulos y atajos Ctrl+Shift+5 / Ctrl+Shift+6 (⇧⌘5 / ⇧⌘6 en macOS).
+    #[test]
+    fn view_shortcuts() {
+        install_fakes();
+        let km = Keymap::default();
+        let spec = |id: &str| ALL.iter().find(|s| s.id == id).unwrap();
+        for (id, i, title, keys, view) in [
+            ("vista_lista", 4u8, "Vista: lista", "Ctrl+Shift+5", crate::list::View::List),
+            ("vista_contenido", 5, "Vista: contenido", "Ctrl+Shift+6", crate::list::View::Content),
+        ] {
+            let s = spec(id);
+            assert_eq!((s.command, s.name, s.default_keys), (Command::View(i), title, &[keys][..]));
+            assert_eq!(crate::list::VIEWS[i as usize].0, view);
+            let c = parse_combo(keys).unwrap();
+            assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(Command::View(i)), "{keys}");
+        }
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Shift+5").unwrap()), "⇧⌘5");
     }
 }

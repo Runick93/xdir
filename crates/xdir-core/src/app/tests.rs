@@ -221,14 +221,19 @@ fn view_is_per_folder_and_cycles_within_bounds() {
     assert_eq!(a.panes[1].tab().list.view, list::View::Details);
     a.new_tab(2, Location::Computer, true);
     assert_eq!(a.panes[2].tab().list.view, list::View::Icons);
-    for _ in 0..list::VIEWS.len() + 2 {
+    for _ in 0..list::CYCLE.len() + 2 {
         a.cycle_view(1, true);
     }
-    assert_eq!(a.panes[1].tab().list.view.index(), list::VIEWS.len() - 1);
-    for _ in 0..list::VIEWS.len() + 2 {
+    assert_eq!(a.panes[1].tab().list.view, list::CYCLE[list::CYCLE.len() - 1]);
+    for _ in 0..list::CYCLE.len() + 2 {
         a.cycle_view(1, false);
     }
-    assert_eq!(a.panes[1].tab().list.view.index(), 0);
+    assert_eq!(a.panes[1].tab().list.view, list::CYCLE[0]);
+    // De Detalles, Ctrl+rueda hacia arriba pasa a la Lista y después a Contenido.
+    a.cycle_view(1, true);
+    assert_eq!(a.panes[1].tab().list.view, list::View::List);
+    a.cycle_view(1, true);
+    assert_eq!(a.panes[1].tab().list.view, list::View::Content);
 }
 
 /// Las columnas también son de la carpeta: las toma una pestaña nueva en la misma carpeta, no una

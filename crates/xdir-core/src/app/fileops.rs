@@ -214,11 +214,10 @@ impl App {
             cmds.push(command);
             Entry::Item { id: cmds.len() as u32 - 1, label: label.to_string(), enabled, checked }
         };
-        let mut views: Vec<Entry> = list::VIEWS
-            .iter()
-            .enumerate()
-            .map(|(i, &(view, name, ..))| item(name, Command::View(i as u8), true, view == list.view))
-            .collect();
+        // En el orden de `CYCLE` (de lo más compacto a lo más grande); el comando lleva el índice
+        // de `VIEWS`.
+        let mut views: Vec<Entry> =
+            list::CYCLE.iter().map(|&view| item(view.name(), Command::View(view.index() as u8), true, view == list.view)).collect();
         // La vista es de cada carpeta: pasarla a todas o volver a la por defecto.
         views.push(Entry::Sep);
         views.push(item("Usar esta vista en todas las carpetas", Command::ApplyViewToAll, true, false));

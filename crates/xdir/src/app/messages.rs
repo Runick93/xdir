@@ -34,15 +34,19 @@ impl App {
                 WM_SIZE => {
                     let width = (lparam.0 & 0xFFFF) as u32;
                     let height = ((lparam.0 >> 16) & 0xFFFF) as u32;
-                    self.renderer.resize(width, height, self.dpi);
+                    if let Some(host) = Win32Host::current() {
+                        host.resize(width, height, self.dpi);
+                    }
                     self.on_resized();
                     LRESULT(0)
                 }
                 WM_DPICHANGED => {
                     self.dpi = (wparam.0 & 0xFFFF) as u32;
                     self.on_resized();
-                    self.renderer.set_dpi(self.dpi);
-                    self.update_edit_resources();
+                    if let Some(host) = Win32Host::current() {
+                        host.set_dpi(self.dpi);
+                    }
+                    self.host.text_restyle(&self.theme);
                     let r = &*(lparam.0 as *const RECT);
                     let _ = SetWindowPos(
                         self.hwnd.hwnd(),
@@ -90,15 +94,16 @@ impl App {
                     }
                     LRESULT(1)
                 }
-                WM_CTLCOLOREDIT => {
-                    let hdc = HDC(wparam.0 as *mut _);
-                    SetTextColor(hdc, colorref(self.theme.text));
-                    SetBkColor(hdc, colorref(self.theme.surface_alt));
-                    LRESULT(self.sys.edit_brush.0 as isize)
-                }
+                WM_CTLCOLOREDIT => match Win32Host::current() {
+                    Some(host) => host.ctl_color_edit(HDC(wparam.0 as *mut _)),
+                    None => LRESULT(0),
+                },
                 // El filtro y la paleta se actualizan con cada tecla.
                 WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == EN_CHANGE_CODE => {
-                    self.on_text_changed(lparam.0);
+                    let edit = HWND(lparam.0 as *mut _);
+                    if let Some(b) = Win32Host::current().and_then(|h| h.text_box_of(edit)) {
+                        self.on_text_changed(b.0 as isize);
+                    }
                     LRESULT(0)
                 }
                 // Solo con `--features pruebas`: otro proceso maneja la app por texto (capturas y
@@ -111,9 +116,13 @@ impl App {
                     self.test_hook(text.trim_end_matches('\0'));
                     LRESULT(1)
                 }
-                WM_MENURBUTTONUP if self.sys.fav_menu.is_some() => {
-                    self.on_fav_menu_right_click(lparam.0, wparam.0 as u32);
-                    LRESULT(0)
+                // Clic derecho dentro de un menú emergente (el de favoritos abre ahí su menú contextual).
+                WM_MENURBUTTONUP => {
+                    if Win32Host::current().is_some_and(|h| h.on_menu_right_click(lparam.0, wparam.0 as u32)) {
+                        LRESULT(0)
+                    } else {
+                        DefWindowProcW(self.hwnd.hwnd(), msg, wparam, lparam)
+                    }
                 }
                 // Al volver a la ventana se releen los favoritos (por si se editó el archivo).
                 WM_ACTIVATEAPP if wparam.0 != 0 => {
@@ -172,7 +181,7 @@ impl App {
                     let (x, y) = self.mouse_pos(lparam);
                     // El desplegable de la barra de dirección no le quita el foco a la caja.
                     if !matches!(self.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
-                        focus_main(self.hwnd);
+                        self.host.focus_main();
                     }
                     self.on_left_down(x, y, msg == WM_LBUTTONDBLCLK);
                     LRESULT(0)
@@ -193,21 +202,23 @@ impl App {
                     LRESULT(0)
                 }
                 WM_MOUSELEAVE => {
-                    self.sys.tracking_mouse = false;
+                    if let Some(host) = Win32Host::current() {
+                        host.mouse_left();
+                    }
                     self.on_mouse_left();
                     LRESULT(0)
                 }
                 WM_MOUSEWHEEL => {
                     let (x, y) = self.cursor_pos();
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
-                    self.on_wheel(x, y, delta, wheel_lines());
+                    self.on_wheel(x, y, delta, self.host.wheel_lines());
                     LRESULT(0)
                 }
                 // Rueda horizontal (touchpad, mouse con inclinación).
                 0x020E => {
                     let (x, y) = self.cursor_pos();
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
-                    self.on_wheel_h(x, y, delta, wheel_lines());
+                    self.on_wheel_h(x, y, delta, self.host.wheel_lines());
                     LRESULT(0)
                 }
                 WM_XBUTTONUP => {
@@ -239,8 +250,10 @@ impl App {
                         None::<&windows::Win32::UI::Accessibility::IRawElementProviderSimple>,
                     );
                     let _ = RevokeDragDrop(self.hwnd.hwnd());
-                    let _ = DeleteObject(self.sys.edit_font.into());
-                    let _ = DeleteObject(self.sys.edit_brush.into());
+                    if let Some(host) = Win32Host::current() {
+                        host.release_drop_target();
+                        host.release_edit_resources();
+                    }
                     PostQuitMessage(0);
                     LRESULT(0)
                 }

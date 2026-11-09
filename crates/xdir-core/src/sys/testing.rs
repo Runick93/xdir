@@ -1,8 +1,9 @@
 //! Implementaciones falsas de los servicios del sistema, para los tests (de este crate y de
 //! `xdir`).
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -15,6 +16,7 @@ use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, 
 use crate::config::ColorRule;
 use crate::format::thousands;
 use crate::geom::{Color, Rect};
+use crate::host::{MenuPos, TextBox, TextKind, WindowHost};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
 use crate::paint::{FontId, Painter};
@@ -773,5 +775,236 @@ impl Painter for RecordingPainter {
 
     fn file_colors(&self) -> &[ColorRule] {
         &[]
+    }
+}
+
+/// Ventana falsa para las pruebas de `App`: no crea nada. El área mide 1280×800 DIPs (se puede
+/// cambiar con `client`), registra títulos, pedidos de repintar y pitidos, expande variables del
+/// entorno y responde lo que el test le fije a las preguntas, al selector de color y al arrastre.
+/// Dibuja con un `RecordingPainter` (guarda los textos del último cuadro) y mide 7 DIPs por
+/// carácter. Las cajas de texto son entradas de un mapa (tipo, texto y si tienen el foco); los
+/// menús se registran y devuelven lo que fije `set_menu_choice`.
+pub struct FakeHost {
+    /// Tamaño del área de la ventana en DIPs.
+    pub client: Cell<(f32, f32)>,
+    titles: RefCell<Vec<String>>,
+    invalidations: Cell<usize>,
+    beeps: Cell<usize>,
+    color_choice: Cell<Option<u32>>,
+    answer: Cell<Option<bool>>,
+    drag_result: RefCell<Result<(), String>>,
+    drawn: RefCell<Vec<(FontId, String, Rect)>>,
+    /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
+    text_boxes: RefCell<HashMap<u32, (TextKind, String, bool)>>,
+    next_text_box: Cell<u32>,
+    menu_choice: Cell<Option<u32>>,
+    menus: RefCell<Vec<Vec<Entry>>>,
+}
+
+impl FakeHost {
+    pub fn new() -> Rc<FakeHost> {
+        Rc::new(FakeHost {
+            client: Cell::new((1280.0, 800.0)),
+            titles: RefCell::new(Vec::new()),
+            invalidations: Cell::new(0),
+            beeps: Cell::new(0),
+            color_choice: Cell::new(None),
+            answer: Cell::new(None),
+            drag_result: RefCell::new(Ok(())),
+            drawn: RefCell::new(Vec::new()),
+            text_boxes: RefCell::new(HashMap::new()),
+            next_text_box: Cell::new(1),
+            menu_choice: Cell::new(None),
+            menus: RefCell::new(Vec::new()),
+        })
+    }
+
+    /// El texto de la caja abierta de ese tipo (`None` si no hay ninguna).
+    pub fn text_of(&self, kind: TextKind) -> Option<String> {
+        self.text_boxes.borrow().values().find(|(k, _, _)| *k == kind).map(|(_, t, _)| t.clone())
+    }
+
+    /// Lo que devuelven los menús (`None`: se cerraron sin elegir).
+    pub fn set_menu_choice(&self, id: Option<u32>) {
+        self.menu_choice.set(id);
+    }
+
+    /// Los menús que se mostraron, en orden.
+    pub fn menus(&self) -> Vec<Vec<Entry>> {
+        self.menus.borrow().clone()
+    }
+
+    /// Los textos del último cuadro dibujado, en orden.
+    pub fn drawn_texts(&self) -> Vec<(FontId, String, Rect)> {
+        self.drawn.borrow().clone()
+    }
+
+    /// Los títulos que se pusieron, en orden.
+    pub fn titles(&self) -> Vec<String> {
+        self.titles.borrow().clone()
+    }
+
+    /// Cuántas veces se pidió repintar.
+    pub fn invalidations(&self) -> usize {
+        self.invalidations.get()
+    }
+
+    /// Lo que devuelve el selector de color (`None`: se canceló).
+    pub fn set_color_choice(&self, c: Option<u32>) {
+        self.color_choice.set(c);
+    }
+
+    /// La respuesta a `ask_yes_no_cancel` (`None`: cancelar).
+    pub fn set_answer(&self, a: Option<bool>) {
+        self.answer.set(a);
+    }
+
+    /// Cuántas veces sonó el pitido de "no se puede".
+    pub fn beeps(&self) -> usize {
+        self.beeps.get()
+    }
+
+    /// Lo que devuelve `start_drag` (por defecto, `Ok`).
+    pub fn set_drag_result(&self, r: Result<(), String>) {
+        *self.drag_result.borrow_mut() = r;
+    }
+}
+
+impl WindowHost for FakeHost {
+    fn attach(&self, _window: Handle) {}
+
+    fn invalidate(&self) {
+        self.invalidations.set(self.invalidations.get() + 1);
+    }
+
+    fn client_size(&self) -> (f32, f32) {
+        self.client.get()
+    }
+
+    fn cursor_dips(&self) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+
+    fn set_title(&self, title: &str) {
+        self.titles.borrow_mut().push(title.to_string());
+    }
+
+    fn request_close(&self) {}
+    fn focus_main(&self) {}
+    fn focus_main_if_lost(&self) {}
+    fn capture_mouse(&self) {}
+    fn release_mouse(&self) {}
+    fn track_mouse_leave(&self) {}
+
+    fn beep(&self) {
+        self.beeps.set(self.beeps.get() + 1);
+    }
+
+    fn ask_yes_no_cancel(&self, _title: &str, _text: &str) -> Option<bool> {
+        self.answer.get()
+    }
+
+    fn open_url(&self, _url: &str) {}
+    fn open_in_editor(&self, _path: &Path) {}
+
+    fn wheel_lines(&self) -> f32 {
+        3.0
+    }
+
+    /// Variables del entorno del proceso con la sintaxis de los dos sistemas (`%TEMP%`, `$TMPDIR`,
+    /// `${HOME}`); las que no existen quedan como estaban.
+    fn expand_env(&self, s: &str) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find(['%', '$']) {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + 1..];
+            let (name, len) = match (&rest[i..i + 1], after.strip_prefix('{')) {
+                ("%", _) => after.find('%').map_or(("", 0), |end| (&after[..end], end + 1)),
+                (_, Some(inner)) => inner.find('}').map_or(("", 0), |end| (&inner[..end], end + 2)),
+                _ => {
+                    let end = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(after.len());
+                    (&after[..end], end)
+                }
+            };
+            match std::env::var(name).ok().filter(|_| !name.is_empty()) {
+                Some(v) => out.push_str(&v),
+                None => out.push_str(&rest[i..i + 1 + len]),
+            }
+            rest = &after[len..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn apply_theme(&self, _theme: &Theme, _follow_system: bool) -> bool {
+        false
+    }
+
+    fn choose_color(&self, _current: u32) -> Option<u32> {
+        self.color_choice.get()
+    }
+
+    fn start_drag(&self, _items: &[Item]) -> Result<(), String> {
+        self.drag_result.borrow().clone()
+    }
+
+    fn placement(&self) -> Option<([i32; 4], bool)> {
+        None
+    }
+
+    fn show(&self, _saved: Option<([i32; 4], bool)>) {}
+
+    /// Dibuja en un `RecordingPainter` del tamaño de `client` y guarda sus textos.
+    fn draw(&self, theme: &Theme, _file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
+        let p = RecordingPainter::new(*theme);
+        let (w, h) = self.client.get();
+        paint(&p, w, h);
+        *self.drawn.borrow_mut() = p.texts();
+        Ok(())
+    }
+
+    fn text_width(&self, s: &str, _bold: bool) -> f32 {
+        7.0 * s.chars().count() as f32
+    }
+
+    fn text_create(&self, kind: TextKind, _r: Rect, text: &str, _theme: &Theme) -> Option<TextBox> {
+        let id = self.next_text_box.replace(self.next_text_box.get() + 1);
+        self.text_boxes.borrow_mut().insert(id, (kind, text.to_string(), false));
+        Some(TextBox(id))
+    }
+
+    fn text_get(&self, b: TextBox) -> String {
+        self.text_boxes.borrow().get(&b.0).map(|(_, t, _)| t.clone()).unwrap_or_default()
+    }
+
+    fn text_set(&self, b: TextBox, text: &str) {
+        if let Some((_, t, _)) = self.text_boxes.borrow_mut().get_mut(&b.0) {
+            *t = text.to_string();
+        }
+    }
+
+    fn text_select(&self, _b: TextBox, _from: usize, _to: isize) {}
+
+    /// El foco pasa a esta caja (las demás lo pierden).
+    fn text_focus(&self, b: TextBox) {
+        for (id, (_, _, focused)) in self.text_boxes.borrow_mut().iter_mut() {
+            *focused = *id == b.0;
+        }
+    }
+
+    fn text_has_focus(&self, b: TextBox) -> bool {
+        self.text_boxes.borrow().get(&b.0).is_some_and(|(_, _, f)| *f)
+    }
+
+    fn text_destroy(&self, b: TextBox) {
+        self.text_boxes.borrow_mut().remove(&b.0);
+    }
+
+    fn text_restyle(&self, _theme: &Theme) {}
+
+    fn popup_menu(&self, entries: &[Entry], _pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<crate::host::OnContext<'_>>) -> Option<u32> {
+        self.menus.borrow_mut().push(entries.to_vec());
+        self.menu_choice.get()
     }
 }

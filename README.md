@@ -84,4 +84,6 @@ Desde una Mac también se puede verificar que la versión de Windows compile:
 
 El código propio de cada sistema está separado: `crates/xdir/src/platform`, y en `fs`, `shell`, `ops`, `icons`,
 `thumbs`, `render` y `drop` un `win32.rs` y un `macos.rs` con la misma interfaz; la ventana está en
-`crates/xdir/src/app/win.rs` (Windows) y `crates/xdir/src/app/mac.rs` (macOS).
+`crates/xdir/src/app/host_win.rs` (Windows) y `crates/xdir/src/app/host_mac.rs` (macOS), con el arranque
+y los mensajes en `app/win.rs` y `app/mac.rs`. El dibujo, la lista, los paneles, las pestañas, el árbol,
+la paleta, xtree, la configuración y la sesión viven en `crates/xdir-core`, sin código de ningún sistema.

@@ -13,7 +13,11 @@ mod paint;
 mod quick_jump;
 mod panes;
 
-// Lo propio de cada sistema: arranque, ventana, controles nativos y menús.
+// Lo propio de cada sistema: arranque, ventana, controles nativos y menús (en el host).
+#[cfg(windows)]
+mod host_win;
+#[cfg(windows)]
+use host_win::Win32Host;
 #[cfg(windows)]
 mod messages;
 #[cfg(windows)]
@@ -27,9 +31,11 @@ use crate::platform::HandleExt;
 #[cfg(windows)]
 pub use win::run;
 #[cfg(target_os = "macos")]
-mod mac;
+mod host_mac;
 #[cfg(target_os = "macos")]
-use mac::*;
+use host_mac::MacHost;
+#[cfg(target_os = "macos")]
+mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::run;
 
@@ -47,6 +53,7 @@ use crate::tree;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
@@ -67,37 +74,20 @@ use crate::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
 use crate::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use crate::list::{Action, ColumnSpec};
 use crate::pane::{Button, FavDrop, Pane, PaneHit, SearchView};
-use crate::render::{Renderer, contains};
+use crate::render::contains;
 use crate::session::{PaneState, Session};
 use crate::tab::Tab;
 use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
-
-/// Error de las llamadas al sistema (crear el renderizador, la ventana...).
-#[cfg(windows)]
-pub type SysResult<T> = windows::core::Result<T>;
-#[cfg(target_os = "macos")]
-pub type SysResult<T> = Result<T, String>;
+use xdir_core::host::{
+    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
+    WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED, WindowHost,
+};
 
 /// Tamaño inicial en DIPs; se escala según el DPI del monitor.
 const INITIAL_SIZE: (i32, i32) = (1280, 800);
 /// Siempre hay 4 paneles; el layout decide cuántos se ven. Los ocultos conservan sus pestañas.
 const PANES: usize = 4;
-/// La barra de dirección terminó de editarse. `wparam` = 1 si hay que navegar.
-const WM_APP_EDIT_DONE: u32 = WM_APP + 10;
-/// El renombrado en línea terminó. `wparam` = 1 si hay que aplicarlo.
-const WM_APP_RENAME_DONE: u32 = WM_APP + 11;
-/// Terminó el renombrado de un favorito. `wparam` = 1 si hay que aplicarlo.
-const WM_APP_FAVEDIT_DONE: u32 = WM_APP + 12;
-/// Terminó la edición del filtro rápido. `wparam` = 1 si se conserva, 0 si se quita (Escape).
-const WM_APP_FILTER_DONE: u32 = WM_APP + 13;
-/// Tecla de la paleta: `wparam` = tecla virtual (0: perdió el foco), `lparam` = 1 si con Ctrl.
-const WM_APP_PALETTE_KEY: u32 = WM_APP + 14;
-/// Flecha / Re Pág / Av Pág en la barra de dirección: recorren el desplegable de rutas.
-const WM_APP_SUGGEST_KEY: u32 = WM_APP + 15;
-/// Cambió el texto de una caja de edición. `lparam` = `TextBox::id`.
-#[cfg_attr(windows, allow(dead_code))]
-const WM_APP_TEXT_CHANGED: u32 = WM_APP + 16;
 /// Pasó la pausa después de escribir en el buscador. `lparam` = turno de la búsqueda pendiente.
 const WM_APP_SEARCH: u32 = WM_APP + 17;
 /// Cuánto se espera después de la última tecla para empezar a buscar.
@@ -231,9 +221,10 @@ struct LayoutAnim {
 
 struct App {
     hwnd: Handle,
+    /// La ventana: repintar, tamaño, título, foco, diálogos, tema y arrastre (falsa en las pruebas).
+    host: Rc<dyn WindowHost>,
     dpi: u32,
     theme: Theme,
-    renderer: Renderer,
     panes: Vec<Pane>,
     layout: Layout,
     splits: Splits,
@@ -256,9 +247,6 @@ struct App {
     edit: Option<(TextBox, usize)>,
     /// Desplegable de rutas de la barra de dirección (vive mientras `edit`).
     suggest: Option<typed::Suggest>,
-    /// Estado propio del sistema (fuentes de los controles, destino de arrastre...).
-    #[cfg_attr(not(windows), allow(dead_code))]
-    sys: Sys,
     hover: Hit,
     drag: Drag,
     title: String,
@@ -345,9 +333,6 @@ struct App {
     xtree: Option<Xtree>,
     /// La vista de xtree tapa los paneles.
     xtree_open: bool,
-    /// Tamaño de la ventana en DIPs fijado por las pruebas (sin ventana real no hay `GetClientRect`).
-    #[cfg(test)]
-    client: Option<(f32, f32)>,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -413,20 +398,19 @@ impl Init {
 }
 
 impl App {
-    /// Arma la aplicación (sin ventana: el `HWND` llega en `WM_NCCREATE`) y abre sus paneles.
-    pub(crate) fn new(init: Init) -> SysResult<App> {
-        let Init { session, history, config, favorites, groups, probe, start_path, started, mut marks } = init;
+    /// Arma la aplicación (sin ventana: el `HWND` llega en `WM_NCCREATE` y se le pasa al host con
+    /// `attach`) y abre sus paneles.
+    pub(crate) fn new(init: Init, host: Rc<dyn WindowHost>) -> App {
+        let Init { session, history, config, favorites, groups, probe, start_path, started, marks } = init;
         let theme = Theme::from_system(session.accent, session.dark_mode);
-        let renderer = Renderer::new()?;
-        marks.push(("fabricas d2d/dwrite", ms_since(started)));
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
         let mut app = App {
             hwnd: Handle::default(),
+            host,
             dpi: 96,
             theme,
-            renderer,
             panes: Vec::new(),
             layout: Layout::from_index(session.layout).unwrap_or(Layout::Four),
             splits: Splits { x: session.split_x, y: session.split_y },
@@ -442,7 +426,6 @@ impl App {
             rx,
             edit: None,
             suggest: None,
-            sys: Sys::new(),
             hover: Hit::None,
             drag: Drag::None,
             title: String::new(),
@@ -494,8 +477,6 @@ impl App {
             term_ctx: None,
             xtree: None,
             xtree_open: false,
-            #[cfg(test)]
-            client: Some((1280.0, 800.0)),
         };
         app.restore_panes(&session, start_path);
         app.ensure_group();
@@ -505,7 +486,7 @@ impl App {
             app.tree.set_pinned(session.tree_pinned, false);
             app.tree.set_quick_open(session.quick_open);
         }
-        Ok(app)
+        app
     }
 }
 

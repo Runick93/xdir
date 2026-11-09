@@ -6,11 +6,7 @@ impl App {
     // ---------- entrada ----------
 
     pub(super) fn client_dips(&self) -> (f32, f32) {
-        #[cfg(test)]
-        if let Some(size) = self.client {
-            return size;
-        }
-        client_size(self.hwnd, self.dpi)
+        self.host.client_size()
     }
 
     pub(super) fn hit(&self, x: f32, y: f32) -> Hit {
@@ -89,7 +85,7 @@ impl App {
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         if self.about_open {
             match hit {
-                Hit::About(about::AboutHit::Report) => open_url(self.hwnd, about::ISSUES_URL),
+                Hit::About(about::AboutHit::Report) => self.host.open_url(about::ISSUES_URL),
                 Hit::About(about::AboutHit::Panel) => {}
                 _ => self.about_open = false,
             }
@@ -110,7 +106,7 @@ impl App {
                 Hit::Palette(Some(i)) => self.activate_palette(i, key_down(VK_CONTROL)),
                 Hit::Palette(None) => {
                     if let Some((_, edit)) = &self.palette {
-                        edit.focus();
+                        self.host.text_focus(*edit);
                     }
                 }
                 _ => self.close_palette(),
@@ -120,12 +116,12 @@ impl App {
         #[cfg(feature = "arbol")]
         if !self.xtree_open {
             if self.tree.edge_at(x, y) {
-                capture_mouse(self.hwnd);
+                self.host.capture_mouse();
                 self.drag = Drag::TreeEdge;
                 return;
             }
             if let Some((bar, grab)) = self.tree.bar_at(x, y) {
-                capture_mouse(self.hwnd);
+                self.host.capture_mouse();
                 self.drag = Drag::TreeBar(bar, grab);
                 self.tree.drag_bar(bar, grab, x, y);
                 self.redraw();
@@ -193,7 +189,7 @@ impl App {
                 self.redraw();
             }
             Hit::Splitter(s) => {
-                capture_mouse(self.hwnd);
+                self.host.capture_mouse();
                 self.drag = Drag::Splitter(s);
             }
             Hit::Layout(l) => {
@@ -206,7 +202,7 @@ impl App {
                 match ph {
                     PaneHit::Tab(j) => {
                         self.select_tab(i, j);
-                        capture_mouse(self.hwnd);
+                        self.host.capture_mouse();
                         let grab = self.panes[i].tab_grab(j, x);
                         self.drag = Drag::Tab { pane: i, index: j, start_x: x, start_y: y, moved: false, grab };
                     }
@@ -226,7 +222,7 @@ impl App {
                     PaneHit::TabStrip if double => self.toggle_maximize(i),
                     PaneHit::TabStrip => {}
                     PaneHit::Button(b) => {
-                        capture_mouse(self.hwnd);
+                        self.host.capture_mouse();
                         self.drag = Drag::Button(i, b);
                     }
                     PaneHit::Crumb(k) => {
@@ -242,7 +238,7 @@ impl App {
                         self.term_menu = if self.term_menu == Some(i) { None } else { Some(i) };
                     }
                     PaneHit::Fav(j) => {
-                        capture_mouse(self.hwnd);
+                        self.host.capture_mouse();
                         self.drag = Drag::Fav { pane: i, index: j, start_x: x, moved: false };
                     }
                     PaneHit::FavOverflow => {
@@ -252,8 +248,8 @@ impl App {
                     }
                     PaneHit::FavBar => {}
                     PaneHit::List if double => {
-                        let renderer = &self.renderer;
-                        let fit = self.panes[i].tab_mut().list.fit_column_at(x, y, &|s, bold| renderer.text_width(s, bold));
+                        let host = &self.host;
+                        let fit = self.panes[i].tab_mut().list.fit_column_at(x, y, &|s, bold| host.text_width(s, bold));
                         let action = match fit {
                             Some(action) => action,
                             None => self.panes[i].tab_mut().list.on_double_click(x, y),
@@ -264,7 +260,7 @@ impl App {
                         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
                         let (action, capture) = self.panes[i].tab_mut().list.on_mouse_down(x, y, ctrl, shift);
                         if capture {
-                            capture_mouse(self.hwnd);
+                            self.host.capture_mouse();
                             self.drag = Drag::List(i);
                         }
                         self.apply(i, action);
@@ -279,7 +275,7 @@ impl App {
 
     pub(super) fn on_left_up(&mut self, x: f32, y: f32) {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
-        release_mouse();
+        self.host.release_mouse();
         let tab_drop = self.tab_drop.take();
         for p in &mut self.panes {
             p.drag_tab = None;
@@ -336,7 +332,7 @@ impl App {
     }
 
     pub(super) fn on_mouse_move(&mut self, x: f32, y: f32) {
-        self.track_mouse_leave();
+        self.host.track_mouse_leave();
         let mut redraw = false;
         match self.drag {
             Drag::Splitter(s) => {

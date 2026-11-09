@@ -76,7 +76,7 @@ impl App {
     pub(super) fn close_group_tab(&mut self, index: usize) {
         let Some(name) = self.groups.items.get(index).map(|g| g.name.clone()) else { return };
         let text = format!("¿Guardar «{name}» como grupo?\n\nSí: queda guardado. No: se descarta.");
-        let answer = ask_yes_no_cancel(self.hwnd, "Cerrar pestaña de grupo", &text);
+        let answer = self.host.ask_yes_no_cancel("Cerrar pestaña de grupo", &text);
         if answer == Some(true) {
             self.groups.items[index].temp = false;
             let _ = self.groups.save();
@@ -189,13 +189,13 @@ impl App {
         // El grupo activo lleva un punto del color de acento.
         let dot = self.group_name.as_deref().and_then(|n| self.groups.find(n)).map(|i| ((OPEN + i) as u32, self.theme.accent));
         // Hacia arriba desde el botón: la barra de estado está abajo de todo.
-        let cmd = popup_menu(self, &entries, MenuPos::Above(r.left, r.top), dot).map_or(0, |c| c as usize);
+        let cmd = self.host.popup_menu(&entries, MenuPos::Above(r.left, r.top), dot, None).map_or(0, |c| c as usize);
         self.groups_menu_closed = (cmd == 0).then(Instant::now);
         match cmd {
             SAVE => self.open_palette(PaletteMode::GroupName),
             EDIT => {
                 if let Some(dir) = session::config_dir() {
-                    open_in_editor(self.hwnd, &dir.join("grupos.toml"));
+                    self.host.open_in_editor(&dir.join("grupos.toml"));
                 }
             }
             c if c >= DELETE => {

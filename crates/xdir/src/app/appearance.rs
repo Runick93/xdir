@@ -20,8 +20,28 @@ impl App {
     pub(super) fn set_accent(&mut self, accent: Accent) {
         self.accent = accent;
         self.theme = Theme::from_system(accent, self.dark_mode);
-        self.update_edit_resources();
+        self.host.text_restyle(&self.theme);
         self.redraw();
+    }
+
+    /// "Personalizado…": el selector de color del sistema. En Windows es modal y el color se aplica
+    /// al volver; en macOS el panel queda abierto y cada color llega después (`MSG_ACCENT`).
+    pub(super) fn choose_custom_color(&mut self) {
+        let current = match self.accent {
+            Accent::Rgb(c) => c,
+            Accent::System => theme::PRESETS[0].1,
+        };
+        if let Some(c) = self.host.choose_color(current) {
+            self.set_accent(Accent::Rgb(c));
+        }
+    }
+
+    /// Ajusta la ventana al tema (barra de título, fondo Mica en Windows) y los controles de edición.
+    pub(super) fn apply_window_theme(&mut self) {
+        // El host también pasa el renderizador a fondo translúcido si quedó Mica.
+        let mica = self.host.apply_theme(&self.theme, self.dark_mode.is_none());
+        self.transparent = mica;
+        self.host.text_restyle(&self.theme);
     }
 
     /// Switch del panel de la rueda dentada: fija oscuro o claro (deja de seguir a Windows).

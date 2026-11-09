@@ -1,7 +1,7 @@
 //! Núcleo neutro de xdir: todo lo que no depende del sistema operativo (geometría, teclas,
 //! configuración TOML, tema, dibujo abstracto, lista de archivos, pestañas, paneles, paleta,
-//! árbol lateral, sesión, barra de estado y diálogos, formato de textos y xtree con su vista). Sin
-//! dependencias externas.
+//! árbol lateral, sesión, barra de estado y diálogos, formato de textos y xtree con su vista) y la
+//! ventana vista como trait (`host::WindowHost`). Sin dependencias externas.
 
 pub mod about;
 pub mod anim;
@@ -13,6 +13,7 @@ pub mod format;
 pub mod fs;
 pub mod geom;
 pub mod groups;
+pub mod host;
 pub mod jump;
 pub mod keys;
 pub mod list;

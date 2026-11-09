@@ -3,7 +3,6 @@
 
 use xdir_core::commands;
 
-mod config;
 mod console;
 mod drop;
 mod fs;
@@ -13,10 +12,9 @@ mod platform;
 mod render;
 mod shell;
 mod sys;
-mod theme;
 mod thumbs;
 mod app;
-pub(crate) use xdir_core::{about, anim, favorites, groups, jump, list, palette, pane, session, tab, typed, ui, xtree};
+pub(crate) use xdir_core::{about, anim, config, favorites, groups, jump, list, palette, pane, session, tab, theme, typed, ui, xtree};
 #[cfg(feature = "arbol")]
 pub(crate) use xdir_core::tree;
 

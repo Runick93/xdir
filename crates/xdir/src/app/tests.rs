@@ -2,6 +2,8 @@
 //! y se ejercitan las transiciones de paneles, pestañas, layout y vistas.
 
 use super::*;
+use std::rc::Rc;
+use xdir_core::sys::testing::FakeHost;
 
 fn app() -> App {
     app_with(Init::blank())
@@ -10,8 +12,13 @@ fn app() -> App {
 /// Toda `App` de prueba sale de acá: primero los servicios del sistema falsos (el `Waker` solo
 /// cuenta los mensajes), así ningún hilo de trabajo los pide sin instalar.
 fn app_with(init: Init) -> App {
+    app_with_host(init, FakeHost::new())
+}
+
+/// Igual que `app_with`, con una ventana falsa propia para mirar qué le pidió la `App`.
+fn app_with_host(init: Init, host: Rc<FakeHost>) -> App {
     xdir_core::sys::testing::install_fakes();
-    App::new(init).expect("App sin ventana")
+    App::new(init, host)
 }
 
 /// La `App` de prueba usa el entorno falso: configuración en la carpeta temporal del hilo, una
@@ -780,6 +787,70 @@ fn undo_after_new_folder_sends_undo() {
     assert!(a.undo.is_empty());
 }
 
+// ---------- cajas de texto y menús del host ----------
+
+/// Perder el foco de la barra de dirección (`WM_APP_EDIT_DONE` con 0) cancela: no navega aunque
+/// se haya escrito otra ruta, y la caja se cierra.
+#[test]
+fn address_edit_cancel_on_focus_loss() {
+    use xdir_core::host::TextKind;
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let from = fixture("barra-desde");
+    let other = fixture("barra-otra");
+    a.new_tab(0, Location::Path(from.clone()), true);
+    a.begin_edit(0);
+    assert_eq!(host.text_of(TextKind::Address), Some(from.to_string_lossy().into_owned()));
+    let (edit, _) = a.edit.expect("la barra quedó abierta");
+    assert!(host.text_has_focus(edit));
+    host.text_set(edit, &other.to_string_lossy());
+    assert!(a.on_app_message(WM_APP_EDIT_DONE, 0, 0));
+    assert_eq!(a.panes[0].tab().location, Location::Path(from));
+    assert!(a.edit.is_none());
+    assert_eq!(host.text_of(TextKind::Address), None, "la caja se destruyó");
+}
+
+/// El renombrado en línea: lo escrito en la caja se aplica al terminar (`WM_APP_RENAME_DONE` con 1).
+#[test]
+fn rename_applies_on_done() {
+    use xdir_core::host::TextKind;
+    use xdir_core::sys::testing::FakeFileOps;
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("renombrar-caja");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    let list = &mut a.panes[0].tab_mut().list;
+    list.append(vec![file_entry("viejo.txt")]);
+    assert!(list.focus_name(&"viejo.txt".into()));
+    a.begin_rename(0);
+    assert_eq!(host.text_of(TextKind::Rename).as_deref(), Some("viejo.txt"));
+    let edit = a.rename.as_ref().expect("se abrió el renombrado").edit;
+    host.text_set(edit, "nuevo.txt");
+    FakeFileOps::take_ops();
+    assert!(a.on_app_message(WM_APP_RENAME_DONE, 1, 0));
+    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Rename { path: dir.join("viejo.txt"), new_name: "nuevo.txt".into() }]);
+    assert_eq!(host.text_of(TextKind::Rename), None);
+}
+
+/// El menú de una carpeta de favoritos con otra carpeta adentro lleva un submenú con su nombre.
+#[test]
+fn fav_folder_menu_is_nested() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.favorites.items.push(Fav::Group {
+        name: "Trabajo".into(),
+        items: vec![link("a", r"C:\a"), Fav::Group { name: "Clientes".into(), items: vec![link("b", r"C:\b")] }],
+    });
+    host.set_menu_choice(None);
+    a.activate_fav(0, &[0], false);
+    let menus = host.menus();
+    let menu = menus.last().expect("se mostró el menú");
+    assert!(
+        menu.iter().any(|e| matches!(e, shell::Entry::Sub(name, items) if name == "Clientes" && items.len() == 1)),
+        "{menu:?}"
+    );
+}
+
 // ---------- xtree ----------
 
 /// Carpeta temporal propia de una prueba (así la vista no analiza el disco del usuario).
@@ -999,4 +1070,138 @@ fn context_menu_own_entries_reach_shell() {
         })
         .collect();
     assert_eq!(&labels[..6], ["Ver", "Ordenar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+}
+
+// ---------- ventana (WindowHost) ----------
+
+/// El título de la ventana sigue al grupo cargado.
+#[test]
+fn title_follows_group_name() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.save_group("Trabajo");
+    a.group_name = None;
+    a.apply_group(0);
+    a.paint();
+    assert_eq!(host.titles().last().map(String::as_str), Some("xdir - Trabajo"));
+}
+
+/// Punto del panel de colores donde está «Personalizado…».
+fn custom_color_point(a: &App) -> (f32, f32) {
+    let (w, h) = a.client_dips();
+    let r = ui::picker_rect(w, h);
+    let mut y = r.top;
+    while y < r.bottom {
+        let x = (r.left + r.right) / 2.0;
+        if ui::picker_at(w, h, x, y) == Some(ui::PickerHit::Custom) {
+            return (x, y);
+        }
+        y += 1.0;
+    }
+    panic!("no se encontró «Personalizado…»");
+}
+
+fn click(a: &mut App, (x, y): (f32, f32)) {
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+}
+
+/// Si el selector no devuelve color (se canceló, o en macOS llega después), el acento no cambia.
+#[test]
+fn custom_color_none_keeps_accent() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    host.set_color_choice(None);
+    let before = a.accent;
+    a.picker_open = true;
+    let at = custom_color_point(&a);
+    click(&mut a, at);
+    assert_eq!(a.accent, before);
+}
+
+/// El color elegido en el selector modal queda como acento.
+#[test]
+fn custom_color_some_sets_accent() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    host.set_color_choice(Some(0xF85149));
+    a.picker_open = true;
+    let at = custom_color_point(&a);
+    click(&mut a, at);
+    assert_eq!(a.accent, Accent::Rgb(0xF85149));
+}
+
+/// Si el sistema no puede arrastrar, se avisa en la barra de estado.
+#[test]
+fn failed_drag_shows_notice() {
+    let host = FakeHost::new();
+    host.set_drag_result(Err("x".into()));
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("arrastre");
+    a.new_tab(0, Location::Path(dir), true);
+    let list = &mut a.panes[0].tab_mut().list;
+    list.append(vec![file_entry("a.txt")]);
+    list.select_all();
+    a.apply(0, Action::BeginDrag);
+    assert_eq!(a.notice.as_deref(), Some("No se pudo arrastrar: x"));
+    assert_eq!(a.drag, Drag::None);
+}
+
+// ---------- dibujo con el host ----------
+
+/// `paint` dibuja a través del host: el pintor falso registra el texto de la barra de estado del
+/// panel activo.
+#[test]
+fn paint_draws_with_host() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.paint();
+    let status = a.panes[a.active].tab().status();
+    let texts = host.drawn_texts();
+    assert!(texts.iter().any(|(_, s, _)| *s == status), "falta «{status}» entre {:?}", texts.iter().map(|t| &t.1).collect::<Vec<_>>());
+}
+
+/// App con el panel 0 en una carpeta temporal, con archivos cuyo nombre más largo tiene 10
+/// caracteres, ya dibujada (la lista conoce su área).
+fn app_with_files(host: Rc<FakeHost>, name: &str) -> App {
+    let mut a = app_with_host(Init::blank(), host);
+    let dir = xtree_dir(name);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
+    a.set_active(0);
+    a.panes[0].tab_mut().list.replace(vec![file_entry("a.txt"), file_entry("abcdefghij"), file_entry("b")]);
+    a.paint();
+    a
+}
+
+/// Punto sobre el borde derecho de la columna Nombre, en el encabezado de la lista del panel 0.
+fn name_edge(a: &App) -> (f32, f32) {
+    let r = a.panes[0].rect;
+    let list = &a.panes[0].tab().list;
+    let x_mid = (r.left + r.right) / 2.0;
+    let y = (r.top as i32..r.bottom as i32).map(|y| y as f32 + 0.5).find(|&y| list.in_header(x_mid, y)).expect("encabezado");
+    let xs: Vec<f32> = (0..((r.right - r.left) * 4.0) as i32).map(|i| r.left + i as f32 / 4.0).collect();
+    let start = xs.iter().position(|&x| list.wants_resize_cursor(x, y)).expect("borde del nombre");
+    let len = xs[start..].iter().take_while(|&&x| list.wants_resize_cursor(x, y)).count();
+    (xs[start + len / 2], y)
+}
+
+/// Doble clic en el borde de la columna Nombre: se ajusta con el ancho de texto del host (7 DIPs
+/// por carácter en el falso), igual que `fit_column_at` con esa medida.
+#[test]
+fn double_click_header_fits_column_with_host_width() {
+    let (host_a, host_b) = (FakeHost::new(), FakeHost::new());
+    let mut a = app_with_files(host_a.clone(), "ajuste");
+    let mut b = app_with_files(host_b.clone(), "ajuste");
+    let (x, y) = name_edge(&a);
+    assert_eq!(name_edge(&b), (x, y));
+    a.on_left_down(x, y, true);
+    a.on_left_up(x, y);
+    let fit = b.panes[0].tab_mut().list.fit_column_at(x, y, &|s, _| 7.0 * s.chars().count() as f32);
+    assert!(fit.is_some(), "el punto está sobre el borde");
+    assert_ne!(name_edge(&a).0, x, "el borde se movió");
+    assert_eq!(name_edge(&a), name_edge(&b));
+    a.paint();
+    b.paint();
+    assert_eq!(host_a.drawn_texts(), host_b.drawn_texts());
 }

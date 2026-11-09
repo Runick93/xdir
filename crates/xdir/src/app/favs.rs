@@ -72,6 +72,72 @@ impl App {
         })
     }
 
+    /// El menú de favoritos de `source` (la carpeta o el desborde), con los favoritos de cada id:
+    /// el id `n` es `ids[n - 1]`. Las carpetas de adentro son submenús (una vacía dice «(vacía)»).
+    pub(super) fn fav_menu(&self, source: &FavMenuSource) -> (Vec<shell::Entry>, Vec<FavPath>) {
+        fn build(entries: &[(FavPath, Fav)], ids: &mut Vec<FavPath>) -> Vec<shell::Entry> {
+            entries
+                .iter()
+                .map(|(path, fav)| match fav {
+                    Fav::Link { .. } => {
+                        ids.push(path.clone());
+                        shell::Entry::Item { id: ids.len() as u32, label: fav.name().to_string(), enabled: true, checked: false }
+                    }
+                    Fav::Group { items, .. } => {
+                        let children: Vec<(FavPath, Fav)> =
+                            items.iter().enumerate().map(|(j, f)| ([path.as_slice(), &[j]].concat(), f.clone())).collect();
+                        let mut sub = build(&children, ids);
+                        if sub.is_empty() {
+                            sub.push(shell::Entry::Item { id: 0, label: "(vacía)".into(), enabled: false, checked: false });
+                        }
+                        shell::Entry::Sub(fav.name().to_string(), sub)
+                    }
+                })
+                .collect()
+        }
+        let mut ids = Vec::new();
+        let menu = build(&self.fav_menu_entries(source).unwrap_or_default(), &mut ids);
+        (menu, ids)
+    }
+
+    /// Menú desplegable de una carpeta de favoritos o del desborde "»". Donde el sistema lo
+    /// avisa (Windows), se puede hacer clic derecho sobre un favorito del menú: su menú
+    /// contextual se abre encima y, si se elige algo, eso manda sobre el menú de favoritos.
+    pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: render::Rect) {
+        if self.fav_menu_entries(&source).is_none() {
+            return;
+        }
+        let (menu, ids) = self.fav_menu(&source);
+        let (base, first) = match &source {
+            FavMenuSource::Group(path) => (path.clone(), 0),
+            FavMenuSource::Overflow(first) => (Vec::new(), *first),
+        };
+        let host = self.host.clone();
+        let mut chosen: Option<(FavPath, FavAct)> = None;
+        let cmd = {
+            // SAFETY (aliasing): `this` convive con el `&mut App` que arma el `wndproc` para los
+            // mensajes que se atienden dentro del bucle modal del menú. Es el mismo patrón
+            // reentrante del `wndproc` que ya usa el resto de la `App`.
+            let this = &*self;
+            let mut on_context = |positions: &[usize]| {
+                let Some(path) = crate::favorites::fav_path_at(&this.favorites, &base, first, positions) else { return false };
+                match this.fav_context_menu(Some(&path), true) {
+                    Some(act) => {
+                        chosen = Some((path, act));
+                        true
+                    }
+                    None => false,
+                }
+            };
+            host.popup_menu(&menu, MenuPos::At(anchor.left, anchor.bottom), None, Some(&mut on_context))
+        };
+        if let Some((path, act)) = chosen {
+            self.fav_action(pane, Some(path), act);
+        } else if let Some(path) = cmd.and_then(|c| (c as usize).checked_sub(1)).and_then(|i| ids.get(i)).cloned() {
+            self.activate_fav(pane, &path, key_down(VK_CONTROL));
+        }
+    }
+
     /// Clic derecho en PowerShell o CMD del menú de terminales: abrirla como administrador o con
     /// las credenciales de otro usuario.
     pub(super) fn console_context_menu(&mut self, pane: usize, console: Console) {
@@ -85,7 +151,7 @@ impl App {
             .enumerate()
             .map(|(i, (_, label))| shell::Entry::Item { id: i as u32 + 1, label: label.to_string(), enabled: true, checked: false })
             .collect();
-        let Some(cmd) = popup_menu(self, &entries, MenuPos::Cursor, None) else { return };
+        let Some(cmd) = self.host.popup_menu(&entries, MenuPos::Cursor, None, None) else { return };
         let Some(&(verb, _)) = verbs.get(cmd as usize - 1) else { return };
         self.term_menu = None;
         if let Location::Path(dir) = self.panes[pane].tab().location.clone() {
@@ -130,7 +196,7 @@ impl App {
             entries.push(item(FavAct::HideBar, &format!("Ocultar la barra de favoritos ({})", crate::commands::shortcut_label("Ctrl+Shift+B"))));
         }
         let pos = if recurse { MenuPos::CursorNested } else { MenuPos::Cursor };
-        popup_menu(self, &entries, pos, None).and_then(|id| FavAct::from_id(id as i32))
+        self.host.popup_menu(&entries, pos, None, None).and_then(|id| FavAct::from_id(id as i32))
     }
 
     pub(super) fn fav_action(&mut self, pane: usize, path: Option<FavPath>, act: FavAct) {
@@ -191,17 +257,17 @@ impl App {
             _ => bar,
         };
         let r = render::rect(r.left, r.top, r.right.max(r.left + 200.0).min(bar.right), r.bottom);
-        let Some(edit) = TextBox::create(self, TextKind::FavRename, r, &name) else { return };
-        edit.select(0, -1);
-        edit.focus();
+        let Some(edit) = self.host.text_create(TextKind::FavRename, r, &name, &self.theme) else { return };
+        self.host.text_select(edit, 0, -1);
+        self.host.text_focus(edit);
         self.fav_edit = Some((edit, path));
     }
 
     pub(super) fn end_fav_edit(&mut self, commit: bool) {
         let Some((edit, path)) = self.fav_edit.take() else { return };
-        let text = edit.text();
-        edit.destroy();
-        focus_main(self.hwnd);
+        let text = self.host.text_get(edit);
+        self.host.text_destroy(edit);
+        self.host.focus_main();
         let name = text.trim().to_string();
         if commit && !name.is_empty() {
             if let Some(f) = self.favorites.get_mut(&path) {

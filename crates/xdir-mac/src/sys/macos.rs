@@ -14,7 +14,7 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
 use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
@@ -143,6 +143,17 @@ impl SystemEnv for MacEnv {
         let secs = ft as f64 / 10_000_000.0 - EPOCH_DIFF;
         let d = NSDate::dateWithTimeIntervalSince1970(secs);
         DATES.with(|f| f.stringFromDate(&d).to_string())
+    }
+
+    /// Hoy en hora local, con la zona horaria del sistema (`localtime_r`).
+    fn local_now(&self) -> LocalNow {
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let t = unix as libc::time_t;
+        // SAFETY: `localtime_r` escribe en `tm`, que es nuestro (la versión `_r` no comparte
+        // memoria entre hilos).
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let offset = if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() { 0 } else { tm.tm_gmtoff as i64 };
+        LocalNow::from_unix(unix, offset)
     }
 
     /// Como lo muestra el Finder: "1,2 MB".

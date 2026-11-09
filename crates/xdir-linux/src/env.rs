@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use xdir_core::format::{date_time_text, size_kb_text, size_short_text};
 use xdir_core::keys::Key;
-use xdir_core::sys::{ConsoleInfo, Handle, SystemEnv};
+use xdir_core::sys::{ConsoleInfo, Handle, LocalNow, SystemEnv};
 
 /// Carpeta de configuración: `$XDG_CONFIG_HOME/xdir` si es una ruta absoluta (la especificación
 /// XDG manda ignorar las relativas), si no `$HOME/.config/xdir`. Recibe los valores en vez de
@@ -71,6 +71,12 @@ impl SystemEnv for LinuxEnv {
     fn format_date(&self, filetime: u64) -> String {
         let unix = (filetime / 10_000_000) as i64 - SECS_1601_TO_1970;
         date_time_text(filetime, utc_offset(unix))
+    }
+
+    /// Hoy en hora local, con la zona horaria del sistema (`localtime_r`).
+    fn local_now(&self) -> LocalNow {
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        LocalNow::from_unix(unix, utc_offset(unix))
     }
 
     /// "1.234 KB" (redondea hacia arriba), como el entorno falso del núcleo.

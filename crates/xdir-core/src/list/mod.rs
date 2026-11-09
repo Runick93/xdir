@@ -15,6 +15,10 @@ use crate::paint::{FontId, Painter};
 use crate::theme::alpha;
 use crate::thumbs;
 
+pub mod groups;
+
+pub use groups::{GROUPINGS, GroupKey, LocalNow, Meta, Row, group_key};
+
 pub const ROW_H: f32 = 24.0;
 pub const HEADER_H: f32 = 30.0;
 const ICON: f32 = 16.0;
@@ -215,7 +219,11 @@ struct Band {
 
 pub struct FileList {
     pub entries: Vec<Entry>,
-    /// Índices de `entries` visibles, ya filtrados y ordenados.
+    /// Índices de `entries` que se muestran (sin los ocultos), ordenados, sin agrupar.
+    order: Vec<u32>,
+    /// Índices de `entries` a la vista, en orden: `order` o, con grupos, los elementos de los
+    /// grupos desplegados, grupo por grupo. Las posiciones de la lista (foco, selección por rango,
+    /// accesibilidad) son posiciones en este vector: los encabezados no cuentan.
     visible: Vec<u32>,
     /// Selección por índice de `entries`.
     selected: Vec<bool>,
@@ -258,6 +266,22 @@ pub struct FileList {
     pub group_by: Option<Column>,
     pub collapsed: Vec<String>,
     pub filters: Vec<(Column, Vec<String>)>,
+    /// Con grupos: encabezados y elementos (ver `groups::Row`); vacío sin agrupar.
+    rows: Vec<Row>,
+    /// Índices en `rows` de los encabezados.
+    header_rows: Vec<u32>,
+    /// Grupo de cada elemento (índice en `key_table`) según la columna `keys_for`: se calcula una
+    /// vez por elemento, no en cada rearmado.
+    entry_keys: Vec<u32>,
+    key_table: Vec<GroupKey>,
+    key_index: std::collections::HashMap<GroupKey, u32>,
+    keys_for: Option<Column>,
+    /// Geometría de la lista agrupada (líneas de encabezado y de elementos).
+    layout: Option<groups::Layout>,
+    /// El foco está en el encabezado de este grupo (en vez de en un elemento).
+    header_focus: Option<String>,
+    /// Cuántas veces se rearmaron las filas (los tests miran que dibujar no las rearme).
+    pub(crate) rows_built: u64,
     /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
     pub folder: Option<std::path::PathBuf>,
     /// Carpeta en la que se busca, mientras la lista muestra resultados de una búsqueda.
@@ -320,6 +344,7 @@ impl Default for FileList {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            order: Vec::new(),
             visible: Vec::new(),
             selected: Vec::new(),
             focus: None,
@@ -345,6 +370,15 @@ impl Default for FileList {
             group_by: None,
             collapsed: Vec::new(),
             filters: Vec::new(),
+            rows: Vec::new(),
+            header_rows: Vec::new(),
+            entry_keys: Vec::new(),
+            key_table: Vec::new(),
+            key_index: std::collections::HashMap::new(),
+            keys_for: None,
+            layout: None,
+            header_focus: None,
+            rows_built: 0,
             folder: None,
             search_root: None,
             header_drag: None,
@@ -422,6 +456,7 @@ impl FileList {
     /// Aplica la vista de una carpeta, conservando el elemento con foco a la vista.
     pub fn apply_view_settings(&mut self, v: &ViewSettings) {
         let resort = self.sort != v.sort || self.descending != v.descending;
+        let regroup = self.group_by != v.group_by || self.collapsed != v.collapsed;
         self.sort = v.sort;
         self.descending = v.descending;
         self.columns = v.columns.clone();
@@ -439,6 +474,8 @@ impl FileList {
             if let Some(f) = self.focus {
                 self.ensure_visible(f);
             }
+        } else if regroup {
+            self.regroup_keep_focus();
         }
     }
 
@@ -456,7 +493,7 @@ impl FileList {
         let cmp = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], sort, desc);
         new.sort_unstable_by(cmp);
 
-        let old = std::mem::take(&mut self.visible);
+        let old = std::mem::take(&mut self.order);
         let mut merged = Vec::with_capacity(old.len() + new.len());
         let (mut i, mut j) = (0, 0);
         while i < old.len() && j < new.len() {
@@ -470,7 +507,8 @@ impl FileList {
         }
         merged.extend_from_slice(&old[i..]);
         merged.extend_from_slice(&new[j..]);
-        self.visible = merged;
+        self.order = merged;
+        self.regroup();
 
         self.restore_focus(focus_entry);
     }
@@ -482,6 +520,8 @@ impl FileList {
         let focus_name = self.focused_index().map(|i| self.entries[i].name.clone());
         self.selected = entries.iter().map(|e| selected.contains(&e.name)).collect();
         self.entries = entries;
+        // Los grupos se vuelven a calcular para los elementos nuevos.
+        self.entry_keys.clear();
         let focus = focus_name.and_then(|n| self.entries.iter().position(|e| e.name == n));
         self.rebuild(focus);
         self.hover = None;
@@ -560,7 +600,7 @@ impl FileList {
 
     /// Posición con foco (en los elementos a la vista).
     pub fn focus_pos(&self) -> Option<usize> {
-        self.focus
+        self.focus.filter(|_| self.header_focus.is_none())
     }
 
     /// Lo que un lector de pantalla necesita saber del elemento en la posición `pos`.
@@ -592,6 +632,7 @@ impl FileList {
     /// Agrega (o saca) el elemento de la selección sin tocar el resto.
     pub fn set_selected_pos(&mut self, pos: usize, on: bool) {
         if let Some(&idx) = self.visible.get(pos) {
+            self.header_focus = None;
             self.auto_focus = false;
             self.selected[idx as usize] = on;
             self.focus = Some(pos);
@@ -633,14 +674,15 @@ impl FileList {
     /// Filtra ocultos y filtro rápido, ordena y reubica el foco en `focus_entry`.
     fn rebuild(&mut self, focus_entry: Option<usize>) {
         let shown: Vec<bool> = self.entries.iter().map(|e| self.shows(e)).collect();
-        self.visible = (0..self.entries.len() as u32).filter(|&i| shown[i as usize]).collect();
+        self.order = (0..self.entries.len() as u32).filter(|&i| shown[i as usize]).collect();
         // Lo que queda fuera se deselecciona para no operar sobre lo que no se ve.
         for (s, &v) in self.selected.iter_mut().zip(&shown) {
             *s &= v;
         }
 
         let (entries, sort, desc) = (&self.entries, self.sort, self.descending);
-        self.visible.sort_unstable_by(|&a, &b| compare(&entries[a as usize], &entries[b as usize], sort, desc));
+        self.order.sort_unstable_by(|&a, &b| compare(&entries[a as usize], &entries[b as usize], sort, desc));
+        self.regroup();
 
         self.restore_focus(focus_entry);
     }
@@ -651,7 +693,8 @@ impl FileList {
         } else {
             focus_entry.and_then(|f| self.visible.iter().position(|&v| v as usize == f))
         };
-        if self.focus.is_none() && !self.visible.is_empty() {
+        // Con el foco en un encabezado, ningún elemento lo toma.
+        if self.focus.is_none() && !self.visible.is_empty() && self.header_focus.is_none() {
             self.focus = Some(0);
             self.auto_focus = true;
         }
@@ -702,6 +745,9 @@ impl FileList {
     /// Alto del contenido más dos líneas vacías al final, para poder hacer clic derecho en la
     /// carpeta aunque la lista llene el panel.
     fn content_h(&self) -> f32 {
+        if let Some(l) = &self.layout {
+            return l.bottom + self.top_pad() + self.line_h() * 2.0;
+        }
         let lines = self.visible.len().div_ceil(self.per_line());
         lines as f32 * self.line_h() + self.top_pad() * 2.0 + self.line_h() * 2.0
     }
@@ -713,6 +759,16 @@ impl FileList {
 
     /// Posiciones (en `visible`) a la vista: [primera, última).
     fn visible_range(&self) -> (usize, usize) {
+        if let Some(layout) = &self.layout {
+            let mut range: Option<(usize, usize)> = None;
+            for l in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_h())] {
+                if l.header.is_none() {
+                    let end = (l.first + l.count) as usize;
+                    range = Some(range.map_or((l.first as usize, end), |(f, _)| (f, end)));
+                }
+            }
+            return range.unwrap_or((0, 0));
+        }
         let (lh, per) = (self.line_h(), self.per_line());
         let first_line = ((self.scroll - self.top_pad()).max(0.0) / lh).floor() as usize;
         let lines = (self.view_h() / lh).ceil() as usize + 1;
@@ -722,17 +778,25 @@ impl FileList {
     /// Rectángulo de un elemento (fila en detalles, celda en las cuadrículas).
     fn item_rect(&self, pos: usize) -> Rect {
         let rows = self.rows_area();
+        // Con grupos, la línea y la columna salen de la geometría agrupada.
+        let placed = self.layout.as_ref().and_then(|l| {
+            let line = l.lines[*l.pos_line.get(pos)? as usize];
+            Some((line.top, pos - line.first as usize))
+        });
         if !self.view.is_grid() {
-            let y = rows.top + pos as f32 * ROW_H - self.scroll;
+            let top = placed.map_or(pos as f32 * ROW_H, |(top, _)| top);
+            let y = rows.top + top - self.scroll;
             return rect(rows.left, y, rows.right - SCROLLBAR_W, y + ROW_H);
         }
         let per = self.per_line();
         let (line, col) = (pos / per, pos % per);
+        let col = placed.map_or(col, |(_, c)| c);
         // Las celdas se reparten el ancho sobrante, para no dejar un hueco a la derecha.
         let usable = rows.right - rows.left - SCROLLBAR_W - GRID_PAD * 2.0;
         let w = (usable / per as f32).max(self.cell_w());
         let x = rows.left + GRID_PAD + col as f32 * w;
-        let y = rows.top + self.top_pad() + line as f32 * self.line_h() - self.scroll;
+        let top = placed.map_or(self.top_pad() + line as f32 * self.line_h(), |(top, _)| top);
+        let y = rows.top + top - self.scroll;
         rect(x, y, x + w, y + self.line_h())
     }
 
@@ -742,12 +806,21 @@ impl FileList {
         if y < rows.top || y >= rows.bottom || x >= rows.right - SCROLLBAR_W {
             return None;
         }
-        if !self.view.is_grid() {
-            return self.row_at(y);
-        }
         let per = self.per_line();
         let usable = rows.right - rows.left - SCROLLBAR_W - GRID_PAD * 2.0;
         let w = (usable / per as f32).max(self.cell_w());
+        if let Some(layout) = &self.layout {
+            // Con grupos: la línea bajo el punto; los encabezados no son elementos.
+            let line = layout.lines[layout.line_at(y - rows.top + self.scroll)?];
+            if line.header.is_some() {
+                return None;
+            }
+            let col = if self.view.is_grid() { ((x - rows.left - GRID_PAD) / w).floor() } else { 0.0 };
+            return (col >= 0.0 && (col as u32) < line.count).then_some(line.first as usize + col as usize);
+        }
+        if !self.view.is_grid() {
+            return self.row_at(y);
+        }
         let col = ((x - rows.left - GRID_PAD) / w).floor();
         let line = ((y - rows.top - self.top_pad() + self.scroll) / self.line_h()).floor();
         if col < 0.0 || line < 0.0 || col as usize >= per {
@@ -770,8 +843,16 @@ impl FileList {
 
     /// Lleva el elemento a la vista (el destino del scroll; se llega suave, ver `tick`).
     fn ensure_visible(&mut self, pos: usize) {
-        let lh = self.line_h();
-        let top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
+        let mut lh = self.line_h();
+        let mut top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
+        if let Some(l) = self.layout.as_ref().and_then(|l| Some(l.lines[*l.pos_line.get(pos)? as usize])) {
+            (top, lh) = (l.top, l.h);
+        }
+        self.ensure_span(top, lh);
+    }
+
+    /// Lleva a la vista el tramo [top, top + lh) del contenido.
+    fn ensure_span(&mut self, top: f32, lh: f32) {
         if top < self.scroll_target {
             self.scroll_target = (top - self.top_pad()).max(0.0);
         } else if top + lh > self.scroll_target + self.view_h() {
@@ -800,6 +881,7 @@ impl FileList {
         self.hover = None;
         self.scroll = 0.0;
         self.scroll_target = 0.0;
+        self.relayout();
         if let Some(f) = self.focus {
             self.ensure_visible(f);
             self.snap_scroll();
@@ -1045,14 +1127,24 @@ impl FileList {
         let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
         let mut sel = b.base.clone();
         let (lh, per, pad) = (self.line_h(), self.per_line(), self.top_pad());
-        let first_line = ((y0 - pad) / lh).floor().max(0.0) as usize;
-        let last_line = ((y1 - pad) / lh).floor().max(0.0) as usize;
-        let first = (first_line * per).min(self.visible.len());
-        let last = ((last_line + 1) * per).min(self.visible.len());
+        let (first, last) = match &self.layout {
+            // Con grupos: los elementos de las líneas que toca el rectángulo.
+            Some(layout) => {
+                let lines = &layout.lines[layout.lines_between(y0, y1.max(y0 + 0.01))];
+                let items = || lines.iter().filter(|l| l.header.is_none());
+                (items().next().map_or(0, |l| l.first as usize), items().last().map_or(0, |l| (l.first + l.count) as usize))
+            }
+            None => {
+                let first_line = ((y0 - pad) / lh).floor().max(0.0) as usize;
+                let last_line = ((y1 - pad) / lh).floor().max(0.0) as usize;
+                ((first_line * per).min(self.visible.len()), ((last_line + 1) * per).min(self.visible.len()))
+            }
+        };
+        let rows_top = self.rows_area().top;
         let mut hit = None;
         for pos in first..last {
             let r = self.item_rect(pos);
-            let line_top = pad + (pos / per) as f32 * lh;
+            let line_top = r.top - rows_top + self.scroll;
             // Detalles: la fila ocupa todo el ancho; en las cuadrículas también cuenta la x.
             let across = !self.view.is_grid() || (r.left < x1 && r.right > x0);
             if across && line_top < y1 && line_top + lh > y0 {
@@ -1062,6 +1154,7 @@ impl FileList {
         }
         self.selected = sel;
         if let Some(pos) = hit {
+            self.header_focus = None;
             self.auto_focus = false;
             self.focus_visible = true;
             self.focus = Some(pos);
@@ -1070,6 +1163,7 @@ impl FileList {
     }
 
     fn select_only(&mut self, pos: usize) {
+        self.header_focus = None;
         self.auto_focus = false;
         self.focus_visible = true;
         self.selected.iter_mut().for_each(|s| *s = false);
@@ -1081,6 +1175,7 @@ impl FileList {
     }
 
     fn select_range(&mut self, to: usize, keep_others: bool) {
+        self.header_focus = None;
         self.auto_focus = false;
         self.focus_visible = true;
         if !keep_others {
@@ -1095,6 +1190,7 @@ impl FileList {
     }
 
     fn toggle(&mut self, pos: usize) {
+        self.header_focus = None;
         self.auto_focus = false;
         self.focus_visible = true;
         if let Some(&idx) = self.visible.get(pos) {
@@ -1136,6 +1232,9 @@ impl FileList {
     pub fn on_key(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
         use crate::keys::Key;
         use crate::keys::keys::*;
+        if self.layout.is_some() {
+            return self.on_key_grouped(vk, ctrl, shift);
+        }
         let n = self.visible.len();
         if n == 0 {
             return None;
@@ -1166,16 +1265,130 @@ impl FileList {
             VK_RETURN => return self.focused_index().map(Action::Open),
             _ => return None,
         };
+        self.move_focus_to(target, ctrl, shift);
+        Some(Action::Redraw)
+    }
+
+    /// Lleva el foco a la posición con las teclas: con Shift, rango desde el ancla; con Ctrl, solo
+    /// el foco; si no, la selección pasa a ser ese elemento.
+    fn move_focus_to(&mut self, target: usize, ctrl: bool, shift: bool) {
         if shift {
             self.select_range(target, ctrl);
         } else if ctrl {
+            self.header_focus = None;
             self.focus = Some(target);
             self.auto_focus = false;
         } else {
             self.select_only(target);
         }
         self.ensure_visible(target);
+    }
+
+    /// Teclas con grupos: ↑/↓ recorren encabezados y elementos de los grupos desplegados (los
+    /// plegados se saltean); con el foco en un encabezado, ← lo pliega, → lo despliega y Enter o
+    /// Espacio lo alternan; en Detalles, ← desde un elemento lleva al encabezado de su grupo.
+    fn on_key_grouped(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
+        use crate::keys::Key;
+        use crate::keys::keys::*;
+        let layout = self.layout.as_ref()?;
+        if layout.lines.is_empty() {
+            return None;
+        }
+        let n = self.visible.len();
+        let grid = self.view.is_grid();
+        let header = self.focused_header();
+        // Línea con foco: la del encabezado o la del elemento.
+        let header_line = header.and_then(|r| layout.lines.iter().position(|l| l.header == Some(r as u32)));
+        let cur = self.focus.filter(|&f| f < n);
+        let line_of = |pos: usize| layout.pos_line[pos] as usize;
+        let key = Key(vk);
+        // Ir a la línea `li` en la columna `col`: un encabezado toma el foco; una fila de elementos,
+        // su elemento en esa columna (o el último).
+        enum To {
+            Header(usize),
+            Pos(usize),
+        }
+        let to_line = |li: usize, col: usize| {
+            let l = layout.lines[li];
+            match l.header {
+                Some(r) => To::Header(r as usize),
+                None => To::Pos(l.first as usize + col.min(l.count as usize - 1)),
+            }
+        };
+        let step = usize::from(self.selected.iter().any(|&s| s));
+        let target = match (key, header, cur) {
+            (VK_LEFT, Some(r), _) => {
+                if !self.collapsed_row(r) {
+                    self.toggle_group_row(r);
+                }
+                return Some(Action::Redraw);
+            }
+            (VK_RIGHT, Some(r), _) => {
+                if self.collapsed_row(r) {
+                    self.toggle_group_row(r);
+                }
+                return Some(Action::Redraw);
+            }
+            (VK_RETURN | VK_SPACE, Some(r), _) if !ctrl => {
+                self.toggle_group_row(r);
+                return Some(Action::Redraw);
+            }
+            (VK_UP | VK_DOWN, Some(_), _) => {
+                let li = header_line?;
+                let li = if key == VK_UP { li.checked_sub(1)? } else { li + 1 };
+                if li >= layout.lines.len() {
+                    return Some(Action::None);
+                }
+                to_line(li, 0)
+            }
+            (VK_UP | VK_DOWN, None, Some(pos)) if step == 0 => To::Pos(pos),
+            (VK_UP | VK_DOWN, None, Some(pos)) => {
+                let li = line_of(pos);
+                let col = pos - layout.lines[li].first as usize;
+                match if key == VK_UP { li.checked_sub(1) } else { Some(li + 1).filter(|&l| l < layout.lines.len()) } {
+                    Some(l) => to_line(l, col),
+                    None => To::Pos(pos),
+                }
+            }
+            // Detalles: ← desde un elemento va al encabezado de su grupo.
+            (VK_LEFT, None, Some(pos)) if !grid => {
+                let li = line_of(pos);
+                let r = layout.lines[..li].iter().rev().find_map(|l| l.header)?;
+                To::Header(r as usize)
+            }
+            (VK_LEFT, None, Some(pos)) if grid => To::Pos(pos.saturating_sub(step)),
+            (VK_RIGHT, None, Some(pos)) if grid => To::Pos((pos + step).min(n - 1)),
+            (VK_PRIOR, _, _) if n > 0 => To::Pos(cur.unwrap_or(0).saturating_sub(self.page_rows())),
+            (VK_NEXT, _, _) if n > 0 => To::Pos((cur.unwrap_or(0) + self.page_rows()).min(n - 1)),
+            (VK_HOME, _, _) if n > 0 => To::Pos(0),
+            (VK_END, _, _) if n > 0 => To::Pos(n - 1),
+            // Sin elementos a la vista (todo plegado): el primer o el último encabezado.
+            (VK_HOME, _, _) => to_line(0, 0),
+            (VK_END, _, _) => to_line(layout.lines.len() - 1, 0),
+            (VK_SPACE, None, Some(pos)) if ctrl => {
+                self.toggle(pos);
+                return Some(Action::Redraw);
+            }
+            (VK_RETURN, None, _) => return self.focused_index().map(Action::Open),
+            _ => return None,
+        };
+        self.focus_visible = true;
+        match target {
+            To::Header(r) => {
+                let top = layout.lines.iter().find(|l| l.header == Some(r as u32)).map(|l| (l.top, l.h));
+                self.focus_header(r);
+                if let Some((top, h)) = top {
+                    self.ensure_span(top, h);
+                }
+            }
+            To::Pos(pos) => self.move_focus_to(pos, ctrl, shift),
+        }
         Some(Action::Redraw)
+    }
+
+    /// ¿El encabezado (índice en `rows`) está plegado?
+    fn collapsed_row(&self, row: usize) -> bool {
+        matches!(self.rows.get(row), Some(Row::Header { collapsed: true, .. }))
     }
 
     /// Búsqueda al teclear: salta al primer nombre que empieza con lo escrito.
@@ -1252,6 +1465,11 @@ impl FileList {
 
     /// Posición en pantalla (DIPs) del elemento con foco, para el menú contextual por teclado.
     pub fn focus_point(&self) -> Option<(f32, f32)> {
+        if let (Some(row), Some(layout)) = (self.focused_header(), &self.layout) {
+            let line = layout.lines.iter().find(|l| l.header == Some(row as u32))?;
+            let r = self.line_rect(line);
+            return Some((self.area.left + 40.0, r.bottom.clamp(self.area.top, self.area.bottom)));
+        }
         let r = self.item_rect(self.focus?);
         let x = if self.view.is_grid() { (r.left + r.right) / 2.0 } else { self.area.left + 40.0 };
         Some((x, r.bottom.clamp(self.area.top, self.area.bottom)))
@@ -1300,6 +1518,12 @@ impl FileList {
                 }
                 return (Action::Redraw, false);
             }
+        }
+        // Encabezado de un grupo: toma el foco y se pliega o despliega.
+        if let Some(r) = self.header_at(x, y) {
+            self.focus_header(r);
+            self.toggle_group_row(r);
+            return (Action::Redraw, false);
         }
         // En detalles, el hueco a la derecha del nombre cuenta como vacío: arma el rectángulo en
         // vez de arrastrar el archivo (como en el Explorador).
@@ -1364,6 +1588,12 @@ impl FileList {
     pub fn on_double_click(&mut self, x: f32, y: f32) -> Action {
         if self.scrollbar().is_some_and(|(track, _)| contains(&track, x, y)) {
             return Action::None;
+        }
+        // El segundo clic de un doble clic en un encabezado también lo alterna.
+        if let Some(r) = self.header_at(x, y) {
+            self.focus_header(r);
+            self.toggle_group_row(r);
+            return Action::Redraw;
         }
         match self.pos_at(x, y) {
             Some(pos) => {
@@ -1454,6 +1684,10 @@ impl FileList {
 
     pub fn draw(&mut self, p: &dyn Painter, area: Rect, active: bool) {
         self.area = area;
+        // Con otro ancho entran otros elementos por línea: solo la geometría se recalcula.
+        if !self.layout_current() {
+            self.relayout();
+        }
         self.clamp_scroll();
         let th = p.theme();
         let cols = self.columns();
@@ -1490,12 +1724,14 @@ impl FileList {
         }
 
         let rows = self.rows_area();
-        if self.visible.is_empty() {
+        if self.visible.is_empty() && self.rows.is_empty() {
             return;
         }
 
         let (first, last) = self.visible_range();
         let grid = self.view.is_grid();
+        let header_focus = self.focused_header();
+        let item_focus = if header_focus.is_none() { self.focus } else { None };
 
         let mut ends = Vec::with_capacity(last - first);
         p.clip(rows, &mut || {
@@ -1516,13 +1752,13 @@ impl FileList {
                 } else if self.selected[idx] {
                     let c = if active { th.selection } else { alpha(th.text_dim, 0.18) };
                     p.round_fill(row, 4.0, c);
-                } else if active && self.focus_visible && self.focus == Some(pos) {
+                } else if active && self.focus_visible && item_focus == Some(pos) {
                     // Foco sin selección: fondo tenue del acento, además del borde.
                     p.round_fill(row, 4.0, th.focus_fill);
                 } else if self.hover == Some(pos) {
                     p.round_fill(row, 4.0, th.hover);
                 }
-                if active && self.focus_visible && self.focus == Some(pos) {
+                if active && self.focus_visible && item_focus == Some(pos) {
                     p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
                 }
 
@@ -1560,6 +1796,16 @@ impl FileList {
                             p.text(FontId::UiRight, &s, cell, th.text_secondary);
                         }
                     }
+                }
+            }
+
+            // Encabezados de los grupos a la vista.
+            if let Some(layout) = &self.layout {
+                for line in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_h())] {
+                    let Some(r) = line.header else { continue };
+                    let Some(Row::Header { key, count, collapsed }) = self.rows.get(r as usize) else { continue };
+                    let focused = active && self.focus_visible && header_focus == Some(r as usize);
+                    self.draw_group_header(p, self.line_rect(line), key, *count, *collapsed, focused);
                 }
             }
 

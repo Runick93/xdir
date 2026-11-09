@@ -547,7 +547,7 @@ impl Tab {
 
     pub fn status(&self) -> String {
         if let Some(s) = &self.search {
-            let found = self.list.count();
+            let found = self.list.total();
             let found = if found == 1 { "1 encontrado".to_string() } else { format!("{found} encontrados") };
             let scanned = crate::format::thousands(s.scanned);
             return if s.done {
@@ -566,7 +566,8 @@ impl Tab {
             .list
             .selected_entries()
             .fold((0usize, 0u64, 0usize), |(c, b, f), e| (c + 1, b + if e.is_dir { 0 } else { e.size }, f + !e.is_dir as usize));
-        let mut s = match self.list.count() {
+        // Todos los elementos, también los de los grupos plegados.
+        let mut s = match self.list.total() {
             1 => "1 elemento".to_string(),
             n => format!("{n} elementos"),
         };

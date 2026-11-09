@@ -228,12 +228,19 @@ impl App {
             .enumerate()
             .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
             .collect();
+        // «Agrupar por»: los criterios con el título de su columna y «(Ninguno)».
+        let groupings = list::GROUPINGS
+            .iter()
+            .enumerate()
+            .map(|(i, &col)| item(col.map_or("(Ninguno)", |c| c.title()), Command::GroupBy(i as u8), true, col == list.group_by))
+            .collect();
         let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
         // Sin el árbol no se agrega nada después.
         #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
         let mut entries = vec![
             Entry::Sub("Ver".into(), views),
             Entry::Sub("Ordenar por".into(), sorts),
+            Entry::Sub("Agrupar por".into(), groupings),
             item("Actualizar", Command::Refresh, true, false),
             Entry::Sep,
             item("Pegar", Command::Paste, true, false),

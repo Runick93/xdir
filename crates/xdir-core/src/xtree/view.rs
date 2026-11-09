@@ -232,12 +232,12 @@ impl Xtree {
         self.menu_hover = None;
     }
 
-    /// Abre el menú de discos sin pasar por el clic. Lo usan las pruebas de `App` (crates/xdir).
+    /// Abre el menú de discos sin pasar por el clic. Lo usan las pruebas de `App` (app/tests.rs).
     pub fn open_menu(&mut self) {
         self.menu_open = true;
     }
 
-    /// ¿Está abierto el menú de discos? Lo usan las pruebas de `App` (crates/xdir).
+    /// ¿Está abierto el menú de discos? Lo usan las pruebas de `App` (app/tests.rs).
     pub fn menu_is_open(&self) -> bool {
         self.menu_open
     }

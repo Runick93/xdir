@@ -687,14 +687,16 @@ fn go_to_text_accepts_quotes_relative_paths_and_variables() {
         a.go_to_text(0, r"hijo\..\hijo");
         assert_eq!(leaf(&a, 0), "hijo");
         a.go_to_text(1, "%TEMP%");
+        assert_eq!(leaf(&a, 1), leaf_of(&std::env::temp_dir()));
     }
     #[cfg(not(windows))]
     {
         a.go_to_text(0, "hijo/../hijo");
         assert_eq!(leaf(&a, 0), "hijo");
-        a.go_to_text(1, "$TMPDIR");
+        // $HOME siempre está definida (TMPDIR suele faltar en Linux).
+        a.go_to_text(1, "$HOME");
+        assert_eq!(leaf(&a, 1), leaf_of(std::path::Path::new(&std::env::var("HOME").unwrap())));
     }
-    assert_eq!(leaf(&a, 1), leaf_of(&std::env::temp_dir()));
 }
 
 fn leaf_of(p: &std::path::Path) -> String {

@@ -14,6 +14,8 @@ use windows::Win32::UI::Shell::{SFBS_FLAGS_TRUNCATE_UNDISPLAYED_DECIMAL_DIGITS, 
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SPI_GETCLIENTAREAANIMATION, SW_SHOWNORMAL, SystemParametersInfoW};
 use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
+use std::sync::mpsc::Sender;
+use xdir_core::ops::{Op, OpResult};
 use xdir_core::sys::{ConsoleInfo, FileOps, Handle, Services, SystemEnv, Waker};
 use xdir_core::typed::MAX as TYPED_MAX;
 
@@ -224,7 +226,11 @@ pub fn platform_env() -> Box<dyn SystemEnv> {
 }
 
 struct Win32FileOps;
-impl FileOps for Win32FileOps {}
+impl FileOps for Win32FileOps {
+    fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op) {
+        crate::ops::spawn_native(owner, tx, op);
+    }
+}
 
 /// Instala los servicios de Windows en el registro del núcleo.
 pub fn install() {

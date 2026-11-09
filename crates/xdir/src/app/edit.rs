@@ -36,12 +36,18 @@ impl App {
         let text = edit.text();
         edit.destroy();
         focus_main(self.hwnd);
-        let new_name = text.trim().to_string();
-        let old_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if commit && !new_name.is_empty() && new_name != old_name {
-            ops::spawn(self.hwnd, self.ops_tx.clone(), Op::Rename { path, new_name });
+        if commit {
+            self.commit_rename(path, text.trim().to_string());
         }
         self.redraw();
+    }
+
+    /// Renombra `path` a `new_name` si el nombre cambió y no está vacío.
+    pub(super) fn commit_rename(&mut self, path: PathBuf, new_name: String) {
+        let old_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !new_name.is_empty() && new_name != old_name {
+            ops::spawn(self.hwnd, self.ops_tx.clone(), Op::Rename { path, new_name });
+        }
     }
 
     // ---------- barra de dirección editable ----------

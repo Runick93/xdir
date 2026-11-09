@@ -10,6 +10,8 @@ use objc2_foundation::{
 };
 use xdir_core::commands::Command;
 use xdir_core::keys::Key;
+use std::sync::mpsc::Sender;
+use xdir_core::ops::{Op, OpResult};
 use xdir_core::sys::{ConsoleInfo, FileOps, Handle, KeyStyle, Services, SystemEnv, Waker};
 
 /// Quién atiende los mensajes de la aplicación en el hilo principal (lo fija la ventana al
@@ -189,7 +191,11 @@ pub fn platform_env() -> Box<dyn SystemEnv> {
 }
 
 struct MacFileOps;
-impl FileOps for MacFileOps {}
+impl FileOps for MacFileOps {
+    fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op) {
+        crate::ops::spawn_native(owner, tx, op);
+    }
+}
 
 /// Instala los servicios de macOS en el registro del núcleo.
 pub fn install() {

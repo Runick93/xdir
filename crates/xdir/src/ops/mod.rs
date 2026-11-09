@@ -1,51 +1,25 @@
-//! Operaciones de archivos (copiar, mover, borrar, renombrar, carpeta nueva y deshacer). Cada
-//! operación corre en su propio hilo para que la ventana nunca se congele; al terminar avisa con
-//! `WM_APP_OP_DONE`. La implementación es de cada sistema.
+//! Operaciones de archivos (copiar, mover, borrar, renombrar, carpeta nueva y deshacer). Los tipos
+//! son del núcleo; la implementación (un hilo por operación) es de cada sistema y se pide con
+//! `sys::file_ops()`.
 
-use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 
-use crate::platform::WM_APP;
+use crate::platform::Handle;
+pub use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
-pub use self::win32::*;
+pub use self::win32::item;
+#[cfg(windows)]
+pub(crate) use self::win32::spawn as spawn_native;
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use self::macos::*;
+pub(crate) use self::macos::spawn as spawn_native;
 
-/// Terminó una operación; el resultado está en el canal.
-pub const WM_APP_OP_DONE: u32 = WM_APP + 4;
-
-pub enum Op {
-    Copy { sources: Vec<PathBuf>, dest: PathBuf },
-    Move { sources: Vec<PathBuf>, dest: PathBuf },
-    Delete { paths: Vec<PathBuf>, recycle: bool },
-    Rename { path: PathBuf, new_name: String },
-    NewFolder { parent: PathBuf },
-    Undo(Undo),
-}
-
-/// Cómo deshacer una operación ya hecha.
-#[derive(Clone, Debug)]
-pub enum Undo {
-    /// Volver a llamar `path` como `old_name`.
-    Rename { path: PathBuf, old_name: String },
-    /// Copias o carpetas nuevas: se mandan a la papelera.
-    Created(Vec<PathBuf>),
-    /// (dónde quedó, dónde estaba).
-    Moved(Vec<(PathBuf, PathBuf)>),
-    /// (nombre del elemento dentro de la papelera, dónde estaba).
-    Recycled(Vec<(String, PathBuf)>),
-}
-
-pub struct OpResult {
-    pub undo: Option<Undo>,
-    /// Elemento a enfocar al terminar (renombrado o carpeta nueva).
-    pub focus: Option<PathBuf>,
-    /// Carpeta nueva: se abre el renombrado en línea sobre ella.
-    pub rename_after: bool,
-    pub error: Option<String>,
+/// Corre `op` en su propio hilo con la implementación del sistema instalada.
+pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
+    xdir_core::sys::file_ops().spawn(owner, tx, op);
 }

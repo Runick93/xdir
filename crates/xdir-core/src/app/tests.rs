@@ -1877,3 +1877,72 @@ fn filter_dropdown_click_flow() {
     assert_eq!(a.panes[0].tab().list.filters, [(list::Column::Type, vec!["Imagen JPEG".to_string()])]);
     assert!(a.panes[0].tab().status().ends_with(" (filtrado)"));
 }
+
+/// Un filtro cambiado durante una búsqueda es de la carpeta buscada: al terminar la búsqueda la
+/// carpeta lo conserva, y también al volver a abrirla.
+#[test]
+fn filter_changed_during_search_sticks_to_folder() {
+    let dir = fixture("filtro-en-busqueda");
+    let other = fixture("filtro-en-busqueda-otra");
+    for n in ["IMG_2035.jpg", "IMG_2036.jpg", "IMG_2036.png"] {
+        std::fs::write(dir.join(n), "x").unwrap();
+    }
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(dir.clone()));
+    let folder_key = view_key(&a, 0);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "2036");
+    pump(&mut a, 0);
+    assert_ne!(view_key(&a, 0), folder_key, "la búsqueda tiene su propia vista");
+    a.panes[0].tab_mut().list.set_filter(list::Column::Extension, vec!["PNG".into()]);
+    a.sync_folder_views();
+    assert_eq!(a.panes[0].tab().list.count(), 1);
+    assert_eq!(a.folder_views.get(&folder_key).filters, [(list::Column::Extension, vec!["PNG".to_string()])]);
+    assert!(a.folder_views.get(&view_key(&a, 0)).filters.is_empty(), "la entrada de la búsqueda no guarda filtros");
+    a.clear_filter(0);
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.filters, [(list::Column::Extension, vec!["PNG".to_string()])]);
+    assert_eq!(a.panes[0].tab().list.count(), 1);
+    go(&mut a, 0, Location::Path(other));
+    go(&mut a, 0, Location::Path(dir));
+    assert_eq!(a.panes[0].tab().list.filters, [(list::Column::Extension, vec!["PNG".to_string()])]);
+    // Cambiado justo antes de terminar la búsqueda (sin sincronizar en el medio): también queda.
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "2036");
+    pump(&mut a, 0);
+    a.panes[0].tab_mut().list.set_filter(list::Column::Extension, Vec::new());
+    a.clear_filter(0);
+    pump(&mut a, 0);
+    assert!(a.panes[0].tab().list.filters.is_empty());
+    assert!(a.folder_views.get(&folder_key).filters.is_empty());
+}
+
+/// El desplegable de filtros se cierra al cambiar de pestaña (no reaparece al volver), al abrir
+/// la paleta y al abrir un menú contextual.
+#[test]
+fn filter_menu_closes_on_tab_switch_palette_and_context_menu() {
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, Location::Path(fixture("filtro-cierra")));
+    a.paint();
+    let open = |a: &mut App| {
+        a.panes[0].tab_mut().list.open_filter_menu(list::Column::Type);
+        assert!(a.filter_menu_pane().is_some());
+    };
+    open(&mut a);
+    a.new_tab(0, Location::Path(fixture("filtro-cierra-2")), true);
+    a.run_command(Command::PrevTab);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None, "no reaparece al volver");
+    open(&mut a);
+    a.run_command(Command::NextTab);
+    a.select_tab(0, 0);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+    open(&mut a);
+    a.open_palette(PaletteMode::All);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+    a.close_palette();
+    open(&mut a);
+    a.on_right_down(10.0, 10.0);
+    assert_eq!(a.panes[0].tab().list.filter_menu(), None);
+}

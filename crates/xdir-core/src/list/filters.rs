@@ -16,8 +16,6 @@ pub const OPTION_H: f32 = 28.0;
 const MENU_PAD: f32 = 6.0;
 /// Separador antes de «Quitar el filtro»: 4 de aire, la línea y 4 más.
 const SEP_H: f32 = 9.0;
-/// Opciones a la vista como mínimo aunque el panel sea bajo (las demás, con la rueda).
-const MIN_ROWS: usize = 5;
 /// Botón de la flecha en el encabezado: 20 × 21, a 4 del borde derecho de la columna y de arriba.
 const BUTTON_W: f32 = 20.0;
 const BUTTON_H: f32 = 21.0;
@@ -207,12 +205,13 @@ impl FileList {
         self.layout_columns().into_iter().map(|c| c.1).find(|&col| self.filter_button_rect(col).is_some_and(|r| contains(&r, x, y)))
     }
 
-    /// Opciones del desplegable a la vista (las demás se ven con la rueda).
+    /// Opciones del desplegable a la vista: las que entran hasta el borde de abajo de la lista
+    /// (al menos una); las demás se ven con la rueda.
     fn menu_rows(&self) -> usize {
         let Some(m) = &self.menu else { return 0 };
         let top = self.area.top + HEADER_H;
         let fit = ((self.area.bottom - top - MENU_PAD * 2.0 - SEP_H - OPTION_H) / OPTION_H).floor().max(0.0) as usize;
-        m.options.len().min(fit.max(MIN_ROWS))
+        m.options.len().min(fit.max(1))
     }
 
     /// Rectángulo del desplegable: bajo el encabezado, pegado al borde derecho de su columna.
@@ -571,6 +570,21 @@ mod tests {
         assert!(l.filters.is_empty());
         assert_eq!(l.filter_menu(), None);
         assert_eq!(l.count(), 21);
+    }
+
+    /// En un panel bajo el desplegable no pasa del borde de abajo de la lista: muestra las
+    /// opciones que entran y el resto se ve con la rueda.
+    #[test]
+    fn filter_menu_fits_short_list() {
+        let mut l = photos();
+        l.area = rect(0.0, 0.0, 900.0, 160.0);
+        l.open_filter_menu(Column::Type);
+        let menu = l.filter_menu_rect().unwrap();
+        assert!(menu.bottom <= l.area.bottom, "{menu:?}");
+        assert!(l.filter_option_rect(0).is_some() && l.filter_option_rect(3).is_none());
+        assert!(l.filter_menu_wheel(-3.0));
+        assert!(l.filter_option_rect(3).is_some() && l.filter_option_rect(0).is_none());
+        assert!(!l.filter_menu_wheel(-3.0), "no pasa de la última");
     }
 
     /// Dibujo según `draw_filter_menu` (X33): opciones «Imagen JPEG (12)» en `Ui`, «Quitar el

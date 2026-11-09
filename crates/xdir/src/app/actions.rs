@@ -185,7 +185,7 @@ impl App {
                     if !path.exists() {
                         self.config = Config::load();
                     }
-                    open_in_editor(hwnd, &path);
+                    self.host.open_in_editor(&path);
                 }
             }
         }
@@ -302,17 +302,13 @@ impl App {
     }
 
     pub(super) fn redraw(&self) {
-        // Sin ventana todavía (o en pruebas) no hay nada que repintar: un HWND nulo invalidaría todas las ventanas.
-        if self.hwnd.is_null() {
-            return;
-        }
-        invalidate(self.hwnd);
+        self.host.invalidate();
     }
 
     /// Posición del mouse en DIPs del área de la ventana.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(super) fn cursor_pos(&self) -> (f32, f32) {
-        cursor_dips(self.hwnd, self.dpi)
+        self.host.cursor_dips()
     }
 }
 

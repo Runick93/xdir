@@ -172,7 +172,7 @@ impl App {
                     let (x, y) = self.mouse_pos(lparam);
                     // El desplegable de la barra de dirección no le quita el foco a la caja.
                     if !matches!(self.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
-                        focus_main(self.hwnd);
+                        self.host.focus_main();
                     }
                     self.on_left_down(x, y, msg == WM_LBUTTONDBLCLK);
                     LRESULT(0)
@@ -193,21 +193,23 @@ impl App {
                     LRESULT(0)
                 }
                 WM_MOUSELEAVE => {
-                    self.sys.tracking_mouse = false;
+                    if let Some(host) = Win32Host::current() {
+                        host.mouse_left();
+                    }
                     self.on_mouse_left();
                     LRESULT(0)
                 }
                 WM_MOUSEWHEEL => {
                     let (x, y) = self.cursor_pos();
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
-                    self.on_wheel(x, y, delta, wheel_lines());
+                    self.on_wheel(x, y, delta, self.host.wheel_lines());
                     LRESULT(0)
                 }
                 // Rueda horizontal (touchpad, mouse con inclinación).
                 0x020E => {
                     let (x, y) = self.cursor_pos();
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
-                    self.on_wheel_h(x, y, delta, wheel_lines());
+                    self.on_wheel_h(x, y, delta, self.host.wheel_lines());
                     LRESULT(0)
                 }
                 WM_XBUTTONUP => {

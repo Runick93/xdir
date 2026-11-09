@@ -201,7 +201,7 @@ impl App {
         let Some((edit, path)) = self.fav_edit.take() else { return };
         let text = edit.text();
         edit.destroy();
-        focus_main(self.hwnd);
+        self.host.focus_main();
         let name = text.trim().to_string();
         if commit && !name.is_empty() {
             if let Some(f) = self.favorites.get_mut(&path) {

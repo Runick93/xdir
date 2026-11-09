@@ -35,7 +35,7 @@ impl App {
         let Some(Rename { edit, path }) = self.rename.take() else { return };
         let text = edit.text();
         edit.destroy();
-        focus_main(self.hwnd);
+        self.host.focus_main();
         if commit {
             self.commit_rename(path, text.trim().to_string());
         }
@@ -141,7 +141,7 @@ impl App {
         self.suggest = None;
         let text = edit.text();
         edit.destroy();
-        focus_main(self.hwnd);
+        self.host.focus_main();
         if commit {
             self.go_to_text(pane, &text);
             let typed = text.trim().trim_matches('"');
@@ -165,7 +165,7 @@ impl App {
         self.end_edit(false);
         self.set_active(pane);
         if matches!(self.panes[pane].tab().location, Location::Shell { .. }) {
-            beep();
+            self.host.beep();
             return;
         }
         let r = self.panes[pane].search_text_rect();
@@ -184,7 +184,7 @@ impl App {
         let Some((edit, pane)) = self.filter_edit.take() else { return };
         let text = edit.text();
         edit.destroy();
-        focus_main_if_lost(self.hwnd);
+        self.host.focus_main_if_lost();
         self.pending_search = None;
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let tab = self.panes[pane].tab_mut();
@@ -255,11 +255,11 @@ impl App {
         if text.starts_with("shell:") || text.starts_with("::") {
             match fs::shell_location(text) {
                 Some(loc) => tab.navigate(hwnd, &tx, loc),
-                None => beep(),
+                None => self.host.beep(),
             }
             return;
         }
-        let mut path = PathBuf::from(expand_env(text));
+        let mut path = PathBuf::from(self.host.expand_env(text));
         if path.is_relative() {
             if let Location::Path(base) = &tab.location {
                 path = base.join(path);
@@ -295,7 +295,7 @@ impl App {
                 tab.focus_after_load(name.to_os_string());
             }
         } else {
-            beep();
+            self.host.beep();
         }
     }
 }

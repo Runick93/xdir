@@ -11,13 +11,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSAppearance, NSAppearanceNameAqua,
-    NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
-    NSBackingStoreType, NSColor, NSColorPanel, NSControl, NSControlTextEditingDelegate, NSCursor, NSDragOperation,
-    NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSEvent,
-    NSEventModifierFlags, NSFocusRingType, NSFont, NSMenu, NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSTextField,
-    NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWorkspace,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply, NSBackingStoreType,
+    NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSDragOperation, NSDraggingContext, NSDraggingDestination,
+    NSDraggingInfo, NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSMenu,
+    NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
@@ -27,9 +25,9 @@ use super::*;
 use crate::platform::{MenuAt, keys};
 
 /// Mensajes propios de la ventana de macOS (por encima de los de la aplicación).
-const MSG_CLOSE: u32 = WM_APP + 90;
+pub(super) const MSG_CLOSE: u32 = WM_APP + 90;
 /// Se eligió un color en el panel de colores: `lparam` = 0xRRGGBB.
-const MSG_ACCENT: u32 = WM_APP + 91;
+pub(super) const MSG_ACCENT: u32 = WM_APP + 91;
 /// Hay un comando de prueba en la cola (feature `pruebas`).
 #[cfg(feature = "pruebas")]
 const MSG_TEST: u32 = WM_APP + 92;
@@ -41,18 +39,16 @@ thread_local! {
     static WINDOW: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
     static VIEW: RefCell<Option<Retained<XdirView>>> = const { RefCell::new(None) };
     /// Último evento de mouse (para empezar a arrastrar desde la lista).
-    static LAST_MOUSE: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
+    pub(super) static LAST_MOUSE: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
     /// Rutas que se están arrastrando sobre la ventana.
     static DRAG_PATHS: RefCell<Option<Vec<PathBuf>>> = const { RefCell::new(None) };
     static TEXT_BOXES: RefCell<HashMap<u32, TextBoxData>> = RefCell::new(HashMap::new());
     static NEXT_TEXT_BOX: Cell<u32> = const { Cell::new(1) };
     static CLOSED: Cell<bool> = const { Cell::new(false) };
     /// Se está dibujando un cuadro (un pedido de repintar en ese momento AppKit lo descarta).
-    static DRAWING: Cell<bool> = const { Cell::new(false) };
-    /// Ya hay un cuadro programado para el próximo refresco de pantalla.
-    static FRAME_PENDING: Cell<bool> = const { Cell::new(false) };
+    pub(super) static DRAWING: Cell<bool> = const { Cell::new(false) };
     /// Objetos que tienen que vivir mientras la aplicación corre (delegados).
-    static KEEP: RefCell<Vec<Retained<NSObject>>> = const { RefCell::new(Vec::new()) };
+    pub(super) static KEEP: RefCell<Vec<Retained<NSObject>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// La aplicación, si ya existe (los eventos de AppKit pueden llegar antes o después).
@@ -65,11 +61,11 @@ fn with_app(f: impl FnOnce(&mut App)) {
     }
 }
 
-fn window() -> Option<Retained<NSWindow>> {
+pub(super) fn window() -> Option<Retained<NSWindow>> {
     WINDOW.with(|w| w.borrow().clone())
 }
 
-fn view() -> Option<Retained<XdirView>> {
+pub(super) fn view() -> Option<Retained<XdirView>> {
     VIEW.with(|v| v.borrow().clone())
 }
 
@@ -92,7 +88,8 @@ pub fn run() -> Result<(), String> {
     let (session, probe, start_path) = startup_args();
     let marks = vec![("init", ms_since(started))];
     let init = Init::load(session, probe, start_path, started, marks);
-    let mut app = Box::new(App::new(init)?);
+    let host = MacHost::new();
+    let mut app = Box::new(App::new(init, host.clone())?);
 
     let nsapp = NSApplication::sharedApplication(mtm);
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -113,6 +110,7 @@ pub fn run() -> Result<(), String> {
     VIEW.with(|v| *v.borrow_mut() = Some(view.clone()));
 
     app.hwnd = Handle(1);
+    host.attach(app.hwnd);
     app.dpi = 96;
     let scale = window.backingScaleFactor() as f32;
     app.renderer.set_size(INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32, scale);
@@ -136,7 +134,8 @@ pub fn run() -> Result<(), String> {
         #[cfg(feature = "arbol")]
         app.start_quick_access();
         app.marks.push(("ventana creada", ms_since(started)));
-        app.show();
+        let saved = app.window_state.take();
+        app.host.show(saved);
     });
     #[cfg(feature = "pruebas")]
     pruebas::start();
@@ -305,7 +304,7 @@ define_class!(
     /// abajo) para usar las mismas coordenadas que en Windows.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
-    struct XdirView;
+    pub(super) struct XdirView;
 
     unsafe impl NSObjectProtocol for XdirView {}
 
@@ -369,7 +368,7 @@ define_class!(
             with_app(|app| {
                 // El desplegable de la barra de dirección no le quita el foco a la caja.
                 if !matches!(app.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
-                    focus_main(app.hwnd);
+                    app.host.focus_main();
                 }
                 app.on_left_down(x, y, event.clickCount() >= 2);
             });
@@ -899,153 +898,6 @@ pub(super) fn popup_menu(_app: &App, entries: &[shell::Entry], pos: MenuPos, dot
     crate::platform::popup_menu(entries, at, dot)
 }
 
-// ---------- ventana ----------
-
-/// Devuelve el foco del teclado a la vista principal.
-pub(super) fn focus_main(_h: Handle) {
-    if let (Some(w), Some(v)) = (window(), view()) {
-        w.makeFirstResponder(Some(&v));
-    }
-}
-
-/// Devuelve el foco a la vista solo si nadie lo tiene (se cerró la caja que lo tenía).
-pub(super) fn focus_main_if_lost(h: Handle) {
-    let Some(w) = window() else { return };
-    let lost = match w.firstResponder() {
-        None => true,
-        Some(r) => r.isKindOfClass(NSWindow::class()),
-    };
-    if lost {
-        focus_main(h);
-    }
-}
-
-/// En macOS la vista recibe los arrastres aunque el mouse salga de ella.
-pub(super) fn capture_mouse(_h: Handle) {}
-
-pub(super) fn release_mouse() {}
-
-/// Pide repintar toda la ventana. Durante el dibujo (una animación que pide el cuadro siguiente)
-/// el pedido se programa para el próximo refresco de pantalla: AppKit descarta los que se hacen
-/// mientras dibuja, y la animación avanzaría solo con cada evento del mouse.
-pub(super) fn invalidate(_h: Handle) {
-    let Some(v) = view() else { return };
-    if !DRAWING.with(|d| d.get()) {
-        v.setNeedsDisplay(true);
-        return;
-    }
-    if FRAME_PENDING.with(|p| p.replace(true)) {
-        return;
-    }
-    let fps = v.window().and_then(|w| w.screen()).map_or(60, |s| s.maximumFramesPerSecond()).clamp(30, 240);
-    let when = dispatch2::DispatchTime::try_from(std::time::Duration::from_secs_f64(1.0 / fps as f64)).unwrap_or(dispatch2::DispatchTime::NOW);
-    let _ = dispatch2::DispatchQueue::main().after(when, || {
-        FRAME_PENDING.with(|p| p.set(false));
-        if let Some(v) = view() {
-            v.setNeedsDisplay(true);
-        }
-    });
-}
-
-/// Tamaño del área de la ventana en DIPs (puntos).
-pub(super) fn client_size(_h: Handle, _dpi: u32) -> (f32, f32) {
-    view().map_or((INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32), |v| {
-        let s = v.bounds().size;
-        (s.width as f32, s.height as f32)
-    })
-}
-
-/// Posición del mouse en DIPs del área de la ventana.
-#[allow(dead_code)]
-pub(super) fn cursor_dips(_h: Handle, _dpi: u32) -> (f32, f32) {
-    let (Some(w), Some(v)) = (window(), view()) else { return (0.0, 0.0) };
-    let p = v.convertPoint_fromView(w.mouseLocationOutsideOfEventStream(), None);
-    (p.x as f32, p.y as f32)
-}
-
-pub(super) fn set_title(_h: Handle, title: &str) {
-    if let Some(w) = window() {
-        w.setTitle(&NSString::from_str(title));
-    }
-}
-
-/// Pide cerrar la ventana (como el botón de cerrar).
-pub(super) fn request_close(h: Handle) {
-    h.post(MSG_CLOSE, 0, 0);
-}
-
-/// Sonido de "no se puede".
-pub(super) fn beep() {
-    objc2_app_kit::NSBeep();
-}
-
-/// Pregunta Sí / No / Cancelar. Some(true): sí; Some(false): no; None: cancelar.
-pub(super) fn ask_yes_no_cancel(_h: Handle, title: &str, text: &str) -> Option<bool> {
-    let mtm = MainThreadMarker::new()?;
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(title));
-    alert.setInformativeText(&NSString::from_str(text));
-    alert.setAlertStyle(NSAlertStyle::Informational);
-    alert.addButtonWithTitle(&NSString::from_str("Sí"));
-    alert.addButtonWithTitle(&NSString::from_str("No"));
-    alert.addButtonWithTitle(&NSString::from_str("Cancelar"));
-    match alert.runModal() {
-        r if r == NSAlertFirstButtonReturn => Some(true),
-        r if r == NSAlertSecondButtonReturn => Some(false),
-        _ => None,
-    }
-}
-
-/// Abre un enlace en el navegador predeterminado.
-pub(super) fn open_url(_h: Handle, url: &str) {
-    if let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) {
-        NSWorkspace::sharedWorkspace().openURL(&url);
-    }
-}
-
-/// Abre un archivo de configuración en el editor de texto predeterminado.
-pub(super) fn open_in_editor(_h: Handle, path: &std::path::Path) {
-    let _ = std::process::Command::new("open").arg("-t").arg(path).spawn();
-}
-
-/// Filas por "clic" de una rueda de mouse.
-#[allow(dead_code)]
-pub(super) fn wheel_lines() -> f32 {
-    3.0
-}
-
-/// Expande `~` y variables de entorno (`$HOME`, `${HOME}`).
-pub(super) fn expand_env(s: &str) -> String {
-    let mut s = s.to_string();
-    if s == "~" || s.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            s = format!("{}{}", home.to_string_lossy(), &s[1..]);
-        }
-    }
-    let mut out = String::new();
-    let mut rest = s.as_str();
-    while let Some(i) = rest.find('$') {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 1..];
-        let (name, len) = if let Some(inner) = after.strip_prefix('{') {
-            match inner.find('}') {
-                Some(end) => (&inner[..end], end + 2),
-                None => ("", 0),
-            }
-        } else {
-            let end = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(after.len());
-            (&after[..end], end)
-        };
-        match std::env::var(name).ok().filter(|_| !name.is_empty()) {
-            Some(v) => out.push_str(&v),
-            None => out.push_str(&rest[i..i + 1 + len]),
-        }
-        rest = &after[len..];
-    }
-    out.push_str(rest);
-    out
-}
-
 // ---------- métodos de App propios de macOS ----------
 
 impl App {
@@ -1057,22 +909,6 @@ impl App {
             style_field(&f, &theme);
         }
     }
-
-    /// Barra de título y menús al modo claro u oscuro del tema.
-    pub(super) fn apply_window_theme(&mut self) {
-        if let Some(w) = window() {
-            let name = unsafe { if self.theme.dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua } };
-            let appearance = NSAppearance::appearanceNamed(name);
-            // Siguiendo al sistema se deja la del sistema (así llegan sus cambios).
-            w.setAppearance(if self.dark_mode.is_some() { appearance.as_deref() } else { None });
-        }
-        self.renderer.set_transparent(false);
-        self.transparent = false;
-        self.update_edit_resources();
-    }
-
-    /// AppKit avisa solo cuando el mouse sale (con el área de seguimiento de la vista).
-    pub(super) fn track_mouse_leave(&mut self) {}
 
     /// Menú desplegable de una carpeta de favoritos o del desborde "»".
     pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: render::Rect) {
@@ -1103,102 +939,6 @@ impl App {
         if let Some(path) = ids.get(cmd as usize - 1).cloned() {
             self.activate_fav(pane, &path, key_down(VK_CONTROL));
         }
-    }
-
-    /// "Personalizado…": el panel de colores de macOS. El color se aplica al elegirlo.
-    pub(super) fn choose_custom_color(&mut self) {
-        let Some(mtm) = MainThreadMarker::new() else { return };
-        let current = match self.accent {
-            Accent::Rgb(c) => c,
-            Accent::System => theme::PRESETS[0].1,
-        };
-        let panel = NSColorPanel::sharedColorPanel(mtm);
-        let ch = |v: u32| v as f64 / 255.0;
-        panel.setColor(&NSColor::colorWithSRGBRed_green_blue_alpha(ch(current >> 16), ch((current >> 8) & 0xFF), ch(current & 0xFF), 1.0));
-        let target = ColorTarget::new(mtm);
-        unsafe {
-            panel.setTarget(Some(&target));
-            panel.setAction(Some(sel!(colorChanged:)));
-        }
-        KEEP.with(|k| k.borrow_mut().push(Retained::into_super(target)));
-        panel.orderFront(None);
-    }
-
-    /// Arrastra la selección hacia otras ventanas (o dentro de la misma).
-    pub(super) fn start_drag(&mut self, pane: usize) {
-        let items = self.selection_items(pane);
-        self.drag = Drag::None;
-        let (Some(view), Some(event), Some(mtm)) = (view(), LAST_MOUSE.with(|m| m.borrow().clone()), MainThreadMarker::new()) else { return };
-        if items.is_empty() {
-            return;
-        }
-        let at = view.convertPoint_fromView(event.locationInWindow(), None);
-        let ws = NSWorkspace::sharedWorkspace();
-        let dragging: Vec<Retained<NSDraggingItem>> = items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let path = NSString::from_str(&item.path.to_string_lossy());
-                let url = NSURL::fileURLWithPath(&path);
-                let drag = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), ProtocolObject::from_ref(&*url));
-                let icon = ws.iconForFile(&path);
-                let off = (i.min(4) * 4) as f64;
-                let frame = NSRect::new(NSPoint::new(at.x - 16.0 + off, at.y - 16.0 + off), NSSize::new(32.0, 32.0));
-                unsafe { drag.setDraggingFrame_contents(frame, Some(&icon)) };
-                drag
-            })
-            .collect();
-        let _ = mtm;
-        view.beginDraggingSessionWithItems_event_source(&NSArray::from_retained_slice(&dragging), &event, ProtocolObject::from_ref(&*view));
-    }
-
-    /// Posición y tamaño de la ventana (puntos de pantalla) y si está con zoom.
-    pub(super) fn window_placement(&self) -> Option<([i32; 4], bool)> {
-        let w = window()?;
-        let f = w.frame();
-        Some(([f.origin.x as i32, f.origin.y as i32, f.size.width as i32, f.size.height as i32], w.isZoomed()))
-    }
-
-    /// Muestra la ventana con la posición guardada (o el tamaño inicial, centrada).
-    pub(super) fn show(&mut self) {
-        let Some(w) = window() else { return };
-        match self.window_state.take() {
-            Some(([x, y, width, height], zoomed)) if width > 0 && height > 0 => {
-                let frame = NSRect::new(NSPoint::new(x as f64, y as f64), NSSize::new(width as f64, height as f64));
-                w.setFrame_display(frame, false);
-                if zoomed && !w.isZoomed() {
-                    w.zoom(None);
-                }
-            }
-            _ => w.center(),
-        }
-        w.makeKeyAndOrderFront(None);
-    }
-}
-
-define_class!(
-    /// Recibe los cambios del panel de colores.
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    struct ColorTarget;
-
-    unsafe impl NSObjectProtocol for ColorTarget {}
-
-    impl ColorTarget {
-        #[unsafe(method(colorChanged:))]
-        fn color_changed(&self, panel: &NSColorPanel) {
-            let Some(rgb) = panel.color().colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace()) else { return };
-            let ch = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-            let c = ch(rgb.redComponent()) << 16 | ch(rgb.greenComponent()) << 8 | ch(rgb.blueComponent());
-            Handle(1).post(MSG_ACCENT, 0, c as isize);
-        }
-    }
-);
-
-impl ColorTarget {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
-        unsafe { msg_send![super(this), init] }
     }
 }
 
@@ -1241,7 +981,7 @@ mod pruebas {
         let nums: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
         match (verb, nums.as_slice()) {
             ("captura", _) => capture(Path::new(rest)),
-            ("salir", _) => request_close(Handle(1)),
+            ("salir", _) => with_app(|app| app.host.request_close()),
             ("clic", [x, y]) => with_app(|app| {
                 app.on_left_down(*x, *y, false);
                 app.on_left_up(*x, *y);

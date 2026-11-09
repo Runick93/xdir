@@ -17,6 +17,22 @@ impl App {
         tab.list.selected_indices().map(|i| tab.entry_item(i)).collect()
     }
 
+    /// Arrastra la selección hacia otras ventanas (o dentro de la misma). Si el sistema no puede
+    /// arrastrar, se avisa en la barra de estado.
+    pub(super) fn start_drag(&mut self, pane: usize) {
+        let items = self.selection_items(pane);
+        if items.is_empty() {
+            return;
+        }
+        // En Windows el arrastre es un bucle modal: mientras dura llegan los eventos de soltar.
+        self.drag = Drag::None;
+        let host = self.host.clone();
+        if let Err(e) = host.start_drag(&items) {
+            self.notice = Some(format!("No se pudo arrastrar: {e}"));
+        }
+        self.redraw();
+    }
+
     pub(super) fn copy_selection(&mut self, cut: bool) {
         let items = self.selection_items(self.active);
         if !items.is_empty() {

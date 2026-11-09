@@ -76,7 +76,7 @@ impl App {
     pub(super) fn close_group_tab(&mut self, index: usize) {
         let Some(name) = self.groups.items.get(index).map(|g| g.name.clone()) else { return };
         let text = format!("¿Guardar «{name}» como grupo?\n\nSí: queda guardado. No: se descarta.");
-        let answer = ask_yes_no_cancel(self.hwnd, "Cerrar pestaña de grupo", &text);
+        let answer = self.host.ask_yes_no_cancel("Cerrar pestaña de grupo", &text);
         if answer == Some(true) {
             self.groups.items[index].temp = false;
             let _ = self.groups.save();
@@ -195,7 +195,7 @@ impl App {
             SAVE => self.open_palette(PaletteMode::GroupName),
             EDIT => {
                 if let Some(dir) = session::config_dir() {
-                    open_in_editor(self.hwnd, &dir.join("grupos.toml"));
+                    self.host.open_in_editor(&dir.join("grupos.toml"));
                 }
             }
             c if c >= DELETE => {

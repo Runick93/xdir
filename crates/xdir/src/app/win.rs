@@ -37,11 +37,6 @@ pub(super) struct Sys {
     /// Fuente y fondo de los controles de edición (siguen el DPI y el tema).
     pub edit_font: HFONT,
     pub edit_brush: HBRUSH,
-    /// Se mantiene viva mientras exista la ventana.
-    pub drop_target: Option<IDropTarget>,
-    pub tracking_mouse: bool,
-    /// Colores personalizados del selector de Windows, para que se recuerden entre usos.
-    pub custom_colors: [COLORREF; 16],
     /// Menú de favoritos abierto (para el clic derecho dentro del menú).
     pub fav_menu: Option<FavMenu>,
 }
@@ -51,9 +46,6 @@ impl Sys {
         Sys {
             edit_font: HFONT::default(),
             edit_brush: HBRUSH::default(),
-            drop_target: None,
-            tracking_mouse: false,
-            custom_colors: [COLORREF(0x00FFFFFF); 16],
             fav_menu: None,
         }
     }
@@ -133,7 +125,8 @@ pub fn run() -> windows::core::Result<()> {
         let marks = vec![("init", ms_since(started))];
         let init = Init::load(session, probe, start_path, started, marks);
         shell::set_menu_mode(init.session.dark_mode);
-        let app = App::new(init)?;
+        let host = Win32Host::install();
+        let app = App::new(init, host.clone())?;
         let app = Box::into_raw(Box::new(app));
 
         // La ventana se crea oculta para aplicar tema y tamaño antes de mostrarla (sin flash blanco).
@@ -167,11 +160,12 @@ pub fn run() -> windows::core::Result<()> {
 
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         (*app).sync_visibility();
-        (*app).sys.drop_target = drop::register((*app).hwnd.hwnd()).ok();
+        host.register_drop_target();
         #[cfg(feature = "arbol")]
         (*app).start_quick_access();
         (*app).marks.push(("ventana creada", ms_since(started)));
-        (*app).show();
+        let saved = (*app).window_state.take();
+        host.show(saved);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -189,10 +183,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let app = cs.lpCreateParams as *mut App;
             (*app).hwnd = crate::platform::handle_from_hwnd(hwnd);
             (*app).dpi = GetDpiForWindow(hwnd);
-            let mica = apply_window_theme(&(*app).theme, hwnd);
-            (*app).renderer.set_transparent(mica);
-            (*app).transparent = mica;
-            (*app).update_edit_resources();
+            (*app).host.attach((*app).hwnd);
+            (*app).apply_window_theme();
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
@@ -476,42 +468,6 @@ pub(super) fn popup_menu(app: &App, entries: &[shell::Entry], pos: MenuPos, dot:
     }
 }
 
-/// Ajusta la ventana al tema: barra de título oscura y fondo Mica (Windows 11).
-/// Devuelve si Mica quedó activo; en ese caso el marco se extiende a toda la ventana para
-/// que el fondo se vea donde la aplicación no pinta.
-fn apply_window_theme(theme: &Theme, hwnd: HWND) -> bool {
-    use std::ffi::c_void;
-    use windows::Win32::Graphics::Dwm::{
-        DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
-        DwmSetWindowAttribute,
-    };
-    use windows::Win32::UI::Controls::MARGINS;
-    use windows::core::BOOL;
-    let dark = BOOL::from(theme.dark);
-    unsafe {
-        // Los errores se ignoran: en versiones viejas de Windows el atributo no existe.
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &dark as *const _ as *const c_void,
-            size_of::<BOOL>() as u32,
-        );
-        let backdrop = DWMSBT_MAINWINDOW;
-        let mica = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &backdrop as *const _ as *const c_void,
-            size_of_val(&backdrop) as u32,
-        )
-        .is_ok();
-        if mica {
-            let all = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
-            return DwmExtendFrameIntoClientArea(hwnd, &all).is_ok();
-        }
-        false
-    }
-}
-
 /// Punto de color para marcar un ítem de menú (bitmap de 32 bits con alfa).
 fn accent_dot(c: Color, dpi: u32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
     use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DIB_RGB_COLORS};
@@ -548,122 +504,6 @@ fn accent_dot(c: Color, dpi: u32) -> Option<windows::Win32::Graphics::Gdi::HBITM
     Some(bitmap)
 }
 
-// ---------- ventana ----------
-
-/// Devuelve el foco del teclado a la ventana principal.
-pub(super) fn focus_main(h: Handle) {
-    unsafe {
-        let _ = SetFocus(Some(h.hwnd()));
-    }
-}
-
-/// Devuelve el foco a la ventana solo si nadie lo tiene (se cerró el control que lo tenía).
-pub(super) fn focus_main_if_lost(h: Handle) {
-    unsafe {
-        if GetFocus().is_invalid() {
-            let _ = SetFocus(Some(h.hwnd()));
-        }
-    }
-}
-
-/// El mouse sigue llegando a la ventana aunque salga de ella (arrastres).
-pub(super) fn capture_mouse(h: Handle) {
-    unsafe {
-        SetCapture(h.hwnd());
-    }
-}
-
-pub(super) fn release_mouse() {
-    unsafe {
-        let _ = ReleaseCapture();
-    }
-}
-
-/// Pide repintar toda la ventana.
-pub(super) fn invalidate(h: Handle) {
-    unsafe {
-        let _ = InvalidateRect(Some(h.hwnd()), None, false);
-    }
-}
-
-/// Tamaño del área de la ventana en DIPs.
-pub(super) fn client_size(h: Handle, dpi: u32) -> (f32, f32) {
-    let mut rc = RECT::default();
-    unsafe {
-        let _ = GetClientRect(h.hwnd(), &mut rc);
-    }
-    let k = 96.0 / dpi as f32;
-    ((rc.right - rc.left) as f32 * k, (rc.bottom - rc.top) as f32 * k)
-}
-
-/// Posición del mouse en DIPs del área de la ventana.
-pub(super) fn cursor_dips(h: Handle, dpi: u32) -> (f32, f32) {
-    let mut pt = POINT::default();
-    unsafe {
-        let _ = GetCursorPos(&mut pt);
-        let _ = ScreenToClient(h.hwnd(), &mut pt);
-    }
-    let k = 96.0 / dpi as f32;
-    (pt.x as f32 * k, pt.y as f32 * k)
-}
-
-pub(super) fn set_title(h: Handle, title: &str) {
-    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        let _ = SetWindowTextW(h.hwnd(), PCWSTR(wide.as_ptr()));
-    }
-}
-
-/// Pide cerrar la ventana (como el botón de cerrar).
-pub(super) fn request_close(h: Handle) {
-    h.post(WM_CLOSE, 0, 0);
-}
-
-/// Sonido de "no se puede".
-pub(super) fn beep() {
-    unsafe {
-        let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONWARNING);
-    }
-}
-
-/// Pregunta Sí / No / Cancelar. Some(true): sí; Some(false): no; None: cancelar.
-pub(super) fn ask_yes_no_cancel(h: Handle, title: &str, text: &str) -> Option<bool> {
-    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-    let answer = unsafe { MessageBoxW(Some(h.hwnd()), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNOCANCEL | MB_ICONQUESTION) };
-    if answer == IDYES {
-        Some(true)
-    } else if answer == IDNO {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// Abre un enlace en el navegador predeterminado.
-pub(super) fn open_url(h: Handle, url: &str) {
-    let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        ShellExecuteW(Some(h.hwnd()), w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
-    }
-}
-
-/// Abre un archivo de configuración con el programa asociado; si `.toml` no tiene ninguno, con el
-/// Bloc de notas.
-pub(super) fn open_in_editor(h: Handle, path: &std::path::Path) {
-    use std::os::windows::ffi::OsStrExt;
-    let hwnd = h.hwnd();
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    unsafe {
-        let r = ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
-        // Menor o igual a 32 es un error (p. ej. SE_ERR_NOASSOC: la extensión no tiene programa).
-        if r.0 as isize <= 32 {
-            let arg: Vec<u16> = format!("\"{}\"", path.display()).encode_utf16().chain(Some(0)).collect();
-            let _ = ShellExecuteW(Some(hwnd), w!("open"), w!("notepad.exe"), PCWSTR(arg.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
-        }
-    }
-}
-
 /// Ícono de la app (recurso 1) al tamaño de la métrica dada; nulo si no está (la clase usa el genérico).
 fn app_icon(instance: HINSTANCE, metric: SYSTEM_METRICS_INDEX) -> HICON {
     unsafe {
@@ -672,32 +512,6 @@ fn app_icon(instance: HINSTANCE, metric: SYSTEM_METRICS_INDEX) -> HICON {
             .map(|h| HICON(h.0))
             .unwrap_or_default()
     }
-}
-
-/// Líneas por "clic" de la rueda según la configuración de Windows.
-pub(super) fn wheel_lines() -> f32 {
-    let mut lines = 3u32;
-    unsafe {
-        let _ = SystemParametersInfoW(
-            SPI_GETWHEELSCROLLLINES,
-            0,
-            Some(&mut lines as *mut _ as *mut std::ffi::c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        );
-    }
-    // u32::MAX significa "una pantalla por clic"; se aproxima con 10 filas.
-    if lines == u32::MAX { 10.0 } else { lines as f32 }
-}
-
-/// Expande variables de entorno: "%USERPROFILE%\Descargas".
-pub(super) fn expand_env(s: &str) -> String {
-    let src: Vec<u16> = s.encode_utf16().chain(Some(0)).collect();
-    let mut buf = vec![0u16; 32 * 1024];
-    let n = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut buf)) } as usize;
-    if n == 0 || n > buf.len() {
-        return s.to_string();
-    }
-    String::from_utf16_lossy(&buf[..n - 1])
 }
 
 pub(super) fn colorref(c: Color) -> COLORREF {
@@ -741,27 +555,6 @@ impl App {
         }
     }
 
-    /// Ajusta la ventana al tema (barra de título oscura, Mica) y los controles de edición.
-    pub(super) fn apply_window_theme(&mut self) {
-        let mica = apply_window_theme(&self.theme, self.hwnd.hwnd());
-        self.renderer.set_transparent(mica);
-        self.transparent = mica;
-        self.update_edit_resources();
-    }
-
-    /// Pide a Windows el aviso de `WM_MOUSELEAVE` cuando el mouse salga de la ventana.
-    pub(super) fn track_mouse_leave(&mut self) {
-        if !self.sys.tracking_mouse {
-            let mut tme = TRACKMOUSEEVENT {
-                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
-                hwndTrack: self.hwnd.hwnd(),
-                dwHoverTime: 0,
-            };
-            self.sys.tracking_mouse = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
-        }
-    }
-
     /// Menú desplegable de una carpeta de favoritos o del desborde "»". Se puede hacer clic
     /// derecho sobre un favorito del menú (`WM_MENURBUTTONUP`).
     pub(super) fn show_fav_menu(&mut self, pane: usize, source: FavMenuSource, anchor: render::Rect) {
@@ -798,94 +591,6 @@ impl App {
             }
             unsafe {
                 let _ = EndMenu();
-            }
-        }
-    }
-
-    /// "Personalizado…": el selector de color de Windows (espectro, RGB y HSL).
-    pub(super) fn choose_custom_color(&mut self) {
-        let current = match self.accent {
-            Accent::Rgb(c) => c,
-            Accent::System => theme::PRESETS[0].1,
-        };
-        // COLORREF es 0x00BBGGRR.
-        let bgr = |c: u32| COLORREF((c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16));
-        let mut cc = CHOOSECOLORW {
-            lStructSize: size_of::<CHOOSECOLORW>() as u32,
-            hwndOwner: self.hwnd.hwnd(),
-            rgbResult: bgr(current),
-            lpCustColors: self.sys.custom_colors.as_mut_ptr(),
-            Flags: CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR,
-            ..Default::default()
-        };
-        if unsafe { ChooseColorW(&mut cc) }.as_bool() {
-            let c = cc.rgbResult.0;
-            self.set_accent(Accent::Rgb((c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF));
-        }
-    }
-
-    /// Arrastra la selección hacia otras ventanas (o dentro de la misma).
-    pub(super) fn start_drag(&mut self, pane: usize) {
-        let items = self.selection_items(pane);
-        if items.is_empty() {
-            return;
-        }
-        let obj = match shell::win32::data_object(&items) {
-            Ok(o) => o,
-            Err(e) => {
-                self.notice = Some(format!("No se pudo arrastrar: {e}"));
-                self.redraw();
-                return;
-            }
-        };
-        let result = unsafe {
-            let _ = ReleaseCapture();
-            self.drag = Drag::None;
-            // Bucle modal: mientras dura, los eventos de soltar llegan por `WM_APP_DRAG`.
-            SHDoDragDrop(Some(self.hwnd.hwnd()), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)
-        };
-        // Cancelar con Esc no es un error; que Windows no pueda arrastrar, sí: se avisa.
-        if let Err(e) = result {
-            self.notice = Some(format!("No se pudo arrastrar: {e}"));
-        }
-        self.redraw();
-    }
-
-    /// Posición y tamaño normales de la ventana (en píxeles de pantalla) y si está maximizada.
-    pub(super) fn window_placement(&self) -> Option<([i32; 4], bool)> {
-        let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        unsafe { GetWindowPlacement(self.hwnd.hwnd(), &mut wp) }.ok()?;
-        let r = wp.rcNormalPosition;
-        Some(([r.left, r.top, r.right - r.left, r.bottom - r.top], wp.showCmd == SW_SHOWMAXIMIZED.0 as u32))
-    }
-
-    /// Muestra la ventana con la posición guardada (o el tamaño inicial).
-    pub(super) fn show(&mut self) {
-        unsafe {
-            match self.window_state.take() {
-                Some(([x, y, w, h], maximized)) => {
-                    let wp = WINDOWPLACEMENT {
-                        length: size_of::<WINDOWPLACEMENT>() as u32,
-                        showCmd: if maximized { SW_SHOWMAXIMIZED.0 as u32 } else { SW_SHOWNORMAL.0 as u32 },
-                        rcNormalPosition: RECT { left: x, top: y, right: x + w, bottom: y + h },
-                        ..Default::default()
-                    };
-                    // Ajusta solo si la posición guardada quedó fuera de los monitores actuales.
-                    let _ = SetWindowPlacement(self.hwnd.hwnd(), &wp);
-                }
-                None => {
-                    let dpi = GetDpiForWindow(self.hwnd.hwnd());
-                    let _ = SetWindowPos(
-                        self.hwnd.hwnd(),
-                        None,
-                        0,
-                        0,
-                        scale(INITIAL_SIZE.0, dpi),
-                        scale(INITIAL_SIZE.1, dpi),
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                    let _ = ShowWindow(self.hwnd.hwnd(), SW_SHOW);
-                }
             }
         }
     }

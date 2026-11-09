@@ -153,7 +153,7 @@ impl App {
 
     /// Botón derecho apretado: prepara el menú contextual que llega al soltarlo.
     pub(super) fn on_right_down(&mut self, x: f32, y: f32) {
-        focus_main(self.hwnd);
+        self.host.focus_main();
         self.fav_ctx = None;
         self.header_ctx = None;
         self.term_ctx = None;

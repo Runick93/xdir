@@ -2,6 +2,8 @@
 //! y se ejercitan las transiciones de paneles, pestañas, layout y vistas.
 
 use super::*;
+use std::rc::Rc;
+use xdir_core::sys::testing::FakeHost;
 
 fn app() -> App {
     app_with(Init::blank())
@@ -10,8 +12,13 @@ fn app() -> App {
 /// Toda `App` de prueba sale de acá: primero los servicios del sistema falsos (el `Waker` solo
 /// cuenta los mensajes), así ningún hilo de trabajo los pide sin instalar.
 fn app_with(init: Init) -> App {
+    app_with_host(init, FakeHost::new())
+}
+
+/// Igual que `app_with`, con una ventana falsa propia para mirar qué le pidió la `App`.
+fn app_with_host(init: Init, host: Rc<FakeHost>) -> App {
     xdir_core::sys::testing::install_fakes();
-    App::new(init).expect("App sin ventana")
+    App::new(init, host).expect("App sin ventana")
 }
 
 /// La `App` de prueba usa el entorno falso: configuración en la carpeta temporal del hilo, una
@@ -999,4 +1006,79 @@ fn context_menu_own_entries_reach_shell() {
         })
         .collect();
     assert_eq!(&labels[..6], ["Ver", "Ordenar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+}
+
+// ---------- ventana (WindowHost) ----------
+
+/// El título de la ventana sigue al grupo cargado.
+#[test]
+fn title_follows_group_name() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.save_group("Trabajo");
+    a.group_name = None;
+    a.apply_group(0);
+    a.paint();
+    assert_eq!(host.titles().last().map(String::as_str), Some("xdir - Trabajo"));
+}
+
+/// Punto del panel de colores donde está «Personalizado…».
+fn custom_color_point(a: &App) -> (f32, f32) {
+    let (w, h) = a.client_dips();
+    let r = ui::picker_rect(w, h);
+    let mut y = r.top;
+    while y < r.bottom {
+        let x = (r.left + r.right) / 2.0;
+        if ui::picker_at(w, h, x, y) == Some(ui::PickerHit::Custom) {
+            return (x, y);
+        }
+        y += 1.0;
+    }
+    panic!("no se encontró «Personalizado…»");
+}
+
+fn click(a: &mut App, (x, y): (f32, f32)) {
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+}
+
+/// Si el selector no devuelve color (se canceló, o en macOS llega después), el acento no cambia.
+#[test]
+fn custom_color_none_keeps_accent() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    host.set_color_choice(None);
+    let before = a.accent;
+    a.picker_open = true;
+    let at = custom_color_point(&a);
+    click(&mut a, at);
+    assert_eq!(a.accent, before);
+}
+
+/// El color elegido en el selector modal queda como acento.
+#[test]
+fn custom_color_some_sets_accent() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    host.set_color_choice(Some(0xF85149));
+    a.picker_open = true;
+    let at = custom_color_point(&a);
+    click(&mut a, at);
+    assert_eq!(a.accent, Accent::Rgb(0xF85149));
+}
+
+/// Si el sistema no puede arrastrar, se avisa en la barra de estado.
+#[test]
+fn failed_drag_shows_notice() {
+    let host = FakeHost::new();
+    host.set_drag_result(Err("x".into()));
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("arrastre");
+    a.new_tab(0, Location::Path(dir), true);
+    let list = &mut a.panes[0].tab_mut().list;
+    list.append(vec![file_entry("a.txt")]);
+    list.select_all();
+    a.apply(0, Action::BeginDrag);
+    assert_eq!(a.notice.as_deref(), Some("No se pudo arrastrar: x"));
+    assert_eq!(a.drag, Drag::None);
 }

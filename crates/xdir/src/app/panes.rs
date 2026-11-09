@@ -229,7 +229,7 @@ impl App {
                 .collect(),
             ..Default::default()
         };
-        if let Some((window, maximized)) = self.window_placement() {
+        if let Some((window, maximized)) = self.host.placement() {
             s.window = Some(window);
             s.maximized = maximized;
         }

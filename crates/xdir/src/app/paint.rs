@@ -18,7 +18,7 @@ impl App {
             None => "xdir".to_string(),
         };
         if title != self.title {
-            set_title(self.hwnd, &title);
+            self.host.set_title(&title);
             self.title = title;
         }
 
@@ -223,7 +223,7 @@ impl App {
                     out += &format!("  {t:7.2}  {name}\n");
                 }
                 let _ = std::fs::write(path, out);
-                request_close(self.hwnd);
+                self.host.request_close();
             }
         }
     }

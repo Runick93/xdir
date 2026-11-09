@@ -18,7 +18,7 @@ impl App {
         self.picker_open = false;
         self.term_menu = None;
         let (w, _) = self.client_dips();
-        let items = palette::search(mode, "", &Sources { history: &self.history, favorites: &self.favorites, groups: &self.groups, keymap: &self.config.keymap }, expand_env);
+        let items = palette::search(mode, "", &Sources { history: &self.history, favorites: &self.favorites, groups: &self.groups, keymap: &self.config.keymap }, |s| self.host.expand_env(s));
         let pal = Palette::new(mode, items);
         let r = pal.input_rect(w);
         let y = (r.top + r.bottom) / 2.0 - 10.0;
@@ -30,9 +30,10 @@ impl App {
 
     /// Vuelve a buscar con lo escrito (cambió el texto o el modo).
     pub(super) fn refresh_palette(&mut self) {
+        let host = self.host.clone();
         let Some((pal, edit)) = &mut self.palette else { return };
         let query = edit.text();
-        pal.set_items(palette::search(pal.mode, &query, &Sources { history: &self.history, favorites: &self.favorites, groups: &self.groups, keymap: &self.config.keymap }, expand_env));
+        pal.set_items(palette::search(pal.mode, &query, &Sources { history: &self.history, favorites: &self.favorites, groups: &self.groups, keymap: &self.config.keymap }, |s| host.expand_env(s)));
         self.redraw();
     }
 
@@ -68,7 +69,7 @@ impl App {
     pub(super) fn close_palette(&mut self) {
         let Some((_, edit)) = self.palette.take() else { return };
         edit.destroy();
-        focus_main_if_lost(self.hwnd);
+        self.host.focus_main_if_lost();
         self.redraw();
     }
 

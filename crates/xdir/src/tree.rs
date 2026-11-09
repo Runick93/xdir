@@ -19,7 +19,7 @@ use crate::platform::WM_APP;
 
 use crate::anim;
 use crate::fs::{Location, QuickItem};
-use crate::render::{Painter, Rect, contains, rect};
+use crate::render::{FontId, Painter, Rect, contains, rect};
 use crate::theme::{Theme, alpha};
 
 /// Terminó de leerse una carpeta del árbol.
@@ -704,9 +704,9 @@ impl Tree {
     }
 
     /// `current`: carpeta del panel activo, resaltada si está a la vista.
-    pub fn draw(&mut self, p: &Painter, area: Rect, current: Option<&Path>) {
+    pub fn draw(&mut self, p: &dyn Painter, area: Rect, current: Option<&Path>) {
         self.area = area;
-        let th = p.theme;
+        let th = p.theme();
         let e = (self.expand.value / 100.0).clamp(0.0, 1.0);
         p.round_fill(area, 8.0, th.surface);
         let rows = self.rows();
@@ -718,7 +718,7 @@ impl Tree {
                 continue;
             }
             if n.text_w == 0.0 {
-                n.text_w = p.measure(&p.fonts.ui, &n.name);
+                n.text_w = p.measure(FontId::Ui, &n.name);
             }
             content_w = content_w.max(SIDE + 2.0 + n.depth as f32 * INDENT + 48.0 + n.text_w + SIDE + 8.0);
         }
@@ -754,7 +754,7 @@ impl Tree {
         let hs = self.hscroll;
         let body = rect(area.left + 1.0, area.top + TOP_PAD - 2.0, area.left + view_w - 1.0, area.top + view_h);
         let centered_x = area.left + (COLLAPSED_W - 22.0) / 2.0;
-        p.clip(body, || {
+        p.clip(body, &mut || {
             for (i, &id) in rows.iter().enumerate() {
                 let y = area.top + TOP_PAD + i as f32 * ROW_H - self.scroll;
                 if y + ROW_H < area.top || y > area.top + view_h {
@@ -781,12 +781,12 @@ impl Tree {
                 let has_children = n.children.as_ref().is_none_or(|c| !c.is_empty());
                 if has_children && e > 0.05 {
                     let glyph = if n.loading { "\u{E712}" } else if n.expanded { "\u{E70D}" } else { "\u{E76C}" };
-                    p.text(&p.fonts.glyphs_small, glyph, rect(x, y, x + 16.0, y + ROW_H), alpha(th.text_dim, e * e));
+                    p.text(FontId::GlyphsSmall, glyph, rect(x, y, x + 16.0, y + ROW_H), alpha(th.text_dim, e * e));
                 }
                 let (icon, color) = self.icon(n, th);
-                p.text(&p.fonts.glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
+                p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
                 if e > 0.05 {
-                    p.text(&p.fonts.ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
+                    p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
                     if self.shows_pin(n) {
                         let slot = rect(row.right - 26.0, y + 5.0, row.right - 4.0, y + ROW_H - 5.0);
                         let hot = self.pin_hover == Some(id);
@@ -794,7 +794,7 @@ impl Tree {
                             p.round_fill(slot, 5.0, alpha(th.text, 0.12));
                         }
                         let c = if hot { th.text } else { th.text_dim };
-                        p.text(&p.fonts.glyphs_small, PIN_GLYPH, slot, alpha(c, e * e));
+                        p.text(FontId::GlyphsSmall, PIN_GLYPH, slot, alpha(c, e * e));
                     }
                 }
             }
@@ -804,7 +804,7 @@ impl Tree {
         if e > 0.05 {
             static USER_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
             let user = USER_NAME.get_or_init(|| std::env::var("USERNAME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "Inicio".to_string()));
-            p.text(&p.fonts.ui_bold, user, rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), alpha(th.text_dim, e * e));
+            p.text(FontId::UiBold, user, rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), alpha(th.text_dim, e * e));
         }
         // En la franja de íconos no hay chincheta: aparece al expandirse.
         if e > 0.05 {
@@ -813,7 +813,7 @@ impl Tree {
                 p.round_fill(btn, 5.0, alpha(th.hover, e * e));
             }
             let (glyph, color) = if self.pinned { (PIN_GLYPH, th.accent) } else { ("\u{E718}", if self.toggle_hot { th.text } else { th.text_dim }) };
-            p.text(&p.fonts.glyphs_small, glyph, btn, alpha(color, e * e));
+            p.text(FontId::GlyphsSmall, glyph, btn, alpha(color, e * e));
         }
 
         // Contorno gris, como el de los paneles que no están activos.

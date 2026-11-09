@@ -3,7 +3,7 @@
 
 use crate::platform::Color;
 use crate::icons::Pixels;
-use crate::render::{Painter, Rect, contains, rect};
+use crate::render::{FontId, Painter, Rect, contains, rect};
 use crate::theme::alpha;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -55,22 +55,22 @@ pub fn at(w: f32, h: f32, x: f32, y: f32) -> Option<AboutHit> {
     })
 }
 
-pub fn draw(p: &Painter, w: f32, h: f32, hover: Option<AboutHit>) {
-    let th = p.theme;
+pub fn draw(p: &dyn Painter, w: f32, h: f32, hover: Option<AboutHit>) {
+    let th = p.theme();
     // Velo sobre la ventana, para que el diálogo se lea como modal.
     p.fill(rect(0.0, 0.0, w, h), Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
     let pn = panel(w, h);
     p.round_fill(rect(pn.left - 2.0, pn.top, pn.right + 2.0, pn.bottom + 4.0), 14.0, alpha(th.background, 0.5));
     p.round_fill(pn, 12.0, th.surface_alt);
     // Franja del logo: el panel entero en oscuro, recortado a la parte de arriba.
-    p.clip(rect(pn.left, pn.top, pn.right, pn.top + BANNER_H), || p.round_fill(pn, 12.0, BANNER));
+    p.clip(rect(pn.left, pn.top, pn.right, pn.top + BANNER_H), &mut || p.round_fill(pn, 12.0, BANNER));
     p.logo(rect(pn.left + 28.0, pn.top + 14.0, pn.right - 28.0, pn.top + BANNER_H - 14.0));
     p.round_stroke(pn, 12.0, th.border);
 
     let line = |top: f32, bottom: f32| rect(pn.left + 20.0, top, pn.right - 20.0, bottom);
-    p.text(&p.fonts.ui_bold, &format!("xdir {VERSION}"), line(pn.top + BANNER_H + 8.0, pn.top + BANNER_H + 34.0), th.text);
+    p.text(FontId::UiBold, &format!("xdir {VERSION}"), line(pn.top + BANNER_H + 8.0, pn.top + BANNER_H + 34.0), th.text);
     p.text(
-        &p.fonts.ui,
+        FontId::Ui,
         "Explorador de archivos multipanel para Windows.",
         line(pn.top + BANNER_H + 34.0, pn.top + BANNER_H + 58.0),
         th.text_dim,
@@ -80,6 +80,25 @@ pub fn draw(p: &Painter, w: f32, h: f32, hover: Option<AboutHit>) {
     if hover == Some(AboutHit::Report) {
         p.round_fill(r, 6.0, th.hover);
     }
-    p.text(&p.fonts.glyphs, "\u{E783}", rect(r.left + 6.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
-    p.text(&p.fonts.ui, "Reportar un problema o sugerir algo", rect(r.left + 38.0, r.top, r.right - 8.0, r.bottom), th.text);
+    p.text(FontId::Glyphs, "\u{E783}", rect(r.left + 6.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
+    p.text(FontId::Ui, "Reportar un problema o sugerir algo", rect(r.left + 38.0, r.top, r.right - 8.0, r.bottom), th.text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xdir_core::sys::testing::RecordingPainter;
+
+    /// El nombre «xdir» con la versión va en la fuente de interfaz en seminegrita (como hoy).
+    #[test]
+    fn about_title_uses_bold_font() {
+        xdir_core::sys::testing::install_fakes();
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        draw(&p, 800.0, 600.0, None);
+        let title = format!("xdir {VERSION}");
+        let texts = p.texts();
+        let found: Vec<_> = texts.iter().filter(|(_, s, _)| *s == title).collect();
+        assert_eq!(found.len(), 1, "{texts:?}");
+        assert_eq!(found[0].0, FontId::UiBold);
+    }
 }

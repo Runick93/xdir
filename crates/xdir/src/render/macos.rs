@@ -25,6 +25,7 @@ use crate::icons::{self, Pixels};
 use crate::platform::Handle;
 use crate::theme::Theme;
 use crate::thumbs;
+use xdir_core::paint::{self, FontId, Painter as _};
 
 /// Formato de texto: fuente, alineación y si corta en varias líneas. Los formatos de glifos
 /// dibujan SF Symbols.
@@ -38,24 +39,8 @@ pub struct TextFormat {
     size: f32,
 }
 
-pub struct Fonts {
-    /// Texto normal, alineado a la izquierda, con "…" si no entra.
-    pub ui: TextFormat,
-    pub ui_right: TextFormat,
-    pub ui_center: TextFormat,
-    pub ui_bold: TextFormat,
-    /// Títulos (16, seminegrita): barra superior y tarjeta de xtree.
-    pub title: TextFormat,
-    /// Texto chico (11,5): rótulos del mapa y de la barra de datos de xtree.
-    pub small: TextFormat,
-    /// Texto chico en seminegrita (12,5): carpetas de primer nivel del mapa de xtree.
-    pub small_bold: TextFormat,
-    /// Íconos de interfaz (SF Symbols).
-    pub glyphs: TextFormat,
-    pub glyphs_small: TextFormat,
-    /// Nombre debajo de una miniatura: centrado, arriba, partido en varias líneas y con "…" si no entra.
-    pub label: TextFormat,
-}
+/// Formatos de texto, uno por `FontId` (en el orden del enum).
+pub struct Fonts([TextFormat; FontId::COUNT]);
 
 pub struct Renderer {
     fonts: Fonts,
@@ -86,7 +71,7 @@ impl Renderer {
 
     /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados).
     pub fn text_width(&self, s: &str, bold: bool) -> f32 {
-        measure(if bold { &self.fonts.ui_bold } else { &self.fonts.ui }, s)
+        measure(if bold { self.fonts.get(FontId::UiBold) } else { self.fonts.get(FontId::Ui) }, s)
     }
 
     /// Tamaño del área en puntos; `dpi` = 96 × píxeles por punto.
@@ -120,7 +105,7 @@ impl Renderer {
         _dpi: u32,
         theme: &Theme,
         file_colors: &[ColorRule],
-        paint: impl FnOnce(&Painter, f32, f32),
+        paint: impl FnOnce(&dyn paint::Painter, f32, f32),
     ) -> Result<(), String> {
         self.images.borrow_mut().handle = owner;
         let Some(ctx) = NSGraphicsContext::currentContext() else { return Ok(()) };
@@ -135,9 +120,9 @@ impl Renderer {
 
 pub struct Painter<'a> {
     cg: &'a CGContext,
-    pub theme: &'a Theme,
-    pub fonts: &'a Fonts,
-    pub file_colors: &'a [ColorRule],
+    theme: &'a Theme,
+    fonts: &'a Fonts,
+    file_colors: &'a [ColorRule],
     images: &'a RefCell<Images>,
     scale: f32,
 }
@@ -176,13 +161,15 @@ impl Painter<'_> {
         CGContext::add_arc_to_point(c, l, t, rr, t, radius);
         CGContext::close_path(c);
     }
+}
 
-    pub fn fill(&self, r: Rect, c: Color) {
+impl paint::Painter for Painter<'_> {
+    fn fill(&self, r: Rect, c: Color) {
         self.set_fill(c);
         CGContext::fill_rect(self.ctx(), cgr(r));
     }
 
-    pub fn round_fill(&self, r: Rect, radius: f32, c: Color) {
+    fn round_fill(&self, r: Rect, radius: f32, c: Color) {
         self.set_fill(c);
         CGContext::begin_path(self.ctx());
         self.add_round_rect(r, radius);
@@ -191,7 +178,7 @@ impl Painter<'_> {
 
     /// Polígono con esquinas redondeadas: cada punto es (x, y, radio de la esquina). Abierto, los
     /// extremos no se redondean.
-    pub fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, stroke: Option<(Color, f32)>) {
+    fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, stroke: Option<(Color, f32)>) {
         let n = pts.len();
         if n < 2 {
             return;
@@ -243,18 +230,18 @@ impl Painter<'_> {
         }
     }
 
-    pub fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
+    fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
         self.set_fill(fill);
         CGContext::fill_ellipse_in_rect(self.ctx(), cgr(rect(cx - radius, cy - radius, cx + radius, cy + radius)));
     }
 
-    pub fn circle_stroke(&self, cx: f32, cy: f32, radius: f32, c: Color, width: f32) {
+    fn circle_stroke(&self, cx: f32, cy: f32, radius: f32, c: Color, width: f32) {
         self.set_stroke(c, width);
         CGContext::stroke_ellipse_in_rect(self.ctx(), cgr(rect(cx - radius, cy - radius, cx + radius, cy + radius)));
     }
 
     /// Contorno redondeado de grosor arbitrario.
-    pub fn round_stroke_w(&self, r: Rect, radius: f32, c: Color, width: f32) {
+    fn round_stroke_w(&self, r: Rect, radius: f32, c: Color, width: f32) {
         self.set_stroke(c, width);
         let h = width / 2.0;
         CGContext::begin_path(self.ctx());
@@ -262,11 +249,12 @@ impl Painter<'_> {
         CGContext::stroke_path(self.ctx());
     }
 
-    pub fn round_stroke(&self, r: Rect, radius: f32, c: Color) {
+    fn round_stroke(&self, r: Rect, radius: f32, c: Color) {
         self.round_stroke_w(r, radius, c, 1.0);
     }
 
-    pub fn text(&self, format: &TextFormat, s: &str, r: Rect, c: Color) {
+    fn text(&self, font: FontId, s: &str, r: Rect, c: Color) {
+        let format = self.fonts.get(font);
         if r.right <= r.left || s.is_empty() {
             return;
         }
@@ -294,19 +282,19 @@ impl Painter<'_> {
         CGContext::restore_g_state(self.ctx());
     }
 
-    pub fn measure(&self, format: &TextFormat, s: &str) -> f32 {
-        measure(format, s)
+    fn measure(&self, font: FontId, s: &str) -> f32 {
+        measure(self.fonts.get(font), s)
     }
 
     /// Dibuja el ícono `index` (ver `icons`) en un cuadrado de `size` DIPs.
-    pub fn shell_icon(&self, index: i32, _overlay: u8, x: f32, y: f32, size: f32) {
+    fn shell_icon(&self, index: i32, _overlay: u8, x: f32, y: f32, size: f32) {
         let Some(image) = icons::image(index) else { return };
         draw_ns_image(&image, rect(x, y, x + size, y + size));
     }
 
     /// Miniatura centrada en `r`, sin deformar y sin agrandarla más que su tamaño en píxeles.
     /// Devuelve false si todavía no está (se dibuja otra cosa).
-    pub fn thumbnail(&self, key: &thumbs::Key, r: Rect) -> bool {
+    fn thumbnail(&self, key: &thumbs::Key, r: Rect) -> bool {
         let image = {
             let mut images = self.images.borrow_mut();
             for (k, px) in thumbs::take_done() {
@@ -337,7 +325,7 @@ impl Painter<'_> {
     }
 
     /// Logo de Runick centrado en `r` sin deformarlo.
-    pub fn logo(&self, r: Rect) {
+    fn logo(&self, r: Rect) {
         let image = {
             let mut images = self.images.borrow_mut();
             if images.logo.is_none() {
@@ -354,18 +342,27 @@ impl Painter<'_> {
     }
 
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
-    pub fn thumb_px(&self, dips: f32) -> u32 {
+    fn thumb_px(&self, dips: f32) -> u32 {
         (dips * self.scale).round() as u32
     }
 
-    pub fn clip<R>(&self, r: Rect, f: impl FnOnce() -> R) -> R {
+    fn clip(&self, r: Rect, f: &mut dyn FnMut()) {
         CGContext::save_g_state(self.ctx());
         CGContext::clip_to_rect(self.ctx(), cgr(r));
-        let out = f();
+        f();
         CGContext::restore_g_state(self.ctx());
-        out
     }
 
+    fn theme(&self) -> &Theme {
+        self.theme
+    }
+
+    fn file_colors(&self) -> &[ColorRule] {
+        self.file_colors
+    }
+}
+
+impl Painter<'_> {
     /// Una imagen de Core Graphics en `r`: la vista está invertida, así que se dibuja dándola vuelta.
     fn draw_cg_image(&self, image: &CGImage, r: Rect) {
         let c = self.ctx();
@@ -468,18 +465,33 @@ impl Fonts {
             para.setLineBreakMode(if wrap { NSLineBreakMode::ByWordWrapping } else { NSLineBreakMode::ByTruncatingTail });
             TextFormat { font, para, wrap, glyph, size }
         };
-        Fonts {
-            ui: make(13.0, false, NSTextAlignment::Left, false, false),
-            ui_right: make(13.0, false, NSTextAlignment::Right, false, false),
-            ui_center: make(13.0, false, NSTextAlignment::Center, false, false),
-            ui_bold: make(13.0, true, NSTextAlignment::Left, false, false),
-            title: make(16.0, true, NSTextAlignment::Left, false, false),
-            small: make(11.5, false, NSTextAlignment::Left, false, false),
-            small_bold: make(12.5, true, NSTextAlignment::Left, false, false),
-            glyphs: make(13.0, false, NSTextAlignment::Center, false, true),
-            glyphs_small: make(10.0, false, NSTextAlignment::Center, false, true),
-            label: make(12.0, false, NSTextAlignment::Center, true, false),
-        }
+        // En el orden de `FontId`.
+        Fonts([
+            // Ui: texto normal, alineado a la izquierda, con "…" si no entra.
+            make(13.0, false, NSTextAlignment::Left, false, false),
+            // UiRight
+            make(13.0, false, NSTextAlignment::Right, false, false),
+            // UiCenter
+            make(13.0, false, NSTextAlignment::Center, false, false),
+            // UiBold
+            make(13.0, true, NSTextAlignment::Left, false, false),
+            // Title: títulos (16, seminegrita).
+            make(16.0, true, NSTextAlignment::Left, false, false),
+            // Small: texto chico (11,5).
+            make(11.5, false, NSTextAlignment::Left, false, false),
+            // SmallBold: texto chico en seminegrita (12,5).
+            make(12.5, true, NSTextAlignment::Left, false, false),
+            // Glyphs: íconos de interfaz (SF Symbols).
+            make(13.0, false, NSTextAlignment::Center, false, true),
+            // GlyphsSmall
+            make(10.0, false, NSTextAlignment::Center, false, true),
+            // Label: nombre debajo de una miniatura, centrado, arriba y en varias líneas.
+            make(12.0, false, NSTextAlignment::Center, true, false),
+        ])
+    }
+
+    fn get(&self, id: FontId) -> &TextFormat {
+        &self.0[id as usize]
     }
 }
 

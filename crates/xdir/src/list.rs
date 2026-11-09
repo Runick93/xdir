@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::format;
 use crate::fs::Entry;
-use crate::render::{Painter, Rect, contains, rect};
+use crate::render::{FontId, Painter, Rect, contains, rect};
 use crate::theme::alpha;
 use crate::thumbs;
 
@@ -288,29 +288,7 @@ fn filter_matches(parts: &[String], name: &str) -> bool {
         || parts.iter().any(|p| if p.contains(['*', '?']) { wildcard(p, name) } else { name.contains(p.as_str()) })
 }
 
-/// Comodines de Windows: `*` cualquier secuencia, `?` un carácter. Sin recursión: vuelve al
-/// último `*` cuando algo no coincide.
-pub fn wildcard(pattern: &str, text: &str) -> bool {
-    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
-    let (mut i, mut j) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while j < t.len() {
-        if i < p.len() && (p[i] == '?' || p[i] == t[j]) {
-            i += 1;
-            j += 1;
-        } else if i < p.len() && p[i] == '*' {
-            star = Some((i, j));
-            i += 1;
-        } else if let Some((si, sj)) = star {
-            i = si + 1;
-            j = sj + 1;
-            star = Some((si, sj + 1));
-        } else {
-            return false;
-        }
-    }
-    p[i..].iter().all(|&c| c == '*')
-}
+pub use xdir_core::config::wildcard;
 
 impl Default for FileList {
     fn default() -> Self {
@@ -1391,10 +1369,10 @@ impl FileList {
 
     // ---------- dibujo ----------
 
-    pub fn draw(&mut self, p: &Painter, area: Rect, active: bool) {
+    pub fn draw(&mut self, p: &dyn Painter, area: Rect, active: bool) {
         self.area = area;
         self.clamp_scroll();
-        let th = p.theme;
+        let th = p.theme();
         let cols = self.columns();
 
         p.fill(area, th.surface);
@@ -1414,14 +1392,14 @@ impl FileList {
             if dragging == Some(col) {
                 p.fill(rect(left, header.top, right, header.bottom - 1.0), alpha(th.accent, 0.18));
             }
-            let format = if col.right_aligned() { &p.fonts.ui_right } else { &p.fonts.ui_bold };
+            let format = if col.right_aligned() { FontId::UiRight } else { FontId::UiBold };
             let text_r = rect(left + PAD, header.top, right - PAD, header.bottom);
             p.text(format, col.title(), text_r, th.text_dim);
             if col == self.sort {
                 // Chevron arriba/abajo de Segoe Fluent Icons.
                 let glyph = if self.descending { "\u{E70D}" } else { "\u{E70E}" };
                 let gx = if col.right_aligned() { left + 2.0 } else { right - 22.0 };
-                p.text(&p.fonts.glyphs, glyph, rect(gx, header.top, gx + 20.0, header.bottom), th.text_dim);
+                p.text(FontId::Glyphs, glyph, rect(gx, header.top, gx + 20.0, header.bottom), th.text_dim);
             }
             if left > area.left {
                 p.fill(rect(left, header.top + 7.0, left + 1.0, header.bottom - 7.0), th.border);
@@ -1437,7 +1415,7 @@ impl FileList {
         let grid = self.view.is_grid();
 
         let mut ends = Vec::with_capacity(last - first);
-        p.clip(rows, || {
+        p.clip(rows, &mut || {
             for pos in first..last {
                 let idx = self.visible[pos] as usize;
                 let e = &self.entries[idx];
@@ -1466,7 +1444,7 @@ impl FileList {
                 }
 
                 // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
-                let color = crate::config::color_for(p.file_colors, &e.sort_key, e.is_dir, e.attrs)
+                let color = crate::config::color_for(p.file_colors(), &e.sort_key, e.is_dir, e.attrs)
                     .unwrap_or(if e.is_hidden() { th.text_dim } else { th.text });
                 if grid {
                     self.draw_cell(p, e, row, color);
@@ -1479,15 +1457,15 @@ impl FileList {
                             let iy = y + (ROW_H - ICON) / 2.0;
                             p.shell_icon(e.icon, e.overlay, cell.left, iy, ICON);
                             let text = rect(cell.left + ICON + 8.0, y, cell.right, y + ROW_H);
-                            p.text(&p.fonts.ui, &e.display, text, color);
-                            ends.push(text.left + p.measure(&p.fonts.ui, &e.display) + 6.0);
+                            p.text(FontId::Ui, &e.display, text, color);
+                            ends.push(text.left + p.measure(FontId::Ui, &e.display) + 6.0);
                         }
-                        Column::Modified => p.text(&p.fonts.ui, &format::date(e.modified), cell, th.text_secondary),
-                        Column::Created => p.text(&p.fonts.ui, &format::date(e.created), cell, th.text_secondary),
-                        Column::Type => p.text(&p.fonts.ui, &e.type_name, cell, th.text_secondary),
-                        Column::Extension => p.text(&p.fonts.ui, extension_of(e), cell, th.text_secondary),
-                        Column::Attributes => p.text(&p.fonts.ui, &attr_letters(e.attrs), cell, th.text_secondary),
-                        Column::Folder => p.text(&p.fonts.ui, &relative_folder(self.search_root.as_deref(), e), cell, th.text_secondary),
+                        Column::Modified => p.text(FontId::Ui, &format::date(e.modified), cell, th.text_secondary),
+                        Column::Created => p.text(FontId::Ui, &format::date(e.created), cell, th.text_secondary),
+                        Column::Type => p.text(FontId::Ui, &e.type_name, cell, th.text_secondary),
+                        Column::Extension => p.text(FontId::Ui, extension_of(e), cell, th.text_secondary),
+                        Column::Attributes => p.text(FontId::Ui, &attr_letters(e.attrs), cell, th.text_secondary),
+                        Column::Folder => p.text(FontId::Ui, &relative_folder(self.search_root.as_deref(), e), cell, th.text_secondary),
                         Column::Size => {
                             let s = match (e.is_dir, e.modified) {
                                 // Unidades (sin fecha): capacidad total.
@@ -1495,7 +1473,7 @@ impl FileList {
                                 (true, _) => String::new(),
                                 (false, _) => format::size_kb(e.size),
                             };
-                            p.text(&p.fonts.ui_right, &s, cell, th.text_secondary);
+                            p.text(FontId::UiRight, &s, cell, th.text_secondary);
                         }
                     }
                 }
@@ -1522,7 +1500,7 @@ impl FileList {
     }
 
     /// Celda de la cuadrícula: miniatura (o ícono grande) arriba y el nombre en hasta dos líneas.
-    fn draw_cell(&self, p: &Painter, e: &Entry, cell: Rect, color: Color) {
+    fn draw_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color) {
         let size = self.view.icon();
         let cx = (cell.left + cell.right) / 2.0;
         let image = rect(cx - size / 2.0, cell.top + 6.0, cx + size / 2.0, cell.top + 6.0 + size);
@@ -1540,7 +1518,7 @@ impl FileList {
             p.shell_icon(e.icon, e.overlay, ix, iy, small);
         }
         let label = rect(cell.left + 4.0, image.bottom + 4.0, cell.right - 4.0, cell.bottom - 2.0);
-        p.text(&p.fonts.label, &e.display, label, color);
+        p.text(FontId::Label, &e.display, label, color);
     }
 }
 
@@ -1782,6 +1760,25 @@ mod column_tests {
         l.toggle_column(Column::Name);
         assert!(l.columns.iter().any(|c| c.col == Column::Name));
         assert_eq!(attr_letters(0x1 | 0x2 | 0x20), "RHA");
+    }
+
+    /// La columna Tamaño va alineada a la derecha: su texto usa `FontId::UiRight`.
+    #[test]
+    fn list_size_column_is_right_aligned() {
+        use xdir_core::sys::testing::RecordingPainter;
+        xdir_core::sys::testing::install_fakes();
+        let mut l = list(800.0);
+        let mut e = entry("datos.bin");
+        e.size = 2048;
+        l.append(vec![e]);
+        l.set_view(View::Details);
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        l.draw(&p, rect(0.0, 0.0, 800.0, 400.0), true);
+        let size = format::size_kb(2048);
+        let texts = p.texts();
+        let found: Vec<_> = texts.iter().filter(|(_, s, _)| *s == size).collect();
+        assert_eq!(found.len(), 1, "{texts:?}");
+        assert_eq!(found[0].0, FontId::UiRight);
     }
 }
 

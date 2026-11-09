@@ -2,20 +2,20 @@
 
 use xdir_core::typed::{MAX_ROWS, Suggest};
 
-use crate::render::{Painter, rect};
+use crate::render::{FontId, Painter, rect};
 use crate::theme::alpha;
 
 /// `Suggest::draw`: el desplegable se dibuja con el `Painter` de la ventana.
 pub trait SuggestDraw {
-    fn draw(&self, p: &Painter);
+    fn draw(&self, p: &dyn Painter);
 }
 
 impl SuggestDraw for Suggest {
-    fn draw(&self, p: &Painter) {
+    fn draw(&self, p: &dyn Painter) {
         if self.items.is_empty() {
             return;
         }
-        let th = p.theme;
+        let th = p.theme();
         let panel = self.rect();
         let scroll = self.scroll();
         p.round_fill(rect(panel.left - 2.0, panel.top, panel.right + 2.0, panel.bottom + 4.0), 10.0, alpha(th.background, 0.6));
@@ -28,7 +28,7 @@ impl SuggestDraw for Suggest {
             } else if self.hover == Some(i) {
                 p.round_fill(r, 5.0, th.hover);
             }
-            p.text(&p.fonts.ui, item, rect(r.left + 8.0, r.top, r.right - 8.0, r.bottom), th.text);
+            p.text(FontId::Ui, item, rect(r.left + 8.0, r.top, r.right - 8.0, r.bottom), th.text);
         }
     }
 }

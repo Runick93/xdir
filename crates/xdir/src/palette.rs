@@ -10,7 +10,7 @@ use crate::favorites::{Fav, Favorites};
 use crate::fs::Location;
 use crate::groups::Groups;
 use crate::jump::{self, History};
-use crate::render::{Painter, Rect, contains, rect};
+use crate::render::{FontId, Painter, Rect, contains, rect};
 use crate::theme::alpha;
 
 const WIDTH: f32 = 640.0;
@@ -309,8 +309,8 @@ impl Palette {
         Some((0..n).find(|&i| contains(&self.row_rect(w, i), x, y)).map(|i| i + self.scroll))
     }
 
-    pub fn draw(&self, p: &Painter, w: f32) {
-        let th = p.theme;
+    pub fn draw(&self, p: &dyn Painter, w: f32) {
+        let th = p.theme();
         let panel = self.rect(w);
         p.round_fill(rect(panel.left - 2.0, panel.top, panel.right + 2.0, panel.bottom + 5.0), 12.0, alpha(th.background, 0.6));
         p.round_fill(panel, 10.0, th.surface_alt);
@@ -325,12 +325,12 @@ impl Palette {
             PaletteMode::Folders => "{E721}",
             PaletteMode::GroupName => "{E74E}",
         };
-        p.text(&p.fonts.glyphs_small, glyph, rect(field.left + 6.0, field.top, field.left + 30.0, field.bottom), th.accent);
+        p.text(FontId::GlyphsSmall, glyph, rect(field.left + 6.0, field.top, field.left + 30.0, field.bottom), th.accent);
 
         if self.items.is_empty() {
             let r = self.row_rect(w, 0);
             let empty = if self.mode == PaletteMode::GroupName { "Escribí un nombre para el grupo" } else { "Sin resultados" };
-            p.text(&p.fonts.ui, empty, rect(r.left + 40.0, r.top, r.right, r.bottom), th.text_dim);
+            p.text(FontId::Ui, empty, rect(r.left + 40.0, r.top, r.right, r.bottom), th.text_dim);
         }
         for (i, item) in self.items.iter().enumerate().skip(self.scroll).take(MAX_ROWS) {
             let r = self.row_rect(w, i - self.scroll);
@@ -339,20 +339,20 @@ impl Palette {
             } else if self.hover == Some(i) {
                 p.round_fill(r, 6.0, th.hover);
             }
-            p.text(&p.fonts.glyphs_small, item.glyph, rect(r.left + 8.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
+            p.text(FontId::GlyphsSmall, item.glyph, rect(r.left + 8.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
             let keys_w = if item.keys.is_empty() { 0.0 } else { 120.0 };
             let text_l = r.left + 40.0;
             let text_r = r.right - 10.0 - keys_w;
             if item.detail.is_empty() {
-                p.text(&p.fonts.ui, &item.title, rect(text_l, r.top, text_r, r.bottom), th.text);
+                p.text(FontId::Ui, &item.title, rect(text_l, r.top, text_r, r.bottom), th.text);
             } else {
                 // Nombre y, más tenue, la ruta.
                 let split = text_l + ((text_r - text_l) * 0.4).min(220.0);
-                p.text(&p.fonts.ui, &item.title, rect(text_l, r.top, split - 8.0, r.bottom), th.text);
-                p.text(&p.fonts.ui, &item.detail, rect(split, r.top, text_r, r.bottom), th.text_dim);
+                p.text(FontId::Ui, &item.title, rect(text_l, r.top, split - 8.0, r.bottom), th.text);
+                p.text(FontId::Ui, &item.detail, rect(split, r.top, text_r, r.bottom), th.text_dim);
             }
             if !item.keys.is_empty() {
-                p.text(&p.fonts.ui_right, &item.keys, rect(text_r, r.top, r.right - 10.0, r.bottom), th.text_dim);
+                p.text(FontId::UiRight, &item.keys, rect(text_r, r.top, r.right - 10.0, r.bottom), th.text_dim);
             }
         }
 
@@ -369,10 +369,10 @@ impl Palette {
             }
             PaletteMode::GroupName => "Nombre del grupo nuevo, o elegí uno para reemplazarlo · Enter guardar · Esc cancelar".to_string(),
         };
-        p.text(&p.fonts.ui, &hint, foot, th.text_dim);
+        p.text(FontId::Ui, &hint, foot, th.text_dim);
         if self.items.len() > MAX_ROWS {
             let more = format!("{}–{} de {}", self.scroll + 1, (self.scroll + MAX_ROWS).min(self.items.len()), self.items.len());
-            p.text(&p.fonts.ui_right, &more, foot, th.text_dim);
+            p.text(FontId::UiRight, &more, foot, th.text_dim);
         }
     }
 }

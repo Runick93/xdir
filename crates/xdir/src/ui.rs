@@ -2,7 +2,7 @@
 //! de estado con los botones para cambiar de layout.
 
 use crate::platform::Color;
-use crate::render::{Painter, Rect, contains, rect};
+use crate::render::{FontId, Painter, Rect, contains, rect};
 
 use crate::console::Console;
 use crate::theme::{Accent, PRESETS, alpha};
@@ -134,8 +134,8 @@ pub fn group_bar_at(w: f32, left: f32, temps: &[bool], x: f32, y: f32) -> Option
     Some(if temps[i] && contains(&group_close_rect(tabs[i]), x, y) { GroupHit::Close(i) } else { GroupHit::Tab(i) })
 }
 
-pub fn draw_group_bar(p: &Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
-    let th = p.theme;
+pub fn draw_group_bar(p: &dyn Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+    let th = p.theme();
     let (tabs, add) = group_tabs(w, left, names.len());
     for (i, (r, (name, temp))) in tabs.iter().zip(names).enumerate() {
         // Píldora con borde fino; la activa lleva el contorno y un velo del color de acento.
@@ -151,21 +151,21 @@ pub fn draw_group_bar(p: &Painter, w: f32, left: f32, names: &[(&str, bool)], ac
         }
         let color = if active == Some(i) { th.text } else { th.text_dim };
         let right = if *temp { r.right - 28.0 } else { r.right - 12.0 };
-        p.text(&p.fonts.ui, name, rect(r.left + 14.0, r.top, right, r.bottom), color);
+        p.text(FontId::Ui, name, rect(r.left + 14.0, r.top, right, r.bottom), color);
         if *temp {
             let x = group_close_rect(*r);
             let hot = hover == Some(GroupHit::Close(i));
             if hot {
                 p.round_fill(x, 4.0, th.hover);
             }
-            p.text(&p.fonts.glyphs_small, "\u{E711}", x, if hot { th.text } else { th.text_dim });
+            p.text(FontId::GlyphsSmall, "\u{E711}", x, if hot { th.text } else { th.text_dim });
         }
     }
     let hot = hover == Some(GroupHit::Add);
     if hot {
         p.round_fill(add, 6.0, th.hover);
     }
-    p.text(&p.fonts.glyphs_small, "\u{E710}", add, if hot { th.text } else { th.text_dim });
+    p.text(FontId::GlyphsSmall, "\u{E710}", add, if hot { th.text } else { th.text_dim });
 }
 
 /// Rectángulos de cada panel visible, en orden.
@@ -265,20 +265,20 @@ pub fn layout_at(w: f32, h: f32, x: f32, y: f32) -> Option<Layout> {
 
 /// `xtree_on`: la vista de xtree está abierta (el botón queda encendido).
 #[allow(clippy::too_many_arguments)]
-pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool, xtree_hot: bool, xtree_on: bool) {
-    let th = p.theme;
+pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool, xtree_hot: bool, xtree_on: bool) {
+    let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
     let xtree = xtree_rect(w, h);
     let text_r = rect(GAP * 2.0, h - STATUSBAR_H, xtree.left - GAP, h);
-    p.text(&p.fonts.ui, text, text_r, th.text_dim);
+    p.text(FontId::Ui, text, text_r, th.text_dim);
 
     if groups_hot {
         p.round_fill(groups, 4.0, th.hover);
     }
     let color = if groups_hot { th.text } else { th.text_dim };
-    p.text(&p.fonts.glyphs_small, "\u{E8A9}", rect(groups.left + 6.0, groups.top, groups.left + 26.0, groups.bottom), color);
-    p.text(&p.fonts.ui, "Grupos", rect(groups.left + 30.0, groups.top, groups.right - 4.0, groups.bottom), color);
+    p.text(FontId::GlyphsSmall, "\u{E8A9}", rect(groups.left + 6.0, groups.top, groups.left + 26.0, groups.bottom), color);
+    p.text(FontId::Ui, "Grupos", rect(groups.left + 30.0, groups.top, groups.right - 4.0, groups.bottom), color);
 
     if xtree_on {
         p.round_fill(xtree, 4.0, th.selection);
@@ -286,14 +286,14 @@ pub fn draw_status(p: &Painter, w: f32, h: f32, text: &str, current: Layout, hov
         p.round_fill(xtree, 4.0, th.hover);
     }
     let color = if xtree_on { th.accent } else if xtree_hot { th.text } else { th.text_dim };
-    p.text(&p.fonts.glyphs_small, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
-    p.text(&p.fonts.ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
+    p.text(FontId::GlyphsSmall, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
+    p.text(FontId::Ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
 
     let gear = gear_rect(w, h);
     if gear_hot {
         p.round_fill(gear, 4.0, th.hover);
     }
-    p.text(&p.fonts.glyphs, "\u{E713}", gear, if gear_hot { th.text } else { th.text_dim });
+    p.text(FontId::Glyphs, "\u{E713}", gear, if gear_hot { th.text } else { th.text_dim });
     for (layout, r) in buttons {
         if layout == current {
             p.round_fill(r, 4.0, alpha(th.accent, 0.25));
@@ -394,15 +394,15 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, group_bar: bool, tree: bool) {
-    let th = p.theme;
+pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, group_bar: bool, tree: bool) {
+    let th = p.theme();
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
     p.round_fill(rect(panel.left - 2.0, panel.top, panel.right + 2.0, panel.bottom + 4.0), 12.0, alpha(th.background, 0.5));
     p.round_fill(panel, 10.0, th.surface_alt);
     p.round_stroke(panel, 10.0, th.border);
     let title = rect(panel.left + PICKER_PAD, panel.top + 4.0, panel.right - PICKER_PAD, panel.top + PICKER_TITLE_H);
-    p.text(&p.fonts.ui_bold, "Color de acento", title, th.text);
+    p.text(FontId::UiBold, "Color de acento", title, th.text);
 
     let is_preset = PRESETS.iter().any(|(_, c)| current == Accent::Rgb(*c));
     for (kind, r) in picker_items(w, h) {
@@ -427,19 +427,19 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                     _ => !is_preset && current != Accent::System,
                 };
                 let label = if kind == PickerHit::System { "Color de Windows" } else { "Personalizado…" };
-                p.text(&p.fonts.ui, label, rect(r.left + 34.0, r.top, r.right - 8.0, r.bottom), th.text);
+                p.text(FontId::Ui, label, rect(r.left + 34.0, r.top, r.right - 8.0, r.bottom), th.text);
                 let icon = rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom);
                 if kind == PickerHit::Custom {
                     // Muestra del color personalizado, o el ícono de paleta si no hay.
                     match (selected, current) {
                         (true, Accent::Rgb(c)) => p.circle((icon.left + icon.right) / 2.0, (icon.top + icon.bottom) / 2.0, 8.0, hex(c)),
-                        _ => p.text(&p.fonts.glyphs, "\u{E790}", icon, th.text_dim),
+                        _ => p.text(FontId::Glyphs, "\u{E790}", icon, th.text_dim),
                     }
                 } else {
-                    p.text(&p.fonts.glyphs, "\u{E7F8}", icon, th.text_dim);
+                    p.text(FontId::Glyphs, "\u{E7F8}", icon, th.text_dim);
                 }
                 if selected {
-                    p.text(&p.fonts.glyphs_small, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
+                    p.text(FontId::GlyphsSmall, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
                 }
             }
             PickerHit::DarkMode | PickerHit::FileColors | PickerHit::GroupBar | PickerHit::Tree => {
@@ -457,8 +457,8 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                     let sy = r.top - PICKER_SEP_H / 2.0;
                     p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 }
-                p.text(&p.fonts.glyphs, glyph, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
-                p.text(&p.fonts.ui, label, rect(r.left + 34.0, r.top, r.right - 56.0, r.bottom), th.text);
+                p.text(FontId::Glyphs, glyph, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
+                p.text(FontId::Ui, label, rect(r.left + 34.0, r.top, r.right - 56.0, r.bottom), th.text);
                 // Switch: pastilla de acento con la perilla a la derecha cuando está encendido.
                 let cy = (r.top + r.bottom) / 2.0;
                 let track = rect(r.right - 50.0, cy - 10.0, r.right - 10.0, cy + 10.0);
@@ -476,9 +476,9 @@ pub fn draw_picker(p: &Painter, w: f32, h: f32, current: Accent, hover: Option<P
                 }
                 let sy = r.top - PICKER_SEP_H / 2.0;
                 p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
-                p.text(&p.fonts.glyphs, "\u{E946}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
-                p.text(&p.fonts.ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
-                p.text(&p.fonts.ui_right, crate::about::VERSION, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
+                p.text(FontId::Glyphs, "\u{E946}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
+                p.text(FontId::Ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
+                p.text(FontId::UiRight, crate::about::VERSION, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
             }
             PickerHit::Panel => {}
         }
@@ -518,8 +518,8 @@ pub fn terminal_menu_at(anchor: Rect, w: f32, x: f32, y: f32) -> Option<Option<C
     Some(terminal_menu_rows(anchor, w).into_iter().find(|(_, r)| contains(r, x, y)).map(|(c, _)| c))
 }
 
-pub fn draw_terminal_menu(p: &Painter, anchor: Rect, w: f32, hover: Option<Console>) {
-    let th = p.theme;
+pub fn draw_terminal_menu(p: &dyn Painter, anchor: Rect, w: f32, hover: Option<Console>) {
+    let th = p.theme();
     let panel = terminal_menu_rect(anchor, w);
     p.round_fill(rect(panel.left - 2.0, panel.top, panel.right + 2.0, panel.bottom + 4.0), 10.0, alpha(th.background, 0.5));
     p.round_fill(panel, 8.0, th.surface_alt);
@@ -528,8 +528,8 @@ pub fn draw_terminal_menu(p: &Painter, anchor: Rect, w: f32, hover: Option<Conso
         if hover == Some(c) {
             p.round_fill(r, 6.0, th.hover);
         }
-        p.text(&p.fonts.ui_bold, ">_", rect(r.left + 8.0, r.top, r.left + 34.0, r.bottom), th.accent);
-        p.text(&p.fonts.ui, c.label(), rect(r.left + 40.0, r.top, r.right - 8.0, r.bottom), th.text);
+        p.text(FontId::UiBold, ">_", rect(r.left + 8.0, r.top, r.left + 34.0, r.bottom), th.accent);
+        p.text(FontId::Ui, c.label(), rect(r.left + 40.0, r.top, r.right - 8.0, r.bottom), th.text);
     }
 }
 
@@ -543,8 +543,8 @@ fn hex(c: u32) -> Color {
 }
 
 /// Resalta el divisor bajo el mouse o arrastrándose (una línea en el centro de su área).
-pub fn draw_splitter(p: &Painter, r: Rect) {
-    let th = p.theme;
+pub fn draw_splitter(p: &dyn Painter, r: Rect) {
+    let th = p.theme();
     let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
     let line = if r.right - r.left < r.bottom - r.top {
         rect(cx - 1.0, r.top + 4.0, cx + 1.0, r.bottom - 4.0)

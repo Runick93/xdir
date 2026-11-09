@@ -57,6 +57,7 @@ use crate::config::ColorRule;
 use crate::icons;
 use crate::thumbs;
 use crate::theme::Theme;
+use xdir_core::paint::{self, FontId};
 
 use super::{Color, Rect, rect};
 
@@ -73,24 +74,8 @@ pub struct Renderer {
     transparent: bool,
 }
 
-pub struct Fonts {
-    /// Texto normal, alineado a la izquierda, con "…" si no entra.
-    pub ui: IDWriteTextFormat,
-    pub ui_right: IDWriteTextFormat,
-    pub ui_center: IDWriteTextFormat,
-    pub ui_bold: IDWriteTextFormat,
-    /// Títulos (16, seminegrita): barra superior y tarjeta de xtree.
-    pub title: IDWriteTextFormat,
-    /// Texto chico (11,5): rótulos del mapa y de la barra de datos de xtree.
-    pub small: IDWriteTextFormat,
-    /// Texto chico en seminegrita (12,5): carpetas de primer nivel del mapa de xtree.
-    pub small_bold: IDWriteTextFormat,
-    /// Íconos de interfaz (Segoe Fluent Icons en Windows 11, MDL2 Assets en Windows 10).
-    pub glyphs: IDWriteTextFormat,
-    pub glyphs_small: IDWriteTextFormat,
-    /// Nombre debajo de una miniatura: centrado, arriba, partido en varias líneas y con "…" si no entra.
-    pub label: IDWriteTextFormat,
-}
+/// Formatos de texto, uno por `FontId` (en el orden del enum).
+pub struct Fonts([IDWriteTextFormat; FontId::COUNT]);
 
 struct Gpu {
     d3d: ID3D11Device,
@@ -132,7 +117,7 @@ impl Renderer {
     /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
     /// necesitar un cuadro en curso.
     pub fn text_width(&self, s: &str, bold: bool) -> f32 {
-        measure(&self.dwrite, if bold { &self.fonts.ui_bold } else { &self.fonts.ui }, s)
+        measure(&self.dwrite, if bold { self.fonts.get(FontId::UiBold) } else { self.fonts.get(FontId::Ui) }, s)
     }
 
     pub fn resize(&mut self, width: u32, height: u32, dpi: u32) {
@@ -194,7 +179,7 @@ impl Renderer {
         dpi: u32,
         theme: &Theme,
         file_colors: &[ColorRule],
-        paint: impl FnOnce(&Painter, f32, f32),
+        paint: impl FnOnce(&dyn paint::Painter, f32, f32),
     ) -> Result<()> {
         self.ensure_target(hwnd, dpi)?;
         let t = self.target.as_ref().unwrap();
@@ -251,9 +236,9 @@ pub struct Painter<'a> {
     ctx: &'a ID2D1DeviceContext,
     factory: &'a ID2D1Factory1,
     brush: &'a ID2D1SolidColorBrush,
-    pub theme: &'a Theme,
-    pub fonts: &'a Fonts,
-    pub file_colors: &'a [ColorRule],
+    theme: &'a Theme,
+    fonts: &'a Fonts,
+    file_colors: &'a [ColorRule],
     dwrite: &'a IDWriteFactory,
     icons: &'a RefCell<Icons>,
 }
@@ -263,13 +248,15 @@ impl Painter<'_> {
         let c = d2c(c);
         unsafe { self.brush.SetColor(&c) };
     }
+}
 
-    pub fn fill(&self, r: Rect, c: Color) {
+impl paint::Painter for Painter<'_> {
+    fn fill(&self, r: Rect, c: Color) {
         self.color(c);
         unsafe { self.ctx.FillRectangle(&d2r(r), self.brush) };
     }
 
-    pub fn round_fill(&self, r: Rect, radius: f32, c: Color) {
+    fn round_fill(&self, r: Rect, radius: f32, c: Color) {
         self.color(c);
         let rr = D2D1_ROUNDED_RECT { rect: d2r(r), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.FillRoundedRectangle(&rr, self.brush) };
@@ -278,7 +265,7 @@ impl Painter<'_> {
     /// Polígono con esquinas redondeadas: cada punto es (x, y, radio de la esquina). Abierto, los
     /// extremos no se redondean. Sirve para el contorno de panel + pestaña activa como una sola
     /// línea continua, y para las pestañas.
-    pub fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, stroke: Option<(Color, f32)>) {
+    fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, stroke: Option<(Color, f32)>) {
         let n = pts.len();
         if n < 2 {
             return;
@@ -338,20 +325,20 @@ impl Painter<'_> {
         }
     }
 
-    pub fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
+    fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
         self.color(fill);
         let e = D2D1_ELLIPSE { point: v2(cx, cy), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.FillEllipse(&e, self.brush) };
     }
 
-    pub fn circle_stroke(&self, cx: f32, cy: f32, radius: f32, c: Color, width: f32) {
+    fn circle_stroke(&self, cx: f32, cy: f32, radius: f32, c: Color, width: f32) {
         self.color(c);
         let e = D2D1_ELLIPSE { point: v2(cx, cy), radiusX: radius, radiusY: radius };
         unsafe { self.ctx.DrawEllipse(&e, self.brush, width, None) };
     }
 
     /// Contorno redondeado de grosor arbitrario.
-    pub fn round_stroke_w(&self, r: Rect, radius: f32, c: Color, width: f32) {
+    fn round_stroke_w(&self, r: Rect, radius: f32, c: Color, width: f32) {
         self.color(c);
         let h = width / 2.0;
         let r = rect(r.left + h, r.top + h, r.right - h, r.bottom - h);
@@ -359,7 +346,7 @@ impl Painter<'_> {
         unsafe { self.ctx.DrawRoundedRectangle(&rr, self.brush, width, None) };
     }
 
-    pub fn round_stroke(&self, r: Rect, radius: f32, c: Color) {
+    fn round_stroke(&self, r: Rect, radius: f32, c: Color) {
         self.color(c);
         // Medio DIP hacia adentro para que el trazo de 1 DIP quede nítido.
         let r = rect(r.left + 0.5, r.top + 0.5, r.right - 0.5, r.bottom - 0.5);
@@ -367,7 +354,8 @@ impl Painter<'_> {
         unsafe { self.ctx.DrawRoundedRectangle(&rr, self.brush, 1.0, None) };
     }
 
-    pub fn text(&self, format: &IDWriteTextFormat, s: &str, r: Rect, c: Color) {
+    fn text(&self, font: FontId, s: &str, r: Rect, c: Color) {
+        let format = self.fonts.get(font);
         if r.right <= r.left {
             return;
         }
@@ -385,12 +373,12 @@ impl Painter<'_> {
         };
     }
 
-    pub fn measure(&self, format: &IDWriteTextFormat, s: &str) -> f32 {
-        measure(self.dwrite, format, s)
+    fn measure(&self, font: FontId, s: &str) -> f32 {
+        measure(self.dwrite, self.fonts.get(font), s)
     }
 
     /// Dibuja un ícono de la lista de imágenes del sistema en un cuadrado de `size` DIPs.
-    pub fn shell_icon(&self, index: i32, overlay: u8, x: f32, y: f32, size: f32) {
+    fn shell_icon(&self, index: i32, overlay: u8, x: f32, y: f32, size: f32) {
         let Some(bitmap) = self.icons.borrow_mut().get(self.ctx, index, overlay) else { return };
         let dest = rect(x, y, x + size, y + size);
         unsafe {
@@ -407,7 +395,7 @@ impl Painter<'_> {
 
     /// Miniatura centrada en `r`, sin deformar (las imágenes no son cuadradas) y sin agrandarla
     /// más que su tamaño en píxeles. Devuelve false si todavía no está (se dibuja otra cosa).
-    pub fn thumbnail(&self, key: &thumbs::Key, r: Rect) -> bool {
+    fn thumbnail(&self, key: &thumbs::Key, r: Rect) -> bool {
         let Some(bitmap) = self.icons.borrow_mut().thumb(self.ctx, key) else { return false };
         let size = unsafe { bitmap.GetPixelSize() };
         let (bw, bh) = (size.width as f32, size.height as f32);
@@ -427,7 +415,7 @@ impl Painter<'_> {
     }
 
     /// Logo de Runick centrado en `r` sin deformarlo (ni agrandarlo más que su tamaño de origen).
-    pub fn logo(&self, r: Rect) {
+    fn logo(&self, r: Rect) {
         let mut icons = self.icons.borrow_mut();
         if icons.logo.is_none() {
             icons.logo = crate::about::logo_pixels().and_then(|px| bitmap_from(self.ctx, &px));
@@ -446,17 +434,24 @@ impl Painter<'_> {
     }
 
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
-    pub fn thumb_px(&self, dips: f32) -> u32 {
+    fn thumb_px(&self, dips: f32) -> u32 {
         (dips * self.icons.borrow().dpi_k).round() as u32
     }
 
-    pub fn clip<R>(&self, r: Rect, f: impl FnOnce() -> R) -> R {
+    fn clip(&self, r: Rect, f: &mut dyn FnMut()) {
         unsafe {
             self.ctx.PushAxisAlignedClip(&d2r(r), windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED);
         }
-        let out = f();
+        f();
         unsafe { self.ctx.PopAxisAlignedClip() };
-        out
+    }
+
+    fn theme(&self) -> &Theme {
+        self.theme
+    }
+
+    fn file_colors(&self) -> &[ColorRule] {
+        self.file_colors
     }
 }
 
@@ -465,18 +460,33 @@ impl Fonts {
         let family = if has_font(dwrite, "Segoe UI Variable Text") { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
         let glyph_family = if has_font(dwrite, "Segoe Fluent Icons") { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") };
         let make = |family: PCWSTR, weight, size, align| text_format(dwrite, family, weight, size, align);
-        Ok(Self {
-            ui: make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
-            ui_right: make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
-            ui_center: make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
-            ui_bold: make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
-            title: make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 16.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
-            small: make(family, DWRITE_FONT_WEIGHT_NORMAL, 11.5, DWRITE_TEXT_ALIGNMENT_LEADING)?,
-            small_bold: make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.5, DWRITE_TEXT_ALIGNMENT_LEADING)?,
-            glyphs: make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 14.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
-            glyphs_small: make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 10.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
-            label: label_format(dwrite, family)?,
-        })
+        // En el orden de `FontId`.
+        Ok(Self([
+            // Ui: texto normal, alineado a la izquierda, con "…" si no entra.
+            make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            // UiRight
+            make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
+            // UiCenter
+            make(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+            // UiBold
+            make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            // Title: títulos (16, seminegrita).
+            make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 16.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            // Small: texto chico (11,5).
+            make(family, DWRITE_FONT_WEIGHT_NORMAL, 11.5, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            // SmallBold: texto chico en seminegrita (12,5).
+            make(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.5, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            // Glyphs: íconos de interfaz (Segoe Fluent Icons en Windows 11, MDL2 Assets en Windows 10).
+            make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 14.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+            // GlyphsSmall
+            make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 10.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+            // Label: nombre debajo de una miniatura, centrado, arriba y en varias líneas.
+            label_format(dwrite, family)?,
+        ]))
+    }
+
+    fn get(&self, id: FontId) -> &IDWriteTextFormat {
+        &self.0[id as usize]
     }
 }
 

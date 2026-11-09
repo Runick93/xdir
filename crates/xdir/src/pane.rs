@@ -4,7 +4,7 @@
 use crate::platform::Color;
 use crate::favorites::{Fav, Favorites};
 use crate::fs::Location;
-use crate::render::{Painter, Rect, contains, rect};
+use crate::render::{FontId, Painter, Rect, contains, rect};
 use crate::tab::Tab;
 use crate::theme::alpha;
 
@@ -327,8 +327,8 @@ impl Pane {
 
     /// Marca de destino al arrastrar una pestaña desde otro panel: contorno de acento y una
     /// barra en la tira donde caería.
-    pub fn draw_tab_drop(&self, p: &Painter, at: usize) {
-        let th = p.theme;
+    pub fn draw_tab_drop(&self, p: &dyn Painter, at: usize) {
+        let th = p.theme();
         let body = rect(self.rect.left, self.rect.top + TABSTRIP_H, self.rect.right, self.rect.bottom);
         p.round_fill(body, PANE_RADIUS, alpha(th.accent, 0.06));
         p.round_stroke_w(body, PANE_RADIUS, th.accent, 2.0);
@@ -477,7 +477,7 @@ impl Pane {
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
-        p: &Painter,
+        p: &dyn Painter,
         area: Rect,
         active_pane: bool,
         hover: PaneHit,
@@ -489,7 +489,7 @@ impl Pane {
         search: SearchView,
     ) {
         self.rect = area;
-        let th = p.theme;
+        let th = p.theme();
         // Cuerpo del panel (debajo de las pestañas) y pestaña activa forman una sola pieza: un
         // contorno continuo que sube por la pestaña y vuelve a bajar, sin uniones.
         let body = rect(area.left, area.top + TABSTRIP_H, area.right, area.bottom);
@@ -523,7 +523,7 @@ impl Pane {
                 p.round_fill(r, 6.0, c);
             }
             let color = if enabled { th.text } else { alpha(th.text_dim, 0.45) };
-            p.text(&p.fonts.glyphs, glyph, r, color);
+            p.text(FontId::Glyphs, glyph, r, color);
             self.buttons.push((b, r));
             x += BTN + 2.0;
         }
@@ -548,7 +548,7 @@ impl Pane {
             if hover == PaneHit::AddressClear {
                 p.round_fill(clear, 4.0, alpha(th.text, 0.12));
             }
-            p.text(&p.fonts.glyphs_small, "\u{E711}", clear, th.text_dim);
+            p.text(FontId::GlyphsSmall, "\u{E711}", clear, th.text_dim);
             self.address_clear = clear;
         } else {
             let border = if hover == PaneHit::Address { th.text_dim } else { th.border };
@@ -573,7 +573,7 @@ impl Pane {
             } else {
                 th.text_dim
             };
-            p.text(&p.fonts.ui_center, ">_", term, color);
+            p.text(FontId::UiCenter, ">_", term, color);
             self.terminal = if enabled { term } else { rect(0.0, 0.0, 0.0, 0.0) };
             if let Some((f, _)) = favs {
                 // Estrella llena si la carpeta ya es favorita.
@@ -583,7 +583,7 @@ impl Pane {
                 }
                 let is_fav = f.find(&self.tabs[self.active].location).is_some();
                 let (glyph, color) = if is_fav { ("\u{E735}", th.accent) } else { ("\u{E734}", th.text_dim) };
-                p.text(&p.fonts.glyphs, glyph, star, color);
+                p.text(FontId::Glyphs, glyph, star, color);
                 self.star = star;
             }
         }
@@ -610,14 +610,14 @@ impl Pane {
             let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
             p.round_fill(vb, 6.0, c);
         }
-        p.text(&p.fonts.glyphs_small, "\u{E8A9}", vb, th.text_dim);
+        p.text(FontId::GlyphsSmall, "\u{E8A9}", vb, th.text_dim);
         self.view_button = vb;
         let nb = rect(vb.left - VIEW_BTN_W, vb.top, vb.left, vb.bottom);
         if hover == PaneHit::NewFolderButton {
             let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
             p.round_fill(nb, 6.0, c);
         }
-        p.text(&p.fonts.glyphs_small, "\u{E8F4}", nb, th.text_dim);
+        p.text(FontId::GlyphsSmall, "\u{E8F4}", nb, th.text_dim);
         self.new_folder_button = nb;
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];
@@ -695,8 +695,8 @@ impl Pane {
 
     /// La pestaña que se arrastra, flotando sobre todo: con `detach` en 1 es una pieza suelta con
     /// sombra; en 0 está acoplada a una tira y solo se ve su texto (la forma es la del panel).
-    pub fn draw_ghost(p: &Painter, r: Rect, title: &str, detach: f32) {
-        let th = p.theme;
+    pub fn draw_ghost(p: &dyn Painter, r: Rect, title: &str, detach: f32) {
+        let th = p.theme();
         if detach > 0.01 {
             let shadow = |a: f32| Color { r: 0.0, g: 0.0, b: 0.0, a };
             for (grow, a) in [(6.0, 0.05), (3.0, 0.08), (1.0, 0.10)] {
@@ -705,13 +705,13 @@ impl Pane {
             let shape = tab_points(r, TAB_SLANT);
             p.rounded_path(&shape, true, Some(alpha(th.surface_alt, detach)), Some((alpha(th.accent, detach), 1.5)));
         }
-        p.text(&p.fonts.ui, title, rect(r.left + TAB_SLANT + 12.0, r.top, r.right - TAB_SLANT - 6.0, r.bottom), th.text);
+        p.text(FontId::Ui, title, rect(r.left + TAB_SLANT + 12.0, r.top, r.right - TAB_SLANT - 6.0, r.bottom), th.text);
     }
 
     /// Dibuja las pestañas inactivas (la activa ya es parte del contorno del panel) y los textos.
     /// `layout`: los lugares fijos; `shown`: dónde se dibuja cada una ahora. La arrastrada va al final.
-    fn draw_tabs(&mut self, p: &Painter, area: Rect, layout: &[Rect], shown: &[Rect], hover: PaneHit) {
-        let th = p.theme;
+    fn draw_tabs(&mut self, p: &dyn Painter, area: Rect, layout: &[Rect], shown: &[Rect], hover: PaneHit) {
+        let th = p.theme();
         self.tab_rects.clear();
         self.tab_rects.resize(shown.len(), (rect(0.0, 0.0, 0.0, 0.0), rect(0.0, 0.0, 0.0, 0.0)));
         let dragged = self.drag_tab.map(|(d, _)| d).or(self.drag_hidden).filter(|&d| d < shown.len());
@@ -742,12 +742,12 @@ impl Pane {
             let text_right = if show_close { close.left - 2.0 } else { r.right - TAB_SLANT - 6.0 };
             let color = if active { th.text } else { th.text_dim };
             let text = rect(r.left + left_slant + 12.0, r.top, text_right, r.bottom);
-            p.text(&p.fonts.ui, &tab.location.title(), text, color);
+            p.text(FontId::Ui, &tab.location.title(), text, color);
             if show_close {
                 if hover == PaneHit::TabClose(i) {
                     p.round_fill(close, 4.0, alpha(th.text, 0.12));
                 }
-                p.text(&p.fonts.glyphs_small, "\u{E711}", close, th.text_dim);
+                p.text(FontId::GlyphsSmall, "\u{E711}", close, th.text_dim);
             }
             self.tab_rects[i] = (r, if show_close { close } else { rect(0.0, 0.0, 0.0, 0.0) });
         }
@@ -758,7 +758,7 @@ impl Pane {
         if hover == PaneHit::NewTab {
             p.round_fill(nt, 6.0, th.hover);
         }
-        p.text(&p.fonts.glyphs_small, "\u{E710}", nt, th.text_dim);
+        p.text(FontId::GlyphsSmall, "\u{E710}", nt, th.text_dim);
         self.new_tab = nt;
     }
 
@@ -769,8 +769,8 @@ impl Pane {
         rect(b.left + 28.0, b.top + 5.0, (b.right - SEARCH_PROGRESS_W - 24.0).max(b.left + 60.0), b.bottom - 5.0)
     }
 
-    fn draw_search(&mut self, p: &Painter, field: Rect, s: &SearchView, hover: PaneHit) {
-        let th = p.theme;
+    fn draw_search(&mut self, p: &dyn Painter, field: Rect, s: &SearchView, hover: PaneHit) {
+        let th = p.theme();
         self.search = if s.enabled { field } else { rect(0.0, 0.0, 0.0, 0.0) };
         self.search_clear = rect(0.0, 0.0, 0.0, 0.0);
         p.round_fill(field, 6.0, th.surface_alt);
@@ -784,13 +784,13 @@ impl Pane {
         p.round_stroke(field, 6.0, border);
         let dim = if s.enabled { th.text_dim } else { alpha(th.text_dim, 0.45) };
         let lens_color = if s.text.is_empty() { dim } else { th.accent };
-        p.text(&p.fonts.glyphs_small, "\u{E721}", rect(field.left + 4.0, field.top, field.left + 26.0, field.bottom), lens_color);
+        p.text(FontId::GlyphsSmall, "\u{E721}", rect(field.left + 4.0, field.top, field.left + 26.0, field.bottom), lens_color);
         let text = rect(field.left + 28.0, field.top, field.right - SEARCH_PROGRESS_W - 24.0, field.bottom);
         if !s.editing {
             if s.text.is_empty() {
-                p.text(&p.fonts.ui, "Buscar", text, dim);
+                p.text(FontId::Ui, "Buscar", text, dim);
             } else {
-                p.text(&p.fonts.ui, s.text, text, th.text);
+                p.text(FontId::Ui, s.text, text, th.text);
             }
         }
         // En curso: indicador girando y porcentaje estimado.
@@ -799,22 +799,22 @@ impl Pane {
             spinner(p, r.left + 9.0, (r.top + r.bottom) / 2.0, th.accent);
             // Es una estimación (el total no se conoce hasta terminar): no llega a 100 antes de tiempo.
             let pct = format!("{:.0} %", (done * 100.0).floor().min(99.0));
-            p.text(&p.fonts.ui_right, &pct, rect(r.left + 18.0, r.top, r.right - 2.0, r.bottom), th.text_dim);
+            p.text(FontId::UiRight, &pct, rect(r.left + 18.0, r.top, r.right - 2.0, r.bottom), th.text_dim);
         }
         if !s.text.is_empty() || s.editing {
             let clear = rect(field.right - 24.0, field.top + 4.0, field.right - 4.0, field.bottom - 4.0);
             if hover == PaneHit::SearchClear {
                 p.round_fill(clear, 4.0, alpha(th.text, 0.12));
             }
-            p.text(&p.fonts.glyphs_small, "\u{E711}", clear, th.text_dim);
+            p.text(FontId::GlyphsSmall, "\u{E711}", clear, th.text_dim);
             self.search_clear = clear;
         }
     }
 
     /// Botón de maximizar (`Some(false)`) o restaurar (`Some(true)`) en el extremo derecho de la
     /// tira de pestañas; `None` si el layout tiene un solo panel.
-    fn draw_maximize(&mut self, p: &Painter, area: Rect, maximized: Option<bool>, hover: PaneHit) {
-        let th = p.theme;
+    fn draw_maximize(&mut self, p: &dyn Painter, area: Rect, maximized: Option<bool>, hover: PaneHit) {
+        let th = p.theme();
         self.maximize = rect(0.0, 0.0, 0.0, 0.0);
         let Some(on) = maximized else { return };
         let (top, bottom) = (area.top + 3.0, area.top + TABSTRIP_H);
@@ -826,15 +826,15 @@ impl Pane {
         }
         // Segoe: pantalla completa / volver a ventana.
         let (glyph, color) = if on { ("\u{E73F}", th.accent) } else { ("\u{E740}", th.text_dim) };
-        p.text(&p.fonts.glyphs_small, glyph, r, color);
+        p.text(FontId::GlyphsSmall, glyph, r, color);
         self.maximize = r;
     }
 
-    fn draw_favs(&mut self, p: &Painter, bar: Rect, f: &Favorites, hover: PaneHit, drop: Option<FavDrop>) {
-        let th = p.theme;
+    fn draw_favs(&mut self, p: &dyn Painter, bar: Rect, f: &Favorites, hover: PaneHit, drop: Option<FavDrop>) {
+        let th = p.theme();
         if f.items.is_empty() {
             let hint = "Arrastrá carpetas acá o tocá la estrella para agregar favoritos";
-            p.text(&p.fonts.ui, hint, rect(bar.left + 12.0, bar.top, bar.right - 8.0, bar.bottom), th.text_dim);
+            p.text(FontId::Ui, hint, rect(bar.left + 12.0, bar.top, bar.right - 8.0, bar.bottom), th.text_dim);
             if drop.is_some() {
                 p.fill(rect(bar.left + 6.0, bar.top + 5.0, bar.left + 8.0, bar.bottom - 5.0), th.accent);
             }
@@ -843,7 +843,7 @@ impl Pane {
         let folder_icon = crate::fs::folder_icon();
         let mut x = bar.left + 6.0;
         for (i, fav) in f.items.iter().enumerate() {
-            let text_w = p.measure(&p.fonts.ui, fav.name()).min(FAV_MAX_W);
+            let text_w = p.measure(FontId::Ui, fav.name()).min(FAV_MAX_W);
             let extra = if fav.is_group() { 14.0 } else { 0.0 };
             let w = 8.0 + 16.0 + 6.0 + text_w + extra + 10.0;
             // Si no entra (dejando lugar para "»"), el resto va al desborde.
@@ -853,7 +853,7 @@ impl Pane {
                 if hover == PaneHit::FavOverflow {
                     p.round_fill(r, 4.0, th.hover);
                 }
-                p.text(&p.fonts.ui_center, "»", r, th.text);
+                p.text(FontId::UiCenter, "»", r, th.text);
                 self.fav_overflow = Some((r, i));
                 break;
             }
@@ -870,14 +870,14 @@ impl Pane {
                 (Fav::Group { .. }, _) | (_, None) => {
                     let g = rect(r.left + 6.0, r.top, r.left + 26.0, r.bottom);
                     let color = if fav.is_group() { th.accent } else { th.text_dim };
-                    p.text(&p.fonts.glyphs, "\u{E8B7}", g, color);
+                    p.text(FontId::Glyphs, "\u{E8B7}", g, color);
                 }
                 (Fav::Link { .. }, Some(icon)) => p.shell_icon(icon, 0, r.left + 8.0, iy, 16.0),
             }
             let tx = r.left + 8.0 + 16.0 + 6.0;
-            p.text(&p.fonts.ui, fav.name(), rect(tx, r.top, tx + text_w, r.bottom), th.text);
+            p.text(FontId::Ui, fav.name(), rect(tx, r.top, tx + text_w, r.bottom), th.text);
             if fav.is_group() {
-                p.text(&p.fonts.glyphs_small, "\u{E70D}", rect(tx + text_w, r.top, tx + text_w + 14.0, r.bottom), th.text_dim);
+                p.text(FontId::GlyphsSmall, "\u{E70D}", rect(tx + text_w, r.top, tx + text_w + 14.0, r.bottom), th.text_dim);
             }
             if drop == Some(FavDrop::Before(i)) {
                 p.fill(rect(r.left - 3.0, r.top + 2.0, r.left - 1.0, r.bottom - 2.0), th.accent);
@@ -890,8 +890,8 @@ impl Pane {
         }
     }
 
-    fn draw_crumbs(&mut self, p: &Painter, addr: Rect, hover: PaneHit) {
-        let th = p.theme;
+    fn draw_crumbs(&mut self, p: &dyn Painter, addr: Rect, hover: PaneHit) {
+        let th = p.theme();
         self.crumbs.clear();
         self.chevrons.clear();
         let all = self.tabs[self.active].location.crumbs();
@@ -899,7 +899,7 @@ impl Pane {
         let widths: Vec<f32> = all
             .iter()
             .enumerate()
-            .map(|(i, (label, _))| p.measure(&p.fonts.ui, label) + 16.0 + if i == 0 { THIS_PC_ICON_W } else { 0.0 })
+            .map(|(i, (label, _))| p.measure(FontId::Ui, label) + 16.0 + if i == 0 { THIS_PC_ICON_W } else { 0.0 })
             .collect();
 
         // Si no entran, se descartan los primeros (los más lejanos).
@@ -911,7 +911,7 @@ impl Pane {
 
         let mut x = addr.left + 6.0;
         if first > 0 {
-            p.text(&p.fonts.ui, "…", rect(x, addr.top, x + 16.0, addr.bottom), th.text_dim);
+            p.text(FontId::Ui, "…", rect(x, addr.top, x + 16.0, addr.bottom), th.text_dim);
             x += 16.0;
         }
         for (i, (label, loc)) in all.iter().enumerate().skip(first) {
@@ -931,10 +931,10 @@ impl Pane {
             let color = if last || hot { th.text } else { th.text_dim };
             if i == 0 {
                 let icon = rect(r.left + 4.0, r.top, r.left + 4.0 + THIS_PC_ICON_W, r.bottom);
-                p.text(&p.fonts.glyphs_small, "\u{E7F4}", icon, color);
-                p.text(&p.fonts.ui_center, label, rect(r.left + THIS_PC_ICON_W, r.top, r.right, r.bottom), color);
+                p.text(FontId::GlyphsSmall, "\u{E7F4}", icon, color);
+                p.text(FontId::UiCenter, label, rect(r.left + THIS_PC_ICON_W, r.top, r.right, r.bottom), color);
             } else {
-                p.text(&p.fonts.ui_center, label, r, color);
+                p.text(FontId::UiCenter, label, r, color);
             }
             self.crumbs.push((r, loc.clone()));
             x = r.right;
@@ -948,8 +948,8 @@ impl Pane {
     }
 
     /// Flecha entre tramos: abre el menú de subcarpetas de `of`. Abierta, apunta hacia abajo.
-    fn draw_chevron(&mut self, p: &Painter, r: Rect, of: Location, hover: PaneHit) {
-        let th = p.theme;
+    fn draw_chevron(&mut self, p: &dyn Painter, r: Rect, of: Location, hover: PaneHit) {
+        let th = p.theme();
         let idx = self.chevrons.len();
         let open = self.open_chevron == Some(idx);
         let hot = open || hover == PaneHit::Chevron(idx);
@@ -957,13 +957,13 @@ impl Pane {
             p.round_fill(r, 4.0, alpha(th.text, 0.16));
         }
         let glyph = if open { "\u{E70D}" } else { "\u{E76C}" };
-        p.text(&p.fonts.glyphs_small, glyph, r, if hot { th.text } else { th.text_dim });
+        p.text(FontId::GlyphsSmall, glyph, r, if hot { th.text } else { th.text_dim });
         self.chevrons.push((r, of));
     }
 }
 
 /// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
-fn spinner(p: &Painter, cx: f32, cy: f32, c: crate::platform::Color) {
+fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::platform::Color) {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();

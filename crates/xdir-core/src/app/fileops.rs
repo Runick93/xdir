@@ -225,6 +225,8 @@ impl App {
             .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
             .collect();
         let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
+        // Sin el árbol no se agrega nada después.
+        #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
         let mut entries = vec![
             Entry::Sub("Ver".into(), views),
             Entry::Sub("Ordenar por".into(), sorts),
@@ -333,7 +335,7 @@ mod tests {
 
     fn effect(sources: &[&str], dest: &str, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
         // `volume_of` pasa por el `Shell` del registro (el falso compara el primer tramo, como Windows).
-        xdir_core::sys::testing::install_fakes();
+        crate::sys::testing::install_fakes();
         let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
         drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed)
     }

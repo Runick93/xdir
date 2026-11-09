@@ -39,7 +39,7 @@ impl App {
                     self.redraw();
                 }
             }
-            xdir_core::paint::WM_APP_ICONS => self.redraw(),
+            crate::paint::WM_APP_ICONS => self.redraw(),
             WM_APP_CHANGED => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 if let Some(tab) = self.tab_by_id(wparam) {

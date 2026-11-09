@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use super::host_mac::MacHost;
 use super::{App, CursorKind, INITIAL_SIZE, Init, ms_since, startup_args};
-use crate::commands::Command;
+use xdir_core::commands::Command;
 use crate::drop::{DragEvent, DragKind, Effect};
 use crate::platform::{Handle, Key, WM_APP, keys};
 use crate::theme::Accent;

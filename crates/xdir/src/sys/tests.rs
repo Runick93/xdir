@@ -94,7 +94,7 @@ fn search_real(root: &std::path::Path, query: &str, show_hidden: bool) -> (Vec<S
     let fs: &'static dyn xdir_core::sys::FileSystem = Box::leak(platform_file_system());
     let (tx, rx) = std::sync::mpsc::channel();
     let current = Arc::new(AtomicU64::new(7));
-    search_with(fs, crate::platform::Handle(0), tx, 1, 7, current, vec![root.to_path_buf()], show_hidden, crate::list::name_matcher(query));
+    search_with(fs, crate::platform::Handle(0), tx, 1, 7, current, vec![root.to_path_buf()], show_hidden, xdir_core::list::name_matcher(query));
     let (mut names, mut progress) = (Vec::new(), 0.0);
     while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
         match ev.msg {

@@ -1,4 +1,5 @@
-//! Abrir una consola (PowerShell o CMD en Windows, Terminal en macOS) en la carpeta de un panel.
+//! Abrir una consola (PowerShell, CMD o Windows Terminal en Windows; Terminal o iTerm en macOS;
+//! la terminal del sistema en Linux) en la carpeta de un panel.
 //! La lista y la forma de abrirlas las da la plataforma (`sys::env()`).
 
 use std::path::Path;
@@ -24,8 +25,9 @@ impl Console {
         env().consoles().into_iter().map(Console::from).collect()
     }
 
-    /// La consola `i` del menú; si el sistema tiene menos, la primera (en macOS los comandos
-    /// "PowerShell" y "CMD" abren los dos Terminal).
+    /// La consola `i` del menú; si el sistema tiene menos, la primera. Los comandos "PowerShell"
+    /// y "CMD" piden la 0 y la 1: en Windows, PowerShell y CMD (Windows Terminal, si está, es la
+    /// 2); en macOS la 1 es iTerm si está instalada (si no, Terminal); en Linux hay una sola.
     pub fn nth(i: usize) -> Console {
         let all = Self::all();
         all.get(i).or(all.first()).copied().expect("el sistema no ofrece ninguna consola")

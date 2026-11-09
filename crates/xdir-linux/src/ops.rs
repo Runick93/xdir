@@ -1,8 +1,7 @@
 //! Operaciones de archivos de Linux (`xdir_core::sys::FileOps`): copiar, mover, borrar (a la
 //! papelera de `crate::trash` o definitivamente), renombrar, carpeta nueva, archivo de texto nuevo
-//! y deshacer. Cada
-//! operación corre en su propio hilo y avisa con `WM_APP_OP_DONE`. Los nombres repetidos se
-//! resuelven como en macOS ("informe copia.txt", "informe copia 2.txt").
+//! y deshacer. Cada operación corre en su propio hilo y avisa con `WM_APP_OP_DONE`. Los nombres
+//! repetidos se resuelven como en macOS ("informe copia.txt", "informe copia 2.txt").
 
 use std::io;
 use std::path::{Path, PathBuf};

@@ -1,13 +1,13 @@
-//! Compila assets/xdir.rc (el ícono) con rc.exe del Windows SDK y lo enlaza al exe.
+//! Compila ../../assets/xdir.rc (el ícono) con rc.exe del Windows SDK y lo enlaza al exe.
 //! Sin crates: busca rc.exe en el PATH (entorno de vcvars) o en la instalación del SDK.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/xdir.rc");
-    println!("cargo:rerun-if-changed=assets/xdir.ico");
-    println!("cargo:rerun-if-changed=assets/xdir.manifest");
+    println!("cargo:rerun-if-changed=../../assets/xdir.rc");
+    println!("cargo:rerun-if-changed=../../assets/xdir.ico");
+    println!("cargo:rerun-if-changed=../../assets/xdir.manifest");
 
     // El recurso (ícono y manifiesto) es solo del exe de Windows. Compilando desde otro sistema
     // (macOS, o `cargo check --target x86_64-pc-windows-msvc` en una Mac) no hay rc.exe: se omite.
@@ -19,10 +19,10 @@ fn main() {
     let status = Command::new(rc_exe())
         .args(["/nologo", "/fo"])
         .arg(&out)
-        .arg("assets/xdir.rc")
+        .arg("../../assets/xdir.rc")
         .status()
         .expect("no se pudo ejecutar rc.exe");
-    assert!(status.success(), "rc.exe falló al compilar assets/xdir.rc");
+    assert!(status.success(), "rc.exe falló al compilar ../../assets/xdir.rc");
     // link.exe acepta el .res compilado como una entrada más.
     println!("cargo:rustc-link-arg-bins={}", out.display());
 }

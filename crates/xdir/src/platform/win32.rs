@@ -1,14 +1,13 @@
 //! Parte de `platform` propia de Windows.
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW};
 use windows::core::{PCWSTR, w};
 
-use super::{Color, Handle, Key, Rect};
+use super::{Handle, Key};
 
 pub(super) fn post_message(h: Handle, msg: u32, wparam: usize, lparam: isize) {
     unsafe {
@@ -30,18 +29,6 @@ impl Handle {
 impl From<HWND> for Handle {
     fn from(h: HWND) -> Self {
         Handle(h.0 as isize)
-    }
-}
-
-impl From<Color> for D2D1_COLOR_F {
-    fn from(c: Color) -> Self {
-        D2D1_COLOR_F { r: c.r, g: c.g, b: c.b, a: c.a }
-    }
-}
-
-impl From<Rect> for D2D_RECT_F {
-    fn from(r: Rect) -> Self {
-        D2D_RECT_F { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
     }
 }
 

@@ -42,9 +42,10 @@ jobs:
           esac
           new="$maj.$min.$pat"
           if [ "$new" != "$current" ]; then
-            # Solo la primera línea "version" (la de [package]); Cargo.lock también la lleva y el build usa --locked.
+            # Solo la primera línea "version" (la de [workspace.package]); Cargo.lock también la lleva y el build usa --locked.
             sed -i "0,/^version *= *\"$current\"/s//version = \"$new\"/" Cargo.toml
             sed -i "/^name = \"xdir\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
+            sed -i "/^name = \"xdir-core\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
           fi
           echo "version=$new" >> "$GITHUB_OUTPUT"
           echo "changed=$([ "$new" != "$current" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"

@@ -11,7 +11,7 @@ pub const ISSUES_URL: &str = "https://github.com/Runick93/xdir/issues/new/choose
 
 /// Logo de Runick: `assets/runick-logo.bgra` (ancho y alto como u32 little-endian y luego BGRA
 /// premultiplicado), generado a partir de `assets/runick-logo.png`.
-static LOGO: &[u8] = include_bytes!("../assets/runick-logo.bgra");
+static LOGO: &[u8] = include_bytes!("../../../assets/runick-logo.bgra");
 
 pub fn logo_pixels() -> Option<Pixels> {
     let width = u32::from_le_bytes(LOGO.get(0..4)?.try_into().ok()?);

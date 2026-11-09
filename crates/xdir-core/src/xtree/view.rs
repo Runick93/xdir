@@ -36,6 +36,9 @@ const LEGEND_H: f32 = 40.0;
 const GAP: f32 = 6.0;
 const MENU_ROW: f32 = 34.0;
 const MENU_W: f32 = 400.0;
+/// Ancho del estado del análisis, a la derecha de la barra superior («Análisis completado en
+/// 1:02:15»).
+const STATE_W: f32 = 220.0;
 
 const VK_A: Key = Key(0x41);
 const VK_T: Key = Key(0x54);
@@ -191,6 +194,9 @@ pub struct Xtree {
     scan_elapsed: Option<Duration>,
     /// El escaneo se cortó antes de terminar (`cancel`).
     scan_stopped: bool,
+    /// Reescaneo con permisos (tecla A) después de un análisis terminado: cronómetro del análisis
+    /// anterior (inicio, duración), para volver a él si el escaneo elevado no trae árbol.
+    before_elevate: Option<(Option<Instant>, Option<Duration>)>,
     /// Mayor porcentaje mostrado en este escaneo: no retrocede.
     pct_max: std::cell::Cell<u8>,
     /// Disco o carpeta elegida en el desplegable; se analiza al pulsar «Analizar».
@@ -235,6 +241,7 @@ impl Xtree {
             scan_started: None,
             scan_elapsed: None,
             scan_stopped: false,
+            before_elevate: None,
             pct_max: std::cell::Cell::new(0),
             drives: Vec::new(),
             menu_open: false,
@@ -279,9 +286,10 @@ impl Xtree {
     /// el cronómetro queda fijo y el estado dice «Detenido a los …».
     pub fn cancel(&mut self) {
         self.scan.cancel.store(true, Ordering::Relaxed);
-        if self.scanning && self.scan_elapsed.is_none() {
+        if (self.scanning || self.elevated_pending()) && self.scan_elapsed.is_none() {
             self.scan_elapsed = Some(self.elapsed());
             self.scan_stopped = true;
+            self.before_elevate = None;
         }
     }
 
@@ -298,7 +306,11 @@ impl Xtree {
     /// Texto para la barra de estado de xdir mientras la vista está abierta.
     pub fn status_text(&self) -> String {
         if self.elevating.load(Ordering::Relaxed) {
-            format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), disk_scan().elevating_text())
+            if self.elevated_pending() {
+                format!("xtree \u{B7} {} \u{B7} {} \u{B7} {}", self.root.display(), disk_scan().elevating_text(), self.state_text())
+            } else {
+                format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), disk_scan().elevating_text())
+            }
         } else if self.scanning {
             format!("xtree \u{B7} {} \u{B7} {}", self.root.display(), self.state_text())
         } else if self.arena.is_empty() {
@@ -314,6 +326,9 @@ impl Xtree {
         let t = fmt_elapsed(self.elapsed());
         if self.scan_stopped {
             format!("Detenido a los {t}")
+        } else if self.elevated_pending() {
+            // El ayudante elevado no informa bytes leídos: solo el cronómetro.
+            format!("Escaneando\u{2026} {t}")
         } else if self.scanning {
             match self.percent() {
                 Some(p) => format!("Escaneando\u{2026} {p} % \u{B7} {t}"),
@@ -328,6 +343,12 @@ impl Xtree {
         }
     }
 
+    /// Hay un reescaneo con permisos en curso que empezó con el análisis ya terminado: cuenta como
+    /// un escaneo nuevo (el árbol anterior se sigue viendo hasta que llegue el nuevo).
+    fn elevated_pending(&self) -> bool {
+        !self.scanning && self.scan_elapsed.is_none() && self.before_elevate.is_some()
+    }
+
     /// Tiempo del escaneo: fijo si terminó o se cortó; si no, el que lleva.
     fn elapsed(&self) -> Duration {
         self.scan_elapsed.or_else(|| self.scan_started.map(|t| t.elapsed())).unwrap_or_default()
@@ -340,6 +361,9 @@ impl Xtree {
             return None;
         }
         let (total, free) = self.vol?;
+        // En Windows, si el escaneo rápido (MFT) pide administrador, el escáner vuelve a empezar
+        // con el recorrido normal y los bytes leídos vuelven a 0: el porcentaje queda en `pct_max`
+        // hasta que el recorrido lo alcanza (no retrocede).
         let p = scan_percent(self.progress().bytes.load(Ordering::Relaxed), total - free.min(total))?;
         let p = p.max(self.pct_max.get());
         self.pct_max.set(p);
@@ -421,6 +445,7 @@ impl Xtree {
         if self.scan_elapsed.is_none() {
             self.scan_elapsed = Some(self.elapsed());
         }
+        self.before_elevate = None;
         self.scanning = false;
         self.go(0);
         true
@@ -433,6 +458,15 @@ impl Xtree {
         }
         if lparam == 1 {
             return self.take_result();
+        }
+        // El reescaneo con permisos terminó sin árbol (permiso rechazado o error): vuelve el
+        // cronómetro del análisis anterior.
+        if !self.elevating.load(Ordering::Relaxed)
+            && self.elevated_pending()
+            && let Some((started, elapsed)) = self.before_elevate.take()
+        {
+            self.scan_started = started;
+            self.scan_elapsed = elapsed;
         }
         // Avance: el mapa en vivo se recalcula con lo que lleva descubierto el escáner. También
         // llega cuando termina el escaneo elevado sin árbol: hay que repintar su aviso.
@@ -458,6 +492,20 @@ impl Xtree {
             return Action::None;
         }
         let (root, hwnd, id) = (self.root.clone(), self.hwnd, self.scan.id);
+        // Con el análisis ya terminado es un escaneo nuevo: el cronómetro arranca de 0 (incluye el
+        // pedido de permisos) y, como el escáner ya no avisa, un hilo pide repintar cada 250 ms
+        // mientras dure. Si el recorrido normal sigue, su tiempo ya incluye al ayudante.
+        if !self.scanning && !self.scan_stopped && self.scan_elapsed.is_some() {
+            self.before_elevate = Some((self.scan_started, self.scan_elapsed));
+            self.start_clock();
+            let elevating = self.elevating.clone();
+            let _ = std::thread::Builder::new().spawn(move || {
+                while elevating.load(Ordering::Relaxed) {
+                    hwnd.post(WM_APP_XTREE, id, 0);
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            });
+        }
         let (progress, cancel, result, elevating) =
             (self.scan.progress.clone(), self.scan.cancel.clone(), self.scan.result.clone(), self.elevating.clone());
         let _ = std::thread::Builder::new().spawn(move || {
@@ -788,7 +836,7 @@ impl Xtree {
                 fmt_size(progress.bytes.load(Ordering::Relaxed))
             )
         };
-        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - 280.0, t0 + TOP_H), th.text);
+        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - STATE_W - 60.0, t0 + TOP_H), th.text);
         // Barra de avance (volumen entero) sobre el borde inferior de la barra superior.
         if self.scanning && !self.scan_stopped
             && let Some(pc) = self.percent()
@@ -805,11 +853,14 @@ impl Xtree {
         p.round_fill(ui.scan_btn, 6.0, th.accent);
         p.text(FontId::UiCenter, "Analizar", ui.scan_btn, white);
         let state = self.state_text();
-        p.circle(r0 - 238.0, t0 + TOP_H / 2.0, 9.0, if done { rgb(GREEN) } else { warning });
-        if done {
-            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - 247.0, t0, r0 - 229.0, t0 + TOP_H), white);
+        // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
+        // es de escaneo.
+        let done_state = done && !self.elevated_pending();
+        p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
+        if done_state {
+            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
         }
-        p.text(FontId::Ui, &state, rect(r0 - 220.0, t0, r0 - MARGIN, t0 + TOP_H), th.text);
+        p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
 
         if arena.is_empty() {
             p.round_fill(ui.map, 8.0, th.surface);
@@ -1313,6 +1364,51 @@ mod tests {
         assert!(status.contains("Escaneando\u{2026} 0:00"), "{status}");
         assert!(!status.contains("Detenido"), "{status}");
         x.cancel();
+    }
+
+    /// Tecla A con el análisis terminado: escaneo nuevo con el cronómetro desde 0; al llegar el
+    /// árbol elevado, «Análisis completado en» con la duración nueva.
+    #[test]
+    fn elevate_after_done_restarts_clock() {
+        let mut x = scanning_since("raiz-elev", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-elev", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        assert!(x.state_text().contains("Análisis completado en 1:23"));
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let elevated = vec![node("raiz-elev", NO_PARENT, 99, true, vec![])];
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); Some(elevated) }), Action::Redraw);
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 0:00");
+        assert!(x.status_text().contains("Escaneando\u{2026} 0:00"), "{}", x.status_text());
+        assert!(painted(&mut x).iter().any(|t| t == "Escaneando\u{2026} 0:00"));
+        // Simula 7 s de escaneo elevado.
+        x.scan_started = Instant::now().checked_sub(Duration::from_secs(7));
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        assert!(x.on_message(x.scan.id, 1));
+        assert_eq!(x.arena[0].size, 99);
+        assert_eq!(x.state_text(), "Análisis completado en 0:07");
+    }
+
+    /// Si el reescaneo con permisos falla, vuelve el tiempo del análisis anterior.
+    #[test]
+    fn elevate_failure_restores_previous_time() {
+        let mut x = scanning_since("raiz-elev-falla", 83);
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-elev-falla", NO_PARENT, 5, true, vec![])]);
+        assert!(x.take_result());
+        lacking_permissions(&x);
+        assert_eq!(x.elevate_with(|_, _, _| None), Action::Redraw);
+        wait_elevated(&x);
+        assert!(x.on_message(x.scan.id, 0));
+        assert_eq!(x.state_text(), "Análisis completado en 1:23");
+    }
+
+    /// El estado más largo entra en su lugar de la barra superior.
+    #[test]
+    fn longest_state_fits() {
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        assert!(p.measure(FontId::Ui, "Análisis completado en 1:02:15") <= STATE_W - MARGIN);
+        assert!(p.measure(FontId::Ui, "Escaneando\u{2026} 99 % \u{B7} 1:02:15") <= STATE_W - MARGIN);
     }
 
     #[test]

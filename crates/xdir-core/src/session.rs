@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::folder_views::ViewSettings;
 use crate::fs::Location;
 use crate::list::{Column, ColumnSpec, View, default_columns};
 use crate::theme::{Accent, DEFAULT_ACCENT};
@@ -86,9 +87,12 @@ pub struct Session {
     /// Grupo de paneles activo (el que se guarda solo con cada cambio).
     pub group: Option<String>,
     pub panes: Vec<PaneState>,
-    /// Columnas de las listas, de izquierda a derecha.
+    /// Columnas de las listas, de izquierda a derecha. Desde `carpetas.toml` (memoria por
+    /// carpeta) solo se leen para la migración (`legacy_view`); se siguen escribiendo con las de
+    /// la vista por defecto para que una versión anterior las entienda.
     pub columns: Vec<ColumnSpec>,
-    /// Vista de cada panel (detalles, íconos, miniaturas), en el orden de `panes`.
+    /// Vista de cada panel (detalles, íconos, miniaturas), en el orden de `panes`. Igual que
+    /// `columns`: solo para la migración y para versiones anteriores.
     pub views: Vec<View>,
 }
 
@@ -116,6 +120,16 @@ impl Default for Session {
             columns: default_columns(),
             views: Vec::new(),
         }
+    }
+}
+
+impl Session {
+    /// Vista por defecto que sale de una sesión de antes de `carpetas.toml` (migración): la vista
+    /// del panel activo y las columnas, con el nombre sin ancho fijo (la sesión no lo guardaba).
+    pub fn legacy_view(&self) -> ViewSettings {
+        let view = self.views.get(self.active_pane).or(self.views.first()).copied().unwrap_or(View::Details);
+        let columns = self.columns.iter().map(|c| if c.col == Column::Name { ColumnSpec { col: c.col, width: 0.0 } } else { *c }).collect();
+        ViewSettings { view, columns, ..ViewSettings::default() }
     }
 }
 

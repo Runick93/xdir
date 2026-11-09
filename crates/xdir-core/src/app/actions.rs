@@ -161,8 +161,11 @@ impl App {
             Command::SortBy(i) => {
                 if let Some(&(col, ..)) = list::COLUMNS.get(i as usize) {
                     self.tab_mut().list.set_sort(col);
+                    self.sync_folder_views();
                 }
             }
+            Command::ApplyViewToAll => self.apply_view_to_all(),
+            Command::ResetFolderView => self.reset_folder_view(),
             Command::About => {
                 self.picker_open = false;
                 self.term_menu = None;
@@ -332,11 +335,10 @@ impl App {
                 self.start_drag(pane);
                 return;
             }
-            Action::ColumnsChanged => {
-                let cols = self.panes[pane].tab().list.columns.clone();
-                self.set_columns(cols);
-            }
+            // Ordenar con un clic en el encabezado, anchos y columnas: quedan para la carpeta.
+            Action::ColumnsChanged => {}
         }
+        self.sync_folder_views();
         self.redraw();
     }
 

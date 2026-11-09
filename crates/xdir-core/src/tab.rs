@@ -8,6 +8,7 @@ use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use crate::fs::{self, Entry, LoadEvent, LoadMsg, Location, WM_APP_CHANGED};
+use crate::folder_views::{self, FolderViews, ViewSettings};
 use crate::list::{self, Column, ColumnSpec, FileList};
 use crate::sys::{self, Handle, Watch};
 
@@ -53,6 +54,12 @@ pub struct Tab {
     pub visited: Option<PathBuf>,
     /// Mientras hay una búsqueda, la lista muestra sus resultados en vez de la carpeta.
     pub search: Option<Search>,
+    /// Vista de la carpeta que tiene la lista: su clave y cómo era al aplicarla o al guardarla
+    /// por última vez (`None`: falta aplicar la de la ubicación actual, ver `sync_view`).
+    view_applied: Option<(String, ViewSettings)>,
+    /// Lo que el usuario había cambiado en la vista de la ubicación que se acaba de dejar,
+    /// pendiente de guardar en `sync_view`.
+    left_view: Option<(String, ViewSettings)>,
 }
 
 impl Tab {
@@ -114,6 +121,83 @@ impl Tab {
             auth_nav: 0,
             visited: None,
             search: None,
+            view_applied: None,
+            left_view: None,
+        }
+    }
+
+    /// Clave de la vista de lo que muestra la pestaña: la carpeta, la ubicación especial o, con
+    /// una búsqueda, la carpeta buscada (ver `folder_views::folder_key`).
+    pub fn view_key(&self) -> String {
+        match (&self.search, self.list.search_root.as_deref()) {
+            (Some(_), Some(root)) => folder_views::folder_key(&self.location, Some(root)),
+            (Some(_), None) => folder_views::computer_search_key(),
+            (None, _) => folder_views::folder_key(&self.location, None),
+        }
+    }
+
+    /// La vista guardada, como se ve en esta ubicación: con una búsqueda, con la columna de la
+    /// carpeta de cada resultado (después del nombre si no la tenía); sin búsqueda, sin ella.
+    fn view_here(&self, mut v: ViewSettings) -> ViewSettings {
+        let folder = v.columns.iter().position(|c| c.col == Column::Folder);
+        match (self.search.is_some(), folder) {
+            (true, None) => {
+                let at = v.columns.iter().position(|c| c.col == Column::Name).map_or(0, |i| i + 1);
+                v.columns.insert(at, ColumnSpec { col: Column::Folder, width: list::COLUMNS[7].3 });
+            }
+            (false, Some(i)) => {
+                v.columns.remove(i);
+            }
+            _ => {}
+        }
+        v
+    }
+
+    /// La vista de la lista y la de su carpeta van juntas: al llegar a otra ubicación la lista
+    /// toma la vista guardada de esa carpeta (o la por defecto); si el usuario cambió algo
+    /// (vista, orden, columnas, anchos), se guarda para la carpeta actual. Lo llama la `App`
+    /// antes de cada cuadro y antes de entregar cada lote de la carga, así la lista ya está con
+    /// su vista cuando llegan los elementos. Devuelve si cambió algo de `views`.
+    pub fn sync_view(&mut self, views: &mut FolderViews) -> bool {
+        let mut changed = false;
+        if let Some((key, v)) = self.left_view.take() {
+            views.set(&key, v);
+            changed = true;
+        }
+        let key = self.view_key();
+        let current = self.list.view_settings();
+        match &self.view_applied {
+            Some((k, applied)) if *k == key => {
+                if current != *applied {
+                    views.set(&key, current.clone());
+                    self.view_applied = Some((key, current));
+                    changed = true;
+                }
+            }
+            _ => {
+                let v = self.view_here(views.get(&key));
+                self.list.apply_view_settings(&v);
+                views.touch(&key);
+                self.view_applied = Some((key, self.list.view_settings()));
+            }
+        }
+        changed
+    }
+
+    /// La vista guardada de esta ubicación cambió por otro lado («Usar esta vista en todas las
+    /// carpetas», «Restablecer la vista»): la próxima `sync_view` la vuelve a aplicar.
+    pub fn reload_view(&mut self) {
+        self.view_applied = None;
+        self.left_view = None;
+    }
+
+    /// Se deja la ubicación actual: si el usuario le cambió la vista, queda para guardar.
+    fn leave_view(&mut self) {
+        if let Some((key, applied)) = self.view_applied.take() {
+            let current = self.list.view_settings();
+            if current != applied {
+                self.left_view = Some((key, current));
+            }
         }
     }
 
@@ -245,6 +329,7 @@ impl Tab {
             // Las carpetas virtuales no se recorren.
             Location::Shell { .. } => return,
         };
+        self.leave_view();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.list.clear();
         self.list.search_root = root;
@@ -281,6 +366,7 @@ impl Tab {
     }
 
     fn start(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        self.leave_view();
         self.drop_search();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.nav_id += 1;

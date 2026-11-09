@@ -22,15 +22,8 @@ impl App {
             WM_APP_LOAD => {
                 let t0 = Instant::now();
                 let mut changed = false;
-                let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 while let Ok(event) = self.rx.try_recv() {
-                    if let Some(tab) = self.tab_by_id(event.panel) {
-                        changed |= tab.on_load(event);
-                        tab.retry_with_credentials(hwnd, &tx);
-                        if let Some(path) = tab.visited.take() {
-                            self.history.record(&path, jump::now());
-                        }
-                    }
+                    changed |= self.on_load_event(event);
                 }
                 self.ui_load_ms += ms_since(t0);
                 if changed {
@@ -54,6 +47,7 @@ impl App {
             WM_APP_PALETTE_KEY => self.on_palette_key(Key(wparam as u16), lparam == 1),
             WM_APP_TEXT_CHANGED => self.on_text_changed(lparam),
             WM_APP_SEARCH => self.on_search_due(lparam as u64),
+            WM_APP_VIEWS_SAVE => self.on_views_save_due(),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {
                 self.tree.on_loaded();
@@ -86,6 +80,25 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// Un mensaje de carga para una pestaña. Antes de entregarlo, la lista toma la vista de su
+    /// carpeta si acaba de cambiar de ubicación (así los elementos llegan ya con su orden).
+    /// Devuelve si hay que redibujar.
+    pub(super) fn on_load_event(&mut self, event: fs::LoadEvent) -> bool {
+        let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        let views = &mut self.folder_views;
+        let Some(tab) = self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == event.panel) else { return false };
+        let views_changed = tab.sync_view(views);
+        let changed = tab.on_load(event);
+        tab.retry_with_credentials(hwnd, &tx);
+        if let Some(path) = tab.visited.take() {
+            self.history.record(&path, jump::now());
+        }
+        if views_changed {
+            self.schedule_views_save();
+        }
+        changed
     }
 
     /// Cambió el texto de una caja de edición: el filtro y la paleta se actualizan con cada tecla,
@@ -365,6 +378,8 @@ impl App {
         }
         if self.probe.is_none() {
             self.autosave_group();
+            self.sync_folder_views();
+            self.folder_views.save_if_dirty();
             let _ = session::save(&self.session());
             let _ = self.history.save();
         }

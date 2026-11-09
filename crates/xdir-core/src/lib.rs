@@ -13,6 +13,7 @@ pub mod config;
 pub mod console;
 pub mod drop;
 pub mod favorites;
+pub mod folder_views;
 pub mod format;
 pub mod fs;
 pub mod geom;

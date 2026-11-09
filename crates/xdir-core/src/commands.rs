@@ -74,6 +74,10 @@ pub enum Command {
     ToggleQuickPin,
     /// Abrir o cerrar xtree, el mapa de uso de disco.
     Xtree,
+    /// La vista de la carpeta actual pasa a ser la por defecto y se borran las de las demás.
+    ApplyViewToAll,
+    /// La carpeta actual vuelve a la vista por defecto.
+    ResetFolderView,
 }
 
 /// ¿La acción existe en esta compilación y en este sistema? (las experimentales dependen de una
@@ -187,6 +191,8 @@ pub const ALL: &[Spec] = &[
     spec(Command::SortBy(3), "ordenar_tipo", "Ordenar por tipo", &[]),
     spec(Command::SortBy(4), "ordenar_extension", "Ordenar por extensión", &[]),
     spec(Command::SortBy(5), "ordenar_tamano", "Ordenar por tamaño", &[]),
+    spec(Command::ApplyViewToAll, "vista_en_todas", "Usar esta vista en todas las carpetas", &[]),
+    spec(Command::ResetFolderView, "restablecer_vista", "Restablecer la vista de esta carpeta", &[]),
     spec(Command::ToggleTree, "arbol", "Mostrar u ocultar el árbol de carpetas (experimental)", &["Ctrl+Shift+E"]),
 ];
 

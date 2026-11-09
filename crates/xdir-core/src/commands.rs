@@ -363,6 +363,16 @@ mod tests {
         assert!(parse_combo("Meta+X").is_err());
     }
 
+    /// El árbol de carpetas solo existe compilando con la feature `arbol`; las demás acciones no
+    /// dependen de ella.
+    #[test]
+    fn toggle_tree_depends_on_the_feature() {
+        use crate::sys::testing::FakeEnv;
+        assert_eq!(available_in(&FakeEnv, Command::ToggleTree), cfg!(feature = "arbol"));
+        assert!(available_in(&FakeEnv, Command::ToggleTreePin));
+        assert!(available_in(&FakeEnv, Command::ToggleQuickPin));
+    }
+
     /// Cada atajo de fábrica resuelve a su propia acción, y no hay dos acciones con la misma tecla.
     #[test]
     fn defaults_are_consistent() {

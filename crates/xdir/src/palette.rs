@@ -394,6 +394,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn folders_by_frecency_and_favorites() {
+        xdir_core::sys::testing::install_fakes();
         let now = jump::now();
         let mut h = History::default();
         h.record(std::path::Path::new(r"C:\proyectos\viejo"), now - 40 * 86_400);
@@ -430,6 +431,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn groups_open_and_save() {
+        xdir_core::sys::testing::install_fakes();
         use crate::groups::Group;
         use crate::session::PaneState;
         let (h, favs, keymap) = (History::default(), Favorites { items: Vec::new() }, Keymap::default());

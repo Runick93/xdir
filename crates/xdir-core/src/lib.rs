@@ -10,6 +10,7 @@ pub mod anim;
 pub mod commands;
 pub mod config;
 pub mod console;
+pub mod drop;
 pub mod favorites;
 pub mod format;
 pub mod fs;

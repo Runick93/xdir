@@ -34,6 +34,18 @@ fn test_app_uses_the_fake_env() {
     assert_eq!(xdir_core::format::size_kb(2048), "2 KB");
 }
 
+/// La plataforma le pasa la ventana y su DPI con `attach`: la `App` los guarda y le pasa la
+/// ventana al host.
+#[test]
+fn attach_sets_window_and_dpi() {
+    let host = FakeHost::new();
+    let mut app = App::new(Init::blank(), host.clone());
+    app.attach(Handle(7), 144);
+    assert_eq!(app.window(), Handle(7));
+    assert_eq!(app.dpi(), 144);
+    assert_eq!(host.attached(), Some(Handle(7)));
+}
+
 fn count(a: &App, pane: usize) -> usize {
     a.panes[pane].tabs.len()
 }
@@ -42,7 +54,7 @@ fn count(a: &App, pane: usize) -> usize {
 fn test_app_posts_through_the_fake_waker() {
     use xdir_core::sys::testing::FakeWaker;
     // Número propio de este test, para que los demás (en paralelo) no lo cuenten.
-    const MSG: u32 = crate::platform::WM_APP + 0x7B01;
+    const MSG: u32 = WM_APP + 0x7B01;
     let a = app();
     let before = FakeWaker::count(MSG);
     a.hwnd.post(MSG, 0, 0);
@@ -254,7 +266,7 @@ fn fav_act_ids_round_trip() {
 
 // ---------- hit-testing ----------
 
-fn center(r: &render::Rect) -> (f32, f32) {
+fn center(r: &geom::Rect) -> (f32, f32) {
     ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
 }
 
@@ -299,7 +311,7 @@ fn about_dialog_is_modal() {
 #[test]
 fn pane_hit_follows_the_pane_rect() {
     let mut a = app();
-    a.panes[1].rect = render::rect(100.0, 100.0, 500.0, 400.0);
+    a.panes[1].rect = geom::rect(100.0, 100.0, 500.0, 400.0);
     assert_eq!(a.hit(300.0, 101.0), Hit::Pane(1, PaneHit::TabStrip));
     // Un panel fuera del layout no responde aunque tenga rectángulo.
     a.set_layout(Layout::One);
@@ -710,7 +722,7 @@ fn go_to_text_with_a_file_opens_its_folder() {
 
 // ---------- operaciones terminadas ----------
 
-fn result(undo: Option<ops::Undo>, focus: Option<PathBuf>, rename_after: bool, error: Option<&str>) -> OpResult {
+fn result(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, error: Option<&str>) -> OpResult {
     OpResult { undo, focus, rename_after, error: error.map(String::from) }
 }
 
@@ -727,11 +739,11 @@ fn op_done_reports_errors_and_clears_the_notice() {
 fn op_done_stacks_undo_with_a_cap() {
     let mut a = app();
     for i in 0..UNDO_MAX + 10 {
-        a.on_op_done(result(Some(ops::Undo::Created(vec![PathBuf::from(format!("C:\\x{i}"))])), None, false, None));
+        a.on_op_done(result(Some(Undo::Created(vec![PathBuf::from(format!("C:\\x{i}"))])), None, false, None));
     }
     assert_eq!(a.undo.len(), UNDO_MAX);
     // Se descartan las más viejas: la última sigue siendo la más reciente.
-    let ops::Undo::Created(last) = a.undo.last().unwrap() else { panic!() };
+    let Undo::Created(last) = a.undo.last().unwrap() else { panic!() };
     assert_eq!(last[0], PathBuf::from(format!("C:\\x{}", UNDO_MAX + 9)));
 }
 
@@ -764,7 +776,7 @@ fn rename_sends_rename_op() {
     FakeFileOps::take_ops();
     let path = std::env::temp_dir().join("viejo.txt");
     a.commit_rename(path.clone(), "nuevo.txt".into());
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Rename { path, new_name: "nuevo.txt".into() }]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Rename { path, new_name: "nuevo.txt".into() }]);
 }
 
 #[test]
@@ -773,17 +785,17 @@ fn undo_after_new_folder_sends_undo() {
     let mut a = app();
     // La ruta como la guarda la pestaña: en Windows la carpeta temporal puede venir con nombre
     // corto (`RUNNER~1`) y la navegación la pasa al largo.
-    let tmp = crate::fs::true_case(&std::env::temp_dir());
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
     a.new_tab(0, Location::Path(tmp.clone()), true);
     FakeFileOps::take_ops();
     let created = vec![tmp.join("Nueva carpeta")];
-    FakeFileOps::respond_with(OpResult { undo: Some(ops::Undo::Created(created.clone())), ..OpResult::default() });
+    FakeFileOps::respond_with(OpResult { undo: Some(Undo::Created(created.clone())), ..OpResult::default() });
     a.run_command(Command::NewFolder);
     drain_op_results(&mut a);
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::NewFolder { parent: tmp }]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::NewFolder { parent: tmp }]);
     FakeFileOps::respond_with(OpResult::default());
     a.run_command(Command::Undo);
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Undo(ops::Undo::Created(created))]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Undo(Undo::Created(created))]);
     assert!(a.undo.is_empty());
 }
 
@@ -828,7 +840,7 @@ fn rename_applies_on_done() {
     host.text_set(edit, "nuevo.txt");
     FakeFileOps::take_ops();
     assert!(a.on_app_message(WM_APP_RENAME_DONE, 1, 0));
-    assert_eq!(FakeFileOps::take_ops(), [ops::Op::Rename { path: dir.join("viejo.txt"), new_name: "nuevo.txt".into() }]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Rename { path: dir.join("viejo.txt"), new_name: "nuevo.txt".into() }]);
     assert_eq!(host.text_of(TextKind::Rename), None);
 }
 
@@ -859,7 +871,7 @@ fn xtree_dir(name: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     // La ruta como la guarda la pestaña: en Windows la carpeta temporal puede venir con nombre
     // corto (`RUNNER~1`) y la navegación la pasa al largo.
-    crate::fs::true_case(&dir)
+    sys::file_system().true_case(&dir)
 }
 
 /// App con el panel activo en una carpeta temporal.
@@ -951,7 +963,7 @@ fn closing_xdir_cancels_scan() {
 fn xtree_view_swallows_pane_clicks() {
     let (mut a, _) = app_in("swallow");
     a.set_active(1);
-    a.panes[0].rect = render::rect(100.0, 100.0, 500.0, 400.0);
+    a.panes[0].rect = geom::rect(100.0, 100.0, 500.0, 400.0);
     // La tira de pestañas: sin la vista, un clic ahí activa el panel 0.
     let (x, y) = (300.0, 101.0);
     assert!(matches!(a.hit(x, y), Hit::Pane(0, _)), "sin la vista el clic es del panel 0: {:?}", a.hit(x, y));
@@ -1010,8 +1022,8 @@ fn command_xtree_is_listed() {
 // ---------- shell ----------
 
 /// Una fila de archivo para cargar a mano en la lista (sin leer el disco).
-fn file_entry(name: &str) -> crate::fs::Entry {
-    crate::fs::Entry {
+fn file_entry(name: &str) -> fs::Entry {
+    fs::Entry {
         name: name.into(),
         full: None,
         group: 0,

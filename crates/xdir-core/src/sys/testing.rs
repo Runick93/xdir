@@ -799,6 +799,8 @@ pub struct FakeHost {
     next_text_box: Cell<u32>,
     menu_choice: Cell<Option<u32>>,
     menus: RefCell<Vec<Vec<Entry>>>,
+    /// La ventana que se le pasó a `attach` (la última).
+    attached: Cell<Option<Handle>>,
 }
 
 impl FakeHost {
@@ -816,6 +818,7 @@ impl FakeHost {
             next_text_box: Cell::new(1),
             menu_choice: Cell::new(None),
             menus: RefCell::new(Vec::new()),
+            attached: Cell::new(None),
         })
     }
 
@@ -864,6 +867,11 @@ impl FakeHost {
         self.beeps.get()
     }
 
+    /// La ventana que recibió `attach` (`None` si todavía no se llamó).
+    pub fn attached(&self) -> Option<Handle> {
+        self.attached.get()
+    }
+
     /// Lo que devuelve `start_drag` (por defecto, `Ok`).
     pub fn set_drag_result(&self, r: Result<(), String>) {
         *self.drag_result.borrow_mut() = r;
@@ -871,7 +879,9 @@ impl FakeHost {
 }
 
 impl WindowHost for FakeHost {
-    fn attach(&self, _window: Handle) {}
+    fn attach(&self, window: Handle) {
+        self.attached.set(Some(window));
+    }
 
     fn invalidate(&self) {
         self.invalidations.set(self.invalidations.get() + 1);

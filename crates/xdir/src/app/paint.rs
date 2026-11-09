@@ -9,7 +9,7 @@ impl App {
         self.panes[..self.layout.panes()].iter().all(|p| p.tab().is_loaded() && !p.tab().loading)
     }
 
-    pub(super) fn paint(&mut self) {
+    pub fn paint(&mut self) {
         if self.drag == Drag::None {
             self.autosave_group();
         }
@@ -64,7 +64,7 @@ impl App {
         if let Some(g) = &mut self.ghost {
             animating |= g.step(dt);
         }
-        let ghost = self.ghost.as_ref().map(|g| (g.title.clone(), render::rect(g.x, g.y, g.x + g.w, g.y + pane::TABSTRIP_H - 3.0), g.detach));
+        let ghost = self.ghost.as_ref().map(|g| (g.title.clone(), geom::rect(g.x, g.y, g.x + g.w, g.y + pane::TABSTRIP_H - 3.0), g.detach));
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
@@ -136,9 +136,9 @@ impl App {
             // franja de íconos que al asomar el mouse se expande encima de los paneles (con sombra).
             #[cfg(feature = "arbol")]
             if tree.visible && !xtree_open {
-                let r = render::rect(ui::GAP, area.top - groups_h, ui::GAP + tree.width_now(), area.bottom);
+                let r = geom::rect(ui::GAP, area.top - groups_h, ui::GAP + tree.width_now(), area.bottom);
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
-                    p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
+                    p.round_fill(geom::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
                 }
                 tree.draw(p, r, current_folder.as_deref());
             }

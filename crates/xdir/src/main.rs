@@ -3,7 +3,6 @@
 
 use xdir_core::commands;
 
-mod console;
 mod drop;
 mod fs;
 mod icons;

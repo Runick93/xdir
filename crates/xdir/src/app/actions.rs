@@ -4,7 +4,7 @@ use super::*;
 
 impl App {
     /// Atajos de la ventana. Devuelve si la tecla se usó.
-    pub(super) fn on_key(&mut self, vk: Key) -> bool {
+    pub fn on_key(&mut self, vk: Key) -> bool {
         let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
         let active = self.active;
         match vk {
@@ -30,7 +30,7 @@ impl App {
     }
 
     /// Ejecuta una acción sobre el panel activo (atajo de teclado o paleta de comandos).
-    pub(super) fn run_command(&mut self, c: Command) {
+    pub fn run_command(&mut self, c: Command) {
         // La vista de xtree tapa los paneles: lo que los cambia la cierra para que se vea el efecto.
         if self.xtree_open && !keeps_xtree(c) {
             self.close_xtree();
@@ -109,17 +109,17 @@ impl App {
             Command::CopyPaths => {
                 let text: Vec<String> = self.selection(active).iter().map(|p| format!("\"{}\"", p.display())).collect();
                 if !text.is_empty() {
-                    let _ = shell::copy_text(hwnd, &text.join("\r\n"));
+                    let _ = sys::shell().copy_text(hwnd, &text.join("\r\n"));
                 }
             }
             Command::Undo => {
                 if let Some(undo) = self.undo.pop() {
-                    ops::spawn(hwnd, self.ops_tx.clone(), Op::Undo(undo));
+                    sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::Undo(undo));
                 }
             }
             Command::NewFolder => {
                 if let Some(parent) = self.panes[active].tab().location.target() {
-                    ops::spawn(hwnd, self.ops_tx.clone(), Op::NewFolder { parent });
+                    sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::NewFolder { parent });
                 }
             }
             Command::Recycle => self.delete_selection(true),
@@ -129,8 +129,8 @@ impl App {
                 // De la selección, o de la carpeta si no hay nada seleccionado.
                 let items = self.selection_items(active);
                 match (&items[..], &self.panes[active].tab().location) {
-                    ([], Location::Path(p)) => shell::properties(hwnd, &[p.clone().into()]),
-                    _ => shell::properties(hwnd, &items),
+                    ([], Location::Path(p)) => sys::shell().properties(hwnd, &[p.clone().into()]),
+                    _ => sys::shell().properties(hwnd, &items),
                 }
             }
             Command::ToggleFavorite => self.toggle_favorite(active),
@@ -265,7 +265,7 @@ impl App {
     }
 
     /// Área de la vista de xtree en la ventana.
-    pub(super) fn xtree_area(&self) -> render::Rect {
+    pub(super) fn xtree_area(&self) -> geom::Rect {
         let (w, h) = self.client_dips();
         ui::xtree_area(w, h)
     }
@@ -301,13 +301,13 @@ impl App {
         self.redraw();
     }
 
-    pub(super) fn redraw(&self) {
+    pub fn redraw(&self) {
         self.host.invalidate();
     }
 
     /// Posición del mouse en DIPs del área de la ventana.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) fn cursor_pos(&self) -> (f32, f32) {
+    pub fn cursor_pos(&self) -> (f32, f32) {
         self.host.cursor_dips()
     }
 }

@@ -44,9 +44,9 @@ impl App {
 
     /// Lee el Acceso rápido de Windows para el árbol y empieza a vigilar sus cambios.
     #[cfg(feature = "arbol")]
-    pub(super) fn start_quick_access(&mut self) {
+    pub fn start_quick_access(&mut self) {
         self.tree.request_quick(self.hwnd);
-        self.quick_watch = fs::quick_access_watch_dir().and_then(|dir| fs::watch(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
+        self.quick_watch = sys::file_system().quick_access_watch_dir().and_then(|dir| sys::file_system().watch(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
     }
 
     /// Menú contextual nativo de una carpeta del árbol (incluye "Anclar a Acceso rápido" /
@@ -55,7 +55,7 @@ impl App {
     pub(super) fn tree_context_menu(&mut self, path: PathBuf, at: (f32, f32)) {
         let items = [shell::Item::from(path.clone())];
         let pinned = self.tree.is_pinned(&path);
-        let chosen = shell::context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &[], pinned);
+        let chosen = sys::shell().context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &[], pinned);
         if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
             self.toggle_quick_pin(path);
         } else if chosen.is_some() {
@@ -70,7 +70,7 @@ impl App {
     #[cfg(feature = "arbol")]
     pub(super) fn toggle_quick_pin(&mut self, path: PathBuf) {
         // El estado se pregunta de nuevo al Shell: "pintohome" sobre una carpeta ya anclada la desancla.
-        let done = if fs::is_quick_pinned(&path) { shell::unpin_quick_access(self.hwnd, &path) } else { shell::pin_quick_access(self.hwnd, &path) };
+        let done = if sys::file_system().is_quick_pinned(&path) { sys::shell().unpin_quick_access(self.hwnd, &path) } else { sys::shell().pin_quick_access(self.hwnd, &path) };
         if done.is_err() {
             self.notice = Some("No se pudo cambiar el Acceso rápido".into());
         }
@@ -237,7 +237,7 @@ impl App {
     }
 
     /// Solo las pestañas a la vista cargan y vigilan su carpeta.
-    pub(super) fn sync_visibility(&mut self) {
+    pub fn sync_visibility(&mut self) {
         let (hwnd, tx, visible_panes) = (self.hwnd, self.tx.clone(), self.layout.panes());
         for (i, pane) in self.panes.iter_mut().enumerate() {
             let active = pane.active;
@@ -283,7 +283,7 @@ impl App {
     /// `select <panel> <pos>`, `active <panel>` y `notice <texto>` dejan la interfaz en un estado
     /// que se quiere mostrar.
     #[cfg(feature = "pruebas")]
-    pub(super) fn test_hook(&mut self, text: &str) {
+    pub fn test_hook(&mut self, text: &str) {
         let mut it = text.splitn(3, ' ');
         let (verb, a, b) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
         let (na, nb) = (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(0));
@@ -318,7 +318,7 @@ impl App {
     }
 
     /// Animaciones: la opción de `config.toml` y la preferencia de Windows tienen que permitirlas.
-    pub(super) fn apply_animation_setting(&mut self) {
+    pub fn apply_animation_setting(&mut self) {
         anim::set_enabled(self.config.animations.unwrap_or_else(anim::system_allows));
         anim::set_off_by_config(self.config.animations == Some(false));
         if !anim::enabled() {
@@ -336,7 +336,7 @@ impl App {
 
     /// Rectángulos de los paneles para este frame: los de destino o, en plena transición, los
     /// intermedios. Devuelve también si la transición sigue en curso.
-    pub(super) fn animated_rects(&mut self, target: Vec<(usize, render::Rect)>) -> (Vec<(usize, render::Rect)>, bool) {
+    pub(super) fn animated_rects(&mut self, target: Vec<(usize, geom::Rect)>) -> (Vec<(usize, geom::Rect)>, bool) {
         let progress = self.layout_anim.as_ref().map(|a| a.start.elapsed().as_secs_f32() * 1000.0 / anim::LAYOUT_MS);
         let (rects, running) = match (&self.layout_anim, progress) {
             (Some(a), Some(t)) if t < 1.0 => {

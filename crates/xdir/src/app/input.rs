@@ -80,7 +80,7 @@ impl App {
         Hit::None
     }
 
-    pub(super) fn on_left_down(&mut self, x: f32, y: f32, double: bool) {
+    pub fn on_left_down(&mut self, x: f32, y: f32, double: bool) {
         let hit = self.hit(x, y);
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         if self.about_open {
@@ -273,7 +273,7 @@ impl App {
         self.redraw();
     }
 
-    pub(super) fn on_left_up(&mut self, x: f32, y: f32) {
+    pub fn on_left_up(&mut self, x: f32, y: f32) {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.host.release_mouse();
         let tab_drop = self.tab_drop.take();
@@ -313,7 +313,7 @@ impl App {
         self.redraw();
     }
 
-    pub(super) fn on_middle_click(&mut self, x: f32, y: f32) {
+    pub fn on_middle_click(&mut self, x: f32, y: f32) {
         match self.hit(x, y) {
             Hit::Pane(i, PaneHit::Tab(j) | PaneHit::TabClose(j)) => self.close_tab(i, j),
             Hit::Pane(i, PaneHit::Fav(j)) => self.activate_fav(i, &[j], true),
@@ -331,7 +331,7 @@ impl App {
         }
     }
 
-    pub(super) fn on_mouse_move(&mut self, x: f32, y: f32) {
+    pub fn on_mouse_move(&mut self, x: f32, y: f32) {
         self.host.track_mouse_leave();
         let mut redraw = false;
         match self.drag {

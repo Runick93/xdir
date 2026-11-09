@@ -13,11 +13,10 @@ mod paint;
 mod quick_jump;
 mod panes;
 
-// Lo propio de cada sistema: arranque, ventana, controles nativos y menús (en el host).
+// Lo propio de cada sistema: arranque, ventana, controles nativos y menús (en el host). Solo usan
+// la API pública de `App` (y `Init`, `startup_args`, `ms_since`, `INITIAL_SIZE`).
 #[cfg(windows)]
 mod host_win;
-#[cfg(windows)]
-use host_win::Win32Host;
 #[cfg(windows)]
 mod messages;
 #[cfg(windows)]
@@ -25,15 +24,9 @@ mod uia;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-use win::*;
-#[cfg(windows)]
-use crate::platform::HandleExt;
-#[cfg(windows)]
 pub use win::run;
 #[cfg(target_os = "macos")]
 mod host_mac;
-#[cfg(target_os = "macos")]
-use host_mac::MacHost;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
@@ -42,39 +35,35 @@ pub use mac::run;
 #[cfg(test)]
 mod tests;
 
-use events::CursorKind;
+pub use events::CursorKind;
 
-use crate::{about, anim, config, fs, icons, jump, list, ops, palette, pane, render, session, shell, theme, typed, ui};
+use crate::{about, anim, config, jump, list, palette, pane, session, theme, typed, ui};
 use crate::xtree::view::{self as xtree_view, Xtree};
-#[cfg(windows)]
-use crate::drop;
 #[cfg(feature = "arbol")]
 use crate::tree;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
-use crate::platform::{Color, Handle, Key, WM_APP, key_down};
-use crate::platform::keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP};
+use xdir_core::geom::{self, contains};
+use xdir_core::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
+use xdir_core::sys::{self, Handle};
+use xdir_core::{WM_APP, fs, shell};
 
 use crate::commands::Command;
 use crate::config::Config;
-use crate::console::Console;
+use xdir_core::console::Console;
 use crate::groups::{Group, Groups};
 use crate::jump::History;
 use crate::palette::{Palette, PaletteMode, Sources, Target};
-use crate::drop::{DragEvent, DragKind, Effect};
-#[cfg(windows)]
-use crate::drop::WM_APP_DRAG;
+use xdir_core::drop::{DragEvent, DragKind, Effect};
 use crate::favorites::{Fav, FavPath, Favorites};
-use crate::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
-use crate::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
+use xdir_core::fs::{Location, WM_APP_CHANGED, WM_APP_LOAD};
+use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use crate::list::{Action, ColumnSpec};
 use crate::pane::{Button, FavDrop, Pane, PaneHit, SearchView};
-use crate::render::contains;
 use crate::session::{PaneState, Session};
 use crate::tab::Tab;
 use crate::theme::{Accent, Theme};
@@ -85,8 +74,13 @@ use xdir_core::host::{
     WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED, WindowHost,
 };
 
+/// ¿La tecla está apretada ahora? (Ctrl, Shift, Alt…; en macOS Ctrl de los atajos es ⌘ y Alt es ⌥.)
+fn key_down(k: Key) -> bool {
+    sys::env().key_down(k)
+}
+
 /// Tamaño inicial en DIPs; se escala según el DPI del monitor.
-const INITIAL_SIZE: (i32, i32) = (1280, 800);
+pub(crate) const INITIAL_SIZE: (i32, i32) = (1280, 800);
 /// Siempre hay 4 paneles; el layout decide cuántos se ven. Los ocultos conservan sus pestañas.
 const PANES: usize = 4;
 /// Pasó la pausa después de escribir en el buscador. `lparam` = turno de la búsqueda pendiente.
@@ -216,14 +210,19 @@ impl Ghost {
 
 /// Transición de layout: desde dónde parte cada panel y cuándo empezó.
 struct LayoutAnim {
-    from: [Option<render::Rect>; PANES],
+    from: [Option<geom::Rect>; PANES],
     start: Instant,
 }
 
-struct App {
+/// El estado de la ventana principal. La plataforma la arma con `new`, le fija la ventana con
+/// `attach` y le pasa los eventos ya traducidos (`on_*`).
+pub struct App {
+    /// La ventana: la fija la plataforma con `attach` (es el dueño que usan los servicios).
     hwnd: Handle,
     /// La ventana: repintar, tamaño, título, foco, diálogos, tema y arrastre (falsa en las pruebas).
     host: Rc<dyn WindowHost>,
+    /// DPI de la ventana (para `--probe` y las coordenadas del mouse): lo fija la plataforma con
+    /// `attach` / `set_dpi`.
     dpi: u32,
     theme: Theme,
     panes: Vec<Pane>,
@@ -232,7 +231,7 @@ struct App {
     /// Panel maximizado temporalmente (ocupa toda el área); no se guarda en la sesión.
     maximized: Option<usize>,
     /// Rectángulos con que se dibujó cada panel el último frame, y la transición de layout en curso.
-    displayed: [Option<render::Rect>; PANES],
+    displayed: [Option<geom::Rect>; PANES],
     layout_anim: Option<LayoutAnim>,
     /// Cuándo fue el último frame de una animación (None: no hay ninguna en curso).
     last_frame: Option<Instant>,
@@ -284,7 +283,7 @@ struct App {
     /// Grupo al que el nombre que se escriba en la paleta le cambia el nombre (en vez de guardar uno).
     group_rename: Option<String>,
     /// Vigila los cambios del Acceso rápido de Windows para releerlo en el árbol.
-    quick_watch: Option<Box<dyn fs::Watch>>,
+    quick_watch: Option<Box<dyn sys::Watch>>,
     /// El último clic derecho fue sobre el árbol: la carpeta (si tiene ruta de disco).
     tree_ctx: Option<Option<PathBuf>>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
@@ -399,8 +398,8 @@ impl Init {
 }
 
 impl App {
-    /// Arma la aplicación (sin ventana: el `HWND` llega en `WM_NCCREATE` y se le pasa al host con
-    /// `attach`) y abre sus paneles.
+    /// Arma la aplicación (sin ventana: la plataforma la fija después con `App::attach`, que se la
+    /// pasa al host) y abre sus paneles.
     pub(crate) fn new(init: Init, host: Rc<dyn WindowHost>) -> App {
         let Init { session, history, config, favorites, groups, probe, start_path, started, marks } = init;
         let theme = Theme::from_system(session.accent, session.dark_mode);
@@ -489,6 +488,72 @@ impl App {
         }
         app
     }
+
+    // ---------- API de la plataforma ----------
+
+    /// Fija la ventana (dueña de diálogos y destino de los mensajes de los servicios) y su DPI, y
+    /// le pasa la ventana al host. La plataforma la llama al crear la ventana.
+    pub fn attach(&mut self, window: Handle, dpi: u32) {
+        self.hwnd = window;
+        self.dpi = dpi;
+        self.host.attach(window);
+    }
+
+    /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn set_dpi(&mut self, dpi: u32) {
+        self.dpi = dpi;
+    }
+
+    /// La ventana que fijó `attach`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn window(&self) -> Handle {
+        self.hwnd
+    }
+
+    /// El DPI de la ventana (96 hasta que la plataforma lo fije).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn dpi(&self) -> u32 {
+        self.dpi
+    }
+
+    /// Posición y estado (maximizada) de la ventana guardados en la sesión, para mostrarla igual;
+    /// se entrega una sola vez.
+    pub fn take_window_state(&mut self) -> Option<([i32; 4], bool)> {
+        self.window_state.take()
+    }
+
+    /// Agrega un hito del arranque para `--probe`, con el tiempo desde que arrancó la aplicación.
+    pub fn mark(&mut self, name: &'static str) {
+        self.marks.push((name, ms_since(self.started)));
+    }
+
+    /// Modo fijado con el switch (`None`: sigue al del sistema).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn dark_mode(&self) -> Option<bool> {
+        self.dark_mode
+    }
+
+    /// Fondo Mica activo: con el marco extendido, la superficie de la ventana va en negro (que es
+    /// transparente) para dejar ver la composición.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn transparent(&self) -> bool {
+        self.transparent
+    }
+
+    /// Vuelve a armar el estilo de las cajas de texto con el tema actual (cambió el DPI).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn restyle_text(&self) {
+        self.host.text_restyle(&self.theme);
+    }
+
+    /// Antes de un clic con el botón izquierdo en `(x, y)`: el foco vuelve a la ventana, salvo
+    /// sobre el desplegable de la barra de dirección y su botón de borrar (no se lo quitan a la caja).
+    pub fn focus_for_click(&self, x: f32, y: f32) {
+        if !matches!(self.hit(x, y), Hit::Suggest(_) | Hit::Pane(_, PaneHit::AddressClear)) {
+            self.host.focus_main();
+        }
+    }
 }
 
 // ---------- accesibilidad ----------
@@ -527,7 +592,7 @@ impl A11yView for App {
     fn status(&self) -> String {
         self.panes[self.active].tab().status()
     }
-    fn pane_rects(&self, pane: usize) -> (render::Rect, render::Rect, render::Rect) {
+    fn pane_rects(&self, pane: usize) -> (geom::Rect, geom::Rect, geom::Rect) {
         let pane = &self.panes[pane];
         (pane.rect, pane.address, pane.list)
     }
@@ -546,7 +611,7 @@ impl App {
     /// Lo que pide un lector de pantalla (seleccionar, abrir, mover el foco). Quien llama ya
     /// comprobó que el elemento existe.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) fn a11y_apply(&mut self, a: A11yAction) {
+    pub fn a11y_apply(&mut self, a: A11yAction) {
         match a {
             A11yAction::Focus(el) => {
                 if let Some(p) = a11y::pane_of(el) {
@@ -592,7 +657,7 @@ impl App {
     }
 }
 
-pub(super) fn ms_since(t: Instant) -> f64 {
+pub(crate) fn ms_since(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
 }
 

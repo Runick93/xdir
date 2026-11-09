@@ -103,15 +103,15 @@ impl App {
 
     /// Cambió el conjunto de unidades: se actualiza "Este equipo" en los paneles y el árbol, y los
     /// paneles que estaban en una unidad que ya no existe vuelven a "Este equipo".
-    pub(super) fn drives_changed(&mut self) {
-        fs::forget_drive_labels();
+    pub fn drives_changed(&mut self) {
+        sys::file_system().forget_drive_labels();
         #[cfg(feature = "arbol")]
         self.tree.refresh_drives();
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
             match &tab.location {
                 Location::Computer => tab.reload(hwnd, &tx, true),
-                Location::Path(p) if fs::drive_missing(p) => tab.navigate(hwnd, &tx, Location::Computer),
+                Location::Path(p) if sys::file_system().drive_missing(p) => tab.navigate(hwnd, &tx, Location::Computer),
                 _ => {}
             }
         }

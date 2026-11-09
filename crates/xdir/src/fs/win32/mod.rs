@@ -984,7 +984,7 @@ impl Drop for Watcher {
 #[cfg(test)]
 mod tests {
     use super::true_case;
-    use crate::fs::normalize_lexical;
+    use xdir_core::fs::normalize_lexical;
     use std::path::Path;
 
     #[test]

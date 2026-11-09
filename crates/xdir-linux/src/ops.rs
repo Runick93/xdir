@@ -79,7 +79,7 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                     continue;
                 }
                 let target = free_name(&dest, src, false);
-                match move_item(src, &target) {
+                match move_path(src, &target) {
                     Ok(()) => moved.push((target, src.clone())),
                     Err(e) => errors.push(err_at(src, e)),
                 }
@@ -147,7 +147,12 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
         }
         Undo::Moved(pairs) => {
             for (now, before) in pairs {
-                if let Err(e) = move_item(&now, &before) {
+                // Lo que apareció después en el lugar de antes no se pisa (`rename` lo reemplazaría).
+                if std::fs::symlink_metadata(&before).is_ok() {
+                    errors.push(err_at(&before, "ya existe, no se pisa"));
+                    continue;
+                }
+                if let Err(e) = move_path(&now, &before) {
                     errors.push(err_at(&now, e));
                 }
             }
@@ -212,22 +217,43 @@ fn remove_item(p: &Path) -> io::Result<()> {
     if std::fs::symlink_metadata(p)?.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) }
 }
 
+/// En qué paso falló un movimiento (`move_path`, `copy_then_remove`).
+#[derive(Debug)]
+pub enum MoveError {
+    /// No se movió nada: el original quedó entero (lo copiado a medias se quitó).
+    Copy(io::Error),
+    /// El destino ya tiene la copia completa, pero el original no se pudo borrar del todo: el
+    /// destino no se toca, es la única copia entera.
+    Remove(io::Error),
+}
+
+impl std::fmt::Display for MoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MoveError::Copy(e) => write!(f, "{e}"),
+            MoveError::Remove(e) => write!(f, "se copió, pero no se pudo borrar del todo el original: {e}"),
+        }
+    }
+}
+
 /// Mueve: renombra si es el mismo disco; si no (`EXDEV`), copia y borra el original.
-fn move_item(src: &Path, dst: &Path) -> io::Result<()> {
+pub fn move_path(src: &Path, dst: &Path) -> std::result::Result<(), MoveError> {
     match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => copy_then_remove(src, dst),
-        r => r,
+        Err(e) => Err(MoveError::Copy(e)),
     }
 }
 
 /// Mover entre discos: copia `src` en `dst` (sin seguir enlaces) y recién después borra el
-/// original. Si la copia falla, el original queda y se quita lo copiado a medias.
-pub fn copy_then_remove(src: &Path, dst: &Path) -> io::Result<()> {
+/// original. Si la copia falla, el original queda y se quita lo copiado a medias; si lo que falla
+/// es borrar el original, la copia completa queda (`MoveError::Remove`).
+pub fn copy_then_remove(src: &Path, dst: &Path) -> std::result::Result<(), MoveError> {
     if let Err(e) = copy_item(src, dst) {
         let _ = remove_item(dst);
-        return Err(e);
+        return Err(MoveError::Copy(e));
     }
-    remove_item(src)
+    remove_item(src).map_err(MoveError::Remove)
 }
 
 #[cfg(test)]
@@ -293,6 +319,23 @@ mod tests {
         copy_then_remove(&f, &dir.join("g.bin")).unwrap();
         assert!(!f.exists());
         assert_eq!(std::fs::read(dir.join("g.bin")).unwrap(), [1u8, 2, 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_move_does_not_overwrite() {
+        let dir = tmp("deshacer-mover");
+        let (a, b) = (dir.join("A"), dir.join("B"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("a.txt"), "viejo").unwrap();
+        let r = run(Op::Move { sources: vec![a.join("a.txt")], dest: b.clone() }, None).unwrap();
+        assert_eq!(r.error, None);
+        std::fs::write(a.join("a.txt"), "nuevo").unwrap();
+        let r = run(Op::Undo(r.undo.unwrap()), None).unwrap();
+        assert!(r.error.is_some());
+        assert_eq!(std::fs::read_to_string(a.join("a.txt")).unwrap(), "nuevo");
+        assert_eq!(std::fs::read_to_string(b.join("a.txt")).unwrap(), "viejo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

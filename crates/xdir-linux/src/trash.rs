@@ -9,6 +9,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
+use crate::ops::{MoveError, move_path};
+
 /// Carpeta de datos del usuario: `$XDG_DATA_HOME` si es una ruta absoluta (la especificación
 /// manda ignorar las relativas), si no `$HOME/.local/share`. Recibe los valores en vez de leerlos.
 pub fn data_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
@@ -84,18 +86,17 @@ fn make_dir(dir: &Path) -> io::Result<()> {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
-/// Mueve `src` a `dst`: renombra y, si están en otro disco, copia y borra el original.
-fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
-    match std::fs::rename(src, dst) {
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => crate::ops::copy_then_remove(src, dst),
-        r => r,
-    }
-}
-
 /// Manda `path` a la papelera `trash`; devuelve su nombre dentro de `files/`. Primero reserva el
 /// `.trashinfo` (creándolo en exclusiva, así dos borrados con el mismo nombre no se pisan) y
 /// después mueve; si el movimiento falla, el original queda y se quita la reserva.
 pub fn recycle(path: &Path, trash: &Path) -> io::Result<String> {
+    recycle_with(path, trash, move_path)
+}
+
+/// `recycle` con la forma de mover recibida (los tests fuerzan el camino de copiar y borrar).
+/// Si la copia a la papelera quedó completa pero el original no se pudo borrar del todo, la
+/// entrada de la papelera (archivo y `.trashinfo`) queda: es la única copia entera.
+fn recycle_with(path: &Path, trash: &Path, mover: impl Fn(&Path, &Path) -> Result<(), MoveError>) -> io::Result<String> {
     let meta = std::fs::symlink_metadata(path)?;
     let name = path.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ruta sin nombre"))?;
     let original = std::path::absolute(path)?;
@@ -115,13 +116,19 @@ pub fn recycle(path: &Path, trash: &Path) -> io::Result<String> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         };
-        let moved = f.write_all(text.as_bytes()).and_then(|()| move_path(path, &dst));
+        let written = f.write_all(text.as_bytes());
         drop(f);
-        if let Err(e) = moved {
-            let _ = std::fs::remove_file(&ip);
-            return Err(e);
-        }
-        return Ok(cand.to_string_lossy().into_owned());
+        let moved = written.map_err(MoveError::Copy).and_then(|()| mover(path, &dst));
+        return match moved {
+            Ok(()) => Ok(cand.to_string_lossy().into_owned()),
+            Err(MoveError::Copy(e)) => {
+                let _ = std::fs::remove_file(&ip);
+                Err(e)
+            }
+            Err(MoveError::Remove(e)) => Err(io::Error::other(format!(
+                "se copió a la Papelera, pero no se pudo borrar del todo el original: {e}"
+            ))),
+        };
     }
     unreachable!("siempre hay un nombre libre")
 }
@@ -132,7 +139,10 @@ pub fn restore(name: &str, original: &Path, trash: &Path) -> io::Result<()> {
     if std::fs::symlink_metadata(original).is_ok() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("ya existe {}", original.display())));
     }
-    move_path(&trash.join("files").join(name), original)?;
+    move_path(&trash.join("files").join(name), original).map_err(|e| match e {
+        MoveError::Copy(e) => e,
+        e @ MoveError::Remove(_) => io::Error::other(e.to_string()),
+    })?;
     let _ = std::fs::remove_file(info_path(trash, OsStr::new(name)));
     Ok(())
 }
@@ -202,6 +212,33 @@ mod tests {
         assert_eq!(std::fs::read_to_string(trash.join("files/a.txt")).unwrap(), "primero");
         assert_eq!(std::fs::read_to_string(trash.join("files/a (2).txt")).unwrap(), "segundo");
         assert!(trash.join("info/a (2).txt.trashinfo").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recycle_keeps_entry_when_source_removal_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("recycle_keeps_entry_when_source_removal_fails: se saltea como root (los permisos no aplican)");
+            return;
+        }
+        let dir = tmp("a-medias");
+        let trash = dir.join("Trash");
+        let src = dir.join("carpeta");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/f"), "f").unwrap();
+        // Una subcarpeta de solo lectura: se copia, pero su archivo no se puede borrar.
+        let ro = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(src.join("sub"), ro).unwrap();
+        // Camino de otro disco: copiar y borrar.
+        let r = recycle_with(&src, &trash, crate::ops::copy_then_remove);
+        let rw = std::fs::Permissions::from_mode(0o755);
+        let _ = std::fs::set_permissions(src.join("sub"), rw.clone());
+        let _ = std::fs::set_permissions(trash.join("files/carpeta/sub"), rw);
+        let e = r.expect_err("el original no se pudo borrar del todo");
+        assert!(e.to_string().contains("no se pudo borrar del todo"), "{e}");
+        assert_eq!(std::fs::read_to_string(trash.join("files/carpeta/sub/f")).unwrap(), "f");
+        assert!(trash.join("info/carpeta.trashinfo").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

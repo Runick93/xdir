@@ -189,7 +189,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let app = cs.lpCreateParams as *mut App;
             (*app).hwnd = crate::platform::handle_from_hwnd(hwnd);
             (*app).dpi = GetDpiForWindow(hwnd);
-            let mica = (*app).theme.apply_to_window(hwnd);
+            let mica = apply_window_theme(&(*app).theme, hwnd);
             (*app).renderer.set_transparent(mica);
             (*app).transparent = mica;
             (*app).update_edit_resources();
@@ -476,6 +476,42 @@ pub(super) fn popup_menu(app: &App, entries: &[shell::Entry], pos: MenuPos, dot:
     }
 }
 
+/// Ajusta la ventana al tema: barra de título oscura y fondo Mica (Windows 11).
+/// Devuelve si Mica quedó activo; en ese caso el marco se extiende a toda la ventana para
+/// que el fondo se vea donde la aplicación no pinta.
+fn apply_window_theme(theme: &Theme, hwnd: HWND) -> bool {
+    use std::ffi::c_void;
+    use windows::Win32::Graphics::Dwm::{
+        DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
+        DwmSetWindowAttribute,
+    };
+    use windows::Win32::UI::Controls::MARGINS;
+    use windows::core::BOOL;
+    let dark = BOOL::from(theme.dark);
+    unsafe {
+        // Los errores se ignoran: en versiones viejas de Windows el atributo no existe.
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const _ as *const c_void,
+            size_of::<BOOL>() as u32,
+        );
+        let backdrop = DWMSBT_MAINWINDOW;
+        let mica = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop as *const _ as *const c_void,
+            size_of_val(&backdrop) as u32,
+        )
+        .is_ok();
+        if mica {
+            let all = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+            return DwmExtendFrameIntoClientArea(hwnd, &all).is_ok();
+        }
+        false
+    }
+}
+
 /// Punto de color para marcar un ítem de menú (bitmap de 32 bits con alfa).
 fn accent_dot(c: Color, dpi: u32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
     use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DIB_RGB_COLORS};
@@ -707,7 +743,7 @@ impl App {
 
     /// Ajusta la ventana al tema (barra de título oscura, Mica) y los controles de edición.
     pub(super) fn apply_window_theme(&mut self) {
-        let mica = self.theme.apply_to_window(self.hwnd.hwnd());
+        let mica = apply_window_theme(&self.theme, self.hwnd.hwnd());
         self.renderer.set_transparent(mica);
         self.transparent = mica;
         self.update_edit_resources();

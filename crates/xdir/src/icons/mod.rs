@@ -24,9 +24,5 @@ pub fn request_overlays(req: OverlayRequest) {
 /// Hay íconos nuevos listos para dibujar.
 pub const WM_APP_ICONS: u32 = WM_APP + 3;
 
-/// Píxeles BGRA premultiplicados.
-pub struct Pixels {
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>,
-}
+/// Píxeles BGRA premultiplicados (viven en el núcleo, junto al `Painter`).
+pub use xdir_core::paint::Pixels;

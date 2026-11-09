@@ -12,10 +12,15 @@ use std::sync::mpsc::Sender;
 
 use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, QuickItem, WM_APP_LOAD};
+use crate::config::ColorRule;
 use crate::format::thousands;
+use crate::geom::{Color, Rect};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
+use crate::paint::{FontId, Painter};
 use crate::shell::{Entry, Item};
+use crate::theme::Theme;
+use crate::thumbs;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::Node;
 
@@ -694,4 +699,65 @@ pub struct FakeOverlays;
 
 impl Overlays for FakeOverlays {
     fn request(&self, _req: OverlayRequest) {}
+}
+
+/// `Painter` que no dibuja: registra cada `text` (fuente, texto y rectángulo) para que los tests
+/// vean qué se escribió y con qué formato. `measure` da 7 DIPs por carácter; `clip` solo llama a
+/// la clausura; íconos y miniaturas no hacen nada (`thumbnail` da `false`).
+pub struct RecordingPainter {
+    theme: Theme,
+    texts: RefCell<Vec<(FontId, String, Rect)>>,
+}
+
+impl RecordingPainter {
+    pub fn new(theme: Theme) -> Self {
+        Self { theme, texts: RefCell::new(Vec::new()) }
+    }
+
+    /// Los textos dibujados, en orden.
+    pub fn texts(&self) -> Vec<(FontId, String, Rect)> {
+        self.texts.borrow().clone()
+    }
+}
+
+impl Painter for RecordingPainter {
+    fn fill(&self, _r: Rect, _c: Color) {}
+    fn round_fill(&self, _r: Rect, _radius: f32, _c: Color) {}
+    fn rounded_path(&self, _pts: &[(f32, f32, f32)], _closed: bool, _fill: Option<Color>, _stroke: Option<(Color, f32)>) {}
+    fn circle(&self, _cx: f32, _cy: f32, _radius: f32, _fill: Color) {}
+    fn circle_stroke(&self, _cx: f32, _cy: f32, _radius: f32, _c: Color, _width: f32) {}
+    fn round_stroke_w(&self, _r: Rect, _radius: f32, _c: Color, _width: f32) {}
+    fn round_stroke(&self, _r: Rect, _radius: f32, _c: Color) {}
+
+    fn text(&self, font: FontId, s: &str, r: Rect, _c: Color) {
+        self.texts.borrow_mut().push((font, s.to_string(), r));
+    }
+
+    fn measure(&self, _font: FontId, s: &str) -> f32 {
+        7.0 * s.chars().count() as f32
+    }
+
+    fn shell_icon(&self, _index: i32, _overlay: u8, _x: f32, _y: f32, _size: f32) {}
+
+    fn thumbnail(&self, _key: &thumbs::Key, _r: Rect) -> bool {
+        false
+    }
+
+    fn logo(&self, _r: Rect) {}
+
+    fn thumb_px(&self, dips: f32) -> u32 {
+        dips.round() as u32
+    }
+
+    fn clip(&self, _r: Rect, f: &mut dyn FnMut()) {
+        f();
+    }
+
+    fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    fn file_colors(&self) -> &[ColorRule] {
+        &[]
+    }
 }

@@ -17,7 +17,7 @@ use super::tree::{NO_PARENT, Node, node_path, rows_of};
 use super::treemap::{Cell, header_h, layout};
 use crate::platform::keys::{VK_BACK, VK_ESCAPE};
 use crate::platform::{Color, Handle, Key, Rect, contains, rect};
-use crate::render::Painter;
+use crate::render::{FontId, Painter};
 use crate::shell;
 use crate::theme::alpha;
 use xdir_core::sys::disk_scan;
@@ -655,10 +655,9 @@ impl Xtree {
         self.scroll = self.scroll.clamp(0.0, (rows_of(arena, self.current).len() as f32 * ROW_H - visible).max(0.0));
     }
 
-    pub fn paint(&mut self, p: &Painter, area: Rect) {
+    pub fn paint(&mut self, p: &dyn Painter, area: Rect) {
         self.prepare(area);
-        let th = p.theme;
-        let f = p.fonts;
+        let th = p.theme();
         let ui = layout_ui(area, self.legend_h());
         let (l0, t0, r0, b0) = (area.left, area.top, area.right, area.bottom);
         let white = color(1.0, 1.0, 1.0);
@@ -701,20 +700,20 @@ impl Xtree {
                 fmt_size(progress.bytes.load(Ordering::Relaxed))
             )
         };
-        p.text(&f.title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - 220.0, t0 + TOP_H), th.text);
+        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - 220.0, t0 + TOP_H), th.text);
         let cb = ui.combo;
         p.round_fill(cb, 6.0, th.surface_alt);
         p.round_stroke_w(cb, 6.0, if self.menu_open { th.accent } else { th.border }, 1.0);
-        p.text(&f.ui, &self.pick_label(), rect(cb.left + 10.0, cb.top, cb.right - 28.0, cb.bottom), th.text);
-        p.text(&f.glyphs_small, "\u{E70D}", rect(cb.right - 26.0, cb.top, cb.right - 6.0, cb.bottom), th.text_dim);
+        p.text(FontId::Ui, &self.pick_label(), rect(cb.left + 10.0, cb.top, cb.right - 28.0, cb.bottom), th.text);
+        p.text(FontId::GlyphsSmall, "\u{E70D}", rect(cb.right - 26.0, cb.top, cb.right - 6.0, cb.bottom), th.text_dim);
         p.round_fill(ui.scan_btn, 6.0, th.accent);
-        p.text(&f.ui_center, "Analizar", ui.scan_btn, white);
+        p.text(FontId::UiCenter, "Analizar", ui.scan_btn, white);
         let state = if done { "Análisis completado" } else { "Escaneando\u{2026}" };
         p.circle(r0 - 178.0, t0 + TOP_H / 2.0, 9.0, if done { rgb(GREEN) } else { warning });
         if done {
-            p.text(&f.ui_center, "\u{2713}", rect(r0 - 187.0, t0, r0 - 169.0, t0 + TOP_H), white);
+            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - 187.0, t0, r0 - 169.0, t0 + TOP_H), white);
         }
-        p.text(&f.ui, state, rect(r0 - 160.0, t0, r0 - MARGIN, t0 + TOP_H), th.text);
+        p.text(FontId::Ui, state, rect(r0 - 160.0, t0, r0 - MARGIN, t0 + TOP_H), th.text);
 
         if arena.is_empty() {
             p.round_fill(ui.map, 8.0, th.surface);
@@ -731,7 +730,7 @@ impl Xtree {
                 _ if self.scanning => "Escaneando el disco\u{2026}".to_string(),
                 _ => "No hay nada que mostrar".to_string(),
             };
-            p.text(&f.ui_center, &msg, ui.map, th.text_dim);
+            p.text(FontId::UiCenter, &msg, ui.map, th.text_dim);
         } else {
             let cur = &arena[self.current as usize];
             let rows = rows_of(arena, self.current);
@@ -752,11 +751,11 @@ impl Xtree {
             p.round_fill(l, 8.0, th.surface);
             p.round_stroke_w(l, 8.0, th.border, 1.0);
             let (hy0, hy1) = (l.top, l.top + TABLE_H);
-            p.text(&f.ui, "Nombre", rect(l.left + 36.0, hy0, l.right - 214.0, hy1), th.text_dim);
-            p.text(&f.ui_right, "Tamaño", rect(l.right - 214.0, hy0, l.right - 124.0, hy1), th.text_dim);
-            p.text(&f.ui_right, "%", rect(l.right - 124.0, hy0, l.right - 72.0, hy1), th.text_dim);
+            p.text(FontId::Ui, "Nombre", rect(l.left + 36.0, hy0, l.right - 214.0, hy1), th.text_dim);
+            p.text(FontId::UiRight, "Tamaño", rect(l.right - 214.0, hy0, l.right - 124.0, hy1), th.text_dim);
+            p.text(FontId::UiRight, "%", rect(l.right - 124.0, hy0, l.right - 72.0, hy1), th.text_dim);
             p.fill(rect(l.left + 1.0, l.top + TABLE_H - 1.0, l.right - 1.0, l.top + TABLE_H), th.border);
-            p.clip(rect(l.left, l.top + TABLE_H, l.right, l.bottom - 2.0), || {
+            p.clip(rect(l.left, l.top + TABLE_H, l.right, l.bottom - 2.0), &mut || {
                 for (i, row) in rows.iter().enumerate() {
                     let top = l.top + TABLE_H + i as f32 * ROW_H - self.scroll;
                     if top + ROW_H < l.top + TABLE_H || top > l.bottom {
@@ -772,16 +771,16 @@ impl Xtree {
                         p.round_fill(band, 5.0, th.hover);
                     }
                     match row {
-                        None => p.text(&f.ui, "\u{2191}  Subir", rect(l.left + 12.0, top, l.right - 8.0, top + ROW_H), th.text_dim),
+                        None => p.text(FontId::Ui, "\u{2191}  Subir", rect(l.left + 12.0, top, l.right - 8.0, top + ROW_H), th.text_dim),
                         Some(id) => {
                             let n = &arena[*id as usize];
                             let frac = if cur.size > 0 { n.size as f32 / cur.size as f32 } else { 0.0 };
                             let ic = if n.is_dir { rgb(FOLDER_ICON) } else { file_icon };
                             icon(l.left + 12.0, top + (ROW_H - 16.0) / 2.0, n.is_dir, ic);
-                            p.text(&f.ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
-                            p.text(&f.ui_right, &fmt_size(n.size), rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
+                            p.text(FontId::Ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
+                            p.text(FontId::UiRight, &fmt_size(n.size), rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
                             let pc = format!("{:.1} %", frac * 100.0).replace('.', ",");
-                            p.text(&f.ui_right, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
+                            p.text(FontId::UiRight, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
                             let track = rect(l.right - 62.0, top + ROW_H / 2.0 - 4.0, l.right - 12.0, top + ROW_H / 2.0 + 4.0);
                             p.round_fill(track, 4.0, th.border);
                             let bar_w = ((track.right - track.left) * frac).max(3.0);
@@ -793,7 +792,7 @@ impl Xtree {
 
             // ----- mapa -----
             p.round_fill(ui.map, 8.0, th.surface);
-            p.clip(ui.map, || {
+            p.clip(ui.map, &mut || {
                 for c in &self.cells {
                     let Some(n) = arena.get(c.node as usize) else { continue };
                     let same = hot_top == Some(c.top);
@@ -815,7 +814,7 @@ impl Xtree {
                         let hh = header_h(c.depth, cw, ch);
                         if hh > 0.0 {
                             let label = format!("{}   {}", n.name, fmt_size(n.size));
-                            let font = if c.depth == 0 { &f.small_bold } else { &f.small };
+                            let font = if c.depth == 0 { FontId::SmallBold } else { FontId::Small };
                             let tc = if tinted { text_on(base) } else if c.depth == 0 { th.text } else { th.text_dim };
                             p.text(font, &label, rect(c.r.left + 8.0, c.r.top + 2.0, c.r.right - 4.0, c.r.top + 2.0 + hh), tc);
                         }
@@ -831,10 +830,10 @@ impl Xtree {
                         p.fill(rect(c.r.left + 0.5, c.r.top + 0.5, c.r.right - 0.5, c.r.bottom - 0.5), col);
                         let tc = if c.small { th.text_dim } else if self.by_type { white } else { text_on(col) };
                         if cw >= 60.0 && ch >= 38.0 {
-                            p.text(&f.small, &n.name, rect(c.r.left + 6.0, c.r.top + 3.0, c.r.right - 3.0, c.r.top + 19.0), tc);
-                            p.text(&f.small, &fmt_size(n.size), rect(c.r.left + 6.0, c.r.top + 19.0, c.r.right - 3.0, c.r.top + 35.0), tc);
+                            p.text(FontId::Small, &n.name, rect(c.r.left + 6.0, c.r.top + 3.0, c.r.right - 3.0, c.r.top + 19.0), tc);
+                            p.text(FontId::Small, &fmt_size(n.size), rect(c.r.left + 6.0, c.r.top + 19.0, c.r.right - 3.0, c.r.top + 35.0), tc);
                         } else if cw >= 60.0 && ch >= 18.0 {
-                            p.text(&f.small, &n.name, rect(c.r.left + 6.0, c.r.top, c.r.right - 3.0, c.r.bottom), tc);
+                            p.text(FontId::Small, &n.name, rect(c.r.left + 6.0, c.r.top, c.r.right - 3.0, c.r.bottom), tc);
                         }
                     }
                     if sel {
@@ -860,9 +859,9 @@ impl Xtree {
             }
             let text_right = ui.buttons[0].left - 14.0;
             let title = format!("{}  \u{B7}  {}", self.name_of(arena, shown), fmt_size(n.size));
-            p.text(&f.title, &title, rect(cd.left + 62.0, cd.top + 8.0, text_right, cd.top + 38.0), th.text);
+            p.text(FontId::Title, &title, rect(cd.left + 62.0, cd.top + 8.0, text_right, cd.top + 38.0), th.text);
             let path = self.path_of(arena, shown).display().to_string();
-            p.text(&f.ui, &path, rect(cd.left + 62.0, cd.top + 38.0, text_right, cd.top + 66.0), th.text_dim);
+            p.text(FontId::Ui, &path, rect(cd.left + 62.0, cd.top + 38.0, text_right, cd.top + 66.0), th.text_dim);
             let labels = [("\u{E838}", "Abrir en el panel"), ("\u{E8C8}", "Copiar ruta"), ("\u{E8A7}", "Explorar aquí")];
             let t = self.target();
             let target_is_dir = arena.get(t as usize).is_some_and(|n| n.is_dir) && t != self.current;
@@ -877,8 +876,8 @@ impl Xtree {
                 }
                 p.round_stroke_w(b, 7.0, alpha(if hot { th.accent } else { th.border }, k), 1.0);
                 let tc = alpha(th.text, k);
-                p.text(&f.glyphs, glyph, rect(b.left + 10.0, b.top, b.left + 30.0, b.bottom), tc);
-                p.text(&f.ui, label, rect(b.left + 40.0, b.top, b.right - 6.0, b.bottom), tc);
+                p.text(FontId::Glyphs, glyph, rect(b.left + 10.0, b.top, b.left + 30.0, b.bottom), tc);
+                p.text(FontId::Ui, label, rect(b.left + 40.0, b.top, b.right - 6.0, b.bottom), tc);
             }
 
             // ----- leyenda (solo al colorear por tipo; por carpeta el color no necesita explicación) -----
@@ -893,7 +892,7 @@ impl Xtree {
                 for (i, (name, c)) in entries.iter().enumerate() {
                     let x = lg.left + 16.0 + slot * i as f32;
                     p.round_fill(rect(x, ly - 9.0, x + 18.0, ly + 9.0), 4.0, *c);
-                    p.text(&f.ui, name, rect(x + 26.0, ly - 12.0, x + slot - 4.0, ly + 12.0), th.text);
+                    p.text(FontId::Ui, name, rect(x + 26.0, ly - 12.0, x + slot - 4.0, ly + 12.0), th.text);
                 }
             }
         }
@@ -938,15 +937,15 @@ impl Xtree {
         let mut x = bar.left + 16.0;
         for (i, (label, value)) in cols.iter().enumerate() {
             let cw = widths[i.min(widths.len() - 1)];
-            p.text(&f.small, label, rect(x, bar.top + 4.0, x + cw, bar.top + 20.0), th.text_dim);
-            p.text(&f.ui_bold, value, rect(x, bar.top + 19.0, x + cw, bar.top + 37.0), th.text);
+            p.text(FontId::Small, label, rect(x, bar.top + 4.0, x + cw, bar.top + 20.0), th.text_dim);
+            p.text(FontId::UiBold, value, rect(x, bar.top + 19.0, x + cw, bar.top + 37.0), th.text);
             x += cw;
         }
         if !hint.is_empty() {
-            p.text(&f.ui_right, &hint, rect((x + 10.0).max(bar.right - 480.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), warning);
+            p.text(FontId::UiRight, &hint, rect((x + 10.0).max(bar.right - 480.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), warning);
         } else if done {
             let help = if self.by_type { "T: color por carpeta" } else { "T: color por tipo de archivo" };
-            p.text(&f.ui_right, help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
+            p.text(FontId::UiRight, help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
         }
 
         // ----- lista de discos: va al final para quedar por encima de todo -----
@@ -962,10 +961,10 @@ impl Xtree {
                     p.round_fill(row, 5.0, th.selection);
                 }
                 if let Some(d) = self.drives.get(i) {
-                    p.text(&f.ui, &d.label, rect(row.left + 10.0, top, row.right - 170.0, top + MENU_ROW), th.text);
-                    p.text(&f.ui_right, &d.detail, rect(row.right - 170.0, top, row.right - 10.0, top + MENU_ROW), th.text_dim);
+                    p.text(FontId::Ui, &d.label, rect(row.left + 10.0, top, row.right - 170.0, top + MENU_ROW), th.text);
+                    p.text(FontId::UiRight, &d.detail, rect(row.right - 170.0, top, row.right - 10.0, top + MENU_ROW), th.text_dim);
                 } else {
-                    p.text(&f.ui, "Seleccionar carpeta\u{2026}", rect(row.left + 10.0, top, row.right - 10.0, top + MENU_ROW), th.text);
+                    p.text(FontId::Ui, "Seleccionar carpeta\u{2026}", rect(row.left + 10.0, top, row.right - 10.0, top + MENU_ROW), th.text);
                 }
             }
         }

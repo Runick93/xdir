@@ -21,17 +21,8 @@ pub use xdir_core::keys::{Key, keys};
 /// La ventana principal; vive en el núcleo (`xdir_core::sys`) y `post` usa el `Waker` instalado.
 pub use xdir_core::sys::Handle;
 
-// Tema, animaciones y teclado: los da la plataforma instalada (`sys::env()`).
-
-/// ¿El sistema está en modo oscuro para las apps?
-pub fn system_dark() -> bool {
-    xdir_core::sys::env().system_dark()
-}
-
-/// Color de acento del sistema, 0xRRGGBB.
-pub fn system_accent() -> Option<u32> {
-    xdir_core::sys::env().system_accent()
-}
+// Teclado: lo da la plataforma instalada (`sys::env()`). El modo oscuro y el acento los lee el
+// tema directo desde el núcleo (`xdir_core::theme`).
 
 /// ¿La tecla está apretada ahora? (Ctrl, Shift, Alt…; en macOS Ctrl de los atajos es ⌘ y Alt es ⌥.)
 pub fn key_down(k: Key) -> bool {

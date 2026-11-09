@@ -132,7 +132,7 @@ impl App {
             if tree.visible && !xtree_open {
                 let r = render::rect(ui::GAP, area.top - groups_h, ui::GAP + tree.width_now(), area.bottom);
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
-                    p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme.background, 0.45));
+                    p.round_fill(render::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
                 }
                 tree.draw(p, r, current_folder.as_deref());
             }

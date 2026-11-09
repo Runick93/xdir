@@ -28,7 +28,7 @@ mod typed;
 mod ui;
 mod xtree;
 mod app;
-pub(crate) use xdir_core::{anim, favorites, groups, jump, toml};
+pub(crate) use xdir_core::{anim, favorites, groups, jump};
 
 #[cfg(windows)]
 fn main() -> windows::core::Result<()> {

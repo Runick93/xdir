@@ -503,3 +503,22 @@ fn unsafe_nested_name_refuses_copy() {
     a.run_command(Command::Copy);
     assert!(a.archive.clip.is_none());
 }
+
+/// Escape cierra primero lo que esté abierto (el selector de colores, un menú…): la apertura en
+/// curso solo se cancela cuando no hay otra cosa que cerrar.
+#[test]
+fn escape_closes_other_things_before_cancelling_open() {
+    let mut a = app(FakeHost::new());
+    let (_, zip) = fixture("esc-orden", &[("nota.txt", b"hola")]);
+    go(&mut a, 0, root(&zip));
+    a.set_active(0);
+    let i = idx_of(&a, 0, "nota.txt");
+    a.apply(0, Action::Open(i));
+    a.picker_open = true;
+    a.on_key(VK_ESCAPE);
+    assert!(!a.picker_open);
+    assert!(a.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)), "la apertura sigue");
+    a.on_key(VK_ESCAPE);
+    assert_eq!(a.notice.as_deref(), Some("Se canceló la apertura"));
+    task(&mut a);
+}

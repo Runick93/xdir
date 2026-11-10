@@ -34,9 +34,6 @@ impl App {
         let active = self.active;
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
-            VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {
-                self.cancel_archive_open();
-            }
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
             VK_ESCAPE if self.filter_menu_pane().is_some() => {
@@ -47,6 +44,10 @@ impl App {
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
+            // Lo último: si nada más tomó el Escape, corta la apertura desde un archivo comprimido.
+            VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {
+                self.cancel_archive_open();
+            }
             _ => match self.config.keymap.lookup(vk, ctrl, shift, alt, meta) {
                 Some(c) => self.run_command(c),
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {

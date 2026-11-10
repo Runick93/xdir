@@ -410,6 +410,9 @@ pub struct FileList {
     strip_scroll: f32,
     strip_w: f32,
     strip_active: bool,
+    /// Galería: foco (posición) para el que vale `strip_scroll`; si el foco cambió por otro
+    /// camino, la tira se vuelve a centrar (`gallery::settle_strip`).
+    strip_focus: Option<usize>,
     /// Galería: elemento (índice en `entries`) presionado en la tira con el último clic y si fue
     /// en su casilla. El doble clic actúa sobre él aunque la tira se haya corrido entre medio.
     gallery_press: Option<(usize, bool)>,
@@ -522,6 +525,7 @@ impl Default for FileList {
             strip_scroll: 0.0,
             strip_w: 0.0,
             strip_active: true,
+            strip_focus: None,
             gallery_press: None,
             wheel_acc: 0.0,
         }
@@ -871,6 +875,11 @@ impl FileList {
             self.auto_focus = true;
         }
         self.anchor = self.focus;
+        // Galería: lo que se presionó antes de rearmar ya no vale, y la tira sigue al foco.
+        self.gallery_press = None;
+        if self.view == View::Gallery {
+            self.settle_strip();
+        }
     }
 
     // ---------- geometría ----------

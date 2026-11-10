@@ -95,6 +95,7 @@ impl FileList {
         let w = self.strip_width();
         self.strip_scroll = strip_offset(self.visible.len(), pos, w);
         self.strip_w = w;
+        self.strip_focus = Some(pos);
     }
 
     /// Corre la tira lo justo para que la celda `pos` se vea entera (después de un clic).
@@ -107,16 +108,27 @@ impl FileList {
             self.strip_scroll += r.right - hi;
         }
         self.strip_scroll = strip_clamp(self.strip_scroll, self.visible.len(), self.strip_width());
+        // El corrimiento sigue valiendo para el foco que dejó el clic.
+        self.strip_focus = self.focus;
     }
 
-    /// Antes de dibujar: con otro ancho se vuelve a centrar el enfocado; si cambió la cantidad,
-    /// el corrimiento se lleva a lo posible.
-    fn settle_strip(&mut self) {
+    /// Después de recargar, filtrar u ocultar, y antes de dibujar: si cambió el ancho o el foco
+    /// cambió por otro camino que un clic en la tira (`strip_focus` es el foco para el que se
+    /// calculó el corrimiento), se vuelve a centrar el enfocado; si no, el corrimiento se lleva a
+    /// lo posible y, si así la celda con foco no se ve entera, también se centra.
+    pub(super) fn settle_strip(&mut self) {
         let w = self.strip_width();
-        if w != self.strip_w {
-            self.center_strip(self.focus.unwrap_or(0));
-        } else {
-            self.strip_scroll = strip_clamp(self.strip_scroll, self.visible.len(), w);
+        let focus = self.focus.unwrap_or(0);
+        if w != self.strip_w || self.strip_focus != self.focus {
+            self.center_strip(focus);
+            return;
+        }
+        self.strip_scroll = strip_clamp(self.strip_scroll, self.visible.len(), w);
+        if focus < self.visible.len() {
+            let (s, r) = (self.strip_rect(), self.strip_cell_rect(focus));
+            if r.left < s.left || r.right > s.right {
+                self.center_strip(focus);
+            }
         }
     }
 
@@ -617,6 +629,71 @@ mod tests {
         assert_eq!(l.selected_positions(), [0, 9]);
         assert_eq!(l.on_double_click(x, y), Action::Redraw);
         assert_eq!(l.selected_positions(), [0], "se alternó la 9 y no otra");
+    }
+
+    /// ¿La celda enfocada se ve entera en la tira?
+    fn focus_on_screen(l: &FileList) -> bool {
+        let r = l.item_rect(l.focus_pos().unwrap());
+        r.left >= 0.0 && r.right <= 960.0
+    }
+
+    /// Recarga con menos elementos (el enfocado desaparece): el foco pasa al primero y la tira
+    /// lo muestra, sin quedar corrida para el foco viejo.
+    #[test]
+    fn gallery_reload_recenters_on_focus() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[25] as usize);
+        l.replace((0..20).map(|i| entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false)).collect());
+        assert_eq!(l.focus_pos(), Some(0));
+        assert!(focus_on_screen(&l), "{:?}", l.item_rect(0));
+        // Igual después de dibujar.
+        let p = painter();
+        l.draw(&p, l.area, true);
+        assert!(focus_on_screen(&l));
+        assert_eq!(p.big_requests()[0].0, thumbs::Source::Path("/fotos/f00.jpg".into()));
+    }
+
+    /// Se borra el enfocado (recarga con todos menos él): la celda con foco se ve.
+    #[test]
+    fn gallery_delete_focused_keeps_focus_visible() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[25] as usize);
+        l.replace((0..30).filter(|&i| i != 25).map(|i| entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false)).collect());
+        assert!(focus_on_screen(&l), "{:?}", l.item_rect(l.focus_pos().unwrap()));
+    }
+
+    /// Ocultar los ocultos cambia la posición del enfocado: la tira se vuelve a centrar en él.
+    #[test]
+    fn gallery_toggle_hidden_recenters() {
+        let mut l = blank();
+        l.show_hidden = true;
+        l.append(
+            (0..40)
+                .map(|i| {
+                    let mut e = entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false);
+                    e.attrs = if i < 25 { 0x2 } else { 0 };
+                    e
+                })
+                .collect(),
+        );
+        l.set_view(View::Gallery);
+        l.select_index(32);
+        l.toggle_hidden();
+        assert_eq!(l.focus_pos(), Some(7));
+        let r = l.item_rect(7);
+        assert_eq!((r.left + r.right) / 2.0, 480.0);
+    }
+
+    /// Una recarga entre los dos clics de un doble clic no abre otro elemento por el clic viejo.
+    #[test]
+    fn gallery_reload_forgets_press() {
+        let mut l = gallery(10);
+        let (x, y) = center(l.item_rect(3));
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert!(l.gallery_press.is_some());
+        l.replace((0..10).map(|i| entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false)).collect());
+        assert!(l.gallery_press.is_none());
     }
 
     /// Con casillas, un clic en la casilla de una celda alejada alterna esa celda y no otra, y un

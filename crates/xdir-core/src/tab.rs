@@ -284,6 +284,14 @@ impl Tab {
         self.counts_as_visit = true;
     }
 
+    /// Cambia la ubicación por otra sin dejar la de ahora en el historial (lo que se iba a ver ya
+    /// no está: un archivo comprimido que se borró).
+    pub fn replace_location(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, to: Location) {
+        self.location = to;
+        self.start(hwnd, tx);
+        self.counts_as_visit = true;
+    }
+
     pub fn go_back(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         self.go_back_n(1, hwnd, tx);
     }

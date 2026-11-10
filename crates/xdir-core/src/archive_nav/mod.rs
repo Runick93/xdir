@@ -27,6 +27,10 @@ pub const BAD_NAME: &str = "Ese elemento tiene un nombre no permitido y no se pu
 pub const LINK: &str = "Los enlaces dentro de un archivo comprimido no se siguen";
 /// La carpeta interior ya no está (el archivo cambió).
 pub const NO_FOLDER: &str = "Esa carpeta ya no está en el archivo";
+/// El archivo comprimido ya no está en el disco.
+pub const GONE: &str = "El archivo comprimido ya no está";
+/// Un archivo anidado ya no está dentro del de afuera.
+pub const NESTED_GONE: &str = "Ese archivo comprimido ya no está adentro";
 
 /// Más entradas que esto no se listan (el mismo límite con el que el motor pregunta antes de
 /// extraer): un archivo con millones de entradas vacías no infla la memoria de la lista.
@@ -266,8 +270,10 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
 /// Resuelve el archivo (con sus anidados), lo lista y arma la carpeta `inner`.
 /// Devuelve también si se cortó en `MAX_ENTRIES`.
 fn read(file: &Path, nested: &[String], inner: &str, cancelled: &dyn Fn() -> bool) -> Result<(Vec<Child>, bool), CopyError> {
-    let real = temps::global().resolve(file, nested, cancelled)?;
-    let entries = list_cached(&real, &mut || if cancelled() { Flow::Stop } else { Flow::Continue })?;
+    let gone = |e: CopyError, text: &str| if e.kind == sys::ErrKind::NotFound { CopyError::new(sys::ErrKind::Other(text.into()), &e.path) } else { e };
+    let real = temps::global().resolve(file, nested, cancelled).map_err(|e| gone(e, NESTED_GONE))?;
+    let entries = list_cached(&real, &mut || if cancelled() { Flow::Stop } else { Flow::Continue })
+        .map_err(|e| gone(e, if nested.is_empty() { GONE } else { NESTED_GONE }))?;
     if entries.iter().any(|e| e.encrypted) {
         return Err(CopyError::new(sys::ErrKind::Other(sys::PASSWORD.into()), &real));
     }

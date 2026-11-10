@@ -299,14 +299,37 @@ fn preview_of_file_inside_archive_extracts_then_shows() {
     assert!(a.task_rx.recv_timeout(Duration::from_millis(200)).is_err());
 }
 
+/// Al restaurar no se mira el disco en el hilo de interfaz: la pestaña queda como estaba y, si el
+/// archivo ya no está, al leerla pasa a su carpeta (sin quedar en el historial).
 #[test]
 fn restore_archive_tab_falls_back_to_folder() {
     crate::sys::testing::install_fakes();
     let gone = std::env::temp_dir().join("xdir-test-zipnav").join("no-esta.zip");
+    let lost = Location::Archive { file: gone.clone(), nested: vec![], inner: "a".into() };
     let mut init = Init::blank();
-    init.session.panes[0] = session::PaneState { tabs: vec![Location::Archive { file: gone.clone(), nested: vec![], inner: "a".into() }], active: 0 };
-    let a = App::new(init, FakeHost::new());
+    init.session.panes[0] = session::PaneState { tabs: vec![lost.clone()], active: 0 };
+    let mut a = App::new(init, FakeHost::new());
+    assert_eq!(a.panes[0].tab().location, lost, "sin mirar el disco al armar la App");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().set_visible(hwnd, &tx, true);
+    pump(&mut a, 0);
+    pump(&mut a, 0);
     assert_eq!(a.panes[0].tab().location, Location::Path(gone.parent().unwrap().to_path_buf()));
+    assert!(!a.panes[0].tab().can_back());
+}
+
+/// Una carpeta de adentro que ya no está: a la raíz del archivo. Un anidado que ya no está: a la
+/// carpeta del de afuera donde estaba.
+#[test]
+fn missing_inner_folder_or_nested_falls_back() {
+    let mut a = app(FakeHost::new());
+    let (_, zip) = fixture("se-fue", &[("d/a.txt", b"a")]);
+    go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec![], inner: "no-esta".into() });
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().location, root(&zip));
+    go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec!["d/viejo.zip".into()], inner: String::new() });
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().location, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
 }
 
 #[test]

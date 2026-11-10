@@ -184,7 +184,18 @@ impl App {
     pub(super) fn after_archive_load(&mut self, tab_id: usize) {
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let Some(tab) = self.tab_by_id(tab_id) else { return };
-        let (Location::Archive { file, nested, .. }, Some(err)) = (&tab.location, &tab.error) else { return };
+        let (Location::Archive { file, nested, inner }, Some(err)) = (&tab.location, &tab.error) else { return };
+        // Lo que se iba a ver ya no está: a lo más cercano que sigue (sin dejarlo en el historial).
+        let fallback = match err.as_str() {
+            nav::GONE => Some(file.parent().map_or(Location::Computer, |p| Location::Path(p.to_path_buf()))),
+            nav::NO_FOLDER if !inner.is_empty() => Some(Location::Archive { file: file.clone(), nested: nested.clone(), inner: String::new() }),
+            nav::NESTED_GONE => Location::Archive { file: file.clone(), nested: nested.clone(), inner: String::new() }.parent(),
+            _ => None,
+        };
+        if let Some(to) = fallback {
+            tab.replace_location(hwnd, &tx, to);
+            return;
+        }
         if !nav::offers_system(err) {
             return;
         }

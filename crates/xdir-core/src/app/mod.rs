@@ -151,6 +151,9 @@ enum Hit {
     // Solo existe con el árbol (feature `arbol`).
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     TreePin,
+    /// La entrada «xtree» del árbol (abre o cierra la vista; su cartel dice cómo va el escaneo).
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    TreeXtree,
 }
 
 /// Lo que se está arrastrando con el botón izquierdo.

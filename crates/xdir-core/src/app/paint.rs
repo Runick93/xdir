@@ -146,7 +146,7 @@ impl App {
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
                     p.round_fill(geom::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
                 }
-                tree.draw(p, r, current_folder.as_deref());
+                tree.draw(p, r, current_folder.as_deref(), xtree_badge);
             }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);

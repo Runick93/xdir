@@ -2282,3 +2282,44 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     crate::sys::testing::FakeDiskScan::set_volume(None, false);
     a.on_closing();
 }
+
+// ---------- entrada «xtree» del árbol ----------
+
+/// App con el árbol a la vista, el panel activo en una carpeta temporal y un cuadro dibujado.
+#[cfg(feature = "arbol")]
+fn app_with_tree(name: &str) -> (App, PathBuf) {
+    let (mut a, dir) = app_in(name);
+    a.tree.visible = true;
+    a.paint();
+    (a, dir)
+}
+
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_xtree_click_opens_and_closes_view() {
+    let (mut a, dir) = app_with_tree("arbol-clic");
+    let (x, y) = point_of(&a, Hit::TreeXtree);
+    let before = a.panes[a.active].tab().location.clone();
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(a.xtree_open, "el clic abre xtree");
+    assert_eq!(a.xtree.as_ref().unwrap().root(), dir.as_path(), "sobre la carpeta del panel activo");
+    assert_eq!(a.panes[a.active].tab().location, before, "el panel no navega");
+    // Con la vista abierta, la misma entrada la cierra (como el botón de la barra).
+    assert!(a.on_tree_click(x, y));
+    assert!(!a.xtree_open);
+    assert_eq!(a.panes[a.active].tab().location, before);
+    a.on_closing();
+}
+
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_xtree_tooltip() {
+    let (mut a, dir) = app_with_tree("arbol-cartel");
+    assert_eq!(a.tooltip_text(Hit::TreeXtree).as_deref(), Some("xtree"));
+    a.toggle_xtree();
+    a.toggle_xtree();
+    let tip = a.tooltip_text(Hit::TreeXtree).unwrap();
+    assert!(tip.starts_with(&format!("Escaneando {}", dir.display())), "{tip}");
+    a.on_closing();
+}

@@ -791,8 +791,10 @@ impl FileList {
         self.entries.iter().zip(&self.selected).filter(|(_, s)| **s).map(|(e, _)| e)
     }
 
+    /// Elemento con foco (índice en `entries`); ninguno mientras el foco está en un encabezado de
+    /// grupo.
     pub fn focused_index(&self) -> Option<usize> {
-        self.focus.and_then(|p| self.visible.get(p)).map(|&i| i as usize)
+        self.focus_pos().and_then(|p| self.visible.get(p)).map(|&i| i as usize)
     }
 
     /// Filtra ocultos y filtros por columna, ordena, agrupa y reubica el foco en `focus_entry`.
@@ -1640,6 +1642,12 @@ impl FileList {
             }
         };
         let step = usize::from(self.selected.iter().any(|&s| s));
+        // Re Pág / Av Pág cuentan desde el encabezado con foco (el primer elemento que le sigue)
+        // o desde el elemento con foco.
+        let page_from = match header_line {
+            Some(li) => layout.lines[li + 1..].iter().find(|l| l.header.is_none()).map_or(n.saturating_sub(1), |l| l.first as usize),
+            None => cur.unwrap_or(0),
+        };
         let target = match (key, header, cur) {
             (VK_LEFT, Some(r), _) => {
                 if !self.collapsed_row(r) {
@@ -1682,8 +1690,8 @@ impl FileList {
             }
             (VK_LEFT, None, Some(pos)) if grid => To::Pos(pos.saturating_sub(step)),
             (VK_RIGHT, None, Some(pos)) if grid => To::Pos((pos + step).min(n - 1)),
-            (VK_PRIOR, _, _) if n > 0 => To::Pos(cur.unwrap_or(0).saturating_sub(self.page_rows())),
-            (VK_NEXT, _, _) if n > 0 => To::Pos((cur.unwrap_or(0) + self.page_rows()).min(n - 1)),
+            (VK_PRIOR, _, _) if n > 0 => To::Pos(page_from.saturating_sub(self.page_rows())),
+            (VK_NEXT, _, _) if n > 0 => To::Pos((page_from + self.page_rows()).min(n - 1)),
             (VK_HOME, _, _) if n > 0 => To::Pos(0),
             (VK_END, _, _) if n > 0 => To::Pos(n - 1),
             // Sin elementos a la vista (todo plegado): el primer o el último encabezado.

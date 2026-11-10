@@ -716,6 +716,30 @@ mod list_tests {
         assert_eq!(names(&l, &[l.focus_pos().unwrap()]), ["f"]);
     }
 
+    /// Con el foco en un encabezado no hay elemento con foco (F2 o Enter no actúan sobre el que
+    /// lo tenía antes) y Re Pág / Av Pág cuentan desde el encabezado.
+    #[test]
+    fn header_focus_has_no_focused_item_and_pages_from_header() {
+        use crate::keys::keys::{VK_NEXT, VK_PRIOR};
+        let mut l = grouped();
+        l.area = rect(0.0, 0.0, 800.0, 110.0);
+        let page = l.page_rows();
+        assert!((1..5).contains(&page), "página {page}");
+        // h (pos 7) y ← lleva al encabezado «Pequeño» (su primer elemento es f, pos 5).
+        l.select_index(l.visible[7] as usize);
+        l.on_key(VK_LEFT.0, false, false);
+        assert!(l.focused_header().is_some());
+        assert_eq!(l.focused_index(), None);
+        l.on_key(VK_PRIOR.0, false, false);
+        assert_eq!(l.focus_pos(), Some(5 - page), "desde el encabezado");
+        // Av Pág desde el encabezado «Diminuto» (primer elemento d, pos 3).
+        l.select_index(l.visible[4] as usize);
+        l.on_key(VK_LEFT.0, false, false);
+        assert!(l.focused_header().is_some());
+        l.on_key(VK_NEXT.0, false, false);
+        assert_eq!(l.focus_pos(), Some((3 + page).min(7)));
+    }
+
     /// Ctrl+A (seleccionar todo) e invertir solo tocan lo que se ve.
     #[test]
     fn ctrl_a_selects_visible_only() {

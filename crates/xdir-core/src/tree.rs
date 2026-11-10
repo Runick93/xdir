@@ -266,6 +266,8 @@ pub struct Tree {
     net_addresses: Vec<(usize, String)>,
     /// Separador entre lo de xdir y la Red del Shell.
     net_sep_shell: Option<usize>,
+    /// Nodos de «Red» que se pueden reusar.
+    net_free: Vec<usize>,
 }
 
 /// Revelación pendiente (`Tree::reveal`).
@@ -317,6 +319,7 @@ impl Tree {
             net_shell: None,
             net_addresses: Vec::new(),
             net_sep_shell: None,
+            net_free: Vec::new(),
             eject_rects: Vec::new(),
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
@@ -483,8 +486,7 @@ impl Tree {
                 }
                 return id;
             }
-            t.nodes.push(Node::new(kind, path, name, 1));
-            t.nodes.len() - 1
+            t.new_net_node(kind, path, name)
         };
         let mut items = Vec::new();
         for (name, address) in favorites {
@@ -499,10 +501,11 @@ impl Tree {
             items.push(id);
         }
         if !hosts.is_empty() {
-            let sep = old.iter().copied().find(|&id| self.nodes[id].kind == Kind::Separator).unwrap_or_else(|| {
-                self.nodes.push(Node::new(Kind::Separator, PathBuf::new(), String::new(), 1));
-                self.nodes.len() - 1
-            });
+            let sep = old
+                .iter()
+                .copied()
+                .find(|&id| self.nodes[id].kind == Kind::Separator)
+                .unwrap_or_else(|| self.new_net_node(Kind::Separator, PathBuf::new(), String::new()));
             items.push(sep);
             for h in hosts {
                 let id = reuse(self, Kind::NetHost, PathBuf::new(), h);
@@ -510,10 +513,44 @@ impl Tree {
                 items.push(id);
             }
         }
+        // Lo que ya no está se recicla (con sus subcarpetas leídas), así el árbol no crece sin fin.
+        let mut gone: Vec<usize> = old.into_iter().filter(|id| !items.contains(id)).collect();
+        while let Some(id) = gone.pop() {
+            if let Some(c) = self.nodes[id].children.take() {
+                gone.extend(c);
+            }
+            if self.hover == Some(id) {
+                self.hover = None;
+            }
+            // Uno que todavía se está leyendo no se recicla: su lectura vuelve con este número.
+            if !self.nodes[id].loading {
+                self.net_free.push(id);
+            }
+        }
         self.net_items = items;
         self.rebuild_network_children();
-        // Una conexión nueva queda cerrada; «Red» queda como estaba.
         let _ = red;
+    }
+
+    /// Un nodo de «Red»: uno reciclado si hay, si no uno nuevo.
+    fn new_net_node(&mut self, kind: Kind, path: PathBuf, name: String) -> usize {
+        let node = Node::new(kind, path, name, 1);
+        match self.net_free.pop() {
+            Some(id) => {
+                self.nodes[id] = node;
+                id
+            }
+            None => {
+                self.nodes.push(node);
+                self.nodes.len() - 1
+            }
+        }
+    }
+
+    /// Para las pruebas: cuántos nodos tiene el árbol.
+    #[cfg(test)]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
     }
 
     fn rebuild_network_children(&mut self) {

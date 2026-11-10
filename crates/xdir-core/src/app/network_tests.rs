@@ -1451,3 +1451,19 @@ fn auth_retry_error_shown_in_tab() {
     wait_until(&mut a, |a| a.panes[0].tab().error.as_deref() == Some("Ya hay una conexión con \"nas-r1autherr\" con otro usuario"));
     FakeFileSystem::set_load_error(&path, None);
 }
+
+/// M10: las máquinas que aparecen y se van no hacen crecer el árbol sin fin.
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_network_nodes_recycled() {
+    let mut a = net_app();
+    a.net.hosts = vec!["UNO".into()];
+    a.net_changed();
+    let base = a.tree.node_count();
+    for i in 0..200 {
+        a.net.hosts = vec![format!("MAQ-{i}"), format!("OTRA-{i}")];
+        a.net.connections = vec![conn(&format!("smb://n{i}/x"), &format!("/net-r1m10/{i}"))];
+        a.net_changed();
+    }
+    assert!(a.tree.node_count() < base + 20, "{} nodos", a.tree.node_count());
+}

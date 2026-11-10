@@ -12,7 +12,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBackingStoreType, NSEvent, NSResponder,
+    NSAppearance, NSAppearanceCustomization, NSWindowOrderingMode, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBackingStoreType, NSEvent, NSResponder,
     NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -36,6 +36,15 @@ pub fn initial_frame(main: NSRect, visible: NSRect, size: NSSize) -> NSRect {
     let x = (cx - size.width / 2.0).min(vr - size.width).max(visible.origin.x);
     let y = (cy - size.height / 2.0).max(visible.origin.y).min(vt - size.height);
     NSRect::new(NSPoint::new(x, y), size)
+}
+
+/// `frame` corrido lo justo para entrar en `visible` (una posición recordada en una pantalla que ya
+/// no está, o que quedó medio afuera). Si es más alta, el borde de arriba queda a la vista.
+pub fn clamp_frame(frame: NSRect, visible: NSRect) -> NSRect {
+    let (vr, vt) = (visible.origin.x + visible.size.width, visible.origin.y + visible.size.height);
+    let x = frame.origin.x.min(vr - frame.size.width).max(visible.origin.x);
+    let y = frame.origin.y.max(visible.origin.y).min(vt - frame.size.height);
+    NSRect::new(NSPoint::new(x, y), frame.size)
 }
 
 /// El marco nuevo al cambiar de alto: queda fijo el borde de arriba, salvo que el de abajo salga
@@ -185,7 +194,7 @@ define_class!(
     unsafe impl NSWindowDelegate for AuxDelegate {
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, sender: &NSWindow) -> bool {
-            sender.orderOut(None);
+            detach_and_hide(sender);
             crate::app::with_app(|app| app.aux_closed(AuxWindow::Transfers));
             false
         }
@@ -208,7 +217,7 @@ fn style() -> NSWindowStyleMask {
     NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable
 }
 
-/// La ventana, creándola la primera vez (abajo a la derecha de la pantalla de xdir).
+/// La ventana, creándola la primera vez (centrada sobre la de xdir).
 fn ensure(main: Handle, theme: &Theme, size: (f32, f32)) -> Option<Retained<NSWindow>> {
     if let Some(w) = with(|a| {
         a.main = main;
@@ -250,9 +259,29 @@ pub fn show(main: Handle, w: AuxWindow, title: &str, size: (f32, f32), theme: &T
     if window.isMiniaturized() {
         window.deminiaturize(None);
     }
-    window.orderFront(None);
+    let main_window = crate::app::main_window();
+    if !window.isVisible() {
+        // Donde quedó la vez anterior, pero entera en una pantalla que exista.
+        let screen = window.screen().or_else(|| main_window.as_ref().and_then(|m| m.screen()));
+        if let Some(screen) = screen {
+            window.setFrame_display(clamp_frame(window.frame(), screen.visibleFrame()), false);
+        }
+    }
+    // Hija de la principal: queda siempre encima de xdir (no se pierde detrás) y la acompaña.
+    match &main_window {
+        Some(m) if window.parentWindow().is_none() => unsafe { m.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) },
+        _ => window.orderFront(None),
+    }
     invalidate(w);
     true
+}
+
+/// Se suelta de la principal y se oculta.
+fn detach_and_hide(window: &NSWindow) {
+    if let Some(parent) = window.parentWindow() {
+        parent.removeChildWindow(window);
+    }
+    window.orderOut(None);
 }
 
 fn set_content_size(window: &NSWindow, size: (f32, f32)) {
@@ -290,8 +319,13 @@ pub fn invalidate(w: AuxWindow) {
 pub fn hide(w: AuxWindow) {
     let AuxWindow::Transfers = w;
     if let Some(window) = with(|a| a.window.clone()) {
-        window.orderOut(None);
+        detach_and_hide(&window);
     }
+}
+
+/// La principal se cierra: la de copia no queda sola en pantalla (y no frena la salida).
+pub fn close_all() {
+    hide(AuxWindow::Transfers);
 }
 
 /// Número de la ventana de copia para el sistema (pruebas: capturar solo esa ventana).
@@ -338,6 +372,21 @@ mod tests {
         let small = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 400.0));
         let f = initial_frame(small, small, size);
         assert!(f.origin.y + f.size.height <= 400.0);
+    }
+
+    #[test]
+    fn remembered_frame_is_brought_back_on_screen() {
+        let visible = NSRect::new(NSPoint::new(0.0, 70.0), NSSize::new(1512.0, 845.0));
+        let size = NSSize::new(560.0, 442.0);
+        // Adentro: queda igual.
+        let f = clamp_frame(NSRect::new(NSPoint::new(300.0, 200.0), size), visible);
+        assert_eq!((f.origin.x, f.origin.y), (300.0, 200.0));
+        // Quedó en una pantalla que ya no está (a la derecha): vuelve entera.
+        let f = clamp_frame(NSRect::new(NSPoint::new(2400.0, -500.0), size), visible);
+        assert_eq!((f.origin.x + f.size.width, f.origin.y), (1512.0, 70.0));
+        // Arriba del todo: la barra de título queda a la vista.
+        let f = clamp_frame(NSRect::new(NSPoint::new(10.0, 800.0), size), visible);
+        assert_eq!(f.origin.y + f.size.height, 915.0);
     }
 
     #[test]

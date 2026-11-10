@@ -201,6 +201,7 @@ fn may_close() -> bool {
 }
 
 fn closing() {
+    crate::auxwin::close_all();
     if !CLOSED.with(|c| c.replace(true)) {
         with_app(|app| app.on_closing());
     }

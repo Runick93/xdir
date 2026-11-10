@@ -266,7 +266,7 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
 /// Resuelve el archivo (con sus anidados), lo lista y arma la carpeta `inner`.
 /// Devuelve también si se cortó en `MAX_ENTRIES`.
 fn read(file: &Path, nested: &[String], inner: &str, cancelled: &dyn Fn() -> bool) -> Result<(Vec<Child>, bool), CopyError> {
-    let real = temps::global().resolve(file, nested)?;
+    let real = temps::global().resolve(file, nested, cancelled)?;
     let entries = list_cached(&real, &mut || if cancelled() { Flow::Stop } else { Flow::Continue })?;
     if entries.iter().any(|e| e.encrypted) {
         return Err(CopyError::new(sys::ErrKind::Other(sys::PASSWORD.into()), &real));

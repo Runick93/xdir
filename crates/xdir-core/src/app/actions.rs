@@ -30,6 +30,9 @@ impl App {
         let active = self.active;
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
+            VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {
+                self.cancel_archive_open();
+            }
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
             VK_ESCAPE if self.filter_menu_pane().is_some() => {

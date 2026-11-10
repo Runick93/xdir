@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::archive::{ArchiveEntry, ArchiveFormat, EntryKind, format_of, is_root_entry, safe_entry_path, symlink_inside};
-use crate::sys::{Archives, CopyError, CopyPrims, ErrKind, Flow, ItemKind, NOT_ALLOWED, PASSWORD, UNSUPPORTED};
+use crate::sys::{Archives, Pick, CopyError, CopyPrims, ErrKind, Flow, ItemKind, NOT_ALLOWED, PASSWORD, UNSUPPORTED};
 
 use super::FakeCopyPrims;
 
@@ -204,19 +204,28 @@ impl Archives for FakeArchives {
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, CopyError),
     ) -> Result<usize, CopyError> {
-        self.extract_some(archive, root, &|_| true, progress, failed)
+        self.extract_some(archive, root, &|_, _| Pick::Take, progress, failed)
     }
 
     fn extract_some(
         &self,
         archive: &Path,
         root: &Path,
-        want: &dyn Fn(&str) -> bool,
+        want: &dyn Fn(usize, &str) -> Pick,
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, CopyError),
     ) -> Result<usize, CopyError> {
-        let mut entries = self.entries(archive)?;
-        entries.retain(|e| want(&e.name));
+        let mut entries = Vec::new();
+        for (i, e) in self.entries(archive)?.into_iter().enumerate() {
+            match want(i, &e.name) {
+                Pick::Skip => {}
+                Pick::Take => entries.push(e),
+                Pick::Last => {
+                    entries.push(e);
+                    break;
+                }
+            }
+        }
         if self.st().password.iter().any(|p| p == archive) {
             return Err(CopyError::new(ErrKind::Other(PASSWORD.into()), archive));
         }

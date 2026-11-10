@@ -7,7 +7,7 @@ use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 
 use crate::{
-    ArchiveEntry, CancelRead, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other,
+    Pick, ArchiveEntry, CancelRead, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other,
     resolve_rel, write_entry,
 };
 
@@ -115,7 +115,7 @@ pub fn extract(
 pub fn extract_all(
     archive: &Path,
     root: &Path,
-    want: &dyn Fn(&str) -> bool,
+    want: &dyn Fn(usize, &str) -> Pick,
     progress: &mut dyn FnMut(u64) -> Flow,
     on_fail: OnFail,
 ) -> Result<usize, Error> {
@@ -125,12 +125,20 @@ pub fn extract_all(
     let mut base = 0u64;
     let mut omitted = 0usize;
     let mut links: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+    let mut index = 0usize;
+    let mut last = false;
     for e in a.entries().map_err(|e| bad(e, archive))? {
+        if last {
+            break;
+        }
         let mut e = e.map_err(|e| bad(e, archive))?;
         let kind = kind_of_type(e.header().entry_type());
         let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
-        if !want(&name) {
-            continue;
+        index += 1;
+        match want(index - 1, &name) {
+            Pick::Skip => continue,
+            Pick::Take => {}
+            Pick::Last => last = true,
         }
         if kind == ItemKind::Omitted {
             omitted += 1;

@@ -1,6 +1,7 @@
 use super::temps::Temps;
 use super::*;
 use crate::sys::testing::{FakeArchives, FakeCopyPrims, install_fakes};
+use crate::sys::ErrKind;
 
 fn e(name: &str, kind: EntryKind) -> ArchiveEntry {
     ArchiveEntry { index: 0, name: name.into(), size: 10, kind, link: None, modified: 1_700_000_000, packed: 4, encrypted: false }
@@ -112,19 +113,19 @@ fn ensure_extracts_once_and_again_if_changed() {
     let zip = b.join("datos").join("fotos.zip");
     FakeArchives::shared().add_archive(&zip, &[("a/", b""), ("a/nota.txt", b"hola")], 30);
     let t = Temps::new(Some(&b));
-    let got = t.ensure(&zip, &[], "a/nota.txt").unwrap();
+    let got = t.ensure(&zip, &[], "a/nota.txt", &super::temps::Limits::up_to(u64::MAX)).unwrap();
     assert_eq!(Some(got.clone()), t.entry_path(&zip, &[], "a/nota.txt"));
     assert_eq!(FakeCopyPrims::shared().read_content(&got).unwrap(), b"hola");
     // Otra vez: no se toca (se cambió a mano y sigue así).
     FakeCopyPrims::shared().add_file(&got, b"tocado".to_vec());
-    assert_eq!(t.ensure(&zip, &[], "a/nota.txt").unwrap(), got);
+    assert_eq!(t.ensure(&zip, &[], "a/nota.txt", &super::temps::Limits::up_to(u64::MAX)).unwrap(), got);
     assert_eq!(FakeCopyPrims::shared().read_content(&got).unwrap(), b"tocado");
     // El zip cambió: se vuelve a extraer.
     FakeArchives::shared().add_archive(&zip, &[("a/", b""), ("a/nota.txt", b"nueva version")], 31);
-    let again = t.ensure(&zip, &[], "a/nota.txt").unwrap();
+    let again = t.ensure(&zip, &[], "a/nota.txt", &super::temps::Limits::up_to(u64::MAX)).unwrap();
     assert_eq!(FakeCopyPrims::shared().read_content(&again).unwrap(), b"nueva version");
-    assert!(t.ensure(&zip, &[], "../x").is_err());
-    assert!(t.ensure(&zip, &[], "no-esta.txt").is_err());
+    assert!(t.ensure(&zip, &[], "../x", &super::temps::Limits::up_to(u64::MAX)).is_err());
+    assert!(t.ensure(&zip, &[], "no-esta.txt", &super::temps::Limits::up_to(u64::MAX)).is_err());
     t.clean_own();
 }
 
@@ -138,10 +139,10 @@ fn nested_chain_resolves() {
     let t = Temps::new(Some(&b));
     let inner_path = t.entry_path(&outer, &[], "dir/adentro.zip").unwrap();
     // El de adentro también es un «zip» del falso (con sus entradas).
-    let real = t.resolve(&outer, &["dir/adentro.zip".to_string()]).unwrap();
+    let real = t.resolve(&outer, &["dir/adentro.zip".to_string()], &|| false).unwrap();
     assert_eq!(real, inner_path);
     FakeArchives::shared().add_archive(&real, &[("hondo.txt", b"!")], 1);
-    let deep = t.ensure(&outer, &["dir/adentro.zip".to_string()], "hondo.txt").unwrap();
+    let deep = t.ensure(&outer, &["dir/adentro.zip".to_string()], "hondo.txt", &super::temps::Limits::up_to(u64::MAX)).unwrap();
     assert_eq!(FakeCopyPrims::shared().read_content(&deep).unwrap(), b"!");
     assert_ne!(t.dir_for(&outer, &[]), t.dir_for(&outer, &["dir/adentro.zip".to_string()]));
     t.clean_own();
@@ -166,7 +167,7 @@ fn no_safe_base_refuses_extraction() {
     FakeArchives::shared().add_archive(&zip, &[("x.txt", b"x")], 3);
     let t = Temps::new(None);
     assert_eq!(t.entry_path(&zip, &[], "x.txt"), None);
-    let err = t.ensure(&zip, &[], "x.txt").unwrap_err();
+    let err = t.ensure(&zip, &[], "x.txt", &super::temps::Limits::up_to(u64::MAX)).unwrap_err();
     assert_eq!(err.message(), super::temps::NO_SAFE_TEMP);
 }
 
@@ -187,11 +188,45 @@ fn ensure_propagates_origin() {
     let zip = b.join("bajado.zip");
     FakeArchives::shared().add_archive(&zip, &[("d/e/malo.js", b"x")], 3);
     let t = Temps::new(Some(&b));
-    let got = t.ensure(&zip, &[], "d/e/malo.js").unwrap();
+    let got = t.ensure(&zip, &[], "d/e/malo.js", &super::temps::Limits::up_to(u64::MAX)).unwrap();
     let dir = t.dir_for(&zip, &[]);
     let marked = FakeArchives::shared().propagated(&zip);
     for p in [got.clone(), dir.join("d"), dir.join("d").join("e")] {
         assert!(marked.contains(&p), "{p:?} no heredó el origen: {marked:?}");
     }
+    t.clean_own();
+}
+
+/// Más grande que el límite, sin lugar en el disco o cancelado: no se extrae.
+#[test]
+fn ensure_limits_size_space_and_cancel() {
+    install_fakes();
+    let b = base("limites");
+    let zip = b.join("grande.zip");
+    FakeArchives::shared().add_archive(&zip, &[("chico.txt", b"1234"), ("grande.bin", b"")], 3);
+    FakeArchives::shared().set_declared(&zip, "grande.bin", 10_000);
+    let t = Temps::new(Some(&b));
+    let err = t.ensure(&zip, &[], "grande.bin", &super::temps::Limits::up_to(5_000)).unwrap_err();
+    assert_eq!(err.message(), super::temps::TOO_BIG);
+    let err = t.ensure(&zip, &[], "chico.txt", &super::temps::Limits { max: 1_000, cancel: &|| true }).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
+    assert!(FakeCopyPrims::shared().read_content(&t.entry_path(&zip, &[], "chico.txt").unwrap()).is_err());
+    let tiny = crate::sys::VolumeInfo { id: "temp".into(), label: "temp".into(), case_insensitive: false, has_trash: false, max_file: None, free: 2 };
+    FakeCopyPrims::shared().set_volume(t.run_dir().unwrap(), tiny);
+    let err = t.ensure(&zip, &[], "chico.txt", &super::temps::Limits::up_to(1_000)).unwrap_err();
+    assert_eq!(err.message(), super::temps::NO_ROOM);
+    t.clean_own();
+}
+
+/// Con dos entradas del mismo nombre se abre la que muestra la lista (la última).
+#[test]
+fn ensure_extracts_the_listed_duplicate() {
+    install_fakes();
+    let b = base("dobles");
+    let zip = b.join("dobles.zip");
+    FakeArchives::shared().add_archive(&zip, &[("a.txt", b"uno"), ("a.txt", b"dos")], 3);
+    let t = Temps::new(Some(&b));
+    let got = t.ensure(&zip, &[], "a.txt", &super::temps::Limits::up_to(u64::MAX)).unwrap();
+    assert_eq!(FakeCopyPrims::shared().read_content(&got).unwrap(), b"dos");
     t.clean_own();
 }

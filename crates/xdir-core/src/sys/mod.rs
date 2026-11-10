@@ -24,7 +24,7 @@ pub mod testing;
 mod copy;
 mod archives;
 
-pub use archives::{Archives, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
+pub use archives::{Archives, Pick, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
     CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
     starts_with_folded,

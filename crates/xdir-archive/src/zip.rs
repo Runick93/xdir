@@ -8,7 +8,7 @@ use ::zip::write::SimpleFileOptions;
 use ::zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use crate::{
-    ArchiveEntry, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other, resolve_rel, stored_name, write_entry,
+    Pick, ArchiveEntry, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other, resolve_rel, stored_name, write_entry,
 };
 use xdir_core::sys::{DAMAGED_ZIP, PASSWORD, UNSUPPORTED};
 
@@ -190,7 +190,7 @@ pub fn extract(
 pub fn extract_all(
     archive: &Path,
     root: &Path,
-    want: &dyn Fn(&str) -> bool,
+    want: &dyn Fn(usize, &str) -> Pick,
     progress: &mut dyn FnMut(u64) -> Flow,
     on_fail: OnFail,
 ) -> Result<usize, Error> {
@@ -202,7 +202,19 @@ pub fn extract_all(
     let mut omitted = 0usize;
     // Carpetas y archivos primero, enlaces al final.
     let (links, rest): (Vec<_>, Vec<_>) = entries.iter().partition(|e| e.kind == ItemKind::Symlink);
-    for e in rest.into_iter().chain(links).filter(|e| want(&e.name)) {
+    // Con `Pick::Last` no hace falta mirar más (el zip se lee por posición: no cambia nada más).
+    let mut picked: Vec<&ArchiveEntry> = Vec::new();
+    for e in rest.into_iter().chain(links) {
+        match want(e.index, &e.name) {
+            Pick::Skip => {}
+            Pick::Take => picked.push(e),
+            Pick::Last => {
+                picked.push(e);
+                break;
+            }
+        }
+    }
+    for e in picked {
         if e.kind == ItemKind::Symlink && cfg!(not(unix)) {
             omitted += 1;
             continue;

@@ -19,7 +19,7 @@ mod zip;
 mod tests;
 
 pub use xdir_core::archive::{ArchiveEntry, EntryKind as ItemKind};
-pub use xdir_core::sys::{CopyError as Error, ErrKind, Flow};
+pub use xdir_core::sys::{CopyError as Error, ErrKind, Flow, Pick};
 
 /// Un error con su texto.
 pub(crate) fn other(msg: &str, path: &Path) -> Error {
@@ -175,7 +175,7 @@ impl Service {
     /// mientras se descomprime. Devuelve cuántos enlaces se omitieron (en Windows todos). Si se
     /// corta o falla, lo ya extraído queda: lo limpia quien llama.
     pub fn extract_all(&self, archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<usize, Error> {
-        self.extract_each(archive, root, &|_| true, progress, &mut |_, e| Err(e))
+        self.extract_each(archive, root, &|_, _| Pick::Take, progress, &mut |_, e| Err(e))
     }
 
     /// Como `extract_all`, pero cada entrada que falla va a `on_fail`, que decide si se sigue.
@@ -183,7 +183,7 @@ impl Service {
         &self,
         archive: &Path,
         root: &Path,
-        want: &dyn Fn(&str) -> bool,
+        want: &dyn Fn(usize, &str) -> Pick,
         progress: &mut dyn FnMut(u64) -> Flow,
         on_fail: OnFail,
     ) -> Result<usize, Error> {
@@ -472,14 +472,14 @@ impl Archives for Service {
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, Error),
     ) -> Result<usize, Error> {
-        self.extract_some(archive, root, &|_| true, progress, failed)
+        self.extract_some(archive, root, &|_, _| Pick::Take, progress, failed)
     }
 
     fn extract_some(
         &self,
         archive: &Path,
         root: &Path,
-        want: &dyn Fn(&str) -> bool,
+        want: &dyn Fn(usize, &str) -> Pick,
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, Error),
     ) -> Result<usize, Error> {

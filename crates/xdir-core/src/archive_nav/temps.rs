@@ -9,17 +9,44 @@
 //! Lo que se extrae pasa por `sys::archives()` y se mira con `sys::copy_prims()` (en las pruebas,
 //! el disco falso); la carpeta de la ejecución y su candado son del disco real.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::archive::safe_entry_path;
-use crate::sys::{self, CopyError, ErrKind, Flow, ItemKind};
+use crate::sys::{self, CopyError, ErrKind, Flow, ItemKind, Pick};
 
 /// Nombre del candado dentro de la carpeta de cada ejecución.
 const LOCK: &str = ".candado";
+
+/// Lo más que se extrae para abrir un archivo de adentro o entrar en un archivo anidado (la vista
+/// previa usa su propio límite, `thumbs::BIG_CACHE_BYTES`).
+pub const OPEN_MAX: u64 = 4 << 30;
+/// Más que el límite.
+pub const TOO_BIG: &str = "Es demasiado grande para abrirlo desde adentro: usá «Extraer en…»";
+/// No entra en el disco de la temporal.
+pub const NO_ROOM: &str = "No hay lugar en el disco para extraerlo";
+
+/// Límites de una extracción temporal.
+pub struct Limits<'a> {
+    /// Bytes que puede declarar (y escribir) el elemento.
+    pub max: u64,
+    /// `true` corta (se dejó la carpeta, se movió el foco, se canceló).
+    pub cancel: &'a dyn Fn() -> bool,
+}
+
+fn never() -> bool {
+    false
+}
+
+impl Limits<'static> {
+    /// Hasta `max`, sin cancelar.
+    pub fn up_to(max: u64) -> Limits<'static> {
+        Limits { max, cancel: &never }
+    }
+}
 
 /// Texto del error cuando no hay una carpeta temporal segura.
 pub const NO_SAFE_TEMP: &str = "No hay una carpeta temporal segura para extraer";
@@ -32,6 +59,10 @@ pub struct Temps {
     lock: Mutex<Option<File>>,
     /// Tamaño y fecha de cada archivo cuando se extrajo de él: si cambió, lo viejo se borra.
     stamps: Mutex<HashMap<PathBuf, (u64, u64)>>,
+    /// Lo que extrajo esta ejecución (lo único que se reusa).
+    done: Mutex<HashSet<PathBuf>>,
+    /// Un candado por carpeta de archivo comprimido.
+    locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
 }
 
 /// Las temporales del proceso, en la carpeta que da la plataforma
@@ -57,7 +88,14 @@ impl Temps {
     pub fn new(base: Option<&Path>) -> Temps {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
         let run = base.map(|b| b.join(format!("{}-{nanos}", std::process::id()))).unwrap_or_default();
-        Temps { base: base.map(Path::to_path_buf), run, lock: Mutex::new(None), stamps: Mutex::new(HashMap::new()) }
+        Temps {
+            base: base.map(Path::to_path_buf),
+            run,
+            lock: Mutex::new(None),
+            stamps: Mutex::new(HashMap::new()),
+            done: Mutex::new(HashSet::new()),
+            locks: Mutex::new(HashMap::new()),
+        }
     }
 
     fn unsafe_base() -> CopyError {
@@ -112,6 +150,7 @@ impl Temps {
         }
         let _ = std::fs::remove_dir_all(&self.run);
         self.stamps.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.done.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// La carpeta de lo extraído del archivo `file` con la cadena `nested` (sin tocar el disco).
@@ -129,46 +168,59 @@ impl Temps {
         Some(self.dir_for(file, nested).join(safe_entry_path(rel)?))
     }
 
-    /// El archivo comprimido de verdad: `file`, o la extracción temporal del último anidado.
-    /// Bloqueante (hilos de trabajo).
-    pub fn resolve(&self, file: &Path, nested: &[String]) -> Result<PathBuf, CopyError> {
+    /// El archivo comprimido de verdad: `file`, o la extracción temporal del último anidado
+    /// (hasta `OPEN_MAX`). Bloqueante (hilos de trabajo); `cancel` corta.
+    pub fn resolve(&self, file: &Path, nested: &[String], cancel: &dyn Fn() -> bool) -> Result<PathBuf, CopyError> {
         match nested.split_last() {
             None => Ok(file.to_path_buf()),
-            Some((last, outer)) => self.ensure(file, outer, last),
+            Some((last, outer)) => self.ensure(file, outer, last, &Limits { max: OPEN_MAX, cancel }),
         }
     }
 
     /// Extrae (si no estaba ya, o si el archivo cambió) el elemento `rel` del archivo `file` con
-    /// la cadena `nested` y devuelve su ruta temporal. Bloqueante (hilos de trabajo); de a una
-    /// extracción a la vez, así dos pedidos del mismo elemento no se pisan.
-    pub fn ensure(&self, file: &Path, nested: &[String], rel: &str) -> Result<PathBuf, CopyError> {
-        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        self.ensure_locked(file, nested, rel)
-    }
-
-    fn ensure_locked(&self, file: &Path, nested: &[String], rel: &str) -> Result<PathBuf, CopyError> {
+    /// la cadena `nested` y devuelve su ruta temporal. Bloqueante (hilos de trabajo). Se extrae la
+    /// entrada que muestra la lista (la última con ese nombre), solo si declara hasta `lim.max`
+    /// bytes y entra en el disco, cortando si escribe más o si `lim.cancel` lo pide; un tar.gz se
+    /// deja de leer apenas llega. De a una extracción por archivo comprimido (dos pedidos del
+    /// mismo elemento no se pisan; los de otros archivos no esperan).
+    pub fn ensure(&self, file: &Path, nested: &[String], rel: &str, lim: &Limits) -> Result<PathBuf, CopyError> {
         let real = match nested.split_last() {
             None => file.to_path_buf(),
-            Some((last, outer)) => self.ensure_locked(file, outer, last)?,
+            Some((last, outer)) => self.ensure(file, outer, last, &Limits { max: OPEN_MAX, cancel: lim.cancel })?,
         };
         let not_allowed = || CopyError::new(ErrKind::Other(sys::NOT_ALLOWED.into()), Path::new(rel));
         let target = safe_entry_path(rel).ok_or_else(not_allowed)?;
         self.run_dir().ok_or_else(Temps::unsafe_base)?;
         let prims = sys::copy_prims();
         let dir = self.dir_for(file, nested);
+        let lock = self.lock_for(&dir);
+        let _one = lock.lock().unwrap_or_else(|e| e.into_inner());
         let stat = prims.stat(&real)?;
         let stamp = (stat.size, stat.modified);
         {
             let mut stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
             if stamps.get(&dir) != Some(&stamp) {
                 remove_tree(&dir);
+                self.done.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| !p.starts_with(&dir));
                 stamps.insert(dir.clone(), stamp);
             }
         }
         let dst = dir.join(&target);
-        if prims.stat(&dst).is_ok() {
+        // Solo lo que extrajo esta ejecución (en un disco sin mayúsculas, «A.txt» no es «a.txt»).
+        if self.done.lock().unwrap_or_else(|e| e.into_inner()).contains(&dst) && prims.stat(&dst).is_ok() {
             return Ok(dst);
+        }
+        let entries = super::list_cached(&real, &mut || if (lim.cancel)() { Flow::Stop } else { Flow::Continue })?;
+        let Some(entry) = entries.iter().rev().find(|e| safe_entry_path(&e.name).as_deref() == Some(target.as_path())) else {
+            return Err(CopyError::new(ErrKind::NotFound, &dst));
+        };
+        if entry.size > lim.max {
+            return Err(CopyError::new(ErrKind::Other(TOO_BIG.into()), &dst));
+        }
+        if let Some(v) = prims.volume(&self.run)
+            && entry.size > v.free
+        {
+            return Err(CopyError::new(ErrKind::Other(NO_ROOM.into()), &dst));
         }
         if prims.stat(&dir).is_err() {
             // La de la ejecución ya está en el disco real; en el falso de las pruebas se crea acá.
@@ -180,10 +232,26 @@ impl Temps {
             prims.create_private_dir(&dir)?;
         }
         let mut failed = None;
-        let want = |name: &str| safe_entry_path(name).as_deref() == Some(target.as_path());
-        sys::archives().extract_some(&real, &dir, &want, &mut |_| Flow::Continue, &mut |_, e| failed = Some(e))?;
+        let mut too_big = false;
+        let index = entry.index;
+        let res = sys::archives().extract_some(
+            &real,
+            &dir,
+            &|i, _| if i == index { Pick::Last } else { Pick::Skip },
+            &mut |b| {
+                too_big |= b > lim.max;
+                if too_big || (lim.cancel)() { Flow::Stop } else { Flow::Continue }
+            },
+            &mut |_, e| failed = Some(e),
+        );
+        if too_big {
+            remove_tree(&dst);
+            return Err(CopyError::new(ErrKind::Other(TOO_BIG.into()), &dst));
+        }
+        res?;
         match prims.stat(&dst) {
             Ok(_) => {
+                self.done.lock().unwrap_or_else(|e| e.into_inner()).insert(dst.clone());
                 // El origen del archivo (marca de la web, cuarentena) pasa a lo extraído y a las
                 // carpetas que se crearon para llegar.
                 let written: Vec<PathBuf> = dst.ancestors().take_while(|p| *p != dir).map(Path::to_path_buf).collect();
@@ -192,6 +260,11 @@ impl Temps {
             }
             Err(e) => Err(failed.unwrap_or(e)),
         }
+    }
+
+    /// El candado de las extracciones de la carpeta `dir` (una por archivo comprimido).
+    fn lock_for(&self, dir: &Path) -> Arc<Mutex<()>> {
+        self.locks.lock().unwrap_or_else(|e| e.into_inner()).entry(dir.to_path_buf()).or_default().clone()
     }
 }
 

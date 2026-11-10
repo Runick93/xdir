@@ -25,7 +25,7 @@ use super::walk::{Planned, totals, walk};
 use super::{Answer, Choice, ConflictInfo, Control, Flow, JobError, JobOutcome, JobSpec, Update};
 use crate::format::thousands;
 use crate::ops::{OpResult, Undo};
-use crate::sys::{self, Archives, CopyError, CopyPrims, ErrKind, ItemKind, ItemStat, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
+use crate::sys::{self, Archives, CopyError, CopyPrims, ErrKind, ItemKind, ItemStat, NOT_ALLOWED, NoArchives, PASSWORD, Pick, UNSUPPORTED};
 
 /// Como mucho un aviso de progreso cada tanto por trabajo.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
@@ -1744,8 +1744,9 @@ impl<'a> Job<'a> {
             }
         };
         let wanted: Vec<PathBuf> = entries.iter().filter_map(|e| safe_entry_path(e)).collect();
-        let want = |name: &str| !is_mac_metadata(name) && safe_entry_path(name).is_some_and(|p| wanted.iter().any(|w| p.starts_with(w)));
-        let chosen: Vec<_> = list.into_iter().filter(|e| want(&e.name)).collect();
+        let wanted_name = |name: &str| !is_mac_metadata(name) && safe_entry_path(name).is_some_and(|p| wanted.iter().any(|w| p.starts_with(w)));
+        let want = |_: usize, name: &str| if wanted_name(name) { Pick::Take } else { Pick::Skip };
+        let chosen: Vec<_> = list.into_iter().filter(|e| wanted_name(&e.name)).collect();
         let declared = declared_total(&chosen);
         let count = chosen.iter().filter(|e| e.kind != EntryKind::Omitted).count() as u64;
         if let Some(v) = self.prims.volume(dest)

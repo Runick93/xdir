@@ -122,7 +122,7 @@ fn open_file_inside_extracts_and_opens() {
     go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec![], inner: "docs".into() });
     let i = idx_of(&a, 0, "nota.txt");
     a.apply(0, Action::Open(i));
-    assert_eq!(a.notice.as_deref(), Some("Abriendo «nota.txt»…"));
+    assert_eq!(a.notice.as_deref(), Some("Abriendo «nota.txt»…   Esc cancela"));
     task(&mut a);
     let temp = crate::archive_nav::temps::global().entry_path(&zip, &[], "docs/nota.txt").unwrap();
     assert_eq!(FakeCopyPrims::shared().read_content(&temp).unwrap(), b"hola");
@@ -136,7 +136,7 @@ fn nested_zip_navigable() {
     let mut a = app(FakeHost::new());
     let (_, zip) = fixture("anidado", &[("dir/viejo.zip", b"zz"), ("dir/b.txt", b"b")]);
     // El zip de adentro, una vez extraído a la temporal, es otro «zip» del falso.
-    let inner = crate::archive_nav::temps::global().ensure(&zip, &[], "dir/viejo.zip").unwrap();
+    let inner = crate::archive_nav::temps::global().ensure(&zip, &[], "dir/viejo.zip", &crate::archive_nav::temps::Limits::up_to(u64::MAX)).unwrap();
     FakeArchives::shared().add_archive(&inner, &[("hondo/x.txt", b"x")], 2);
     go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec![], inner: "dir".into() });
     let i = idx_of(&a, 0, "viejo.zip");
@@ -377,4 +377,20 @@ fn unsafe_names_never_become_disk_paths() {
     a.run_command(Command::CopyPaths);
     let copied: Vec<String> = FakeShell::take_calls().into_iter().filter_map(|c| if let ShellCall::CopyText(t) = c { Some(t) } else { None }).collect();
     assert_eq!(copied, [format!("\"{}/ok.jpg\"", zip.display())]);
+}
+
+/// Escape mientras se extrae para abrir: no se abre nada.
+#[test]
+fn escape_cancels_opening_from_archive() {
+    let mut a = app(FakeHost::new());
+    let (_, zip) = fixture("cancela", &[("nota.txt", b"hola")]);
+    go(&mut a, 0, root(&zip));
+    a.set_active(0);
+    let i = idx_of(&a, 0, "nota.txt");
+    a.apply(0, Action::Open(i));
+    assert!(a.on_key(VK_ESCAPE));
+    assert_eq!(a.notice.as_deref(), Some("Se canceló la apertura"));
+    task(&mut a);
+    assert!(FakeShell::take_calls().iter().all(|c| !matches!(c, ShellCall::OpenFile(..))));
+    assert!(a.archive.opening.is_none());
 }

@@ -962,7 +962,7 @@ fn extract_some_only_wanted_zip() {
     svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
     let dst = t.p("dst");
     fs::create_dir(&dst).unwrap();
-    let want = |n: &str| safe_entry_path(n).is_some_and(|p| p.starts_with(Path::new("src").join("sub")));
+    let want = |_: usize, n: &str| if safe_entry_path(n).is_some_and(|p| p.starts_with(Path::new("src").join("sub"))) { Pick::Take } else { Pick::Skip };
     let mut failed = Vec::new();
     xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &want, &mut |_| Flow::Continue, &mut |n, e| failed.push((n.to_string(), e))).unwrap();
     assert!(failed.is_empty());
@@ -981,7 +981,7 @@ fn extract_some_only_wanted_targz() {
     });
     let dst = t.p("dst");
     fs::create_dir(&dst).unwrap();
-    let want = |n: &str| n == "d/b.txt";
+    let want = |_: usize, n: &str| if n == "d/b.txt" { Pick::Take } else { Pick::Skip };
     xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &want, &mut |_| Flow::Continue, &mut |_, _| {}).unwrap();
     assert_eq!(tree(&dst), [("d/".to_string(), None), ("d/b.txt".to_string(), Some(b"chau".to_vec()))]);
 }
@@ -1026,4 +1026,34 @@ fn propagate_origin_calls_the_platform_for_each() {
     let (z, a, b) = (Path::new("z.zip"), PathBuf::from("a"), PathBuf::from("b"));
     xdir_core::sys::Archives::propagate_origin(&s, z, &[a.clone(), b.clone()]);
     assert_eq!(*SEEN.lock().unwrap(), [(z.to_path_buf(), a), (z.to_path_buf(), b)]);
+}
+
+/// Con `Pick::Last` un tar.gz deja de descomprimirse después de esa entrada (no se lee lo que
+/// sigue); la posición es la de `list`.
+#[cfg(unix)]
+#[test]
+fn targz_extract_some_stops_after_last() {
+    let t = Tmp::new();
+    let z = t.p("largo.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"a.txt", tar::EntryType::Regular, None, b"a");
+        tar_entry(b, b"b.txt", tar::EntryType::Regular, None, b"b");
+        let big: Vec<u8> = (0..4_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        tar_entry(b, b"grande.bin", tar::EntryType::Regular, None, &big);
+    });
+    assert_eq!(svc().list(&z).unwrap()[1].name, "b.txt");
+    let run = |pick: Pick| {
+        let dst = t.p(&format!("dst-{pick:?}"));
+        fs::create_dir(&dst).unwrap();
+        let mut checks = 0;
+        xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &|i, _| if i == 1 { pick } else { Pick::Skip }, &mut |_| {
+            checks += 1;
+            Flow::Continue
+        }, &mut |_, _| {})
+        .unwrap();
+        assert_eq!(fs::read(dst.join("b.txt")).unwrap(), b"b");
+        checks
+    };
+    let (last, take) = (run(Pick::Last), run(Pick::Take));
+    assert!(last * 10 < take, "Last {last} / Take {take}");
 }

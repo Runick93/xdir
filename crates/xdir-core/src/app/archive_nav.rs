@@ -5,6 +5,8 @@
 //! vista rápida.
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::path::Path;
 
 use super::tasks::TaskDone;
@@ -28,7 +30,16 @@ pub(super) struct ArchiveState {
     /// Extracciones temporales listas (para la vista previa) y en camino.
     pub ready: HashSet<PathBuf>,
     pub pending: HashSet<PathBuf>,
+    /// Turno de la extracción para la vista previa: al pasar a otro elemento la anterior se corta.
+    pub prefetch_turn: Arc<AtomicU64>,
+    /// Lo último que se pidió para la vista previa.
+    pub prefetch_last: Option<PathBuf>,
+    /// La extracción para abrir en curso (Escape la cancela).
+    pub opening: Option<Arc<AtomicBool>>,
 }
+
+/// El aviso de una apertura cancelada.
+const CANCELLED: &str = "Se canceló la apertura";
 
 /// ¿El comando escribe en la carpeta del panel o en lo elegido? (dentro de un archivo comprimido
 /// no se puede).
@@ -120,12 +131,39 @@ impl App {
         }
         let name = e.name.to_string_lossy().into_owned();
         let (file, nested) = (file.clone(), nested.clone());
-        self.notice = Some(format!("Abriendo «{name}»…"));
-        self.spawn_task(move || TaskDone::ArchiveOpened { name, with, result: temps::global().ensure(&file, &nested, &rel).map_err(|e| e.message()) });
+        self.notice = Some(format!("Abriendo «{name}»…   Esc cancela"));
+        // Una apertura nueva corta la anterior.
+        let stop = Arc::new(AtomicBool::new(false));
+        if let Some(old) = self.archive.opening.replace(stop.clone()) {
+            old.store(true, Ordering::Relaxed);
+        }
+        self.spawn_task(move || {
+            let cancel = || stop.load(Ordering::Relaxed);
+            let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
+            TaskDone::ArchiveOpened { name, with, result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
+        });
+    }
+
+    /// Escape con una apertura desde un archivo comprimido en curso: se corta. `false` si no había.
+    pub(super) fn cancel_archive_open(&mut self) -> bool {
+        // Queda anotada (marcada) hasta que llegue: si ya había terminado, tampoco se abre.
+        let Some(stop) = self.archive.opening.as_ref().filter(|s| !s.load(Ordering::Relaxed)) else { return false };
+        stop.store(true, Ordering::Relaxed);
+        self.notice = Some(CANCELLED.into());
+        true
     }
 
     /// Terminó la extracción para abrir: se abre con su programa (o se avisa por qué no).
     pub(super) fn on_archive_opened(&mut self, name: String, with: bool, result: Result<PathBuf, String>) {
+        // Cancelada con Escape, o reemplazada por otra apertura: no se abre nada.
+        if self.archive.opening.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            self.archive.opening = None;
+            return;
+        }
+        if matches!(&result, Err(m) if m == CANCELLED) {
+            return;
+        }
+        self.archive.opening = None;
         match result {
             Ok(path) if with => {
                 self.notice = None;
@@ -343,26 +381,30 @@ impl App {
         let list = &tab.list;
         let mut sel = list.selected_indices();
         let idx = match (sel.next(), sel.next()) {
-            (Some(i), None) => i,
-            (None, _) => match list.focused_index() {
-                Some(i) => i,
-                None => return,
-            },
-            _ => return,
+            (Some(i), None) => Some(i),
+            (None, _) => list.focused_index(),
+            _ => None,
         };
-        let Some(e) = list.entries.get(idx) else { return };
-        if e.is_dir || e.attrs & (ATTR_ARCHIVE_BAD | ATTR_LINK) != 0 || e.size > crate::thumbs::BIG_CACHE_BYTES as u64 {
-            return;
+        let limit = crate::thumbs::BIG_CACHE_BYTES as u64;
+        let wanted = idx.filter(|&i| list.entries.get(i).is_some_and(|e| !e.is_dir && e.attrs & (ATTR_ARCHIVE_BAD | ATTR_LINK) == 0 && e.size <= limit));
+        let path = wanted.map(|i| tab.entry_path(i));
+        // Pasó a otro elemento (o a ninguno): la extracción anterior se corta.
+        if path != self.archive.prefetch_last {
+            self.archive.prefetch_turn.fetch_add(1, Ordering::Relaxed);
+            self.archive.prefetch_last = path.clone();
         }
-        let path = tab.entry_path(idx);
+        let (Some(idx), Some(path)) = (wanted, path) else { return };
         if self.archive.ready.contains(&path) || self.archive.pending.contains(&path) {
             return;
         }
         let Some(rel) = tab.archive_rel(idx) else { return };
         let (file, nested) = (file.clone(), nested.clone());
         self.archive.pending.insert(path.clone());
+        let turn = self.archive.prefetch_turn.clone();
+        let mine = turn.load(Ordering::Relaxed);
         self.spawn_task(move || {
-            let ok = temps::global().ensure(&file, &nested, &rel).is_ok();
+            let cancel = || turn.load(Ordering::Relaxed) != mine;
+            let ok = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: limit, cancel: &cancel }).is_ok();
             TaskDone::ArchivePrepared { path, ok }
         });
     }

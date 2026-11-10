@@ -18,6 +18,16 @@ pub const DAMAGED: &str = "El archivo está dañado";
 /// Texto del error de una entrada que saldría de la carpeta (o un enlace que apunta afuera).
 pub const NOT_ALLOWED: &str = "Ruta no permitida dentro del archivo";
 
+/// Qué hacer con una entrada en `Archives::extract_some`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pick {
+    Skip,
+    Take,
+    /// Extraerla y no seguir leyendo (un tar.gz no se descomprime hasta el final por un solo
+    /// elemento).
+    Last,
+}
+
 pub trait Archives: Send + Sync {
     /// Los formatos que este sistema sabe extraer (Windows: solo zip).
     fn formats(&self) -> &'static [ArchiveFormat];
@@ -46,14 +56,15 @@ pub trait Archives: Send + Sync {
     /// escribirlo, pero al llevarlo a su lugar puede quedar al lado de un enlace del usuario que
     /// apunta afuera: el motor lo vuelve a mirar ahí y borra los que salen.
     fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf>;
-    /// Como `extract_all`, pero solo las entradas cuyo nombre guardado (sin sanear) acepta
-    /// `want`; las carpetas de arriba se crean al bajar. Para abrir o copiar algo de adentro sin
+    /// Como `extract_all`, pero solo las entradas que elige `want` (recibe la posición de la
+    /// entrada, la de `list`, y su nombre guardado sin sanear); las carpetas de arriba se crean al
+    /// bajar. Con `Pick::Last` deja de leer después de esa. Para abrir o copiar algo de adentro sin
     /// extraer todo. Por defecto, sin soporte.
     fn extract_some(
         &self,
         archive: &Path,
         _root: &Path,
-        _want: &dyn Fn(&str) -> bool,
+        _want: &dyn Fn(usize, &str) -> Pick,
         _progress: &mut dyn FnMut(u64) -> Flow,
         _failed: &mut dyn FnMut(&str, CopyError),
     ) -> Result<usize, CopyError> {

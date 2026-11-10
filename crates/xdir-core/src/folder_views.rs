@@ -114,18 +114,23 @@ impl FolderViews {
     /// Lee `carpetas.toml` de la carpeta de configuración. Sin archivo, queda «primera vez».
     pub fn load() -> FolderViews {
         let Some(path) = crate::session::config_dir().map(|d| d.join(FILE_NAME)) else { return FolderViews::default() };
-        let mut fv = match std::fs::read_to_string(&path) {
+        Self::load_from(path)
+    }
+
+    /// Lee las vistas de `path` y guarda ahí en adelante.
+    fn load_from(path: PathBuf) -> FolderViews {
+        match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let (mut fv, errors) = parse(&text);
                 fv.errors = errors;
+                fv.path = Some(path);
                 fv
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FolderViews::default(),
-            // Ilegible: se arranca con la de fábrica y se avisa (no se pisa hasta el primer cambio).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FolderViews { path: Some(path), ..FolderViews::default() },
+            // Existe pero no se puede leer: se arranca con la de fábrica, se avisa y no se guarda
+            // (pisarlo perdería la configuración del usuario).
             Err(e) => FolderViews { fresh: false, errors: vec![format!("no se pudo leer: {e}")], ..FolderViews::default() },
-        };
-        fv.path = Some(path);
-        fv
+        }
     }
 
     /// ¿No había `carpetas.toml`? (primera vez: hay que copiar la vista de la sesión).
@@ -367,7 +372,7 @@ fn settings_from(section: &toml::Section) -> Result<ViewSettings, String> {
                 for item in entry.value.as_str_list().ok_or_else(bad)? {
                     let (id, width) = item.split_once(':').unwrap_or((item, ""));
                     let col = column(id.trim())?;
-                    let width = width.trim().parse::<f32>().unwrap_or(0.0);
+                    let width = width.trim().parse::<f32>().ok().filter(|w| w.is_finite()).unwrap_or(0.0);
                     let width = if col == Column::Name { width.max(0.0) } else { width.max(48.0) };
                     if !cols.iter().any(|c: &ColumnSpec| c.col == col) {
                         cols.push(ColumnSpec { col, width });
@@ -445,6 +450,28 @@ mod tests {
         assert!(!back.is_fresh());
     }
 
+    /// Las columnas de metadatos (con sus ids `dimensiones`, `duracion`, `autor`, `etiquetas`,
+    /// `artista`, `album`) se guardan y se leen como las demás, también al agrupar y filtrar.
+    #[test]
+    fn folder_views_roundtrip_metadata_columns() {
+        let meta = [Column::Dimensions, Column::Duration, Column::Authors, Column::Tags, Column::Artist, Column::Album];
+        assert_eq!(meta.map(Column::id), ["dimensiones", "duracion", "autor", "etiquetas", "artista", "album"]);
+        let mut fv = FolderViews::default();
+        let mut columns = vec![ColumnSpec { col: Column::Name, width: 0.0 }];
+        columns.extend(meta.iter().map(|&col| ColumnSpec { col, width: 120.0 }));
+        let v = ViewSettings {
+            columns,
+            sort: Column::Duration,
+            group_by: Some(Column::Dimensions),
+            filters: vec![(Column::Tags, vec!["viaje".into()])],
+            ..ViewSettings::default()
+        };
+        fv.set("/fotos", v.clone());
+        let (back, errors) = parse(&write(&fv));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(back.get("/fotos"), v);
+    }
+
     #[test]
     fn folder_views_ignores_bad_lines() {
         let text = write(&sample());
@@ -460,6 +487,42 @@ mod tests {
         assert!(fv.contains("/home/x/fotos, raras"));
         assert_eq!(fv.get("/buena").view, View::LargeIcons);
         assert_eq!(fv.default_view(), sample().default_view());
+    }
+
+    /// Un `carpetas.toml` que existe pero no se puede leer (acá, una carpeta con ese nombre) no se
+    /// pisa: la vista de fábrica, con el aviso, y sin dónde guardar.
+    #[test]
+    fn folder_views_unreadable_file_is_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("xdir-carpetas-ilegible-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(FILE_NAME);
+        std::fs::create_dir_all(&path).unwrap();
+        let mut fv = FolderViews::load_from(path.clone());
+        assert_eq!(fv.errors.len(), 1, "{:?}", fv.errors);
+        assert!(!fv.is_fresh());
+        assert_eq!(fv.path, None);
+        fv.set("/x", ViewSettings { view: View::Icons, ..ViewSettings::default() });
+        fv.save_if_dirty();
+        assert!(path.is_dir());
+        // Sin archivo: «primera vez», y se guarda ahí.
+        let other = dir.join("otro.toml");
+        let fv = FolderViews::load_from(other.clone());
+        assert!(fv.is_fresh() && fv.errors.is_empty());
+        assert_eq!(fv.path, Some(other));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un ancho no finito (inf, NaN) se ignora: la columna queda con el ancho mínimo.
+    #[test]
+    fn folder_views_ignores_non_finite_widths() {
+        for w in ["inf", "-inf", "NaN"] {
+            let text = format!("[[carpeta]]\nclave = \"/a\"\ncolumnas = [\"nombre:{w}\", \"tamano:{w}\"]\n");
+            let (fv, errors) = parse(&text);
+            assert!(errors.is_empty(), "{errors:?}");
+            let cols = fv.get("/a").columns;
+            assert!(cols.iter().all(|c| c.width.is_finite()), "{w}: {cols:?}");
+            assert_eq!(cols.iter().map(|c| c.width).collect::<Vec<_>>(), [0.0, 48.0], "{w}");
+        }
     }
 
     #[test]

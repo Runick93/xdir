@@ -154,6 +154,18 @@ fn moving_the_only_tab_leaves_this_pc_behind() {
     assert_eq!(a.panes[3].tabs.last().unwrap().id, id);
 }
 
+/// Llevar una pestaña a otro panel cierra su desplegable de filtros (quedaría abierto en un lugar
+/// que ya no corresponde).
+#[test]
+fn moving_a_tab_closes_its_filter_menu() {
+    let mut a = app();
+    a.new_tab(0, Location::Path(std::env::temp_dir()), true);
+    a.panes[0].tab_mut().list.open_filter_menu(list::Column::Type);
+    assert!(a.panes[0].tab().list.filter_menu().is_some());
+    a.move_tab_to_pane(0, 1, 2, 0);
+    assert_eq!(a.panes[2].tab().list.filter_menu(), None);
+}
+
 #[test]
 fn moving_within_the_same_pane_or_out_of_range_does_nothing() {
     let mut a = app();
@@ -1800,6 +1812,33 @@ fn navigating_restores_folder_view() {
     assert_eq!(a.folder_views.get(&view_key(&a, 0)).sort, list::Column::Name);
 }
 
+/// El aviso «Vista: …» se va al navegar a otra carpeta o cuando la lista activa ya no muestra
+/// esa vista (otro panel activo); otros avisos no se tocan.
+#[test]
+fn view_notice_clears_on_navigation_or_view_change() {
+    let (x, y, z) = (fixture("aviso-vista-x"), fixture("aviso-vista-y"), fixture("aviso-vista-z"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(x));
+    go(&mut a, 1, Location::Path(y));
+    a.set_active(0);
+    a.set_view(0, list::View::Icons);
+    assert_eq!(a.notice.as_deref(), Some("Vista: íconos medianos"));
+    a.sync_folder_views();
+    assert_eq!(a.notice.as_deref(), Some("Vista: íconos medianos"), "sigue mientras vale");
+    go(&mut a, 0, Location::Path(z));
+    a.sync_folder_views();
+    assert_eq!(a.notice, None, "al navegar");
+    a.set_view(0, list::View::Icons);
+    a.set_active(1);
+    a.sync_folder_views();
+    assert_eq!(a.notice, None, "otra lista activa, con otra vista");
+    // Otro aviso no se borra.
+    a.notice = Some("Error: algo".into());
+    a.sync_folder_views();
+    assert_eq!(a.notice.as_deref(), Some("Error: algo"));
+}
+
 /// «Usar esta vista en todas las carpetas» pregunta; con «Sí» la vista actual pasa a ser la por
 /// defecto, se borran las de las carpetas y las listas abiertas la toman; con «No», nada.
 #[test]
@@ -1887,7 +1926,7 @@ fn group_menu_in_background_menu() {
         })
         .collect();
     let names: Vec<&str> = labels.iter().map(|(l, _)| l.as_str()).collect();
-    assert_eq!(names, ["Nombre", "Fecha de modificación", "Fecha de creación", "Tipo", "Tamaño", "(Ninguno)"]);
+    assert_eq!(names, ["Nombre", "Fecha de modificación", "Fecha de creación", "Tipo", "Tamaño", "Dimensiones", "Duración", "(Ninguno)"]);
     let tipo = labels.iter().find(|(l, _)| l == "Tipo").unwrap().1;
     FakeShell::choose(Some(&format!("own:{tipo}")));
     a.on_context_menu(Some((10.0, 20.0)));
@@ -2353,6 +2392,134 @@ fn tooltip_does_not_return_after_click() {
     assert!(!shown(&mut a));
     deliver_tip(&mut a);
     assert!(shown(&mut a));
+}
+
+// ---------- encabezado: ordenar y agrupar ----------
+
+fn header_subs(menu: &[shell::Entry]) -> Vec<(usize, String, Vec<(String, u32)>)> {
+    menu.iter()
+        .enumerate()
+        .filter_map(|(pos, e)| match e {
+            shell::Entry::Sub(name, items) => Some((
+                pos,
+                name.clone(),
+                items
+                    .iter()
+                    .filter_map(|i| match i {
+                        shell::Entry::Item { id, label, .. } => Some((label.clone(), *id)),
+                        _ => None,
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// El menú del encabezado trae «Ordenar por» y «Agrupar por» entre las columnas y «Columnas de
+/// fábrica», con los mismos ítems que el menú del fondo.
+#[test]
+fn header_menu_has_sort_and_group_submenus() {
+    use crate::sys::testing::{FakeShell, ShellCall};
+    let dir = fixture("encabezado-subs");
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(dir));
+    a.show_columns_menu(0, (10.0, 10.0));
+    let menu = host.menus().pop().unwrap();
+    let subs = header_subs(&menu);
+    let names: Vec<&str> = subs.iter().map(|s| s.1.as_str()).collect();
+    assert_eq!(names, ["Ordenar por", "Agrupar por"]);
+    assert!(matches!(menu[subs[0].0 - 1], shell::Entry::Sep));
+    assert_eq!(subs[1].0, subs[0].0 + 1);
+    assert!(matches!(&menu[subs[1].0 + 2], shell::Entry::Item { label, .. } if label == "Columnas de fábrica"));
+    // Mismos textos que el menú del fondo.
+    FakeShell::choose(None);
+    FakeShell::take_calls();
+    a.set_active(0);
+    a.on_context_menu(Some((10.0, 20.0)));
+    let calls = FakeShell::take_calls();
+    let [ShellCall::ContextMenu { own, .. }] = calls.as_slice() else { panic!("se esperaba un menú: {calls:?}") };
+    let bg: Vec<_> = header_subs(own).into_iter().filter(|s| s.1 != "Ver").collect();
+    assert_eq!(bg.len(), 2);
+    for (h, b) in subs.iter().zip(bg.iter()) {
+        assert_eq!(h.1, b.1);
+        let (hl, bl): (Vec<_>, Vec<_>) = (h.2.iter().map(|x| &x.0).collect(), b.2.iter().map(|x| &x.0).collect());
+        assert_eq!(hl, bl);
+    }
+    // Sin choques de ids con columnas ni «Columnas de fábrica».
+    for (_, _, items) in &subs {
+        for (_, id) in items {
+            assert!(*id >= 200, "id {id}");
+            assert!(!(1..=list::COLUMNS.len() as u32).contains(id) && *id != 100, "id {id}");
+        }
+    }
+}
+
+/// «Ordenar por» del encabezado lista la columna de orden actual aunque sea de metadatos y esté
+/// oculta (marcada), para que se vea por qué está ordenada la lista.
+#[test]
+fn header_menu_lists_hidden_meta_sort_column() {
+    let dir = fixture("encabezado-orden-meta");
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(dir));
+    {
+        let list = &mut a.panes[0].tab_mut().list;
+        assert!(!list.columns.iter().any(|c| c.col == list::Column::Duration));
+        list.set_sort(list::Column::Duration);
+    }
+    host.set_menu_choice(None);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let menu = host.menus().pop().unwrap();
+    let Some(shell::Entry::Sub(_, sorts)) = menu.iter().find(|e| matches!(e, shell::Entry::Sub(n, _) if n == "Ordenar por")) else {
+        panic!("sin «Ordenar por»")
+    };
+    let dur = sorts.iter().find(|e| matches!(e, shell::Entry::Item { label, .. } if label == list::Column::Duration.title()));
+    assert!(matches!(dur, Some(shell::Entry::Item { checked: true, .. })), "{sorts:?}");
+    // Las otras de metadatos ocultas siguen sin aparecer.
+    assert!(!sorts.iter().any(|e| matches!(e, shell::Entry::Item { label, .. } if label == list::Column::Artist.title())));
+}
+
+/// Elegir «Tipo» en «Agrupar por» del encabezado agrupa la lista y la carpeta lo recuerda.
+#[test]
+fn header_menu_group_by_type_groups_list() {
+    let dir = fixture("encabezado-agrupar");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("a.txt"), "x").unwrap();
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(dir));
+    host.set_menu_choice(None);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let subs = header_subs(&host.menus().pop().unwrap());
+    let tipo = subs[1].2.iter().find(|(l, _)| l == "Tipo").unwrap().1;
+    host.set_menu_choice(Some(tipo));
+    a.show_columns_menu(0, (10.0, 10.0));
+    let list = &a.panes[0].tab().list;
+    assert_eq!(list.group_by, Some(list::Column::Type));
+    assert!(matches!(list.rows().first(), Some(list::Row::Header { .. })));
+    assert_eq!(a.folder_views.get(&view_key(&a, 0)).group_by, Some(list::Column::Type));
+}
+
+/// «Ordenar por ▸ Tamaño» desde el encabezado del panel 0 ordena el 0 aunque el activo sea el 1.
+#[test]
+fn header_menu_sort_applies_to_clicked_pane() {
+    let (x, y) = (fixture("encabezado-orden-x"), fixture("encabezado-orden-y"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(x));
+    go(&mut a, 1, Location::Path(y));
+    a.set_active(1);
+    let before = a.panes[1].tab().list.sort;
+    host.set_menu_choice(None);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let subs = header_subs(&host.menus().pop().unwrap());
+    let size = subs[0].2.iter().find(|(l, _)| l == "Tamaño").unwrap().1;
+    host.set_menu_choice(Some(size));
+    a.show_columns_menu(0, (10.0, 10.0));
+    assert_eq!(a.panes[0].tab().list.sort, list::Column::Size);
+    assert_eq!(a.panes[1].tab().list.sort, before);
 }
 
 /// El botón «xtree» lleva como cartel el estado del escaneo; sin escaneo, no lleva.

@@ -5,8 +5,8 @@
 //! operaciones de archivos en `crate::ops` (con la papelera de `crate::trash`), el escritorio en
 //! `crate::shell` y el escaneo de xtree en `crate::scan`. Acá quedan los chicos.
 
-use xdir_core::fs::OverlayRequest;
-use xdir_core::sys::{Handle, Overlays, Services, Waker};
+use xdir_core::fs::{MetadataRequest, OverlayRequest};
+use xdir_core::sys::{Handle, Metadata, Overlays, Services, Waker};
 
 use crate::env::LinuxEnv;
 use crate::fs::LinuxFileSystem;
@@ -29,6 +29,16 @@ impl Overlays for LinuxOverlays {
     fn request(&self, _req: OverlayRequest) {}
 }
 
+/// Linux no tiene de dónde leer dimensiones, duración, autor ni etiquetas sin dependencias de
+/// escritorio: se responde vacío (las columnas quedan sin valor).
+struct LinuxMetadata;
+
+impl Metadata for LinuxMetadata {
+    fn request(&self, req: MetadataRequest) {
+        req.answer_empty();
+    }
+}
+
 /// Instala los servicios de Linux en el registro del núcleo.
 pub fn install() {
     xdir_core::sys::install(Services {
@@ -39,5 +49,6 @@ pub fn install() {
         shell: Box::new(LinuxShell),
         file_system: Box::new(LinuxFileSystem),
         overlays: Box::new(LinuxOverlays),
+        metadata: Box::new(LinuxMetadata),
     });
 }

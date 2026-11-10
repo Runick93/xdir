@@ -338,6 +338,9 @@ impl Tab {
         }
         if silent {
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            // Los lotes de metadatos en camino traen la generación vieja y se descartan: lo que no
+            // llegó se vuelve a pedir (si la recarga falla, la lista sigue igual y sin «Leyendo…» colgado).
+            self.list.forget_unanswered_meta();
             self.reload_buf = Some(Vec::new());
             sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
         } else {
@@ -368,6 +371,8 @@ impl Tab {
         self.leave_view();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.list.clear();
+        // Los resultados llevan su ruta completa: de ahí se leen los metadatos.
+        self.list.meta_enabled = true;
         self.list.search_root = root;
         if !self.list.columns.iter().any(|c| c.col == Column::Folder) {
             let at = self.list.columns.iter().position(|c| c.col == Column::Name).map_or(0, |i| i + 1);
@@ -409,6 +414,8 @@ impl Tab {
         // Quien navega la vuelve a marcar como visita después; una recarga no cuenta.
         self.counts_as_visit = false;
         self.list.clear();
+        // Solo las carpetas de disco tienen de dónde leer metadatos.
+        self.list.meta_enabled = matches!(self.location, Location::Path(_));
         self.loading = true;
         self.error = None;
         self.reload_buf = None;
@@ -474,6 +481,13 @@ impl Tab {
                 }
                 self.list.set_overlays(&overlays);
             }
+            // Los índices son de la lista actual; los de una recarga sin aplicar se vuelven a pedir.
+            LoadMsg::Metadata(batch) => {
+                if self.reload_buf.is_some() {
+                    return false;
+                }
+                self.list.set_meta(batch);
+            }
             LoadMsg::Icons(icons) => match &mut self.reload_buf {
                 // Íconos de una recarga que todavía no se aplicó.
                 Some(buf) => {
@@ -519,6 +533,30 @@ impl Tab {
             generation: self.generation.load(Ordering::Relaxed),
             items,
         });
+    }
+
+    /// Pide los metadatos que la lista necesita (columnas de metadatos a la vista, o la carpeta
+    /// entera si se agrupa, ordena o filtra por una), en pedidos de hasta `fs::META_BATCH`.
+    pub fn request_metadata(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        if self.reload_buf.is_some() {
+            return;
+        }
+        let idxs = self.list.take_meta_request();
+        if idxs.is_empty() {
+            return;
+        }
+        let generation = self.generation.load(Ordering::Relaxed);
+        for chunk in idxs.chunks(fs::META_BATCH) {
+            sys::metadata().request(fs::MetadataRequest {
+                hwnd,
+                tx: tx.clone(),
+                panel: self.id,
+                generation,
+                current: self.generation.clone(),
+                items: chunk.iter().map(|&i| (i, self.entry_path(i))).collect(),
+                fields: fs::MetaField::ALL.to_vec(),
+            });
+        }
     }
 
     pub fn entry_item(&self, idx: usize) -> crate::shell::Item {

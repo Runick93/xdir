@@ -1,17 +1,17 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
 //! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
-//! `disk_scan()`, `shell()`, `file_system()` y `overlays()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! `disk_scan()`, `shell()`, `file_system()`, `overlays()` y `metadata()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{DirEntry, Metadata};
+use std::fs::{DirEntry, Metadata as FsMetadata};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 
 use crate::commands::Command;
-use crate::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
+use crate::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult};
 use crate::shell::{Entry, Item};
@@ -247,15 +247,15 @@ pub trait FileSystem: Send + Sync {
     /// Prepara el hilo de una búsqueda (COM e íconos en Windows) y corre `f` en él.
     fn with_search_thread(&self, f: Box<dyn FnOnce() + Send>);
     /// Datos de un elemento encontrado (los enlaces simbólicos, de lo que apuntan en macOS).
-    fn search_metadata(&self, item: &DirEntry, path: &Path) -> Option<Metadata>;
+    fn search_metadata(&self, item: &DirEntry, path: &Path) -> Option<FsMetadata>;
     /// ¿Está oculto? (atributo en Windows; punto o marca del Finder en macOS).
-    fn is_hidden(&self, meta: &Metadata, name: &OsStr) -> bool;
+    fn is_hidden(&self, meta: &FsMetadata, name: &OsStr) -> bool;
     /// ¿La búsqueda entra en esta carpeta? (en macOS, no en paquetes como las apps).
     fn searchable_dir(&self, name: &OsStr) -> bool;
     /// ¿Es la raíz de otro disco montado adentro? (la búsqueda no cruza).
     fn is_mount_point(&self, path: &Path) -> bool;
     /// Elemento de la lista para un resultado de búsqueda, con su ruta completa en `full`.
-    fn disk_entry(&self, path: &Path, name: OsString, meta: &Metadata) -> FsEntry;
+    fn disk_entry(&self, path: &Path, name: OsString, meta: &FsMetadata) -> FsEntry;
 
     /// Carpeta del usuario `i` (0..6: Escritorio, Descargas, Documentos, Imágenes, Música,
     /// Vídeos), si existe.
@@ -317,6 +317,14 @@ pub trait Overlays: Send + Sync {
     fn request(&self, req: OverlayRequest);
 }
 
+/// Metadatos de archivos para las columnas Dimensiones, Duración, Autor, Etiquetas, Artista y
+/// Álbum: se leen en un hilo aparte y vuelven como `LoadMsg::Metadata` por el canal del pedido,
+/// en lotes (ver `MetadataRequest::send`). Donde no hay de dónde leerlos se responde vacío
+/// (`MetadataRequest::answer_empty`).
+pub trait Metadata: Send + Sync {
+    fn request(&self, req: MetadataRequest);
+}
+
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {
     pub waker: Box<dyn Waker>,
@@ -326,6 +334,7 @@ pub struct Services {
     pub shell: Box<dyn Shell>,
     pub file_system: Box<dyn FileSystem>,
     pub overlays: Box<dyn Overlays>,
+    pub metadata: Box<dyn Metadata>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -376,4 +385,8 @@ pub fn file_system() -> &'static dyn FileSystem {
 
 pub fn overlays() -> &'static dyn Overlays {
     &*services().overlays
+}
+
+pub fn metadata() -> &'static dyn Metadata {
+    &*services().metadata
 }

@@ -223,10 +223,11 @@ impl App {
             self.redraw();
         }
         self.notify_a11y_focus();
-        // Superposiciones de las filas recién dibujadas.
+        // Superposiciones y metadatos de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for i in self.shown_panes() {
             self.panes[i].tab_mut().request_overlays(hwnd, &tx);
+            self.panes[i].tab_mut().request_metadata(hwnd, &tx);
         }
 
         if self.first_frame_ms.is_none() {

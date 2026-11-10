@@ -54,7 +54,9 @@ espera que Descargas quede agrupada por fecha y Fotos en miniaturas sin tener qu
    - Funciona en las vistas Detalles, Lista, Contenido, Íconos y Miniaturas (en las de grilla el
      encabezado ocupa una fila completa).
    - Menú «Agrupar por» en el clic derecho del fondo (junto a «Ordenar por» y «Vista») y comandos en la
-     paleta («Agrupar por nombre», …, «No agrupar»).
+     paleta («Agrupar por nombre», …, «No agrupar»). El clic derecho en el encabezado de columnas trae
+     también «Ordenar por ▸» y «Agrupar por ▸» (los mismos submenús, sobre el panel del encabezado),
+     entre las columnas y «Columnas de fábrica».
 3. **Más columnas**: Dimensiones (ancho × alto en píxeles, imágenes y videos), Duración (h:mm:ss, audio y
    video), Autor, Etiquetas, Artista y Álbum. Se agregan desde el menú de columnas del encabezado (como las
    de hoy). Los valores se leen en segundo plano solo para las columnas visibles (o la que agrupa o
@@ -81,8 +83,10 @@ espera que Descargas quede agrupada por fecha y Fotos en miniaturas sin tener qu
    - Se suman a «Vista» del menú y de la paleta, con atajos `Ctrl+Shift+5` (Lista) y `Ctrl+Shift+6`
      (Contenido) (en macOS con ⌘ según la tabla de atajos).
 6. **Casillas de selección**: switch «Casillas de selección» en la rueda dentada, apagado por defecto
-   (global, se guarda en la sesión). Prendido: cada elemento muestra una casilla a la izquierda del ícono
-   al pasar el mouse o cuando está seleccionado; clic en la casilla suma o quita ese elemento de la
+   (global, se guarda en la sesión). Prendido: cada elemento muestra una casilla a la izquierda del ícono,
+   en todas las filas (vacía o marcada); en oscuro el borde de la vacía usa `text_secondary` para que se
+   distinga (decisión del usuario; se aparta de la maqueta X36, que la mostraba solo con el mouse encima o
+   seleccionado). Clic en la casilla suma o quita ese elemento de la
    selección sin tocar los demás (como Ctrl+clic). En Detalles, el encabezado tiene una casilla para
    seleccionar o quitar todo.
 

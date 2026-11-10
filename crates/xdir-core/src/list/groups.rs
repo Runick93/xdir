@@ -8,10 +8,7 @@ use crate::geom::{Rect, rect};
 use crate::paint::{FontId, Painter};
 pub use crate::sys::LocalNow;
 
-/// Metadatos leídos de un elemento (dimensiones, duración, autor…). Provisorio: lo completa la
-/// tarea de las columnas nuevas; por ahora ninguna columna de metadatos agrupa.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Meta;
+pub use crate::fs::Meta;
 
 /// Grupo de un elemento: `order` ordena los grupos (después, el nombre); `label` es lo que se
 /// muestra y lo que se guarda como grupo plegado.
@@ -29,17 +26,24 @@ pub const PINNED_LAST: i64 = 1000;
 
 /// Criterios de «Agrupar por», en el orden del menú y de `Command::GroupBy`; el último es
 /// «(Ninguno)».
-pub const GROUPINGS: [Option<Column>; 6] =
-    [Some(Column::Name), Some(Column::Modified), Some(Column::Created), Some(Column::Type), Some(Column::Size), None];
+pub const GROUPINGS: [Option<Column>; 8] = [
+    Some(Column::Name),
+    Some(Column::Modified),
+    Some(Column::Created),
+    Some(Column::Type),
+    Some(Column::Size),
+    Some(Column::Dimensions),
+    Some(Column::Duration),
+    None,
+];
 
 fn key(order: i64, label: &str) -> GroupKey {
     GroupKey { order, label: label.to_string() }
 }
 
-/// Grupo de `e` según la columna `col`. `meta` son los metadatos leídos del elemento (si los
-/// hay) y `now` la fecha de hoy en hora local. Pura.
+/// Grupo de `e` según la columna `col`. `meta` son los metadatos leídos del elemento (`None`:
+/// todavía no llegaron, «Leyendo…») y `now` la fecha de hoy en hora local. Pura.
 pub fn group_key(col: Column, e: &Entry, meta: Option<&Meta>, now: LocalNow) -> GroupKey {
-    let _ = meta;
     match col {
         Column::Name => name_group(&e.sort_key),
         Column::Modified => date_group(e.modified, now),
@@ -49,6 +53,7 @@ pub fn group_key(col: Column, e: &Entry, meta: Option<&Meta>, now: LocalNow) -> 
         Column::Extension => value_group(&extension_of(e).to_uppercase()),
         Column::Attributes => value_group(&attr_letters(e.attrs)),
         Column::Folder => value_group(&parent_of(e)),
+        Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => super::meta::meta_group(col, meta),
     }
 }
 
@@ -119,10 +124,13 @@ fn date_group(ft: u64, now: LocalNow) -> GroupKey {
     }
 }
 
-/// Tipo: un grupo por tipo; las carpetas primero.
+/// Tipo: un grupo por tipo; las carpetas primero. Sin tipo (carpeta o archivo), un solo grupo
+/// «Sin valor» al final, como en las otras columnas.
 fn type_group(e: &Entry) -> GroupKey {
-    let order = if e.is_dir { PINNED_FIRST - 1 } else { 1 };
-    if e.type_name.is_empty() { key(order, "Sin valor") } else { key(order, &e.type_name) }
+    if e.type_name.is_empty() {
+        return key(PINNED_LAST, "Sin valor");
+    }
+    key(if e.is_dir { PINNED_FIRST - 1 } else { 1 }, &e.type_name)
 }
 
 /// Tamaño: de chico a grande; las carpetas aparte, primero.
@@ -221,6 +229,19 @@ impl FileList {
         self.regroup_keep_focus();
     }
 
+    /// Si el elemento (índice en `entries`) está en un grupo plegado, lo despliega.
+    pub(super) fn reveal(&mut self, idx: usize) {
+        if self.group_by.is_none() {
+            return;
+        }
+        self.ensure_keys();
+        if let Some(label) = self.label_of(idx).map(str::to_string)
+            && self.collapsed.contains(&label)
+        {
+            self.toggle_group(&label);
+        }
+    }
+
     /// Pliega o despliega el grupo. Si el foco estaba en un elemento del grupo que se pliega,
     /// pasa a su encabezado.
     pub fn toggle_group(&mut self, label: &str) {
@@ -296,26 +317,43 @@ impl FileList {
     /// reemplazaron los elementos).
     fn ensure_keys(&mut self) {
         let Some(col) = self.group_by else { return };
-        if self.keys_for != Some(col) || self.entry_keys.len() > self.entries.len() {
+        // La fecha de hoy solo hace falta para las fechas.
+        let now = if natural_descending(col) { crate::sys::env().local_now() } else { LocalNow::from_unix(0, 0) };
+        let new_day = natural_descending(col) && now.day != self.keys_day;
+        if self.keys_for != Some(col) || self.entry_keys.len() > self.entries.len() || new_day {
             self.entry_keys.clear();
             self.key_table.clear();
             self.key_index.clear();
             self.keys_for = Some(col);
+            self.keys_day = now.day;
         }
         if self.entry_keys.len() == self.entries.len() {
             return;
         }
-        // La fecha de hoy solo hace falta para las fechas.
-        let now = if natural_descending(col) { crate::sys::env().local_now() } else { LocalNow::from_unix(0, 0) };
-        for e in &self.entries[self.entry_keys.len()..] {
-            let k = group_key(col, e, None, now);
-            let n = self.key_table.len() as u32;
-            let i = *self.key_index.entry(k.clone()).or_insert(n);
-            if i == n {
-                self.key_table.push(k);
-            }
-            self.entry_keys.push(i);
+        for i in self.entry_keys.len()..self.entries.len() {
+            let k = group_key(col, &self.entries[i], self.meta_of(i), now);
+            let id = self.intern_key(k);
+            self.entry_keys.push(id);
         }
+    }
+
+    /// Agrupada por fecha: si cambió el día desde que se calcularon los grupos (pasó la
+    /// medianoche), los rearma. Se llama al dibujar.
+    pub(super) fn regroup_if_day_changed(&mut self) {
+        let Some(col) = self.group_by.filter(|&c| natural_descending(c)) else { return };
+        if self.keys_for == Some(col) && !self.entry_keys.is_empty() && crate::sys::env().local_now().day != self.keys_day {
+            self.regroup_keep_focus();
+        }
+    }
+
+    /// Índice del grupo en `key_table` (lo agrega si es nuevo).
+    pub(super) fn intern_key(&mut self, k: GroupKey) -> u32 {
+        let n = self.key_table.len() as u32;
+        let i = *self.key_index.entry(k.clone()).or_insert(n);
+        if i == n {
+            self.key_table.push(k);
+        }
+        i
     }
 
     /// Arma lo que se ve a partir de `order` (elementos que pasan los filtros, ya ordenados):
@@ -586,6 +624,19 @@ mod tests {
         assert!(d.order < PINNED_FIRST);
     }
 
+    /// Sin tipo, carpeta o archivo, van al mismo grupo «Sin valor», al final.
+    #[test]
+    fn group_key_type_without_value_is_one_group() {
+        let mut dir = entry("raro");
+        dir.is_dir = true;
+        dir.type_name = Arc::from("");
+        let mut file = entry("x");
+        file.type_name = Arc::from("");
+        let (d, f) = (group_key(Column::Type, &dir, None, FakeNow::now()), group_key(Column::Type, &file, None, FakeNow::now()));
+        assert_eq!(d, f);
+        assert_eq!((d.label.as_str(), d.order), ("Sin valor", PINNED_LAST));
+    }
+
     /// Fecha fija para los tests que no dependen de ella.
     struct FakeNow;
     impl FakeNow {
@@ -703,6 +754,92 @@ mod list_tests {
         // Shift+↓ desde ahí entra y selecciona.
         l.on_key(VK_DOWN.0, false, true);
         assert_eq!(names(&l, &[l.focus_pos().unwrap()]), ["f"]);
+    }
+
+    /// Con el foco en un encabezado no hay elemento con foco (F2 o Enter no actúan sobre el que
+    /// lo tenía antes) y Re Pág / Av Pág cuentan desde el encabezado.
+    #[test]
+    fn header_focus_has_no_focused_item_and_pages_from_header() {
+        use crate::keys::keys::{VK_NEXT, VK_PRIOR};
+        let mut l = grouped();
+        l.area = rect(0.0, 0.0, 800.0, 110.0);
+        let page = l.page_rows();
+        assert!((1..5).contains(&page), "página {page}");
+        // h (pos 7) y ← lleva al encabezado «Pequeño» (su primer elemento es f, pos 5).
+        l.select_index(l.visible[7] as usize);
+        l.on_key(VK_LEFT.0, false, false);
+        assert!(l.focused_header().is_some());
+        assert_eq!(l.focused_index(), None);
+        l.on_key(VK_PRIOR.0, false, false);
+        assert_eq!(l.focus_pos(), Some(5 - page), "desde el encabezado");
+        // Av Pág desde el encabezado «Diminuto» (primer elemento d, pos 3).
+        l.select_index(l.visible[4] as usize);
+        l.on_key(VK_LEFT.0, false, false);
+        assert!(l.focused_header().is_some());
+        l.on_key(VK_NEXT.0, false, false);
+        assert_eq!(l.focus_pos(), Some((3 + page).min(7)));
+    }
+
+    /// Agrupada por fecha, pasada la medianoche los grupos se rearman con el día nuevo: lo de
+    /// «Hoy» pasa a «Ayer» en el siguiente dibujo.
+    #[test]
+    fn date_groups_follow_midnight() {
+        use crate::sys::testing::FakeEnv;
+        install_fakes();
+        let today = FakeEnv::DEFAULT_NOW;
+        let unix = today.day * 86_400 + 3_600;
+        let mut e = entry("a", 0);
+        e.modified = ((unix + 11_644_473_600) * 10_000_000) as u64;
+        let mut l = FileList { area: rect(0.0, 0.0, 800.0, 600.0), ..Default::default() };
+        l.append(vec![e]);
+        l.set_group(Some(Column::Modified));
+        assert_eq!(headers(&l)[0].0, "Hoy");
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        let area = l.area;
+        l.draw(&p, area, true);
+        assert_eq!(headers(&l)[0].0, "Hoy");
+        FakeEnv::set_local_now(crate::sys::LocalNow { day: today.day + 1, weekday: today.weekday + 1, ..today });
+        l.draw(&p, area, true);
+        let label = headers(&l)[0].0.clone();
+        FakeEnv::set_local_now(today);
+        assert_eq!(label, "Ayer");
+    }
+
+    /// Llevar a la vista el primer elemento de un grupo muestra también su encabezado.
+    #[test]
+    fn ensure_visible_shows_group_header() {
+        use crate::keys::keys::{VK_END, VK_HOME};
+        let mut l = grouped();
+        l.area = rect(0.0, 0.0, 800.0, 110.0);
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_END.0, false, false);
+        assert!(l.scroll_target > GROUP_H);
+        l.on_key(VK_HOME.0, false, false);
+        assert_eq!(l.scroll_target, 0.0, "el encabezado «Vacío» queda a la vista");
+        // Primer elemento del grupo «Pequeño» (f, pos 5) desde arriba: entra su encabezado.
+        let layout = l.layout.as_ref().unwrap();
+        let li = layout.pos_line[5] as usize;
+        let header_top = layout.lines[li - 1].top;
+        l.on_key(VK_END.0, false, false);
+        l.select_pos(5);
+        assert!(l.scroll_target <= header_top, "{} > {header_top}", l.scroll_target);
+    }
+
+    /// Un elemento de un grupo plegado que se selecciona por programa (carpeta nueva que se va a
+    /// renombrar, elemento renombrado) despliega su grupo para verse y poder editarse.
+    #[test]
+    fn selecting_item_in_collapsed_group_expands_it() {
+        let mut l = grouped();
+        l.toggle_group("Diminuto (0–16 KB)");
+        let d = l.entries.iter().position(|e| e.display == "d").unwrap();
+        l.select_index(d);
+        assert!(!headers(&l)[1].2, "desplegado");
+        assert_eq!(l.focused_index(), Some(d));
+        assert_eq!(names(&l, &l.selected_positions()), ["d"]);
+        l.toggle_group("Pequeño (16 KB–1 MB)");
+        assert!(l.focus_name(&std::ffi::OsString::from("g")));
+        assert!(!headers(&l)[2].2);
+        assert_eq!(names(&l, &[l.focus_pos().unwrap()]), ["g"]);
     }
 
     /// Ctrl+A (seleccionar todo) e invertir solo tocan lo que se ve.

@@ -199,6 +199,11 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
     Ok(OpResult { undo: None, focus, rename_after: false, error: None, ..Default::default() })
 }
 
+/// `CMIC_MASK_NOASYNC`: `InvokeCommand` no vuelve hasta que el verbo terminó (el motor de copia
+/// renombra lo restaurado enseguida). `CMIC_MASK_FLAG_NO_UI`: sin diálogos de error.
+const CMIC_MASK_NOASYNC: u32 = 0x0000_0100;
+const CMIC_MASK_FLAG_NO_UI: u32 = 0x0000_0400;
+
 pub(super) fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
     unsafe {
         let it: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(parsing_name), None)?;
@@ -208,6 +213,7 @@ pub(super) fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
         let _ = menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, 0);
         let info = CMINVOKECOMMANDINFO {
             cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            fMask: CMIC_MASK_NOASYNC | CMIC_MASK_FLAG_NO_UI,
             lpVerb: s!("undelete"),
             nShow: 1,
             ..Default::default()

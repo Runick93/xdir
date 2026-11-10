@@ -400,7 +400,17 @@ impl CopyPrims for WinCopyPrims {
         // ahí al lugar pedido (sin pisar).
         super::win32::restore_from_recycle_bin(in_bin).map_err(|e| err(e, original))?;
         match from {
-            Some(from) if from != original => self.rename_noreplace(from, original),
+            Some(from) if from != original => {
+                // El verbo corre sin asincronía (`CMIC_MASK_NOASYNC`), pero algunas extensiones
+                // de la Papelera terminan después: se espera un poco a que aparezca.
+                for _ in 0..50 {
+                    if attr_data(from).is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                self.rename_noreplace(from, original)
+            }
             _ => Ok(()),
         }
     }

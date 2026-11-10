@@ -364,6 +364,12 @@ impl CopyPrims for WinCopyPrims {
         }
     }
 
+    /// Windows da «acceso denegado» con un archivo abierto por otro para borrar (un antivirus):
+    /// también es «por un momento».
+    fn transient(&self, kind: &ErrKind) -> bool {
+        matches!(kind, ErrKind::InUse | ErrKind::Denied)
+    }
+
     fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
         let (f, t) = (long_path(from), long_path(to));
         // Sin `MOVEFILE_COPY_ALLOWED` (no copia entre discos) ni `REPLACE_EXISTING` (no pisa).

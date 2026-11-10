@@ -138,6 +138,12 @@ pub trait CopyPrims: Send + Sync {
     fn sync(&self, _p: &Path) -> Result<(), CopyError> {
         Ok(())
     }
+    /// ¿Es un error de «ocupado por un momento» (un antivirus o el indexador abrieron lo recién
+    /// escrito)? El motor reintenta un rato los renombres finales. Por defecto, solo «ocupado»;
+    /// Windows también cuenta «sin permiso» (lo da con un archivo abierto para borrar).
+    fn transient(&self, kind: &ErrKind) -> bool {
+        *kind == ErrKind::InUse
+    }
     /// Deja en el disco la carpeta `dir` (sus nombres: lo recién renombrado ahí adentro), antes de
     /// borrar el original al mover.
     fn sync_dir(&self, _dir: &Path) -> Result<(), CopyError> {

@@ -1275,3 +1275,23 @@ fn new_folder_with_keeps_undo_for_copies_whose_source_stayed() {
     assert!(!fake.exists(&folder.join("x.txt")), "deshacer saca la copia");
     assert!(!fake.exists(&folder), "y la carpeta");
 }
+
+#[test]
+fn busy_retries_cover_replace_and_set_aside_but_not_denied() {
+    // Revisión del cableado (M3): «ocupado» se reintenta también al poner el temporal de un
+    // «Reemplazar» y al apartar lo que estaba; «sin permiso» no (salvo donde el sistema lo usa
+    // para «ocupado», como Windows).
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/br/s/a.txt"), b"nuevo".to_vec());
+    fake.add_file(&p("/br/d/a.txt"), b"viejo".to_vec());
+    fake.fail(&p("/br/d/a.txt"), ErrKind::InUse, 2);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/br/s/a.txt")], dest: p("/br/d") }, &[answer(Choice::Replace)]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.contents(&p("/br/d/a.txt")).unwrap(), b"nuevo");
+    // Sin permiso: un solo intento.
+    fake.add_file(&p("/br/s/b.txt"), b"b".to_vec());
+    fake.fail(&p("/br/d/b.txt"), ErrKind::Denied, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/br/s/b.txt")], dest: p("/br/d") }, &[]);
+    assert_eq!(r.messages(), vec!["No tenés permiso".to_string()]);
+    no_tmp_left(&fake, &p("/br/d"));
+}

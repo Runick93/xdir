@@ -821,7 +821,7 @@ impl<'a> Job<'a> {
         let name = name_of(dst);
         let parent = dst.parent().unwrap_or(Path::new(""));
         let aside = free_name(parent, &|n| replaced_name(&name, is_dir, n), &|p| self.exists(p).is_some());
-        match self.prims.rename_noreplace(dst, &aside) {
+        match self.rename_final(dst, &aside) {
             Ok(()) => Some(aside),
             Err(e) => {
                 self.fail(src, dst, e);
@@ -1073,7 +1073,7 @@ impl<'a> Job<'a> {
         let mut tries = 0;
         loop {
             match self.prims.rename_noreplace(part, dst) {
-                Err(e) if matches!(e.kind, ErrKind::InUse | ErrKind::Denied) && tries < RENAME_RETRIES && !self.ctl.is_cancelled() => {
+                Err(e) if self.prims.transient(&e.kind) && tries < RENAME_RETRIES && !self.ctl.is_cancelled() => {
                     tries += 1;
                     std::thread::sleep(RENAME_PAUSE);
                 }
@@ -1148,7 +1148,7 @@ impl<'a> Job<'a> {
             let _ = self.prims.remove(&tmp);
             return false;
         };
-        if let Err(e) = self.prims.rename_noreplace(&tmp, dst) {
+        if let Err(e) = self.rename_final(&tmp, dst) {
             self.put_back(&aside, dst);
             let _ = self.prims.remove(&tmp);
             self.fail(&item.src, dst, e);

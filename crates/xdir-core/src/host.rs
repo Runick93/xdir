@@ -14,6 +14,7 @@ use crate::a11y::El;
 use crate::config::ColorRule;
 use crate::geom::{Color, Rect};
 use crate::paint::Painter;
+use crate::quicklook::QuickLookItem;
 use crate::shell::{Entry, Item};
 use crate::sys::Handle;
 use crate::theme::Theme;
@@ -180,4 +181,15 @@ pub trait WindowHost {
     fn accessibility(&self) -> Option<&dyn Accessibility> {
         None
     }
+
+    /// Vista rápida: muestra el elemento (o pasa a él si ya estaba abierta). `true` si lo muestra
+    /// el sistema o una ventana propia del host; `false` si no hay visor y la `App` dibuja su
+    /// tarjeta encima de los paneles (`quicklook::draw_fallback`). Cuando el usuario cierra el
+    /// visor por su cuenta, la plataforma llama a `App::on_quick_look_closed`; las teclas que
+    /// recibe el visor (Espacio, Esc y flechas) las pasa a `App::on_key`.
+    fn quick_look_show(&self, _item: &QuickLookItem) -> bool {
+        false
+    }
+    /// Cierra el visor de la vista rápida (sin avisar `on_quick_look_closed`).
+    fn quick_look_close(&self) {}
 }

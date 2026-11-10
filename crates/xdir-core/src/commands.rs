@@ -84,6 +84,8 @@ pub enum Command {
     ClearFilters,
     /// Mostrar u ocultar la columna de vista previa (a la derecha de los paneles).
     TogglePreview,
+    /// Vista rápida del elemento seleccionado (Espacio): la abre, o la cierra si estaba abierta.
+    QuickLook,
 }
 
 /// ¿La acción existe en esta compilación y en este sistema? (las experimentales dependen de una
@@ -186,6 +188,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::ToggleGroupBar, "barra_grupos", "Mostrar u ocultar la barra de grupos", &[]),
     spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
     spec(Command::TogglePreview, "vista_previa", "Mostrar u ocultar la vista previa", &["Alt+P"]),
+    spec(Command::QuickLook, "vista_rapida", "Vista rápida", &["Espacio"]),
     spec(Command::Xtree, "xtree", "Mapa de uso de disco (xtree)", &[]),
     spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),

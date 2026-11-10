@@ -416,6 +416,20 @@ impl WindowHost for MacHost {
         };
         crate::platform::popup_menu(entries, at, dot)
     }
+
+    /// `QLPreviewPanel` del sistema (lo solo en la nube no: lo dibuja la `App`).
+    fn quick_look_show(&self, item: &xdir_core::quicklook::QuickLookItem) -> bool {
+        // Pruebas: como un sistema sin visor (la tarjeta de xdir, la de Linux y Windows).
+        #[cfg(feature = "pruebas")]
+        if std::env::var_os("XDIR_PRUEBAS_SIN_VISOR").is_some() {
+            return false;
+        }
+        crate::quicklook::show(item)
+    }
+
+    fn quick_look_close(&self) {
+        crate::quicklook::close();
+    }
 }
 
 // ---------- cajas de texto ----------

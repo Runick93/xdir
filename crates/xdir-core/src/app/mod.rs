@@ -4,6 +4,7 @@
 
 mod actions;
 mod appearance;
+mod archive_nav;
 mod edit;
 mod events;
 mod favs;
@@ -33,6 +34,8 @@ mod quick_look_tests;
 mod transfers_tests;
 #[cfg(test)]
 mod archive_tests;
+#[cfg(test)]
+mod archive_nav_tests;
 #[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
@@ -211,6 +214,8 @@ enum Drag {
     Button(usize, Button),
     /// Un favorito de la barra: clic al soltar sin mover, si no reordenar.
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
+    /// Arrastre de lo elegido dentro de un archivo comprimido (solo hacia otro panel de xdir).
+    ArchiveOut(usize),
 }
 
 /// Algo elegido en el menú del fondo ("Nuevo > Carpeta"...): si en los próximos segundos aparece un
@@ -419,6 +424,8 @@ pub struct App {
     swallow_space: bool,
     /// Trabajos del motor de copia (cola, estado de cada uno).
     transfers: transfers::Transfers,
+    /// Dentro de archivos comprimidos: lo copiado y las extracciones para la vista previa.
+    archive: archive_nav::ArchiveState,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -472,6 +479,10 @@ impl Init {
         anim::set_off_by_config(config.animations == Some(false));
         // `--probe` tampoco lee ni escribe la vista de las carpetas.
         let folder_views = if probe.is_none() { FolderViews::load() } else { FolderViews::default() };
+        // Lo que quedó en la temporal de los archivos comprimidos de ejecuciones anteriores.
+        if probe.is_none() {
+            crate::archive_nav::temps::clean_at_start();
+        }
         Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, probe, start_path, started, marks }
     }
 
@@ -603,6 +614,7 @@ impl App {
             renaming: false,
             swallow_space: false,
             transfers: transfers::Transfers::new(),
+            archive: archive_nav::ArchiveState::default(),
         };
         app.restore_panes(&session, start_path);
         app.sync_folder_views();

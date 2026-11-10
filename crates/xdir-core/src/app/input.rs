@@ -392,6 +392,7 @@ impl App {
                 let action = self.panes[i].tab_mut().list.on_mouse_up();
                 self.apply(i, action);
             }
+            Drag::ArchiveOut(from) => self.drop_archive_drag(from, x, y),
             _ => {}
         }
         self.redraw();
@@ -405,9 +406,14 @@ impl App {
             Hit::Pane(i, PaneHit::List) => {
                 let tab = self.panes[i].tab();
                 if let Some(idx) = tab.list.entry_at(x, y) {
-                    if tab.list.entries[idx].is_dir {
-                        let path = tab.entry_path(idx);
-                        self.new_tab(i, Location::Path(path), false);
+                    let e = &tab.list.entries[idx];
+                    if e.is_dir {
+                        // Dentro de un archivo comprimido, la subcarpeta de adentro.
+                        let to = match tab.location.archive_child(&e.name.to_string_lossy()) {
+                            Some(child) => child,
+                            None => Location::Path(tab.entry_path(idx)),
+                        };
+                        self.new_tab(i, to, false);
                     }
                 }
             }

@@ -34,6 +34,9 @@ impl App {
     /// Arrastra la selección hacia otras ventanas (o dentro de la misma). Si el sistema no puede
     /// arrastrar, se avisa en la barra de estado.
     pub(super) fn start_drag(&mut self, pane: usize) {
+        if self.start_archive_drag(pane) {
+            return;
+        }
         let items = self.selection_items(pane);
         if items.is_empty() {
             return;
@@ -48,6 +51,11 @@ impl App {
     }
 
     pub(super) fn copy_selection(&mut self, cut: bool) {
+        if !cut && self.copy_from_archive() {
+            return;
+        }
+        // Copiar otra cosa reemplaza lo copiado de un archivo comprimido.
+        self.archive.clip = None;
         let items = self.selection_items(self.active);
         if !items.is_empty() {
             if let Err(e) = sys::shell().copy_files(&items, cut) {
@@ -58,6 +66,10 @@ impl App {
 
     pub(super) fn paste(&mut self) {
         let Some(dest) = self.panes[self.active].tab().location.target() else { return };
+        // Lo copiado dentro de un archivo comprimido se extrae con el motor.
+        if self.paste_from_archive(&dest) {
+            return;
+        }
         let Some((sources, cut)) = sys::shell().clipboard_files() else {
             // Sin rutas de disco (copiado por RDP, desde un zip...): pega la carpeta destino.
             match sys::shell().paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
@@ -272,6 +284,10 @@ impl App {
     pub(super) fn drop_folder(&self, x: f32, y: f32) -> Option<(usize, Option<usize>, PathBuf)> {
         let Hit::Pane(i, ph) = self.hit(x, y) else { return None };
         let tab = self.panes[i].tab();
+        // Dentro de un archivo comprimido no se suelta nada (solo lectura).
+        if tab.location.is_archive() {
+            return None;
+        }
         if ph == PaneHit::List {
             if let Some(idx) = tab.list.entry_at(x, y) {
                 if tab.list.entries[idx].is_dir {
@@ -450,6 +466,11 @@ impl App {
         let pane = self.active;
         let at = at.unwrap_or_else(|| self.panes[pane].tab().list.focus_point().unwrap_or((40.0, 80.0)));
         let location = self.panes[pane].tab().location.clone();
+        if location.is_archive() {
+            self.archive_context_menu(pane);
+            self.redraw();
+            return;
+        }
         let items = self.selection_items(pane);
         // En carpetas virtuales el Shell resuelve todo: conoce el contexto (p. ej. la Papelera).
         let intercept = !matches!(location, Location::Shell { .. });

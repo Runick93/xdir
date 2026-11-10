@@ -354,7 +354,12 @@ impl App {
         for i in 0..PANES {
             let state = s.panes.get(i).or(fallback.panes.get(i)).cloned().unwrap_or_default();
             let locations = if state.tabs.is_empty() { vec![Location::Computer] } else { state.tabs };
-            let tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
+            // Dentro de un archivo comprimido que ya no está: su carpeta.
+            let locations = locations.into_iter().map(|l| match l {
+                Location::Archive { file, .. } if !file.is_file() => file.parent().map_or(Location::Computer, |p| Location::Path(p.to_path_buf())),
+                other => other,
+            });
+            let tabs: Vec<Tab> = locations.map(|l| self.make_tab(l)).collect();
             self.panes.push(Pane::new(tabs, state.active));
         }
         self.active = s.active_pane.min(self.layout.panes() - 1);

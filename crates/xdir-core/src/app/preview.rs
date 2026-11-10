@@ -82,6 +82,13 @@ pub(super) struct PreviewState {
 }
 
 impl PreviewState {
+    /// Olvida lo que se estaba mostrando: el próximo `sync_preview` lo vuelve a pedir (llegó la
+    /// extracción temporal de un elemento de un archivo comprimido).
+    pub(super) fn refresh(&mut self) {
+        self.fingerprint = None;
+        self.subject = None;
+    }
+
     pub(super) fn new(on: bool, width: f32) -> PreviewState {
         let (tx, rx) = channel();
         PreviewState {
@@ -227,6 +234,15 @@ impl App {
         };
         let Some(idx) = idx.filter(|&i| i < list.entries.len()) else { return (None, None) };
         let e = &list.entries[idx];
+        // Dentro de un archivo comprimido solo se lee lo ya extraído a la temporal (las carpetas
+        // de adentro no tienen de dónde contarse).
+        if tab.location.is_archive() {
+            let path = tab.entry_path(idx);
+            if e.is_dir || !self.archive_ready(&path) {
+                return (None, Some(idx));
+            }
+            return (Some(Wanted { target: PreviewTarget::File(path), stamp: (e.modified, e.size) }), Some(idx));
+        }
         let target = match &tab.location {
             // Las carpetas virtuales no tienen de dónde leer.
             Location::Shell { .. } => return (None, Some(idx)),
@@ -287,6 +303,7 @@ impl App {
     }
 
     pub(super) fn sync_preview(&mut self) {
+        self.archive_prefetch();
         // Con otro panel en su lugar, la vista previa no muestra ni pide nada.
         if !self.preview_visible() || self.preview.owner != RightPanel::Preview {
             self.clear_preview_subject();

@@ -127,6 +127,8 @@ impl App {
         // Terminó de cargar «Este equipo»: se averigua qué discos se pueden expulsar.
         let computer_listed = matches!(tab.location, Location::Computer) && matches!(event.msg, fs::LoadMsg::Listed(_));
         let views_changed = tab.sync_view(views);
+        let listed = matches!(event.msg, fs::LoadMsg::Listed(Err(_))) && tab.location.is_archive();
+        let tab_id = tab.id;
         let changed = tab.on_load(event);
         tab.retry_with_credentials(hwnd, &tx);
         if let Some(path) = tab.visited.take() {
@@ -141,6 +143,9 @@ impl App {
         }
         if computer_listed {
             self.request_ejectable();
+        }
+        if listed {
+            self.after_archive_load(tab_id);
         }
         changed
     }
@@ -461,6 +466,7 @@ impl App {
             self.folder_views.save_if_dirty();
             let _ = session::save(&self.session());
             let _ = self.history.save();
+            crate::archive_nav::temps::clean_at_exit();
         }
     }
 }

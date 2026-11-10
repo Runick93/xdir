@@ -62,6 +62,10 @@ impl App {
         if self.xtree_open && !keeps_xtree(c) {
             self.close_xtree();
         }
+        // Dentro de un archivo comprimido, lo que escribe no se hace (aviso).
+        if self.refuse_in_archive(c) {
+            return;
+        }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
         match c {
@@ -417,10 +421,7 @@ impl App {
         match action {
             Action::None => return,
             Action::Redraw => {}
-            Action::Open(idx) => {
-                let (hwnd, tx) = (self.hwnd, self.tx.clone());
-                self.panes[pane].tab_mut().open(hwnd, &tx, idx);
-            }
+            Action::Open(idx) => self.open_entry(pane, idx),
             Action::BeginDrag => {
                 self.start_drag(pane);
                 return;

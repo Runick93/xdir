@@ -117,14 +117,23 @@ impl Temps {
     }
 
     /// Borra las carpetas de ejecuciones que ya no están: las que tienen un candado que se puede
-    /// tomar (las de un xdir abierto, no). Una sin candado se borra si tiene más de un minuto (la
-    /// de una ejecución que justo está arrancando, no).
+    /// tomar (las de un xdir abierto, no) o no tienen candado. Nunca una de menos de un minuto:
+    /// puede ser de una ejecución que está arrancando y todavía no tomó el suyo.
     pub fn clean_stale(&self) {
+        self.clean_stale_older_than(std::time::Duration::from_secs(60));
+    }
+
+    /// `clean_stale` con otra edad mínima (las pruebas).
+    pub fn clean_stale_older_than(&self, min_age: std::time::Duration) {
         let Some(base) = &self.base else { return };
         let Ok(dirs) = std::fs::read_dir(base) else { return };
         for d in dirs.flatten() {
             let path = d.path();
             if path == self.run || !path.is_dir() {
+                continue;
+            }
+            let old = d.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e >= min_age));
+            if !old {
                 continue;
             }
             let stale = match File::open(path.join(LOCK)) {
@@ -133,7 +142,7 @@ impl Temps {
                     drop(f);
                     free
                 }
-                Err(_) => d.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e.as_secs() > 60)),
+                Err(_) => true,
             };
             if stale {
                 let _ = std::fs::remove_dir_all(&path);

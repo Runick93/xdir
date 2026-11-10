@@ -96,7 +96,10 @@ fn stale_run_dirs_removed_live_kept() {
     std::fs::write(dead.join(".candado"), "").unwrap();
     std::fs::write(dead.join("foto.jpg"), "x").unwrap();
     let me = Temps::new(Some(&b));
+    // Recién creada: puede ser de una ejecución que todavía no tomó su candado.
     me.clean_stale();
+    assert!(dead.exists(), "una carpeta de menos de un minuto no se toca");
+    me.clean_stale_older_than(std::time::Duration::ZERO);
     assert!(!dead.exists());
     assert!(live_dir.exists(), "la de la otra ejecución, con su candado, queda");
     live.clean_own();

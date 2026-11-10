@@ -248,7 +248,10 @@ impl App {
             _ => self.drop_folder(x, y),
         };
         ev.effect = match (&target, ev.paths) {
-            (Some((_, _, dest)), Some(paths)) => drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed),
+            (Some((_, _, dest)), Some(paths)) => {
+                let roots: Vec<PathBuf> = self.net.connections.iter().map(|c| c.local.clone()).collect();
+                drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed, &roots)
+            }
             _ => Effect::NONE,
         };
 
@@ -486,11 +489,23 @@ pub fn quoted_paths(paths: &[PathBuf]) -> String {
 /// Efecto al soltar como en el Explorador: Ctrl copia, Shift mueve; sin teclas, mueve dentro
 /// de la misma unidad y copia entre unidades. Soltar en la misma carpeta (o dentro de sí
 /// misma) no hace nada.
-pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
+/// El volumen de una ruta para decidir mover o copiar. Una ruta de red no se pregunta al sistema
+/// (iría al servidor con cada movimiento del mouse): su volumen es la conexión que la contiene
+/// (`net_roots`) o, en UNC, `\\servidor\recurso`.
+fn volume_id(p: &std::path::Path, net_roots: &[PathBuf]) -> Option<std::ffi::OsString> {
+    if !sys::network().is_remote(p) {
+        return sys::shell().volume_of(p);
+    }
+    let root = net_roots.iter().filter(|r| !r.as_os_str().is_empty() && p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned();
+    let root = root.unwrap_or_else(|| p.components().take(if crate::fs::is_unc(p) { 1 } else { 3 }).collect());
+    Some(std::ffi::OsString::from(format!("red:{}", root.to_string_lossy().to_lowercase())))
+}
+
+pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool, shift: bool, allowed: Effect, net_roots: &[PathBuf]) -> Effect {
     if paths.iter().any(|p| p.parent() == Some(dest) || dest.starts_with(p)) {
         return Effect::NONE;
     }
-    let same_volume = paths.first().and_then(|p| sys::shell().volume_of(p)) == sys::shell().volume_of(dest);
+    let same_volume = paths.first().and_then(|p| volume_id(p, net_roots)) == volume_id(dest, net_roots);
     let want = if ctrl {
         Effect::COPY
     } else if shift || same_volume {
@@ -515,7 +530,7 @@ mod tests {
         // `volume_of` pasa por el `Shell` del registro (el falso compara el primer tramo, como Windows).
         crate::sys::testing::install_fakes();
         let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
-        drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed)
+        drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed, &[])
     }
 
     #[test]

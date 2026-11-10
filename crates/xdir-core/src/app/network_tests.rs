@@ -1265,3 +1265,20 @@ fn chevron_of_remote_folder_lists_off_thread() {
     assert_eq!(labels, ["sub"]);
     assert!(FakeNetwork::ui_io_calls().is_empty(), "{:?}", FakeNetwork::ui_io_calls());
 }
+
+/// I3: arrastrar desde o hacia una carpeta de red no pregunta el volumen al sistema (iría al
+/// servidor con cada movimiento): misma conexión mueve, otra copia.
+#[test]
+fn drag_effect_on_remote_without_io() {
+    use crate::drop::Effect;
+    install_fakes();
+    FakeNetwork::set_remote(Path::new("/net-r1drag"));
+    FakeNetwork::mark_ui_thread();
+    let roots = vec![PathBuf::from("/net-r1drag/fotos"), PathBuf::from("/net-r1drag/musica")];
+    let src = vec![PathBuf::from("/net-r1drag/fotos/a/x.jpg")];
+    let all = Effect::ALL;
+    assert_eq!(super::fileops::drop_effect(&src, Path::new("/net-r1drag/fotos/b"), false, false, all, &roots), Effect::MOVE);
+    assert_eq!(super::fileops::drop_effect(&src, Path::new("/net-r1drag/musica"), false, false, all, &roots), Effect::COPY);
+    assert_eq!(super::fileops::drop_effect(&src, Path::new("/local-r1drag/x"), false, false, all, &roots), Effect::COPY);
+    assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("volume_of /net-r1drag")), "{:?}", FakeNetwork::ui_io_calls());
+}

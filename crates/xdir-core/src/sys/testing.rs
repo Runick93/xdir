@@ -531,6 +531,7 @@ impl Shell for FakeShell {
     }
 
     fn volume_of(&self, path: &Path) -> Option<OsString> {
+        FakeNetwork::note_io("volume_of", path);
         path.components().next().map(|c| c.as_os_str().to_ascii_lowercase())
     }
 }

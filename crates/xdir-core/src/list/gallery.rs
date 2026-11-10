@@ -36,12 +36,21 @@ pub fn strip_offset(count: usize, focus: usize, width: f32) -> f32 {
     if count == 0 {
         return 0.0;
     }
+    let center = GALLERY_PAD + focus.min(count - 1) as f32 * CELL_STEP + CELL / 2.0;
+    strip_clamp(center - width / 2.0, count, width)
+}
+
+/// Lleva un corrimiento a lo posible: entre el principio y el fin de la tira, o el conjunto
+/// centrado si todo entra.
+fn strip_clamp(offset: f32, count: usize, width: f32) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
     let content = GALLERY_PAD * 2.0 + count as f32 * CELL_STEP - (CELL_STEP - CELL);
     if content <= width {
         return -(width - content) / 2.0;
     }
-    let center = GALLERY_PAD + focus.min(count - 1) as f32 * CELL_STEP + CELL / 2.0;
-    (center - width / 2.0).clamp(0.0, content - width)
+    offset.clamp(0.0, content - width)
 }
 
 /// Estado de una celda de la tira (diseño `list::FileList::draw_strip_cell`). `Focus` (foco sin
@@ -69,9 +78,46 @@ impl FileList {
         rect(a.left + GALLERY_PAD, a.top + GALLERY_PAD, (a.right - GALLERY_PAD).max(a.left + GALLERY_PAD), (s.top - GALLERY_PAD).max(a.top + GALLERY_PAD))
     }
 
+    /// Corrimiento guardado de la tira: lo centran el teclado y la rueda (`center_strip`, desde
+    /// `ensure_visible`); un clic no lo mueve salvo para mostrar entera la celda (`reveal_strip`),
+    /// así el doble clic cae en la misma celda que el primero.
     fn strip_shift(&self) -> f32 {
+        self.strip_scroll
+    }
+
+    fn strip_width(&self) -> f32 {
         let s = self.strip_rect();
-        strip_offset(self.visible.len(), self.focus.unwrap_or(0), s.right - s.left)
+        s.right - s.left
+    }
+
+    /// Centra la celda `pos` (lo que se pueda).
+    pub(super) fn center_strip(&mut self, pos: usize) {
+        let w = self.strip_width();
+        self.strip_scroll = strip_offset(self.visible.len(), pos, w);
+        self.strip_w = w;
+    }
+
+    /// Corre la tira lo justo para que la celda `pos` se vea entera (después de un clic).
+    pub(super) fn reveal_strip(&mut self, pos: usize) {
+        let (s, r) = (self.strip_rect(), self.strip_cell_rect(pos));
+        let (lo, hi) = (s.left + GALLERY_PAD, s.right - GALLERY_PAD);
+        if r.left < lo {
+            self.strip_scroll -= lo - r.left;
+        } else if r.right > hi {
+            self.strip_scroll += r.right - hi;
+        }
+        self.strip_scroll = strip_clamp(self.strip_scroll, self.visible.len(), self.strip_width());
+    }
+
+    /// Antes de dibujar: con otro ancho se vuelve a centrar el enfocado; si cambió la cantidad,
+    /// el corrimiento se lleva a lo posible.
+    fn settle_strip(&mut self) {
+        let w = self.strip_width();
+        if w != self.strip_w {
+            self.center_strip(self.focus.unwrap_or(0));
+        } else {
+            self.strip_scroll = strip_clamp(self.strip_scroll, self.visible.len(), w);
+        }
     }
 
     /// Celda de la posición `pos` en la tira.
@@ -139,6 +185,8 @@ impl FileList {
             _ => return None,
         };
         self.move_focus_to(target, ctrl, shift);
+        // La tira se corrió: lo que está bajo el mouse es otra celda.
+        self.hover = self.mouse_at.and_then(|(x, y)| self.strip_pos_at(x, y));
         Some(Action::Redraw)
     }
 
@@ -176,6 +224,8 @@ impl FileList {
     /// están en la columna de vista previa.
     pub fn draw_gallery(&mut self, p: &dyn Painter, area: Rect, active: bool) {
         self.area = area;
+        self.strip_active = active;
+        self.settle_strip();
         let th = p.theme();
         let strip = self.strip_rect();
 
@@ -224,6 +274,8 @@ impl FileList {
         let idx = idx as usize;
         let e = &self.entries[idx];
         let ring = |p: &dyn Painter| p.round_stroke_w(grow(r, -0.75), 5.25, th.accent, 1.5);
+        // En el panel inactivo, la selección en gris como en la lista.
+        let selection = if self.strip_active { th.selection } else { alpha(th.text_dim, 0.18) };
         if self.drop_target == Some(idx) {
             p.round_fill(r, 6.0, th.selection);
             ring(p);
@@ -231,9 +283,9 @@ impl FileList {
             match state {
                 CellState::Normal => {}
                 CellState::Hover => p.round_fill(r, 6.0, th.hover),
-                CellState::Selected => p.round_fill(r, 6.0, th.selection),
+                CellState::Selected => p.round_fill(r, 6.0, selection),
                 CellState::SelectedFocus => {
-                    p.round_fill(r, 6.0, th.selection);
+                    p.round_fill(r, 6.0, selection);
                     ring(p);
                 }
                 CellState::Focus => {
@@ -506,6 +558,75 @@ mod tests {
         l.draw(&p, l.area, true);
         assert_eq!(p.big_draws().len(), 1);
         assert!(p.icons().iter().any(|i| i.2 == 96.0));
+    }
+
+    /// Un clic no centra la tira: el doble clic en la celda 8 de 30 (con el foco en la 0) abre
+    /// la 8, no la que quedó bajo el mouse después de recentrar.
+    #[test]
+    fn gallery_click_does_not_recenter() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[0] as usize);
+        let before = l.item_rect(8);
+        let (x, y) = center(before);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.item_rect(8), before, "la tira no se movió");
+        assert_eq!(l.on_double_click(x, y), Action::Open(l.visible[8] as usize));
+        // Una celda que no se ve entera: la tira se corre lo justo para mostrarla.
+        let edge = (0..30).find(|&p| l.item_rect(p).right > 960.0 - GALLERY_PAD).unwrap();
+        let (x, y) = center(l.item_rect(edge));
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.item_rect(edge).right, 960.0 - GALLERY_PAD);
+        // El teclado sí centra.
+        l.on_key(VK_RIGHT.0, false, false);
+        let r = l.item_rect(edge + 1);
+        assert_eq!((r.left + r.right) / 2.0, 480.0);
+    }
+
+    /// Con casillas, un clic en la casilla de una celda alejada alterna esa celda y no otra, y un
+    /// segundo clic (doble clic) la vuelve a alternar.
+    #[test]
+    fn gallery_checkbox_click_keeps_cell() {
+        let mut l = gallery(30);
+        l.checkboxes = true;
+        l.select_index(l.visible[0] as usize);
+        let cell = l.item_rect(8);
+        let (x, y) = (cell.left + 12.0 + 7.0, cell.top + 12.0 + 7.0);
+        l.on_mouse_move(x, y);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.selected_positions(), [0, 8]);
+        assert_eq!(l.on_double_click(x, y), Action::Redraw);
+        assert_eq!(l.selected_positions(), [0]);
+    }
+
+    /// Clic derecho en la imagen grande: el menú del elemento con foco (queda seleccionado); en
+    /// un hueco de la tira, el del fondo.
+    #[test]
+    fn gallery_right_click_on_image_is_focused_item() {
+        let mut l = gallery(10);
+        l.select_index(l.visible[2] as usize);
+        l.on_key(VK_RIGHT.0, true, false);
+        assert!(l.on_right_down(480.0, 200.0));
+        assert_eq!(l.selected_positions(), [3]);
+        let r = l.item_rect(3);
+        assert!(!l.on_right_down(r.right + 4.0, (r.top + r.bottom) / 2.0));
+        assert!(l.selected_positions().is_empty());
+    }
+
+    /// Después de mover con las flechas la tira se recentra: el hover pasa a la celda que quedó
+    /// bajo el mouse (la nueva enfocada), no se queda en la anterior.
+    #[test]
+    fn gallery_hover_follows_recenter() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[10] as usize);
+        let (x, y) = center(l.item_rect(10));
+        l.on_mouse_move(x, y);
+        assert_eq!(l.hover, Some(10));
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.pos_at_point(x, y), Some(11));
+        assert_eq!(l.hover, Some(11));
     }
 
     /// La rueda sobre la tira pasa al anterior o al siguiente; sobre la imagen no hace nada.

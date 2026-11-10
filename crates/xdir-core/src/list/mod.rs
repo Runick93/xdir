@@ -405,6 +405,11 @@ pub struct FileList {
     meta_wanted: Vec<usize>,
     /// Último punto del mouse sobre la lista (la rueda de la Galería solo actúa sobre la tira).
     mouse_at: Option<(f32, f32)>,
+    /// Galería: corrimiento de la tira, el ancho con el que se calculó y si el panel estaba
+    /// activo al dibujarla (ver `gallery`).
+    strip_scroll: f32,
+    strip_w: f32,
+    strip_active: bool,
     /// Galería: rueda acumulada que todavía no llegó a un paso (touchpad).
     wheel_acc: f32,
 }
@@ -511,6 +516,9 @@ impl Default for FileList {
             meta_dirty: false,
             meta_wanted: Vec::new(),
             mouse_at: None,
+            strip_scroll: 0.0,
+            strip_w: 0.0,
+            strip_active: true,
             wheel_acc: 0.0,
         }
     }
@@ -1096,8 +1104,9 @@ impl FileList {
 
     /// Lleva el elemento a la vista (el destino del scroll; se llega suave, ver `tick`).
     fn ensure_visible(&mut self, pos: usize) {
-        // La tira de la Galería centra el enfocado sola (`gallery::strip_offset`).
+        // Galería: la tira se corre para centrarlo (teclado, rueda, búsqueda por tipeo).
         if self.view == View::Gallery {
+            self.center_strip(pos);
             return;
         }
         if self.horizontal() {
@@ -1821,7 +1830,10 @@ impl FileList {
     /// Clic derecho: si cae en un elemento no seleccionado, lo selecciona solo a él.
     /// Devuelve si cayó sobre un elemento (menú de elementos) o no (menú del fondo).
     pub fn on_right_down(&mut self, x: f32, y: f32) -> bool {
-        match self.entry_at(x, y) {
+        // Galería: la imagen grande es el elemento con foco (menú de elementos).
+        let image = self.view == View::Gallery && contains(&self.gallery_image_rect(), x, y);
+        let hit = if image { self.focused_index() } else { self.entry_at(x, y) };
+        match hit {
             Some(idx) => {
                 if !self.selected[idx] {
                     let pos = self.visible.iter().position(|&v| v as usize == idx).unwrap();
@@ -1965,12 +1977,25 @@ impl FileList {
         // Casilla de un elemento: lo suma o lo quita de la selección sin tocar los demás (Ctrl+clic).
         if let Some(pos) = self.checkbox_at(x, y) {
             self.toggle(pos);
+            if self.view == View::Gallery {
+                self.reveal_strip(pos);
+            }
             return (Action::Redraw, false);
         }
         // En detalles, el hueco a la derecha del nombre cuenta como vacío: arma el rectángulo en
         // vez de arrastrar el archivo (como en el Explorador).
         let hit = self.pos_at(x, y).filter(|&pos| !self.in_name_blank(pos, x));
         match hit {
+            // Galería: un clic no centra la tira (el doble clic tiene que caer en la misma celda);
+            // solo la corre si la celda no se ve entera.
+            Some(pos) if self.view == View::Gallery && (ctrl || shift) => {
+                if ctrl {
+                    self.toggle(pos);
+                } else {
+                    self.select_range(pos, false);
+                }
+                self.reveal_strip(pos);
+            }
             Some(pos) if ctrl => self.toggle(pos),
             Some(pos) if shift => self.select_range(pos, false),
             Some(pos) => {
@@ -1986,6 +2011,9 @@ impl FileList {
                     self.press_band = Some((x, y, ctrl));
                 } else {
                     self.press = Some((x, y));
+                }
+                if self.view == View::Gallery {
+                    self.reveal_strip(pos);
                 }
             }
             // En la Galería no hay rectángulo de selección: la imagen grande y los huecos de la

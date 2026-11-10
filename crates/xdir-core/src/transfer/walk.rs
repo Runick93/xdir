@@ -17,11 +17,14 @@ pub struct Planned {
 /// Cada cuántos elementos se avisa «Preparando… N elementos».
 const SEEN_EVERY: u64 = 200;
 
+/// Lo que se recorrió de una raíz y lo que no se pudo leer (cada error se anota y se sigue: una
+/// carpeta que no se pudo listar queda sin su contenido; un elemento sin datos, afuera).
+pub type Walked = (Vec<Planned>, Vec<CopyError>);
+
 /// Recorre `root` en preorden (cada carpeta antes que su contenido, por nombre), sin seguir
-/// enlaces ni leer contenido. `seen(n)` cada 200 elementos. Falla si no se puede leer la raíz o
-/// alguna carpeta (el trabajo anota ese error para esta raíz y sigue con las demás), o con
-/// `Cancelled` si se canceló.
-pub fn walk(prims: &dyn CopyPrims, root: &Path, ctl: &Control, seen: &mut dyn FnMut(u64)) -> Result<Vec<Planned>, CopyError> {
+/// enlaces ni leer contenido. `seen(n)` cada 200 elementos. Falla solo si no existe la raíz o si
+/// se canceló (`Cancelled`).
+pub fn walk(prims: &dyn CopyPrims, root: &Path, ctl: &Control, seen: &mut dyn FnMut(u64)) -> Result<Walked, CopyError> {
     let stat = prims.stat(root)?;
     let name = root.file_name().map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
     let mut out = vec![Planned { src: root.to_path_buf(), rel: name, stat }];
@@ -30,13 +33,20 @@ pub fn walk(prims: &dyn CopyPrims, root: &Path, ctl: &Control, seen: &mut dyn Fn
     // su carpeta para mantener el preorden.
     let mut stack = vec![0usize];
     let mut ordered = Vec::with_capacity(16);
+    let mut errors = Vec::new();
     while let Some(i) = stack.pop() {
         ordered.push(i);
         if out[i].stat.kind != ItemKind::Dir {
             continue;
         }
         let (dir, rel) = (out[i].src.clone(), out[i].rel.clone());
-        let mut names = prims.read_dir(&dir)?;
+        let mut names = match prims.read_dir(&dir) {
+            Ok(n) => n,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
         names.sort();
         let first = out.len();
         for n in names {
@@ -44,7 +54,13 @@ pub fn walk(prims: &dyn CopyPrims, root: &Path, ctl: &Control, seen: &mut dyn Fn
                 return Err(CopyError::new(ErrKind::Cancelled, root));
             }
             let src = dir.join(&n);
-            let stat = prims.stat(&src)?;
+            let stat = match prims.stat(&src) {
+                Ok(s) => s,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
             out.push(Planned { src, rel: rel.join(&n), stat });
             count += 1;
             if count.is_multiple_of(SEEN_EVERY) {
@@ -54,7 +70,7 @@ pub fn walk(prims: &dyn CopyPrims, root: &Path, ctl: &Control, seen: &mut dyn Fn
         stack.extend((first..out.len()).rev());
     }
     let mut slots: Vec<Option<Planned>> = out.into_iter().map(Some).collect();
-    Ok(ordered.into_iter().map(|i| slots[i].take().unwrap()).collect())
+    Ok((ordered.into_iter().map(|i| slots[i].take().unwrap()).collect(), errors))
 }
 
 /// (elementos, bytes) de un recorrido.

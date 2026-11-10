@@ -113,6 +113,8 @@ pub struct JobError {
     pub src: PathBuf,
     pub dst: PathBuf,
     pub message: String,
+    /// Se puede «Reintentar» (no, si es un aviso de lo que quedó con otro nombre).
+    pub retry: bool,
 }
 
 /// Cómo terminó un trabajo.
@@ -124,6 +126,8 @@ pub struct JobOutcome {
     /// Se detuvo sin terminar (o no empezó): el motivo.
     pub stopped: Option<String>,
     pub cancelled: bool,
+    /// Lo que no se llevó porque ya existía y se eligió «Omitir» (los de origen).
+    pub skipped: Vec<PathBuf>,
 }
 
 /// Qué hacer con un conflicto (el destino ya existe).
@@ -196,6 +200,11 @@ impl Control {
     /// Responde el conflicto que está esperando el trabajo.
     pub fn answer(&self, a: Answer) {
         self.update(|s| s.answer = Some(a));
+    }
+
+    /// Olvida una respuesta vieja (antes de preguntar de nuevo).
+    pub(crate) fn clear_answer(&self) {
+        self.lock().answer = None;
     }
 
     /// Lo llama el trabajo en cada aviso de progreso: bloquea mientras está en pausa; `Stop` si

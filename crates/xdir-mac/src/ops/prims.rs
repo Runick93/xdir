@@ -31,6 +31,7 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
         libc::EFBIG => ErrKind::TooBig,
         libc::EEXIST => ErrKind::Exists,
         libc::ECANCELED => ErrKind::Cancelled,
+        libc::EXDEV => ErrKind::CrossDevice,
         n => ErrKind::Other(io::Error::from_raw_os_error(n).to_string()),
     }
 }
@@ -82,12 +83,20 @@ extern "C" fn status(what: c_int, stage: c_int, state: libc::copyfile_state_t, _
     libc::COPYFILE_CONTINUE
 }
 
-/// ¿Son el mismo elemento? (renombrar solo mayúsculas en un disco que no las distingue).
-fn same_item(a: &Path, b: &Path) -> bool {
-    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
-        _ => false,
-    }
+/// ¿Es renombrar solo las mayúsculas del mismo elemento? (en un disco que no las distingue). Los
+/// nombres tienen que ser iguales salvo mayúsculas: dos enlaces duros con otro nombre son el mismo
+/// archivo, pero renombrar uno sobre el otro borraría un nombre.
+fn case_only_rename(a: &Path, b: &Path) -> bool {
+    let same_name = a.parent() == b.parent()
+        && match (a.file_name(), b.file_name()) {
+            (Some(x), Some(y)) => x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase(),
+            _ => false,
+        };
+    same_name
+        && match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
 }
 
 /// `copyfile` de un archivo con aviso de progreso (`clone`: `COPYFILE_CLONE`, o 0 para copiar
@@ -137,7 +146,7 @@ impl CopyPrims for MacCopyPrims {
         };
         let size = if kind == ItemKind::Dir { 0 } else { m.len() };
         let cloud_only = kind == ItemKind::File && m.st_flags() & SF_DATALESS != 0;
-        Ok(ItemStat { kind, size, modified: filetime(m.mtime(), m.mtime_nsec()), cloud_only })
+        Ok(ItemStat { kind, size, modified: filetime(m.mtime(), m.mtime_nsec()), cloud_only, file_id: Some((m.dev(), m.ino())) })
     }
 
     fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> {
@@ -207,10 +216,10 @@ impl CopyPrims for MacCopyPrims {
         let e = io::Error::last_os_error();
         match e.raw_os_error() {
             // Solo cambian las mayúsculas en un disco que no las distingue: es el mismo.
-            Some(libc::EEXIST) if same_item(from, to) => std::fs::rename(from, to).map_err(|e| err(e, from)),
+            Some(libc::EEXIST) if case_only_rename(from, to) => std::fs::rename(from, to).map_err(|e| err(e, from)),
             Some(libc::EEXIST) => Err(CopyError::new(ErrKind::Exists, to)),
             Some(libc::ENOTSUP) => {
-                if std::fs::symlink_metadata(to).is_ok() && !same_item(from, to) {
+                if std::fs::symlink_metadata(to).is_ok() && !case_only_rename(from, to) {
                     return Err(CopyError::new(ErrKind::Exists, to));
                 }
                 std::fs::rename(from, to).map_err(|e| err(e, from))
@@ -223,6 +232,17 @@ impl CopyPrims for MacCopyPrims {
         std::fs::rename(from, to).map_err(|e| err(e, to))
     }
 
+    /// `F_FULLFSYNC`: que la copia esté en el disco (no solo en su caché) antes de borrar el
+    /// original al mover.
+    fn sync(&self, p: &Path) -> Result<(), CopyError> {
+        let f = std::fs::File::open(p).map_err(|e| err(e, p))?;
+        if unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&f), libc::F_FULLFSYNC) } == -1 {
+            // Discos que no lo tienen (red, FAT): lo que haya.
+            f.sync_all().map_err(|e| err(e, p))?;
+        }
+        Ok(())
+    }
+
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
         let m = std::fs::symlink_metadata(p).map_err(|e| err(e, p))?;
         if m.is_dir() { std::fs::remove_dir(p) } else { std::fs::remove_file(p) }.map_err(|e| err(e, p))
@@ -232,9 +252,12 @@ impl CopyPrims for MacCopyPrims {
     // `trash_origin` = `trash::origin` (Task 3, otra rama). Sin él, «Devolver» dice «No se sabe
     // de dónde vino».
     fn trash(&self, p: &Path) -> Result<String, CopyError> {
-        super::macos::trash(p)
-            .map(|in_trash| in_trash.to_string_lossy().into_owned())
-            .map_err(|e| CopyError::new(ErrKind::Other(e), p))
+        let in_trash = super::macos::trash(p).map_err(|e| CopyError::new(ErrKind::Other(e), p))?;
+        if in_trash.as_os_str().is_empty() {
+            // Sin saber dónde quedó no se puede devolver.
+            return Err(CopyError::new(ErrKind::Other("No se sabe dónde quedó en la Papelera".into()), p));
+        }
+        Ok(in_trash.to_string_lossy().into_owned())
     }
 
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {
@@ -347,6 +370,12 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         assert_eq!(MacCopyPrims.rename_noreplace(&a, &b).unwrap_err().kind, ErrKind::Exists);
         assert_eq!((std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()), (b"a".to_vec(), b"b".to_vec()));
+        // Dos enlaces duros con otro nombre son el mismo archivo, pero no se pisan.
+        std::fs::hard_link(&b, dir.join("duro.txt")).unwrap();
+        assert_eq!(MacCopyPrims.rename_noreplace(&b, &dir.join("duro.txt")).unwrap_err().kind, ErrKind::Exists);
+        assert!(b.exists() && dir.join("duro.txt").exists());
+        assert!(MacCopyPrims.stat(&b).unwrap().same_item(&MacCopyPrims.stat(&dir.join("duro.txt")).unwrap()));
+        MacCopyPrims.sync(&b).unwrap();
         // Solo mayúsculas (en APFS sin distinción): se puede.
         let upper = dir.join("A.txt");
         MacCopyPrims.rename_noreplace(&a, &upper).unwrap();
@@ -399,6 +428,7 @@ mod tests {
         assert_eq!(err_kind(libc::EDQUOT), ErrKind::DiskFull);
         assert_eq!(err_kind(libc::EFBIG), ErrKind::TooBig);
         assert_eq!(err_kind(libc::EEXIST), ErrKind::Exists);
+        assert_eq!(err_kind(libc::EXDEV), ErrKind::CrossDevice);
         assert!(matches!(err_kind(libc::EIO), ErrKind::Other(_)));
     }
 
@@ -562,5 +592,148 @@ mod tests {
         assert!(std::fs::symlink_metadata(src.join("Dir/sub/cerrado.txt")).is_ok());
         assert!(std::fs::symlink_metadata(other.join("Dir/sub/cerrado.txt")).is_err());
         let _ = std::fs::set_permissions(src.join("Dir/sub/cerrado.txt"), std::fs::Permissions::from_mode(0o644));
+    }
+
+    /// Primitivas reales con dos trucos de las revisiones: `alias` es otro nombre (un enlace) de
+    /// la misma carpeta pero el disco dice que es otro, y la Papelera puede ser una que borra y
+    /// falla (`trash_mode` 1, como Windows sin Papelera con `FOFX_RECYCLEONDELETE`) o una carpeta
+    /// `bin` (2). 0: sin Papelera.
+    struct Sim {
+        alias: Option<PathBuf>,
+        trash_mode: u8,
+        bin: PathBuf,
+    }
+
+    impl CopyPrims for Sim {
+        fn stat(&self, p: &Path) -> Result<ItemStat, CopyError> {
+            MacCopyPrims.stat(p)
+        }
+        fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> {
+            MacCopyPrims.read_dir(p)
+        }
+        fn volume(&self, p: &Path) -> Option<VolumeInfo> {
+            let mut v = MacCopyPrims.volume(p)?;
+            v.has_trash = self.trash_mode != 0;
+            if self.alias.as_ref().is_some_and(|o| p.starts_with(o)) {
+                v.id = "otro".into();
+            }
+            Some(v)
+        }
+        fn copy_file(&self, s: &Path, d: &Path, pr: &mut dyn FnMut(u64) -> Flow) -> Result<(), CopyError> {
+            // Los archivos «lentos» dan tiempo a que llegue un aviso de progreso a mitad.
+            let slow = s.file_name().is_some_and(|n| n == "b.bin");
+            copy_data(s, d, &mut |n| {
+                if slow {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                pr(n)
+            }, 0)
+        }
+        fn copy_symlink(&self, s: &Path, d: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.copy_symlink(s, d)
+        }
+        fn create_dir(&self, d: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.create_dir(d)
+        }
+        fn finish_dir(&self, d: &Path, l: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.finish_dir(d, l)
+        }
+        fn rename_noreplace(&self, f: &Path, t: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.rename_noreplace(f, t)
+        }
+        fn replace(&self, f: &Path, t: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.replace(f, t)
+        }
+        fn remove(&self, p: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.remove(p)
+        }
+        fn trash(&self, p: &Path) -> Result<String, CopyError> {
+            match self.trash_mode {
+                1 => {
+                    let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+                    Err(CopyError::new(ErrKind::Other("E_FAIL".into()), p))
+                }
+                _ => {
+                    std::fs::create_dir_all(&self.bin).unwrap();
+                    let n = std::fs::read_dir(&self.bin).unwrap().count();
+                    let to = self.bin.join(format!("{n}-{}", p.file_name().unwrap().to_string_lossy()));
+                    std::fs::rename(p, &to).map_err(|e| err(e, p))?;
+                    Ok(to.to_string_lossy().into_owned())
+                }
+            }
+        }
+        fn untrash(&self, t: &str, o: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.rename_noreplace(Path::new(t), o)
+        }
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).map(|r| r.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Revisión 1, C1: «Reemplazar» moviendo un archivo sobre sí mismo por otro camino (una carpeta
+    /// enlazada que el disco informa como otra) lo borraba.
+    #[test]
+    fn regression_alias_path_replace_on_move_keeps_file() {
+        let dir = tmp("regresion-alias");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        std::fs::write(dir.join("real/a.txt"), b"datos unicos").unwrap();
+        let prims = Sim { alias: Some(dir.join("alias")), trash_mode: 0, bin: dir.join("bin") };
+        let replace = [Answer { choice: Choice::Replace, all: false }];
+        go(&prims, JobSpec::Move { sources: vec![dir.join("real/a.txt")], dest: dir.join("alias") }, &replace, &Control::new(), &mut |_| {});
+        assert_eq!(std::fs::read(dir.join("real/a.txt")).unwrap(), b"datos unicos");
+        // Copiarlo «sobre sí mismo» por el otro camino lo duplica.
+        go(&prims, JobSpec::Copy { sources: vec![dir.join("real/a.txt")], dest: dir.join("alias") }, &replace, &Control::new(), &mut |_| {});
+        assert_eq!(std::fs::read(dir.join("real/a.txt")).unwrap(), b"datos unicos");
+        assert_eq!(names(&dir.join("real")), vec!["a copia.txt", "a.txt"]);
+    }
+
+    /// Revisión 1, C2: una Papelera que borra definitivamente y falla dejaba sin lo viejo y sin lo
+    /// nuevo. Ahora lo nuevo ya está en su lugar antes de tocar lo viejo.
+    #[test]
+    fn regression_trash_that_deletes_keeps_new_in_place() {
+        let dir = tmp("regresion-papelera-borra");
+        std::fs::create_dir_all(dir.join("s/Carpeta")).unwrap();
+        std::fs::create_dir_all(dir.join("d/Carpeta")).unwrap();
+        std::fs::write(dir.join("s/informe.pdf"), b"nuevo").unwrap();
+        std::fs::write(dir.join("d/informe.pdf"), b"viejo").unwrap();
+        std::fs::write(dir.join("s/Carpeta/x"), b"x").unwrap();
+        std::fs::write(dir.join("d/Carpeta/tesis.docx"), b"tesis").unwrap();
+        let prims = Sim { alias: None, trash_mode: 1, bin: dir.join("bin") };
+        let replace = Answer { choice: Choice::Replace, all: false };
+        let out = go(&prims, JobSpec::Copy { sources: vec![dir.join("s/informe.pdf"), dir.join("s/Carpeta")], dest: dir.join("d") }, &[replace, replace], &Control::new(), &mut |_| {});
+        assert_eq!(std::fs::read(dir.join("d/informe.pdf")).unwrap(), b"nuevo");
+        assert_eq!(std::fs::read(dir.join("d/Carpeta/x")).unwrap(), b"x");
+        // Lo que pasó con lo viejo se informa (no «no pasó nada»).
+        assert_eq!(out.errors.len(), 2, "{:?}", out.errors);
+        no_tmp(&dir.join("d"));
+    }
+
+    /// Revisión 1, I3: cancelar a mitad de «Reemplazar» una carpeta dejaba la nueva a medias y la
+    /// vieja en la Papelera. Ahora vuelve la vieja.
+    #[test]
+    fn regression_replace_folder_cancel_restores_old() {
+        let dir = tmp("regresion-cancelar-carpeta");
+        std::fs::create_dir_all(dir.join("s/Carpeta")).unwrap();
+        std::fs::create_dir_all(dir.join("d/Carpeta")).unwrap();
+        std::fs::write(dir.join("s/Carpeta/a.bin"), big(4 << 20)).unwrap();
+        std::fs::write(dir.join("s/Carpeta/b.bin"), big(40 << 20)).unwrap();
+        std::fs::write(dir.join("d/Carpeta/viejo.txt"), b"viejo").unwrap();
+        let prims = Sim { alias: None, trash_mode: 2, bin: dir.join("bin") };
+        let ctl = Control::new();
+        let c = ctl.clone();
+        let out = go(&prims, JobSpec::Copy { sources: vec![dir.join("s/Carpeta")], dest: dir.join("d") }, &[Answer { choice: Choice::Replace, all: false }], &ctl, &mut |u| {
+            if matches!(u, Update::Progress { bytes, .. } if *bytes > (6 << 20)) {
+                c.cancel();
+            }
+        });
+        assert!(out.cancelled);
+        assert_eq!(names(&dir.join("d/Carpeta")), vec!["viejo.txt"]);
+        assert!(names(&dir.join("bin")).is_empty());
+        no_tmp(&dir.join("d"));
+        assert_eq!(out.result.undo, None);
     }
 }

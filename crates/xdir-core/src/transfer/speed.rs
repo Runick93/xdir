@@ -17,11 +17,27 @@ pub struct Speed {
     /// (cuándo, bytes hechos), de los últimos `WINDOW` (más uno anterior como borde).
     samples: VecDeque<(Instant, u64)>,
     graph: Vec<f32>,
+    /// En pausa (o esperando la respuesta a un conflicto) desde entonces.
+    paused_at: Option<Instant>,
+    /// Tiempo en pausa ya cerrado (no cuenta para el promedio).
+    excluded: Duration,
 }
 
 impl Speed {
     pub fn new(start: Instant, total: u64) -> Speed {
-        Speed { start, total, samples: VecDeque::from([(start, 0)]), graph: Vec::new() }
+        Speed { start, total, samples: VecDeque::from([(start, 0)]), graph: Vec::new(), paused_at: None, excluded: Duration::ZERO }
+    }
+
+    /// Empieza una pausa (o la espera de una respuesta): ese tiempo no cuenta para el promedio.
+    pub fn pause(&mut self, now: Instant) {
+        self.paused_at.get_or_insert(now);
+    }
+
+    /// Termina la pausa.
+    pub fn resume(&mut self, now: Instant) {
+        if let Some(t) = self.paused_at.take() {
+            self.excluded += now.saturating_duration_since(t);
+        }
     }
 
     /// Bytes hechos hasta ahora (`done`, acumulado).
@@ -61,10 +77,11 @@ impl Speed {
         Some(Duration::from_secs_f64((left - since).max(0.0)))
     }
 
-    /// Bytes por segundo desde el principio.
+    /// Bytes por segundo desde el principio, sin contar pausas ni esperas por conflictos.
     pub fn average(&self) -> Option<f64> {
         let &(last, done) = self.samples.back()?;
-        let secs = last.saturating_duration_since(self.start).as_secs_f64();
+        let open = self.paused_at.map_or(Duration::ZERO, |t| last.saturating_duration_since(t));
+        let secs = last.saturating_duration_since(self.start).saturating_sub(self.excluded + open).as_secs_f64();
         (secs > 0.0).then(|| done as f64 / secs)
     }
 

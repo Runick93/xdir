@@ -24,6 +24,17 @@ pub struct ItemStat {
     pub modified: u64,
     /// Está solo en la nube: copiarlo lo baja; recorrerlo o moverlo en el mismo disco, no.
     pub cloud_only: bool,
+    /// Identidad del elemento (disco, número de archivo): dos rutas con la misma son el mismo
+    /// elemento aunque se escriban distinto (`Z:\` y `\\servidor\recurso`, un enlace a la carpeta,
+    /// un disco montado dos veces). `None` si el sistema no la da.
+    pub file_id: Option<(u64, u64)>,
+}
+
+impl ItemStat {
+    /// ¿Son el mismo elemento? (solo si los dos tienen identidad).
+    pub fn same_item(&self, other: &ItemStat) -> bool {
+        self.file_id.is_some() && self.file_id == other.file_id
+    }
 }
 
 /// El disco de una ruta.
@@ -60,6 +71,8 @@ pub enum ErrKind {
     TooBig,
     Exists,
     Cancelled,
+    /// Renombrar no puede llevarlo a otro disco (hay que copiar).
+    CrossDevice,
     Other(String),
 }
 
@@ -85,6 +98,7 @@ impl CopyError {
             ErrKind::TooBig => "Es demasiado grande para el formato del disco de destino (FAT32)".into(),
             ErrKind::Exists => "Ya existe".into(),
             ErrKind::Cancelled => "Cancelado".into(),
+            ErrKind::CrossDevice => "Está en otro disco".into(),
             ErrKind::Other(text) => text.clone(),
         }
     }
@@ -113,17 +127,25 @@ pub trait CopyPrims: Send + Sync {
     /// Renombra o mueve dentro del mismo disco; falla con Exists si `to` ya está (salvo que sea
     /// el mismo elemento con otras mayúsculas).
     fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError>;
-    /// Pone `from` en lugar de `to` en un solo paso (atómico).
+    /// Pone `from` en lugar de `to` en un solo paso (atómico). El motor no lo usa para
+    /// «Reemplazar» (aparta lo que está con `rename_noreplace` y recién después lo manda a la
+    /// Papelera): queda para quien necesite pisar a propósito.
     fn replace(&self, from: &Path, to: &Path) -> Result<(), CopyError>;
+    /// Deja en el disco lo escrito en `p` (antes de borrar el original al mover).
+    fn sync(&self, _p: &Path) -> Result<(), CopyError> {
+        Ok(())
+    }
     /// Borra un archivo, un enlace o una carpeta vacía.
     fn remove(&self, p: &Path) -> Result<(), CopyError>;
-    /// Manda a la Papelera; devuelve el nombre dentro de ella (como `Undo::Recycled`).
+    /// Manda a la Papelera; devuelve cómo encontrarlo ahí (como `Undo::Recycled`; el texto es de
+    /// la plataforma). Si el sistema lo borró en vez de mandarlo a la Papelera, es un error.
     fn trash(&self, p: &Path) -> Result<String, CopyError>;
     /// Lugar original de un elemento de la Papelera, si se sabe.
     fn trash_origin(&self, _in_trash: &Path) -> Option<PathBuf> {
         None
     }
-    /// Deshace `trash`: devuelve `in_trash` a `original`.
+    /// Deshace `trash`: devuelve `in_trash` a `original` (que puede no ser donde estaba al
+    /// mandarlo: el motor manda a la Papelera lo apartado con un nombre temporal).
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError>;
 }
 

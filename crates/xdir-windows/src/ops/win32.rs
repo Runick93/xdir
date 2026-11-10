@@ -15,7 +15,7 @@ use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::Win32::UI::Shell::{
-    BHID_SFUIObject, CMINVOKECOMMANDINFO, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_SILENT,
+    BHID_SFUIObject, CMINVOKECOMMANDINFO, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
     FOF_RENAMEONCOLLISION, FOFX_RECYCLEONDELETE, FileOperation, IContextMenu, IFileOperation,
     IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem, SHCreateItemFromParsingName,
     SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
@@ -218,25 +218,24 @@ pub(super) fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
     }
 }
 
-/// Manda un elemento a la Papelera sin diálogos (para el motor de copia: lo reemplazado). Devuelve
-/// su nombre de análisis dentro de la Papelera (lo que usa `restore_from_recycle_bin`). COM tiene
-/// que estar iniciado en el hilo.
-pub(super) fn recycle_one(path: &Path) -> Result<String> {
+/// Manda un elemento a la Papelera (para el motor de copia: lo reemplazado). Devuelve su nombre de
+/// análisis dentro de la Papelera (lo que usa `restore_from_recycle_bin`), o `None` si no quedó
+/// ahí: borrado definitivamente (no entraba) o no se hizo nada. `FOF_WANTNUKEWARNING` hace que el
+/// sistema pregunte antes de borrar algo que no entra en la Papelera. COM tiene que estar iniciado
+/// en el hilo.
+pub(super) fn recycle_one(path: &Path) -> Result<Option<String>> {
     let fo: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
     let recorder: IFileOperationProgressSink = Recorder::default().into();
     unsafe {
         fo.Advise(&recorder)?;
-        fo.SetOperationFlags(FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI)?;
+        fo.SetOperationFlags(FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_WANTNUKEWARNING)?;
         fo.DeleteItem(&item(path)?, None)?;
         fo.PerformOperations()?;
         if fo.GetAnyOperationsAborted().map(|b| b.as_bool()).unwrap_or(false) {
             return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_ABORT));
         }
     }
-    recorder_log(&recorder)
-        .into_iter()
-        .find_map(|r| r.created)
-        .ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))
+    Ok(recorder_log(&recorder).into_iter().find_map(|r| r.created))
 }
 
 pub fn item(path: &Path) -> Result<IShellItem> {

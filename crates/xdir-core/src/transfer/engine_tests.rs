@@ -242,9 +242,9 @@ fn conflict_replace_trashes_old() {
     conflict_setup(&fake);
     let r = go(&fake, copy_informe(), &[answer(Choice::Replace)]);
     assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"nuevo");
+    // Lo que va a la Papelera es lo apartado (con un nombre temporal), pero se devuelve al lugar.
     let trashed = fake.trashed();
     assert_eq!(trashed.len(), 1);
-    assert_eq!(trashed[0].1, p("/k/dst/informe.pdf"));
     no_tmp_left(&fake, &p("/k/dst"));
     let undo = r.out.result.undo.clone().unwrap();
     assert_eq!(
@@ -278,13 +278,18 @@ fn replace_folder_trashes_whole_existing() {
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/kd/src/D")], dest: p("/kd/dst") }, &[answer(Choice::Replace)]);
     assert!(r.conflicts()[0].can_merge);
     assert_eq!(fake.list_all(&p("/kd/dst")), vec![p("/kd/dst/D"), p("/kd/dst/D/nuevo.txt")]);
-    assert_eq!(fake.trashed()[0].1, p("/kd/dst/D"));
+    assert_eq!(fake.trashed().len(), 1);
+    // Un paso de deshacer: primero se va lo nuevo y después vuelve la carpeta vieja entera.
+    let undo = r.out.result.undo.clone().unwrap();
+    assert!(matches!(&undo, Undo::Batch(steps) if matches!(steps[..], [Undo::Recycled(_), Undo::Created(_)])), "{undo:?}");
+    go(&fake, JobSpec::Undo(undo), &[]);
+    assert_eq!(fake.list_all(&p("/kd/dst")), vec![p("/kd/dst/D"), p("/kd/dst/D/viejo.txt")]);
 }
 
 #[test]
-fn replace_folder_without_trash_keeps_old_on_error() {
-    // Sin Papelera, la carpeta vieja se aparta y se borra solo si la nueva quedó entera; si algo
-    // falló, queda con otro nombre.
+fn replace_folder_error_restores_old() {
+    // La carpeta vieja se aparta y se descarta solo si la nueva quedó entera; si algo falló, la
+    // nueva (copias de este trabajo) se borra y la vieja vuelve a su lugar.
     let fake = FakeCopyPrims::new();
     fake.set_volume(&p("/kn"), VolumeInfo { has_trash: false, ..volume("kn", "Red") });
     fake.add_file(&p("/kn/src/D/a.txt"), b"a".to_vec());
@@ -292,9 +297,9 @@ fn replace_folder_without_trash_keeps_old_on_error() {
     fake.add_file(&p("/kn/dst/D/viejo.txt"), b"v".to_vec());
     fake.fail(&p("/kn/src/D/b.txt"), ErrKind::Denied, 1);
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/kn/src/D")], dest: p("/kn/dst") }, &[answer(Choice::Replace)]);
-    assert_eq!(fake.contents(&p("/kn/dst/D 2/viejo.txt")).unwrap(), b"v");
-    assert_eq!(fake.contents(&p("/kn/dst/D/a.txt")).unwrap(), b"a");
-    assert_eq!(r.out.errors.len(), 2, "{:?}", r.out.errors);
+    assert_eq!(fake.list_all(&p("/kn/dst")), vec![p("/kn/dst/D"), p("/kn/dst/D/viejo.txt")]);
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.out.errors);
+    assert_eq!(r.out.result.undo, None);
     no_tmp_left(&fake, &p("/kn/dst"));
     // Si todo sale bien, la vieja se borra.
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/kn/src/D")], dest: p("/kn/dst") }, &[answer(Choice::Replace)]);
@@ -702,5 +707,235 @@ fn replace_never_trashes_what_contains_the_source() {
     let r = go(&fake, JobSpec::Move { sources: vec![p("/rp/a/a")], dest: p("/rp") }, &[answer(Choice::Replace)]);
     assert_eq!(r.messages(), vec!["No se puede reemplazar una carpeta que contiene lo que se copia".to_string()]);
     assert_eq!(fake.contents(&p("/rp/a/a/dato.txt")).unwrap(), b"d");
+    assert!(fake.trashed().is_empty());
+}
+
+// ---------- revisión 1 ----------
+
+#[test]
+fn replace_same_file_through_another_path_never_deletes() {
+    // `Z:\` y `\\servidor\recurso`, o una carpeta enlazada: el mismo archivo por otro camino, y el
+    // disco lo informa como otro.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/al/real/a.txt"), b"unico".to_vec());
+    fake.add_alias(&p("/al/alias"), &p("/al/real"));
+    fake.set_volume(&p("/al/alias"), volume("otro", "Z:"));
+    let replace = [answer(Choice::Replace)];
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/al/real/a.txt")], dest: p("/al/alias") }, &replace);
+    assert!(r.conflicts().is_empty(), "no es un conflicto consigo mismo");
+    assert_eq!(fake.contents(&p("/al/real/a.txt")).unwrap(), b"unico");
+    assert!(fake.trashed().is_empty());
+    // Copiarlo ahí es duplicarlo.
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/al/real/a.txt")], dest: p("/al/alias") }, &replace);
+    assert!(r.conflicts().is_empty());
+    assert_eq!(fake.list_all(&p("/al/real")), vec![p("/al/real/a copia.txt"), p("/al/real/a.txt")]);
+    // Copiar la carpeta dentro de sí misma por el otro camino: se rechaza.
+    fake.add_dir(&p("/al/real/sub"));
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/al/real")], dest: p("/al/alias/sub") }, &[]);
+    assert_eq!(r.messages(), vec!["No se puede copiar una carpeta dentro de sí misma".to_string()]);
+}
+
+#[test]
+fn replace_keeps_new_in_place_when_trash_deletes() {
+    // Una Papelera que borra definitivamente y falla: lo nuevo ya está en su lugar y se avisa.
+    let fake = FakeCopyPrims::new();
+    conflict_setup(&fake);
+    fake.add_file(&p("/k/src/D/x"), b"x".to_vec());
+    fake.add_file(&p("/k/dst/D/tesis.docx"), b"tesis".to_vec());
+    fake.set_trash_deletes(true);
+    let spec = JobSpec::Copy { sources: vec![p("/k/src/informe.pdf"), p("/k/src/D")], dest: p("/k/dst") };
+    let r = go(&fake, spec, &[answer(Choice::Replace), answer(Choice::Replace)]);
+    assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"nuevo");
+    assert_eq!(fake.contents(&p("/k/dst/D/x")).unwrap(), b"x");
+    assert_eq!(r.out.errors.len(), 2, "{:?}", r.out.errors);
+    assert!(r.out.errors.iter().all(|e| e.message.starts_with("Lo que estaba antes no entró en la Papelera") && !e.retry));
+    no_tmp_left(&fake, &p("/k/dst"));
+}
+
+#[test]
+fn replace_trash_failure_keeps_old_visible() {
+    // La Papelera falla sin borrar: lo nuevo queda en su lugar y lo viejo, a la vista con otro
+    // nombre.
+    let fake = FakeCopyPrims::new();
+    conflict_setup(&fake);
+    install_fakes();
+    let ctl = Control::new();
+    let prims = TrashFails(fake.clone());
+    let mut updates = Vec::new();
+    run(copy_informe(), &prims, &ctl, &mut |u| {
+        if let Update::Conflict(_) = &u {
+            ctl.answer(answer(Choice::Replace));
+        }
+        updates.push(u);
+    });
+    let Some(Update::Finished(out)) = updates.last() else { panic!() };
+    assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"nuevo");
+    assert_eq!(fake.contents(&p("/k/dst/informe 2.pdf")).unwrap(), b"viejo");
+    assert_eq!(out.errors.len(), 1);
+    assert!(out.errors[0].message.contains("«informe 2.pdf»"), "{:?}", out.errors);
+    no_tmp_left(&fake, &p("/k/dst"));
+}
+
+/// El disco falso con una Papelera que falla sin tocar nada.
+struct TrashFails(FakeCopyPrims);
+
+impl crate::sys::CopyPrims for TrashFails {
+    fn stat(&self, p: &Path) -> Result<crate::sys::ItemStat, crate::sys::CopyError> {
+        self.0.stat(p)
+    }
+    fn read_dir(&self, p: &Path) -> Result<Vec<std::ffi::OsString>, crate::sys::CopyError> {
+        self.0.read_dir(p)
+    }
+    fn volume(&self, p: &Path) -> Option<VolumeInfo> {
+        self.0.volume(p)
+    }
+    fn copy_file(&self, s: &Path, d: &Path, pr: &mut dyn FnMut(u64) -> crate::sys::Flow) -> Result<(), crate::sys::CopyError> {
+        self.0.copy_file(s, d, pr)
+    }
+    fn copy_symlink(&self, s: &Path, d: &Path) -> Result<(), crate::sys::CopyError> {
+        self.0.copy_symlink(s, d)
+    }
+    fn create_dir(&self, d: &Path) -> Result<(), crate::sys::CopyError> {
+        self.0.create_dir(d)
+    }
+    fn finish_dir(&self, d: &Path, l: &Path) -> Result<(), crate::sys::CopyError> {
+        self.0.finish_dir(d, l)
+    }
+    fn rename_noreplace(&self, f: &Path, t: &Path) -> Result<(), crate::sys::CopyError> {
+        self.0.rename_noreplace(f, t)
+    }
+    fn replace(&self, f: &Path, t: &Path) -> Result<(), crate::sys::CopyError> {
+        self.0.replace(f, t)
+    }
+    fn remove(&self, p: &Path) -> Result<(), crate::sys::CopyError> {
+        self.0.remove(p)
+    }
+    fn trash(&self, p: &Path) -> Result<String, crate::sys::CopyError> {
+        Err(crate::sys::CopyError::new(ErrKind::Denied, p))
+    }
+    fn untrash(&self, t: &str, o: &Path) -> Result<(), crate::sys::CopyError> {
+        self.0.untrash(t, o)
+    }
+}
+
+#[test]
+fn replace_on_same_volume_move_sets_aside_first() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/rm/a/x.txt"), b"nuevo".to_vec());
+    fake.add_file(&p("/rm/b/x.txt"), b"viejo".to_vec());
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/rm/a/x.txt")], dest: p("/rm/b") }, &[answer(Choice::Replace)]);
+    assert_eq!(fake.contents(&p("/rm/b/x.txt")).unwrap(), b"nuevo");
+    assert_eq!(fake.reads(&p("/rm/a/x.txt")), 0);
+    no_tmp_left(&fake, &p("/rm/b"));
+    let undo = r.out.result.undo.unwrap();
+    go(&fake, JobSpec::Undo(undo), &[]);
+    assert_eq!(fake.contents(&p("/rm/a/x.txt")).unwrap(), b"nuevo");
+    assert_eq!(fake.contents(&p("/rm/b/x.txt")).unwrap(), b"viejo");
+}
+
+#[test]
+fn unknown_volume_tries_rename_then_copies() {
+    let fake = FakeCopyPrims::new();
+    fake.hide_volume(&p("/uv"));
+    fake.add_file(&p("/uv/a/x.bin"), vec![1; 10]);
+    fake.add_dir(&p("/uv/b"));
+    // Mismo disco de verdad (aunque no se sepa): renombra, no lee.
+    go(&fake, JobSpec::Move { sources: vec![p("/uv/a/x.bin")], dest: p("/uv/b") }, &[]);
+    assert_eq!(fake.reads(&p("/uv/a/x.bin")), 0);
+    assert!(fake.exists(&p("/uv/b/x.bin")));
+    // Otro disco de verdad: renombrar no puede y se copia (verificando y borrando el original).
+    fake.set_volume(&p("/uv/usb"), volume("usb", "USB"));
+    fake.add_dir(&p("/uv/usb"));
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/uv/b/x.bin")], dest: p("/uv/usb") }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.out.errors);
+    assert_eq!(fake.reads(&p("/uv/b/x.bin")), 1);
+    assert!(!fake.exists(&p("/uv/b/x.bin")) && fake.exists(&p("/uv/usb/x.bin")));
+}
+
+#[test]
+fn move_keeps_source_if_it_changed_during_copy() {
+    let fake = FakeCopyPrims::new();
+    two_volumes(&fake);
+    fake.add_file(&p("/v1/a/doc.txt"), vec![1; 1000]);
+    fake.set_block(100);
+    let f2 = fake.clone();
+    let r = go_with(&fake, JobSpec::Move { sources: vec![p("/v1/a/doc.txt")], dest: p("/v2/dst") }, &[], &Control::new(), &mut |u, _| {
+        if matches!(u, Update::Progress { bytes, .. } if *bytes > 0) {
+            // Otro programa lo guarda con el mismo tamaño.
+            f2.write(&p("/v1/a/doc.txt"), vec![2; 1000], 99);
+        }
+    });
+    assert_eq!(r.messages(), vec!["El original cambió durante la copia".to_string()]);
+    assert_eq!(fake.contents(&p("/v1/a/doc.txt")).unwrap(), vec![2; 1000]);
+    assert!(!fake.exists(&p("/v2/dst/doc.txt")));
+}
+
+#[test]
+fn move_syncs_copy_before_deleting_source() {
+    let fake = FakeCopyPrims::new();
+    two_volumes(&fake);
+    fake.add_file(&p("/v1/a/x.txt"), b"x".to_vec());
+    fake.add_file(&p("/v1/a/y.txt"), b"y".to_vec());
+    go(&fake, JobSpec::Move { sources: vec![p("/v1/a/x.txt")], dest: p("/v2/dst") }, &[]);
+    assert_eq!(fake.syncs(), vec![p("/v2/dst/x.txt")]);
+    assert!(!fake.exists(&p("/v1/a/x.txt")));
+    // Si no se puede asegurar la copia, el original queda.
+    fake.fail(&p("/v2/dst/y.txt"), ErrKind::Other("No se pudo guardar".into()), 1);
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/v1/a/y.txt")], dest: p("/v2/dst") }, &[]);
+    assert_eq!(r.messages(), vec!["No se pudo guardar".to_string()]);
+    assert!(fake.exists(&p("/v1/a/y.txt")) && !fake.exists(&p("/v2/dst/y.txt")));
+}
+
+#[test]
+fn skipped_are_reported_and_stale_answers_ignored() {
+    let fake = FakeCopyPrims::new();
+    conflict_setup(&fake);
+    let ctl = Control::new();
+    // Una respuesta vieja (de otro conflicto) no decide este.
+    ctl.answer(answer(Choice::Replace));
+    let r = go_with(&fake, copy_informe(), &[answer(Choice::Skip)], &ctl, &mut |_, _| {});
+    assert_eq!(r.out.skipped, vec![p("/k/src/informe.pdf")]);
+    assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"viejo");
+}
+
+#[test]
+fn unreadable_subfolder_does_not_stop_the_rest() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/ur/s/D/ok.txt"), b"ok".to_vec());
+    fake.add_file(&p("/ur/s/D/cerrada/x.txt"), b"x".to_vec());
+    fake.add_dir(&p("/ur/d"));
+    fake.fail(&p("/ur/s/D/cerrada"), ErrKind::Denied, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/ur/s/D")], dest: p("/ur/d") }, &[]);
+    assert_eq!(fake.contents(&p("/ur/d/D/ok.txt")).unwrap(), b"ok");
+    assert_eq!(r.out.errors.len(), 1);
+    assert_eq!((r.out.errors[0].src.clone(), r.out.errors[0].dst.clone()), (p("/ur/s/D/cerrada"), p("/ur/d/D/cerrada")));
+    assert_eq!(r.out.errors[0].message, "No tenés permiso");
+}
+
+#[test]
+fn retry_keeps_the_into_itself_check() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/ri/A/f.txt"), b"f".to_vec());
+    let r = go(&fake, JobSpec::Retry { moving: false, pairs: vec![(p("/ri/A"), p("/ri/A/sub/A"))] }, &[]);
+    assert_eq!(r.messages(), vec!["No se puede copiar una carpeta dentro de sí misma".to_string()]);
+    assert!(!r.out.errors[0].retry);
+}
+
+#[test]
+fn replace_same_file_from_another_folder_never_deletes() {
+    // Dos nombres del mismo archivo en carpetas distintas (un enlace duro): «Reemplazar» uno con
+    // el otro lo borraría.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/hl/a/x.txt"), b"unico".to_vec());
+    fake.add_dir(&p("/hl/b"));
+    fake.add_alias(&p("/hl/b/x.txt"), &p("/hl/a/x.txt"));
+    let replace = [answer(Choice::Replace)];
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/hl/a/x.txt")], dest: p("/hl/b") }, &replace);
+    assert!(r.conflicts().is_empty());
+    assert_eq!(fake.contents(&p("/hl/a/x.txt")).unwrap(), b"unico");
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/hl/a/x.txt")], dest: p("/hl/b") }, &replace);
+    assert!(r.conflicts().is_empty());
+    assert_eq!(fake.contents(&p("/hl/a/x.txt")).unwrap(), b"unico");
+    assert_eq!(fake.contents(&p("/hl/b/x copia.txt")).unwrap(), b"unico");
     assert!(fake.trashed().is_empty());
 }

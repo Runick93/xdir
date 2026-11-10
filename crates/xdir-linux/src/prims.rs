@@ -34,6 +34,7 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
         libc::EFBIG => ErrKind::TooBig,
         libc::EEXIST => ErrKind::Exists,
         libc::ECANCELED => ErrKind::Cancelled,
+        libc::EXDEV => ErrKind::CrossDevice,
         n => ErrKind::Other(io::Error::from_raw_os_error(n).to_string()),
     }
 }
@@ -63,22 +64,57 @@ fn trash_dir(p: &Path) -> Result<PathBuf, CopyError> {
     trash::data_home().map(|d| trash::trash_dir(&d)).ok_or_else(|| CopyError::new(ErrKind::Other("No hay Papelera".into()), p))
 }
 
-/// Copia los atributos `user.*` de `from` a `to` (lo que se pueda: no todos los discos los
-/// tienen).
-fn copy_xattrs(from: i32, to: i32) {
-    let mut names = vec![0u8; 4096];
-    let n = unsafe { libc::flistxattr(from, names.as_mut_ptr().cast(), names.len()) };
-    if n <= 0 {
-        return;
+/// Lee con `call(buffer)` algo de largo variable (lista o valor de un atributo): pregunta el
+/// tamaño, lee y, si creció entre las dos llamadas (`ERANGE`), vuelve a empezar; reintenta con
+/// `EINTR`. Nunca devuelve algo cortado. `Ok(None)`: el disco no tiene atributos.
+fn read_sized(call: &dyn Fn(&mut [u8]) -> isize) -> io::Result<Option<Vec<u8>>> {
+    loop {
+        let need = call(&mut []);
+        if need < 0 {
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ENOTSUP) => return Ok(None),
+                _ => return Err(e),
+            }
+        }
+        let mut buf = vec![0u8; need as usize];
+        let got = call(&mut buf);
+        if got < 0 {
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::EINTR | libc::ERANGE) => continue,
+                _ => return Err(e),
+            }
+        }
+        buf.truncate(got as usize);
+        return Ok(Some(buf));
     }
-    for name in names[..n as usize].split(|b| *b == 0).filter(|n| n.starts_with(b"user.")) {
+}
+
+/// Copia los atributos `user.*` de `from` a `to`. Que el disco de destino no los acepte no es un
+/// error (no todos los tienen); leerlos a medias, sí.
+fn copy_xattrs(from: i32, to: i32) -> io::Result<()> {
+    let list = |b: &mut [u8]| unsafe { libc::flistxattr(from, b.as_mut_ptr().cast(), b.len()) };
+    let Some(names) = read_sized(&list)? else { return Ok(()) };
+    for name in names.split(|b| *b == 0).filter(|n| n.starts_with(b"user.")) {
         let Ok(cname) = CString::new(name) else { continue };
-        let mut value = vec![0u8; 64 * 1024];
-        let len = unsafe { libc::fgetxattr(from, cname.as_ptr(), value.as_mut_ptr().cast(), value.len()) };
-        if len >= 0 {
-            unsafe { libc::fsetxattr(to, cname.as_ptr(), value.as_ptr().cast(), len as usize, 0) };
+        let get = |b: &mut [u8]| unsafe { libc::fgetxattr(from, cname.as_ptr(), b.as_mut_ptr().cast(), b.len()) };
+        let value = match read_sized(&get) {
+            Ok(Some(v)) => v,
+            Ok(None) => continue,
+            // Se borró entre la lista y la lectura.
+            Err(e) if e.raw_os_error() == Some(libc::ENODATA) => continue,
+            Err(e) => return Err(e),
+        };
+        loop {
+            let r = unsafe { libc::fsetxattr(to, cname.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
+            if r == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
         }
     }
+    Ok(())
 }
 
 /// Fechas de acceso y modificación de `meta` en el archivo abierto `fd`.
@@ -145,13 +181,12 @@ impl LinuxCopyPrims {
         let mut to = OpenOptions::new().write(true).create_new(true).mode(meta.permissions().mode() | 0o200).open(dst).map_err(|e| err(e, dst))?;
         // De acá en adelante el destino es nuestro: si algo falla, se borra.
         let result = match copy_data(&mut from, &mut to, meta.len(), progress) {
-            Ok(true) => {
-                copy_xattrs(from.as_raw_fd(), to.as_raw_fd());
+            Ok(true) => copy_xattrs(from.as_raw_fd(), to.as_raw_fd()).map_err(|e| err(e, src)).and_then(|()| {
                 let perms = std::fs::Permissions::from_mode(meta.permissions().mode());
                 let _ = to.set_permissions(perms);
                 set_times(to.as_raw_fd(), &meta);
                 to.sync_data().map_err(|e| err(e, dst))
-            }
+            }),
             Ok(false) => Err(CopyError::new(ErrKind::Cancelled, dst)),
             Err(e) => Err(err(e, dst)),
         };
@@ -174,7 +209,7 @@ impl CopyPrims for LinuxCopyPrims {
             ItemKind::File
         };
         let size = if kind == ItemKind::Dir { 0 } else { m.len() };
-        Ok(ItemStat { kind, size, modified: filetime(m.mtime(), m.mtime_nsec()), cloud_only: false })
+        Ok(ItemStat { kind, size, modified: filetime(m.mtime(), m.mtime_nsec()), cloud_only: false, file_id: Some((m.dev(), m.ino())) })
     }
 
     fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> {
@@ -223,7 +258,7 @@ impl CopyPrims for LinuxCopyPrims {
         let meta = std::fs::metadata(like).map_err(|e| err(e, like))?;
         let dir = File::open(dst).map_err(|e| err(e, dst))?;
         let from = File::open(like).map_err(|e| err(e, like))?;
-        copy_xattrs(from.as_raw_fd(), dir.as_raw_fd());
+        copy_xattrs(from.as_raw_fd(), dir.as_raw_fd()).map_err(|e| err(e, like))?;
         set_times(dir.as_raw_fd(), &meta);
         std::fs::set_permissions(dst, meta.permissions()).map_err(|e| err(e, dst))
     }
@@ -250,6 +285,10 @@ impl CopyPrims for LinuxCopyPrims {
 
     fn replace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
         std::fs::rename(from, to).map_err(|e| err(e, to))
+    }
+
+    fn sync(&self, p: &Path) -> Result<(), CopyError> {
+        File::open(p).and_then(|f| f.sync_all()).map_err(|e| err(e, p))
     }
 
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
@@ -354,6 +393,10 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         assert_eq!(LinuxCopyPrims.rename_noreplace(&a, &b).unwrap_err().kind, ErrKind::Exists);
         assert_eq!((std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()), (b"a".to_vec(), b"b".to_vec()));
+        std::fs::hard_link(&b, dir.join("duro.txt")).unwrap();
+        assert_eq!(LinuxCopyPrims.rename_noreplace(&b, &dir.join("duro.txt")).unwrap_err().kind, ErrKind::Exists);
+        assert!(LinuxCopyPrims.stat(&b).unwrap().same_item(&LinuxCopyPrims.stat(&dir.join("duro.txt")).unwrap()));
+        LinuxCopyPrims.sync(&b).unwrap();
         LinuxCopyPrims.rename_noreplace(&a, &dir.join("c.txt")).unwrap();
         assert_eq!(std::fs::read(dir.join("c.txt")).unwrap(), b"a");
     }
@@ -405,6 +448,7 @@ mod tests {
         assert_eq!(err_kind(libc::EDQUOT), ErrKind::DiskFull);
         assert_eq!(err_kind(libc::EFBIG), ErrKind::TooBig);
         assert_eq!(err_kind(libc::EEXIST), ErrKind::Exists);
+        assert_eq!(err_kind(libc::EXDEV), ErrKind::CrossDevice);
         assert!(matches!(err_kind(libc::EIO), ErrKind::Other(_)));
     }
 
@@ -585,5 +629,148 @@ mod tests {
         assert!(!f.exists());
         LinuxCopyPrims.untrash(&name, &f).unwrap();
         assert_eq!(std::fs::read(&f).unwrap(), b"x");
+    }
+
+    /// Primitivas reales con dos trucos de las revisiones: `alias` es otro nombre (un enlace) de
+    /// la misma carpeta pero el disco dice que es otro, y la Papelera puede ser una que borra y
+    /// falla (`trash_mode` 1, como Windows sin Papelera con `FOFX_RECYCLEONDELETE`) o una carpeta
+    /// `bin` (2). 0: sin Papelera.
+    struct Sim {
+        alias: Option<PathBuf>,
+        trash_mode: u8,
+        bin: PathBuf,
+    }
+
+    impl CopyPrims for Sim {
+        fn stat(&self, p: &Path) -> Result<ItemStat, CopyError> {
+            LinuxCopyPrims.stat(p)
+        }
+        fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> {
+            LinuxCopyPrims.read_dir(p)
+        }
+        fn volume(&self, p: &Path) -> Option<VolumeInfo> {
+            let mut v = LinuxCopyPrims.volume(p)?;
+            v.has_trash = self.trash_mode != 0;
+            if self.alias.as_ref().is_some_and(|o| p.starts_with(o)) {
+                v.id = "otro".into();
+            }
+            Some(v)
+        }
+        fn copy_file(&self, s: &Path, d: &Path, pr: &mut dyn FnMut(u64) -> Flow) -> Result<(), CopyError> {
+            // Los archivos «lentos» dan tiempo a que llegue un aviso de progreso a mitad.
+            let slow = s.file_name().is_some_and(|n| n == "b.bin");
+            LinuxCopyPrims.copy_file(s, d, &mut |n| {
+                if slow {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                pr(n)
+            })
+        }
+        fn copy_symlink(&self, s: &Path, d: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.copy_symlink(s, d)
+        }
+        fn create_dir(&self, d: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.create_dir(d)
+        }
+        fn finish_dir(&self, d: &Path, l: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.finish_dir(d, l)
+        }
+        fn rename_noreplace(&self, f: &Path, t: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.rename_noreplace(f, t)
+        }
+        fn replace(&self, f: &Path, t: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.replace(f, t)
+        }
+        fn remove(&self, p: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.remove(p)
+        }
+        fn trash(&self, p: &Path) -> Result<String, CopyError> {
+            match self.trash_mode {
+                1 => {
+                    let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+                    Err(CopyError::new(ErrKind::Other("E_FAIL".into()), p))
+                }
+                _ => {
+                    std::fs::create_dir_all(&self.bin).unwrap();
+                    let n = std::fs::read_dir(&self.bin).unwrap().count();
+                    let to = self.bin.join(format!("{n}-{}", p.file_name().unwrap().to_string_lossy()));
+                    std::fs::rename(p, &to).map_err(|e| err(e, p))?;
+                    Ok(to.to_string_lossy().into_owned())
+                }
+            }
+        }
+        fn untrash(&self, t: &str, o: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.rename_noreplace(Path::new(t), o)
+        }
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).map(|r| r.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Revisión 1, C1: «Reemplazar» moviendo un archivo sobre sí mismo por otro camino (una carpeta
+    /// enlazada que el disco informa como otra) lo borraba.
+    #[test]
+    fn regression_alias_path_replace_on_move_keeps_file() {
+        let dir = tmp("regresion-alias");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        std::fs::write(dir.join("real/a.txt"), b"datos unicos").unwrap();
+        let prims = Sim { alias: Some(dir.join("alias")), trash_mode: 0, bin: dir.join("bin") };
+        let replace = [Answer { choice: Choice::Replace, all: false }];
+        go(&prims, JobSpec::Move { sources: vec![dir.join("real/a.txt")], dest: dir.join("alias") }, &replace, &Control::new(), &mut |_| {});
+        assert_eq!(std::fs::read(dir.join("real/a.txt")).unwrap(), b"datos unicos");
+        // Copiarlo «sobre sí mismo» por el otro camino lo duplica.
+        go(&prims, JobSpec::Copy { sources: vec![dir.join("real/a.txt")], dest: dir.join("alias") }, &replace, &Control::new(), &mut |_| {});
+        assert_eq!(std::fs::read(dir.join("real/a.txt")).unwrap(), b"datos unicos");
+        assert_eq!(names(&dir.join("real")), vec!["a copia.txt", "a.txt"]);
+    }
+
+    /// Revisión 1, C2: una Papelera que borra definitivamente y falla dejaba sin lo viejo y sin lo
+    /// nuevo. Ahora lo nuevo ya está en su lugar antes de tocar lo viejo.
+    #[test]
+    fn regression_trash_that_deletes_keeps_new_in_place() {
+        let dir = tmp("regresion-papelera-borra");
+        std::fs::create_dir_all(dir.join("s/Carpeta")).unwrap();
+        std::fs::create_dir_all(dir.join("d/Carpeta")).unwrap();
+        std::fs::write(dir.join("s/informe.pdf"), b"nuevo").unwrap();
+        std::fs::write(dir.join("d/informe.pdf"), b"viejo").unwrap();
+        std::fs::write(dir.join("s/Carpeta/x"), b"x").unwrap();
+        std::fs::write(dir.join("d/Carpeta/tesis.docx"), b"tesis").unwrap();
+        let prims = Sim { alias: None, trash_mode: 1, bin: dir.join("bin") };
+        let replace = Answer { choice: Choice::Replace, all: false };
+        let out = go(&prims, JobSpec::Copy { sources: vec![dir.join("s/informe.pdf"), dir.join("s/Carpeta")], dest: dir.join("d") }, &[replace, replace], &Control::new(), &mut |_| {});
+        assert_eq!(std::fs::read(dir.join("d/informe.pdf")).unwrap(), b"nuevo");
+        assert_eq!(std::fs::read(dir.join("d/Carpeta/x")).unwrap(), b"x");
+        // Lo que pasó con lo viejo se informa (no «no pasó nada»).
+        assert_eq!(out.errors.len(), 2, "{:?}", out.errors);
+        no_tmp(&dir.join("d"));
+    }
+
+    /// Revisión 1, I3: cancelar a mitad de «Reemplazar» una carpeta dejaba la nueva a medias y la
+    /// vieja en la Papelera. Ahora vuelve la vieja.
+    #[test]
+    fn regression_replace_folder_cancel_restores_old() {
+        let dir = tmp("regresion-cancelar-carpeta");
+        std::fs::create_dir_all(dir.join("s/Carpeta")).unwrap();
+        std::fs::create_dir_all(dir.join("d/Carpeta")).unwrap();
+        std::fs::write(dir.join("s/Carpeta/a.bin"), big(4 << 20)).unwrap();
+        std::fs::write(dir.join("s/Carpeta/b.bin"), big(40 << 20)).unwrap();
+        std::fs::write(dir.join("d/Carpeta/viejo.txt"), b"viejo").unwrap();
+        let prims = Sim { alias: None, trash_mode: 2, bin: dir.join("bin") };
+        let ctl = Control::new();
+        let c = ctl.clone();
+        let out = go(&prims, JobSpec::Copy { sources: vec![dir.join("s/Carpeta")], dest: dir.join("d") }, &[Answer { choice: Choice::Replace, all: false }], &ctl, &mut |u| {
+            if matches!(u, Update::Progress { bytes, .. } if *bytes > (6 << 20)) {
+                c.cancel();
+            }
+        });
+        assert!(out.cancelled);
+        assert_eq!(names(&dir.join("d/Carpeta")), vec!["viejo.txt"]);
+        assert!(names(&dir.join("bin")).is_empty());
+        no_tmp(&dir.join("d"));
+        assert_eq!(out.result.undo, None);
     }
 }

@@ -26,13 +26,13 @@ fn walk_preorder_with_totals() {
     fake.add_file(&p("/w/A/B/y.txt"), vec![2; 20]);
     fake.add_file(&p("/w/A/B/z.txt"), vec![3; 30]);
     let ctl = Control::new();
-    let items = walk(&fake, &p("/w/A"), &ctl, &mut |_| {}).unwrap();
+    let items = walk(&fake, &p("/w/A"), &ctl, &mut |_| {}).unwrap().0;
     assert_eq!(rels(&items), vec![p("A"), p("A/B"), p("A/B/y.txt"), p("A/B/z.txt"), p("A/x.txt")]);
     assert_eq!(items[0].src, p("/w/A"));
     assert_eq!(items[0].stat.kind, ItemKind::Dir);
     assert_eq!(totals(&items), (5, 60));
     // Un archivo suelto es su propia raíz.
-    let one = walk(&fake, &p("/w/A/x.txt"), &ctl, &mut |_| {}).unwrap();
+    let one = walk(&fake, &p("/w/A/x.txt"), &ctl, &mut |_| {}).unwrap().0;
     assert_eq!(rels(&one), vec![p("x.txt")]);
     assert_eq!(totals(&one), (1, 10));
 }
@@ -43,7 +43,7 @@ fn walk_does_not_read_content() {
     fake.add_file(&p("/w/nube/a.bin"), vec![0; 100]);
     fake.add_file(&p("/w/nube/b.bin"), vec![0; 5000]);
     fake.set_cloud_only(&p("/w/nube/b.bin"));
-    let items = walk(&fake, &p("/w/nube"), &Control::new(), &mut |_| {}).unwrap();
+    let items = walk(&fake, &p("/w/nube"), &Control::new(), &mut |_| {}).unwrap().0;
     assert_eq!(totals(&items), (3, 5100));
     assert!(items.iter().any(|i| i.stat.cloud_only));
     assert_eq!(fake.reads(&p("/w/nube/a.bin")), 0);
@@ -56,7 +56,7 @@ fn walk_does_not_follow_symlinks() {
     fake.add_file(&p("/w/otra/grande.bin"), vec![0; 1000]);
     fake.add_dir(&p("/w/L"));
     fake.add_symlink(&p("/w/L/enlace"), &p("/w/otra"));
-    let items = walk(&fake, &p("/w/L"), &Control::new(), &mut |_| {}).unwrap();
+    let items = walk(&fake, &p("/w/L"), &Control::new(), &mut |_| {}).unwrap().0;
     assert_eq!(rels(&items), vec![p("L"), p("L/enlace")]);
     assert_eq!(items[1].stat.kind, ItemKind::Symlink);
     assert_eq!(totals(&items).0, 2);
@@ -70,7 +70,7 @@ fn walk_cancel_stops() {
     }
     let ctl = Control::new();
     let mut seen = Vec::new();
-    let all = walk(&fake, &p("/w/muchos"), &ctl, &mut |n| seen.push(n)).unwrap();
+    let all = walk(&fake, &p("/w/muchos"), &ctl, &mut |n| seen.push(n)).unwrap().0;
     assert_eq!(all.len(), 501);
     // «Preparando… N elementos» cada 200.
     assert_eq!(seen, vec![200, 400]);
@@ -78,6 +78,20 @@ fn walk_cancel_stops() {
     let c = ctl2.clone();
     let err = walk(&fake, &p("/w/muchos"), &ctl2, &mut |_| c.cancel()).unwrap_err();
     assert_eq!(err.kind, ErrKind::Cancelled);
+}
+
+#[test]
+fn walk_keeps_going_after_unreadable_items() {
+    // Una carpeta que no se puede listar queda sin su contenido; el resto se recorre igual.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/w/E/ok.txt"), vec![1; 3]);
+    fake.add_file(&p("/w/E/cerrada/adentro.txt"), vec![1; 5]);
+    fake.add_file(&p("/w/E/z.txt"), vec![1; 7]);
+    fake.fail(&p("/w/E/cerrada"), ErrKind::Denied, 1);
+    let (items, errors) = walk(&fake, &p("/w/E"), &Control::new(), &mut |_| {}).unwrap();
+    assert_eq!(rels(&items), vec![p("E"), p("E/cerrada"), p("E/ok.txt"), p("E/z.txt")]);
+    assert_eq!(errors.len(), 1);
+    assert_eq!((errors[0].kind.clone(), errors[0].path.clone()), (ErrKind::Denied, p("/w/E/cerrada")));
 }
 
 #[test]
@@ -118,6 +132,19 @@ fn speed_moving_average_five_seconds() {
     assert!((rate - 20.0 * MB as f64).abs() < 0.5 * MB as f64, "{rate}");
     let avg = s.average().unwrap();
     assert!((avg - 16.0 * MB as f64).abs() < 0.5 * MB as f64, "{avg}");
+}
+
+#[test]
+fn speed_average_excludes_pauses() {
+    let t0 = Instant::now();
+    let mut s = Speed::new(t0, 100 * MB);
+    s.push(t0 + Duration::from_secs(2), 20 * MB);
+    s.pause(t0 + Duration::from_secs(2));
+    // Diez segundos en pausa (o esperando un conflicto) no bajan el promedio.
+    s.resume(t0 + Duration::from_secs(12));
+    s.push(t0 + Duration::from_secs(14), 40 * MB);
+    let avg = s.average().unwrap();
+    assert!((avg - 10.0 * MB as f64).abs() < 0.1 * MB as f64, "{avg}");
 }
 
 #[test]

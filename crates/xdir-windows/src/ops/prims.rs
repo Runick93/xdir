@@ -10,8 +10,8 @@ use std::path::{Component, Path, Prefix};
 
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
-    ERROR_FILE_TOO_LARGE, ERROR_HANDLE_DISK_FULL, ERROR_LOCK_VIOLATION, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED,
-    ERROR_SHARING_VIOLATION, FILETIME,
+    ERROR_FILE_TOO_LARGE, ERROR_HANDLE_DISK_FULL, ERROR_LOCK_VIOLATION, ERROR_NOT_SAME_DEVICE, ERROR_PATH_NOT_FOUND,
+    ERROR_REQUEST_ABORTED, ERROR_SHARING_VIOLATION, FILETIME, HANDLE,
 };
 use windows::Win32::Storage::FileSystem::{
     COPY_FILE_COPY_SYMLINK, COPY_FILE_FAIL_IF_EXISTS, COPYFILE2_CALLBACK_CHUNK_FINISHED, COPYFILE2_EXTENDED_PARAMETERS,
@@ -19,19 +19,20 @@ use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, DeleteFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FindClose, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetFileAttributesExW,
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_NO_RECALL, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
+    FILE_WRITE_ATTRIBUTES, FileIdInfo, FindClose, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetFileAttributesExW,
     GetFileExInfoStandard, GetVolumeInformationW, GetVolumePathNameW, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, RemoveDirectoryW, SetFileAttributesW, SetFileTime,
     WIN32_FILE_ATTRIBUTE_DATA, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::SystemServices::{FILE_CASE_SENSITIVE_SEARCH, FILE_READ_ONLY_VOLUME, IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK};
+use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
 use windows::core::PCWSTR;
 
 use xdir_core::sys::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, VolumeInfo};
 
-/// `GetDriveTypeW` (de `Win32_System_WindowsProgramming`, que no se incluye por dos constantes).
-const DRIVE_REMOVABLE: u32 = 2;
+/// `GetDriveTypeW` (de `Win32_System_WindowsProgramming`, que no se incluye por una constante).
 const DRIVE_FIXED: u32 = 3;
 
 pub struct WinCopyPrims;
@@ -46,6 +47,7 @@ pub(crate) fn err_kind(code: u32) -> ErrKind {
         c if c == ERROR_FILE_TOO_LARGE.0 => ErrKind::TooBig,
         c if c == ERROR_FILE_EXISTS.0 || c == ERROR_ALREADY_EXISTS.0 => ErrKind::Exists,
         c if c == ERROR_REQUEST_ABORTED.0 => ErrKind::Cancelled,
+        c if c == ERROR_NOT_SAME_DEVICE.0 => ErrKind::CrossDevice,
         c => ErrKind::Other(std::io::Error::from_raw_os_error(c as i32).to_string()),
     }
 }
@@ -104,6 +106,47 @@ fn reparse_tag(p: &Path) -> Option<u32> {
         let _ = FindClose(h);
     }
     (find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0).then_some(find.dwReserved0)
+}
+
+/// Abre `p` sin pedir sus datos (ni bajarlo de la nube) para leer o escribir atributos.
+fn open_meta(p: &Path, access: u32) -> Result<HANDLE, CopyError> {
+    let wide = long_path(p);
+    unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OPEN_NO_RECALL,
+            None,
+        )
+    }
+    .map_err(|e| err(e, p))
+}
+
+/// Identidad del elemento: número de serie del disco y número de archivo (`FileIdInfo`, de 128
+/// bits en ReFS; si no está, el de 64 de `GetFileInformationByHandle`).
+fn file_id(p: &Path) -> Option<(u64, u64)> {
+    let h = open_meta(p, FILE_READ_ATTRIBUTES.0).ok()?;
+    let mut info = FILE_ID_INFO::default();
+    let id = unsafe { GetFileInformationByHandleEx(h, FileIdInfo, (&mut info as *mut FILE_ID_INFO).cast(), size_of::<FILE_ID_INFO>() as u32) }
+        .ok()
+        .map(|()| {
+            let b = info.FileId.Identifier;
+            let lo = u64::from_le_bytes(b[..8].try_into().unwrap());
+            let hi = u64::from_le_bytes(b[8..].try_into().unwrap());
+            (info.VolumeSerialNumber ^ hi.rotate_left(17), lo)
+        })
+        .or_else(|| {
+            let mut by = BY_HANDLE_FILE_INFORMATION::default();
+            unsafe { GetFileInformationByHandle(h, &mut by) }.ok()?;
+            Some((u64::from(by.dwVolumeSerialNumber), (u64::from(by.nFileIndexHigh) << 32) | u64::from(by.nFileIndexLow)))
+        });
+    unsafe {
+        let _ = CloseHandle(h);
+    }
+    id
 }
 
 fn filetime(ft: FILETIME) -> u64 {
@@ -181,7 +224,13 @@ impl CopyPrims for WinCopyPrims {
         };
         let size = if kind == ItemKind::File { (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow) } else { 0 };
         let cloud = FILE_ATTRIBUTE_OFFLINE.0 | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 | FILE_ATTRIBUTE_RECALL_ON_OPEN.0;
-        Ok(ItemStat { kind, size, modified: filetime(data.ftLastWriteTime), cloud_only: kind == ItemKind::File && attrs & cloud != 0 })
+        Ok(ItemStat {
+            kind,
+            size,
+            modified: filetime(data.ftLastWriteTime),
+            cloud_only: kind == ItemKind::File && attrs & cloud != 0,
+            file_id: file_id(p),
+        })
     }
 
     fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> {
@@ -214,7 +263,12 @@ impl CopyPrims for WinCopyPrims {
             id: OsString::from(root_text.to_lowercase()),
             label,
             case_insensitive: flags & FILE_CASE_SENSITIVE_SEARCH == 0,
-            has_trash: (drive == DRIVE_FIXED || drive == DRIVE_REMOVABLE) && flags & FILE_READ_ONLY_VOLUME == 0,
+            // Los extraíbles y los de red no tienen Papelera (mandar ahí lo borra): solo discos
+            // fijos donde el sistema la informa.
+            has_trash: drive == DRIVE_FIXED && flags & FILE_READ_ONLY_VOLUME == 0 && {
+                let mut q = SHQUERYRBINFO { cbSize: size_of::<SHQUERYRBINFO>() as u32, ..Default::default() };
+                unsafe { SHQueryRecycleBinW(PCWSTR(root.as_ptr()), &mut q) }.is_ok()
+            },
             max_file: fs_name.eq_ignore_ascii_case("FAT32").then_some((4u64 << 30) - 1),
             free,
         })
@@ -297,6 +351,16 @@ impl CopyPrims for WinCopyPrims {
         unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }.map_err(|e| err(e, to))
     }
 
+    /// `FlushFileBuffers`: que la copia esté en el disco antes de borrar el original al mover.
+    fn sync(&self, p: &Path) -> Result<(), CopyError> {
+        let h = open_meta(p, FILE_GENERIC_WRITE.0)?;
+        let r = unsafe { FlushFileBuffers(h) };
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+        r.map_err(|e| err(e, p))
+    }
+
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
         let data = attr_data(p)?;
         let wide = long_path(p);
@@ -311,18 +375,34 @@ impl CopyPrims for WinCopyPrims {
         delete_file(p)
     }
 
+    /// Devuelve «nombre en la Papelera» + `\n` + de dónde salió (el motor manda a la Papelera lo
+    /// apartado con un nombre temporal; `untrash` lo lleva después a donde corresponde). Si el
+    /// sistema no lo mandó a la Papelera, es un error: «se borró definitivamente» si ya no está.
     fn trash(&self, p: &Path) -> Result<String, CopyError> {
         let _com = Com::new();
-        super::win32::recycle_one(p).map_err(|e| err(e, p))
+        match super::win32::recycle_one(p) {
+            Ok(Some(in_bin)) => Ok(format!("{in_bin}\n{}", p.display())),
+            Ok(None) | Err(_) if attr_data(p).is_err() => {
+                Err(CopyError::new(ErrKind::Other("Se borró definitivamente (no entraba en la Papelera)".into()), p))
+            }
+            Ok(None) => Err(CopyError::new(ErrKind::Other("No se mandó a la Papelera".into()), p)),
+            Err(e) => Err(err(e, p)),
+        }
     }
 
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {
         if attr_data(original).is_ok() {
             return Err(CopyError::new(ErrKind::Exists, original));
         }
+        let (in_bin, from) = in_trash.split_once('\n').map_or((in_trash, None), |(a, b)| (a, Some(Path::new(b))));
         let _com = Com::new();
-        // «Restaurar» del Shell: vuelve a su lugar original (que es `original`).
-        super::win32::restore_from_recycle_bin(in_trash).map_err(|e| err(e, original))
+        // «Restaurar» del Shell: vuelve a donde estaba al mandarlo; si era un nombre temporal, de
+        // ahí al lugar pedido (sin pisar).
+        super::win32::restore_from_recycle_bin(in_bin).map_err(|e| err(e, original))?;
+        match from {
+            Some(from) if from != original => self.rename_noreplace(from, original),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -471,6 +551,7 @@ mod tests {
         assert_eq!(err_kind(ERROR_FILE_EXISTS.0), ErrKind::Exists);
         assert_eq!(err_kind(ERROR_ALREADY_EXISTS.0), ErrKind::Exists);
         assert_eq!(err_kind(ERROR_REQUEST_ABORTED.0), ErrKind::Cancelled);
+        assert_eq!(err_kind(ERROR_NOT_SAME_DEVICE.0), ErrKind::CrossDevice);
         assert!(matches!(err_kind(1117), ErrKind::Other(_)));
         // Los HRESULT de Win32 se traducen por su código.
         let e = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(ERROR_SHARING_VIOLATION.0));

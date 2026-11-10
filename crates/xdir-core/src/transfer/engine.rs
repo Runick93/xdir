@@ -1,11 +1,15 @@
 //! El motor: corre un `JobSpec` con las primitivas del sistema y manda `Update`s.
 //!
 //! Reglas que cuidan los datos:
-//! - nada se pisa sin preguntar; «Reemplazar» un archivo copia a un temporal oculto en la carpeta
-//!   destino y recién al terminar bien lo pone en lugar del otro (atómico); lo reemplazado va a la
-//!   Papelera si el disco tiene (si no, lo borra el reemplazo);
-//! - mover entre discos es copiar, verificar el tamaño y recién ahí borrar el original, archivo
-//!   por archivo; las carpetas de origen se borran solo si quedaron vacías;
+//! - nada se pisa sin preguntar, tampoco el mismo elemento por otro camino (se compara la
+//!   identidad de los archivos, no solo las rutas);
+//! - «Reemplazar» nunca toca lo que está hasta que lo nuevo está listo: un archivo se copia a un
+//!   temporal oculto en la carpeta destino; recién entonces lo que estaba se aparta (renombrado sin
+//!   pisar), el temporal toma su nombre y lo apartado va a la Papelera (si el disco no tiene, se
+//!   borra). Una carpeta se aparta antes de llenar la nueva y, si algo falla o se cancela, vuelve;
+//! - mover entre discos es copiar, verificar el tamaño, ver que el original no cambió, dejar la
+//!   copia guardada en el disco y recién ahí borrar el original, archivo por archivo; las carpetas
+//!   de origen se borran solo si quedaron vacías;
 //! - mover dentro del mismo disco es renombrar (no lee contenido);
 //! - lo a medio copiar lo borra la primitiva; el temporal de un reemplazo lo borra el motor;
 //! - cada error se anota y se sigue, salvo «El disco está lleno», que detiene el trabajo.
@@ -29,6 +33,7 @@ const INTO_ITSELF: &str = "No se puede copiar una carpeta dentro de sí misma";
 const NOT_SAME: &str = "La copia no quedó igual";
 const NO_ORIGIN: &str = "No se sabe de dónde vino";
 const REPLACE_PARENT: &str = "No se puede reemplazar una carpeta que contiene lo que se copia";
+const CHANGED: &str = "El original cambió durante la copia";
 
 /// Título del trabajo para la ventana de copia; `items`: cuántos elementos de arriba.
 pub fn title(spec: &JobSpec, items: u64) -> String {
@@ -78,7 +83,7 @@ pub fn run(spec: JobSpec, prims: &dyn CopyPrims, ctl: &Control, out: &mut dyn Fn
         }
         JobSpec::Retry { moving, pairs } => {
             let t = title(&JobSpec::Retry { moving, pairs: pairs.clone() }, pairs.len() as u64);
-            let items = pairs.iter().map(|(src, dst)| job.item_to(src, dst.clone(), moving)).collect();
+            let items = job.plan_retry(&pairs, moving);
             job.run_items(t, items, moving);
         }
         JobSpec::NewFolderWith { parent, items } => job.new_folder_with(&parent, &items),
@@ -137,11 +142,10 @@ enum Decision {
     Fresh(PathBuf),
     /// Entrar en la carpeta que ya está.
     Merge(PathBuf),
-    /// Reemplazar el archivo que ya está (por un temporal).
-    ReplaceFile(PathBuf),
-    /// Escribir en esa ruta, que se liberó apartando lo que había (a un temporal oculto, en
-    /// discos sin Papelera): al terminar se borra si salió todo bien o se devuelve.
-    FreshAside(PathBuf, PathBuf),
+    /// Reemplazar lo que está en esa ruta: se aparta (renombrado sin pisar) recién cuando lo nuevo
+    /// está listo para ponerse (archivos) o antes de empezar a llenar la carpeta nueva; lo
+    /// apartado va a la Papelera cuando lo nuevo ya está en su lugar, o vuelve si algo falla.
+    Replace(PathBuf),
 }
 
 /// Una carpeta abierta mientras se copia su contenido.
@@ -151,7 +155,17 @@ struct Frame {
     dst: PathBuf,
     created: bool,
     errors_before: usize,
+    /// «Reemplazar» una carpeta: dónde quedó apartada la que estaba.
     aside: Option<PathBuf>,
+    /// Anotar el deshacer al cerrar (después de lo apartado, así se deshace en el orden justo).
+    record_later: bool,
+}
+
+/// Resultado de mover renombrando.
+enum Renamed {
+    Done(Option<PathBuf>),
+    /// El sistema dice que es otro disco: hay que copiar.
+    CrossDevice,
 }
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -183,6 +197,7 @@ struct Job<'a> {
     dir_all: Option<Choice>,
     cancelled: bool,
     stopped: Option<String>,
+    skipped: Vec<PathBuf>,
     /// Conflictos de arriba que se ven por delante (por índice de elemento).
     ahead: Vec<bool>,
     index: usize,
@@ -209,6 +224,7 @@ impl<'a> Job<'a> {
             dir_all: None,
             cancelled: false,
             stopped: None,
+            skipped: Vec::new(),
             ahead: Vec::new(),
             index: 0,
             moves_as_created: false,
@@ -217,6 +233,18 @@ impl<'a> Job<'a> {
 
     fn halted(&self) -> bool {
         self.cancelled || self.stopped.is_some()
+    }
+
+    /// ¿Hay que cortar? (cancelado, disco lleno o en pausa hasta que siga).
+    fn should_stop(&mut self) -> bool {
+        if self.halted() {
+            return true;
+        }
+        if self.ctl.checkpoint() == Flow::Stop {
+            self.cancelled = true;
+            return true;
+        }
+        false
     }
 
     // ---------- avisos ----------
@@ -240,7 +268,13 @@ impl<'a> Job<'a> {
         let undo = (!self.undo.is_empty()).then(|| Undo::Batch(std::mem::take(&mut self.undo)));
         let focus = self.focus.take().or_else(|| self.select.last().cloned());
         let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, select: std::mem::take(&mut self.select) };
-        let outcome = JobOutcome { result, errors: std::mem::take(&mut self.errors), stopped: self.stopped.take(), cancelled: self.cancelled };
+        let outcome = JobOutcome {
+            result,
+            errors: std::mem::take(&mut self.errors),
+            stopped: self.stopped.take(),
+            cancelled: self.cancelled,
+            skipped: std::mem::take(&mut self.skipped),
+        };
         (self.out)(Update::Finished(outcome));
     }
 
@@ -258,14 +292,15 @@ impl<'a> Job<'a> {
             ErrKind::Cancelled => self.cancelled = true,
             ErrKind::DiskFull => {
                 self.stopped = Some(e.message());
-                self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message() });
+                self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true });
             }
-            _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message() }),
+            _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true }),
         }
     }
 
-    fn fail_msg(&mut self, src: &Path, dst: &Path, message: &str) {
-        self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: message.into() });
+    /// Un error con su texto; `retry`: «Reintentar» lo vuelve a intentar (no, si es un aviso).
+    fn fail_msg(&mut self, src: &Path, dst: &Path, message: &str, retry: bool) {
+        self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: message.into(), retry });
     }
 
     /// Anota un paso de deshacer, juntándolo con el anterior si es del mismo tipo.
@@ -296,15 +331,18 @@ impl<'a> Job<'a> {
         self.prims.stat(p).ok()
     }
 
-    fn same_volume(&self, a: &Path, b: &Path) -> bool {
+    /// ¿Mismo disco? `None` si no se sabe (se intenta renombrar y, si el sistema dice que es otro
+    /// disco, se copia).
+    fn same_volume(&self, a: &Path, b: &Path) -> Option<bool> {
         match (self.prims.volume(a), self.prims.volume(b)) {
-            (Some(x), Some(y)) => x.id == y.id,
-            _ => false,
+            (Some(x), Some(y)) => Some(x.id == y.id),
+            _ => None,
         }
     }
 
+    /// Sin saber del disco, se compara sin mayúsculas (más conflictos, nunca menos).
     fn case_insensitive(&self, p: &Path) -> bool {
-        self.prims.volume(p).is_some_and(|v| v.case_insensitive)
+        self.prims.volume(p).is_none_or(|v| v.case_insensitive)
     }
 
     /// ¿Es la misma ruta? (sin distinguir mayúsculas donde el disco no las distingue).
@@ -312,26 +350,41 @@ impl<'a> Job<'a> {
         a == b || (self.case_insensitive(a) && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase())
     }
 
+    /// ¿Es la misma carpeta? (por la ruta o por la identidad: otro camino a la misma).
+    fn same_dir(&self, a: &Path, b: &Path) -> bool {
+        self.same_path(a, b) || matches!((self.exists(a), self.exists(b)), (Some(x), Some(y)) if x.same_item(&y))
+    }
+
     /// ¿`inner` está dentro de `outer` (o es la misma)?
     fn inside(&self, inner: &Path, outer: &Path) -> bool {
         if inner.starts_with(outer) {
             return true;
         }
-        if !self.case_insensitive(outer) {
-            return false;
+        if self.case_insensitive(outer) {
+            let (i, o) = (inner.to_string_lossy().to_lowercase(), outer.to_string_lossy().to_lowercase());
+            if Path::new(&i).starts_with(Path::new(&o)) {
+                return true;
+            }
         }
-        let (i, o) = (inner.to_string_lossy().to_lowercase(), outer.to_string_lossy().to_lowercase());
-        Path::new(&i).starts_with(Path::new(&o))
+        // Otro camino a la misma carpeta: alguna de arriba de `inner` es `outer`.
+        let Some(target) = self.exists(outer).filter(|s| s.kind == ItemKind::Dir && s.file_id.is_some()) else { return false };
+        inner.ancestors().any(|a| self.exists(a).is_some_and(|s| s.same_item(&target)))
     }
 
-    fn has_trash(&self, p: &Path) -> bool {
-        self.prims.volume(p).is_some_and(|v| v.has_trash)
+    /// ¿El disco tiene Papelera? `None` si no se sabe.
+    fn has_trash(&self, p: &Path) -> Option<bool> {
+        let dir = p.parent().unwrap_or(p);
+        self.prims.volume(dir).map(|v| v.has_trash)
     }
 
     fn free_numbered(&self, dst: &Path, is_dir: bool) -> PathBuf {
         let name = name_of(dst);
         let parent = dst.parent().unwrap_or(Path::new(""));
         free_name(parent, &|n| numbered_name(&name, is_dir, n.max(2)), &|p| self.exists(p).is_some())
+    }
+
+    fn free_copy(&self, dir: &Path, name: &str, is_dir: bool) -> PathBuf {
+        free_name(dir, &|n| copy_name(name, is_dir, n), &|p| self.exists(p).is_some())
     }
 
     // ---------- armar los trabajos ----------
@@ -342,11 +395,10 @@ impl<'a> Job<'a> {
         for src in sources {
             let Some(name) = src.file_name() else { continue };
             if self.inside(dest, src) {
-                self.fail_msg(src, &dest.join(name), INTO_ITSELF);
+                self.fail_msg(src, &dest.join(name), INTO_ITSELF, false);
                 continue;
             }
-            let same_folder = src.parent().is_some_and(|p| self.same_path(p, dest));
-            if same_folder {
+            if src.parent().is_some_and(|p| self.same_dir(p, dest)) {
                 // Mover a la misma carpeta no hace nada; copiar ahí es duplicar.
                 if !moving {
                     items.push(Item::new(src, Target::Duplicate(dest.to_path_buf()), How::Walk(None)));
@@ -359,8 +411,32 @@ impl<'a> Job<'a> {
     }
 
     fn item_to(&self, src: &Path, dst: PathBuf, moving: bool) -> Item {
-        let rename = moving && dst.parent().is_some_and(|parent| self.same_volume(src, parent));
+        let rename = moving && dst.parent().is_some_and(|parent| self.same_volume(src, parent) != Some(false));
         Item::new(src, Target::Fixed(dst), if rename { How::Rename } else { How::Walk(None) })
+    }
+
+    /// «Reintentar»: los pares que fallaron, con las mismas comprobaciones de entrada.
+    fn plan_retry(&mut self, pairs: &[(PathBuf, PathBuf)], moving: bool) -> Vec<Item> {
+        let mut items = Vec::new();
+        for (src, dst) in pairs {
+            if dst.parent().is_some_and(|d| self.inside(d, src)) {
+                self.fail_msg(src, dst, INTO_ITSELF, false);
+                continue;
+            }
+            items.push(self.item_to(src, dst.clone(), moving));
+        }
+        items
+    }
+
+    /// Anota los errores del recorrido de `item`, con el destino que les tocaba.
+    fn walk_errors(&mut self, item: &Item, errors: Vec<CopyError>) {
+        let hint = self.target_hint(item);
+        let (base, dst_base) = (item.src.parent().map(Path::to_path_buf).unwrap_or_default(), hint.parent().map(Path::to_path_buf).unwrap_or_default());
+        for e in errors {
+            let dst = e.path.strip_prefix(&base).map(|rel| dst_base.join(rel)).unwrap_or_else(|_| hint.clone());
+            let src = e.path.clone();
+            self.fail(&src, &dst, e);
+        }
     }
 
     /// Recorre, cuenta, comprueba espacio y tamaños, y lleva cada elemento.
@@ -369,12 +445,13 @@ impl<'a> Job<'a> {
         let mut seen_before = 0u64;
         let mut keep = Vec::with_capacity(items.len());
         for mut item in items.drain(..) {
-            if let How::Walk(plan @ None) = &mut item.how {
+            if matches!(item.how, How::Walk(None)) {
                 let mut on_seen = |n: u64| (self.out)(Update::Preparing { items: seen_before + n });
                 match walk(self.prims, &item.src, self.ctl, &mut on_seen) {
-                    Ok(p) => {
-                        seen_before += p.len() as u64;
-                        *plan = Some(p);
+                    Ok((plan, errors)) => {
+                        seen_before += plan.len() as u64;
+                        item.how = How::Walk(Some(plan));
+                        self.walk_errors(&item, errors);
                     }
                     Err(e) => {
                         let dst = self.target_hint(&item);
@@ -394,7 +471,7 @@ impl<'a> Job<'a> {
         }
 
         // Archivos demasiado grandes para el disco de destino: error de entrada.
-        let mut needed: HashMap<std::ffi::OsString, (u64, String, u64, PathBuf)> = HashMap::new();
+        let mut needed: HashMap<std::ffi::OsString, (u64, String, u64)> = HashMap::new();
         let (mut total_items, mut total_bytes) = (0u64, 0u64);
         for item in &mut items {
             let hint = self.target_hint(item);
@@ -421,8 +498,7 @@ impl<'a> Job<'a> {
                     total_items += n;
                     total_bytes += bytes;
                     if let Some(v) = vol {
-                        let e = needed.entry(v.id.clone()).or_insert((0, v.label.clone(), v.free, dir.clone()));
-                        e.0 += bytes;
+                        needed.entry(v.id.clone()).or_insert((0, v.label.clone(), v.free)).0 += bytes;
                     }
                 }
                 How::Walk(None) => {}
@@ -430,7 +506,7 @@ impl<'a> Job<'a> {
         }
 
         // Espacio: si no alcanza, no empieza.
-        if let Some((bytes, label, free, _)) = needed.values().find(|(bytes, _, free, _)| bytes > free) {
+        if let Some((bytes, label, free)) = needed.values().find(|(bytes, _, free)| bytes > free) {
             let missing = sys::env().format_size_short(bytes - free);
             self.stopped = Some(format!("Faltan {missing} en \"{label}\""));
             return;
@@ -443,8 +519,7 @@ impl<'a> Job<'a> {
             .collect();
         for (i, item) in items.into_iter().enumerate() {
             self.index = i;
-            if self.halted() || self.ctl.checkpoint() == Flow::Stop {
-                self.cancelled |= self.ctl.is_cancelled();
+            if self.should_stop() {
                 break;
             }
             self.process(item, moving);
@@ -462,46 +537,44 @@ impl<'a> Job<'a> {
     /// Lleva un elemento de arriba.
     fn process(&mut self, item: Item, moving: bool) {
         self.current = name_of(&item.src);
-        let hint = self.target_hint(&item);
-        match item.how {
-            How::Rename => {
-                let Target::Fixed(dst) = item.target else { return };
-                if let Some(done) = self.rename_tree(&item.src, &dst) {
-                    self.select.push(done);
-                }
-                self.items_done += 1;
-                self.progress(0, false);
-            }
-            How::Walk(plan) => {
-                let plan = match plan {
-                    Some(p) => p,
-                    None => match walk(self.prims, &item.src, self.ctl, &mut |_| {}) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            self.fail(&item.src, &hint, e);
-                            return;
-                        }
-                    },
-                };
-                if plan.is_empty() {
+        if let (How::Rename, Target::Fixed(dst)) = (&item.how, &item.target) {
+            match self.rename_tree(&item.src, dst) {
+                Renamed::Done(done) => {
+                    self.select.extend(done);
+                    self.items_done += 1;
+                    self.progress(0, false);
                     return;
                 }
-                let first = match &item.target {
-                    Target::Fixed(dst) => Some(dst.clone()),
-                    Target::Duplicate(dir) => {
-                        let (name, is_dir) = (name_of(&item.src), plan[0].stat.kind == ItemKind::Dir);
-                        let dst = free_name(dir, &|n| copy_name(&name, is_dir, n), &|p| self.exists(p).is_some());
-                        // Elegido libre: nunca es conflicto.
-                        self.copy_tree(plan, Decision::Fresh(dst), moving);
-                        return;
-                    }
-                };
-                if let Some(dst) = first {
-                    let decision = self.decide(&plan[0].src, &plan[0].stat, &dst, moving);
-                    self.copy_tree(plan, decision, moving);
-                }
+                // No era el mismo disco: se copia (y se borra el original archivo por archivo).
+                Renamed::CrossDevice => {}
             }
         }
+        let plan = match item.how {
+            How::Walk(Some(p)) => p,
+            _ => match walk(self.prims, &item.src, self.ctl, &mut |_| {}) {
+                Ok((p, errors)) => {
+                    self.walk_errors(&item, errors);
+                    p
+                }
+                Err(e) => {
+                    let hint = self.target_hint(&item);
+                    self.fail(&item.src, &hint, e);
+                    return;
+                }
+            },
+        };
+        let Some(first) = plan.first() else { return };
+        let decision = match &item.target {
+            Target::Duplicate(dir) => {
+                // Elegido libre: nunca es conflicto.
+                Decision::Fresh(self.free_copy(dir, &name_of(&item.src), first.stat.kind == ItemKind::Dir))
+            }
+            Target::Fixed(dst) => {
+                let (src, stat) = (first.src.clone(), first.stat);
+                self.decide(&src, &stat, dst, moving)
+            }
+        };
+        self.copy_tree(plan, decision, moving);
     }
 
     // ---------- conflictos ----------
@@ -509,14 +582,15 @@ impl<'a> Job<'a> {
     /// Decide qué hacer con `dst` (si existe, pregunta o usa «Hacer esto con todos»).
     fn decide(&mut self, src: &Path, incoming: &ItemStat, dst: &Path, moving: bool) -> Decision {
         let Some(existing) = self.exists(dst) else { return Decision::Fresh(dst.to_path_buf()) };
-        if self.same_path(src, dst) {
-            // El mismo elemento: mover no hace nada; copiar sería pisarlo.
-            if !moving {
-                self.fail_msg(src, dst, "No se puede copiar un elemento sobre sí mismo");
-            }
-            return Decision::Skip;
-        }
         let is_dir = incoming.kind == ItemKind::Dir;
+        if self.same_path(src, dst) || incoming.same_item(&existing) {
+            // El mismo elemento (quizás por otro camino): mover no hace nada; copiar duplica.
+            if moving {
+                return Decision::Skip;
+            }
+            let dir = dst.parent().unwrap_or(Path::new(""));
+            return Decision::Fresh(self.free_copy(dir, &name_of(dst), is_dir));
+        }
         let can_merge = is_dir && existing.kind == ItemKind::Dir;
         let stored = if is_dir { self.dir_all } else { self.file_all };
         let choice = match stored {
@@ -526,39 +600,18 @@ impl<'a> Job<'a> {
         };
         let Some(choice) = choice else { return Decision::Skip };
         match choice {
-            Choice::Skip => Decision::Skip,
+            Choice::Skip => {
+                self.skipped.push(src.to_path_buf());
+                Decision::Skip
+            }
             Choice::Merge if can_merge => Decision::Merge(dst.to_path_buf()),
             Choice::KeepBoth | Choice::Merge => Decision::Fresh(self.free_numbered(dst, is_dir)),
             Choice::Replace => {
                 if self.inside(src, dst) {
-                    self.fail_msg(src, dst, REPLACE_PARENT);
+                    self.fail_msg(src, dst, REPLACE_PARENT, false);
                     return Decision::Skip;
                 }
-                if !is_dir && existing.kind != ItemKind::Dir {
-                    return Decision::ReplaceFile(dst.to_path_buf());
-                }
-                // Hay una carpeta en juego: lo que está se aparta entero.
-                if self.has_trash(dst) {
-                    match self.prims.trash(dst) {
-                        Ok(name) => {
-                            self.record(Undo::Recycled(vec![(name, dst.to_path_buf())]));
-                            Decision::Fresh(dst.to_path_buf())
-                        }
-                        Err(e) => {
-                            self.fail(src, dst, e);
-                            Decision::Skip
-                        }
-                    }
-                } else {
-                    let aside = tmp_in(dst.parent().unwrap_or(Path::new("")));
-                    match self.prims.rename_noreplace(dst, &aside) {
-                        Ok(()) => Decision::FreshAside(dst.to_path_buf(), aside),
-                        Err(e) => {
-                            self.fail(src, dst, e);
-                            Decision::Skip
-                        }
-                    }
-                }
+                Decision::Replace(dst.to_path_buf())
             }
         }
     }
@@ -567,6 +620,8 @@ impl<'a> Job<'a> {
         let remaining = self.ahead.iter().skip(self.index + 1).filter(|c| **c).count();
         let folder = dst.parent().map(name_of).unwrap_or_default();
         let info = ConflictInfo { name: name_of(src), folder, is_dir, can_merge, incoming: *incoming, existing, remaining };
+        // Una respuesta que llegó tarde a otro conflicto no vale para este.
+        self.ctl.clear_answer();
         (self.out)(Update::Conflict(info));
         let Some(Answer { choice, all }) = self.ctl.wait_answer() else {
             self.cancelled = true;
@@ -584,6 +639,55 @@ impl<'a> Job<'a> {
         Some(choice)
     }
 
+    // ---------- lo reemplazado ----------
+
+    /// Aparta lo que está en `dst` (renombrado sin pisar a un temporal oculto al lado).
+    fn set_aside(&mut self, src: &Path, dst: &Path) -> Option<PathBuf> {
+        let aside = tmp_in(dst.parent().unwrap_or(Path::new("")));
+        match self.prims.rename_noreplace(dst, &aside) {
+            Ok(()) => Some(aside),
+            Err(e) => {
+                self.fail(src, dst, e);
+                None
+            }
+        }
+    }
+
+    /// Devuelve lo apartado a `dst`; si no se puede, lo deja a la vista con otro nombre.
+    fn put_back(&mut self, aside: &Path, dst: &Path) {
+        if self.prims.rename_noreplace(aside, dst).is_err() {
+            self.keep_visible(aside, dst, "Lo que estaba antes quedó como");
+        }
+    }
+
+    /// Lo apartado queda al lado de `dst` con un nombre libre a la vista («informe 2.pdf»).
+    fn keep_visible(&mut self, aside: &Path, dst: &Path, why: &str) {
+        let is_dir = self.exists(aside).is_some_and(|s| s.kind == ItemKind::Dir);
+        let keep = self.free_numbered(dst, is_dir);
+        let shown = if self.prims.rename_noreplace(aside, &keep).is_ok() { keep } else { aside.to_path_buf() };
+        self.fail_msg(dst, &shown, &format!("{why} «{}»", name_of(&shown)), false);
+    }
+
+    /// Lo nuevo ya está en `dst`: lo apartado va a la Papelera (si el disco no tiene, se borra,
+    /// que es lo que pidió «Reemplazar»). Si la Papelera falla, queda a la vista y se avisa.
+    fn dispose_aside(&mut self, aside: &Path, dst: &Path) {
+        if self.has_trash(dst) == Some(false) {
+            self.remove_tree(aside);
+            return;
+        }
+        match self.prims.trash(aside) {
+            Ok(name) => self.record(Undo::Recycled(vec![(name, dst.to_path_buf())])),
+            Err(e) => {
+                if self.exists(aside).is_some() {
+                    self.keep_visible(aside, dst, "No se pudo mandar a la Papelera lo que estaba antes: quedó como");
+                } else {
+                    let msg = format!("Lo que estaba antes no entró en la Papelera y se borró ({})", e.message());
+                    self.fail_msg(dst, dst, &msg, false);
+                }
+            }
+        }
+    }
+
     // ---------- copiar (o mover entre discos) elemento por elemento ----------
 
     fn copy_tree(&mut self, plan: Vec<Planned>, first: Decision, moving: bool) {
@@ -599,9 +703,7 @@ impl<'a> Job<'a> {
                 let frame = stack.pop().unwrap();
                 self.close_dir(frame, moving);
             }
-            if self.halted() || self.ctl.checkpoint() == Flow::Stop {
-                self.cancelled |= self.ctl.is_cancelled();
-                // Lo que queda no se cuenta como hecho.
+            if self.should_stop() {
                 break;
             }
             self.current = name_of(&item.src);
@@ -623,9 +725,10 @@ impl<'a> Job<'a> {
             };
             let record = !parent_created;
             let size = if item.stat.kind == ItemKind::File { item.stat.size } else { 0 };
+            let is_dir = item.stat.kind == ItemKind::Dir;
             match decision {
                 Decision::Skip => {
-                    if item.stat.kind == ItemKind::Dir {
+                    if is_dir {
                         dests.insert(item.rel.clone(), None);
                     }
                 }
@@ -635,29 +738,25 @@ impl<'a> Job<'a> {
                         self.select.push(dst.clone());
                     }
                     let errors_before = self.errors.len();
-                    stack.push(Frame { rel: item.rel.clone(), src: item.src.clone(), dst, created: false, errors_before, aside: None });
+                    stack.push(Frame { rel: item.rel.clone(), src: item.src.clone(), dst, created: false, errors_before, aside: None, record_later: false });
                 }
-                Decision::Fresh(dst) if item.stat.kind == ItemKind::Dir => {
-                    self.open_dir(&item, dst, None, moving, record, is_root, &mut dests, &mut stack);
-                }
-                Decision::FreshAside(dst, aside) if item.stat.kind == ItemKind::Dir => {
-                    // Lo apartado se resuelve al cerrar la carpeta.
-                    self.open_dir(&item, dst, Some(aside), moving, record, is_root, &mut dests, &mut stack);
+                Decision::Fresh(dst) if is_dir => self.open_dir(&item, dst, None, moving, record, is_root, &mut dests, &mut stack),
+                Decision::Replace(dst) if is_dir => {
+                    // La carpeta que estaba se aparta entera antes de llenar la nueva; vuelve si
+                    // algo falla.
+                    match self.set_aside(&item.src, &dst) {
+                        Some(aside) => self.open_dir(&item, dst, Some(aside), moving, record, is_root, &mut dests, &mut stack),
+                        None => {
+                            dests.insert(item.rel.clone(), None);
+                        }
+                    }
                 }
                 Decision::Fresh(dst) => {
                     if self.copy_one(&item, &dst, moving, record) && is_root {
                         self.select.push(dst);
                     }
                 }
-                Decision::FreshAside(dst, aside) => {
-                    // Un archivo en lugar de una carpeta, en un disco sin Papelera.
-                    let ok = self.copy_one(&item, &dst, moving, record);
-                    if ok && is_root {
-                        self.select.push(dst.clone());
-                    }
-                    self.settle_aside(&dst, &aside, ok);
-                }
-                Decision::ReplaceFile(dst) => {
+                Decision::Replace(dst) => {
                     if self.replace_one(&item, &dst, moving, record) && is_root {
                         self.select.push(dst);
                     }
@@ -672,7 +771,8 @@ impl<'a> Job<'a> {
         }
     }
 
-    /// Crea la carpeta `dst` (libre) para `item` y la abre para su contenido.
+    /// Crea la carpeta `dst` (libre) para `item` y la abre para su contenido. `aside`: la que
+    /// estaba, apartada por «Reemplazar».
     #[allow(clippy::too_many_arguments)]
     fn open_dir(
         &mut self,
@@ -687,7 +787,9 @@ impl<'a> Job<'a> {
     ) {
         match self.prims.create_dir(&dst) {
             Ok(()) => {
-                if record {
+                // Con algo apartado, el deshacer se anota al cerrar (después de la Papelera).
+                let record_later = record && aside.is_some();
+                if record && aside.is_none() {
                     self.record_done(&item.src, &dst, moving);
                 }
                 if is_root {
@@ -695,13 +797,13 @@ impl<'a> Job<'a> {
                 }
                 dests.insert(item.rel.clone(), Some((dst.clone(), true)));
                 let errors_before = self.errors.len();
-                stack.push(Frame { rel: item.rel.clone(), src: item.src.clone(), dst, created: true, errors_before, aside });
+                stack.push(Frame { rel: item.rel.clone(), src: item.src.clone(), dst, created: true, errors_before, aside, record_later });
             }
             Err(e) => {
                 self.fail(&item.src, &dst, e);
                 dests.insert(item.rel.clone(), None);
                 if let Some(aside) = aside {
-                    self.settle_aside(&dst, &aside, false);
+                    self.put_back(&aside, &dst);
                 }
             }
         }
@@ -714,8 +816,18 @@ impl<'a> Job<'a> {
             self.fail(&item.src, dst, e);
             return false;
         }
-        if moving && !self.verified_remove(item, dst) {
-            return false;
+        if moving {
+            if !self.verify_move(item, dst, dst) {
+                return false;
+            }
+            if let Err(e) = self.prims.remove(&item.src) {
+                // Quedó copiado y el original sigue: se anota como copia (deshacer la borra).
+                self.fail(&item.src, dst, e);
+                if record {
+                    self.record(Undo::Created(vec![dst.to_path_buf()]));
+                }
+                return false;
+            }
         }
         if record {
             self.record_done(&item.src, dst, moving);
@@ -738,29 +850,33 @@ impl<'a> Job<'a> {
         }
     }
 
-    /// Al mover entre discos: comprueba que la copia en `dst` quedó igual y borra el original.
-    /// Si no quedó igual, borra la copia y el original queda.
-    fn verified_remove(&mut self, item: &Planned, dst: &Path) -> bool {
-        if item.stat.kind == ItemKind::File {
-            let copied = self.prims.stat(dst).map(|s| s.size).ok();
-            let original = self.prims.stat(&item.src).map(|s| s.size).ok();
-            if copied.is_none() || copied != original {
-                let _ = self.prims.remove(dst);
-                self.fail_msg(&item.src, dst, NOT_SAME);
-                return false;
+    /// Al mover entre discos, antes de borrar el original: la copia en `written` quedó del mismo
+    /// tamaño, el original no cambió mientras se copiaba y la copia está guardada en el disco. Si
+    /// algo no da, se borra la copia (el original queda) y se anota con `dst`.
+    fn verify_move(&mut self, item: &Planned, written: &Path, dst: &Path) -> bool {
+        if item.stat.kind != ItemKind::File {
+            return true;
+        }
+        let problem = match (self.prims.stat(written), self.prims.stat(&item.src)) {
+            (Ok(_), Ok(now)) if now.size != item.stat.size || now.modified != item.stat.modified => Some(CHANGED.to_string()),
+            (Ok(copy), Ok(now)) if copy.size != now.size => Some(NOT_SAME.to_string()),
+            (Ok(_), Ok(_)) => self.prims.sync(written).err().map(|e| e.message()),
+            (Err(_), _) => Some(NOT_SAME.to_string()),
+            (_, Err(e)) => Some(e.message()),
+        };
+        match problem {
+            None => true,
+            Some(msg) => {
+                let _ = self.prims.remove(written);
+                self.fail_msg(&item.src, dst, &msg, true);
+                false
             }
         }
-        if let Err(e) = self.prims.remove(&item.src) {
-            // Quedó copiado y el original sigue: se anota como copia (deshacer la borra).
-            self.fail(&item.src, dst, e);
-            self.record(Undo::Created(vec![dst.to_path_buf()]));
-            return false;
-        }
-        true
     }
 
-    /// «Reemplazar» un archivo: copia a un temporal en la carpeta destino y recién al terminar
-    /// bien pone el temporal en lugar del que estaba (que va a la Papelera si el disco tiene).
+    /// «Reemplazar» con un archivo (o enlace): se copia a un temporal en la carpeta destino; recién
+    /// cuando está entero se aparta lo que estaba, se pone el temporal en su lugar y lo apartado va
+    /// a la Papelera. Si algo falla, lo que estaba vuelve.
     fn replace_one(&mut self, item: &Planned, dst: &Path, moving: bool, record: bool) -> bool {
         let tmp = tmp_in(dst.parent().unwrap_or(Path::new("")));
         if let Err(e) = self.write(item, &tmp) {
@@ -770,48 +886,30 @@ impl<'a> Job<'a> {
             self.fail(&item.src, dst, e);
             return false;
         }
-        if moving && item.stat.kind == ItemKind::File {
-            let copied = self.prims.stat(&tmp).map(|s| s.size).ok();
-            let original = self.prims.stat(&item.src).map(|s| s.size).ok();
-            if copied.is_none() || copied != original {
-                let _ = self.prims.remove(&tmp);
-                self.fail_msg(&item.src, dst, NOT_SAME);
-                return false;
-            }
+        if moving && !self.verify_move(item, &tmp, dst) {
+            return false;
         }
         if self.halted() || self.ctl.is_cancelled() {
             let _ = self.prims.remove(&tmp);
             self.cancelled = true;
             return false;
         }
-        if self.has_trash(dst) {
-            let name = match self.prims.trash(dst) {
-                Ok(name) => name,
-                Err(e) => {
-                    let _ = self.prims.remove(&tmp);
-                    self.fail(&item.src, dst, e);
-                    return false;
-                }
-            };
-            if let Err(e) = self.prims.replace(&tmp, dst) {
-                // Lo de antes vuelve a su lugar; si no se puede, queda en la Papelera (y en el
-                // deshacer).
-                if self.prims.untrash(&name, dst).is_err() {
-                    self.record(Undo::Recycled(vec![(name, dst.to_path_buf())]));
-                }
-                let _ = self.prims.remove(&tmp);
-                self.fail(&item.src, dst, e);
-                return false;
-            }
-            self.record(Undo::Recycled(vec![(name, dst.to_path_buf())]));
-        } else if let Err(e) = self.prims.replace(&tmp, dst) {
+        let Some(aside) = self.set_aside(&item.src, dst) else {
+            let _ = self.prims.remove(&tmp);
+            return false;
+        };
+        if let Err(e) = self.prims.rename_noreplace(&tmp, dst) {
+            self.put_back(&aside, dst);
             let _ = self.prims.remove(&tmp);
             self.fail(&item.src, dst, e);
             return false;
         }
+        self.dispose_aside(&aside, dst);
         if moving && let Err(e) = self.prims.remove(&item.src) {
             self.fail(&item.src, dst, e);
-            self.record(Undo::Created(vec![dst.to_path_buf()]));
+            if record {
+                self.record(Undo::Created(vec![dst.to_path_buf()]));
+            }
             return false;
         }
         if record {
@@ -821,7 +919,7 @@ impl<'a> Job<'a> {
     }
 
     /// Termina una carpeta: sus fechas y atributos, borra el origen vacío al mover y resuelve
-    /// lo apartado.
+    /// lo apartado por «Reemplazar» (a la Papelera si todo salió bien; si no, vuelve).
     fn close_dir(&mut self, frame: Frame, moving: bool) {
         if frame.created {
             let _ = self.prims.finish_dir(&frame.dst, &frame.src);
@@ -830,35 +928,46 @@ impl<'a> Job<'a> {
             // Solo si quedó vacía: si algo no se movió, queda con ella.
             let _ = self.prims.remove(&frame.src);
         }
-        if let Some(aside) = &frame.aside {
-            let ok = self.errors.len() == frame.errors_before && !self.halted();
-            self.settle_aside(&frame.dst, aside, ok);
-        }
-    }
-
-    /// Lo apartado (disco sin Papelera): si lo nuevo quedó bien, se borra; si no, vuelve a su
-    /// lugar o, si ya hay algo ahí, queda con un nombre libre.
-    fn settle_aside(&mut self, dst: &Path, aside: &Path, ok: bool) {
+        let Some(aside) = frame.aside else { return };
+        let ok = self.errors.len() == frame.errors_before && !self.halted();
         if ok {
-            self.remove_tree(aside);
+            self.dispose_aside(&aside, &frame.dst);
+            if frame.record_later {
+                self.record_done(&frame.src, &frame.dst, moving);
+            }
             return;
         }
-        if self.exists(dst).is_none() && self.prims.rename_noreplace(aside, dst).is_ok() {
-            return;
+        // Algo falló o se canceló: vuelve la carpeta que estaba.
+        self.select.retain(|p| p != &frame.dst);
+        if moving {
+            // Lo que ya se movió no tiene otra copia: queda a la vista con otro nombre.
+            let keep = self.free_numbered(&frame.dst, true);
+            match self.prims.rename_noreplace(&frame.dst, &keep) {
+                Ok(()) => {
+                    self.fail_msg(&frame.src, &keep, &format!("Lo que se llegó a mover quedó en «{}»", name_of(&keep)), false);
+                    self.record_done(&frame.src, &keep, true);
+                }
+                Err(_) => {
+                    self.keep_visible(&aside, &frame.dst, "Lo que estaba antes quedó como");
+                    return;
+                }
+            }
+        } else {
+            // Solo copias de este trabajo: se borran.
+            self.remove_tree(&frame.dst);
         }
-        let is_dir = self.exists(aside).is_some_and(|s| s.kind == ItemKind::Dir);
-        let keep = self.free_numbered(dst, is_dir);
-        match self.prims.rename_noreplace(aside, &keep) {
-            Ok(()) => self.fail_msg(dst, &keep, &format!("Lo que estaba antes quedó como «{}»", name_of(&keep))),
-            Err(_) => self.fail_msg(dst, aside, &format!("Lo que estaba antes quedó como «{}»", name_of(aside))),
-        }
+        self.put_back(&aside, &frame.dst);
     }
 
-    /// Borra un árbol (un temporal del motor), de adentro hacia afuera.
+    /// Borra un árbol (un temporal del motor o lo copiado a medias), de adentro hacia afuera.
     fn remove_tree(&mut self, root: &Path) {
         let never = Control::default();
         match walk(self.prims, root, &never, &mut |_| {}) {
-            Ok(items) => {
+            Ok((items, errors)) => {
+                for e in errors {
+                    let p = e.path.clone();
+                    self.fail(&p, &p, e);
+                }
                 for i in items.iter().rev() {
                     if let Err(e) = self.prims.remove(&i.src) {
                         self.fail(&i.src, &i.src, e);
@@ -871,90 +980,61 @@ impl<'a> Job<'a> {
 
     // ---------- mover en el mismo disco ----------
 
-    /// Renombra `src` a `dst` (mismo disco), con conflictos. Devuelve dónde quedó.
-    fn rename_tree(&mut self, src: &Path, dst: &Path) -> Option<PathBuf> {
-        if self.same_path(src, dst) {
-            return None;
-        }
+    /// Renombra `src` a `dst` (mismo disco), con conflictos.
+    fn rename_tree(&mut self, src: &Path, dst: &Path) -> Renamed {
         let incoming = match self.prims.stat(src) {
             Ok(s) => s,
             Err(e) => {
                 self.fail(src, dst, e);
-                return None;
+                return Renamed::Done(None);
             }
         };
         match self.decide(src, &incoming, dst, true) {
-            Decision::Skip => None,
-            Decision::Fresh(to) => self.rename_one(src, &to),
+            Decision::Skip => Renamed::Done(None),
+            Decision::Fresh(to) => match self.prims.rename_noreplace(src, &to) {
+                Ok(()) => {
+                    self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
+                    Renamed::Done(Some(to))
+                }
+                Err(e) if e.kind == ErrKind::CrossDevice => Renamed::CrossDevice,
+                Err(e) => {
+                    self.fail(src, &to, e);
+                    Renamed::Done(None)
+                }
+            },
             Decision::Merge(to) => {
                 match self.prims.read_dir(src) {
                     Ok(mut names) => {
                         names.sort();
                         for n in names {
-                            if self.halted() {
+                            if self.should_stop() {
                                 break;
                             }
-                            self.rename_tree(&src.join(&n), &to.join(&n));
+                            let (child, child_dst) = (src.join(&n), to.join(&n));
+                            if let Renamed::CrossDevice = self.rename_tree(&child, &child_dst) {
+                                self.fail(&child, &child_dst, CopyError::new(ErrKind::CrossDevice, &child));
+                            }
                         }
                         let _ = self.prims.remove(src);
                     }
                     Err(e) => self.fail(src, &to, e),
                 }
-                Some(to)
+                Renamed::Done(Some(to))
             }
-            Decision::ReplaceFile(to) => {
-                if self.has_trash(&to) {
-                    let name = match self.prims.trash(&to) {
-                        Ok(name) => name,
-                        Err(e) => {
-                            self.fail(src, &to, e);
-                            return None;
-                        }
-                    };
-                    match self.prims.rename_noreplace(src, &to) {
-                        Ok(()) => {
-                            self.record(Undo::Recycled(vec![(name, to.clone())]));
-                            self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
-                            Some(to)
-                        }
-                        Err(e) => {
-                            if self.prims.untrash(&name, &to).is_err() {
-                                self.record(Undo::Recycled(vec![(name, to.clone())]));
-                            }
-                            self.fail(src, &to, e);
-                            None
-                        }
+            Decision::Replace(to) => {
+                let Some(aside) = self.set_aside(src, &to) else { return Renamed::Done(None) };
+                match self.prims.rename_noreplace(src, &to) {
+                    Ok(()) => {
+                        self.dispose_aside(&aside, &to);
+                        self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
+                        Renamed::Done(Some(to))
                     }
-                } else {
-                    match self.prims.replace(src, &to) {
-                        Ok(()) => {
-                            self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
-                            Some(to)
-                        }
-                        Err(e) => {
-                            self.fail(src, &to, e);
-                            None
-                        }
+                    Err(e) => {
+                        self.put_back(&aside, &to);
+                        self.fail(src, &to, e);
+                        Renamed::Done(None)
                     }
                 }
-            }
-            Decision::FreshAside(to, aside) => {
-                let done = self.rename_one(src, &to);
-                self.settle_aside(&to, &aside, done.is_some());
-                done
-            }
-        }
-    }
-
-    fn rename_one(&mut self, src: &Path, to: &Path) -> Option<PathBuf> {
-        match self.prims.rename_noreplace(src, to) {
-            Ok(()) => {
-                self.record(Undo::Moved(vec![(to.to_path_buf(), src.to_path_buf())]));
-                Some(to.to_path_buf())
-            }
-            Err(e) => {
-                self.fail(src, to, e);
-                None
             }
         }
     }
@@ -977,8 +1057,7 @@ impl<'a> Job<'a> {
             .collect();
         for (i, item) in list.into_iter().enumerate() {
             self.index = i;
-            if self.halted() || self.ctl.checkpoint() == Flow::Stop {
-                self.cancelled |= self.ctl.is_cancelled();
+            if self.should_stop() {
                 break;
             }
             self.process(item, true);
@@ -1002,7 +1081,7 @@ impl<'a> Job<'a> {
         let mut list = Vec::new();
         for src in items {
             let Some(origin) = self.prims.trash_origin(src) else {
-                self.fail_msg(src, src, NO_ORIGIN);
+                self.fail_msg(src, src, NO_ORIGIN, false);
                 continue;
             };
             list.push((src.clone(), origin));
@@ -1011,8 +1090,7 @@ impl<'a> Job<'a> {
         self.ahead = list.iter().map(|(_, o)| self.exists(o).is_some()).collect();
         for (i, (src, origin)) in list.into_iter().enumerate() {
             self.index = i;
-            if self.halted() || self.ctl.checkpoint() == Flow::Stop {
-                self.cancelled |= self.ctl.is_cancelled();
+            if self.should_stop() {
                 break;
             }
             if let Some(dir) = origin.parent()
@@ -1050,8 +1128,7 @@ impl<'a> Job<'a> {
     // ---------- deshacer ----------
 
     fn undo(&mut self, undo: Undo) {
-        if self.halted() || self.ctl.checkpoint() == Flow::Stop {
-            self.cancelled |= self.ctl.is_cancelled();
+        if self.should_stop() {
             return;
         }
         match undo {
@@ -1068,7 +1145,6 @@ impl<'a> Job<'a> {
                     self.current = name_of(&now);
                     let item = self.item_to(&now, before, true);
                     self.process(item, true);
-                    self.items_done += 1;
                 }
             }
             Undo::Created(paths) => {

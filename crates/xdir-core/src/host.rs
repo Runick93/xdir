@@ -49,6 +49,8 @@ pub enum TextKind {
     Filter,
     /// Paleta: flechas, Re Pág / Av Pág, Enter, Escape y Ctrl+P van a la ventana.
     Palette,
+    /// Campo del panel de información (nombre, comentario, etiqueta nueva): perder el foco aplica.
+    Info,
 }
 
 impl TextKind {
@@ -60,6 +62,7 @@ impl TextKind {
             TextKind::FavRename => WM_APP_FAVEDIT_DONE,
             TextKind::Filter => WM_APP_FILTER_DONE,
             TextKind::Palette => WM_APP_PALETTE_KEY,
+            TextKind::Info => crate::info::WM_APP_INFO_EDIT_DONE,
         }
     }
 }

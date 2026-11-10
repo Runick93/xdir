@@ -500,7 +500,7 @@ impl WindowHost for Win32Host {
         let k = self.dpi() as f32 / 96.0;
         let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let mut style = WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
-        if matches!(kind, TextKind::Rename | TextKind::FavRename) {
+        if matches!(kind, TextKind::Rename | TextKind::FavRename | TextKind::Info) {
             style |= WS_BORDER;
         }
         unsafe {

@@ -43,10 +43,20 @@ struct Fingerprint {
     len: usize,
 }
 
+/// Quién ocupa el lugar de la derecha: la vista previa (si está prendida) o un panel que se abrió
+/// encima de ella (información). Al cerrarse el panel vuelve la vista previa si estaba prendida.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum RightPanel {
+    Preview,
+    Info,
+}
+
 /// Estado de la columna en la `App`.
 pub(super) struct PreviewState {
     /// Prendida (se ve salvo con xtree abierto).
     pub on: bool,
+    /// Quién ocupa el lugar (con otro dueño que la vista previa, se ve aunque esté apagada).
+    pub owner: RightPanel,
     /// Ancho elegido (240–640); el que se usa puede ser menor para no achicar los paneles.
     pub width: f32,
     pub(super) generation: u64,
@@ -74,6 +84,7 @@ impl PreviewState {
         let (tx, rx) = channel();
         PreviewState {
             on,
+            owner: RightPanel::Preview,
             width: width.clamp(ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W),
             generation: 0,
             current: Arc::new(AtomicU64::new(0)),
@@ -108,9 +119,9 @@ fn source_of(tab: &Tab, idx: usize) -> thumbs::Source {
 }
 
 impl App {
-    /// ¿Se ve la columna? (prendida y sin la vista de xtree encima).
+    /// ¿Se ve la columna? (prendida o con otro panel en su lugar, y sin la vista de xtree encima).
     pub(super) fn preview_visible(&self) -> bool {
-        if !self.preview.on || self.xtree_open {
+        if !(self.preview.on || self.preview.owner != RightPanel::Preview) || self.xtree_open {
             return false;
         }
         // Si ni el mínimo entra sin achicar los paneles, no se ve en este cuadro (sigue prendida).
@@ -164,13 +175,23 @@ impl App {
 
     /// Prende la columna (venía de xtree, donde no se veía).
     pub(super) fn show_preview(&mut self) {
+        if self.preview.owner != RightPanel::Preview {
+            self.close_info();
+        }
         self.preview.on = true;
         self.sync_preview();
         self.redraw();
     }
 
-    /// Prende o apaga la columna.
+    /// Prende o apaga la columna. Con otro panel en su lugar, lo cierra y muestra la vista previa.
     pub(super) fn toggle_preview(&mut self) {
+        if self.preview.owner != RightPanel::Preview {
+            self.close_info();
+            self.preview.on = true;
+            self.sync_preview();
+            self.redraw();
+            return;
+        }
         self.begin_layout_anim();
         self.preview.on = !self.preview.on;
         self.sync_preview();
@@ -246,7 +267,8 @@ impl App {
     }
 
     pub(super) fn sync_preview(&mut self) {
-        if !self.preview_visible() {
+        // Con otro panel en su lugar, la vista previa no muestra ni pide nada.
+        if !self.preview_visible() || self.preview.owner != RightPanel::Preview {
             if self.preview.subject.is_some() || self.preview.fingerprint.is_some() {
                 self.preview.subject = None;
                 self.preview.info = None;

@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use crate::info::{InfoChange, InfoReply, InfoRequest, ItemInfo};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
 use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
@@ -40,6 +41,7 @@ pub fn install_fakes() {
         overlays: Box::new(FakeOverlays),
         metadata: Box::new(FakeMetadata),
         preview: Box::new(FakePreview),
+        info: Box::new(FakeInfo),
     });
 }
 
@@ -883,6 +885,85 @@ impl Preview for FakePreview {
                 });
             }
         }
+    }
+}
+
+thread_local! {
+    /// Información que devuelve el falso, por ruta (por hilo de prueba).
+    static INFO_DATA: RefCell<HashMap<PathBuf, ItemInfo>> = RefCell::new(HashMap::new());
+    /// Pedidos recibidos (las rutas de cada uno).
+    static INFO_REQUESTS: RefCell<Vec<Vec<PathBuf>>> = const { RefCell::new(Vec::new()) };
+    /// Cambios aplicados.
+    static INFO_APPLIED: RefCell<Vec<InfoChange>> = const { RefCell::new(Vec::new()) };
+    /// Error con que responden los cambios (`None`: bien).
+    static INFO_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// ¿Hay diálogo del sistema? Y cuántas veces se abrió.
+    static INFO_MORE: Cell<bool> = const { Cell::new(true) };
+    static INFO_MORE_CALLS: RefCell<Vec<Vec<PathBuf>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `Info` falso: anota cada pedido y responde al pedir, en el hilo del test, con lo cargado con
+/// `serve` para cada ruta o, si no hay nada, con la lectura mínima del núcleo (con la nube de
+/// `FakeFileSystem`, que no abre nada). Los cambios se anotan y responden con `fail_with`.
+pub struct FakeInfo;
+
+impl FakeInfo {
+    pub fn serve(path: &Path, info: ItemInfo) {
+        INFO_DATA.with(|d| d.borrow_mut().insert(path.to_path_buf(), info));
+    }
+
+    /// Pedidos recibidos hasta ahora (y los olvida).
+    pub fn take_requests() -> Vec<Vec<PathBuf>> {
+        INFO_REQUESTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// Cambios aplicados hasta ahora (y los olvida).
+    pub fn take_applied() -> Vec<InfoChange> {
+        INFO_APPLIED.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// Desde ahora los cambios fallan con este texto (`None`: andan).
+    pub fn fail_with(error: Option<&str>) {
+        INFO_ERROR.with(|e| *e.borrow_mut() = error.map(str::to_string));
+    }
+
+    /// ¿El sistema tiene diálogo propio? (por defecto, sí).
+    pub fn set_more_in_system(on: bool) {
+        INFO_MORE.with(|m| m.set(on));
+    }
+
+    /// Veces que se abrió el diálogo del sistema (y las olvida).
+    pub fn take_more_calls() -> Vec<Vec<PathBuf>> {
+        INFO_MORE_CALLS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+}
+
+impl Info for FakeInfo {
+    fn request(&self, req: InfoRequest) {
+        INFO_REQUESTS.with(|r| r.borrow_mut().push(req.paths.clone()));
+        let fs = FakeFileSystem;
+        let items = req
+            .paths
+            .iter()
+            .map(|p| INFO_DATA.with(|d| d.borrow().get(p).cloned()).unwrap_or_else(|| crate::info::read_minimal(p, &|x| fs.cloud_only(x))))
+            .collect();
+        req.send(items);
+    }
+
+    fn apply(&self, owner: Handle, tx: Sender<InfoReply>, generation: u64, change: InfoChange) {
+        let section = change.section();
+        INFO_APPLIED.with(|r| r.borrow_mut().push(change));
+        let error = INFO_ERROR.with(|e| e.borrow().clone());
+        crate::info::send_applied(owner, &tx, generation, section, error);
+    }
+
+    fn more_in_system(&self, _owner: Handle, items: &[Item]) -> bool {
+        INFO_MORE_CALLS.with(|r| r.borrow_mut().push(paths(items)));
+        INFO_MORE.with(Cell::get)
+    }
+
+    fn has_more_in_system(&self) -> bool {
+        INFO_MORE.with(Cell::get)
     }
 }
 

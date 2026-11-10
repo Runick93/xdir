@@ -331,7 +331,7 @@ impl WindowHost for MacHost {
         let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
         field.setStringValue(&NSString::from_str(text));
         field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename);
+        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename | TextKind::Info);
         field.setBezeled(bordered);
         field.setBordered(bordered);
         field.setDrawsBackground(true);

@@ -275,7 +275,8 @@ impl MetadataRequest {
 
     /// Responde leyendo cada elemento con `read` (en el hilo que llama, que no debe ser el de
     /// interfaz): manda lotes de `META_REPLY_BATCH` o lo juntado cada `META_REPLY_EVERY`. Deja de
-    /// leer si el pedido quedó viejo o si la pestaña ya no escucha.
+    /// leer si el pedido quedó viejo o si la pestaña ya no escucha. Si `read` entra en pánico con
+    /// un elemento, ese va sin datos y se sigue: el hilo del servicio no se muere.
     pub fn answer_with(self, mut read: impl FnMut(&Path) -> Meta) {
         let mut batch = Vec::new();
         let mut last = Instant::now();
@@ -283,7 +284,8 @@ impl MetadataRequest {
             if self.is_stale() {
                 return;
             }
-            batch.push((*i, read(path)));
+            let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(path))).unwrap_or_default();
+            batch.push((*i, meta));
             if batch.len() >= META_REPLY_BATCH || last.elapsed() >= META_REPLY_EVERY {
                 if !self.send(std::mem::take(&mut batch)) {
                     return;
@@ -599,6 +601,22 @@ mod tests {
         });
         assert_eq!(reads, 10);
         assert!(batch_sizes(&rx).iter().sum::<usize>() <= 10);
+    }
+
+    /// Si leer un elemento entra en pánico, ese elemento va sin datos y se siguen leyendo los
+    /// demás: el hilo de metadatos no se muere.
+    #[test]
+    fn metadata_answer_survives_a_panicking_read() {
+        let (req, rx, _) = meta_request(3);
+        req.answer_with(|p| {
+            if p.ends_with("1") {
+                panic!("lectura rota");
+            }
+            Meta { width: Some(5), ..Meta::default() }
+        });
+        let got: Vec<(usize, Option<u32>)> =
+            rx.try_iter().flat_map(|e| if let LoadMsg::Metadata(b) = e.msg { b } else { Vec::new() }).map(|(i, m)| (i, m.width)).collect();
+        assert_eq!(got, [(0, Some(5)), (1, None), (2, Some(5))]);
     }
 
     /// Si la pestaña ya no escucha (canal cerrado), se deja de leer.

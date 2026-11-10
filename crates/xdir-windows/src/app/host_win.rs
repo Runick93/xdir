@@ -338,6 +338,12 @@ impl WindowHost for Win32Host {
         }
     }
 
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        unsafe { MessageBoxW(Some(self.hwnd()), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNO | MB_ICONQUESTION) == IDYES }
+    }
+
     fn open_url(&self, url: &str) {
         let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
         unsafe {

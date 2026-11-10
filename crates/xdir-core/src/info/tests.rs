@@ -66,11 +66,12 @@ fn folder_size_skips_cloud_dirs() {
     let cloud = d.join("nube");
     let looked = std::cell::RefCell::new(Vec::new());
     let mut last = (0, 0, 0);
-    folder_size(&d, &|p| {
+    let skipped = folder_size(&d, &|p| {
         looked.borrow_mut().push(p.to_path_buf());
         p == cloud
     }, &AtomicBool::new(false), &mut |b, f, fo| last = (b, f, fo));
     assert_eq!(last, (35, 3, 3));
+    assert_eq!(skipped, 0);
     assert!(looked.borrow().contains(&cloud));
     // 1.200 archivos: avisa a los 500 y 1.000, y al final.
     let d = dir("pasos");
@@ -87,6 +88,22 @@ fn folder_size_skips_cloud_dirs() {
         assert_eq!(f, 0);
     });
     assert_eq!(calls, 1);
+}
+
+/// Las carpetas que no se pueden leer se cuentan aparte (para avisar que faltan).
+#[cfg(unix)]
+#[test]
+fn folder_size_counts_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("sin-permiso");
+    std::fs::create_dir_all(d.join("cerrada")).unwrap();
+    std::fs::write(d.join("cerrada/a"), b"x").unwrap();
+    std::fs::set_permissions(d.join("cerrada"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Con permisos de administrador (Docker) se lee igual: no hay qué probar.
+    let readable = std::fs::read_dir(d.join("cerrada")).is_ok();
+    let skipped = folder_size(&d, &|_| false, &AtomicBool::new(false), &mut |_, _, _| {});
+    std::fs::set_permissions(d.join("cerrada"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(skipped, if readable { 0 } else { 1 });
 }
 
 /// Lo que está solo en la nube se informa así y se lee sin seguir el enlace.

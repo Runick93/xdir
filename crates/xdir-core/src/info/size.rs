@@ -11,12 +11,17 @@ pub const STEP: u64 = 500;
 /// Suma `path`: llama a `step(bytes, archivos, carpetas)` cada `STEP` elementos y una vez al final
 /// (siempre, aunque se cancele). `ctl` en `true` corta la suma. Los archivos solo en la nube cuentan
 /// con su tamaño lógico (sin abrirlos); las carpetas solo en la nube cuentan, pero no se entra.
-pub fn folder_size(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &AtomicBool, step: &mut dyn FnMut(u64, u64, u64)) {
+/// Devuelve cuántas carpetas no se pudieron leer (sin permiso: quedan fuera de la cuenta).
+pub fn folder_size(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &AtomicBool, step: &mut dyn FnMut(u64, u64, u64)) -> u64 {
+    let mut skipped = 0u64;
     let (mut bytes, mut files, mut folders) = (0u64, 0u64, 0u64);
     let mut stack = vec![path.to_path_buf()];
     let mut seen = 0u64;
     'walk: while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            skipped += 1;
+            continue;
+        };
         for entry in rd.flatten() {
             if ctl.load(Ordering::Relaxed) {
                 break 'walk;
@@ -41,4 +46,5 @@ pub fn folder_size(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &Atomic
         }
     }
     step(bytes, files, folders);
+    skipped
 }

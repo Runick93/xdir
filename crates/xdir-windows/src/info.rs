@@ -24,12 +24,12 @@ use windows::Win32::Storage::FileSystem::{
     GetVolumeInformationW, SetFileAttributesW, WIN32_FILE_ATTRIBUTE_DATA,
 };
 use windows::Win32::System::Com::StructuredStorage::{InitPropVariantFromStringVector, PROPVAR_CHANGE_FLAGS, PROPVARIANT, PropVariantChangeType};
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::Win32::UI::Shell::PropertiesSystem::{GPS_HANDLERPROPERTIESONLY, GPS_READWRITE, IPropertyStore, IPropertyStoreCapabilities, SHGetPropertyStoreFromParsingName};
 use windows::Win32::UI::Shell::{
-    ASSOC_FILTER_RECOMMENDED, IAssocHandler, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OAIF_FORCE_REGISTRATION, OAIF_REGISTER_EXT, OPENASINFO,
+    ASSOC_FILTER_RECOMMENDED, ASSOCF_INIT_IGNOREUNKNOWN, ASSOCSTR, ASSOCSTR_EXECUTABLE, ASSOCSTR_FRIENDLYAPPNAME, AssocQueryStringW, IAssocHandler, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OAIF_FORCE_REGISTRATION, OAIF_REGISTER_EXT, OPENASINFO,
     SHAssocEnumHandlers, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHOpenWithDialog,
 };
 use windows::core::{HSTRING, Interface, PCWSTR, PWSTR};
@@ -53,22 +53,43 @@ const FILE_WRITE_DATA: u32 = 0x0002;
 /// El servicio que instala `sys::install`.
 pub struct Win32Info;
 
+/// COM del hilo de trabajo: se inicia al crearlo y se cierra al soltarlo (solo si se inició).
+struct Com(bool);
+
+impl Com {
+    fn init() -> Com {
+        Com(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok())
+    }
+}
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
 impl Info for Win32Info {
     fn request(&self, req: InfoRequest) {
         let spawned = std::thread::Builder::new().name("xdir-informacion".into()).spawn(move || {
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            }
+            let _com = Com::init();
             xdir_core::info::answer(req, &read);
         });
         debug_assert!(spawned.is_ok(), "hilo de información");
     }
 
     fn apply(&self, owner: Handle, tx: Sender<InfoReply>, generation: u64, change: InfoChange) {
+        // «Cambiar todos…» es un diálogo modal del sistema: va en el hilo de interfaz (el que
+        // llama, con COM ya iniciado), dueño de la ventana, como los otros diálogos de xdir. Desde
+        // otro hilo no deshabilitaría la ventana de xdir.
+        if let InfoChange::ChangeAll { path, .. } = &change {
+            let error = change_all(owner, path).err();
+            xdir_core::info::send_applied(owner, &tx, generation, change.section(), error);
+            return;
+        }
         let spawned = std::thread::Builder::new().name("xdir-informacion-cambio".into()).spawn(move || {
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            }
+            let _com = Com::init();
             let section = change.section();
             let error = apply(owner, &change).err();
             xdir_core::info::send_applied(owner, &tx, generation, section, error);
@@ -161,7 +182,9 @@ pub fn read(path: &Path) -> ItemInfo {
             _ => "Disco".into(),
         };
     } else {
-        info.flags = vec![(Flag::Hidden, attrs & FILE_ATTRIBUTE_HIDDEN.0 != 0, ok), (Flag::ReadOnly, attrs & FILE_ATTRIBUTE_READONLY.0 != 0, ok)];
+        info.flags = vec![(Flag::Hidden, attrs & FILE_ATTRIBUTE_HIDDEN.0 != 0, ok), (Flag::ReadOnly, attrs & FILE_ATTRIBUTE_READONLY.0 != 0, ok && !info.is_dir)];
+        // En una carpeta, «solo lectura» marca las carpetas personalizadas (desktop.ini), no
+        // protege nada: se muestra pero no se cambia.
         // Etiquetas y comentario: del property store, salvo lo que está solo en la nube (no se abre).
         if !info.cloud_only {
             let (tags, comment) = keywords_and_comment(&wide);
@@ -221,14 +244,15 @@ fn account_name(sid: PSID) -> String {
 }
 
 /// SID del usuario del proceso (en un búfer que hay que conservar mientras se usa).
-fn token_user() -> Option<Vec<u8>> {
+/// El búfer es de `u64`: `TOKEN_USER` lleva un puntero y tiene que quedar alineado.
+fn token_user() -> Option<Vec<u64>> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
         let mut len = 0u32;
         let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
-        let mut buf = vec![0u8; len as usize];
-        let ok = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr().cast()), len, &mut len).is_ok();
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        let ok = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr().cast()), (buf.len() * 8) as u32, &mut len).is_ok();
         let _ = CloseHandle(token);
         ok.then_some(buf)
     }
@@ -308,10 +332,47 @@ fn app_ref(h: &IAssocHandler) -> Option<AppRef> {
 }
 
 /// «Abrir con»: la primera recomendada es la predeterminada (así las ordena el sistema).
+/// Un texto de `AssocQueryStringW` para la extensión (sin leer el archivo).
+fn assoc(ext: &HSTRING, what: ASSOCSTR) -> Option<String> {
+    let mut len = 0u32;
+    let _ = unsafe { AssocQueryStringW(ASSOCF_INIT_IGNOREUNKNOWN, what, ext, PCWSTR::null(), None, &mut len) };
+    if len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; len as usize];
+    if unsafe { AssocQueryStringW(ASSOCF_INIT_IGNOREUNKNOWN, what, ext, PCWSTR::null(), Some(PWSTR(buf.as_mut_ptr())), &mut len) }.is_err() {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..end])).filter(|s| !s.is_empty())
+}
+
+/// La app predeterminada de la extensión: la de la lista con ese ejecutable o, si no está (apps
+/// de la tienda, programas sin registrar), el ejecutable con su nombre amigable.
+fn default_app(path: &Path, apps: &[AppRef]) -> Option<AppRef> {
+    let ext = HSTRING::from(format!(".{}", path.extension()?.to_string_lossy()));
+    let exe = assoc(&ext, ASSOCSTR_EXECUTABLE);
+    let name = assoc(&ext, ASSOCSTR_FRIENDLYAPPNAME);
+    if let Some(e) = &exe
+        && let Some(a) = apps.iter().find(|a| a.id.eq_ignore_ascii_case(e))
+    {
+        return Some(a.clone());
+    }
+    if let Some(n) = &name
+        && let Some(a) = apps.iter().find(|a| a.name.eq_ignore_ascii_case(n))
+    {
+        return Some(a.clone());
+    }
+    let id = exe?;
+    let mut info = SHFILEINFOW::default();
+    let ok = unsafe { SHGetFileInfoW(&HSTRING::from(&id), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info), size_of::<SHFILEINFOW>() as u32, SHGFI_SYSICONINDEX) };
+    Some(AppRef { name: name.unwrap_or_else(|| id.clone()), icon: if ok != 0 { info.iIcon } else { 0 }, id })
+}
+
 fn open_with(path: &Path) -> Option<OpenWith> {
     let apps: Vec<AppRef> = handlers(path).iter().filter_map(app_ref).collect();
-    let current = apps.first().cloned();
-    (!apps.is_empty()).then_some(OpenWith { current, apps, per_file: false })
+    let current = default_app(path, &apps);
+    (!apps.is_empty() || current.is_some()).then_some(OpenWith { current, apps, per_file: false, system_dialog: true })
 }
 
 /// El error de E/S como lo ve el usuario.
@@ -319,7 +380,9 @@ fn win_text(e: &windows::core::Error) -> String {
     match e.code().0 as u32 {
         0x8007_0005 => "No tenés permiso".into(),
         0x8007_0002 | 0x8007_0003 => "Ya no existe".into(),
-        0x8007_0020 => "Lo está usando otro programa".into(),
+        // ERROR_SHARING_VIOLATION y los de los property store (STG_E_SHAREVIOLATION,
+        // STG_E_LOCKVIOLATION).
+        0x8007_0020 | 0x8003_0020 | 0x8003_0021 => "Lo está usando otro programa".into(),
         _ => e.message(),
     }
 }
@@ -412,6 +475,7 @@ pub fn apply(owner: Handle, change: &InfoChange) -> Result<(), String> {
         InfoChange::Flag { paths, flag, on } => {
             let bit = match flag {
                 Flag::Hidden => FILE_ATTRIBUTE_HIDDEN.0,
+                Flag::ReadOnly if paths.iter().any(|p| p.is_dir()) => return Err("En una carpeta, «Solo lectura» no se cambia desde acá".into()),
                 Flag::ReadOnly => FILE_ATTRIBUTE_READONLY.0,
                 Flag::Locked => return Err("Esto no existe en Windows".into()),
             };
@@ -482,6 +546,16 @@ mod tests {
         apply(Handle::default(), &InfoChange::Flag { paths: vec![f.clone()], flag: Flag::Hidden, on: false }).unwrap();
         let i = read(&f);
         assert!(!flag(&i, Flag::Hidden) && !flag(&i, Flag::ReadOnly));
+    }
+
+    /// En una carpeta «Solo lectura» se ve pero no se cambia (marca carpetas personalizadas).
+    #[test]
+    fn win_folder_readonly_not_editable() {
+        com();
+        let d = temp("carpeta");
+        let ro = read(&d).flags.iter().find(|x| x.0 == Flag::ReadOnly).copied().unwrap();
+        assert!(!ro.2);
+        assert!(apply(Handle::default(), &InfoChange::Flag { paths: vec![d], flag: Flag::ReadOnly, on: true }).is_err());
     }
 
     #[test]

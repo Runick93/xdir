@@ -210,7 +210,7 @@ fn open_with(path: &Path) -> Option<OpenWith> {
         }
     }
     let apps: Vec<AppRef> = ids.iter().map(|id| app_ref(id)).collect();
-    (!apps.is_empty()).then(|| OpenWith { current: default.map(|d| app_ref(&d)), apps, per_file: false })
+    (!apps.is_empty()).then(|| OpenWith { current: default.map(|d| app_ref(&d)), apps, per_file: false, system_dialog: false })
 }
 
 fn user_name(uid: u32) -> String {
@@ -242,19 +242,26 @@ pub fn read(path: &Path) -> ItemInfo {
     if !info.is_dir {
         info.on_disk = m.blocks() * 512;
     }
+    // Sin permiso para leer el atributo se admite igual (se ve vacío; escribir dirá el error);
+    // `None` es solo cuando el sistema de archivos no los tiene.
     info.tags = match get_xattr(path, TAGS) {
         Ok(v) => Some(parse_tags(&String::from_utf8_lossy(&v.unwrap_or_default())).into_iter().map(|name| Tag { name, color: None }).collect()),
+        Err(libc::EACCES | libc::EPERM) => Some(Vec::new()),
         Err(_) => None,
     };
     info.comment = match get_xattr(path, COMMENT) {
         Ok(v) => Some(String::from_utf8_lossy(&v.unwrap_or_default()).into_owned()),
+        Err(libc::EACCES | libc::EPERM) => Some(String::new()),
         Err(_) => None,
     };
     let euid = unsafe { libc::geteuid() };
     let mine = euid == m.uid() || euid == 0;
     let dot = path.file_name().is_some_and(|n| n.as_bytes().first() == Some(&b'.'));
+    // Un enlace: no se cambian Solo lectura ni los permisos (cambiarían el original).
+    let link = m.file_type().is_symlink();
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    if is_mount_point(&mountinfo, path) {
+    let mount = is_mount_point(&mountinfo, path);
+    if mount {
         let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
         if let Some(c) = cpath(path)
             && unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0
@@ -264,7 +271,7 @@ pub fn read(path: &Path) -> ItemInfo {
             info.kind_name = "Disco".into();
         }
     } else {
-        info.flags = vec![(Flag::Hidden, dot, false), (Flag::ReadOnly, m.mode() & 0o200 == 0, mine)];
+        info.flags = vec![(Flag::Hidden, dot, false), (Flag::ReadOnly, m.mode() & 0o200 == 0, mine && !link)];
         if !info.is_dir {
             info.open_with = open_with(path);
         }
@@ -275,7 +282,8 @@ pub fn read(path: &Path) -> ItemInfo {
         owner: user_name(m.uid()),
         group: group_name(m.gid()),
         mode: m.mode() & 0o7777,
-        editable: mine,
+        // Como en macOS: los de un disco entero (punto de montaje) y los de un enlace, solo para ver.
+        editable: mine && !link && !mount,
         can_read: ok(libc::R_OK),
         can_write: ok(libc::W_OK),
     });
@@ -305,12 +313,15 @@ fn joined(errors: Vec<String>) -> Result<(), String> {
 fn set_tags(path: &Path, add: &[String], remove: &[String]) -> Result<(), String> {
     let mut tags = match get_xattr(path, TAGS) {
         Ok(v) => parse_tags(&String::from_utf8_lossy(&v.unwrap_or_default())),
+        Err(libc::EACCES | libc::EPERM) => return Err("No tenés permiso".into()),
         Err(_) => return Err("Este sistema de archivos no admite etiquetas".into()),
     };
     tags.retain(|t| !remove.contains(t));
     for a in add {
-        if !tags.contains(a) {
-            tags.push(a.replace(',', " "));
+        // La coma separa etiquetas: se cambia antes de ver si ya está.
+        let a = a.replace(',', " ");
+        if !tags.contains(&a) {
+            tags.push(a);
         }
     }
     let joined = tags.join(",");
@@ -318,55 +329,70 @@ fn set_tags(path: &Path, add: &[String], remove: &[String]) -> Result<(), String
 }
 
 /// `chmod` del elemento; con `recursive`, lo de adentro toma la lectura y la escritura de cada
-/// clase (la ejecución queda como estaba). Junta los errores.
+/// clase (la ejecución queda como estaba). Lo de adentro va primero y cada carpeta al final (después
+/// de listarla), así quitarle la lectura al dueño no corta el recorrido. Un enlace no se toca
+/// (cambiaría el original). Junta los errores.
 pub fn chmod(path: &Path, mode: u32, recursive: bool) -> Result<(), String> {
+    let m = std::fs::symlink_metadata(path).map_err(|e| io_text(&e))?;
+    if m.file_type().is_symlink() {
+        return Err("Es un enlace: los permisos se cambian en el original".into());
+    }
     let mut errors = Vec::new();
+    if recursive && m.is_dir() {
+        chmod_contents(path, mode, &mut errors);
+    }
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
         errors.push(io_text(&e));
-    }
-    if recursive && path.is_dir() {
-        let mut stack = vec![path.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let rd = match std::fs::read_dir(&dir) {
-                Ok(rd) => rd,
-                Err(e) => {
-                    errors.push(format!("{}: {}", dir.display(), io_text(&e)));
-                    continue;
-                }
-            };
-            for entry in rd.flatten() {
-                let p = entry.path();
-                let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
-                if m.file_type().is_symlink() {
-                    continue;
-                }
-                let next = (m.mode() & 0o7777 & !0o666) | (mode & 0o666);
-                if let Err(e) = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(next)) {
-                    errors.push(format!("{}: {}", p.display(), io_text(&e)));
-                }
-                if m.is_dir() {
-                    stack.push(p);
-                }
-            }
-        }
     }
     joined(errors)
 }
 
+/// Lo de adentro de `dir`, de abajo hacia arriba (ver `chmod`).
+fn chmod_contents(dir: &Path, mode: u32, errors: &mut Vec<String>) {
+    let entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+        Err(e) => {
+            errors.push(format!("{}: {}", dir.display(), io_text(&e)));
+            return;
+        }
+    };
+    for p in entries {
+        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+        if m.file_type().is_symlink() {
+            continue;
+        }
+        if m.is_dir() {
+            chmod_contents(&p, mode, errors);
+        }
+        let next = (m.mode() & 0o7777 & !0o666) | (mode & 0o666);
+        if let Err(e) = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(next)) {
+            errors.push(format!("{}: {}", p.display(), io_text(&e)));
+        }
+    }
+}
+
 fn set_read_only(path: &Path, on: bool) -> Result<(), String> {
     let m = std::fs::symlink_metadata(path).map_err(|e| io_text(&e))?;
+    if m.file_type().is_symlink() {
+        return Err("Es un enlace: Solo lectura se cambia en el original".into());
+    }
     let mode = m.mode() & 0o7777;
     let next = if on { mode & !0o200 } else { mode | 0o200 };
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(next)).map_err(|e| io_text(&e))
 }
 
 /// Lo abre una vez con la app (`gio launch` con su `.desktop`; si no está, `gtk-launch`).
+/// Se espera a que el lanzador termine (corre en el hilo del cambio, vuelve enseguida) para saber
+/// si anduvo.
 fn open_once(path: &Path, id: &str) -> Result<(), String> {
-    let gio = desktop_file(id).and_then(|d| std::process::Command::new("gio").arg("launch").arg(d).arg(path).spawn().ok());
-    if gio.is_some() {
+    let ok = |cmd: &mut std::process::Command| cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    if desktop_file(id).is_some_and(|d| ok(std::process::Command::new("gio").arg("launch").arg(d).arg(path))) {
         return Ok(());
     }
-    std::process::Command::new("gtk-launch").arg(id.trim_end_matches(".desktop")).arg(path).spawn().map(|_| ()).map_err(|_| "No se pudo abrir con esa app".to_string())
+    if ok(std::process::Command::new("gtk-launch").arg(id.trim_end_matches(".desktop")).arg(path)) {
+        return Ok(());
+    }
+    Err("No se pudo abrir con esa app".into())
 }
 
 fn change_all(path: &Path, id: &str) -> Result<(), String> {
@@ -444,6 +470,55 @@ mod tests {
         std::fs::set_permissions(d.join("sub/b.txt"), std::fs::Permissions::from_mode(0o600)).unwrap();
         apply(&InfoChange::Perms { paths: vec![d.join("sub")], mode: 0o775, recursive: true }).unwrap();
         assert_eq!(std::fs::metadata(d.join("sub/b.txt")).unwrap().mode() & 0o777, 0o664);
+    }
+
+    /// Un enlace: ni Solo lectura ni los permisos se pueden cambiar (cambiarían el original con el
+    /// modo del enlace, 0o777).
+    #[test]
+    fn linux_symlink_not_editable() {
+        let d = temp("enlace");
+        let f = d.join("a.txt");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = d.join("enlace");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        let i = read(&link);
+        assert!(!i.perms.unwrap().editable);
+        assert!(i.flags.iter().any(|x| x.0 == Flag::ReadOnly && !x.2));
+        assert!(apply(&InfoChange::Flag { paths: vec![link.clone()], flag: Flag::ReadOnly, on: true }).is_err());
+        assert!(apply(&InfoChange::Perms { paths: vec![link.clone()], mode: 0o600, recursive: false }).is_err());
+        assert_eq!(std::fs::metadata(&f).unwrap().mode() & 0o777, 0o644);
+    }
+
+    /// Sin lectura del dueño y aplicado a lo de adentro: se cambia todo (de abajo hacia arriba).
+    #[test]
+    fn linux_perms_recursive_without_owner_read() {
+        let d = temp("sin-lectura");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/a.txt"), b"x").unwrap();
+        std::fs::set_permissions(d.join("sub/a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(d.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().mode() & 0o777;
+        let r = apply(&InfoChange::Perms { paths: vec![d.clone()], mode: 0o155, recursive: true });
+        let (root, sub) = (mode(&d), mode(&d.join("sub")));
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(d.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(r, Ok(()));
+        assert_eq!((root, sub, mode(&d.join("sub/a.txt"))), (0o155, 0o155, 0o044));
+    }
+
+    /// Una etiqueta con coma se guarda sin ella y no se duplica.
+    #[test]
+    fn linux_tag_with_comma_not_duplicated() {
+        let d = temp("coma");
+        let f = d.join("a.txt");
+        std::fs::write(&f, b"x").unwrap();
+        if read(&f).tags.is_none() {
+            return;
+        }
+        apply(&InfoChange::Tags { paths: vec![f.clone()], add: vec!["a,b".into()], remove: vec![] }).unwrap();
+        apply(&InfoChange::Tags { paths: vec![f.clone()], add: vec!["a,b".into()], remove: vec![] }).unwrap();
+        assert_eq!(get_xattr(&f, TAGS).unwrap().unwrap(), b"a b");
     }
 
     #[test]

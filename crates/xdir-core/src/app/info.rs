@@ -19,6 +19,9 @@ use crate::info::draw::{self as idraw, Body, Header, InfoHit, Panel, Row, Sectio
 use crate::info::{Access, InfoChange, InfoReply, InfoRequest, ItemInfo, Section, Tri, WM_APP_INFO};
 use crate::thumbs;
 
+/// Título del panel (el nombre va en el encabezado).
+const TITLE: &str = "Información";
+
 /// Cuánto se espera después del último cambio de selección para pedir la información.
 const INFO_DELAY_MS: u64 = 50;
 
@@ -36,6 +39,8 @@ struct FolderSize {
     path: PathBuf,
     bytes: u64,
     count: Option<u64>,
+    /// Carpetas que no se pudieron leer.
+    skipped: u64,
     done: bool,
 }
 
@@ -69,6 +74,10 @@ pub(super) struct InfoState {
     pub(super) focused: bool,
     /// Sumar el tamaño de las carpetas en un hilo (las pruebas lo apagan y mandan el avance a mano).
     pub(super) size_thread: bool,
+    /// Generación de la suma de carpeta: cambia solo con el sujeto (releer después de un cambio
+    /// no corta una suma larga).
+    pub(super) size_generation: u64,
+    size_current: Arc<AtomicU64>,
 }
 
 impl InfoState {
@@ -94,7 +103,15 @@ impl InfoState {
             layout: idraw::Layout::default(),
             focused: false,
             size_thread: true,
+            size_generation: 0,
+            size_current: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Corta la suma en curso (cambió el sujeto o se cerró el panel).
+    fn bump_size(&mut self) {
+        self.size_generation += 1;
+        self.size_current.store(self.size_generation, Ordering::Relaxed);
     }
 
     fn bump(&mut self) -> u64 {
@@ -129,6 +146,16 @@ fn short_location(dir: &Path) -> String {
     }
     let sep = std::path::MAIN_SEPARATOR;
     format!("…{sep}{}{sep}{}", parts[parts.len() - 2], parts[parts.len() - 1])
+}
+
+/// «12 elementos», con las carpetas que no se pudieron leer si hubo.
+fn content_text(n: u64, skipped: u64) -> String {
+    let base = crate::preview::draw::items_text(n);
+    match skipped {
+        0 => base,
+        1 => format!("{base} (sin contar 1 carpeta sin permiso)"),
+        k => format!("{base} (sin contar {} carpetas sin permiso)", crate::format::thousands(k)),
+    }
 }
 
 /// «3,8 MB (3.963.904 bytes)».
@@ -185,6 +212,7 @@ impl App {
         st.stamps.clear();
         st.items = None;
         st.folder = None;
+        st.bump_size();
         st.errors.clear();
         st.pending = false;
         st.focused = false;
@@ -231,6 +259,7 @@ impl App {
             let st = &mut self.info;
             st.items = None;
             st.folder = None;
+            st.bump_size();
             st.errors.clear();
             st.scroll = 0.0;
         }
@@ -306,10 +335,11 @@ impl App {
                     self.start_folder_size();
                     got = true;
                 }
-                InfoReply::FolderSize { generation, path, bytes, files, folders, done } if generation == self.info.generation => {
+                InfoReply::FolderSize { generation, path, bytes, files, folders, skipped, done } if generation == self.info.size_generation => {
                     if let Some(f) = self.info.folder.as_mut().filter(|f| f.path == path && !f.done) {
                         f.bytes = bytes;
                         f.count = Some(files + folders);
+                        f.skipped = skipped;
                         f.done = done;
                         got = true;
                     }
@@ -338,32 +368,32 @@ impl App {
             return;
         }
         let path = item.path.clone();
-        // Ya sumada: queda. A medio sumar con una generación vieja (se volvió a leer): se empieza de nuevo.
-        if self.info.folder.as_ref().is_some_and(|f| f.path == path && f.done) {
+        // Ya sumada o sumándose (releer después de un cambio no la corta).
+        if self.info.folder.as_ref().is_some_and(|f| f.path == path) {
             return;
         }
         if let Some(bytes) = self.xtree.as_ref().and_then(|x| x.size_of(&path)) {
-            self.info.folder = Some(FolderSize { path, bytes, count: None, done: true });
+            self.info.folder = Some(FolderSize { path, bytes, count: None, skipped: 0, done: true });
             return;
         }
-        self.info.folder = Some(FolderSize { path: path.clone(), bytes: 0, count: Some(0), done: false });
+        self.info.folder = Some(FolderSize { path: path.clone(), bytes: 0, count: Some(0), skipped: 0, done: false });
         if !self.info.size_thread {
             return;
         }
-        let (hwnd, tx, generation, current) = (self.hwnd, self.info.tx.clone(), self.info.generation, self.info.current.clone());
+        let (hwnd, tx, generation, current) = (self.hwnd, self.info.tx.clone(), self.info.size_generation, self.info.size_current.clone());
         let spawned = std::thread::Builder::new().name("xdir-tamano-carpeta".into()).spawn(move || {
             let ctl = AtomicBool::new(false);
             let stale = || current.load(Ordering::Relaxed) != generation;
             let mut last = (0, 0, 0);
-            crate::info::size::folder_size(&path, &|p| sys::file_system().cloud_only(p), &ctl, &mut |b, f, fo| {
+            let skipped = crate::info::size::folder_size(&path, &|p| sys::file_system().cloud_only(p), &ctl, &mut |b, f, fo| {
                 last = (b, f, fo);
                 if stale() {
                     ctl.store(true, Ordering::Relaxed);
-                } else if tx.send(InfoReply::FolderSize { generation, path: path.clone(), bytes: b, files: f, folders: fo, done: false }).is_ok() {
+                } else if tx.send(InfoReply::FolderSize { generation, path: path.clone(), bytes: b, files: f, folders: fo, skipped: 0, done: false }).is_ok() {
                     hwnd.post(WM_APP_INFO, 0, 0);
                 }
             });
-            if !stale() && tx.send(InfoReply::FolderSize { generation, path: path.clone(), bytes: last.0, files: last.1, folders: last.2, done: true }).is_ok() {
+            if !stale() && tx.send(InfoReply::FolderSize { generation, path: path.clone(), bytes: last.0, files: last.1, folders: last.2, skipped, done: true }).is_ok() {
                 hwnd.post(WM_APP_INFO, 0, 0);
             }
         });
@@ -402,6 +432,12 @@ impl App {
         Some(items)
     }
 
+    /// ¿Se muestra la carpeta abierta (nada seleccionado)?
+    fn info_is_location(&self) -> bool {
+        let tab = self.panes[self.active].tab();
+        tab.list.selected_indices().next().is_none() && matches!(&tab.location, Location::Path(p) if self.info.subject.first() == Some(p))
+    }
+
     /// Lo que dibuja el panel ahora.
     pub(super) fn info_panel(&self) -> Panel {
         let env = sys::env();
@@ -411,7 +447,8 @@ impl App {
         let more_button = sys::info().has_more_in_system() && !st.subject.is_empty();
         let Some(items) = self.info_items() else {
             let n = st.subject.len();
-            let (title, name) = if n == 0 { ("Información".to_string(), tab.location.title()) } else { (format!("Información de {n} elementos"), format!("{n} elementos")) };
+            let name = if n == 0 { tab.location.title() } else { format!("{n} elementos") };
+            let title = TITLE.to_string();
             let line = if n == 0 { "Sin información para este lugar" } else { "Cargando…" };
             let icon = sys::file_system().folder_icon().unwrap_or(0);
             return Panel { title, header: Header { key: None, icon, image: false, name, lines: vec![(line.to_string(), false)] }, sections: Vec::new(), more_button };
@@ -431,7 +468,7 @@ impl App {
             let all_tags = items.iter().all(|i| i.tags.is_some());
             let lines = vec![(sum.kind.clone().unwrap_or_else(|| "Varios tipos".into()), false), (env.format_size_short(sum.size), false)];
             return Panel {
-                title: format!("Información de {} elementos", crate::format::thousands(sum.count as u64)),
+                title: TITLE.to_string(),
                 header: Header { key: None, icon: first_icon, image: false, name: format!("{} elementos", crate::format::thousands(sum.count as u64)), lines },
                 sections: vec![
                     section(Section::Tags, Body::Tags(all_tags.then(|| sum.tags.clone()))),
@@ -453,7 +490,7 @@ impl App {
         let key = Some((thumbs::Source::Path(item.path.clone()), 0));
         let image = !item.is_dir && !item.cloud_only && item.volume.is_none();
         let kind = item.kind_name.clone();
-        let title = format!("Información de «{name}»");
+        let title = TITLE.to_string();
         // Disco.
         if let Some(v) = &item.volume {
             let used = v.total.saturating_sub(v.free);
@@ -506,12 +543,12 @@ impl App {
             match folder {
                 Some(f) if !f.done => {
                     rows.push(Row { spinner: true, ..Row::new("Tamaño", format!("Calculando… {}", env.format_size_short(f.bytes))) });
-                    rows.push(Row::new("Contenido", crate::preview::draw::items_text(f.count.unwrap_or(0))));
+                    rows.push(Row::new("Contenido", content_text(f.count.unwrap_or(0), f.skipped)));
                 }
                 Some(f) => {
                     rows.push(Row::new("Tamaño", size_with_bytes(env, f.bytes)));
                     if let Some(n) = f.count {
-                        rows.push(Row::new("Contenido", crate::preview::draw::items_text(n)));
+                        rows.push(Row::new("Contenido", content_text(n, f.skipped)));
                     }
                 }
                 None => {}
@@ -556,9 +593,12 @@ impl App {
             section(Section::Tags, Body::Tags(item.tags.clone())),
             section(Section::General, Body::General { capacity: None, rows, flags }),
             section(Section::More, Body::Rows { rows: more, note }),
-            section(Section::Name, Body::Name { name: file_name, hide_ext: item.hidden_ext }),
-            section(Section::Comments, Body::Comment(item.comment.clone())),
         ];
+        // La carpeta abierta (sin selección) no se renombra desde acá.
+        if !self.info_is_location() {
+            sections.push(section(Section::Name, Body::Name { name: file_name, hide_ext: item.hidden_ext }));
+        }
+        sections.push(section(Section::Comments, Body::Comment(item.comment.clone())));
         if let Some(ow) = item.open_with.as_ref().filter(|_| !item.is_dir) {
             let note = if ow.per_file {
                 "Abrir todos los documentos como este con esta app."
@@ -585,9 +625,20 @@ impl App {
             ];
             Body::Perms { rows, editable: true, note: None }
         } else {
-            let rows = vec![(p.owner.clone(), "Dueño".to_string()), ("Tu usuario".to_string(), crate::info::rw_text(p.can_read, p.can_write).to_string())];
-            let note = sys::info().has_more_in_system().then(|| "Los permisos detallados están en «Más en el sistema…».".to_string());
-            Body::Perms { rows, editable: false, note }
+            // Sin grupo ni modo es Windows (ACL): el dueño y lo que puede el usuario actual. En
+            // Unix, la tabla de siempre, solo para ver (otro dueño, un disco o un enlace).
+            if p.group.is_empty() && p.mode == 0 {
+                let rows = vec![(p.owner.clone(), "Dueño".to_string()), ("Tu usuario".to_string(), crate::info::rw_text(p.can_read, p.can_write).to_string())];
+                let note = sys::info().has_more_in_system().then(|| "Los permisos detallados están en «Más en el sistema…».".to_string());
+                Body::Perms { rows, editable: false, note }
+            } else {
+                let rows = vec![
+                    (p.owner.clone(), crate::info::access_of(p.mode, 0).label().to_string()),
+                    (p.group.clone(), crate::info::access_of(p.mode, 1).label().to_string()),
+                    ("Todos".to_string(), crate::info::access_of(p.mode, 2).label().to_string()),
+                ];
+                Body::Perms { rows, editable: false, note: Some("Solo para ver: no se pueden cambiar acá.".to_string()) }
+            }
         })
     }
 
@@ -702,9 +753,30 @@ impl App {
             }
             InfoHit::ChangeAll => {
                 let Some(s) = single else { return };
-                let Some(app) = s.open_with.as_ref().and_then(|o| o.current.clone()) else { return };
+                let Some(ow) = s.open_with.clone() else { return };
+                // Windows: su diálogo elige la app (y ya pregunta); acá no se pregunta nada.
+                if ow.system_dialog {
+                    self.apply_info(InfoChange::ChangeAll { path: s.path.clone(), app: String::new() });
+                    self.redraw();
+                    return;
+                }
+                // macOS: la app elegida para este archivo pasa a ser la de todos. Linux (no hay app
+                // por archivo): se elige en un menú.
+                let app = if ow.per_file {
+                    ow.current.clone()
+                } else {
+                    let entries: Vec<shell::Entry> = ow
+                        .apps
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| shell::Entry::Item { id: i as u32, label: a.name.clone(), enabled: true, checked: ow.current.as_ref().is_some_and(|c| c.id == a.id) })
+                        .collect();
+                    let at = self.info.layout.hits.iter().find(|(x, _)| *x == InfoHit::ChangeAll).map_or(MenuPos::Cursor, |(_, r)| MenuPos::At(r.left, r.bottom));
+                    self.host.popup_menu(&entries, at, None, None).and_then(|i| ow.apps.get(i as usize).cloned())
+                };
+                let Some(app) = app else { return };
                 let text = format!("¿Usar «{}» para abrir todos los documentos como este?", app.name);
-                if self.host.ask_yes_no_cancel("Cambiar todos", &text) == Some(true) {
+                if self.host.ask_yes_no("Cambiar todos", &text) {
                     self.apply_info(InfoChange::ChangeAll { path: s.path.clone(), app: app.id });
                 }
             }
@@ -724,18 +796,11 @@ impl App {
                 }
                 let mode = crate::info::with_access(p.mode, who, access);
                 let name = s.path.file_name().map_or_else(|| s.path.display().to_string(), |n| n.to_string_lossy().into_owned());
-                // Cambiar permisos se confirma; en una carpeta, además, si va para lo de adentro.
-                let recursive = if s.is_dir {
-                    match self.host.ask_yes_no_cancel("Compartir y permisos", &format!("¿Aplicar también a los elementos incluidos en «{name}»?")) {
-                        Some(r) => r,
-                        None => return,
-                    }
-                } else {
-                    if self.host.ask_yes_no_cancel("Compartir y permisos", &format!("¿Cambiar los permisos de «{name}»?")) != Some(true) {
-                        return;
-                    }
-                    false
-                };
+                // Cambiar permisos se confirma; en una carpeta, después, si va para lo de adentro.
+                if !self.host.ask_yes_no("Compartir y permisos", &format!("¿Cambiar los permisos de «{name}» a «{}»?", access.label())) {
+                    return;
+                }
+                let recursive = s.is_dir && self.host.ask_yes_no("Compartir y permisos", &format!("¿Aplicar también a los elementos incluidos en «{name}»?"));
                 self.apply_info(InfoChange::Perms { paths, mode, recursive });
             }
             InfoHit::MoreInSystem => {

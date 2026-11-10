@@ -128,6 +128,8 @@ pub trait WindowHost {
     fn beep(&self);
     /// Pregunta Sí / No / Cancelar. Some(true): sí; Some(false): no; None: cancelar.
     fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool>;
+    /// Pregunta de Sí o No (modal). `true` si se eligió Sí.
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool;
     /// Abre un enlace en el navegador predeterminado.
     fn open_url(&self, url: &str);
     /// Abre un archivo de configuración en el editor de texto.

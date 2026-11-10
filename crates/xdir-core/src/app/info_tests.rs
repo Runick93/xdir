@@ -98,7 +98,7 @@ fn full_item(path: &Path) -> ItemInfo {
         comment: Some("Un comentario".into()),
         hidden_ext: Some(false),
         flags: vec![(Flag::Locked, false, true), (Flag::Hidden, false, true)],
-        open_with: Some(OpenWith { current: Some(app.clone()), apps: vec![app], per_file: true }),
+        open_with: Some(OpenWith { current: Some(app.clone()), apps: vec![app], per_file: true, system_dialog: false }),
         perms: Some(Perms { owner: "javier".into(), group: "staff".into(), mode: 0o644, editable: true, can_read: true, can_write: true }),
         more: vec![("Versión", "1.2".into())],
         ..ItemInfo::default()
@@ -207,7 +207,10 @@ fn info_draws_all_sections() {
     for s in ["Etiquetas", "General", "Más información", "Nombre y extensión", "Comentarios", "Abrir con", "Compartir y permisos", "Más en el sistema…"] {
         assert!(t.iter().any(|x| x == s), "falta {s}: {t:?}");
     }
-    assert!(t.iter().any(|x| x == "Información de «IMG_3101.jpg»"), "{t:?}");
+    // El título es «Información»; el nombre va en el encabezado.
+    assert!(t.iter().any(|x| x == "Información"), "{t:?}");
+    assert!(!t.iter().any(|x| x.starts_with("Información de")), "{t:?}");
+    assert!(t.iter().any(|x| x == "IMG_3101.jpg"), "{t:?}");
     for s in ["Rojo", "Viaje", "Bloqueado", "Oculto", "Un comentario", "Ocultar la extensión", "Fotos (predeterminada)", "Cambiar todos…", "javier", "staff", "Todos", "Versión"] {
         assert!(t.iter().any(|x| x == s), "falta {s}: {t:?}");
     }
@@ -236,9 +239,9 @@ fn info_folder_size_calculating() {
     select(&mut a, 0, "Fotos 2026");
     open_on(&mut a);
     let folder = d.join("Fotos 2026");
-    let generation = a.info.generation;
+    let generation = a.info.size_generation;
     let send = |a: &mut App, bytes: u64, files: u64, done: bool| {
-        a.info.tx.send(InfoReply::FolderSize { generation, path: folder.clone(), bytes, files, folders: 0, done }).unwrap();
+        a.info.tx.send(InfoReply::FolderSize { generation, path: folder.clone(), bytes, files, folders: 0, skipped: 0, done }).unwrap();
         deliver(a);
         a.paint();
     };
@@ -413,6 +416,145 @@ fn info_more_in_system_hidden_when_unsupported() {
     assert!(texts(&host).iter().any(|x| x == "Más en el sistema…"));
     click(&mut a, InfoHit::MoreInSystem);
     assert_eq!(FakeInfo::take_more_calls(), [vec![d.join("a.txt")]]);
+}
+
+/// Una carpeta con «Cambiar todos…» de cada sistema: macOS (por archivo) confirma la actual;
+/// Linux elige la app en un menú y confirma; Windows abre su diálogo sin preguntar.
+#[test]
+fn info_change_all_per_platform() {
+    let d = fixture("cambiar", &[("a.jpg", "x")]);
+    let (mut a, host) = app();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    let mut item = full_item(&d.join("a.jpg"));
+    let other = AppRef { id: "gimp.desktop".into(), name: "GIMP".into(), icon: 0 };
+    if let Some(ow) = item.open_with.as_mut() {
+        ow.per_file = false;
+        ow.apps.push(other.clone());
+    }
+    FakeInfo::serve(&d.join("a.jpg"), item.clone());
+    select(&mut a, 0, "a.jpg");
+    a.info.sections |= Section::OpenWith.bit();
+    open_on(&mut a);
+    // Linux: menú de apps, la elegida y la confirmación.
+    host.set_menu_choice(Some(1));
+    host.set_answer(Some(true));
+    click(&mut a, InfoHit::ChangeAll);
+    assert_eq!(FakeInfo::take_applied(), [InfoChange::ChangeAll { path: d.join("a.jpg"), app: "gimp.desktop".into() }]);
+    host.set_menu_choice(None);
+    click(&mut a, InfoHit::ChangeAll);
+    assert!(FakeInfo::take_applied().is_empty(), "sin elegir, nada");
+    // Windows: el diálogo del sistema, sin preguntar.
+    if let Some(ow) = item.open_with.as_mut() {
+        ow.system_dialog = true;
+    }
+    FakeInfo::serve(&d.join("a.jpg"), item);
+    a.info.tx.send(InfoReply::Applied { generation: a.info.generation, section: Section::OpenWith, error: None }).unwrap();
+    deliver(&mut a);
+    a.paint();
+    host.set_answer(None);
+    click(&mut a, InfoHit::ChangeAll);
+    assert_eq!(FakeInfo::take_applied().len(), 1);
+}
+
+/// Permisos de una carpeta: primero se confirma el cambio y después se pregunta por lo de adentro.
+#[test]
+fn info_perms_folder_confirms_then_asks() {
+    let d = fixture("permisos", &[("sub/", ""), ("sub/a.txt", "x")]);
+    let (mut a, host) = app();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    let sub = d.join("sub");
+    let mut item = full_item(&sub);
+    item.is_dir = true;
+    item.open_with = None;
+    FakeInfo::serve(&sub, item);
+    a.info.size_thread = false;
+    select(&mut a, 0, "sub");
+    open_on(&mut a);
+    host.set_menu_choice(Some(2));
+    host.set_answer(Some(false));
+    click(&mut a, InfoHit::Perm(0));
+    assert!(FakeInfo::take_applied().is_empty(), "sin confirmar no cambia nada");
+    host.set_answer(Some(true));
+    click(&mut a, InfoHit::Perm(0));
+    assert_eq!(FakeInfo::take_applied(), [InfoChange::Perms { paths: vec![sub.clone()], mode: 0o044, recursive: true }]);
+}
+
+/// Permisos que no se pueden cambiar: en Unix la tabla de siempre (sin tocar); en Windows el dueño
+/// y lo del usuario actual.
+#[test]
+fn info_perms_read_only_text_per_platform() {
+    let d = fixture("permisos-ver", &[("a.jpg", "x")]);
+    let (mut a, host) = app();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    let mut item = full_item(&d.join("a.jpg"));
+    if let Some(p) = item.perms.as_mut() {
+        p.editable = false;
+    }
+    FakeInfo::serve(&d.join("a.jpg"), item.clone());
+    select(&mut a, 0, "a.jpg");
+    a.info.sections = 0x7F;
+    host.client.set((1400.0, 2400.0));
+    open_on(&mut a);
+    let t = texts(&host);
+    assert!(t.iter().any(|x| x == "staff") && t.iter().any(|x| x == "Todos"), "{t:?}");
+    assert!(!t.iter().any(|x| x == "Tu usuario" || x.contains("Más en el sistema…»")), "{t:?}");
+    assert!(!a.info.layout.hits.iter().any(|(h, _)| matches!(h, InfoHit::Perm(_))));
+    if let Some(p) = item.perms.as_mut() {
+        p.group.clear();
+        p.mode = 0;
+    }
+    FakeInfo::serve(&d.join("a.jpg"), item);
+    a.info.tx.send(InfoReply::Applied { generation: a.info.generation, section: Section::Perms, error: None }).unwrap();
+    deliver(&mut a);
+    a.paint();
+    assert!(texts(&host).iter().any(|x| x == "Tu usuario"), "{:?}", texts(&host));
+}
+
+/// Sin selección (la carpeta abierta) no se ofrece renombrarla.
+#[test]
+fn info_name_hidden_for_current_folder() {
+    let d = fixture("actual", &[("a.txt", "x")]);
+    let (mut a, host) = app();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    open_on(&mut a);
+    assert!(!texts(&host).iter().any(|x| x == "Nombre y extensión"), "{:?}", texts(&host));
+    select(&mut a, 0, "a.txt");
+    a.paint();
+    a.flush_info();
+    deliver(&mut a);
+    a.paint();
+    assert!(texts(&host).iter().any(|x| x == "Nombre y extensión"));
+}
+
+/// Un cambio que anduvo vuelve a leer, pero no corta la suma de la carpeta; las carpetas sin
+/// permiso que no se pudieron contar se avisan.
+#[test]
+fn info_folder_size_survives_change_and_reports_skipped() {
+    let d = fixture("suma-sigue", &[("Fotos/", ""), ("Fotos/a.jpg", "x")]);
+    let (mut a, host) = app();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    let folder = d.join("Fotos");
+    let mut item = full_item(&folder);
+    item.is_dir = true;
+    item.open_with = None;
+    FakeInfo::serve(&folder, item);
+    select(&mut a, 0, "Fotos");
+    open_on(&mut a);
+    let size_gen = a.info.size_generation;
+    click(&mut a, InfoHit::Flag(Flag::Hidden));
+    deliver(&mut a);
+    a.paint();
+    assert_eq!(a.info.size_generation, size_gen, "la suma sigue");
+    a.info.tx.send(InfoReply::FolderSize { generation: size_gen, path: folder.clone(), bytes: 2_000, files: 10, folders: 2, skipped: 3, done: true }).unwrap();
+    deliver(&mut a);
+    a.paint();
+    let t = texts(&host);
+    assert!(t.iter().any(|s| s == "12 elementos (sin contar 3 carpetas sin permiso)"), "{t:?}");
 }
 
 /// «Cambiar todos…» pide confirmación y manda la app actual; elegir otra app del menú también.

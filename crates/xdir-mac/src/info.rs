@@ -143,6 +143,8 @@ fn read_inner(path: &Path) -> ItemInfo {
     }
     // Bloqueado y Oculto: banderas del usuario (las cambia el dueño).
     let (flags, uid, gid, mode) = lstat(path).unwrap_or((0, u32::MAX, u32::MAX, 0));
+    // Un enlace: sus permisos se muestran pero no se cambian (`chmod` cambiaría el original).
+    let link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
     let euid = unsafe { libc::geteuid() };
     let mine = euid == uid || euid == 0;
     if !is_volume {
@@ -156,7 +158,7 @@ fn read_inner(path: &Path) -> ItemInfo {
             owner: user_name(uid),
             group: group_name(gid),
             mode: mode & 0o7777,
-            editable: mine && !is_volume,
+            editable: mine && !is_volume && !link,
             can_read: ok(libc::R_OK),
             can_write: ok(libc::W_OK),
         });
@@ -292,7 +294,7 @@ fn open_with(url: &NSURL) -> Option<OpenWith> {
             break;
         }
     }
-    (!apps.is_empty()).then_some(OpenWith { current, apps, per_file: true })
+    (!apps.is_empty()).then_some(OpenWith { current, apps, per_file: true, system_dialog: false })
 }
 
 // ---------- escritura ----------
@@ -417,40 +419,49 @@ fn set_comment(path: &Path, text: &str) -> Result<(), String> {
 }
 
 /// `chmod` del elemento con `mode`; con `recursive`, lo de adentro toma la lectura y la escritura
-/// de cada clase (la ejecución de cada uno queda como estaba). Junta los errores.
+/// de cada clase (la ejecución de cada uno queda como estaba). Lo de adentro va primero y cada
+/// carpeta al final (después de listarla), así quitarle la lectura al dueño no corta el recorrido.
+/// No entra en carpetas solo en la nube. Un enlace no se toca (cambiaría el original). Junta los
+/// errores.
 pub fn chmod(path: &Path, mode: u32, recursive: bool) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
+    let m = std::fs::symlink_metadata(path).map_err(|e| io_text(&e))?;
+    if m.file_type().is_symlink() {
+        return Err("Es un enlace: los permisos se cambian en el original".into());
+    }
     let mut errors = Vec::new();
+    if recursive && m.is_dir() && !crate::metadata::cloud_only(path) {
+        chmod_contents(path, mode, &mut errors);
+    }
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
         errors.push(io_text(&e));
     }
-    if recursive && path.is_dir() {
-        let mut stack = vec![path.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let rd = match std::fs::read_dir(&dir) {
-                Ok(rd) => rd,
-                Err(e) => {
-                    errors.push(format!("{}: {}", dir.display(), io_text(&e)));
-                    continue;
-                }
-            };
-            for entry in rd.flatten() {
-                let p = entry.path();
-                let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
-                if m.file_type().is_symlink() {
-                    continue;
-                }
-                let next = (m.permissions().mode() & 0o7777 & !0o666) | (mode & 0o666);
-                if let Err(e) = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(next)) {
-                    errors.push(format!("{}: {}", p.display(), io_text(&e)));
-                }
-                if m.is_dir() {
-                    stack.push(p);
-                }
-            }
+    joined(errors)
+}
+
+/// Lo de adentro de `dir`, de abajo hacia arriba (ver `chmod`).
+fn chmod_contents(dir: &Path, mode: u32, errors: &mut Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+        Err(e) => {
+            errors.push(format!("{}: {}", dir.display(), io_text(&e)));
+            return;
+        }
+    };
+    for p in entries {
+        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+        if m.file_type().is_symlink() {
+            continue;
+        }
+        if m.is_dir() && !crate::metadata::cloud_only(&p) {
+            chmod_contents(&p, mode, errors);
+        }
+        let next = (m.permissions().mode() & 0o7777 & !0o666) | (mode & 0o666);
+        if let Err(e) = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(next)) {
+            errors.push(format!("{}: {}", p.display(), io_text(&e)));
         }
     }
-    joined(errors)
 }
 
 /// Aplica un cambio (en el hilo que llama).
@@ -567,6 +578,40 @@ mod tests {
         // A un archivo le llegan la lectura y la escritura; no la ejecución.
         assert_eq!(mode(&d.join("sub/a.txt")), 0o664);
         assert_eq!(read(&d).perms.unwrap().mode & 0o777, 0o775);
+    }
+
+    /// Quitarle la lectura al dueño de una carpeta con «aplicar a lo de adentro»: se cambia todo
+    /// (lo de adentro antes que la carpeta, que después no se podría listar).
+    #[test]
+    fn mac_perms_recursive_without_owner_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = temp("sin-lectura");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/a.txt"), b"x").unwrap();
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        let r = apply_with(&InfoChange::Perms { paths: vec![d.clone()], mode: 0o155, recursive: true }, &SystemDefaults);
+        let (root, sub) = (mode(&d), mode(&d.join("sub")));
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(d.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = mode(&d.join("sub/a.txt"));
+        assert_eq!(r, Ok(()));
+        assert_eq!((root, sub, file), (0o155, 0o155, 0o044));
+    }
+
+    /// Un enlace: los permisos se ven pero no se cambian (cambiarían el original con el modo del
+    /// enlace).
+    #[test]
+    fn mac_symlink_perms_not_editable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = temp("enlace");
+        let f = d.join("a.txt");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = d.join("enlace");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        assert!(!read(&link).perms.unwrap().editable);
+        assert!(apply_with(&InfoChange::Perms { paths: vec![link.clone()], mode: 0o600, recursive: false }, &SystemDefaults).is_err());
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o644);
     }
 
     #[test]

@@ -77,12 +77,14 @@ pub struct AppRef {
 }
 
 /// «Abrir con»: la app actual, las que pueden abrirlo y si elegir una queda para el archivo
-/// (macOS) o lo abre una vez (Windows y Linux).
+/// (macOS) o lo abre una vez (Windows y Linux). `system_dialog`: «Cambiar todos…» abre el diálogo
+/// del sistema, que elige la app (Windows); si no, se elige en el panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenWith {
     pub current: Option<AppRef>,
     pub apps: Vec<AppRef>,
     pub per_file: bool,
+    pub system_dialog: bool,
 }
 
 /// Dueño, grupo y modo (bits de Unix: `0o640`…). `editable`: se puede cambiar (`chmod`); si no,
@@ -205,8 +207,9 @@ impl InfoChange {
 #[derive(Debug)]
 pub enum InfoReply {
     Items { generation: u64, items: Vec<ItemInfo> },
-    /// Avance (o final, con `done`) de la suma de una carpeta.
-    FolderSize { generation: u64, path: PathBuf, bytes: u64, files: u64, folders: u64, done: bool },
+    /// Avance (o final, con `done`) de la suma de una carpeta; `skipped`: carpetas que no se
+    /// pudieron leer (no están en la cuenta). La generación es la de la suma, no la del pedido.
+    FolderSize { generation: u64, path: PathBuf, bytes: u64, files: u64, folders: u64, skipped: u64, done: bool },
     /// Terminó un cambio: `error` es el texto para la sección.
     Applied { generation: u64, section: Section, error: Option<String> },
 }

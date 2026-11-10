@@ -1278,6 +1278,11 @@ impl WindowHost for FakeHost {
         self.answer.get()
     }
 
+    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No.
+    fn ask_yes_no(&self, _title: &str, _text: &str) -> bool {
+        self.answer.get() == Some(true)
+    }
+
     fn open_url(&self, _url: &str) {}
     fn open_in_editor(&self, _path: &Path) {}
 

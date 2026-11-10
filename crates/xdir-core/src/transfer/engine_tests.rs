@@ -1179,3 +1179,48 @@ fn done_items_count_only_what_arrived() {
     // A, sub, 1, 2, ok y z: llegaron A y ok.
     assert_eq!(r.out.done_items, 2);
 }
+
+#[test]
+fn restore_refusal_is_not_retried_and_retry_rechecks() {
+    // Revisión del cableado (C1): el rechazo de «Devolver» no se ofrece para reintentar; y un
+    // Retry con un elemento de la Papelera pasa igual por las reglas de «Devolver».
+    let fake = FakeCopyPrims::new();
+    fake.add_dir(&p("/rr/afuera"));
+    fake.add_symlink(&p("/rr/vol/docs"), &p("/rr/afuera"));
+    fake.add_file(&p("/rr/vol/.Trashes/x.txt"), b"x".to_vec());
+    fake.set_trash_origin(&p("/rr/vol/.Trashes/x.txt"), &p("/rr/vol/docs/x.txt"));
+    let r = go(&fake, JobSpec::Restore { items: vec![p("/rr/vol/.Trashes/x.txt")] }, &[]);
+    assert_eq!(r.out.errors.len(), 1);
+    assert!(!r.out.errors[0].retry);
+    let pairs = vec![(p("/rr/vol/.Trashes/x.txt"), p("/rr/vol/docs/x.txt"))];
+    let r = go(&fake, JobSpec::Retry { moving: true, pairs }, &[]);
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.messages());
+    assert!(!fake.exists(&p("/rr/afuera/x.txt")));
+    assert!(fake.exists(&p("/rr/vol/.Trashes/x.txt")));
+}
+
+#[test]
+fn restore_rechecks_folder_after_the_question() {
+    // Revisión del cableado (I1): la carpeta cambia por un enlace mientras se espera la respuesta.
+    let fake = FakeCopyPrims::new();
+    fake.add_dir(&p("/rq/afuera"));
+    fake.add_file(&p("/rq/vol/docs/x.txt"), b"viejo".to_vec());
+    fake.add_file(&p("/rq/vol/.Trashes/x.txt"), b"x".to_vec());
+    fake.set_trash_origin(&p("/rq/vol/.Trashes/x.txt"), &p("/rq/vol/docs/x.txt"));
+    for choice in [Choice::KeepBoth, Choice::Replace] {
+        let f2 = fake.clone();
+        let r = go_with(&fake, JobSpec::Restore { items: vec![p("/rq/vol/.Trashes/x.txt")] }, &[answer(choice)], &Control::new(), &mut |u, _| {
+            if let Update::Conflict(_) = u {
+                crate::sys::CopyPrims::rename_noreplace(&f2, &p("/rq/vol/docs"), &p("/rq/vol/docs-real")).unwrap();
+                f2.add_symlink(&p("/rq/vol/docs"), &p("/rq/afuera"));
+            }
+        });
+        assert_eq!(r.out.errors.len(), 1, "{choice:?}: {:?}", r.messages());
+        assert!(!r.out.errors[0].retry);
+        assert!(fake.list_all(&p("/rq/afuera")).is_empty(), "{choice:?}: nada afuera");
+        assert!(fake.exists(&p("/rq/vol/.Trashes/x.txt")));
+        // Para la vuelta siguiente: la carpeta de verdad otra vez.
+        crate::sys::CopyPrims::remove(&fake, &p("/rq/vol/docs")).unwrap();
+        crate::sys::CopyPrims::rename_noreplace(&fake, &p("/rq/vol/docs-real"), &p("/rq/vol/docs")).unwrap();
+    }
+}

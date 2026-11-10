@@ -320,10 +320,10 @@ impl CopyPrims for LinuxCopyPrims {
     /// Las reglas de «Devolver» de `Op::Restore` (`ops::prepare_restore_parent`): la papelera de
     /// un disco solo devuelve dentro de ese disco y nunca se siguen enlaces (salvo los de root del
     /// primer nivel del disco de arranque).
-    fn prepare_restore(&self, in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+    fn prepare_restore(&self, in_trash: &Path, dir: &Path, create: bool) -> Result<(), CopyError> {
         let refuse = |e: String| CopyError::new(ErrKind::Other(e), dir);
         let (trash, _) = crate::ops::trash_of(in_trash).ok_or_else(|| refuse("No se sabe de dónde vino".into()))?;
-        crate::ops::prepare_restore_parent(trash, dir).map_err(refuse)
+        crate::ops::prepare_restore_parent(trash, dir, create).map_err(refuse)
     }
 
     /// Ya devuelto: se borra su `.trashinfo`.
@@ -547,8 +547,8 @@ mod tests {
         fn trash_origin(&self, in_trash: &Path) -> Option<PathBuf> {
             LinuxCopyPrims.trash_origin(in_trash)
         }
-        fn prepare_restore(&self, in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
-            LinuxCopyPrims.prepare_restore(in_trash, dir)
+        fn prepare_restore(&self, in_trash: &Path, dir: &Path, create: bool) -> Result<(), CopyError> {
+            LinuxCopyPrims.prepare_restore(in_trash, dir, create)
         }
         fn restored(&self, in_trash: &Path) {
             LinuxCopyPrims.restored(in_trash)
@@ -581,6 +581,34 @@ mod tests {
         assert_eq!(std::fs::read_to_string(top.join("fotos/c")).unwrap(), "c");
         assert!(!trash.join("info/c.trashinfo").exists());
         assert!(trash.join("info/a.trashinfo").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Revisión del cableado (C1): los rechazos de «Devolver» (enlace en el camino, `Path=` fuera
+    /// del disco) no se reintentan, y un Retry con esos pares tampoco escribe afuera.
+    #[test]
+    fn engine_restore_retry_and_outside_paths_stay_refused() {
+        let dir = tmp("motor-devolver-reintento");
+        let (top, outside) = (dir.join("usb"), dir.join("autostart"));
+        let trash = top.join(".Trash-1000");
+        std::fs::create_dir_all(trash.join("files")).unwrap();
+        std::fs::create_dir_all(trash.join("info")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, top.join("docs")).unwrap();
+        for (name, path) in [("a", "docs/a".to_string()), ("b", outside.join("b").display().to_string())] {
+            std::fs::write(trash.join("files").join(name), name).unwrap();
+            std::fs::write(trash.join("info").join(format!("{name}.trashinfo")), format!("[Trash Info]\nPath={path}\n")).unwrap();
+        }
+        let items = vec![trash.join("files/a"), trash.join("files/b")];
+        let prims = Real { other: None };
+        let out = go(&prims, JobSpec::Restore { items }, &[], &Control::new(), &mut |_| {});
+        assert_eq!(out.errors.len(), 2, "{:?}", out.errors);
+        assert!(out.errors.iter().all(|e| !e.retry), "{:?}", out.errors);
+        let pairs: Vec<_> = out.errors.iter().map(|e| (e.src.clone(), e.dst.clone())).collect();
+        let out = go(&prims, JobSpec::Retry { moving: true, pairs }, &[], &Control::new(), &mut |_| {});
+        assert_eq!(out.errors.len(), 2, "{:?}", out.errors);
+        assert!(!outside.join("a").exists() && !outside.join("b").exists());
+        assert!(trash.join("files/a").exists() && trash.join("files/b").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

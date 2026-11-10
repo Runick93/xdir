@@ -136,11 +136,14 @@ struct Item {
     src: PathBuf,
     target: Target,
     how: How,
+    /// «Devolver»: la carpeta del lugar original, ya preparada; se vuelve a mirar
+    /// (`CopyPrims::prepare_restore` sin crear) justo antes de escribir ahí.
+    restore_dir: Option<PathBuf>,
 }
 
 impl Item {
     fn new(src: &Path, target: Target, how: How) -> Item {
-        Item { src: src.to_path_buf(), target, how }
+        Item { src: src.to_path_buf(), target, how, restore_dir: None }
     }
 }
 
@@ -243,6 +246,8 @@ struct Job<'a> {
     merging: usize,
     /// Elementos que llegaron (`JobOutcome::done_items`).
     ok_items: u64,
+    /// «Devolver» del elemento actual: (lo de la Papelera, la carpeta del lugar original).
+    restore_guard: Option<(PathBuf, PathBuf)>,
     index: usize,
     /// «Devolver»: lo movido se deshace mandándolo de nuevo a la Papelera.
     moves_as_created: bool,
@@ -272,6 +277,7 @@ impl<'a> Job<'a> {
             ahead: Vec::new(),
             merging: 0,
             ok_items: 0,
+            restore_guard: None,
             index: 0,
             moves_as_created: false,
         }
@@ -470,9 +476,46 @@ impl<'a> Job<'a> {
                 self.fail_msg(src, dst, INTO_ITSELF, false);
                 continue;
             }
+            // Algo de la Papelera: siempre con las reglas de «Devolver» (nunca un mover común).
+            if self.prims.trash_origin(src).is_some() {
+                if let Some(item) = self.restore_item(src, dst) {
+                    items.push(item);
+                }
+                continue;
+            }
             items.push(self.item_to(src, dst.clone(), moving));
         }
         items
+    }
+
+    /// «Devolver» `src` a `origin`: prepara la carpeta sin seguir enlaces (reglas de cada sistema).
+    /// Un rechazo no se ofrece para «Reintentar» (sería lo mismo, o un camino sin controles).
+    fn restore_item(&mut self, src: &Path, origin: &Path) -> Option<Item> {
+        let dir = origin.parent()?.to_path_buf();
+        if let Err(e) = self.prims.prepare_restore(src, &dir, true) {
+            self.fail_msg(src, origin, &e.message(), false);
+            return None;
+        }
+        let mut item = self.item_to(src, origin.to_path_buf(), true);
+        item.restore_dir = Some(dir);
+        Some(item)
+    }
+
+    /// Justo antes de escribir en `dst`: si se está devolviendo a esa carpeta, se vuelve a mirar
+    /// que siga siendo una carpeta de verdad del disco (pudo cambiar mientras se esperaba una
+    /// respuesta). Si no, error (sin reintento) y no se escribe nada.
+    fn restore_still_safe(&mut self, src: &Path, dst: &Path) -> bool {
+        let Some((in_trash, dir)) = self.restore_guard.clone() else { return true };
+        if !dst.starts_with(&dir) {
+            return true;
+        }
+        match self.prims.prepare_restore(&in_trash, &dir, false) {
+            Ok(()) => true,
+            Err(e) => {
+                self.fail_msg(src, dst, &e.message(), false);
+                false
+            }
+        }
     }
 
     /// Anota los errores del recorrido de `item`, con el destino que les tocaba.
@@ -606,6 +649,17 @@ impl<'a> Job<'a> {
 
     /// Lleva un elemento de arriba.
     fn process(&mut self, item: Item, moving: bool) {
+        let Some(dir) = item.restore_dir.clone() else { return self.process_item(item, moving) };
+        let (src, origin) = (item.src.clone(), self.target_hint(&item));
+        self.restore_guard = Some((src.clone(), dir));
+        self.process_item(item, moving);
+        self.restore_guard = None;
+        if self.exists(&src).is_none() && self.exists(&origin).is_some() {
+            self.prims.restored(&src);
+        }
+    }
+
+    fn process_item(&mut self, item: Item, moving: bool) {
         self.current = name_of(&item.src);
         if let (How::Rename, Target::Fixed(dst)) = (&item.how, &item.target) {
             match self.rename_tree(&item.src, dst) {
@@ -740,6 +794,9 @@ impl<'a> Job<'a> {
 
     /// Aparta lo que está en `dst` (renombrado sin pisar a un temporal oculto al lado).
     fn set_aside(&mut self, src: &Path, dst: &Path) -> Option<PathBuf> {
+        if !self.restore_still_safe(src, dst) {
+            return None;
+        }
         // A la vista y con un nombre que lo explica («informe (reemplazado).pdf»): si xdir se
         // corta antes de tirarlo, queda ahí; y en la Papelera se reconoce.
         let is_dir = self.exists(dst).is_some_and(|s| s.kind == ItemKind::Dir);
@@ -898,6 +955,13 @@ impl<'a> Job<'a> {
         dests: &mut HashMap<PathBuf, Option<(PathBuf, bool)>>,
         stack: &mut Vec<Frame>,
     ) {
+        if !self.restore_still_safe(&item.src, &dst) {
+            dests.insert(item.rel.clone(), None);
+            if let Some(aside) = aside {
+                self.put_back(&aside, &dst);
+            }
+            return;
+        }
         match self.prims.create_dir(&dst) {
             Ok(()) => {
                 self.ok_items += 1;
@@ -926,6 +990,9 @@ impl<'a> Job<'a> {
     /// Copia (o mueve) un archivo o un enlace a `dst`, que está libre. `record`: anota el
     /// deshacer (no hace falta dentro de una carpeta creada por este trabajo).
     fn copy_one(&mut self, item: &Planned, dst: &Path, moving: bool, record: bool) -> bool {
+        if !self.restore_still_safe(&item.src, dst) {
+            return false;
+        }
         // Se escribe con un nombre parcial y recién entero toma el suyo: si xdir se corta a mitad,
         // nunca queda algo a medias con el nombre del archivo.
         let mut part = part_name(dst, &|p| self.exists(p).is_some());
@@ -1040,6 +1107,9 @@ impl<'a> Job<'a> {
     /// cuando está entero se aparta lo que estaba, se pone el temporal en su lugar y lo apartado va
     /// a la Papelera. Si algo falla, lo que estaba vuelve.
     fn replace_one(&mut self, item: &Planned, dst: &Path, moving: bool, record: bool) -> bool {
+        if !self.restore_still_safe(&item.src, dst) {
+            return false;
+        }
         let tmp = tmp_in(dst.parent().unwrap_or(Path::new("")));
         if let Err(e) = self.write(item, &tmp) {
             if e.kind != ErrKind::Exists {
@@ -1155,6 +1225,7 @@ impl<'a> Job<'a> {
         };
         match self.decide(src, &incoming, dst, true) {
             Decision::Skip => Renamed::Done(None),
+            Decision::Fresh(to) if !self.restore_still_safe(src, &to) => Renamed::Done(None),
             Decision::Fresh(to) => match self.prims.rename_noreplace(src, &to) {
                 Ok(()) => {
                     self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
@@ -1263,18 +1334,8 @@ impl<'a> Job<'a> {
             if self.should_stop() {
                 break;
             }
-            // La carpeta del lugar original, sin seguir enlaces (reglas de cada sistema).
-            if let Some(dir) = origin.parent()
-                && let Err(e) = self.prims.prepare_restore(&src, dir)
-            {
-                self.fail(&src, &origin, e);
-                continue;
-            }
-            let item = self.item_to(&src, origin.clone(), true);
+            let Some(item) = self.restore_item(&src, &origin) else { continue };
             self.process(item, true);
-            if self.exists(&src).is_none() && self.exists(&origin).is_some() {
-                self.prims.restored(&src);
-            }
         }
     }
 

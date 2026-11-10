@@ -161,8 +161,9 @@ pub trait CopyPrims: Send + Sync {
     /// ahí, sin seguir enlaces (un disco armado podría tener «docs» apuntando a otro lado): las
     /// que faltan se crean una por una y ninguna del camino puede ser un enlace. Cada sistema
     /// pone sus reglas (en macOS y Linux, solo los enlaces de root del primer nivel del disco de
-    /// arranque, como `/tmp`). Por defecto: ningún enlace en el camino.
-    fn prepare_restore(&self, _in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+    /// arranque, como `/tmp`). Por defecto: ningún enlace en el camino. Con `create` = false solo
+    /// se vuelve a mirar (justo antes de escribir ahí): lo que falte es error.
+    fn prepare_restore(&self, _in_trash: &Path, dir: &Path, create: bool) -> Result<(), CopyError> {
         let refuse = |p: &Path| CopyError::new(ErrKind::Other(format!("«{}» no es una carpeta de ese disco (es un enlace o está afuera): no se devuelve ahí", p.display())), p);
         // Las que faltan (desde abajo) hasta la primera que está; desde ahí, todas carpetas.
         let mut missing = Vec::new();
@@ -171,7 +172,7 @@ pub trait CopyPrims: Send + Sync {
             match self.stat(d) {
                 Ok(s) if s.kind == ItemKind::Dir => found = true,
                 Ok(_) => return Err(refuse(d)),
-                Err(e) if e.kind == ErrKind::NotFound && !found => missing.push(d.to_path_buf()),
+                Err(e) if e.kind == ErrKind::NotFound && !found && create => missing.push(d.to_path_buf()),
                 Err(e) => return Err(e),
             }
         }

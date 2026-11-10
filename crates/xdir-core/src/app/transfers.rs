@@ -35,6 +35,8 @@ struct JobMeta {
     ctl: Arc<Control>,
     /// Mueve (para «Reintentar»).
     moving: bool,
+    /// Es un «Devolver»: «Reintentar» vuelve a ser «Devolver» (con sus reglas), nunca un mover.
+    restore: bool,
     /// «Copiar», «Duplicar»… para los avisos.
     label: &'static str,
     /// Rutas que toca (para saber si usa un disco que se quiere expulsar).
@@ -269,7 +271,8 @@ impl App {
             route: spec_route(&spec),
             done_items: None,
         });
-        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, label, paths: paths.clone() });
+        let restore = matches!(spec, JobSpec::Restore { .. });
+        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone() });
         let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone());
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
@@ -758,8 +761,14 @@ impl App {
         // Los avisos (lo que quedó con otro nombre) no se reintentan.
         let pairs: Vec<_> = v.errors.iter().filter(|e| e.retry).map(|e| (e.src.clone(), e.dst.clone())).collect();
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
+        let restore = self.transfers.meta.get(&id).is_some_and(|m| m.restore);
         self.forget_job(id);
-        let again = (!pairs.is_empty()).then(|| self.start_transfer(JobSpec::Retry { moving, pairs }));
+        let spec = if restore {
+            JobSpec::Restore { items: pairs.into_iter().map(|(src, _)| src).collect() }
+        } else {
+            JobSpec::Retry { moving, pairs }
+        };
+        let again = (spec_count(&spec) > 0).then(|| self.start_transfer(spec));
         self.sync_transfers_window();
         again
     }

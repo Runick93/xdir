@@ -649,3 +649,24 @@ fn conflict_buttons_ignore_clicks_right_after_appearing() {
     assert_eq!(f.contents(&p("/app-wg/d/x 2.txt")).unwrap(), b"nuevo");
     assert_eq!(f.contents(&p("/app-wg/d/x.txt")).unwrap(), b"viejo");
 }
+
+#[test]
+fn retry_of_a_restore_is_a_restore() {
+    // Revisión del cableado (C1): «Reintentar» de un «Devolver» vuelve a ser «Devolver» (con sus
+    // reglas y el aviso a la Papelera), nunca un mover común.
+    let f = fake();
+    f.add_file(&p("/app-rt/.Trash/x.txt"), b"x".to_vec());
+    f.set_trash_origin(&p("/app-rt/.Trash/x.txt"), &p("/app-rt/Docs/x.txt"));
+    f.add_dir(&p("/app-rt/Docs"));
+    f.fail(&p("/app-rt/Docs/x.txt"), ErrKind::NotFound, 1);
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(JobSpec::Restore { items: vec![p("/app-rt/.Trash/x.txt")] });
+    wait(&mut a, idle);
+    assert_eq!(a.jobs()[0].errors.len(), 1, "{:?}", a.jobs()[0].errors);
+    a.take_started();
+    a.retry_job(id).expect("se reintenta");
+    assert_eq!(a.take_started(), vec![JobSpec::Restore { items: vec![p("/app-rt/.Trash/x.txt")] }]);
+    wait(&mut a, idle);
+    assert!(f.exists(&p("/app-rt/Docs/x.txt")));
+    assert_eq!(f.restored(), vec![p("/app-rt/.Trash/x.txt")]);
+}

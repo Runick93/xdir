@@ -174,7 +174,7 @@ fn restore_item(item: &Path) -> Result<PathBuf> {
         let shown = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         return Err(format!("Ya existe «{shown}» en «{folder}»"));
     }
-    prepare_restore_parent(trash, parent)?;
+    prepare_restore_parent(trash, parent, true)?;
     trash::restore(&name, &to, trash).map_err(|e| err_at(item, e))?;
     Ok(to)
 }
@@ -182,10 +182,12 @@ fn restore_item(item: &Path) -> Result<PathBuf> {
 /// Deja lista para «Devolver» la carpeta `parent` de algo de la papelera `trash`. La papelera de un
 /// disco (no la del usuario) solo devuelve dentro de ese disco; y en ningún caso se siguen enlaces
 /// en las carpetas del camino. La usan `Op::Restore` y el motor de copia.
-pub(crate) fn prepare_restore_parent(trash: &Path, parent: &Path) -> Result<()> {
+pub(crate) fn prepare_restore_parent(trash: &Path, parent: &Path, create: bool) -> Result<()> {
     let home = trash::data_home().map(|d| trash::trash_dir(&d));
     let root = if home.as_deref() == Some(trash) { PathBuf::from("/") } else { trash::topdir(trash) };
-    prepare_parent(&root, parent, true)?;
+    if create {
+        prepare_parent(&root, parent, true)?;
+    }
     prepare_parent(&root, parent, false)
 }
 

@@ -283,10 +283,12 @@ impl CopyPrims for MacCopyPrims {
     /// Las mismas reglas que «Devolver» del Finder en xdir (`trash::prepare_parent`): nada de
     /// enlaces en el camino (salvo los de root del primer nivel del disco de arranque, como
     /// `/tmp`), las carpetas que faltan se crean una por una y la ruta real queda en ese disco.
-    fn prepare_restore(&self, _in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+    fn prepare_restore(&self, _in_trash: &Path, dir: &Path, create: bool) -> Result<(), CopyError> {
         let root = crate::trash::volume_root(dir);
         let refuse = |e: String| CopyError::new(ErrKind::Other(e), dir);
-        crate::trash::prepare_parent(&root, dir, true).map_err(refuse)?;
+        if create {
+            crate::trash::prepare_parent(&root, dir, true).map_err(refuse)?;
+        }
         crate::trash::prepare_parent(&root, dir, false).map_err(refuse)
     }
 
@@ -529,8 +531,8 @@ mod tests {
         fn trash_origin(&self, _in_trash: &Path) -> Option<PathBuf> {
             self.origin.clone()
         }
-        fn prepare_restore(&self, in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
-            MacCopyPrims.prepare_restore(in_trash, dir)
+        fn prepare_restore(&self, in_trash: &Path, dir: &Path, create: bool) -> Result<(), CopyError> {
+            MacCopyPrims.prepare_restore(in_trash, dir, create)
         }
     }
 
@@ -582,6 +584,67 @@ mod tests {
         let out = go(&prims, JobSpec::Restore { items: vec![item.clone()] }, &[skip], &Control::new(), &mut |_| {});
         assert_eq!(out.skipped, vec![item.clone()]);
         assert_eq!(std::fs::read_to_string(&back).unwrap(), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Revisión del cableado (C1): «Reintentar» después de un «Devolver» rechazado no puede
+    /// saltearse las reglas. El rechazo no se ofrece para reintentar, y aunque llegue un Retry con
+    /// ese par, el motor vuelve a preparar la carpeta y no escribe del otro lado del enlace.
+    #[test]
+    fn zz_retry_bypasses_restore_checks() {
+        let dir = tmp("motor-devolver-retry");
+        let (vol, outside) = (dir.join("vol"), dir.join("LaunchAgents"));
+        std::fs::create_dir_all(vol.join(".Trashes/501")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, vol.join("docs")).unwrap();
+        let item = vol.join(".Trashes/501/evil.plist");
+        std::fs::write(&item, "x").unwrap();
+        let prims = Real { other: None, origin: Some(vol.join("docs/evil.plist")) };
+        let out = go(&prims, JobSpec::Restore { items: vec![item.clone()] }, &[], &Control::new(), &mut |_| {});
+        assert_eq!(out.errors.len(), 1);
+        assert!(!out.errors[0].retry, "un rechazo de Devolver no se reintenta");
+        // Aunque llegue un Retry con ese par (de otro camino), no pasa.
+        let pairs: Vec<_> = out.errors.iter().map(|e| (e.src.clone(), e.dst.clone())).collect();
+        let out = go(&prims, JobSpec::Retry { moving: true, pairs }, &[], &Control::new(), &mut |_| {});
+        assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
+        assert!(!outside.join("evil.plist").exists(), "no escribió a través del enlace");
+        assert!(item.exists(), "sigue en la Papelera");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Revisión del cableado (I1): mientras espera la respuesta a un conflicto, alguien cambia la
+    /// carpeta por un enlace a otro lado. Antes de escribir se vuelve a mirar: error y nada afuera.
+    #[test]
+    fn zz_swap_during_conflict_prompt() {
+        let dir = tmp("motor-devolver-swap");
+        let (vol, outside) = (dir.join("vol"), dir.join("LaunchAgents"));
+        std::fs::create_dir_all(vol.join(".Trashes/501")).unwrap();
+        std::fs::create_dir_all(vol.join("docs")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(vol.join("docs/evil.plist"), "old").unwrap();
+        std::fs::write(outside.join("evil.plist"), "victim").unwrap();
+        let item = vol.join(".Trashes/501/evil.plist");
+        std::fs::write(&item, "x").unwrap();
+        let prims = Real { other: None, origin: Some(vol.join("docs/evil.plist")) };
+        let (v2, o2) = (vol.clone(), outside.clone());
+        for choice in [Choice::KeepBoth, Choice::Replace] {
+            let answer = Answer { choice, all: false };
+            let _ = std::fs::remove_file(v2.join("docs"));
+            if v2.join("docs-real").exists() {
+                std::fs::rename(v2.join("docs-real"), v2.join("docs")).unwrap();
+            }
+            let out = go(&prims, JobSpec::Restore { items: vec![item.clone()] }, &[answer], &Control::new(), &mut |u| {
+                if let Update::Conflict(_) = u {
+                    std::fs::rename(v2.join("docs"), v2.join("docs-real")).unwrap();
+                    std::os::unix::fs::symlink(&o2, v2.join("docs")).unwrap();
+                }
+            });
+            assert_eq!(out.errors.len(), 1, "{choice:?}: {:?}", out.errors);
+            let listing: Vec<_> = std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert_eq!(listing, vec![std::ffi::OsString::from("evil.plist")], "{choice:?}: nada nuevo afuera");
+            assert_eq!(std::fs::read_to_string(outside.join("evil.plist")).unwrap(), "victim");
+            assert!(item.exists(), "{choice:?}: sigue en la Papelera");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

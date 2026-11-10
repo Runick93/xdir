@@ -53,7 +53,10 @@ impl App {
             WM_APP_SEARCH => self.on_search_due(lparam as u64),
             WM_APP_VIEWS_SAVE => self.on_views_save_due(),
             WM_APP_TOOLTIP => self.on_tooltip_due(lparam as u64),
-            crate::preview::WM_APP_PREVIEW => self.on_preview_reply(),
+            crate::preview::WM_APP_PREVIEW => {
+                self.on_preview_reply();
+                self.on_quick_look_reply();
+            }
             preview::WM_APP_PREVIEW_DUE => self.on_preview_due(),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {
@@ -118,6 +121,10 @@ impl App {
         }
         if views_changed {
             self.schedule_views_save();
+        }
+        // La vista rápida sigue a su carpeta (se borró el elemento, se vació, cambió de carpeta).
+        if changed {
+            self.sync_quick_look();
         }
         changed
     }
@@ -288,9 +295,15 @@ impl App {
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
         self.dismiss_tooltip();
+        // El espacio de la tecla que abrió, cerró o plegó (Windows manda la tecla y después el
+        // carácter) no entra en la búsqueda por tipeo.
+        if std::mem::take(&mut self.swallow_space) && c == ' ' {
+            return;
+        }
         if !c.is_control() && !key_down(VK_CONTROL) && !self.xtree_open {
             let action = self.tab_mut().list.on_char(c);
             self.apply(self.active, action);
+            self.quick_look_follow_list();
         }
     }
 
@@ -324,6 +337,8 @@ impl App {
             return;
         }
         let pane = match self.hit(x, y) {
+            // La rueda sobre la tarjeta de la vista rápida no mueve la lista de abajo.
+            Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => return,
             Hit::Palette(_) => {
                 if let Some((pal, _)) = &mut self.palette {
                     pal.on_wheel(delta.round() as i32 * 3);

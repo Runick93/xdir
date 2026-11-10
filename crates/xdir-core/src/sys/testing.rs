@@ -475,6 +475,8 @@ thread_local! {
     static DRIVES: RefCell<Vec<(PathBuf, String)>> = const { RefCell::new(Vec::new()) };
     /// Rutas que el falso informa como «solo en la nube» (por hilo; ver `set_cloud_only`).
     static CLOUD: RefCell<BTreeSet<PathBuf>> = const { RefCell::new(BTreeSet::new()) };
+    /// Cuántas veces se preguntó `cloud_only` en este hilo.
+    static CLOUD_CHECKS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
@@ -489,6 +491,12 @@ impl FakeFileSystem {
     /// nombres. Con una lista vacía vuelve a no haber unidades.
     pub fn set_drives(drives: &[(&Path, &str)]) {
         DRIVES.with(|d| *d.borrow_mut() = drives.iter().map(|(p, n)| (p.to_path_buf(), n.to_string())).collect());
+    }
+
+    /// Cuántas veces se preguntó `cloud_only` en este hilo (las vistas rápidas lo preguntan por
+    /// `sys::preview()`, nunca al dibujar).
+    pub fn cloud_checks() -> usize {
+        CLOUD_CHECKS.with(Cell::get)
     }
 
     /// Desde ahora (en este hilo) `cloud_only(path)` dice `cloud`.
@@ -756,6 +764,7 @@ impl FileSystem for FakeFileSystem {
 
     /// Solo lo marcado con `set_cloud_only` en este hilo.
     fn cloud_only(&self, path: &Path) -> bool {
+        CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
         CLOUD.with(|c| c.borrow().contains(path))
     }
 }
@@ -1037,6 +1046,12 @@ pub struct FakeHost {
     menus: RefCell<Vec<Vec<Entry>>>,
     /// La ventana que se le pasó a `attach` (la última).
     attached: Cell<Option<Handle>>,
+    /// Imágenes grandes pedidas en el último cuadro dibujado.
+    drawn_big: RefCell<Vec<thumbs::Key>>,
+    /// Vista rápida: lo que se le pidió mostrar, cuántas veces se cerró y si tiene visor propio.
+    quick_look_shown: RefCell<Vec<crate::quicklook::QuickLookItem>>,
+    quick_look_closes: Cell<usize>,
+    quick_look_native: Cell<bool>,
 }
 
 impl FakeHost {
@@ -1055,7 +1070,32 @@ impl FakeHost {
             menu_choice: Cell::new(None),
             menus: RefCell::new(Vec::new()),
             attached: Cell::new(None),
+            drawn_big: RefCell::new(Vec::new()),
+            quick_look_shown: RefCell::new(Vec::new()),
+            quick_look_closes: Cell::new(0),
+            quick_look_native: Cell::new(true),
         })
+    }
+
+    /// Imágenes grandes pedidas en el último cuadro dibujado.
+    pub fn drawn_big(&self) -> Vec<thumbs::Key> {
+        self.drawn_big.borrow().clone()
+    }
+
+    /// Lo que se le pidió mostrar a la vista rápida, en orden.
+    pub fn quick_look_shown(&self) -> Vec<crate::quicklook::QuickLookItem> {
+        self.quick_look_shown.borrow().clone()
+    }
+
+    /// Cuántas veces se cerró la vista rápida desde la `App`.
+    pub fn quick_look_closes(&self) -> usize {
+        self.quick_look_closes.get()
+    }
+
+    /// Si el host tiene visor propio (por defecto, sí): sin él, `quick_look_show` devuelve `false`
+    /// (y no anota nada) y la `App` dibuja su tarjeta.
+    pub fn set_quick_look_native(&self, native: bool) {
+        self.quick_look_native.set(native);
     }
 
     /// El texto de la caja abierta de ese tipo (`None` si no hay ninguna).
@@ -1207,7 +1247,20 @@ impl WindowHost for FakeHost {
         let (w, h) = self.client.get();
         paint(&p, w, h);
         *self.drawn.borrow_mut() = p.texts();
+        *self.drawn_big.borrow_mut() = p.big_requests();
         Ok(())
+    }
+
+    fn quick_look_show(&self, item: &crate::quicklook::QuickLookItem) -> bool {
+        if !self.quick_look_native.get() {
+            return false;
+        }
+        self.quick_look_shown.borrow_mut().push(item.clone());
+        true
+    }
+
+    fn quick_look_close(&self) {
+        self.quick_look_closes.set(self.quick_look_closes.get() + 1);
     }
 
     fn text_width(&self, s: &str, _bold: bool) -> f32 {

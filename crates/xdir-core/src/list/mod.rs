@@ -297,6 +297,9 @@ struct Band {
     base: Vec<bool>,
 }
 
+/// La búsqueda por tipeo sigue el mismo nombre si la tecla siguiente llega antes de esto.
+const TYPEAHEAD_MS: u64 = 900;
+
 pub struct FileList {
     pub entries: Vec<Entry>,
     /// Índices de `entries` que se muestran (sin los ocultos), ordenados, sin agrupar.
@@ -1809,10 +1812,34 @@ impl FileList {
         matches!(self.rows.get(row), Some(Row::Header { collapsed: true, .. }))
     }
 
+    /// ¿Hay una búsqueda por tipeo en curso? (se escribió algo hace menos de `TYPEAHEAD_MS`): el
+    /// Espacio es parte del nombre y no abre la vista rápida.
+    pub fn typeahead_active(&self) -> bool {
+        !self.typeahead.is_empty() && self.typeahead_at.is_some_and(|t| t.elapsed() < Duration::from_millis(TYPEAHEAD_MS))
+    }
+
+    /// ¿El foco está en el encabezado de un grupo? (el Espacio lo pliega).
+    pub fn header_focused(&self) -> bool {
+        self.focused_header().is_some()
+    }
+
+    /// Lleva el foco a esa posición sin tocar la selección y la deja a la vista (la vista rápida
+    /// recorriendo varios seleccionados).
+    pub fn focus_only(&mut self, pos: usize) {
+        if pos < self.visible.len() {
+            self.header_focus = None;
+            self.auto_focus = false;
+            self.focus_visible = true;
+            self.focus = Some(pos);
+            self.anchor = Some(pos);
+            self.ensure_visible(pos);
+        }
+    }
+
     /// Búsqueda al teclear: salta al primer nombre que empieza con lo escrito.
     pub fn on_char(&mut self, c: char) -> Action {
         let now = Instant::now();
-        let fresh = self.typeahead_at.is_none_or(|t| now - t > Duration::from_millis(900));
+        let fresh = self.typeahead_at.is_none_or(|t| now - t > Duration::from_millis(TYPEAHEAD_MS));
         if fresh {
             self.typeahead.clear();
         }

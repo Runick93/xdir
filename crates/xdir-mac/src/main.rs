@@ -17,6 +17,8 @@ mod ops;
 #[cfg(target_os = "macos")]
 mod platform;
 #[cfg(target_os = "macos")]
+mod quicklook;
+#[cfg(target_os = "macos")]
 mod render;
 #[cfg(target_os = "macos")]
 mod shell;

@@ -27,6 +27,7 @@ pub mod paint;
 pub mod palette;
 pub mod pane;
 pub mod preview;
+pub mod quicklook;
 pub mod session;
 pub mod shell;
 pub mod sys;

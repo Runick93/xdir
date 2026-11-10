@@ -12,6 +12,7 @@ mod saved_groups;
 mod input;
 mod paint;
 mod quick_jump;
+mod quick_look;
 mod panes;
 mod preview;
 mod tooltip;
@@ -20,6 +21,8 @@ mod tooltip;
 mod tests;
 #[cfg(test)]
 mod preview_tests;
+#[cfg(test)]
+mod quick_look_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -161,6 +164,10 @@ enum Hit {
     /// La entrada «xtree» del árbol (abre o cierra la vista; su cartel dice cómo va el escaneo).
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     TreeXtree,
+    /// Tarjeta de la vista rápida dibujada por xdir: un botón de su barra de título.
+    QuickLookTitle(crate::quicklook::TitleHit),
+    /// El cuerpo de la tarjeta: un botón, o nada.
+    QuickLookBody(Option<crate::quicklook::FallbackHit>),
 }
 
 /// Lo que se está arrastrando con el botón izquierdo.
@@ -374,6 +381,10 @@ pub struct App {
     xtree_open: bool,
     /// Columna de vista previa (a la derecha de los paneles).
     preview: preview::PreviewState,
+    /// Vista rápida abierta (Espacio).
+    quick_look: Option<quick_look::QlState>,
+    /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
+    swallow_space: bool,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -548,6 +559,8 @@ impl App {
             xtree: None,
             xtree_open: false,
             preview: preview::PreviewState::new(session.preview_on, session.preview_width),
+            quick_look: None,
+            swallow_space: false,
         };
         app.restore_panes(&session, start_path);
         app.sync_folder_views();

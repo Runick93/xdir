@@ -10,6 +10,21 @@ impl App {
         // Ctrl+Alt (y AltGr) en Windows y ⌥⌘ en macOS llegan acá, no a `on_alt_key`: sin mirar
         // Alt, Ctrl+Alt+N se buscaba como Ctrl+N.
         let alt = key_down(VK_MENU);
+        // El Espacio solo se traga si es el carácter que sigue a esta tecla.
+        self.swallow_space = false;
+        // La vista rápida va antes que los atajos: Espacio la abre o la cierra, Esc la cierra y
+        // las flechas la recorren.
+        if let Some(used) = self.quick_look_key(vk, ctrl, shift, alt) {
+            return used;
+        }
+        let used = self.on_window_key(vk, ctrl, shift, alt);
+        // Con la vista rápida recorriendo la carpeta, sigue al foco de la lista.
+        self.quick_look_follow_list();
+        used
+    }
+
+    /// `on_key` después de la vista rápida: Escape de lo que flota, xtree, los atajos y la lista.
+    fn on_window_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool) -> bool {
         let active = self.active;
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
@@ -211,6 +226,7 @@ impl App {
             // Con xtree abierto la columna no se ve: el botón o el atajo cierran xtree y la muestran.
             Command::TogglePreview if from_xtree => self.show_preview(),
             Command::TogglePreview => self.toggle_preview(),
+            Command::QuickLook => self.toggle_quick_look(),
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {
@@ -219,6 +235,10 @@ impl App {
                     self.host.open_in_editor(&path);
                 }
             }
+        }
+        // Ordenar, agrupar, filtrar u ocultar cambian el recorrido de la vista rápida.
+        if c != Command::QuickLook {
+            self.sync_quick_look();
         }
         self.redraw();
     }
@@ -373,6 +393,8 @@ impl App {
             Action::ColumnsChanged => {}
         }
         self.sync_folder_views();
+        // Orden, filtros o grupos plegados: la vista rápida rearma su recorrido.
+        self.sync_quick_look();
         self.redraw();
     }
 

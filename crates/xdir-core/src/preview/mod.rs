@@ -40,12 +40,14 @@ pub enum PreviewTarget {
     Folder(PathBuf),
     /// Un disco entero («Este equipo»): su espacio.
     Drive(PathBuf),
+    /// Solo si está en la nube (la vista rápida): `CloudOnly` o `Nothing`, sin leer nada más.
+    Cloud(PathBuf),
 }
 
 impl PreviewTarget {
     pub fn path(&self) -> &Path {
         match self {
-            PreviewTarget::File(p) | PreviewTarget::Folder(p) | PreviewTarget::Drive(p) => p,
+            PreviewTarget::File(p) | PreviewTarget::Folder(p) | PreviewTarget::Drive(p) | PreviewTarget::Cloud(p) => p,
         }
     }
 }
@@ -135,6 +137,9 @@ pub fn answer(req: PreviewRequest, cloud_only: &dyn Fn(&Path) -> bool) {
 /// Lee lo que muestra la columna para `target`.
 pub fn read(target: &PreviewTarget, cloud_only: &dyn Fn(&Path) -> bool) -> PreviewInfo {
     let path = target.path();
+    if let PreviewTarget::Cloud(p) = target {
+        return PreviewInfo::new(if cloud_only(p) { PreviewBody::CloudOnly } else { PreviewBody::Nothing });
+    }
     let cloud = !matches!(target, PreviewTarget::Drive(_)) && cloud_only(path);
     // De lo que está en la nube, los datos del elemento sin seguir el enlace (en Windows, sin
     // abrir el marcador de posición, que lo haría bajar).
@@ -154,6 +159,7 @@ pub fn read(target: &PreviewTarget, cloud_only: &dyn Fn(&Path) -> bool) -> Previ
             Some((total, free)) => PreviewBody::Drive { total, free },
             None => PreviewBody::Nothing,
         },
+        PreviewTarget::Cloud(_) => PreviewBody::Nothing,
     };
     PreviewInfo { body, accessed, created, modified }
 }

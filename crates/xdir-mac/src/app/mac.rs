@@ -20,6 +20,7 @@ use objc2_app_kit::{
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
+use objc2_quick_look_ui::QLPreviewPanel;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -41,6 +42,9 @@ pub(super) const MSG_ACCENT: u32 = WM_APP + 91;
 /// Hay un comando de prueba en la cola (feature `pruebas`).
 #[cfg(feature = "pruebas")]
 const MSG_TEST: u32 = WM_APP + 92;
+/// El usuario cerró el panel de la vista rápida (se avisa por mensaje: el cierre puede llegar
+/// mientras la `App` está trabajando).
+const MSG_QUICK_LOOK_CLOSED: u32 = WM_APP + 93;
 
 // ---------- estado de la ventana ----------
 
@@ -116,6 +120,7 @@ pub fn run() -> Result<(), String> {
     let ptr = Box::into_raw(app);
     APP.with(|a| a.set(ptr));
     crate::sys::set_message_handler(on_message);
+    crate::quicklook::set_hooks(crate::quicklook::Hooks { key: quick_look_key, closed: quick_look_closed });
 
     let delegate = Delegate::new(mtm);
     window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -153,6 +158,7 @@ fn on_message(msg: u32, wparam: usize, lparam: isize) {
             }
         }
         MSG_ACCENT => with_app(|app| app.set_accent(Accent::Rgb(lparam as u32))),
+        MSG_QUICK_LOOK_CLOSED => with_app(|app| app.on_quick_look_closed()),
         #[cfg(feature = "pruebas")]
         MSG_TEST => pruebas::run_next(),
         _ => {
@@ -167,6 +173,18 @@ fn on_message(msg: u32, wparam: usize, lparam: isize) {
             })
         }
     }
+}
+
+/// Una tecla que el panel de la vista rápida le devuelve a xdir (tiene el foco del teclado).
+fn quick_look_key(key: Key) -> bool {
+    let mut used = false;
+    with_app(|app| used = app.on_key(key));
+    used
+}
+
+/// El usuario cerró el panel de la vista rápida.
+fn quick_look_closed() {
+    Handle(1).post(MSG_QUICK_LOOK_CLOSED, 0, 0);
 }
 
 /// Guarda la sesión una sola vez (cerrar la ventana y salir con ⌘Q llegan por caminos distintos).
@@ -459,6 +477,22 @@ define_class!(
             }
         }
 
+        /// El panel de la vista rápida busca quién lo controla: xdir, mientras tiene una abierta.
+        #[unsafe(method(acceptsPreviewPanelControl:))]
+        fn accepts_preview_panel_control(&self, _panel: Option<&QLPreviewPanel>) -> bool {
+            crate::quicklook::accepts()
+        }
+
+        #[unsafe(method(beginPreviewPanelControl:))]
+        fn begin_preview_panel_control(&self, panel: Option<&QLPreviewPanel>) {
+            crate::quicklook::begin(panel);
+        }
+
+        #[unsafe(method(endPreviewPanelControl:))]
+        fn end_preview_panel_control(&self, panel: Option<&QLPreviewPanel>) {
+            crate::quicklook::end(panel);
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let flags = event.modifierFlags();
@@ -726,6 +760,17 @@ mod pruebas {
         let nums: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
         match (verb, nums.as_slice()) {
             ("captura", _) => capture(Path::new(rest)),
+            ("pantalla", _) => capture_screen(Path::new(rest)),
+            // El panel de la vista rápida con el foco: una tecla (código físico) que le llega a
+            // él, o su botón de cerrar.
+            ("tecla_panel", [code]) => quick_look_panel_key(*code as u16),
+            ("cerrar_panel", _) => {
+                if let Some(mtm) = MainThreadMarker::new()
+                    && let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }
+                {
+                    panel.performClose(None);
+                }
+            }
             ("salir", _) => {
                 if let Some(host) = MacHost::current() {
                     host.request_close();
@@ -772,6 +817,49 @@ mod pruebas {
             _ => with_app(|app| app.test_hook(&line)),
         }
         with_app(|app| app.redraw());
+    }
+
+    /// Le manda al panel de la vista rápida una tecla, como si la apretara con el panel activo.
+    fn quick_look_panel_key(code: u16) {
+        use objc2_app_kit::NSEventType;
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else { return };
+        let chars = NSString::from_str(if code == 49 { " " } else { "" });
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown,
+            NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags::empty(),
+            0.0,
+            panel.windowNumber(),
+            None,
+            &chars,
+            &chars,
+            false,
+            code,
+        );
+        if let Some(event) = event {
+            panel.sendEvent(&event);
+        }
+    }
+
+    /// Guarda la pantalla principal en un PNG con las ventanas de xdir (la principal y el panel
+    /// de la vista rápida, que es otra ventana); las de otras aplicaciones solo salen si el
+    /// sistema da permiso de grabar la pantalla.
+    #[allow(deprecated)]
+    fn capture_screen(path: &Path) {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSScreen};
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        use objc2_core_graphics::{CGWindowImageOption, CGWindowListCreateImage, CGWindowListOption};
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(screen) = NSScreen::mainScreen(mtm) else { return };
+        let f = screen.frame();
+        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(f.size.width, f.size.height));
+        let Some(image) = CGWindowListCreateImage(bounds, CGWindowListOption::OptionOnScreenOnly, 0, CGWindowImageOption::BestResolution) else { return };
+        let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
+        let props = objc2_foundation::NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+        if let Some(data) = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) } {
+            let _ = std::fs::write(path, data.to_vec());
+        }
     }
 
     /// Guarda lo que muestra la vista en un PNG.

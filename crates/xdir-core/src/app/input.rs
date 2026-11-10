@@ -26,6 +26,10 @@ impl App {
                 return Hit::Suggest(i);
             }
         }
+        // La tarjeta de la vista rápida (sin visor del sistema) va encima de los paneles.
+        if let Some(h) = self.quick_look_hit(x, y) {
+            return h;
+        }
         if let Some(pane) = self.term_menu {
             if let Some(c) = ui::terminal_menu_at(self.panes[pane].terminal_rect(), w, x, y) {
                 return Hit::TermMenu(c);
@@ -110,6 +114,10 @@ impl App {
             self.redraw();
             return;
         }
+        if matches!(hit, Hit::QuickLookTitle(_) | Hit::QuickLookBody(_)) {
+            self.quick_look_click(hit);
+            return;
+        }
         // Desplegable de la barra de dirección: una ruta se abre; el resto del panel no hace nada.
         if let Hit::Suggest(i) = hit {
             if let Some(i) = i {
@@ -137,6 +145,7 @@ impl App {
             if let Some(h) = h {
                 self.panes[i].tab_mut().list.click_filter_menu(h);
                 self.sync_folder_views();
+                self.sync_quick_look();
             }
             self.redraw();
             return;
@@ -314,8 +323,10 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree => {}
+            Hit::None | Hit::About(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
+        // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
+        self.quick_look_follow_list();
         self.redraw();
     }
 

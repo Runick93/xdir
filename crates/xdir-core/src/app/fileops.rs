@@ -276,9 +276,13 @@ impl App {
 
     /// Entradas propias del menú de los elementos seleccionados; `cmds` recibe el comando de cada id.
     pub(super) fn item_entries(&self, cmds: &mut Vec<Command>) -> Vec<shell::Entry> {
-        // Las mismas comillas y saltos de línea que «Copiar las rutas como texto» (`quoted_paths`).
-        cmds.push(Command::CopyPaths);
-        vec![shell::Entry::Item { id: cmds.len() as u32 - 1, label: "Copiar como ruta de acceso".into(), enabled: true, checked: false }]
+        let mut item = |label: &str, c: Command| {
+            cmds.push(c);
+            shell::Entry::Item { id: cmds.len() as u32 - 1, label: label.into(), enabled: true, checked: false }
+        };
+        // «Vista rápida» primero. «Copiar como ruta de acceso» usa las mismas comillas y saltos de
+        // línea que «Copiar las rutas como texto» (`quoted_paths`).
+        vec![item("Vista rápida", Command::QuickLook), item("Copiar como ruta de acceso", Command::CopyPaths)]
     }
 
     /// Menú contextual de la lista en `at` (DIPs del área de la ventana). Sin punto (tecla de

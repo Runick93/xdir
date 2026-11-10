@@ -21,6 +21,8 @@ objc2-core-text = "0.3.2"
 # Spotlight (MDItem) para las columnas de metadatos.
 objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "Metadata", "MDItem"] }
 objc2-quick-look-thumbnailing = "0.3.2"
+# Vista rápida: el panel de QuickLook del sistema (`QLPreviewPanel`).
+objc2-quick-look-ui = { version = "0.3.2", default-features = false, features = ["std", "QLPreviewPanel", "QLPreviewItem", "objc2-app-kit"] }
 objc2-uniform-type-identifiers = "0.3.2"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"

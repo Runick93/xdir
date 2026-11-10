@@ -153,6 +153,13 @@ Notas de X39–X44:
     En la tira, el nombre debajo de cada miniatura en una línea (`Small`, `text_dim`; seleccionada o con foco, `text`)
     cortado con «…» al ancho de la celda. Por eso la tira mide 132 de alto (no 112) y las celdas 88×108: la miniatura
     de 72 con 8 de margen arriba y a los lados, y la línea del nombre de 18 debajo.
+- Tarjeta de la vista rápida dibujada por xdir (sin visor del sistema, o un elemento solo en la nube), en la app:
+  - La sombra del diseño (negro al 45 %, 12 abajo, desenfoque 36) se aproxima con 8 capas redondeadas que crecen de a 3,
+    corridas 12 hacia abajo (negro al 5 % cada una en oscuro, al 2,2 % en claro): `Painter` no tiene desenfoque.
+  - `quicklook::overlay_rect` deja 24 de margen a cada lado dentro de la ventana de xdir antes de bajar de 960×680 (nunca
+    menos de 480×360, salvo que la ventana misma sea más chica).
+  - Las áreas que responden al clic son más grandes que el dibujo: ‹ y › de 22×28, la cruz de 28×28 (el dibujo es de
+    5×8 y 10×10); «Abrir» es el botón entero de 72×26.
 
 ### Lo nativo, que no se dibuja
 

@@ -790,8 +790,7 @@ mod list_tests {
         let unix = today.day * 86_400 + 3_600;
         let mut e = entry("a", 0);
         e.modified = ((unix + 11_644_473_600) * 10_000_000) as u64;
-        let mut l = FileList::default();
-        l.area = rect(0.0, 0.0, 800.0, 600.0);
+        let mut l = FileList { area: rect(0.0, 0.0, 800.0, 600.0), ..Default::default() };
         l.append(vec![e]);
         l.set_group(Some(Column::Modified));
         assert_eq!(headers(&l)[0].0, "Hoy");

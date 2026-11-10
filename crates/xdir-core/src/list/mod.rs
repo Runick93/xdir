@@ -3026,7 +3026,7 @@ mod checkbox_tests {
         let mut l = five(true);
         for dark in [true, false] {
             let th = crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(dark));
-            let p = RecordingPainter::new(th.clone());
+            let p = RecordingPainter::new(th);
             l.draw(&p, AREA, true);
             let edges: Vec<Color> =
                 p.strokes().iter().filter(|(r, _)| (r.right - r.left - (CHECK - 1.2)).abs() < 0.01).map(|s| s.1).collect();

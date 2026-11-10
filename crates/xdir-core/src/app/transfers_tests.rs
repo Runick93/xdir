@@ -211,7 +211,7 @@ fn eject_waits_for_cancelled_jobs() {
         }) as transfers::AfterJobs
     };
     // Sin trabajos sobre el disco: se expulsa enseguida, sin preguntar.
-    assert!(a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", then(&ejected)));
+    assert!(a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", super::transfers::Verb::Eject, then(&ejected)));
     assert_eq!(ejected.get(), 1);
     f.set_slow(&p("/app-usb/s/grande.bin"), Some(Duration::from_millis(20)));
     let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-usb/s/grande.bin")], dest: p("/app-usb/d") });
@@ -221,11 +221,11 @@ fn eject_waits_for_cancelled_jobs() {
     assert_eq!(eject_question(2, "USB (E:)"), "Hay 2 operaciones sobre \"USB (E:)\". ¿Cancelarlas y expulsar?");
     // «No»: no se expulsa y el trabajo sigue.
     host.set_answer(Some(false));
-    assert!(!a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", then(&ejected)));
+    assert!(!a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", super::transfers::Verb::Eject, then(&ejected)));
     assert_eq!((a.running_jobs(), ejected.get()), (1, 1));
     // «Sí»: se cancela y se expulsa recién cuando el trabajo terminó de limpiar.
     host.set_answer(Some(true));
-    assert!(a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", then(&ejected)));
+    assert!(a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", super::transfers::Verb::Eject, then(&ejected)));
     assert_eq!(ejected.get(), 1, "no se suelta el disco antes de que termine el trabajo");
     wait(&mut a, idle);
     assert_eq!(ejected.get(), 2);
@@ -250,7 +250,7 @@ fn second_eject_does_not_drop_the_first() {
     }
     for usb in ["/app-ej1", "/app-ej2"] {
         let e = ejected.clone();
-        assert!(a.eject_after_jobs(Path::new(usb), usb, Box::new(move |a: &mut App| {
+        assert!(a.eject_after_jobs(Path::new(usb), usb, super::transfers::Verb::Eject, Box::new(move |a: &mut App| {
             e.borrow_mut().push(usb);
             a.eject_done(Path::new(usb));
         })));
@@ -688,7 +688,7 @@ fn no_new_copies_onto_a_disk_being_ejected() {
     let spec = slow_copy(&f, "/app-ejn", 20);
     a.start_transfer(spec);
     host.set_answer(Some(true));
-    assert!(a.eject_after_jobs(Path::new("/app-ejn"), "USB (F:)", Box::new(|a: &mut App| a.eject_done(Path::new("/app-ejn")))));
+    assert!(a.eject_after_jobs(Path::new("/app-ejn"), "USB (F:)", super::transfers::Verb::Eject, Box::new(|a: &mut App| a.eject_done(Path::new("/app-ejn")))));
     f.add_file(&p("/app-ejn/s/otro.txt"), b"o".to_vec());
     let before = a.jobs().len();
     a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejn/s/otro.txt")], dest: p("/app-ejn/d") });
@@ -718,7 +718,7 @@ fn eject_finds_jobs_on_the_volume_by_identity() {
     wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
     assert_eq!(a.jobs_on_volume(Path::new("/app-ejid")), vec![id]);
     host.set_answer(Some(true));
-    assert!(a.eject_after_jobs(Path::new("/app-ejid"), "USB (G:)", Box::new(|_: &mut App| {})));
+    assert!(a.eject_after_jobs(Path::new("/app-ejid"), "USB (G:)", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
     // Una copia nueva por el otro camino, mientras se espera: no empieza.
     f.add_file(&p("/app-ejid-enlace/s/otro.txt"), b"o".to_vec());
     a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejid-enlace/s/otro.txt")], dest: p("/app-ejid-enlace/d") });
@@ -767,7 +767,7 @@ fn eject_without_jobs_still_blocks_new_copies_until_done() {
     f.add_file(&p("/app-ejw/s/a.txt"), b"a".to_vec());
     f.add_dir(&p("/app-ejw/d"));
     let mut a = app();
-    assert!(a.eject_after_jobs(Path::new("/app-ejw"), "USB (H:)", Box::new(|_: &mut App| {})));
+    assert!(a.eject_after_jobs(Path::new("/app-ejw"), "USB (H:)", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
     a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejw/s/a.txt")], dest: p("/app-ejw/d") });
     assert!(a.jobs().is_empty());
     assert_eq!(a.notice.as_deref(), Some("Se está expulsando \"USB (H:)\""));

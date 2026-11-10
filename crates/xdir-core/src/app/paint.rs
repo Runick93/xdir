@@ -93,7 +93,13 @@ impl App {
             // ⏏ en los discos expulsables de «Este equipo».
             let tab = self.panes[i].tab();
             let ejects: Vec<usize> = match tab.location {
-                Location::Computer => (0..tab.list.entries.len()).filter(|&k| self.ejectable.contains(&tab.entry_path(k))).collect(),
+                // Los discos y las conexiones de red (`Network::connections`).
+                Location::Computer => (0..tab.list.entries.len())
+                    .filter(|&k| {
+                        let p = tab.entry_path(k);
+                        self.ejectable.contains(&p) || self.net.connections.iter().any(|c| c.connected && c.local == p)
+                    })
+                    .collect(),
                 _ => Vec::new(),
             };
             self.panes[i].tab_mut().list.eject_rows = ejects;

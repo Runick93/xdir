@@ -32,6 +32,9 @@ pub(super) enum TaskDone {
     /// Nombres de unidades de red, pedidos en otro hilo (para el árbol).
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     DriveLabels(Vec<(PathBuf, String)>),
+    /// Terminó de desconectar `root` (`label`: el último tramo de la dirección; `force`: si fue
+    /// a la fuerza).
+    Disconnected { root: PathBuf, label: String, force: bool, result: Result<(), crate::net::NetError> },
 }
 
 impl App {
@@ -87,6 +90,7 @@ impl App {
             TaskDone::NetConnections(result) => self.on_net_connections(result),
             TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
             TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
+            TaskDone::Disconnected { root, label, force, result } => self.on_disconnected(root, label, force, result),
         }
     }
 
@@ -130,10 +134,16 @@ impl App {
         match &tab.location {
             Location::Computer => {
                 let idx = tab.list.selected_indices().next().or_else(|| tab.list.focused_index())?;
-                Some(tab.entry_path(idx)).filter(|p| self.ejectable.contains(p))
+                Some(tab.entry_path(idx)).filter(|p| self.ejectable.contains(p) || self.network_root(p).is_some_and(|c| &c.local == p))
             }
             Location::Path(p) => {
-                self.ejectable.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned()
+                let disk = self.ejectable.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned();
+                // Una carpeta de red: su conexión (la más adentro gana).
+                let net = self.network_root(p).map(|c| c.local.clone());
+                match (disk, net) {
+                    (Some(d), Some(n)) => Some(if n.as_os_str().len() >= d.as_os_str().len() { n } else { d }),
+                    (d, n) => n.or(d),
+                }
             }
             _ => None,
         }
@@ -165,10 +175,16 @@ impl App {
     /// cancelan y espera a que limpien lo a medio copiar (`eject_after_jobs`); después suelta lo
     /// de xdir y expulsa en otro hilo.
     pub(super) fn eject(&mut self, root: PathBuf) {
+        // Una conexión de red se desconecta (mismo flujo: trabajos, soltar, en otro hilo).
+        if let Some(c) = self.network_root(&root) {
+            let local = c.local.clone();
+            self.disconnect(local);
+            return;
+        }
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
         let at = root.clone();
-        self.eject_after_jobs(&at, &label, Box::new(move |app: &mut App| app.eject_now(root)));
+        self.eject_after_jobs(&at, &label, super::transfers::Verb::Eject, Box::new(move |app: &mut App| app.eject_now(root)));
     }
 
     /// Suelta lo de xdir en el disco y lo expulsa en otro hilo (sin trabajos de copia encima).

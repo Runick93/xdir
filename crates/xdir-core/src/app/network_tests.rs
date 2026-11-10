@@ -565,3 +565,176 @@ fn drive_label_of_remote_off_thread() {
     // El nombre llega desde otro hilo (el falso lo da por hilo: ahí no lo conoce).
     wait_task(&mut a, |t| matches!(t, TaskDone::DriveLabels(_)));
 }
+
+// ---------- N6: desconectar (⏏) ----------
+
+use crate::sys::{VolumeInfo, testing::FakeCopyPrims};
+use crate::transfer::JobSpec;
+
+fn drive_row(root: &Path, label: &str) -> crate::fs::Entry {
+    crate::fs::Entry {
+        name: root.as_os_str().to_os_string(),
+        full: None,
+        group: 1,
+        pidl: None,
+        display: label.to_string(),
+        sort_key: label.to_lowercase(),
+        is_dir: true,
+        size: 0,
+        modified: 0,
+        created: 0,
+        attrs: 0x10,
+        type_name: std::sync::Arc::from("Disco"),
+        icon: 0,
+        overlay: 0,
+        overlay_checked: true,
+    }
+}
+
+/// Una conexión de red falsa en `root` (una carpeta real, para que las pestañas carguen).
+fn connected(a: &mut App, host_name: &str, root: &Path) {
+    let c = conn(&format!("smb://{host_name}/fotos"), &root.to_string_lossy());
+    FakeNetwork::set_connections(host_name, vec![c.clone()]);
+    FakeNetwork::set_remote(root);
+    a.net.connections = vec![c];
+}
+
+fn wait_disconnected(a: &mut App) {
+    wait_task(a, |t| matches!(t, TaskDone::Disconnected { .. }));
+}
+
+#[test]
+fn disconnect_releases_tabs_xtree_preview() {
+    let root = tmp_dir("n6-rel").join("fotos");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let mut a = net_app();
+    connected(&mut a, "nas-n6rel", &root);
+    a.set_layout(crate::ui::Layout::TwoSide);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(root.join("sub")));
+    a.panes[1].tab_mut().navigate(hwnd, &tx, Location::Path(root.clone()));
+    a.set_active(0);
+    a.run_command(Command::Eject);
+    // Primero se suelta todo (las pestañas pasan a «Este equipo»), después se desconecta.
+    assert_eq!(a.panes[0].tab().location, Location::Computer);
+    assert_eq!(a.panes[1].tab().location, Location::Computer);
+    wait_disconnected(&mut a);
+    assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+    assert!(a.xtree.as_ref().is_none_or(|x| !x.root().starts_with(&root)));
+}
+
+#[test]
+fn disconnect_with_copy_asks() {
+    let root = PathBuf::from("/net-n6copy/fotos");
+    let f = FakeCopyPrims::shared();
+    f.set_volume(&root, VolumeInfo { id: "n6copy".into(), label: "fotos".into(), case_insensitive: false, has_trash: false, max_file: None, free: u64::MAX });
+    f.add_file(&root.join("grande.bin"), vec![1; 64 * 1024 * 20]);
+    f.add_dir(&root.join("d"));
+    f.set_slow(&root.join("grande.bin"), Some(Duration::from_millis(20)));
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    connected(&mut a, "nas-n6copy", &root);
+    a.start_transfer(JobSpec::Copy { sources: vec![root.join("grande.bin")], dest: root.join("d") });
+    host.set_answer(Some(false));
+    a.eject(root.clone());
+    assert_eq!(host.questions().last().unwrap(), &("Desconectar".to_string(), "Hay 1 operación sobre \"fotos\". ¿Cancelarla y desconectar?".to_string()));
+    assert!(FakeNetwork::disconnects(&root).is_empty());
+    assert_eq!(a.running_jobs(), 1);
+    assert_eq!(super::disconnect_question(2, "fotos"), "Hay 2 operaciones sobre \"fotos\". ¿Cancelarlas y desconectar?");
+    // Sí: cancela, espera la limpieza y desconecta.
+    host.set_answer(Some(true));
+    a.eject(root.clone());
+    for _ in 0..500 {
+        a.on_transfer_updates();
+        if a.running_jobs() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_disconnected(&mut a);
+    assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+}
+
+#[test]
+fn disconnect_success_notice() {
+    let root = tmp_dir("n6-ok").join("fotos");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut a = net_app();
+    connected(&mut a, "nas-n6ok", &root);
+    a.eject(root.clone());
+    wait_disconnected(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("Se desconectó \"fotos\""));
+    assert!(a.net.connections.iter().all(|c| c.local != root));
+}
+
+#[test]
+fn disconnect_busy_retry_then_force() {
+    let root = PathBuf::from("/net-n6busy/fotos");
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    connected(&mut a, "nas-n6busy", &root);
+    FakeNetwork::set_can_force(true);
+    FakeNetwork::set_disconnect(&root, vec![Err(NetError::OpenFiles { by: Some("Word".into()) })]);
+    host.set_answer(Some(true));
+    a.eject(root.clone());
+    wait_disconnected(&mut a);
+    assert_eq!(host.questions().last().unwrap().1, "No se pudo desconectar \"fotos\": lo está usando Word. ¿Reintentar?");
+    // Sí → segundo intento, otra vez ocupado → «¿Desconectar igual?» → a la fuerza.
+    wait_disconnected(&mut a);
+    assert_eq!(host.questions().last().unwrap().1, "¿Desconectar igual? Lo que esté abierto en \"fotos\" puede perder cambios.");
+    FakeNetwork::set_disconnect(&root, vec![Ok(())]);
+    wait_disconnected(&mut a);
+    assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false), (root.clone(), false), (root.clone(), true)]);
+    assert_eq!(a.notice.as_deref(), Some("Se desconectó \"fotos\""));
+}
+
+#[test]
+fn busy_without_force_only_retries() {
+    let root = PathBuf::from("/net-n6noforce/fotos");
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    connected(&mut a, "nas-n6nf", &root);
+    FakeNetwork::set_can_force(false);
+    FakeNetwork::set_disconnect(&root, vec![Err(NetError::OpenFiles { by: None }), Err(NetError::OpenFiles { by: None })]);
+    host.set_answer(Some(true));
+    a.eject(root.clone());
+    wait_disconnected(&mut a);
+    wait_disconnected(&mut a);
+    host.set_answer(Some(false));
+    let q = host.questions();
+    assert!(q.iter().all(|(_, t)| !t.contains("igual")), "{q:?}");
+    assert!(FakeNetwork::disconnects(&root).iter().all(|(_, f)| !f));
+}
+
+#[test]
+fn eject_command_on_remote_folder_disconnects() {
+    let root = tmp_dir("n6-cmd").join("fotos");
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    let mut a = net_app();
+    connected(&mut a, "nas-n6cmd", &root);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(root.join("a")));
+    assert_eq!(a.eject_target(), Some(root.clone()));
+    a.run_command(Command::Eject);
+    wait_disconnected(&mut a);
+    assert_eq!(FakeNetwork::disconnects(&root).len(), 1);
+}
+
+#[test]
+fn computer_list_shows_eject_for_connections() {
+    let root = PathBuf::from("/net-n6list/fotos");
+    let other = PathBuf::from("/net-n6list-local");
+    let mut a = net_app();
+    connected(&mut a, "nas-n6list", &root);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Computer);
+    wait_until(&mut a, |a| !a.panes[0].tab().loading);
+    a.panes[0].tab_mut().list.replace(vec![drive_row(&other, "Disco"), drive_row(&root, "fotos")]);
+    a.paint();
+    let list = &a.panes[0].tab().list;
+    let rows: Vec<String> = list.eject_rows.iter().map(|&i| list.entries[i].display.clone()).collect();
+    assert_eq!(rows, ["fotos"]);
+    // Clic derecho en la conexión: «Expulsar» (desconecta).
+    a.panes[0].tab_mut().list.select_index(1);
+    assert_eq!(a.eject_target(), Some(root));
+}

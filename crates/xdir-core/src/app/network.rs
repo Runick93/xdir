@@ -19,6 +19,7 @@ use crate::sys::{self, KeyStyle};
 /// Tiempos límite (spec §B.2).
 pub(super) const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 pub(super) const LIST_LIMIT: Duration = Duration::from_secs(10);
+pub(super) const DISCONNECT_LIMIT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 #[allow(dead_code)] // `hosts` y `browse_cancel` los usa «Red» en el árbol.
@@ -36,6 +37,8 @@ pub(super) struct NetState {
     pub generation: u64,
     /// Conexiones pedidas desde la barra de dirección: (pestaña, generación).
     pub bar_pending: Vec<(usize, u64)>,
+    /// Conexiones en las que ya se reintentó desconectar (la próxima vez se ofrece forzar).
+    pub retried: std::collections::HashSet<PathBuf>,
     /// Hay un redibujo pedido para este momento (`WM_APP_NET_TICK`).
     pub tick_due: Option<std::time::Instant>,
 }
@@ -510,6 +513,78 @@ impl App {
         }
         #[cfg(not(feature = "arbol"))]
         let _ = labels;
+    }
+
+    /// ⏏ de una conexión de red: con trabajos de copia encima pregunta (`eject_after_jobs`),
+    /// suelta lo de xdir (pestañas, xtree, vista previa) y desconecta en otro hilo.
+    pub(super) fn disconnect(&mut self, root: PathBuf) {
+        let label = self.connection_label(&root);
+        let at = root.clone();
+        self.eject_after_jobs(&at, &label, super::transfers::Verb::Disconnect, Box::new(move |app: &mut App| app.disconnect_now(root, false)));
+    }
+
+    /// El nombre de una conexión para los avisos: el último tramo de su dirección.
+    pub(super) fn connection_label(&self, root: &Path) -> String {
+        self.network_root(root)
+            .and_then(|c| Address::parse(&c.address).ok().map(|a| a.label().to_string()))
+            .unwrap_or_else(|| crate::tab::remote_host(root))
+    }
+
+    fn disconnect_now(&mut self, root: PathBuf, force: bool) {
+        self.release_volume(&root);
+        let label = self.connection_label(&root);
+        self.spawn_task(move || {
+            let r = root.clone();
+            let host = label.clone();
+            let result = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&r, force));
+            TaskDone::Disconnected { root, label, force, result }
+        });
+    }
+
+    /// Terminó de desconectar: el aviso, o la pregunta de reintentar (y, si el sistema puede y
+    /// ya se reintentó, la de desconectar igual).
+    pub(super) fn on_disconnected(&mut self, root: PathBuf, label: String, force: bool, result: Result<(), NetError>) {
+        self.eject_done(&root);
+        match result {
+            Ok(()) => {
+                self.net.retried.remove(&root);
+                self.notice = Some(format!("Se desconectó \"{label}\""));
+                self.net.connections.retain(|c| c.local != root);
+                self.request_connections();
+            }
+            Err(NetError::OpenFiles { by }) => {
+                let who = by.unwrap_or_else(|| "otro programa".into());
+                if !force && self.net.retried.contains(&root) && sys::network().can_force() {
+                    let q = format!("¿Desconectar igual? Lo que esté abierto en \"{label}\" puede perder cambios.");
+                    self.net.retried.remove(&root);
+                    if self.host.ask_yes_no_cancel("Desconectar", &q) == Some(true) {
+                        self.disconnect_again(root, true);
+                    }
+                    return;
+                }
+                let q = format!("No se pudo desconectar \"{label}\": lo está usando {who}. ¿Reintentar?");
+                if self.host.ask_yes_no_cancel("Desconectar", &q) == Some(true) {
+                    self.net.retried.insert(root.clone());
+                    self.disconnect_again(root, false);
+                } else {
+                    self.net.retried.remove(&root);
+                }
+            }
+            Err(e) => {
+                self.net.retried.remove(&root);
+                let q = format!("No se pudo desconectar \"{label}\": {}. ¿Reintentar?", e.message());
+                if self.host.ask_yes_no_cancel("Desconectar", &q) == Some(true) {
+                    self.disconnect_again(root, false);
+                }
+            }
+        }
+    }
+
+    /// Otro intento (sin volver a preguntar por los trabajos: ya se cancelaron).
+    fn disconnect_again(&mut self, root: PathBuf, force: bool) {
+        let label = self.connection_label(&root);
+        let at = root.clone();
+        self.eject_after_jobs(&at, &label, super::transfers::Verb::Disconnect, Box::new(move |app: &mut App| app.disconnect_now(root, force)));
     }
 
     /// La conexión que contiene `p` (la de ruta local más larga).

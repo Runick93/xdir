@@ -41,7 +41,7 @@ mod network_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
-pub use transfers::eject_question;
+pub use transfers::{disconnect_question, eject_question};
 use tooltip::{Tip, WM_APP_TOOLTIP};
 #[cfg(test)]
 use tooltip::{tooltip_for, tooltip_rect};

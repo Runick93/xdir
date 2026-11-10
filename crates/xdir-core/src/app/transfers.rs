@@ -230,6 +230,22 @@ impl Drop for Release {
 }
 
 /// «Hay 2 operaciones sobre "USB (E:)". ¿Cancelarlas y expulsar?» (antes de expulsar un disco).
+/// Qué se hace con el disco o la conexión después de los trabajos (`eject_after_jobs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verb {
+    Eject,
+    Disconnect,
+}
+
+/// «Hay 1 operación sobre "fotos". ¿Cancelarla y desconectar?»
+pub fn disconnect_question(jobs: usize, label: &str) -> String {
+    if jobs == 1 {
+        format!("Hay 1 operación sobre \"{label}\". ¿Cancelarla y desconectar?")
+    } else {
+        format!("Hay {jobs} operaciones sobre \"{label}\". ¿Cancelarlas y desconectar?")
+    }
+}
+
 pub fn eject_question(jobs: usize, label: &str) -> String {
     if jobs == 1 {
         format!("Hay 1 operación sobre \"{label}\". ¿Cancelarla y expulsar?")
@@ -891,7 +907,7 @@ impl App {
     /// seguir con `then` (soltar el disco). Sin trabajos, sigue enseguida. Nunca bloquea: `then`
     /// corre desde `on_transfer_updates` cuando llega el último `Finished`. `false` si no se
     /// expulsa (dijo que no).
-    pub fn eject_after_jobs(&mut self, root: &Path, label: &str, then: AfterJobs) -> bool {
+    pub fn eject_after_jobs(&mut self, root: &Path, label: &str, verb: Verb, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
         let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string() };
         if ids.is_empty() {
@@ -901,7 +917,11 @@ impl App {
             return true;
         }
         let host = self.host.clone();
-        if host.ask_yes_no_cancel("Expulsar", &eject_question(ids.len(), label)) != Some(true) {
+        let (title, question) = match verb {
+            Verb::Eject => ("Expulsar", eject_question(ids.len(), label)),
+            Verb::Disconnect => ("Desconectar", disconnect_question(ids.len(), label)),
+        };
+        if host.ask_yes_no_cancel(title, &question) != Some(true) {
             return false;
         }
         for &id in &ids {

@@ -59,6 +59,11 @@ pub trait Archives: Send + Sync {
     ) -> Result<usize, CopyError> {
         Err(CopyError::new(ErrKind::Other(UNSUPPORTED.into()), archive))
     }
+    /// Lo extraído de `archive` (`written`: archivos y carpetas recién escritos) hereda su origen:
+    /// la marca de la web (`Zone.Identifier`) en Windows, la cuarentena en macOS. Así lo que vino
+    /// de internet dentro de un zip sigue avisando al abrirlo. Si el archivo no tiene marca, nada.
+    /// Por defecto, nada.
+    fn propagate_origin(&self, _archive: &Path, _written: &[PathBuf]) {}
     /// Crea un zip en `out` (no debe existir; el nombre puede ser un parcial). `items` = (ruta en
     /// el disco, nombre adentro con `/`; las carpetas terminan en `/`). `progress` recibe los
     /// bytes leídos en total; `Stop` corta y borra `out`. Si falla, también lo borra.

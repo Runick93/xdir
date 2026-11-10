@@ -28,7 +28,7 @@ impl Drop for Tmp {
 }
 
 fn svc() -> Service {
-    Service { tar_gz: true, utc_offset: |_| 0 }
+    Service { tar_gz: true, utc_offset: |_| 0, copy_origin: |_, _| {} }
 }
 
 /// UTC-3 fijo (Buenos Aires), para las horas de los zip.
@@ -382,7 +382,7 @@ fn zip_corrupt_is_clear_error() {
     fs::write(&z, b"esto no es un zip").unwrap();
     assert_eq!(svc().list(&z).unwrap_err().kind, ErrKind::Other("El zip está dañado".into()));
     assert_eq!(svc().list(&t.p("no.rar")).unwrap_err().kind, ErrKind::Other("Formato no soportado".into()));
-    let win = Service { tar_gz: false, utc_offset: |_| 0 };
+    let win = Service { tar_gz: false, utc_offset: |_| 0, copy_origin: |_, _| {} };
     assert_eq!(win.list(&t.p("a.tar.gz")).unwrap_err().kind, ErrKind::Other("Formato no soportado".into()));
     assert_eq!(win.formats().len(), 1);
 }
@@ -923,7 +923,7 @@ fn zip_times_are_local() {
     let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
     fs::File::options().write(true).open(&f).unwrap().set_modified(when).unwrap();
     let z = t.p("hora.zip");
-    let ba = Service { tar_gz: true, utc_offset: utc_minus_3 };
+    let ba = Service { tar_gz: true, utc_offset: utc_minus_3, copy_origin: |_, _| {} };
     ba.create(&z, &[(f.clone(), "a.txt".into())], &mut |_| Flow::Continue).unwrap();
     let mut a = ::zip::ZipArchive::new(fs::File::open(&z).unwrap()).unwrap();
     let dt = a.by_index_raw(0).unwrap().last_modified().unwrap();
@@ -1016,4 +1016,14 @@ fn targz_list_stops_at_max() {
         }
     });
     assert_eq!(xdir_core::sys::Archives::list(&svc(), &z, 3, &mut || Flow::Continue).unwrap().len(), 4);
+}
+
+/// `propagate_origin` le pasa a la plataforma cada cosa extraída con su archivo.
+#[test]
+fn propagate_origin_calls_the_platform_for_each() {
+    static SEEN: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let s = Service { tar_gz: true, utc_offset: |_| 0, copy_origin: |a, d| SEEN.lock().unwrap().push((a.to_path_buf(), d.to_path_buf())) };
+    let (z, a, b) = (Path::new("z.zip"), PathBuf::from("a"), PathBuf::from("b"));
+    xdir_core::sys::Archives::propagate_origin(&s, z, &[a.clone(), b.clone()]);
+    assert_eq!(*SEEN.lock().unwrap(), [(z.to_path_buf(), a), (z.to_path_buf(), b)]);
 }

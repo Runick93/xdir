@@ -1,6 +1,40 @@
-//! macOS: la carpeta temporal privada para lo que se extrae de un archivo comprimido.
+//! macOS: la carpeta temporal privada para lo que se extrae de un archivo comprimido, y la
+//! cuarentena (`com.apple.quarantine`) que lo extraído hereda del archivo, como hacen la Utilidad
+//! de Archivo y el Finder: lo bajado de internet sigue pidiendo permiso a Gatekeeper.
 
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+const QUARANTINE: &std::ffi::CStr = c"com.apple.quarantine";
+
+fn c_path(p: &Path) -> Option<CString> {
+    CString::new(p.as_os_str().as_bytes()).ok()
+}
+
+/// La cuarentena de `path` (sin seguir enlaces), si tiene.
+pub fn quarantine_of(path: &Path) -> Option<Vec<u8>> {
+    let c = c_path(path)?;
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: `c` es una cadena C válida y `buf` tiene el largo que se pasa.
+    let n = unsafe { libc::getxattr(c.as_ptr(), QUARANTINE.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, libc::XATTR_NOFOLLOW) };
+    (n > 0).then(|| {
+        buf.truncate(n as usize);
+        buf
+    })
+}
+
+/// Si `archive` está en cuarentena, `dst` (archivo o carpeta extraídos de él) también. Un enlace
+/// no se toca.
+pub fn copy_origin(archive: &Path, dst: &Path) {
+    let Some(value) = quarantine_of(archive) else { return };
+    if std::fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink()) {
+        return;
+    }
+    let Some(c) = c_path(dst) else { return };
+    // SAFETY: `c` es una cadena C válida y `value` tiene el largo que se pasa.
+    unsafe { libc::setxattr(c.as_ptr(), QUARANTINE.as_ptr(), value.as_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW) };
+}
 
 /// `<TMPDIR del usuario>/xdir-comprimidos` (en macOS `TMPDIR` ya es del usuario, bajo
 /// `/var/folders`), creada 0700 y verificada (`private_dir`).
@@ -42,6 +76,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Lo extraído (archivo y carpeta) de un archivo en cuarentena queda en cuarentena; de uno sin
+    /// ella, no; un enlace no se toca.
+    #[test]
+    fn copy_origin_copies_quarantine() {
+        let d = tmp("cuarentena");
+        let zip = d.join("bajado.zip");
+        std::fs::write(&zip, "z").unwrap();
+        let mark = b"0081;00000000;xdir;";
+        let c = c_path(&zip).unwrap();
+        assert_eq!(unsafe { libc::setxattr(c.as_ptr(), QUARANTINE.as_ptr(), mark.as_ptr().cast(), mark.len(), 0, 0) }, 0);
+        let (file, dir) = (d.join("malo.command"), d.join("carpeta"));
+        std::fs::write(&file, "x").unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        copy_origin(&zip, &file);
+        copy_origin(&zip, &dir);
+        assert_eq!(quarantine_of(&file).as_deref(), Some(&mark[..]));
+        assert_eq!(quarantine_of(&dir).as_deref(), Some(&mark[..]));
+        let link = d.join("enlace");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        copy_origin(&zip, &link);
+        let clean = d.join("limpio.zip");
+        std::fs::write(&clean, "z").unwrap();
+        let other = d.join("otro.txt");
+        std::fs::write(&other, "x").unwrap();
+        copy_origin(&clean, &other);
+        assert_eq!(quarantine_of(&other), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Nueva: 0700. Una que ya estaba abierta a otros: pasa a 0700. Un enlace (aunque lleve a una

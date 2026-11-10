@@ -1712,6 +1712,7 @@ impl<'a> Job<'a> {
         if self.exists(&mac).is_some() {
             self.remove_tree(&mac);
         }
+        self.propagate_origin(archive, &root);
         self.items_done = count;
         self.bytes_done = written;
         self.progress(0, true);
@@ -1805,6 +1806,7 @@ impl<'a> Job<'a> {
             self.cancelled = true;
             return;
         }
+        self.propagate_origin(archive, &root);
         self.items_done = count;
         self.bytes_done = written;
         self.progress(0, true);
@@ -1812,6 +1814,26 @@ impl<'a> Job<'a> {
         self.bring_in(archive, dest, &srcs);
         self.remove_tree(&staging);
         self.items_done = count;
+    }
+
+    /// Todo lo extraído bajo `root` (archivos y carpetas, no los enlaces) hereda el origen de
+    /// `archive` (marca de la web, cuarentena) antes de llevarlo a su lugar.
+    fn propagate_origin(&mut self, archive: &Path, root: &Path) {
+        let mut written = Vec::new();
+        let mut pending: Vec<PathBuf> = self.prims.read_dir(root).unwrap_or_default().into_iter().map(|n| root.join(n)).collect();
+        while let Some(p) = pending.pop() {
+            match self.prims.stat(&p).map(|s| s.kind) {
+                Ok(ItemKind::Dir) => {
+                    pending.extend(self.prims.read_dir(&p).unwrap_or_default().into_iter().map(|n| p.join(n)));
+                    written.push(p);
+                }
+                Ok(ItemKind::File) => written.push(p),
+                _ => {}
+            }
+        }
+        if !written.is_empty() {
+            self.archives.propagate_origin(archive, &written);
+        }
     }
 
     /// Una entrada del archivo que no llegó.

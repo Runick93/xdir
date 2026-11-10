@@ -619,7 +619,7 @@ pub fn install() {
         metadata: Box::new(MacMetadata),
         preview: Box::new(MacPreview),
         copy_prims: Box::new(crate::ops::MacCopyPrims),
-        archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset }),
+        archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset, copy_origin: crate::origin::copy_origin }),
         info: Box::new(crate::info::MacInfo),
     });
 }

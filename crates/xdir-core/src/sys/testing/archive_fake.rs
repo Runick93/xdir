@@ -29,6 +29,8 @@ struct State {
     password: Vec<PathBuf>,
     /// Bytes por aviso de progreso al extraer y comprimir.
     block: Option<usize>,
+    /// Lo que recibió `propagate_origin`: (archivo, rutas).
+    origins: Vec<(PathBuf, Vec<PathBuf>)>,
 }
 
 /// Comprimir y extraer en memoria. `formats` simula el sistema (Windows: solo zip) y `links`, si
@@ -97,6 +99,11 @@ impl FakeArchives {
 
     pub fn set_password(&self, archive: &Path) {
         self.st().password.push(archive.to_path_buf());
+    }
+
+    /// Las rutas que heredaron el origen de `archive` (todas las llamadas juntas).
+    pub fn propagated(&self, archive: &Path) -> Vec<PathBuf> {
+        self.st().origins.iter().filter(|(a, _)| a == archive).flat_map(|(_, v)| v.clone()).collect()
     }
 
     pub fn set_block(&self, n: usize) {
@@ -276,6 +283,10 @@ impl Archives for FakeArchives {
             }
         }
         Ok(omitted)
+    }
+
+    fn propagate_origin(&self, archive: &Path, written: &[PathBuf]) {
+        self.st().origins.push((archive.to_path_buf(), written.to_vec()));
     }
 
     fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf> {

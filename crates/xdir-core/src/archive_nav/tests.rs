@@ -177,3 +177,21 @@ fn global_base_comes_from_the_platform() {
     let base = crate::sys::env().archive_temp_dir().expect("el falso la da");
     assert!(super::temps::global().run_dir().unwrap().starts_with(&base));
 }
+
+/// Lo que se extrae a la temporal hereda el origen del archivo (marca de la web / cuarentena):
+/// el archivo y las carpetas que se crearon para llegar a él.
+#[test]
+fn ensure_propagates_origin() {
+    install_fakes();
+    let b = base("origen");
+    let zip = b.join("bajado.zip");
+    FakeArchives::shared().add_archive(&zip, &[("d/e/malo.js", b"x")], 3);
+    let t = Temps::new(Some(&b));
+    let got = t.ensure(&zip, &[], "d/e/malo.js").unwrap();
+    let dir = t.dir_for(&zip, &[]);
+    let marked = FakeArchives::shared().propagated(&zip);
+    for p in [got.clone(), dir.join("d"), dir.join("d").join("e")] {
+        assert!(marked.contains(&p), "{p:?} no heredó el origen: {marked:?}");
+    }
+    t.clean_own();
+}

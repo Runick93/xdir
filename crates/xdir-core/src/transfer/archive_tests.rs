@@ -495,3 +495,27 @@ fn extract_entries_copies_selected_with_conflicts() {
     let one = JobSpec::ExtractEntries { archive: zip, entries: vec!["fotos/b.jpg".into()], dest: dest.clone() };
     assert_eq!(title(&one, 1), "Copiando «b.jpg» a «destino»");
 }
+
+/// Extraer (todo o solo lo elegido) marca lo extraído con el origen del archivo antes de llevarlo
+/// a su lugar.
+#[test]
+fn extraction_propagates_origin() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    let root = p("/xo");
+    let zip = root.join("bajado.zip");
+    arch.add_archive(&zip, &[("d/", b""), ("d/a.exe", b"a"), ("b.js", b"b")], 5);
+    simple(&disk, &arch, JobSpec::Extract { archive: zip.clone(), into_folder: true });
+    let names = |v: Vec<PathBuf>| -> Vec<String> {
+        let mut n: Vec<String> = v.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(arch.propagated(&zip)), ["a.exe", "b.js", "d"]);
+    let dest = root.join("destino");
+    disk.add_dir(&dest);
+    let arch2 = FakeArchives::new(&disk);
+    arch2.add_archive(&zip, &[("d/", b""), ("d/a.exe", b"a"), ("b.js", b"b")], 5);
+    simple(&disk, &arch2, JobSpec::ExtractEntries { archive: zip.clone(), entries: vec!["d".into()], dest });
+    assert_eq!(names(arch2.propagated(&zip)), ["a.exe", "d"]);
+}

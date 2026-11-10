@@ -78,7 +78,7 @@ fn run(spec: JobSpec, choice: Choice) -> (JobOutcome, Vec<String>) {
 fn run_cb(spec: JobSpec, choice: Choice, mut on_conflict: impl FnMut()) -> (JobOutcome, Vec<String>) {
     let ctl: Arc<Control> = Control::new();
     let (mut fin, mut asked) = (None, Vec::new());
-    let svc = xdir_archive::Service { tar_gz: true, utc_offset: |_| 0 };
+    let svc = xdir_archive::Service { tar_gz: true, utc_offset: |_| 0, copy_origin: crate::origin::copy_origin };
     let c2 = ctl.clone();
     run_with(spec, &MacCopyPrims, &svc as &dyn Archives, &ctl, &mut |u| match u {
         Update::Conflict(_) => {

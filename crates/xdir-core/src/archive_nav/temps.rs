@@ -183,7 +183,13 @@ impl Temps {
         let want = |name: &str| safe_entry_path(name).as_deref() == Some(target.as_path());
         sys::archives().extract_some(&real, &dir, &want, &mut |_| Flow::Continue, &mut |_, e| failed = Some(e))?;
         match prims.stat(&dst) {
-            Ok(_) => Ok(dst),
+            Ok(_) => {
+                // El origen del archivo (marca de la web, cuarentena) pasa a lo extraído y a las
+                // carpetas que se crearon para llegar.
+                let written: Vec<PathBuf> = dst.ancestors().take_while(|p| *p != dir).map(Path::to_path_buf).collect();
+                sys::archives().propagate_origin(&real, &written);
+                Ok(dst)
+            }
             Err(e) => Err(failed.unwrap_or(e)),
         }
     }

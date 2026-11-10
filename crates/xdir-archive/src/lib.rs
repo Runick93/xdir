@@ -100,6 +100,10 @@ pub struct Service {
     /// (segundos desde 1970, UTC), según la zona del sistema. Las horas de un zip (DOS) son
     /// locales: con esto se escriben y se leen. La da cada plataforma.
     pub utc_offset: fn(i64) -> i64,
+    /// Copia el origen del archivo comprimido (primer argumento: la marca de la web de Windows,
+    /// la cuarentena de macOS) a algo extraído de él (segundo). La da cada plataforma; en Linux,
+    /// nada.
+    pub copy_origin: fn(&Path, &Path),
 }
 
 use xdir_core::sys::NOT_ALLOWED;
@@ -486,6 +490,12 @@ impl Archives for Service {
             failed(name, e);
             Ok(())
         })
+    }
+
+    fn propagate_origin(&self, archive: &Path, written: &[PathBuf]) {
+        for p in written {
+            (self.copy_origin)(archive, p);
+        }
     }
 
     fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf> {

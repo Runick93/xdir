@@ -1,4 +1,6 @@
-//! Windows: la carpeta temporal privada para lo que se extrae de un archivo comprimido.
+//! Windows: la carpeta temporal privada para lo que se extrae de un archivo comprimido, y la
+//! marca de la web (`Zone.Identifier`) que lo extraído hereda del archivo, como hace el Explorador:
+//! lo bajado de internet sigue pasando por SmartScreen y la Vista protegida.
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +30,23 @@ pub fn private_dir(path: &Path) -> Option<PathBuf> {
     Some(path.to_path_buf())
 }
 
+/// El flujo alternativo `Zone.Identifier` de `path`.
+fn zone_stream(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(":Zone.Identifier");
+    PathBuf::from(s)
+}
+
+/// Si `archive` tiene marca de la web, el archivo `dst` (extraído de él) también (las carpetas
+/// no la llevan). Nunca pisa una marca que ya tenga.
+pub fn copy_origin(archive: &Path, dst: &Path) {
+    let Ok(mark) = std::fs::read(zone_stream(archive)) else { return };
+    if !std::fs::symlink_metadata(dst).is_ok_and(|m| m.is_file()) {
+        return;
+    }
+    let _ = std::fs::OpenOptions::new().write(true).create_new(true).open(zone_stream(dst)).and_then(|mut f| std::io::Write::write_all(&mut f, &mark));
+}
+
 /// ¿El dueño de `path` es el usuario del proceso (o Administradores)?
 fn owned_by_user(path: &Path) -> bool {
     let Some(buf) = crate::info::token_user() else { return false };
@@ -48,6 +67,27 @@ fn owned_by_user(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lo extraído de un archivo con marca de la web la hereda; de uno sin marca, no.
+    #[test]
+    fn copy_origin_copies_zone_identifier() {
+        let d = std::env::temp_dir().join(format!("xdir-zona-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let zip = d.join("bajado.zip");
+        std::fs::write(&zip, "z").unwrap();
+        let mark = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+        std::fs::write(zone_stream(&zip), mark).unwrap();
+        let file = d.join("malo.js");
+        std::fs::write(&file, "x").unwrap();
+        copy_origin(&zip, &file);
+        assert_eq!(std::fs::read(zone_stream(&file)).unwrap(), mark);
+        let other = d.join("otro.js");
+        std::fs::write(&other, "x").unwrap();
+        copy_origin(&d.join("sin-marca.zip"), &other);
+        assert!(std::fs::read(zone_stream(&other)).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// Nueva: sí. Un archivo: no. Una unión (enlace de carpeta): no.
     #[test]

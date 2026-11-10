@@ -272,6 +272,11 @@ impl App {
 
     pub(super) fn on_net_places(&mut self, read: Option<(NetPlaces, Option<std::time::SystemTime>)>) {
         let Some((places, mtime)) = read else { return };
+        // Con una escritura propia en curso, o si lo leído es anterior a la última propia, lo de
+        // memoria es más nuevo.
+        if self.net.writer.busy() || self.net.writer.written().is_some_and(|w| mtime.is_none_or(|m| w > m)) {
+            return;
+        }
         self.net.places_mtime = mtime;
         if places != self.net.places {
             self.net.places = places;

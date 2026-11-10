@@ -1639,3 +1639,15 @@ fn credential_conflict_goes_through_eject_flow() {
     assert_eq!(FakeNetwork::disconnects(Path::new("/net-r2conf")), vec![(other, false)]);
     assert_eq!(a.panes[a.active].tab().location, Location::Path(target));
 }
+
+/// m1: una relectura de red.toml anterior a una escritura propia no pisa lo que hay en memoria.
+#[test]
+fn stale_red_toml_read_ignored() {
+    let mut a = net_app();
+    a.net.places.add_recent(&Address::parse("smb://nuevo-r2m1/x").unwrap(), 9);
+    a.save_net_places();
+    wait_until(&mut a, |a| !a.net.writer.busy() && a.net.writer.written().is_some());
+    let old = crate::net::NetPlaces::default();
+    a.on_net_places(Some((old, Some(std::time::UNIX_EPOCH))));
+    assert_eq!(a.net.places.recents.len(), 1);
+}

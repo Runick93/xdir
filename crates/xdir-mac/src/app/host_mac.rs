@@ -200,6 +200,17 @@ impl WindowHost for MacHost {
         }
     }
 
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(text));
+        alert.setAlertStyle(NSAlertStyle::Informational);
+        alert.addButtonWithTitle(&NSString::from_str("Sí"));
+        alert.addButtonWithTitle(&NSString::from_str("No"));
+        alert.runModal() == NSAlertFirstButtonReturn
+    }
+
     fn open_url(&self, url: &str) {
         if let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) {
             NSWorkspace::sharedWorkspace().openURL(&url);
@@ -331,7 +342,7 @@ impl WindowHost for MacHost {
         let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
         field.setStringValue(&NSString::from_str(text));
         field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename);
+        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename | TextKind::Info);
         field.setBezeled(bordered);
         field.setBordered(bordered);
         field.setDrawsBackground(true);

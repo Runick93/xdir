@@ -60,6 +60,8 @@ pub enum TextKind {
     /// Campo de un panel (Renombrar varios): Enter y Escape avisan con `WM_APP_FIELD_DONE`;
     /// perder el foco no avisa nada.
     Field,
+    /// Campo del panel de información (nombre, comentario, etiqueta nueva): perder el foco aplica.
+    Info,
 }
 
 impl TextKind {
@@ -72,6 +74,7 @@ impl TextKind {
             TextKind::Filter => WM_APP_FILTER_DONE,
             TextKind::Palette => WM_APP_PALETTE_KEY,
             TextKind::Field => WM_APP_FIELD_DONE,
+            TextKind::Info => crate::info::WM_APP_INFO_EDIT_DONE,
         }
     }
 }
@@ -137,6 +140,8 @@ pub trait WindowHost {
     fn beep(&self);
     /// Pregunta Sí / No / Cancelar. Some(true): sí; Some(false): no; None: cancelar.
     fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool>;
+    /// Pregunta de Sí o No (modal). `true` si se eligió Sí.
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool;
     /// Abre un enlace en el navegador predeterminado.
     fn open_url(&self, url: &str);
     /// Abre un archivo de configuración en el editor de texto.

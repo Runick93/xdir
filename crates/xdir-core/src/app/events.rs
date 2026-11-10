@@ -62,6 +62,8 @@ impl App {
                 self.on_quick_look_reply();
             }
             preview::WM_APP_PREVIEW_DUE => self.on_preview_due(),
+            crate::info::WM_APP_INFO => self.on_info_message(wparam),
+            crate::info::WM_APP_INFO_EDIT_DONE => self.end_info_edit(wparam == 1),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {
                 self.tree.on_loaded();
@@ -161,6 +163,7 @@ impl App {
 
     /// Cambió el tamaño (o la escala) del área de la ventana: los controles flotantes se cierran.
     pub fn on_resized(&mut self) {
+        self.end_info_edit(true);
         self.end_edit(false);
         self.end_filter(true);
         self.close_palette();
@@ -366,6 +369,10 @@ impl App {
                 if self.panes[i].tab_mut().list.filter_menu_wheel(delta * lines) {
                     self.redraw();
                 }
+                return;
+            }
+            Hit::Info(_) => {
+                self.info_wheel(delta * lines);
                 return;
             }
             Hit::Pane(i, _) => i,

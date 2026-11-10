@@ -355,6 +355,8 @@ impl App {
             Some("cut") => self.copy_selection(true),
             Some("copy") => self.copy_selection(false),
             Some("paste") => self.paste(),
+            // «Propiedades» / «Obtener información» del menú: el panel de información.
+            Some("properties") => self.open_info(),
             _ => {}
         }
         self.redraw();

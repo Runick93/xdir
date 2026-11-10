@@ -8,6 +8,7 @@ mod edit;
 mod events;
 mod favs;
 mod fileops;
+mod info;
 mod saved_groups;
 mod input;
 mod paint;
@@ -21,6 +22,8 @@ mod tooltip;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod info_tests;
 #[cfg(test)]
 mod preview_tests;
 #[cfg(test)]
@@ -145,6 +148,8 @@ enum Hit {
     PreviewToggle,
     /// Borde izquierdo de la columna de vista previa (cambiar su ancho).
     PreviewEdge,
+    /// El panel de información (en el lugar de la columna).
+    Info(crate::info::draw::InfoHit),
     /// La vista de xtree abierta, sobre el área de los paneles.
     XtreeView,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
@@ -387,6 +392,8 @@ pub struct App {
     xtree_open: bool,
     /// Columna de vista previa (a la derecha de los paneles).
     preview: preview::PreviewState,
+    /// Panel de información (en el lugar de la columna, cuando se pide).
+    info: info::InfoState,
     /// Vista rápida abierta (Espacio).
     quick_look: Option<quick_look::QlState>,
     /// Renombrar varios abierto (el panel de la derecha y la vista previa en la lista).
@@ -573,6 +580,7 @@ impl App {
             xtree: None,
             xtree_open: false,
             preview: preview::PreviewState::new(session.preview_on, session.preview_width),
+            info: info::InfoState::new(session.info_sections),
             quick_look: None,
             rename_many: None,
             renaming: false,

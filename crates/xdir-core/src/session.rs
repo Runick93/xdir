@@ -94,6 +94,8 @@ pub struct Session {
     /// Columna de vista previa prendida, y su ancho (240–640).
     pub preview_on: bool,
     pub preview_width: f32,
+    /// Secciones abiertas del panel de información (un bit por `info::Section`).
+    pub info_sections: u32,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha. Desde `carpetas.toml` (memoria por
     /// carpeta) solo se leen para la migración (`legacy_view`); se siguen escribiendo con las de
@@ -128,6 +130,7 @@ impl Default for Session {
             group: None,
             preview_on: false,
             preview_width: crate::ui::PREVIEW_W,
+            info_sections: crate::info::DEFAULT_OPEN,
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -187,6 +190,7 @@ fn write(s: &Session) -> String {
 ", s.quick_open);
     out += &format!("vista_previa = {}\n", s.preview_on);
     out += &format!("vista_previa_ancho = {}\n", s.preview_width.round());
+    out += &format!("informacion_secciones = {}\n", s.info_sections);
     if let Some(g) = &s.group {
         out += &format!("grupo = {}
 ", quote(g));
@@ -280,6 +284,7 @@ fn parse(text: &str) -> Session {
             ("vista_previa_ancho", None) => {
                 s.preview_width = float().filter(|w| w.is_finite()).unwrap_or(crate::ui::PREVIEW_W).clamp(crate::ui::PREVIEW_MIN_W, crate::ui::PREVIEW_MAX_W);
             }
+            ("informacion_secciones", None) => s.info_sections = int().filter(|n| (0..128).contains(n)).map_or(crate::info::DEFAULT_OPEN, |n| n as u32),
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
@@ -433,6 +438,7 @@ mod tests {
             group: Some("Trabajo".into()),
             preview_on: false,
             preview_width: 320.0,
+            info_sections: 0b101,
             panes: vec![
                 PaneState {
                     tabs: vec![
@@ -501,6 +507,18 @@ mod tests {
 
     /// La columna de vista previa: prendida y su ancho se guardan y vuelven; un ancho fuera de los
     /// límites se recorta al leer; sin la clave, apagada y de 320.
+    /// Secciones abiertas del panel de información: se guardan como bits y faltando se usan las
+    /// de fábrica.
+    #[test]
+    fn info_sections_persist() {
+        let s = Session { info_sections: 0b0100_0011, ..Session::default() };
+        let text = write(&s);
+        assert!(text.contains("informacion_secciones = 67"), "{text}");
+        assert_eq!(parse(&text).info_sections, 0b0100_0011);
+        assert_eq!(parse("").info_sections, crate::info::DEFAULT_OPEN);
+        assert_eq!(Session::default().info_sections, crate::info::DEFAULT_OPEN);
+    }
+
     #[test]
     fn preview_session_roundtrip() {
         let s = Session { preview_on: true, preview_width: 410.0, ..Session::default() };

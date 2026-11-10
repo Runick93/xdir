@@ -8,33 +8,33 @@ use ::zip::write::SimpleFileOptions;
 use ::zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use crate::{
-    ArchiveEntry, ErrKind, Error, Flow, ItemKind, MAX_LINK, Shared, Source, cancelled, io_err, resolve_rel, stored_name, write_entry,
+    ArchiveEntry, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other, resolve_rel, stored_name, write_entry,
 };
+use xdir_core::sys::{PASSWORD, UNSUPPORTED};
 
-const PASSWORD: &str = "Este zip tiene contraseña";
 /// Desde acá la entrada se marca zip64.
 const ZIP64_AT: u64 = 0xF000_0000;
 
 pub(crate) fn map_zip_ref(e: &ZipError, path: &Path) -> Error {
     match e {
-        ZipError::InvalidPassword => Error::other(PASSWORD, path),
-        ZipError::UnsupportedArchive(m) if *m == ZipError::PASSWORD_REQUIRED => Error::other(PASSWORD, path),
+        ZipError::InvalidPassword => other(PASSWORD, path),
+        ZipError::UnsupportedArchive(m) if *m == ZipError::PASSWORD_REQUIRED => other(PASSWORD, path),
         ZipError::CompressionMethodNotSupported(_) | ZipError::UnsupportedArchive(_) => {
-            Error::other("Formato no soportado", path)
+            other(UNSUPPORTED, path)
         }
-        _ => Error::other("El zip está dañado", path),
+        _ => other("El zip está dañado", path),
     }
 }
 
 fn map_zip(e: ZipError, path: &Path) -> Error {
     match e {
         ZipError::Io(e) => io_err(e, path),
-        ZipError::InvalidPassword => Error::other(PASSWORD, path),
-        ZipError::UnsupportedArchive(m) if m == ZipError::PASSWORD_REQUIRED => Error::other(PASSWORD, path),
+        ZipError::InvalidPassword => other(PASSWORD, path),
+        ZipError::UnsupportedArchive(m) if m == ZipError::PASSWORD_REQUIRED => other(PASSWORD, path),
         ZipError::CompressionMethodNotSupported(_) | ZipError::UnsupportedArchive(_) => {
-            Error::other("Formato no soportado", path)
+            other(UNSUPPORTED, path)
         }
-        _ => Error::other("El zip está dañado", path),
+        _ => other("El zip está dañado", path),
     }
 }
 
@@ -141,7 +141,7 @@ fn extract_index(
     {
         let raw = a.by_index_raw(index).map_err(|e| map_zip(e, archive))?;
         if raw.encrypted() {
-            return Err(Error::other(PASSWORD, archive));
+            return Err(other(PASSWORD, archive));
         }
     }
     let mut z = a.by_index(index).map_err(|e| map_zip(e, archive))?;
@@ -167,7 +167,7 @@ pub fn extract(
     extract_index(&mut a, archive, entry.index, root, override_name, progress).map(|_| ())
 }
 
-pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<usize, Error> {
+pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
     let mut a = open(archive)?;
     let entries = list_open(&mut a, archive)?;
     let sh = Shared::new(progress);
@@ -180,8 +180,10 @@ pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) ->
             omitted += 1;
             continue;
         }
-        let n = extract_index(&mut a, archive, e.index, root, None, &mut |b| sh.report(base, b))?;
-        base += n;
+        match extract_index(&mut a, archive, e.index, root, None, &mut |b| sh.report(base, b)) {
+            Ok(n) => base += n,
+            Err(err) => on_fail(&e.name, err)?,
+        }
         if sh.report(base, 0) == Flow::Stop {
             return Err(cancelled(archive));
         }
@@ -214,7 +216,7 @@ fn write_all(
         let ft = meta.file_type();
         let is_dir_name = name.ends_with('/');
         if is_dir_name != ft.is_dir() || !(ft.is_dir() || ft.is_file() || ft.is_symlink()) {
-            return Err(Error::other("No se puede comprimir este tipo de elemento", src));
+            return Err(other("No se puede comprimir este tipo de elemento", src));
         }
         let mut opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         if let Some(t) = meta
@@ -236,7 +238,7 @@ fn write_all(
             let target = std::fs::read_link(src).map_err(|e| io_err(e, src))?;
             let target = target.to_string_lossy().replace('\\', "/");
             if target.len() as u64 > MAX_LINK {
-                return Err(Error::other("El destino del enlace es demasiado largo", src));
+                return Err(other("El destino del enlace es demasiado largo", src));
             }
             zw.add_symlink(name.as_str(), target, opts).map_err(zerr)?;
         } else {

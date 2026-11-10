@@ -7,8 +7,8 @@ use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 
 use crate::{
-    ArchiveEntry, CancelRead, ErrKind, Error, Flow, ItemKind, MAX_LINK, Shared, Source, cancelled, io_err, resolve_rel,
-    write_entry,
+    ArchiveEntry, CancelRead, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other,
+    resolve_rel, write_entry,
 };
 
 type Reader<'a> = CancelRead<'a, GzDecoder<BufReader<File>>>;
@@ -34,7 +34,7 @@ fn bad(e: std::io::Error, path: &Path) -> Error {
         std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
             if e.get_ref().is_none_or(|i| !i.is::<crate::Cancelled>()) =>
         {
-            Error::other("El archivo está dañado", path)
+            other("El archivo está dañado", path)
         }
         _ => io_err(e, path),
     }
@@ -89,7 +89,7 @@ pub fn extract(
         }
         let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
         if kind == ItemKind::Omitted {
-            return Err(Error::other("Tipo de elemento no soportado", Path::new(&name)));
+            return Err(other("Tipo de elemento no soportado", Path::new(&name)));
         }
         let Some(rel) = resolve_rel(&name, override_name, kind == ItemKind::Dir)? else {
             return Ok(());
@@ -107,13 +107,13 @@ pub fn extract(
 }
 
 /// Una sola pasada; los enlaces simbólicos se crean al final.
-pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<usize, Error> {
+pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
     let sh = Shared::new(progress);
     let mut check = || sh.check();
     let mut a = open(archive, &mut check)?;
     let mut base = 0u64;
     let mut omitted = 0usize;
-    let mut links: Vec<(std::path::PathBuf, Option<String>)> = Vec::new();
+    let mut links: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
     for e in a.entries().map_err(|e| bad(e, archive))? {
         let mut e = e.map_err(|e| bad(e, archive))?;
         let kind = kind_of_type(e.header().entry_type());
@@ -122,35 +122,44 @@ pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) ->
             continue;
         }
         let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
-        let Some(rel) = resolve_rel(&name, None, kind == ItemKind::Dir)? else {
-            continue;
+        let rel = match resolve_rel(&name, None, kind == ItemKind::Dir) {
+            Ok(Some(rel)) => rel,
+            Ok(None) => continue,
+            Err(err) => {
+                on_fail(&name, err)?;
+                continue;
+            }
         };
         if kind == ItemKind::Symlink {
-            links.push((rel, link_of(&e)));
+            links.push((name, rel, link_of(&e)));
             continue;
         }
         let (declared, mode) = (e.size(), e.header().mode().ok());
-        let n = write_entry(
+        match write_entry(
             Source { kind, rel: &rel, link: None, declared, mode, reader: &mut e },
             root,
             &mut |b| sh.report(base, b),
-        )?;
-        base += n;
+        ) {
+            Ok(n) => base += n,
+            Err(err) => on_fail(&name, err)?,
+        }
         if sh.report(base, 0) == Flow::Stop {
             return Err(cancelled(archive));
         }
     }
     drop(a);
-    for (rel, link) in links {
+    for (name, rel, link) in links {
         if cfg!(not(unix)) {
             omitted += 1;
             continue;
         }
-        write_entry(
+        if let Err(err) = write_entry(
             Source { kind: ItemKind::Symlink, rel: &rel, link: link.as_deref(), declared: 0, mode: None, reader: &mut std::io::empty() },
             root,
             &mut |_| Flow::Continue,
-        )?;
+        ) {
+            on_fail(&name, err)?;
+        }
         if sh.report(base, 0) == Flow::Stop {
             return Err(cancelled(archive));
         }

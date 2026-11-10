@@ -461,7 +461,7 @@ fn error_messages_and_kinds() {
     assert_eq!(kind_of(&io::Error::from(io::ErrorKind::PermissionDenied)), ErrKind::Denied);
     assert_eq!(kind_of(&io::Error::from(io::ErrorKind::NotFound)), ErrKind::NotFound);
     assert_eq!(kind_of(&io::Error::from(io::ErrorKind::StorageFull)), ErrKind::DiskFull);
-    assert_eq!(Error::other("x", Path::new("a")).message(), "x");
+    assert_eq!(other("x", Path::new("a")).message(), "x");
     assert_eq!(Error { kind: ErrKind::DiskFull, path: PathBuf::new() }.message(), "El disco está lleno");
 }
 
@@ -749,4 +749,89 @@ fn create_keeps_colons_in_names() {
     let root = t.p("r");
     fs::create_dir(&root).unwrap();
     assert!(extract_all(&z, &root).is_err());
+}
+
+/// `Archives::extract_all` (el del motor): cada entrada mala se anota y se sigue con las demás.
+fn extract_keep_going(z: &Path, root: &Path) -> (Result<usize, Error>, Vec<(String, String)>) {
+    let mut failed = Vec::new();
+    let r = Archives::extract_all(&svc(), z, root, &mut |_| Flow::Continue, &mut |n, e| failed.push((n.to_string(), e.message())));
+    (r, failed)
+}
+
+#[test]
+fn keep_going_skips_bad_entries_and_writes_nothing_outside() {
+    let t = Tmp::new();
+    let z = t.p("mal.zip");
+    let names: [&[u8]; 6] = [b"../evil.txt", b"a/../../evil.txt", b"/abs/evil.txt", b"C:\\evil.txt", b"\\\\srv\\x\\evil.txt", b"CON"];
+    let mut entries: Vec<Raw> = names.iter().map(|n| raw(n, b"pwn")).collect();
+    entries.push(raw(b"bien/ok.txt", b"ok"));
+    fs::write(&z, raw_zip(&entries)).unwrap();
+    let root = t.p("raiz/in");
+    fs::create_dir_all(&root).unwrap();
+    let (r, failed) = extract_keep_going(&z, &root);
+    assert_eq!(r.unwrap(), 0);
+    assert_eq!(failed.len(), 6, "{failed:?}");
+    assert!(failed.iter().all(|(_, m)| m == xdir_core::sys::NOT_ALLOWED), "{failed:?}");
+    assert_eq!(failed[0].0, "../evil.txt");
+    assert_eq!(fs::read(root.join("bien/ok.txt")).unwrap(), b"ok");
+    assert!(!t.p("raiz/evil.txt").exists() && !t.p("evil.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn keep_going_redirected_symlinks_cannot_write_outside() {
+    let t = Tmp::new();
+    let z = t.p("r.zip");
+    fs::write(&z, raw_zip(&[link_entry(b"l", b"b/.."), link_entry(b"b", b"."), raw(b"l/pwned.txt", b"pwn"), link_entry(b"f", b"../fuera")])).unwrap();
+    let root = t.p("raiz/in");
+    fs::create_dir_all(&root).unwrap();
+    let (r, failed) = extract_keep_going(&z, &root);
+    assert!(r.is_ok());
+    assert!(failed.iter().any(|(n, _)| n == "f"), "{failed:?}");
+    assert!(!outside_marker(&t).exists());
+    // Lo de adentro quedó adentro (como carpeta real, no a través del enlace).
+    assert!(fs::symlink_metadata(root.join("l")).unwrap().is_dir());
+
+    let zt = t.p("r.tar.gz");
+    tar_gz(&zt, |b| {
+        tar_entry(b, b"l", tar::EntryType::Symlink, Some(b"b/.."), b"");
+        tar_entry(b, b"b", tar::EntryType::Symlink, Some(b"."), b"");
+        tar_entry(b, b"l/pwned.txt", tar::EntryType::Regular, None, b"pwn");
+        tar_entry(b, b"../evil.txt", tar::EntryType::Regular, None, b"pwn");
+        tar_entry(b, b"ok.txt", tar::EntryType::Regular, None, b"ok");
+    });
+    let root2 = t.p("raiz/in2");
+    fs::create_dir_all(&root2).unwrap();
+    let (r, failed) = extract_keep_going(&zt, &root2);
+    assert!(r.is_ok());
+    assert!(failed.iter().any(|(n, m)| n == "../evil.txt" && m == xdir_core::sys::NOT_ALLOWED), "{failed:?}");
+    assert_eq!(fs::read(root2.join("ok.txt")).unwrap(), b"ok");
+    assert!(!outside_marker(&t).exists() && !t.p("raiz/evil.txt").exists());
+}
+
+#[test]
+fn keep_going_stops_on_password_and_cancel() {
+    let t = Tmp::new();
+    let z = t.p("p.zip");
+    fs::write(&z, raw_zip(&[Raw { flags: 1, ..raw(b"a.txt", b"xxxxxxxxxxxx") }, raw(b"b.txt", b"b")])).unwrap();
+    let root = t.p("r");
+    fs::create_dir_all(&root).unwrap();
+    let (r, _) = extract_keep_going(&z, &root);
+    assert_eq!(r.unwrap_err().kind, ErrKind::Other(xdir_core::sys::PASSWORD.into()));
+
+    let z2 = t.p("c.zip");
+    fs::write(&z2, raw_zip(&[raw(b"a.txt", b"aaaa"), raw(b"b.txt", b"b")])).unwrap();
+    let root2 = t.p("r2");
+    fs::create_dir_all(&root2).unwrap();
+    let err = Archives::extract_all(&svc(), &z2, &root2, &mut |_| Flow::Stop, &mut |_, _| {}).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
+    // Archives::create escribe zip aunque el nombre sea un parcial del motor.
+    let part = t.p(".x.zip.xdir-part");
+    fs::write(t.p("s.txt"), b"s").unwrap();
+    Archives::create(&svc(), &part, &[(t.p("s.txt"), "s.txt".into())], &mut |_| Flow::Continue).unwrap();
+    assert_eq!(svc().list(&{
+        let named = t.p("x.zip");
+        fs::rename(&part, &named).unwrap();
+        named
+    }).unwrap()[0].name, "s.txt");
 }

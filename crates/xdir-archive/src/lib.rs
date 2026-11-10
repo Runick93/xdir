@@ -1,8 +1,7 @@
 //! Zip y tar.gz para las tres plataformas, con las reglas de seguridad de `xdir_core::archive`.
 //!
-//! Los tipos de error y de avance (`Flow`, `ErrKind`, `Error`, `ItemKind`) tienen la misma forma
-//! que los de las primitivas de copia del motor (Task 6); la Task 15 los reemplaza por esos y
-//! enchufa `Service` detrás de `sys::Archives`.
+//! Los tipos de error y de avance son los de las primitivas de copia del motor (`Error` es
+//! `xdir_core::sys::CopyError`) y `Service` se instala detrás de `sys::Archives`.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
@@ -10,6 +9,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
+use xdir_core::sys::Archives;
 use xdir_core::archive::{ArchiveFormat, format_of, is_root_entry, safe_entry_path, symlink_inside};
 
 mod targz;
@@ -18,48 +18,12 @@ mod zip;
 #[cfg(test)]
 mod tests;
 
-/// Qué hacer después de avisar el avance.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Flow {
-    Continue,
-    Stop,
-}
+pub use xdir_core::archive::{ArchiveEntry, EntryKind as ItemKind};
+pub use xdir_core::sys::{CopyError as Error, ErrKind, Flow};
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum ErrKind {
-    InUse,
-    Denied,
-    NotFound,
-    DiskFull,
-    TooBig,
-    Exists,
-    Cancelled,
-    Other(String),
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Error {
-    pub kind: ErrKind,
-    pub path: PathBuf,
-}
-
-impl Error {
-    pub fn other(msg: &str, path: &Path) -> Error {
-        Error { kind: ErrKind::Other(msg.to_string()), path: path.to_path_buf() }
-    }
-
-    pub fn message(&self) -> String {
-        match &self.kind {
-            ErrKind::InUse => "Lo está usando otro programa".into(),
-            ErrKind::Denied => "No tenés permiso".into(),
-            ErrKind::NotFound => "Ya no existe".into(),
-            ErrKind::DiskFull => "El disco está lleno".into(),
-            ErrKind::TooBig => "Es demasiado grande para el formato del disco de destino (FAT32)".into(),
-            ErrKind::Exists => "Ya existe".into(),
-            ErrKind::Cancelled => "Cancelado".into(),
-            ErrKind::Other(s) => s.clone(),
-        }
-    }
+/// Un error con su texto.
+pub(crate) fn other(msg: &str, path: &Path) -> Error {
+    Error::new(ErrKind::Other(msg.to_string()), path)
 }
 
 /// Mismo mapeo que las primitivas de copia.
@@ -121,26 +85,12 @@ pub(crate) fn io_err(e: io::Error, path: &Path) -> Error {
     Error { kind: kind_of(&e), path: path.to_path_buf() }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ItemKind {
-    File,
-    Dir,
-    Symlink,
-    /// Enlace duro, dispositivo o FIFO: se lista pero no se extrae (se cuenta como omitido).
-    Omitted,
-}
+/// Qué hacer con una entrada que no se pudo extraer (nombre, error): `Err` corta todo.
+pub(crate) type OnFail<'a> = &'a mut dyn FnMut(&str, Error) -> Result<(), Error>;
 
-/// Una entrada del archivo, tal como figura adentro (sin sanear: `extract` la valida).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ArchiveEntry {
-    pub index: usize,
-    pub name: String,
-    pub size: u64,
-    pub kind: ItemKind,
-    /// Destino del enlace simbólico.
-    pub link: Option<String>,
-    /// Segundos desde 1970 (0 si no figura).
-    pub modified: u64,
+/// Errores que cortan la extracción entera (seguir no tendría sentido o no se debe).
+fn fatal(e: &Error) -> bool {
+    matches!(&e.kind, ErrKind::Cancelled | ErrKind::DiskFull) || matches!(&e.kind, ErrKind::Other(m) if m == xdir_core::sys::PASSWORD)
 }
 
 pub struct Service {
@@ -148,7 +98,7 @@ pub struct Service {
     pub tar_gz: bool,
 }
 
-const NOT_ALLOWED: &str = "Ruta no permitida dentro del archivo";
+use xdir_core::sys::NOT_ALLOWED;
 /// Los enlaces guardan su destino como datos: más largo que esto se rechaza.
 pub(crate) const MAX_LINK: u64 = 4096;
 
@@ -161,7 +111,7 @@ impl Service {
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match format_of(&name) {
             Some(f) if self.formats().contains(&f) => Ok(f),
-            _ => Err(Error::other("Formato no soportado", p)),
+            _ => Err(other(xdir_core::sys::UNSUPPORTED, p)),
         }
     }
 
@@ -212,9 +162,14 @@ impl Service {
     /// mientras se descomprime. Devuelve cuántos enlaces se omitieron (en Windows todos). Si se
     /// corta o falla, lo ya extraído queda: lo limpia quien llama.
     pub fn extract_all(&self, archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<usize, Error> {
+        self.extract_each(archive, root, progress, &mut |_, e| Err(e))
+    }
+
+    /// Como `extract_all`, pero cada entrada que falla va a `on_fail`, que decide si se sigue.
+    fn extract_each(&self, archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
         match self.format(archive)? {
-            ArchiveFormat::Zip => zip::extract_all(archive, root, progress),
-            ArchiveFormat::TarGz => targz::extract_all(archive, root, progress),
+            ArchiveFormat::Zip => zip::extract_all(archive, root, progress, on_fail),
+            ArchiveFormat::TarGz => targz::extract_all(archive, root, progress, on_fail),
         }
     }
 
@@ -228,7 +183,7 @@ impl Service {
         progress: &mut dyn FnMut(u64) -> Flow,
     ) -> Result<(), Error> {
         if self.format(out)? != ArchiveFormat::Zip {
-            return Err(Error::other("Formato no soportado", out));
+            return Err(other(xdir_core::sys::UNSUPPORTED, out));
         }
         zip::create(out, items, progress)
     }
@@ -240,7 +195,7 @@ impl Service {
 /// de la entrada.
 pub(crate) fn resolve_rel(name: &str, override_name: Option<&OsStr>, is_dir: bool) -> Result<Option<PathBuf>, Error> {
     let at = Path::new(name);
-    let bad = || Error::other(NOT_ALLOWED, at);
+    let bad = || other(NOT_ALLOWED, at);
     if is_dir && is_root_entry(name) {
         return Ok(None);
     }
@@ -276,13 +231,13 @@ fn walk_down(root: &Path, rel: &Path) -> Result<PathBuf, Error> {
     let mut cur = root.to_path_buf();
     let comps: Vec<_> = rel.components().collect();
     let Some((last, parents)) = comps.split_last() else {
-        return Err(Error::other(NOT_ALLOWED, root));
+        return Err(other(NOT_ALLOWED, root));
     };
     for c in parents {
         cur.push(c);
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.is_dir() => {}
-            Ok(m) if m.file_type().is_symlink() => return Err(Error::other(NOT_ALLOWED, &cur)),
+            Ok(m) if m.file_type().is_symlink() => return Err(other(NOT_ALLOWED, &cur)),
             Ok(_) => return Err(Error { kind: ErrKind::Exists, path: cur }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir(&cur).map_err(|e| io_err(e, &cur))?;
@@ -292,7 +247,7 @@ fn walk_down(root: &Path, rel: &Path) -> Result<PathBuf, Error> {
     }
     cur.push(last);
     if !cur.starts_with(root) {
-        return Err(Error::other(NOT_ALLOWED, &cur));
+        return Err(other(NOT_ALLOWED, &cur));
     }
     Ok(cur)
 }
@@ -304,7 +259,7 @@ pub(crate) fn write_entry(src: Source, root: &Path, progress: &mut dyn FnMut(u64
         ItemKind::Dir => {
             match std::fs::symlink_metadata(&dst) {
                 Ok(m) if m.is_dir() => {}
-                Ok(m) if m.file_type().is_symlink() => return Err(Error::other(NOT_ALLOWED, &dst)),
+                Ok(m) if m.file_type().is_symlink() => return Err(other(NOT_ALLOWED, &dst)),
                 Ok(_) => return Err(Error { kind: ErrKind::Exists, path: dst }),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     std::fs::create_dir(&dst).map_err(|e| io_err(e, &dst))?;
@@ -313,13 +268,13 @@ pub(crate) fn write_entry(src: Source, root: &Path, progress: &mut dyn FnMut(u64
             }
             Ok(0)
         }
-        ItemKind::Omitted => Err(Error::other("Tipo de elemento no soportado", &dst)),
+        ItemKind::Omitted => Err(other("Tipo de elemento no soportado", &dst)),
         ItemKind::Symlink => {
             let Some(target) = src.link else {
-                return Err(Error::other("Enlace no válido", &dst));
+                return Err(other("Enlace no válido", &dst));
             };
             if !symlink_inside(src.rel, target) {
-                return Err(Error::other("Enlace que apunta fuera de la carpeta", &dst));
+                return Err(other("Enlace que apunta fuera de la carpeta", &dst));
             }
             make_symlink(target, root, &dst)?;
             Ok(0)
@@ -364,7 +319,7 @@ fn copy_limited(
         }
         done += n as u64;
         if done > declared {
-            return Err(Error::other("El archivo está dañado", path));
+            return Err(other("El archivo está dañado", path));
         }
         w.write_all(&buf[..n]).map_err(|e| io_err(e, path))?;
         if progress(done) == Flow::Stop {
@@ -378,7 +333,7 @@ fn make_symlink(target: &str, root: &Path, dst: &Path) -> Result<(), Error> {
     // El texto puede quedar adentro y el camino real afuera: se resuelve con lo que hay.
     let parent = dst.parent().unwrap_or(dst);
     if !physically_inside(root, parent, target) {
-        return Err(Error::other("Enlace que apunta fuera de la carpeta", dst));
+        return Err(other("Enlace que apunta fuera de la carpeta", dst));
     }
     std::os::unix::fs::symlink(target, dst).map_err(|e| io_err(e, dst))
 }
@@ -386,7 +341,7 @@ fn make_symlink(target: &str, root: &Path, dst: &Path) -> Result<(), Error> {
 /// En Windows los enlaces simbólicos piden privilegios: no se crean.
 #[cfg(not(unix))]
 fn make_symlink(_target: &str, _root: &Path, dst: &Path) -> Result<(), Error> {
-    Err(Error::other("Enlace omitido", dst))
+    Err(other("Enlace omitido", dst))
 }
 
 /// Resuelve `target` desde `parent` siguiendo los enlaces que ya existen y comprueba que el
@@ -422,7 +377,7 @@ fn physically_inside(root: &Path, parent: &Path, target: &str) -> bool {
 /// usa `safe_entry_path`: en macOS y Linux `:` y los nombres como «con» son legales; se guardan
 /// tal cual y se rechazan recién al extraer (en cualquier sistema).
 pub(crate) fn stored_name(name: &str, at: &Path) -> Result<String, Error> {
-    let bad = || Error::other("Nombre no permitido dentro del zip", at);
+    let bad = || other("Nombre no permitido dentro del zip", at);
     if name.contains(['\\', '\0']) || name.starts_with('/') {
         return Err(bad());
     }
@@ -461,5 +416,36 @@ impl<'a> Shared<'a> {
     }
     pub fn check(&self) -> Flow {
         (self.progress.borrow_mut())(self.total.get())
+    }
+}
+
+impl Archives for Service {
+    fn formats(&self) -> &'static [ArchiveFormat] {
+        Service::formats(self)
+    }
+
+    fn list(&self, archive: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+        self.list_cancellable(archive, cancel)
+    }
+
+    fn extract_all(
+        &self,
+        archive: &Path,
+        root: &Path,
+        progress: &mut dyn FnMut(u64) -> Flow,
+        failed: &mut dyn FnMut(&str, Error),
+    ) -> Result<usize, Error> {
+        self.extract_each(archive, root, progress, &mut |name, e| {
+            if fatal(&e) {
+                return Err(e);
+            }
+            failed(name, e);
+            Ok(())
+        })
+    }
+
+    /// Siempre zip (el nombre puede ser un parcial del motor, sin `.zip`).
+    fn create(&self, out: &Path, items: &[(PathBuf, String)], progress: &mut dyn FnMut(u64) -> Flow) -> Result<(), Error> {
+        zip::create(out, items, progress)
     }
 }

@@ -781,6 +781,7 @@ version = "0.1.23"
 dependencies = [
  "libc",
  "notify",
+ "xdir-archive",
  "xdir-core",
 ]
 
@@ -802,6 +803,7 @@ dependencies = [
  "objc2-quick-look-thumbnailing",
  "objc2-quick-look-ui",
  "objc2-uniform-type-identifiers",
+ "xdir-archive",
  "xdir-core",
 ]
 
@@ -812,6 +814,7 @@ dependencies = [
  "windows",
  "windows-core",
  "windows-numerics",
+ "xdir-archive",
  "xdir-core",
 ]
 

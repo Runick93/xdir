@@ -56,6 +56,8 @@ pub(super) struct Win32Host {
     menus: RefCell<Vec<OpenMenu>>,
     /// Se está atendiendo un clic derecho dentro de un menú (no se atiende otro adentro).
     in_menu_context: Cell<bool>,
+    /// El tema del último cuadro (lo usa la ventana de la vista rápida).
+    theme: Cell<Option<Theme>>,
 }
 
 /// La respuesta al clic derecho dentro de un menú (la clausura de `popup_menu`, sin su tiempo de
@@ -89,6 +91,7 @@ impl Win32Host {
             next_text_box: Cell::new(1),
             menus: RefCell::new(Vec::new()),
             in_menu_context: Cell::new(false),
+            theme: Cell::new(None),
         });
         HOST.with(|h| *h.borrow_mut() = Some(host.clone()));
         Ok(host)
@@ -222,6 +225,8 @@ impl WindowHost for Win32Host {
 
     /// El primer cuadro crea el destino de dibujo (espera al hilo que crea el dispositivo de GPU).
     fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
+        self.theme.set(Some(*theme));
+        crate::quicklook::set_theme(theme);
         self.renderer
             .borrow_mut()
             .draw(self.hwnd.get(), self.dpi(), theme, file_colors, |p, w, h| paint(p, w, h))
@@ -694,6 +699,21 @@ impl WindowHost for Win32Host {
 
     fn accessibility(&self) -> Option<&dyn Accessibility> {
         Some(self)
+    }
+
+    /// La ventana de la vista rápida con el visor del panel de vista previa (`crate::quicklook`).
+    fn quick_look_show(&self, item: &xdir_core::quicklook::QuickLookItem) -> bool {
+        let theme = self.theme.get().unwrap_or_else(|| Theme::from_system(xdir_core::theme::DEFAULT_ACCENT, None));
+        crate::quicklook::show(self.hwnd.get(), item, &theme)
+    }
+
+    fn quick_look_close(&self) {
+        crate::quicklook::close();
+    }
+
+    /// Lo solo en la nube lo muestra la ventana propia (ícono y «Disponible solo en línea»).
+    fn quick_look_shows_cloud(&self) -> bool {
+        true
     }
 }
 

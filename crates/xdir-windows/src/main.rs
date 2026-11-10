@@ -22,6 +22,8 @@ mod render;
 #[cfg(windows)]
 mod shell;
 #[cfg(windows)]
+mod quicklook;
+#[cfg(windows)]
 mod sys;
 #[cfg(windows)]
 mod thumbs;
@@ -41,10 +43,14 @@ fn main() {
 }
 
 // Fuera de Windows igual corren las pruebas que no tocan el sistema: el nombre del temporal del
-// ayudante de xtree y la tabla de comandos de Windows contra el entorno falso.
+// ayudante de xtree, la tabla de comandos de Windows contra el entorno falso y lo neutro de la
+// vista rápida.
 #[cfg(all(test, not(windows)))]
 #[path = "fs/xtree_temp.rs"]
 mod xtree_temp;
 #[cfg(all(test, not(windows)))]
 #[path = "sys/tests.rs"]
 mod sys_tests;
+#[cfg(all(test, not(windows)))]
+#[path = "quicklook/pure.rs"]
+mod quicklook_pure;

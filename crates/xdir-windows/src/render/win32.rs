@@ -124,7 +124,7 @@ impl Renderer {
         let Ok(mut icons) = self.icons.try_borrow_mut() else { return };
         match &self.target {
             Some(t) => icons.absorb_big(&t.gpu.ctx),
-            None => drop(thumbs::take_done_big()),
+            None => drop(thumbs::take_done_big(icons.hwnd)),
         }
     }
 
@@ -645,7 +645,7 @@ impl Icons {
     /// Pasa a la caché las imágenes grandes que terminaron (las fallidas, a `big_failed`).
     fn absorb_big(&mut self, ctx: &ID2D1DeviceContext) {
         let now = Instant::now();
-        for (k, px) in thumbs::take_done_big() {
+        for (k, px) in thumbs::take_done_big(self.hwnd) {
             match px.and_then(|px| bitmap_from(ctx, &px).map(|b| (b, px.data.len()))) {
                 Some((bitmap, bytes)) => self.big.insert(k, bitmap, bytes),
                 None => self.big_failed.fail(k, now),

@@ -140,6 +140,15 @@ pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 app.on_app_activated();
                 LRESULT(0)
             }
+            // La ventana de la vista rápida: una tecla suya (o ‹ › ×) y el cierre con Alt+F4.
+            crate::quicklook::WM_APP_QL_KEY => {
+                app.on_key(Key(wparam.0 as u16));
+                LRESULT(0)
+            }
+            crate::quicklook::WM_APP_QL_CLOSED => {
+                app.on_quick_look_closed();
+                LRESULT(0)
+            }
             WM_APP_DRAG => {
                 let ev = &mut *(lparam.0 as *mut DragEvent);
                 app.on_drag(ev);
@@ -259,6 +268,7 @@ pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                     None::<&windows::Win32::UI::Accessibility::IRawElementProviderSimple>,
                 );
                 let _ = RevokeDragDrop(hwnd);
+                crate::quicklook::shutdown();
                 if let Some(host) = Win32Host::current() {
                     host.release_drop_target();
                     host.release_edit_resources();

@@ -160,6 +160,14 @@ Notas de X39–X44:
     menos de 480×360, salvo que la ventana misma sea más chica).
   - Las áreas que responden al clic son más grandes que el dibujo: ‹ y › de 22×28, la cruz de 28×28 (el dibujo es de
     5×8 y 10×10); «Abrir» es el botón entero de 72×26.
+- Ventana de la vista rápida en Windows (X43/X44), en la app:
+  - Sin marco del sistema: la sombra, el borde y el radio 8 son los de DWM (esquinas redondeadas de Windows 11), no la
+    sombra en capas de la tarjeta.
+  - El visor queda 6 adentro de los costados y del borde de abajo (fondo `surface`): es una ventana de otro proceso y
+    sobre ella el mouse no llega a la de xdir, así que ese borde es el que redimensiona. En X43 el visor llega al borde.
+  - Mientras el visor arranca (hasta 3 s), el cuerpo muestra el ícono de 96 del tipo, centrado.
+  - Los archivos solo en la nube se muestran en la misma ventana (ícono y «Disponible solo en línea»), no en la tarjeta
+    sobre los paneles.
 
 ### Lo nativo, que no se dibuja
 

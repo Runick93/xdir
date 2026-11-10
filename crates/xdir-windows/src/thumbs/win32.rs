@@ -8,7 +8,9 @@
 //!
 //! La imagen grande (vista previa, Galería) va por la misma cola, en un escalón de
 //! `thumbs::big_side`, con su propia lista de terminadas; la de un archivo solo en la nube se
-//! pide solo de la caché del Shell (`SIIGBF_INCACHEONLY`), así no se baja.
+//! pide solo de la caché del Shell (`SIIGBF_INCACHEONLY`), así no se baja. Las terminadas quedan
+//! anotadas con la ventana que las pidió: cada renderizador (la ventana principal y la de la vista
+//! rápida) retira solo las suyas.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -36,8 +38,8 @@ type Job = ((Key, bool), usize);
 struct Queue {
     /// Pila: se atiende primero lo último pedido.
     jobs: Vec<Job>,
-    /// (clave, grande) encargadas y sin terminar.
-    pending: HashSet<(Key, bool)>,
+    /// (clave, grande) encargadas y sin terminar, por ventana.
+    pending: HashSet<Job>,
 }
 
 fn queue() -> &'static (Mutex<Queue>, Condvar) {
@@ -51,14 +53,17 @@ fn queue() -> &'static (Mutex<Queue>, Condvar) {
 /// Imágenes terminadas (`None`: no se pudo obtener), hasta que el renderizador las retire.
 type Done = Mutex<Vec<(Key, Option<Arc<Pixels>>)>>;
 
+/// Imágenes grandes terminadas, con la ventana que las pidió.
+type DoneBig = Mutex<Vec<(usize, Key, Option<Arc<Pixels>>)>>;
+
 /// Resultado listo para pasar al renderizador (lo retira de acá).
 fn done() -> &'static Done {
     static D: OnceLock<Done> = OnceLock::new();
     D.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn done_big() -> &'static Done {
-    static D: OnceLock<Done> = OnceLock::new();
+fn done_big() -> &'static DoneBig {
+    static D: OnceLock<DoneBig> = OnceLock::new();
     D.get_or_init(|| Mutex::new(Vec::new()))
 }
 
@@ -75,10 +80,11 @@ pub fn request_big(hwnd: Handle, key: Key) {
 fn enqueue(hwnd: Handle, job: (Key, bool)) {
     let (lock, cv) = queue();
     let mut q = lock.lock().unwrap();
+    let job = (job, hwnd.0 as usize);
     if q.pending.insert(job.clone()) {
-        q.jobs.push((job, hwnd.0 as usize));
+        q.jobs.push(job);
         cv.notify_one();
-    } else if let Some(i) = q.jobs.iter().position(|(j, _)| *j == job) {
+    } else if let Some(i) = q.jobs.iter().position(|j| *j == job) {
         // Ya estaba en cola: pasa adelante (vuelve a estar a la vista).
         let job = q.jobs.remove(i);
         q.jobs.push(job);
@@ -90,9 +96,13 @@ pub fn take_done() -> Vec<(Key, Option<Arc<Pixels>>)> {
     std::mem::take(&mut *done().lock().unwrap())
 }
 
-/// Imágenes grandes que terminó el hilo desde la última vez. `None`: no se pudo obtener.
-pub fn take_done_big() -> Vec<(Key, Option<Arc<Pixels>>)> {
-    std::mem::take(&mut *done_big().lock().unwrap())
+/// Imágenes grandes que terminó el hilo desde la última vez para la ventana `hwnd` (las de otra
+/// ventana quedan para ella). `None`: no se pudo obtener.
+pub fn take_done_big(hwnd: Handle) -> Vec<(Key, Option<Arc<Pixels>>)> {
+    let mut done = done_big().lock().unwrap();
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *done).into_iter().partition(|(h, ..)| *h == hwnd.0 as usize);
+    *done = rest;
+    mine.into_iter().map(|(_, k, px)| (k, px)).collect()
 }
 
 /// Banderas para pedir una imagen grande: ajustada al tamaño y, si el archivo está solo en la
@@ -124,9 +134,13 @@ fn run() {
         let pixels = image(&key, flags).map(Arc::new);
         {
             let (lock, _) = queue();
-            lock.lock().unwrap().pending.remove(&(key.clone(), big));
+            lock.lock().unwrap().pending.remove(&((key.clone(), big), hwnd));
         }
-        if big { done_big() } else { done() }.lock().unwrap().push((key, pixels));
+        if big {
+            done_big().lock().unwrap().push((hwnd, key, pixels));
+        } else {
+            done().lock().unwrap().push((key, pixels));
+        }
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_ICONS, WPARAM(0), LPARAM(0));
         }
@@ -195,7 +209,7 @@ mod tests {
         let start = Instant::now();
         let mut seen = Vec::new();
         let px = loop {
-            seen.extend(take_done_big());
+            seen.extend(take_done_big(Handle::default()));
             if let Some(i) = seen.iter().position(|(k, _)| *k == key) {
                 break seen.swap_remove(i).1;
             }

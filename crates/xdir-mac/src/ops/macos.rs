@@ -121,11 +121,10 @@ fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
             }
             let target = path.with_file_name(&new_name);
             // Solo cambia mayúsculas: el disco dice que "ya existe" (es el mismo).
-            let same = crate::fs::same_path(&path, &target);
-            if target.exists() && !same {
+            if taken(&target) && !same_file(&path, &target) {
                 return Err(format!("ya existe «{new_name}»"));
             }
-            std::fs::rename(&path, &target).map_err(|e| e.to_string())?;
+            rename_excl(&path, &target).map_err(|e| e.to_string())?;
             let old_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             ok(Some(Undo::Rename { path: target.clone(), old_name }), Some(target), false, Vec::new())
         }
@@ -240,7 +239,8 @@ fn undo_op(undo: Undo, hooks: &Hooks) -> Result<OpResult> {
     match undo {
         Undo::Rename { path, old_name } => {
             let target = path.with_file_name(&old_name);
-            std::fs::rename(&path, &target).map_err(|e| e.to_string())?;
+            // Lo que apareció después con el nombre de antes no se pisa.
+            rename_excl(&path, &target).map_err(|e| format!("{}: {e}", target.display()))?;
             return ok(None, Some(target), false, errors);
         }
         Undo::Created(paths) => {
@@ -337,11 +337,40 @@ fn copy(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Mueve: renombra si es el mismo disco; si no, copia y borra el original.
+/// ¿Es el mismo archivo? (mismo disco e inodo: cambiar solo mayúsculas en un disco que no las
+/// distingue).
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// Renombra sin pisar nunca lo que haya en `dst` (`renamex_np` con `RENAME_EXCL`). Si `dst` es el
+/// mismo archivo (solo cambian mayúsculas), un renombrado común.
+fn rename_excl(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if same_file(src, dst) {
+        return std::fs::rename(src, dst);
+    }
+    let bad = |_| std::io::Error::other("ruta inválida");
+    let (from, to) = (CString::new(src.as_os_str().as_bytes()).map_err(bad)?, CString::new(dst.as_os_str().as_bytes()).map_err(bad)?);
+    // SAFETY: dos cadenas C válidas.
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Mueve sin pisar: renombra si es el mismo disco; si no, copia y borra el original.
 fn move_item(src: &Path, dst: &Path) -> Result<()> {
-    match std::fs::rename(src, dst) {
+    match rename_excl(src, dst) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            if taken(dst) {
+                return Err(format!("{}: ya existe, no se pisa", dst.display()));
+            }
             copy(src, dst)?;
             let r = if src.is_dir() && !src.is_symlink() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) };
             r.map_err(|e| format!("{}: {e}", src.display()))
@@ -537,6 +566,53 @@ mod tests {
         assert_eq!(r.focus, Some(dir.join("a.txt alias 2")));
         std::os::unix::fs::symlink("a.txt", dir.join("enlace")).unwrap();
         assert_eq!(crate::shell::macos::link_target(&dir.join("enlace")), Some(dir.join("a.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deshacer un mover no pisa lo que apareció después en el lugar de antes.
+    #[test]
+    fn undo_move_does_not_overwrite() {
+        let dir = tmp("deshacer-mover");
+        let trash = fake_trash(&dir);
+        let (a, b) = (dir.join("A"), dir.join("B"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("a.txt"), "viejo").unwrap();
+        let r = run_with(Op::Move { sources: vec![a.join("a.txt")], dest: b.clone() }, &hooks(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        std::fs::write(a.join("a.txt"), "nuevo").unwrap();
+        let r = run_with(Op::Undo(r.undo.unwrap()), &hooks(&trash)).unwrap();
+        assert!(r.error.is_some());
+        assert_eq!(std::fs::read_to_string(a.join("a.txt")).unwrap(), "nuevo");
+        assert_eq!(std::fs::read_to_string(b.join("a.txt")).unwrap(), "viejo");
+        // Lo mismo al devolver de la Papelera con deshacer (`Undo::Recycled`).
+        let in_bin = dir.join("bin-a.txt");
+        std::fs::write(&in_bin, "papelera").unwrap();
+        let undo = Undo::Recycled(vec![(in_bin.to_string_lossy().into_owned(), a.join("a.txt"))]);
+        let r = run_with(Op::Undo(undo), &hooks(&trash)).unwrap();
+        assert!(r.error.is_some());
+        assert_eq!(std::fs::read_to_string(a.join("a.txt")).unwrap(), "nuevo");
+        assert!(in_bin.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deshacer un renombrado no pisa un archivo nuevo con el nombre de antes; cambiar solo
+    /// mayúsculas sigue andando.
+    #[test]
+    fn undo_rename_does_not_overwrite() {
+        let dir = tmp("deshacer-renombrar");
+        let trash = fake_trash(&dir);
+        let path = dir.join("viejo.txt");
+        std::fs::write(&path, "renombrado").unwrap();
+        let r = run_with(Op::Rename { path: path.clone(), new_name: "nuevo.txt".into() }, &hooks(&trash)).unwrap();
+        std::fs::write(&path, "otro").unwrap();
+        assert!(run_with(Op::Undo(r.undo.unwrap()), &hooks(&trash)).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "otro");
+        assert_eq!(std::fs::read_to_string(dir.join("nuevo.txt")).unwrap(), "renombrado");
+        let r = run_with(Op::Rename { path: dir.join("nuevo.txt"), new_name: "Nuevo.txt".into() }, &hooks(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        run_with(Op::Undo(r.undo.unwrap()), &hooks(&trash)).unwrap();
+        assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name() == "nuevo.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

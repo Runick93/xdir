@@ -6,17 +6,7 @@
 //! Los tipos y la búsqueda están en el núcleo (`xdir_core::fs`) y lo propio de macOS detrás de
 //! `sys::file_system()`; la implementación está en `macos/` (la instala `crate::sys`).
 
-use std::path::Path;
-
-use xdir_core::sys;
-
 pub use xdir_core::fs::{Entry, LoadEvent, LoadMsg, Location, QuickItem, WM_APP_LOAD};
 
 pub(crate) mod macos;
 pub(crate) use macos::is_alias;
-
-/// ¿Es la misma ruta? (sin distinguir mayúsculas ni separador final). La usan las operaciones de
-/// macOS.
-pub fn same_path(a: &Path, b: &Path) -> bool {
-    sys::file_system().same_path(a, b)
-}

@@ -248,13 +248,19 @@ fn prepare_parent(root: &Path, parent: &Path, create: bool) -> Result<()> {
     let refuse = |p: &Path| format!("«{}» no es una carpeta de ese disco (es un enlace o está afuera): no se devuelve ahí", p.display());
     let rest = parent.strip_prefix(root).map_err(|_| refuse(parent))?;
     let system = root == Path::new("/");
+    // Disco del arranque: un enlace del sistema tiene que estar en el mismo disco que «/».
+    let root_dev = std::fs::symlink_metadata("/").map(|m| m.dev()).ok();
     let mut cur = root.to_path_buf();
     for c in rest.components() {
         let Component::Normal(n) = c else { return Err(refuse(parent)) };
         cur.push(n);
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.file_type().is_symlink() => {
-                if !(system && m.uid() == 0) {
+                // Solo los enlaces de root del primer nivel del disco de arranque («/tmp», «/var»,
+                // «/bin»…), en el mismo disco que «/». Uno de root más adentro o en otro disco
+                // montado (un pendrive armado) no vale.
+                let first_level = cur.parent() == Some(Path::new("/"));
+                if !(system && first_level && m.uid() == 0 && Some(m.dev()) == root_dev) {
                     return Err(refuse(&cur));
                 }
             }
@@ -737,6 +743,28 @@ mod tests {
         let mut created = false;
         assert!(copy_tracked(&src, &ya, &mut created).is_err());
         assert!(!created, "no la creó esta copia");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Desde la Papelera del usuario (raíz «/»), un enlace de root más adentro (un pendrive ext4
+    /// armado: «/media/u/USB/docs» → «~/.config/autostart») no vale: solo los del primer nivel
+    /// del disco de arranque (como «/tmp» o «/bin» en algunas distribuciones). En Docker los tests
+    /// corren como root, así que el enlace es de root, como en el pendrive.
+    #[test]
+    fn restore_refuses_root_owned_link_below_first_level() {
+        let dir = tmp("enlace-de-root");
+        let (usb, autostart) = (dir.join("media/u/USB"), dir.join("home/u/.config/autostart"));
+        std::fs::create_dir_all(&usb).unwrap();
+        std::fs::create_dir_all(&autostart).unwrap();
+        std::os::unix::fs::symlink(&autostart, usb.join("docs")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let docs = dir.join("media/u/USB/docs");
+        assert!(prepare_parent(Path::new("/"), &docs, true).is_err());
+        assert!(prepare_parent(Path::new("/"), &docs.join("sub"), true).is_err());
+        assert!(!autostart.join("sub").exists());
+        // Sin enlaces, desde «/» anda.
+        prepare_parent(Path::new("/"), &dir.join("media/u/USB/fotos"), true).unwrap();
+        assert!(dir.join("media/u/USB/fotos").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

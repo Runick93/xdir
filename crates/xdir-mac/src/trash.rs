@@ -76,13 +76,19 @@ pub fn prepare_parent(root: &Path, parent: &Path, create: bool) -> Result<(), St
     let refuse = |p: &Path| format!("«{}» no es una carpeta de ese disco (es un enlace o está afuera): no se devuelve ahí", p.display());
     let rest = parent.strip_prefix(root).map_err(|_| refuse(parent))?;
     let system = root == Path::new("/");
+    // Disco del arranque: un enlace del sistema tiene que estar en el mismo disco que «/».
+    let root_dev = std::fs::symlink_metadata("/").map(|m| m.dev()).ok();
     let mut cur = root.to_path_buf();
     for c in rest.components() {
         let Component::Normal(name) = c else { return Err(refuse(parent)) };
         cur.push(name);
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.file_type().is_symlink() => {
-                if !(system && m.uid() == 0) {
+                // Solo los enlaces de root del primer nivel del disco de arranque («/tmp», «/var»,
+                // «/bin»…), en el mismo disco que «/». Uno de root más adentro o en otro disco
+                // montado (un pendrive armado) no vale.
+                let first_level = cur.parent() == Some(Path::new("/"));
+                if !(system && first_level && m.uid() == 0 && Some(m.dev()) == root_dev) {
                     return Err(refuse(&cur));
                 }
             }

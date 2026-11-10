@@ -2450,7 +2450,7 @@ impl FileList {
     }
 
     /// De dónde sale la miniatura de un elemento (por PIDL o por ruta).
-    fn thumb_source(&self, e: &Entry) -> Option<thumbs::Source> {
+    pub(crate) fn thumb_source(&self, e: &Entry) -> Option<thumbs::Source> {
         match (&e.pidl, &e.full, &self.folder) {
             (Some(pidl), _, _) => Some(thumbs::Source::Pidl(pidl.clone())),
             (_, Some(full), _) => Some(thumbs::Source::Path(full.into())),

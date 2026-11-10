@@ -115,8 +115,6 @@ impl Renderer {
         }
     }
 
-    /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
-    /// necesitar un cuadro en curso.
     /// Pasa a la caché las imágenes grandes que terminaron (al llegar `WM_APP_ICONS`, aunque no se
     /// dibuje ninguna: así no se acumulan con la columna oculta). Sin dispositivo se descartan (se
     /// vuelven a pedir al dibujar).
@@ -124,10 +122,19 @@ impl Renderer {
         let Ok(mut icons) = self.icons.try_borrow_mut() else { return };
         match &self.target {
             Some(t) => icons.absorb_big(&t.gpu.ctx),
-            None => drop(thumbs::take_done_big()),
+            None => drop(thumbs::take_done_big(icons.hwnd)),
         }
     }
 
+    /// Olvida las imágenes grandes (la vista rápida, al cerrarse: un archivo pudo cambiar).
+    pub fn clear_big(&self) {
+        if let Ok(mut icons) = self.icons.try_borrow_mut() {
+            icons.big.clear();
+        }
+    }
+
+    /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
+    /// necesitar un cuadro en curso.
     pub fn text_width(&self, s: &str, bold: bool) -> f32 {
         measure(&self.dwrite, if bold { self.fonts.get(FontId::UiBold) } else { self.fonts.get(FontId::Ui) }, s)
     }
@@ -645,7 +652,7 @@ impl Icons {
     /// Pasa a la caché las imágenes grandes que terminaron (las fallidas, a `big_failed`).
     fn absorb_big(&mut self, ctx: &ID2D1DeviceContext) {
         let now = Instant::now();
-        for (k, px) in thumbs::take_done_big() {
+        for (k, px) in thumbs::take_done_big(self.hwnd) {
             match px.and_then(|px| bitmap_from(ctx, &px).map(|b| (b, px.data.len()))) {
                 Some((bitmap, bytes)) => self.big.insert(k, bitmap, bytes),
                 None => self.big_failed.fail(k, now),

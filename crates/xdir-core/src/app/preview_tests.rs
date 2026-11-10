@@ -522,3 +522,31 @@ fn rename_updates_subject() {
     a.flush_preview();
     assert_eq!(FakePreview::take_requests(), [PreviewTarget::File(d.join("nuevo.txt"))]);
 }
+
+/// En la Galería con la columna apagada, si el archivo enfocado cambia en el disco (otra fecha o
+/// tamaño), se olvida su imagen grande para pedirla de nuevo.
+#[test]
+fn gallery_forgets_changed_big_image() {
+    let d = fixture("galeria-cambia", &[("foto.png", "x"), ("otra.png", "y")]);
+    let mut a = two_panes();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    a.preview.on = false;
+    a.set_view(0, crate::list::View::Gallery);
+    select(&mut a, 0, "foto.png");
+    a.paint();
+    assert!(a.preview.forget.is_empty());
+    // Sin cambios no se olvida nada.
+    a.sync_gallery_stamps();
+    assert!(a.preview.forget.is_empty());
+    let idx = a.panes[0].tab().list.focused_index().unwrap();
+    a.panes[0].tab_mut().list.entries[idx].modified += 10_000_000;
+    a.sync_gallery_stamps();
+    assert_eq!(a.preview.forget, [crate::thumbs::Source::Path(d.join("foto.png"))]);
+    a.paint();
+    assert!(a.preview.forget.is_empty());
+    // Pasar a otro archivo no es un cambio.
+    select(&mut a, 0, "otra.png");
+    a.sync_gallery_stamps();
+    assert!(a.preview.forget.is_empty());
+}

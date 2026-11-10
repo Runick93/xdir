@@ -1052,6 +1052,7 @@ pub struct FakeHost {
     quick_look_shown: RefCell<Vec<crate::quicklook::QuickLookItem>>,
     quick_look_closes: Cell<usize>,
     quick_look_native: Cell<bool>,
+    quick_look_cloud: Cell<bool>,
 }
 
 impl FakeHost {
@@ -1074,6 +1075,7 @@ impl FakeHost {
             quick_look_shown: RefCell::new(Vec::new()),
             quick_look_closes: Cell::new(0),
             quick_look_native: Cell::new(true),
+            quick_look_cloud: Cell::new(false),
         })
     }
 
@@ -1096,6 +1098,11 @@ impl FakeHost {
     /// (y no anota nada) y la `App` dibuja su tarjeta.
     pub fn set_quick_look_native(&self, native: bool) {
         self.quick_look_native.set(native);
+    }
+
+    /// Si la ventana del host muestra también lo solo en la nube (Windows; por defecto, no).
+    pub fn set_quick_look_shows_cloud(&self, on: bool) {
+        self.quick_look_cloud.set(on);
     }
 
     /// El texto de la caja abierta de ese tipo (`None` si no hay ninguna).
@@ -1261,6 +1268,10 @@ impl WindowHost for FakeHost {
 
     fn quick_look_close(&self) {
         self.quick_look_closes.set(self.quick_look_closes.get() + 1);
+    }
+
+    fn quick_look_shows_cloud(&self) -> bool {
+        self.quick_look_cloud.get()
     }
 
     fn text_width(&self, s: &str, _bold: bool) -> f32 {

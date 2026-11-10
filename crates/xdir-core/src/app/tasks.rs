@@ -10,7 +10,7 @@ pub const WM_APP_TASK: u32 = crate::WM_APP + 26;
 /// Lo que devuelve un trabajo suelto.
 pub(super) enum TaskDone {
     /// El original de un acceso directo (`None`: no se resolvió o ya no existe).
-    Original { link: PathBuf, target: Option<PathBuf> },
+    Original { pane: usize, link: PathBuf, target: Option<PathBuf> },
     /// Los discos que se pueden expulsar.
     Ejectable(Vec<PathBuf>),
     /// Terminó de expulsar `root` (`label`: su nombre para los avisos).
@@ -30,12 +30,14 @@ impl App {
 
     pub(super) fn on_task_done(&mut self, t: TaskDone) {
         match t {
-            TaskDone::Original { link, target } => {
+            TaskDone::Original { pane, link, target } => {
                 let name = link.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 match target.as_ref().and_then(|t| Some((t.parent()?, t.file_name()?))) {
                     Some((parent, file)) => {
                         let (hwnd, tx) = (self.hwnd, self.tx.clone());
-                        let tab = self.panes[self.active].tab_mut();
+                        // En el panel desde el que se pidió (aunque ahora el activo sea otro).
+                        let pane = pane.min(self.panes.len() - 1);
+                        let tab = self.panes[pane].tab_mut();
                         tab.navigate(hwnd, &tx, Location::Path(parent.to_path_buf()));
                         tab.focus_after_load(file.to_os_string());
                     }
@@ -123,10 +125,11 @@ impl App {
     /// «Mostrar el original» del elemento seleccionado (si es un enlace).
     pub(super) fn show_original(&mut self) {
         let Some(link) = self.selected_link() else { return };
+        let pane = self.active;
         self.spawn_task(move || {
             // Solo vale un original que exista (sin leer su contenido).
             let target = sys::shell().link_target(&link).filter(|t| std::fs::symlink_metadata(t).is_ok());
-            TaskDone::Original { link, target }
+            TaskDone::Original { pane, link, target }
         });
     }
 
@@ -146,7 +149,7 @@ impl App {
 
     /// «Crear acceso directo»: uno junto a cada seleccionado (solo carpetas de disco).
     pub(super) fn create_shortcuts(&mut self) {
-        if !matches!(self.panes[self.active].tab().location, Location::Path(_)) {
+        if !matches!(self.panes[self.active].tab().location, Location::Path(_)) || self.in_trash() {
             return;
         }
         let targets = self.selection(self.active);

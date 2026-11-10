@@ -303,6 +303,15 @@ fn restore_menu_and_button_in_trash() {
     assert_eq!(items, [d.join("a.txt"), d.join("b.txt")]);
     choose_menu(&mut a, "Devolver");
     assert!(matches!(FakeFileOps::take_ops().as_slice(), [Op::Restore { .. }]));
+    // Dentro de la Papelera no se duplica, ni se crean accesos ni carpetas con la selección.
+    let menu = own_menu(&mut a);
+    for label in ["Duplicar", "Crear acceso directo", "Carpeta nueva con la selección"] {
+        assert!(!menu.iter().any(|l| l == label), "{label} en {menu:?}");
+    }
+    for c in [Command::Duplicate, Command::CreateShortcut, Command::NewFolderWithSelection] {
+        a.run_command(c);
+    }
+    assert_eq!(FakeFileOps::take_ops(), []);
     FakeFileSystem::set_trash(None);
 }
 
@@ -407,6 +416,25 @@ fn show_original_navigates() {
     assert_eq!(a.panes[0].tab().location, Location::Path(dest.clone()));
     pump(&mut a, 0);
     assert_eq!(focused_name(&a), "real.txt");
+}
+
+/// El original se abre en el panel desde donde se pidió, aunque mientras tanto se haya pasado a
+/// otro.
+#[test]
+fn show_original_opens_in_requesting_pane() {
+    let mut a = app();
+    let d = fixture("original-panel", &["enlace"]);
+    let dest = fixture("original-panel-destino", &["real.txt"]);
+    FakeShell::set_link_target(&d.join("enlace"), Some(dest.join("real.txt")));
+    go(&mut a, &d);
+    mark_link(&mut a, "enlace");
+    select(&mut a, &["enlace"]);
+    let other = a.panes[1].tab().location.clone();
+    a.run_command(Command::ShowOriginal);
+    a.set_active(1);
+    wait_task(&mut a);
+    assert_eq!(a.panes[0].tab().location, Location::Path(dest));
+    assert_eq!(a.panes[1].tab().location, other);
 }
 
 /// Sin original (no se resuelve o ya no está): aviso, y la pestaña no se mueve.

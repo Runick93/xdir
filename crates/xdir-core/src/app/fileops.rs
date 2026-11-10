@@ -61,9 +61,14 @@ impl App {
         }
     }
 
-    /// Duplicar: una copia de cada seleccionado a su lado (solo carpetas de disco).
+    /// ¿El panel activo muestra la Papelera?
+    pub(super) fn in_trash(&self) -> bool {
+        sys::file_system().is_trash(&self.panes[self.active].tab().location)
+    }
+
+    /// Duplicar: una copia de cada seleccionado a su lado (solo carpetas de disco, no la Papelera).
     pub(super) fn duplicate_selection(&mut self) {
-        if !matches!(self.panes[self.active].tab().location, Location::Path(_)) {
+        if !matches!(self.panes[self.active].tab().location, Location::Path(_)) || self.in_trash() {
             return;
         }
         let sources = self.selection(self.active);
@@ -77,6 +82,9 @@ impl App {
     pub(super) fn new_folder_with_selection(&mut self) {
         let location = &self.panes[self.active].tab().location;
         let (Location::Path(_), Some(parent)) = (location, location.target()) else { return };
+        if self.in_trash() {
+            return;
+        }
         let items = self.selection(self.active);
         if !items.is_empty() {
             sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::NewFolderWith { parent, items });
@@ -356,13 +364,18 @@ impl App {
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
         let many = self.panes[self.active].tab().list.selected_indices().nth(1).is_some();
         let link = self.selected_link().is_some();
-        let mut entries = vec![item("Vista rápida", Command::QuickLook), item("Duplicar", Command::Duplicate)];
-        entries.push(item("Crear acceso directo", Command::CreateShortcut));
+        // En la Papelera no se crean cosas nuevas (duplicados, accesos, carpetas).
+        let creates = !self.in_trash();
+        let mut entries = vec![item("Vista rápida", Command::QuickLook)];
+        if creates {
+            entries.push(item("Duplicar", Command::Duplicate));
+            entries.push(item("Crear acceso directo", Command::CreateShortcut));
+        }
         if link {
             entries.push(item("Mostrar el original", Command::ShowOriginal));
         }
         // Con dos o más: juntarlos en una carpeta nueva.
-        if many {
+        if many && creates {
             entries.push(item("Carpeta nueva con la selección", Command::NewFolderWithSelection));
         }
         entries.push(item("Copiar como ruta de acceso", Command::CopyPaths));

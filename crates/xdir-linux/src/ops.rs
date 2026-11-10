@@ -62,12 +62,9 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                     continue;
                 }
                 let target = copy_target(&dest, src, src.parent() == Some(dest.as_path()));
-                match copy_item(src, &target) {
+                match copy_new(src, &target) {
                     Ok(()) => created.push(target),
-                    Err(e) => {
-                        let _ = remove_item(&target);
-                        errors.push(err_at(src, e));
-                    }
+                    Err(e) => errors.push(err_at(src, e)),
                 }
             }
             let focus = created.last().cloned();
@@ -133,12 +130,9 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
             for src in &sources {
                 let Some(parent) = src.parent() else { continue };
                 let target = copy_target(parent, src, true);
-                match copy_item(src, &target) {
+                match copy_new(src, &target) {
                     Ok(()) => created.push(target),
-                    Err(e) => {
-                        let _ = remove_item(&target);
-                        errors.push(err_at(src, e));
-                    }
+                    Err(e) => errors.push(err_at(src, e)),
                 }
             }
             let focus = created.last().cloned();
@@ -323,6 +317,20 @@ fn taken(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok()
 }
 
+/// Copia `src` en `dst` sin pisar nunca: si `dst` ya existe, error sin tocarlo. Si falla a
+/// mitad, se quita lo copiado (es solo de esta copia).
+fn copy_new(src: &Path, dst: &Path) -> io::Result<()> {
+    if taken(dst) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "ya existe, no se pisa"));
+    }
+    let r = copy_item(src, dst);
+    // Lo que apareció en el medio con ese nombre (AlreadyExists) no es nuestro: no se toca.
+    if r.as_ref().is_err_and(|e| e.kind() != io::ErrorKind::AlreadyExists) {
+        let _ = remove_item(dst);
+    }
+    r
+}
+
 /// Copia un archivo, un enlace simbólico (como enlace) o una carpeta entera. Los permisos de las
 /// carpetas se ponen al final, así una carpeta de solo lectura igual se llena. Los archivos
 /// especiales (FIFO, sockets, dispositivos) no se copian: abrir una FIFO se queda esperando.
@@ -339,7 +347,11 @@ fn copy_item(src: &Path, dst: &Path) -> io::Result<()> {
         }
         std::fs::set_permissions(dst, meta.permissions())
     } else if ft.is_file() {
-        std::fs::copy(src, dst).map(|_| ())
+        // `create_new`: nunca pisa algo que haya aparecido en el medio.
+        let mut from = std::fs::File::open(src)?;
+        let mut to = std::fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
+        io::copy(&mut from, &mut to)?;
+        to.set_permissions(meta.permissions())
     } else {
         Err(io::Error::other("no se copian archivos especiales"))
     }
@@ -382,8 +394,7 @@ pub fn move_path(src: &Path, dst: &Path) -> std::result::Result<(), MoveError> {
 /// original. Si la copia falla, el original queda y se quita lo copiado a medias; si lo que falla
 /// es borrar el original, la copia completa queda (`MoveError::Remove`).
 pub fn copy_then_remove(src: &Path, dst: &Path) -> std::result::Result<(), MoveError> {
-    if let Err(e) = copy_item(src, dst) {
-        let _ = remove_item(dst);
+    if let Err(e) = copy_new(src, dst) {
         return Err(MoveError::Copy(e));
     }
     remove_item(src).map_err(MoveError::Remove)
@@ -665,6 +676,33 @@ mod tests {
         assert_eq!(r.undo, Some(Undo::Created(vec![dir.join("Nueva carpeta")])));
         let r = run(Op::NewFolder { parent: dir.clone() }, None).unwrap();
         assert_eq!(r.focus, Some(dir.join("Nueva carpeta (2)")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Copiar nunca pisa: sobre algo que ya existe, error y lo de antes intacto. Un duplicado que
+    /// falla a mitad no deja su «copia» a medias.
+    #[test]
+    fn copy_never_overwrites_and_failed_duplicate_cleans_up() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("copia-excl");
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "nuevo").unwrap();
+        std::fs::write(&b, "viejo").unwrap();
+        assert!(copy_new(&a, &b).is_err());
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "viejo");
+        if unsafe { libc::geteuid() } != 0 {
+            let f = dir.join("carpeta");
+            std::fs::create_dir(&f).unwrap();
+            std::fs::write(f.join("ok.txt"), "x").unwrap();
+            let locked = f.join("zz-cerrado.txt");
+            std::fs::write(&locked, "y").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let r = run(Op::Duplicate { sources: vec![f.clone()] }, None).unwrap();
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644));
+            assert!(r.error.is_some());
+            assert!(r.select.is_empty());
+            assert!(!dir.join("carpeta copia").exists(), "no queda la copia a medias");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

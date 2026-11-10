@@ -327,14 +327,35 @@ fn c_path(p: &Path) -> Result<CString> {
 }
 
 /// Copia un archivo o una carpeta entera, clonando en APFS y conservando los metadatos.
+/// Nunca pisa: si `dst` ya existe, error sin tocarlo (`COPYFILE_EXCL`). Si falla a mitad, lo
+/// copiado (que es solo de esta copia) se quita.
 fn copy(src: &Path, dst: &Path) -> Result<()> {
     let (from, to) = (c_path(src)?, c_path(dst)?);
-    let flags = libc::COPYFILE_METADATA | libc::COPYFILE_DATA | libc::COPYFILE_RECURSIVE | libc::COPYFILE_CLONE | libc::COPYFILE_NOFOLLOW_SRC;
+    if taken(dst) {
+        return Err(format!("{}: ya existe, no se pisa", dst.display()));
+    }
+    let flags = libc::COPYFILE_METADATA
+        | libc::COPYFILE_DATA
+        | libc::COPYFILE_RECURSIVE
+        | libc::COPYFILE_CLONE
+        | libc::COPYFILE_NOFOLLOW_SRC
+        | libc::COPYFILE_EXCL;
+    // SAFETY: dos cadenas C válidas; sin estado de copyfile.
     let r = unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), flags) };
     if r != 0 {
-        return Err(format!("{}: {}", src.display(), std::io::Error::last_os_error()));
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EEXIST) {
+            let _ = remove_tree(dst);
+        }
+        return Err(format!("{}: {e}", src.display()));
     }
     Ok(())
+}
+
+/// Borra definitivamente un archivo, enlace o carpeta entera (sin seguir enlaces); lo usa solo
+/// la limpieza de una copia fallida.
+fn remove_tree(p: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(p)?.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) }
 }
 
 /// ¿Es el mismo archivo? (mismo disco e inodo: cambiar solo mayúsculas en un disco que no las
@@ -613,6 +634,33 @@ mod tests {
         assert_eq!(r.error, None);
         run_with(Op::Undo(r.undo.unwrap()), &hooks(&trash)).unwrap();
         assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name() == "nuevo.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Copiar nunca pisa: sobre algo que ya existe, error y lo de antes intacto. Un duplicado que
+    /// falla a mitad no deja su «copia» a medias.
+    #[test]
+    fn copy_never_overwrites_and_failed_duplicate_cleans_up() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("copia-excl");
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "nuevo").unwrap();
+        std::fs::write(&b, "viejo").unwrap();
+        assert!(copy(&a, &b).is_err());
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "viejo");
+        if unsafe { libc::geteuid() } != 0 {
+            let f = dir.join("carpeta");
+            std::fs::create_dir(&f).unwrap();
+            std::fs::write(f.join("ok.txt"), "x").unwrap();
+            let locked = f.join("zz-cerrado.txt");
+            std::fs::write(&locked, "y").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let r = run(Op::Duplicate { sources: vec![f.clone()] }).unwrap();
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644));
+            assert!(r.error.is_some());
+            assert!(r.select.is_empty());
+            assert!(!dir.join("carpeta copia").exists(), "no queda la copia a medias");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

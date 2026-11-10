@@ -21,6 +21,16 @@ pub(super) const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 pub(super) const LIST_LIMIT: Duration = Duration::from_secs(10);
 pub(super) const DISCONNECT_LIMIT: Duration = Duration::from_secs(15);
 
+/// Un reintento de conectar después de desconectar las conexiones del conflicto 1219.
+pub(super) struct ConflictRetry {
+    pane: usize,
+    tab: Option<usize>,
+    generation: u64,
+    addr: Address,
+    /// Las que faltan desconectar.
+    pending: Vec<PathBuf>,
+}
+
 #[derive(Default)]
 pub(super) struct NetState {
     pub places: NetPlaces,
@@ -42,6 +52,8 @@ pub(super) struct NetState {
     /// Fila de «Red» del clic derecho en curso.
     #[cfg(feature = "arbol")]
     pub tree_ctx: Option<crate::tree::NetRow>,
+    /// El reintento del conflicto 1219 en curso.
+    pub conflict_retry: Option<ConflictRetry>,
     /// Credenciales pedidas por una pestaña (carpeta UNC): (pestaña, generación, navegación).
     pub auth_pending: Vec<(usize, u64, u64)>,
     /// Conexión pedida desde el árbol (sin panel): su generación.
@@ -149,19 +161,14 @@ impl App {
     pub(super) fn spawn_connect(&mut self, pane: usize, tab: Option<usize>, addr: Address, opts: ConnectOptions) -> u64 {
         self.net.generation += 1;
         let generation = self.net.generation;
-        self.spawn_connect_as(pane, tab, generation, addr, opts, Vec::new());
+        self.spawn_connect_as(pane, tab, generation, addr, opts);
         generation
     }
 
-    /// `spawn_connect` con una generación ya dada y, antes de conectar, desconectando `first`
-    /// (las conexiones al mismo servidor con otro usuario).
-    fn spawn_connect_as(&mut self, pane: usize, tab: Option<usize>, generation: u64, addr: Address, opts: ConnectOptions, first: Vec<PathBuf>) {
+    /// `spawn_connect` con una generación ya dada (el reintento del conflicto 1219 usa la misma).
+    fn spawn_connect_as(&mut self, pane: usize, tab: Option<usize>, generation: u64, addr: Address, opts: ConnectOptions) {
         let (owner, limit, late_tx) = (self.hwnd, self.net.connect_limit.unwrap_or(CONNECT_LIMIT), self.task_tx.clone());
         self.spawn_task(move || {
-            for local in first {
-                let host = addr.host.clone();
-                let _ = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&local, false));
-            }
             // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
             // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda
             // huérfano detrás de un error.
@@ -198,7 +205,42 @@ impl App {
         if others.is_empty() || self.host.ask_yes_no_cancel("Conectar", &q) != Some(true) {
             return false;
         }
-        self.spawn_connect_as(pane, tab, generation, addr.clone(), ConnectOptions::default(), others);
+        // Cada una por el flujo de ⏏ (pregunta por las copias, suelta lo de xdir, desconecta en un
+        // hilo); al terminar la última, `on_disconnected` reintenta la conexión.
+        self.net.conflict_retry = Some(ConflictRetry { pane, tab, generation, addr: addr.clone(), pending: others.clone() });
+        for local in others {
+            if !self.disconnect(local) {
+                // Dijo que no a cancelar las copias: no se reintenta.
+                self.net.conflict_retry = None;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Terminó de desconectar `root` dentro de un reintento por el conflicto 1219: con la última,
+    /// reintenta; si una falló, el panel muestra el error.
+    /// `true` si `root` era de ese reintento.
+    fn conflict_disconnected(&mut self, root: &Path, result: &Result<(), NetError>) -> bool {
+        let Some(c) = &mut self.net.conflict_retry else { return false };
+        if !c.pending.iter().any(|p| p == root) {
+            return false;
+        }
+        if let Err(e) = result {
+            let generation = c.generation;
+            self.net.conflict_retry = None;
+            if let Some(d) = self.net.dialog.as_mut().filter(|d| d.busy == Some(generation)) {
+                d.busy = None;
+                d.error = Some(format!("No se pudo desconectar: {}", e.message()));
+            }
+            return true;
+        }
+        c.pending.retain(|p| p != root);
+        if c.pending.is_empty()
+            && let Some(c) = self.net.conflict_retry.take()
+        {
+            self.spawn_connect_as(c.pane, c.tab, c.generation, c.addr, ConnectOptions::default());
+        }
         true
     }
 
@@ -1132,10 +1174,11 @@ impl App {
 
     /// ⏏ de una conexión de red: con trabajos de copia encima pregunta (`eject_after_jobs`),
     /// suelta lo de xdir (pestañas, xtree, vista previa) y desconecta en otro hilo.
-    pub(super) fn disconnect(&mut self, root: PathBuf) {
+    /// `false` si no se desconecta (dijo que no a cancelar las copias).
+    pub(super) fn disconnect(&mut self, root: PathBuf) -> bool {
         let label = self.connection_label(&root);
         let at = root.clone();
-        self.eject_after_jobs(&at, &label, super::transfers::Verb::Disconnect, Box::new(move |app: &mut App| app.disconnect_now(root, false)));
+        self.eject_after_jobs(&at, &label, super::transfers::Verb::Disconnect, Box::new(move |app: &mut App| app.disconnect_now(root, false)))
     }
 
     /// El nombre de una conexión para los avisos: el último tramo de su dirección.
@@ -1160,6 +1203,10 @@ impl App {
     /// ya se reintentó, la de desconectar igual).
     pub(super) fn on_disconnected(&mut self, root: PathBuf, label: String, force: bool, result: Result<(), NetError>) {
         self.eject_done(&root);
+        // Una de las del conflicto 1219 que falló: el error va al panel (no se pregunta más).
+        if self.conflict_disconnected(&root, &result) && result.is_err() {
+            return;
+        }
         match result {
             Ok(()) => {
                 self.net.retried.remove(&root);

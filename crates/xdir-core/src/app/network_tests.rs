@@ -1603,3 +1603,39 @@ fn hung_share_does_not_block_connection_list() {
     // Y el colgado se puede desconectar (⏏).
     assert!(a.network_root(Path::new("/net-r2hung/a")).is_some());
 }
+
+/// R2: «Desconectarla» ante el conflicto 1219 pasa por el flujo de ⏏: pregunta por las copias en
+/// curso, las cancela, suelta lo de xdir, desconecta y recién ahí reintenta.
+#[test]
+fn credential_conflict_goes_through_eject_flow() {
+    use crate::sys::{VolumeInfo, testing::FakeCopyPrims};
+    use crate::transfer::JobSpec;
+    let other = PathBuf::from("/net-r2conf/otra");
+    let f = FakeCopyPrims::shared();
+    f.set_volume(&other, VolumeInfo { id: "r2conf".into(), label: "otra".into(), case_insensitive: false, has_trash: false, max_file: None, free: u64::MAX });
+    f.add_file(&other.join("grande.bin"), vec![1; 64 * 1024 * 20]);
+    f.add_dir(&other.join("d"));
+    f.set_slow(&other.join("grande.bin"), Some(Duration::from_millis(20)));
+    let target = tmp_dir("r2-conflict");
+    FakeNetwork::set_connect_seq("nas-r2conf", vec![Err(NetError::CredentialConflict { host: "nas-r2conf".into() }), Ok(target.clone())]);
+    let (mut a, host) = open_with("smb://nas-r2conf/fotos");
+    a.net.connections = vec![conn("smb://nas-r2conf/otra", "/net-r2conf/otra")];
+    a.start_transfer(JobSpec::Copy { sources: vec![other.join("grande.bin")], dest: other.join("d") });
+    std::thread::sleep(Duration::from_millis(60));
+    a.on_transfer_updates();
+    host.set_answer(Some(true));
+    a.on_field_done(true);
+    let t0 = Instant::now();
+    while a.net.dialog.is_some() {
+        assert!(t0.elapsed() < Duration::from_secs(10));
+        a.on_transfer_updates();
+        if let Ok(t) = a.task_rx.recv_timeout(Duration::from_millis(10)) {
+            a.on_task_done(t);
+        }
+    }
+    let qs: Vec<String> = host.questions().into_iter().map(|q| q.1).collect();
+    assert!(qs.iter().any(|q| q == "Hay 1 operación sobre \"otra\". ¿Cancelarla y desconectar?"), "{qs:?}");
+    assert_eq!(a.running_jobs(), 0);
+    assert_eq!(FakeNetwork::disconnects(Path::new("/net-r2conf")), vec![(other, false)]);
+    assert_eq!(a.panes[a.active].tab().location, Location::Path(target));
+}

@@ -164,8 +164,9 @@ struct Frame {
 /// Resultado de mover renombrando.
 enum Renamed {
     Done(Option<PathBuf>),
-    /// El sistema dice que es otro disco: hay que copiar.
-    CrossDevice,
+    /// El sistema dice que es otro disco: hay que copiar, con lo que ya se decidió (no se vuelve
+    /// a preguntar).
+    CrossDevice(Decision),
 }
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -549,8 +550,12 @@ impl<'a> Job<'a> {
                     self.progress(0, false);
                     return;
                 }
-                // No era el mismo disco: se copia (y se borra el original archivo por archivo).
-                Renamed::CrossDevice => {}
+                // No era el mismo disco: se copia (y se borra el original archivo por archivo),
+                // con lo que ya se decidió.
+                Renamed::CrossDevice(decision) => {
+                    self.copy_with(&item.src, decision, moving);
+                    return;
+                }
             }
         }
         let plan = match item.how {
@@ -579,6 +584,24 @@ impl<'a> Job<'a> {
             }
         };
         self.copy_tree(plan, decision, moving);
+    }
+
+    /// Copia (o mueve copiando) `src` con la decisión ya tomada para su destino.
+    fn copy_with(&mut self, src: &Path, decision: Decision, moving: bool) {
+        let hint = match &decision {
+            Decision::Fresh(p) | Decision::Merge(p) | Decision::Replace(p) => p.clone(),
+            Decision::Skip => return,
+        };
+        let item = Item::new(src, Target::Fixed(hint.clone()), How::Walk(None));
+        match walk(self.prims, src, self.ctl, &mut |_| {}) {
+            Ok((plan, errors)) => {
+                self.walk_errors(&item, errors);
+                if !plan.is_empty() {
+                    self.copy_tree(plan, decision, moving);
+                }
+            }
+            Err(e) => self.fail(src, &hint, e),
+        }
     }
 
     // ---------- conflictos ----------
@@ -1005,7 +1028,7 @@ impl<'a> Job<'a> {
                     self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
                     Renamed::Done(Some(to))
                 }
-                Err(e) if e.kind == ErrKind::CrossDevice => Renamed::CrossDevice,
+                Err(e) if e.kind == ErrKind::CrossDevice => Renamed::CrossDevice(Decision::Fresh(to)),
                 Err(e) => {
                     self.fail(src, &to, e);
                     Renamed::Done(None)
@@ -1020,8 +1043,8 @@ impl<'a> Job<'a> {
                                 break;
                             }
                             let (child, child_dst) = (src.join(&n), to.join(&n));
-                            if let Renamed::CrossDevice = self.rename_tree(&child, &child_dst) {
-                                self.fail(&child, &child_dst, CopyError::new(ErrKind::CrossDevice, &child));
+                            if let Renamed::CrossDevice(decision) = self.rename_tree(&child, &child_dst) {
+                                self.copy_with(&child, decision, true);
                             }
                         }
                         let _ = self.prims.remove(src);
@@ -1040,6 +1063,10 @@ impl<'a> Job<'a> {
                     }
                     Err(e) => {
                         self.put_back(&aside, &to);
+                        if e.kind == ErrKind::CrossDevice {
+                            // Otro disco: se reemplaza copiando (sin volver a preguntar).
+                            return Renamed::CrossDevice(Decision::Replace(to));
+                        }
                         self.fail(src, &to, e);
                         Renamed::Done(None)
                     }

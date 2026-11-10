@@ -956,3 +956,38 @@ fn replace_folder_with_unreadable_part_restores_old() {
     assert!(fake.trashed().is_empty());
     assert_eq!(r.out.result.undo, None);
 }
+
+#[test]
+fn unknown_volume_cross_device_keeps_the_first_answer() {
+    // Disco desconocido que resulta ser otro: se pregunta una sola vez y se copia con esa
+    // respuesta (archivo con «Conservar ambos», «Reemplazar», y una carpeta combinada).
+    let fake = FakeCopyPrims::new();
+    fake.hide_volume(&p("/xd"));
+    fake.set_volume(&p("/xd/usb"), volume("usb", "USB"));
+    fake.add_file(&p("/xd/a/x.txt"), b"nuevo".to_vec());
+    fake.add_file(&p("/xd/usb/x.txt"), b"viejo".to_vec());
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/xd/a/x.txt")], dest: p("/xd/usb") }, &[answer(Choice::KeepBoth)]);
+    assert_eq!(r.conflicts().len(), 1);
+    assert_eq!(fake.contents(&p("/xd/usb/x 2.txt")).unwrap(), b"nuevo");
+    assert!(!fake.exists(&p("/xd/a/x.txt")));
+
+    fake.add_file(&p("/xd/a/y.txt"), b"nuevo".to_vec());
+    fake.add_file(&p("/xd/usb/y.txt"), b"viejo".to_vec());
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/xd/a/y.txt")], dest: p("/xd/usb") }, &[answer(Choice::Replace)]);
+    assert_eq!(r.conflicts().len(), 1);
+    assert!(r.out.errors.is_empty(), "{:?}", r.out.errors);
+    assert_eq!(fake.contents(&p("/xd/usb/y.txt")).unwrap(), b"nuevo");
+    assert!(!fake.exists(&p("/xd/a/y.txt")));
+
+    // Combinar: los hijos que no se pueden renombrar se copian, con su propia respuesta.
+    fake.add_file(&p("/xd/a/D/z.txt"), b"z".to_vec());
+    fake.add_file(&p("/xd/a/D/w.txt"), b"w nuevo".to_vec());
+    fake.add_file(&p("/xd/usb/D/w.txt"), b"w viejo".to_vec());
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/xd/a/D")], dest: p("/xd/usb") }, &[answer(Choice::Merge), answer(Choice::Skip)]);
+    assert_eq!(r.conflicts().len(), 2);
+    assert!(r.out.errors.is_empty(), "{:?}", r.out.errors);
+    assert_eq!(fake.contents(&p("/xd/usb/D/z.txt")).unwrap(), b"z");
+    assert_eq!(fake.contents(&p("/xd/usb/D/w.txt")).unwrap(), b"w viejo");
+    assert_eq!(fake.contents(&p("/xd/a/D/w.txt")).unwrap(), b"w nuevo");
+    assert!(!fake.exists(&p("/xd/a/D/z.txt")));
+}

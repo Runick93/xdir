@@ -410,8 +410,9 @@ impl App {
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
         let many = self.panes[self.active].tab().list.selected_indices().nth(1).is_some();
         let link = self.selected_link().is_some();
-        // En la Papelera no se crean cosas nuevas (duplicados, accesos, carpetas).
-        let creates = !self.in_trash();
+        // Solo en una carpeta del disco se crean cosas nuevas (duplicados, accesos, carpetas): ni en
+        // la Papelera ni en «Este equipo» ni en carpetas virtuales.
+        let creates = matches!(self.panes[self.active].tab().location, Location::Path(_)) && !self.in_trash();
         let mut entries = vec![item("Vista rápida", Command::QuickLook)];
         if creates {
             entries.push(item("Duplicar", Command::Duplicate));
@@ -425,7 +426,7 @@ impl App {
             entries.push(item("Carpeta nueva con la selección", Command::NewFolderWithSelection));
         }
         // Comprimir lo elegido; con un solo archivo comprimido, extraerlo (con el nombre real).
-        if creates && matches!(self.panes[self.active].tab().location, Location::Path(_)) {
+        if creates {
             entries.push(item("Comprimir", Command::Compress));
             if let Some((_, name)) = self.selected_archive() {
                 for (label, c) in archive_menu(&name, false, sys::archives().formats()) {

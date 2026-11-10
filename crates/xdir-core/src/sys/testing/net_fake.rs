@@ -18,7 +18,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-static CONNECT: Mutex<BTreeMap<String, Result<PathBuf, NetError>>> = Mutex::new(BTreeMap::new());
+static CONNECT: Mutex<BTreeMap<String, Vec<Result<PathBuf, NetError>>>> = Mutex::new(BTreeMap::new());
 static CONNECTS: Mutex<Vec<(String, ConnectOptions)>> = Mutex::new(Vec::new());
 static CONNECTIONS: Mutex<BTreeMap<String, Vec<NetConnection>>> = Mutex::new(BTreeMap::new());
 static CONNECTIONS_CALLS: Mutex<usize> = Mutex::new(0);
@@ -49,7 +49,12 @@ impl FakeNetwork {
 
     /// Lo que devuelve `connect` para ese host (sin esto, `NotFound`).
     pub fn set_connect(host: &str, result: Result<PathBuf, NetError>) {
-        lock(&CONNECT).insert(host.to_ascii_lowercase(), result);
+        lock(&CONNECT).insert(host.to_ascii_lowercase(), vec![result]);
+    }
+
+    /// Resultados de `connect` para ese host, en orden (el último se repite).
+    pub fn set_connect_seq(host: &str, results: Vec<Result<PathBuf, NetError>>) {
+        lock(&CONNECT).insert(host.to_ascii_lowercase(), results);
     }
 
     /// Las llamadas a `connect`: (URL, opciones sin la clave). La URL nunca lleva contraseña.
@@ -163,7 +168,12 @@ impl Network for FakeNetwork {
         lock(&CONNECTS).push((addr.to_url(), opts.without_secret()));
         drop(opts);
         Self::sleep_if_hung(&addr.host);
-        lock(&CONNECT).get(&addr.host.to_ascii_lowercase()).cloned().unwrap_or(Err(NetError::NotFound { host: addr.host.clone() }))
+        let mut map = lock(&CONNECT);
+        match map.get_mut(&addr.host.to_ascii_lowercase()) {
+            Some(v) if v.len() > 1 => v.remove(0),
+            Some(v) => v[0].clone(),
+            None => Err(NetError::NotFound { host: addr.host.clone() }),
+        }
     }
 
     fn connections(&self) -> Result<Vec<NetConnection>, NetError> {

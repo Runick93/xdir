@@ -1422,3 +1422,32 @@ fn disconnect_finds_jobs_by_volume_identity() {
     }
     wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
 }
+
+/// M5: «Ya hay una conexión con … con otro usuario»: se ofrece desconectar la otra y reintentar.
+#[test]
+fn credential_conflict_offers_disconnect_and_retry() {
+    let target = tmp_dir("r1-conflict");
+    let other = PathBuf::from("/net-r1conf/otra");
+    FakeNetwork::set_connect_seq("nas-r1conf", vec![Err(NetError::CredentialConflict { host: "nas-r1conf".into() }), Ok(target.clone())]);
+    let (mut a, host) = open_with("smb://nas-r1conf/fotos");
+    a.net.connections = vec![conn("smb://nas-r1conf/otra", "/net-r1conf/otra")];
+    host.set_answer(Some(true));
+    a.on_field_done(true);
+    wait_until(&mut a, |a| a.net.dialog.is_none());
+    assert_eq!(host.questions().last().unwrap().1, "Ya hay una conexión con \"nas-r1conf\" con otro usuario. ¿Desconectarla y volver a intentar?");
+    assert_eq!(FakeNetwork::disconnects(Path::new("/net-r1conf")), vec![(other, false)]);
+    assert_eq!(a.panes[a.active].tab().location, Location::Path(target));
+}
+
+/// M5: el error de reconectar una carpeta UNC por credenciales queda en la pestaña.
+#[test]
+fn auth_retry_error_shown_in_tab() {
+    let mut a = net_app();
+    let path = PathBuf::from(r"\\nas-r1autherr\fotos");
+    FakeFileSystem::set_load_error(&path, Some("Acceso denegado (os error 1326)"));
+    FakeNetwork::set_connect("nas-r1autherr", Err(NetError::CredentialConflict { host: "nas-r1autherr".into() }));
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(path.clone()));
+    wait_until(&mut a, |a| a.panes[0].tab().error.as_deref() == Some("Ya hay una conexión con \"nas-r1autherr\" con otro usuario"));
+    FakeFileSystem::set_load_error(&path, None);
+}

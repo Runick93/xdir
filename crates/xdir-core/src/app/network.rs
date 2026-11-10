@@ -135,8 +135,19 @@ impl App {
     pub(super) fn spawn_connect(&mut self, pane: usize, tab: Option<usize>, addr: Address, opts: ConnectOptions) -> u64 {
         self.net.generation += 1;
         let generation = self.net.generation;
+        self.spawn_connect_as(pane, tab, generation, addr, opts, Vec::new());
+        generation
+    }
+
+    /// `spawn_connect` con una generación ya dada y, antes de conectar, desconectando `first`
+    /// (las conexiones al mismo servidor con otro usuario).
+    fn spawn_connect_as(&mut self, pane: usize, tab: Option<usize>, generation: u64, addr: Address, opts: ConnectOptions, first: Vec<PathBuf>) {
         let (owner, limit, late_tx) = (self.hwnd, self.net.connect_limit.unwrap_or(CONNECT_LIMIT), self.task_tx.clone());
         self.spawn_task(move || {
+            for local in first {
+                let host = addr.host.clone();
+                let _ = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&local, false));
+            }
             // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
             // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda
             // huérfano detrás de un error.
@@ -157,7 +168,24 @@ impl App {
             };
             TaskDone::Connected { pane, tab, generation, addr, result }
         });
-        generation
+    }
+
+    /// Windows: ya hay una conexión con ese servidor con otro usuario. Pregunta si se desconectan
+    /// las otras y, si sí, reintenta con la misma generación. `true` si reintenta.
+    fn retry_after_conflict(&mut self, pane: usize, tab: Option<usize>, generation: u64, addr: &Address) -> bool {
+        let others: Vec<PathBuf> = self
+            .net
+            .connections
+            .iter()
+            .filter(|c| c.connected && Address::parse(&c.address).is_ok_and(|a| a.host.eq_ignore_ascii_case(&addr.host)))
+            .map(|c| c.local.clone())
+            .collect();
+        let q = format!("Ya hay una conexión con \"{}\" con otro usuario. ¿Desconectarla y volver a intentar?", addr.host);
+        if others.is_empty() || self.host.ask_yes_no_cancel("Conectar", &q) != Some(true) {
+            return false;
+        }
+        self.spawn_connect_as(pane, tab, generation, addr.clone(), ConnectOptions::default(), others);
+        true
     }
 
     /// Una conexión que había vencido terminó bien: se avisa, se suma a los recientes y, si el
@@ -249,7 +277,8 @@ impl App {
                 t.loading = false;
                 t.error = Some(e.message());
             }
-            Err(_) => {}
+            // El reintento por credenciales de una carpeta UNC: el error queda en la pestaña.
+            Err(e) => t.error = Some(e.message()),
         }
         self.redraw();
     }
@@ -266,10 +295,14 @@ impl App {
             self.connected_from_tree(pane, addr, result);
             return;
         }
-        let Some(d) = &mut self.net.dialog else { return };
+        let Some(d) = &self.net.dialog else { return };
         if d.busy != Some(generation) {
             return;
         }
+        if matches!(result, Err(NetError::CredentialConflict { .. })) && self.retry_after_conflict(pane, None, generation, addr) {
+            return;
+        }
+        let Some(d) = &mut self.net.dialog else { return };
         d.busy = None;
         match result {
             Ok(path) => {

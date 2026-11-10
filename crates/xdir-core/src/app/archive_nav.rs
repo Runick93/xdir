@@ -58,18 +58,18 @@ pub(super) fn writes(c: Command) -> bool {
             | Command::Duplicate
             | Command::CreateShortcut
             | Command::Compress
-            | Command::ExtractHere
-            | Command::ExtractInto
             | Command::Restore
     )
 }
 
 /// El archivo comprimido de verdad de una ubicación: el del disco o la extracción temporal del
 /// último anidado (que ya está, porque se listó).
-fn real_archive(file: &Path, nested: &[String]) -> PathBuf {
+/// `None` si la cadena tiene un nombre no permitido (una sesión editada a mano): nunca otro
+/// archivo en su lugar.
+fn real_archive(file: &Path, nested: &[String]) -> Option<PathBuf> {
     match nested.split_last() {
-        None => file.to_path_buf(),
-        Some((last, outer)) => temps::global().entry_path(file, outer, last).unwrap_or_else(|| file.to_path_buf()),
+        None => Some(file.to_path_buf()),
+        Some((last, outer)) => temps::global().entry_path(file, outer, last),
     }
 }
 
@@ -104,6 +104,11 @@ impl App {
         }
         if !tab.location.is_archive() {
             self.panes[pane].tab_mut().open(hwnd, &tx, idx);
+            return;
+        }
+        // Un archivo comprimido de adentro con Alt/⌥: se extrae y lo abre el sistema.
+        if key_down(VK_MENU) && !e.is_dir && e.attrs & (ATTR_ARCHIVE_BAD | ATTR_LINK) == 0 && nav::is_navigable_archive(&name) {
+            self.open_from_archive(pane, idx, false);
             return;
         }
         if e.attrs & ATTR_ARCHIVE_BAD != 0 {
@@ -199,7 +204,8 @@ impl App {
         if !nav::offers_system(err) {
             return;
         }
-        let (archive, err) = (real_archive(file, nested), err.clone());
+        let Some(archive) = real_archive(file, nested) else { return };
+        let err = err.clone();
         let shown = tab.location.parent().filter(|_| !tab.can_back());
         if tab.can_back() {
             tab.go_back(hwnd, &tx);
@@ -226,8 +232,9 @@ impl App {
             }
             entries.extend(tab.archive_rel(i));
         }
+        let Some(archive) = real_archive(file, nested) else { return true };
         if !entries.is_empty() {
-            self.archive.clip = Some(ArchiveClip { archive: real_archive(file, nested), entries });
+            self.archive.clip = Some(ArchiveClip { archive, entries });
             sys::shell().clear_clipboard();
         }
         true
@@ -269,7 +276,7 @@ impl App {
         if entries.is_empty() {
             return;
         }
-        let archive = real_archive(file, nested);
+        let Some(archive) = real_archive(file, nested) else { return };
         self.start_transfer(JobSpec::ExtractEntries { archive, entries, dest });
         self.set_active(pane);
     }
@@ -329,18 +336,8 @@ impl App {
                     self.open_from_archive(pane, idx, true);
                 }
             }
-            Do::ExtractHere => {
-                if let Location::Archive { file, .. } = &self.panes[pane].tab().location
-                    && let Some(dir) = file.parent().map(Path::to_path_buf)
-                {
-                    self.extract_selection_to(pane, dir);
-                }
-            }
-            Do::ExtractTo => {
-                if let Some(dir) = sys::shell().pick_folder(self.hwnd, "Extraer en") {
-                    self.extract_selection_to(pane, dir);
-                }
-            }
+            Do::ExtractHere => self.extract_from_archive(pane, false),
+            Do::ExtractTo => self.extract_from_archive(pane, true),
             Do::Copy => self.run_command(Command::Copy),
             Do::CopyPath => self.copy_archive_paths(pane),
             Do::Refresh => self.run_command(Command::Refresh),
@@ -364,6 +361,22 @@ impl App {
         }
     }
 
+    /// «Extraer aquí» / «Extraer en…» (atajo, paleta o menú) dentro de un archivo comprimido: lo
+    /// elegido va a la carpeta del archivo, o a la que se elija; siempre afuera.
+    pub(super) fn extract_from_archive(&mut self, pane: usize, choose: bool) {
+        let dir = if choose {
+            sys::shell().pick_folder(self.hwnd, "Extraer en")
+        } else {
+            match &self.panes[pane].tab().location {
+                Location::Archive { file, .. } => file.parent().map(Path::to_path_buf),
+                _ => None,
+            }
+        };
+        if let Some(dir) = dir {
+            self.extract_selection_to(pane, dir);
+        }
+    }
+
     /// Lo elegido en el panel `pane` (dentro de un archivo comprimido) se extrae en `dir` con el
     /// motor («Extraer aquí» del menú: la carpeta del archivo; «Extraer en…»: la que se elija).
     fn extract_selection_to(&mut self, pane: usize, dir: PathBuf) {
@@ -371,8 +384,7 @@ impl App {
         let Location::Archive { file, nested, .. } = &tab.location else { return };
         let entries: Vec<String> =
             tab.list.selected_indices().filter(|&i| tab.list.entries[i].attrs & ATTR_ARCHIVE_BAD == 0).filter_map(|i| tab.archive_rel(i)).collect();
-        if !entries.is_empty() {
-            let archive = real_archive(file, nested);
+        if let (false, Some(archive)) = (entries.is_empty(), real_archive(file, nested)) {
             self.start_transfer(JobSpec::ExtractEntries { archive, entries, dest: dir });
         }
     }

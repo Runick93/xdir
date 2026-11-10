@@ -129,6 +129,11 @@ impl App {
 
     /// Extraer el archivo seleccionado: en su carpeta o en una nueva con su nombre.
     pub(super) fn extract_selection(&mut self, into_folder: bool) {
+        // Dentro de un archivo comprimido: lo elegido, afuera (como el menú de adentro).
+        if self.in_archive() {
+            self.extract_from_archive(self.active, into_folder);
+            return;
+        }
         if let Some((archive, _)) = self.selected_archive() {
             self.start_transfer(JobSpec::Extract { archive, into_folder });
         }

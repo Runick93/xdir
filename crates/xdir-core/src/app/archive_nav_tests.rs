@@ -417,3 +417,89 @@ fn escape_cancels_opening_from_archive() {
     assert!(FakeShell::take_calls().iter().all(|c| !matches!(c, ShellCall::OpenFile(..))));
     assert!(a.archive.opening.is_none());
 }
+
+/// Soltar archivos del sistema sobre un panel dentro de un archivo comprimido: nada (solo lectura).
+#[test]
+fn drop_into_archive_refused() {
+    let mut a = app(FakeHost::new());
+    let (dir, zip) = fixture("soltar", &[("d/a.txt", b"a")]);
+    a.set_layout(Layout::One);
+    go(&mut a, 0, root(&zip));
+    a.paint();
+    let r = a.panes[0].list;
+    let point = ((r.left + r.right) / 2.0, r.top + crate::list::HEADER_H + 5.0);
+    assert!(matches!(a.hit(point.0, point.1), Hit::Pane(0, PaneHit::List)));
+    let paths = vec![dir.join("fotos.zip")];
+    for kind in [DragKind::Enter, DragKind::Drop] {
+        let mut ev = crate::drop::DragEvent { kind, point, ctrl: true, shift: false, paths: Some(&paths), allowed: Effect::ALL, effect: Effect::NONE };
+        a.on_drag(&mut ev);
+        assert_eq!(ev.effect, Effect::NONE);
+    }
+    assert!(a.take_started().is_empty());
+}
+
+/// «Extraer aquí» y «Extraer en…» por atajo o paleta adentro hacen lo mismo que el menú: lo
+/// elegido va a la carpeta del archivo (o a la que se elija), afuera.
+#[test]
+fn extract_commands_inside_archive_extract_selection() {
+    let mut a = app(FakeHost::new());
+    let (dir, zip) = fixture("extraer-atajo", &[("d/a.txt", b"a")]);
+    go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
+    a.set_active(0);
+    select(&mut a, 0, "a.txt");
+    a.run_command(Command::ExtractHere);
+    assert_ne!(a.notice.as_deref(), Some(READ_ONLY));
+    assert_eq!(a.take_started(), [JobSpec::ExtractEntries { archive: zip.clone(), entries: vec!["d/a.txt".into()], dest: dir.clone() }]);
+    let other = dir.join("otra");
+    FakeShell::pick(Some(other.clone()));
+    a.run_command(Command::ExtractInto);
+    assert_eq!(a.take_started(), [JobSpec::ExtractEntries { archive: zip, entries: vec!["d/a.txt".into()], dest: other }]);
+}
+
+/// Alt/⌥ + doble clic en un zip anidado: se extrae y se abre con el sistema (no se entra).
+#[test]
+fn alt_double_click_nested_opens_with_system() {
+    let mut a = app(FakeHost::new());
+    let (_, zip) = fixture("alt-anidado", &[("viejo.zip", b"zz")]);
+    go(&mut a, 0, root(&zip));
+    FakeEnv::hold_keys(&[VK_MENU]);
+    let i = idx_of(&a, 0, "viejo.zip");
+    a.apply(0, Action::Open(i));
+    FakeEnv::hold_keys(&[]);
+    assert_eq!(a.panes[0].tab().location, root(&zip));
+    task(&mut a);
+    let temp = crate::archive_nav::temps::global().entry_path(&zip, &[], "viejo.zip").unwrap();
+    assert!(FakeShell::take_calls().contains(&ShellCall::OpenFile(temp.clone(), temp.parent().map(Path::to_path_buf))));
+}
+
+/// Lo listo para la vista previa se olvida cuando el archivo se vuelve a leer (pudo cambiar y
+/// la temporal se borró).
+#[test]
+fn ready_previews_forgotten_on_reload() {
+    let mut a = app(FakeHost::new());
+    a.preview.on = true;
+    let (_, zip) = fixture("listo", &[("foto.png", b"png")]);
+    go(&mut a, 0, root(&zip));
+    a.set_active(0);
+    select(&mut a, 0, "foto.png");
+    a.paint();
+    task(&mut a);
+    assert_eq!(a.archive.ready.len(), 1);
+    a.run_command(Command::Refresh);
+    pump(&mut a, 0);
+    assert!(a.archive.ready.is_empty());
+}
+
+/// Una ubicación con un anidado de nombre no permitido (sesión editada a mano): no se copia de
+/// ningún otro archivo.
+#[test]
+fn unsafe_nested_name_refuses_copy() {
+    let mut a = app(FakeHost::new());
+    let (_, zip) = fixture("anidado-malo", &[("a.txt", b"a")]);
+    go(&mut a, 0, root(&zip));
+    a.panes[0].tab_mut().location = Location::Archive { file: zip.clone(), nested: vec!["../otro.zip".into()], inner: String::new() };
+    a.set_active(0);
+    select(&mut a, 0, "a.txt");
+    a.run_command(Command::Copy);
+    assert!(a.archive.clip.is_none());
+}

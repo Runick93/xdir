@@ -128,6 +128,11 @@ impl App {
         let computer_listed = matches!(tab.location, Location::Computer) && matches!(event.msg, fs::LoadMsg::Listed(_));
         let views_changed = tab.sync_view(views);
         let listed = matches!(event.msg, fs::LoadMsg::Listed(Err(_))) && tab.location.is_archive();
+        // Se volvió a leer un archivo comprimido: lo extraído para la vista previa puede ser viejo.
+        let archive_listed = match (&event.msg, &tab.location) {
+            (fs::LoadMsg::Listed(_), Location::Archive { file, nested, .. }) => Some(crate::archive_nav::temps::global().dir_for(file, nested)),
+            _ => None,
+        };
         let tab_id = tab.id;
         let changed = tab.on_load(event);
         tab.retry_with_credentials(hwnd, &tx);
@@ -146,6 +151,9 @@ impl App {
         }
         if listed {
             self.after_archive_load(tab_id);
+        }
+        if let Some(dir) = archive_listed {
+            self.archive.ready.retain(|p| !p.starts_with(&dir));
         }
         changed
     }

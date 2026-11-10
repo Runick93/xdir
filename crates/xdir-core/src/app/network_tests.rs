@@ -1282,3 +1282,14 @@ fn drag_effect_on_remote_without_io() {
     assert_eq!(super::fileops::drop_effect(&src, Path::new("/local-r1drag/x"), false, false, all, &roots), Effect::COPY);
     assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("volume_of /net-r1drag")), "{:?}", FakeNetwork::ui_io_calls());
 }
+
+/// I4: xtree sobre una carpeta de red pide el espacio del volumen en otro hilo.
+#[test]
+fn xtree_remote_volume_off_thread() {
+    let root = remote_dir("r1-xtree");
+    FakeNetwork::mark_ui_thread();
+    let a = net_app();
+    let _x = crate::xtree::view::Xtree::new(a.hwnd, root.clone());
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("volume_space")), "{:?}", FakeNetwork::ui_io_calls());
+}

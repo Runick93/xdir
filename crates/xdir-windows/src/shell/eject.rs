@@ -150,7 +150,8 @@ fn last_veto_process() -> Option<String> {
         let query = EvtQuery(
             None,
             w!("System"),
-            w!("*[System[Provider[@Name='Microsoft-Windows-Kernel-PnP'] and (EventID=225)]]"),
+            // Solo uno reciente (de este intento), no el de otra expulsión de hace días.
+            w!("*[System[Provider[@Name='Microsoft-Windows-Kernel-PnP'] and (EventID=225) and TimeCreated[timediff(@SystemTime) <= 15000]]]"),
             EvtQueryChannelPath.0 | EvtQueryReverseDirection.0,
         )
         .ok()?;
@@ -276,6 +277,13 @@ fn eject_with_shell(root: &Path) -> Result<(), EjectError> {
     crate::shell::win32::invoke_verb(xdir_core::sys::Handle(0), &xdir_core::fs::Location::Computer, &[item], "eject").map_err(|e| fail(&e.message()))
 }
 
+/// ¿El veto es porque alguien lo usa? Archivos abiertos (`OutstandingOpen`), el dispositivo o
+/// su controlador, una aplicación o un servicio de Windows. Los demás (no se puede quitar, falta
+/// de permisos…) no se arreglan reintentando.
+pub fn veto_is_busy(veto: i32) -> bool {
+    matches!(veto, 3..=7)
+}
+
 fn fail(message: &str) -> EjectError {
     EjectError { busy_by: None, busy: false, message: message.to_string() }
 }
@@ -303,7 +311,7 @@ pub fn eject(root: &Path) -> Result<(), EjectError> {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    let busy = veto != PNP_VetoTypeUnknown;
+    let busy = veto_is_busy(veto.0);
     Err(EjectError { busy_by: busy.then(last_veto_process).flatten(), busy, message: format!("el sistema no lo permitió ({})", veto.0) })
 }
 
@@ -341,6 +349,19 @@ mod tests {
         assert_eq!(first_removable(10, &|n| n == 10 || n == 20, &parent, 4), Some(10));
         assert_eq!(first_removable(10, &|_| false, &parent, 4), None);
         assert_eq!(first_removable(10, &|n| n == 40, &parent, 2), None, "no sube más de lo permitido");
+    }
+
+    #[test]
+    fn busy_vetoes() {
+        use windows::Win32::Devices::DeviceAndDriverInstallation::{
+            PNP_VetoDevice, PNP_VetoDriver, PNP_VetoOutstandingOpen, PNP_VetoWindowsApp, PNP_VetoWindowsService,
+        };
+        for v in [PNP_VetoOutstandingOpen, PNP_VetoDevice, PNP_VetoDriver, PNP_VetoWindowsApp, PNP_VetoWindowsService] {
+            assert!(veto_is_busy(v.0), "{v:?}");
+        }
+        for v in [0, 1, 2, 8, 9, 10, 11, 12] {
+            assert!(!veto_is_busy(v), "{v}");
+        }
     }
 
     #[test]

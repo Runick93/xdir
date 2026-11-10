@@ -41,7 +41,22 @@ pub fn origin_in(log: Option<&Path>, in_trash: &Path) -> Option<PathBuf> {
     let name = in_trash.file_name()?.to_string_lossy().into_owned();
     let bytes = std::fs::read(dir.join(".DS_Store")).ok()?;
     let (folder, original) = parse_ds_store(&bytes).remove(&name)?;
-    Some(volume_root(dir).join(folder.trim_start_matches('/')).join(original))
+    safe_origin(&volume_root(dir), &folder, &original)
+}
+
+/// `root` + `ptbL` + `ptbN`, solo si no se sale del disco: `ptbN` tiene que ser un nombre suelto y
+/// `ptbL` solo nombres de carpeta (sin «..», «.» ni raíz más que la «/» inicial). El `.DS_Store`
+/// viene del disco: uno armado no puede mandar a escribir en otro lado.
+pub fn safe_origin(root: &Path, folder: &str, name: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut name_parts = Path::new(name).components();
+    let (Some(Component::Normal(n)), None) = (name_parts.next(), name_parts.next()) else { return None };
+    let folder = Path::new(folder.trim_start_matches('/'));
+    if !folder.components().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    let out = root.join(folder).join(n);
+    out.starts_with(root).then_some(out)
 }
 
 /// `<config>/papelera.tsv`.
@@ -350,6 +365,36 @@ mod tests {
         forget_in(&log, &item);
         assert_eq!(origin_in(Some(&log), &item), Some(PathBuf::from("/Users/x/Desktop/a.txt")));
         assert_eq!(origin_in(Some(&log), &bin.join("otro.txt")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un `.DS_Store` armado (un disco ajeno) no puede mandar a devolver fuera del disco: un
+    /// `ptbN` absoluto o con «/», o un `ptbL` con «..», dejan el origen desconocido.
+    #[test]
+    fn ds_store_origin_rejects_escapes() {
+        let dir = tmp("escape");
+        let bin = dir.join("Volumes/USB/.Trashes/501");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cases = [
+            ("abs", "docs/", "/Users/x/Library/LaunchAgents/evil.plist"),
+            ("sub", "docs/", "a/b.txt"),
+            ("dots", "docs/", ".."),
+            ("up", "../../Users/x/Library/LaunchAgents/", "evil.plist"),
+            ("up2", "docs/../../..", "evil.plist"),
+            ("ok", "/docs/", "bien.txt"),
+        ];
+        let mut recs = Vec::new();
+        for (name, l, n) in cases {
+            std::fs::write(bin.join(name), "x").unwrap();
+            recs.push(record(name, b"ptbL", l));
+            recs.push(record(name, b"ptbN", n));
+        }
+        std::fs::write(bin.join(".DS_Store"), ds_store(&[leaf(&recs)], 2)).unwrap();
+        for (name, ..) in &cases[..5] {
+            assert_eq!(origin_in(None, &bin.join(name)), None, "{name}");
+        }
+        assert_eq!(safe_origin(Path::new("/Volumes/USB"), "/docs/", "bien.txt"), Some(PathBuf::from("/Volumes/USB/docs/bien.txt")));
+        assert_eq!(safe_origin(Path::new("/"), "Users/x/", "a.txt"), Some(PathBuf::from("/Users/x/a.txt")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

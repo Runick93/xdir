@@ -141,8 +141,15 @@ pub fn origin(name: &str, trash: &Path) -> io::Result<PathBuf> {
         .find_map(|l| l.strip_prefix("Path="))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "el .trashinfo no tiene Path="))?;
     let path = PathBuf::from(OsString::from_vec(decode_path(raw.trim())));
-    // Una ruta relativa es relativa a la carpeta que tiene a la papelera (papeleras de discos).
-    Ok(if path.is_absolute() { path } else { trash.parent().unwrap_or(Path::new("/")).join(path) })
+    // Una ruta relativa es relativa a la carpeta que tiene a la papelera (papeleras de discos):
+    // solo nombres de carpeta, sin «..» que la saquen del disco.
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    if !path.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Path= se sale del disco"));
+    }
+    Ok(trash.parent().unwrap_or(Path::new("/")).join(path))
 }
 
 /// `%XX` → byte.
@@ -203,6 +210,11 @@ mod tests {
         std::fs::write(trash.join("info/raro.trashinfo"), "[Trash Info]\nPath=/home/a/con%20espacio/b%25.txt\n").unwrap();
         assert_eq!(origin("raro", &trash).unwrap(), PathBuf::from("/home/a/con espacio/b%.txt"));
         assert!(origin("no-esta", &trash).is_err());
+        // Relativa (papelera de un disco): dentro del disco; con «..», no.
+        std::fs::write(trash.join("info/rel.trashinfo"), "[Trash Info]\nPath=fotos/a.jpg\n").unwrap();
+        assert_eq!(origin("rel", &trash).unwrap(), dir.join("fotos/a.jpg"));
+        std::fs::write(trash.join("info/sube.trashinfo"), "[Trash Info]\nPath=../../etc/x\n").unwrap();
+        assert!(origin("sube", &trash).is_err());
         assert_eq!(decode_path("a%2"), b"a%2");
         let _ = std::fs::remove_dir_all(&dir);
     }

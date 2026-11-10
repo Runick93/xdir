@@ -58,6 +58,11 @@ xdir está en desarrollo activo y toda ayuda es bienvenida:
 
 - **Probalo y contanos:** si algo falla o te falta algo, abrí un [issue](https://github.com/Runick93/xdir/issues/new/choose). Hay un formulario para errores y otro para sugerencias.
 - **Sumá código:** hacé un fork, creá una rama y mandá un pull request. Para cambios grandes, abrí antes un issue y lo charlamos.
+- **Contá qué cambia:** cada pull request suma su línea en «Sin publicar» de [`CHANGELOG.md`](CHANGELOG.md), en
+  castellano y para quien usa xdir (qué hay de nuevo, qué cambió o qué se arregló, no cómo). Al publicar, esa sección pasa
+  a ser la de la versión y es lo que se ve en la pestaña Novedades y en las notas del release. El visor de la app entiende
+  solo `## versión — fecha`, `### Nuevo|Cambios|Arreglos`, viñetas `- ` (sub-viñetas con dos espacios), `**negrita**`
+  y `` `código` ``.
 
 Para compilarlo necesitás Rust (`rustup`).
 

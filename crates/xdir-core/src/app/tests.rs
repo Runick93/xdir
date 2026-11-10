@@ -1800,6 +1800,33 @@ fn navigating_restores_folder_view() {
     assert_eq!(a.folder_views.get(&view_key(&a, 0)).sort, list::Column::Name);
 }
 
+/// El aviso «Vista: …» se va al navegar a otra carpeta o cuando la lista activa ya no muestra
+/// esa vista (otro panel activo); otros avisos no se tocan.
+#[test]
+fn view_notice_clears_on_navigation_or_view_change() {
+    let (x, y, z) = (fixture("aviso-vista-x"), fixture("aviso-vista-y"), fixture("aviso-vista-z"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(x));
+    go(&mut a, 1, Location::Path(y));
+    a.set_active(0);
+    a.set_view(0, list::View::Icons);
+    assert_eq!(a.notice.as_deref(), Some("Vista: íconos medianos"));
+    a.sync_folder_views();
+    assert_eq!(a.notice.as_deref(), Some("Vista: íconos medianos"), "sigue mientras vale");
+    go(&mut a, 0, Location::Path(z));
+    a.sync_folder_views();
+    assert_eq!(a.notice, None, "al navegar");
+    a.set_view(0, list::View::Icons);
+    a.set_active(1);
+    a.sync_folder_views();
+    assert_eq!(a.notice, None, "otra lista activa, con otra vista");
+    // Otro aviso no se borra.
+    a.notice = Some("Error: algo".into());
+    a.sync_folder_views();
+    assert_eq!(a.notice.as_deref(), Some("Error: algo"));
+}
+
 /// «Usar esta vista en todas las carpetas» pregunta; con «Sí» la vista actual pasa a ser la por
 /// defecto, se borran las de las carpetas y las listas abiertas la toman; con «No», nada.
 #[test]

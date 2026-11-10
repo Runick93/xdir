@@ -139,6 +139,7 @@ impl App {
         self.panes[pane].tab_mut().list.set_view(view);
         self.sync_folder_views();
         self.notice = Some(format!("Vista: {}", view.name().to_lowercase()));
+        self.view_notice = Some((pane, self.panes[pane].tab().view_key(), view));
         self.redraw();
     }
 
@@ -166,6 +167,24 @@ impl App {
         }
         if changed {
             self.schedule_views_save();
+        }
+        self.expire_view_notice();
+    }
+
+    /// Borra el aviso «Vista: …» si quedó viejo: se navegó a otra carpeta, cambió la vista o la
+    /// lista activa es otra. Si otro aviso lo reemplazó, ese no se toca.
+    fn expire_view_notice(&mut self) {
+        let Some((pane, key, view)) = &self.view_notice else { return };
+        let text = format!("Vista: {}", view.name().to_lowercase());
+        if self.notice.as_deref() != Some(text.as_str()) {
+            self.view_notice = None;
+            return;
+        }
+        let still = *pane == self.active
+            && self.panes.get(*pane).is_some_and(|p| p.tab().view_key() == *key && p.tab().list.view == *view);
+        if !still {
+            self.notice = None;
+            self.view_notice = None;
         }
     }
 

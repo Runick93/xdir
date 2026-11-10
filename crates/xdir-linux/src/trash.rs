@@ -149,7 +149,17 @@ pub fn origin(name: &str, trash: &Path) -> io::Result<PathBuf> {
     if !path.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Path= se sale del disco"));
     }
-    Ok(trash.parent().unwrap_or(Path::new("/")).join(path))
+    Ok(topdir(trash).join(path))
+}
+
+/// La carpeta de arriba de una papelera de disco: `$topdir/.Trash-$uid` → `$topdir`;
+/// `$topdir/.Trash/$uid` → `$topdir` (dos niveles).
+pub fn topdir(trash: &Path) -> PathBuf {
+    let parent = trash.parent().unwrap_or(Path::new("/"));
+    match parent.file_name() {
+        Some(n) if n == ".Trash" => parent.parent().unwrap_or(Path::new("/")).to_path_buf(),
+        _ => parent.to_path_buf(),
+    }
 }
 
 /// `%XX` → byte.
@@ -217,6 +227,15 @@ mod tests {
         assert_eq!(origin("rel", &trash).unwrap(), dir.join("fotos/a.jpg"));
         std::fs::write(trash.join("info/sube.trashinfo"), "[Trash Info]\nPath=../../etc/x\n").unwrap();
         assert!(origin("sube", &trash).is_err());
+        // Papelera de disco con la forma «$topdir/.Trash/$uid»: lo relativo es al disco, dos
+        // niveles arriba.
+        let top = dir.join("usb");
+        let shared = top.join(".Trash/1000");
+        std::fs::create_dir_all(shared.join("info")).unwrap();
+        std::fs::write(shared.join("info/x.trashinfo"), "[Trash Info]\nPath=docs/x\n").unwrap();
+        assert_eq!(origin("x", &shared).unwrap(), top.join("docs/x"));
+        assert_eq!(topdir(&shared), top);
+        assert_eq!(topdir(&top.join(".Trash-1000")), top);
         assert_eq!(decode_path("a%2"), b"a%2");
         // Solo dos dígitos hexadecimales: «%+5» o «%g1» quedan como están.
         assert_eq!(decode_path("a%+5b"), b"a%+5b");

@@ -231,7 +231,7 @@ fn restore_item(item: &Path) -> Result<PathBuf> {
     // La papelera de un disco (no la del usuario) solo devuelve dentro de ese disco; y en ningún
     // caso se siguen enlaces en las carpetas del camino.
     let home = trash::data_home().map(|d| trash::trash_dir(&d));
-    let root = if home.as_deref() == Some(trash) { PathBuf::from("/") } else { trash.parent().unwrap_or(Path::new("/")).to_path_buf() };
+    let root = if home.as_deref() == Some(trash) { PathBuf::from("/") } else { trash::topdir(trash) };
     prepare_parent(&root, parent, true)?;
     prepare_parent(&root, parent, false)?;
     trash::restore(&name, &to, trash).map_err(|e| err_at(item, e))?;

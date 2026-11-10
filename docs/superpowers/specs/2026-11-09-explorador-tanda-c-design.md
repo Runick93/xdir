@@ -45,7 +45,7 @@ Poder ver qué es un archivo sin abrirlo, con lo mejor del Explorador (panel de 
 ```
 
 - Una sola columna a la derecha de la ventana (después de los paneles), que muestra lo seleccionado en el **panel activo**; al cambiar de panel activo, cambia.
-- Se prende y apaga con un botón en la barra de estado (junto a los de vistas, con cartel de ayuda), con un comando de la paleta («Mostrar u ocultar la vista previa») y con el atajo **Alt+P** en Windows y Linux y **⇧⌘P** en macOS. El ancho se cambia arrastrando el borde (mínimo y máximo razonables; los paneles nunca quedan más angostos que su mínimo). Prendida y ancho se guardan en la sesión.
+- Se prende y apaga con un botón en la barra de estado (junto a los de vistas, con cartel de ayuda), con un comando de la paleta («Mostrar u ocultar la vista previa») y con el atajo **Alt+P** en Windows y Linux y **⌥⌘P** en macOS (⇧⌘P ya es la paleta de comandos). El ancho se cambia arrastrando el borde (mínimo y máximo razonables; los paneles nunca quedan más angostos que su mínimo). Prendida y ancho se guardan en la sesión.
 - **Arriba, la vista previa** según el tipo:
   - Imágenes, video, PDF, documentos y lo que el sistema sepa previsualizar: la imagen del servicio de miniaturas pedida al tamaño de la columna (más grande que las miniaturas de la lista, en su propia caché).
   - Texto y código (extensiones conocidas o contenido que es texto UTF-8 válido): las primeras líneas en letra de ancho fijo, hasta 64 KB leídos, sin ajustar líneas largas (se cortan).

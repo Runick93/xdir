@@ -519,9 +519,18 @@ impl Tree {
             if let Some(c) = self.nodes[id].children.take() {
                 gone.extend(c);
             }
+            // Nada queda apuntando a un nodo que se va a reusar (el mouse, la chincheta, lo que se
+            // deja a la vista y los ⏏ del último cuadro).
             if self.hover == Some(id) {
                 self.hover = None;
             }
+            if self.pin_hover == Some(id) {
+                self.pin_hover = None;
+            }
+            if self.scroll_to == Some(id) {
+                self.scroll_to = None;
+            }
+            self.eject_rects.retain(|(_, e)| *e != id);
             // Uno que todavía se está leyendo no se recicla: su lectura vuelve con este número.
             if !self.nodes[id].loading {
                 self.net_free.push(id);
@@ -1318,6 +1327,23 @@ fn subfolders(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// m4: al reciclar un nodo de «Red» no queda nada apuntándolo.
+    #[test]
+    fn recycled_net_nodes_leave_no_references() {
+        crate::sys::testing::install_fakes();
+        let mut t = Tree::new();
+        t.set_network(Vec::new(), vec![("x (nas)".into(), PathBuf::from("/net-r2m4/x"), "smb://nas/x".into())], vec!["MAQ".into()]);
+        let ids: Vec<usize> = t.net_items.clone();
+        let conn = ids.iter().copied().find(|&i| t.nodes[i].kind == Kind::NetConnected).unwrap();
+        t.hover = Some(conn);
+        t.pin_hover = Some(conn);
+        t.scroll_to = Some(conn);
+        t.eject_rects = vec![(Rect::default(), conn)];
+        t.set_network(Vec::new(), Vec::new(), Vec::new());
+        assert_eq!((t.hover, t.pin_hover, t.scroll_to), (None, None, None));
+        assert!(t.eject_rects.is_empty());
+    }
     use super::*;
     use crate::sys::testing::{FakeFileSystem, install_fakes};
 

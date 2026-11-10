@@ -215,11 +215,12 @@ impl App {
     ) -> (shell::Entry, shell::Entry) {
         use shell::Entry;
         let list = &self.panes[pane].tab().list;
-        // Las columnas de metadatos, solo si están a la vista (son muchas y casi siempre vacías).
+        // Las columnas de metadatos, solo si están a la vista (son muchas y casi siempre vacías) o
+        // si la lista está ordenada por ella.
         let sorts = list::COLUMNS
             .iter()
             .enumerate()
-            .filter(|(_, c)| !c.0.is_meta() || list.columns.iter().any(|s| s.col == c.0))
+            .filter(|(_, c)| !c.0.is_meta() || c.0 == list.sort || list.columns.iter().any(|s| s.col == c.0))
             .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
             .collect();
         // «Agrupar por»: los criterios con el título de su columna y «(Ninguno)».

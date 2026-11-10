@@ -2410,8 +2410,36 @@ fn header_menu_has_sort_and_group_submenus() {
     }
     // Sin choques de ids con columnas ni «Columnas de fábrica».
     for (_, _, items) in &subs {
-        assert!(items.iter().all(|(_, id)| *id > 100 && *id != list::COLUMNS.len() as u32));
+        for (_, id) in items {
+            assert!(*id >= 200, "id {id}");
+            assert!(!(1..=list::COLUMNS.len() as u32).contains(id) && *id != 100, "id {id}");
+        }
     }
+}
+
+/// «Ordenar por» del encabezado lista la columna de orden actual aunque sea de metadatos y esté
+/// oculta (marcada), para que se vea por qué está ordenada la lista.
+#[test]
+fn header_menu_lists_hidden_meta_sort_column() {
+    let dir = fixture("encabezado-orden-meta");
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(dir));
+    {
+        let list = &mut a.panes[0].tab_mut().list;
+        assert!(!list.columns.iter().any(|c| c.col == list::Column::Duration));
+        list.set_sort(list::Column::Duration);
+    }
+    host.set_menu_choice(None);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let menu = host.menus().pop().unwrap();
+    let Some(shell::Entry::Sub(_, sorts)) = menu.iter().find(|e| matches!(e, shell::Entry::Sub(n, _) if n == "Ordenar por")) else {
+        panic!("sin «Ordenar por»")
+    };
+    let dur = sorts.iter().find(|e| matches!(e, shell::Entry::Item { label, .. } if label == list::Column::Duration.title()));
+    assert!(matches!(dur, Some(shell::Entry::Item { checked: true, .. })), "{sorts:?}");
+    // Las otras de metadatos ocultas siguen sin aparecer.
+    assert!(!sorts.iter().any(|e| matches!(e, shell::Entry::Item { label, .. } if label == list::Column::Artist.title())));
 }
 
 /// Elegir «Tipo» en «Agrupar por» del encabezado agrupa la lista y la carpeta lo recuerda.

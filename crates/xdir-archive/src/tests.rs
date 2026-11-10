@@ -599,7 +599,7 @@ fn missing_entry_is_not_found_and_declared_total() {
     let z = t.p("out.zip");
     svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
     assert_eq!(svc().declared_total(&z).unwrap(), 200_004);
-    let ghost = ArchiveEntry { index: 99, name: "x".into(), size: 0, kind: ItemKind::File, link: None, modified: 0 };
+    let ghost = ArchiveEntry { index: 99, name: "x".into(), size: 0, kind: ItemKind::File, link: None, modified: 0, packed: 0, encrypted: false };
     let err = svc().extract(&z, &ghost, &t.0, None, &mut |_| Flow::Continue).unwrap_err();
     assert_eq!(err.kind, ErrKind::NotFound);
 }
@@ -931,4 +931,57 @@ fn zip_times_are_local() {
     assert_eq!(ba.list(&z).unwrap()[0].modified, 1_700_000_000);
     // Leído en otra zona (UTC), la misma hora de pared: tres horas antes.
     assert_eq!(svc().list(&z).unwrap()[0].modified, 1_700_000_000 - 10_800);
+}
+
+// ---------- navegar dentro de un archivo comprimido ----------
+
+/// El listado trae el tamaño comprimido (zip) y si la entrada está cifrada, sin descomprimir.
+#[test]
+fn list_reports_packed_and_encrypted() {
+    let t = Tmp::new();
+    let (_, items) = sample(&t);
+    let z = t.p("out.zip");
+    svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
+    let list = svc().list(&z).unwrap();
+    let b = list.iter().find(|e| e.name == "src/b.bin").unwrap();
+    // 200.000 bytes iguales se comprimen muchísimo.
+    assert!(b.packed > 0 && b.packed < 10_000, "{}", b.packed);
+    assert!(list.iter().all(|e| !e.encrypted));
+    let c = t.p("clave.zip");
+    fs::write(&c, raw_zip(&[Raw { flags: 1, ..raw(b"secreto.txt", b"datos cifrados") }])).unwrap();
+    assert!(svc().list(&c).unwrap()[0].encrypted);
+}
+
+/// `extract_some` extrae solo lo que acepta `want` (por el nombre guardado), con las mismas
+/// reglas que `extract_all`.
+#[test]
+fn extract_some_only_wanted_zip() {
+    let t = Tmp::new();
+    let (_, items) = sample(&t);
+    let z = t.p("out.zip");
+    svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
+    let dst = t.p("dst");
+    fs::create_dir(&dst).unwrap();
+    let want = |n: &str| safe_entry_path(n).is_some_and(|p| p.starts_with(Path::new("src").join("sub")));
+    let mut failed = Vec::new();
+    xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &want, &mut |_| Flow::Continue, &mut |n, e| failed.push((n.to_string(), e))).unwrap();
+    assert!(failed.is_empty());
+    assert_eq!(tree(&dst), [("src/".to_string(), None), ("src/sub/".to_string(), None), ("src/sub/c.txt".to_string(), Some(vec![])), ("src/sub/vacia/".to_string(), None)]);
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_some_only_wanted_targz() {
+    let t = Tmp::new();
+    let z = t.p("a.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"d/", tar::EntryType::Directory, None, b"");
+        tar_entry(b, b"d/a.txt", tar::EntryType::Regular, None, b"hola");
+        tar_entry(b, b"d/b.txt", tar::EntryType::Regular, None, b"chau");
+    });
+    let dst = t.p("dst");
+    fs::create_dir(&dst).unwrap();
+    let want = |n: &str| n == "d/b.txt";
+    xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &want, &mut |_| Flow::Continue, &mut |_, _| {}).unwrap();
+    assert_eq!(tree(&dst), [("d/".to_string(), None), ("d/b.txt".to_string(), Some(b"chau".to_vec()))]);
 }

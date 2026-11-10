@@ -166,14 +166,21 @@ impl Service {
     /// mientras se descomprime. Devuelve cuántos enlaces se omitieron (en Windows todos). Si se
     /// corta o falla, lo ya extraído queda: lo limpia quien llama.
     pub fn extract_all(&self, archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<usize, Error> {
-        self.extract_each(archive, root, progress, &mut |_, e| Err(e))
+        self.extract_each(archive, root, &|_| true, progress, &mut |_, e| Err(e))
     }
 
     /// Como `extract_all`, pero cada entrada que falla va a `on_fail`, que decide si se sigue.
-    fn extract_each(&self, archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
+    fn extract_each(
+        &self,
+        archive: &Path,
+        root: &Path,
+        want: &dyn Fn(&str) -> bool,
+        progress: &mut dyn FnMut(u64) -> Flow,
+        on_fail: OnFail,
+    ) -> Result<usize, Error> {
         match self.format(archive)? {
-            ArchiveFormat::Zip => zip::extract_all(archive, root, progress, on_fail),
-            ArchiveFormat::TarGz => targz::extract_all(archive, root, progress, on_fail),
+            ArchiveFormat::Zip => zip::extract_all(archive, root, want, progress, on_fail),
+            ArchiveFormat::TarGz => targz::extract_all(archive, root, want, progress, on_fail),
         }
     }
 
@@ -456,7 +463,18 @@ impl Archives for Service {
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, Error),
     ) -> Result<usize, Error> {
-        self.extract_each(archive, root, progress, &mut |name, e| {
+        self.extract_some(archive, root, &|_| true, progress, failed)
+    }
+
+    fn extract_some(
+        &self,
+        archive: &Path,
+        root: &Path,
+        want: &dyn Fn(&str) -> bool,
+        progress: &mut dyn FnMut(u64) -> Flow,
+        failed: &mut dyn FnMut(&str, Error),
+    ) -> Result<usize, Error> {
+        self.extract_each(archive, root, want, progress, &mut |name, e| {
             if fatal(&e) {
                 return Err(e);
             }

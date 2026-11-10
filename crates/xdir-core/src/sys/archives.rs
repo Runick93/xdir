@@ -40,6 +40,19 @@ pub trait Archives: Send + Sync {
     /// escribirlo, pero al llevarlo a su lugar puede quedar al lado de un enlace del usuario que
     /// apunta afuera: el motor lo vuelve a mirar ahí y borra los que salen.
     fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf>;
+    /// Como `extract_all`, pero solo las entradas cuyo nombre guardado (sin sanear) acepta
+    /// `want`; las carpetas de arriba se crean al bajar. Para abrir o copiar algo de adentro sin
+    /// extraer todo. Por defecto, sin soporte.
+    fn extract_some(
+        &self,
+        archive: &Path,
+        _root: &Path,
+        _want: &dyn Fn(&str) -> bool,
+        _progress: &mut dyn FnMut(u64) -> Flow,
+        _failed: &mut dyn FnMut(&str, CopyError),
+    ) -> Result<usize, CopyError> {
+        Err(CopyError::new(ErrKind::Other(UNSUPPORTED.into()), archive))
+    }
     /// Crea un zip en `out` (no debe existir; el nombre puede ser un parcial). `items` = (ruta en
     /// el disco, nombre adentro con `/`; las carpetas terminan en `/`). `progress` recibe los
     /// bytes leídos en total; `Stop` corta y borra `out`. Si falla, también lo borra.

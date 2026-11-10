@@ -62,6 +62,8 @@ pub fn list(path: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<Archive
             kind,
             link,
             modified: e.header().mtime().unwrap_or(0),
+            packed: 0,
+            encrypted: false,
         });
     }
     Ok(out)
@@ -107,7 +109,13 @@ pub fn extract(
 }
 
 /// Una sola pasada; los enlaces simbólicos se crean al final.
-pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
+pub fn extract_all(
+    archive: &Path,
+    root: &Path,
+    want: &dyn Fn(&str) -> bool,
+    progress: &mut dyn FnMut(u64) -> Flow,
+    on_fail: OnFail,
+) -> Result<usize, Error> {
     let sh = Shared::new(progress);
     let mut check = || sh.check();
     let mut a = open(archive, &mut check)?;
@@ -117,11 +125,14 @@ pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) ->
     for e in a.entries().map_err(|e| bad(e, archive))? {
         let mut e = e.map_err(|e| bad(e, archive))?;
         let kind = kind_of_type(e.header().entry_type());
+        let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
+        if !want(&name) {
+            continue;
+        }
         if kind == ItemKind::Omitted {
             omitted += 1;
             continue;
         }
-        let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
         let rel = match resolve_rel(&name, None, kind == ItemKind::Dir) {
             Ok(Some(rel)) => rel,
             Ok(None) => continue,

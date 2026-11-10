@@ -111,12 +111,12 @@ fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path, utc_offset: fn(i6
     let mut out = Vec::with_capacity(a.len());
     for i in 0..a.len() {
         // `by_index_raw` no descifra: así las entradas con contraseña también se listan.
-        let (name, kind, size, modified, readable_link) = {
+        let (name, kind, size, modified, readable_link, packed, encrypted) = {
             let f = a.by_index_raw(i).map_err(|e| map_zip(e, path))?;
             let kind = kind_of_file(&f);
             let name = f.name().map_err(|e| map_zip(e, path))?.into_owned();
             let ok = kind == ItemKind::Symlink && !f.encrypted() && f.size() <= MAX_LINK;
-            (name, kind, f.size(), epoch_of(f.last_modified(), utc_offset), ok)
+            (name, kind, f.size(), epoch_of(f.last_modified(), utc_offset), ok, f.compressed_size(), f.encrypted())
         };
         let link = if readable_link {
             let mut z = a.by_index(i).map_err(|e| map_zip(e, path))?;
@@ -124,7 +124,7 @@ fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path, utc_offset: fn(i6
         } else {
             None
         };
-        out.push(ArchiveEntry { index: i, name, size, kind, link, modified });
+        out.push(ArchiveEntry { index: i, name, size, kind, link, modified, packed, encrypted });
     }
     Ok(out)
 }
@@ -175,7 +175,13 @@ pub fn extract(
     extract_index(&mut a, archive, entry.index, root, override_name, progress).map(|_| ())
 }
 
-pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
+pub fn extract_all(
+    archive: &Path,
+    root: &Path,
+    want: &dyn Fn(&str) -> bool,
+    progress: &mut dyn FnMut(u64) -> Flow,
+    on_fail: OnFail,
+) -> Result<usize, Error> {
     let mut a = open(archive)?;
     // La hora no se usa al extraer.
     let entries = list_open(&mut a, archive, |_| 0)?;
@@ -184,7 +190,7 @@ pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) ->
     let mut omitted = 0usize;
     // Carpetas y archivos primero, enlaces al final.
     let (links, rest): (Vec<_>, Vec<_>) = entries.iter().partition(|e| e.kind == ItemKind::Symlink);
-    for e in rest.into_iter().chain(links) {
+    for e in rest.into_iter().chain(links).filter(|e| want(&e.name)) {
         if e.kind == ItemKind::Symlink && cfg!(not(unix)) {
             omitted += 1;
             continue;

@@ -174,11 +174,15 @@ impl Archives for FakeArchives {
     }
 
     fn list(&self, archive: &Path, _cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError> {
+        let encrypted = self.st().password.iter().any(|p| p == archive);
         Ok(self
             .entries(archive)?
             .into_iter()
             .enumerate()
-            .map(|(index, e)| ArchiveEntry { index, name: e.name, size: e.size.unwrap_or(e.data.len() as u64), kind: e.kind, link: e.link, modified: 0 })
+            .map(|(index, e)| {
+                let size = e.size.unwrap_or(e.data.len() as u64);
+                ArchiveEntry { index, name: e.name, size, kind: e.kind, link: e.link, modified: 0, packed: size / 2, encrypted }
+            })
             .collect())
     }
 
@@ -189,7 +193,19 @@ impl Archives for FakeArchives {
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, CopyError),
     ) -> Result<usize, CopyError> {
-        let entries = self.entries(archive)?;
+        self.extract_some(archive, root, &|_| true, progress, failed)
+    }
+
+    fn extract_some(
+        &self,
+        archive: &Path,
+        root: &Path,
+        want: &dyn Fn(&str) -> bool,
+        progress: &mut dyn FnMut(u64) -> Flow,
+        failed: &mut dyn FnMut(&str, CopyError),
+    ) -> Result<usize, CopyError> {
+        let mut entries = self.entries(archive)?;
+        entries.retain(|e| want(&e.name));
         if self.st().password.iter().any(|p| p == archive) {
             return Err(CopyError::new(ErrKind::Other(PASSWORD.into()), archive));
         }

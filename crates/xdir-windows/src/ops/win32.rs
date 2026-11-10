@@ -70,6 +70,8 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     let mut focus = None;
     // Carpeta que creó «Carpeta nueva con la selección» (se quita si no se movió nada).
     let mut created_folder: Option<PathBuf> = None;
+    // Error de `PerformOperations` cuando igual hay algo hecho que deshacer.
+    let mut perform_error: Option<String> = None;
 
     match &op {
         Op::Copy { sources, dest } | Op::Move { sources, dest } => {
@@ -102,9 +104,17 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             let folder = names::free_name(parent, &|n| names::numbered_name(&base, true, n), &|p| std::fs::symlink_metadata(p).is_ok());
             std::fs::create_dir(&folder).map_err(|e| Error::new(E_FAIL, format!("{}: {e}", folder.display())))?;
             created_folder = Some(folder.clone());
-            let dest = item(&folder)?;
-            for src in items {
-                unsafe { fo.MoveItem(&item(src)?, &dest, PCWSTR::null(), None)? };
+            // Si no se pudo armar la operación, la carpeta (vacía) no queda.
+            let queued = (|| -> Result<()> {
+                let dest = item(&folder)?;
+                for src in items {
+                    unsafe { fo.MoveItem(&item(src)?, &dest, PCWSTR::null(), None)? };
+                }
+                Ok(())
+            })();
+            if let Err(e) = queued {
+                let _ = std::fs::remove_dir(&folder);
+                return Err(e);
             }
             rename_after = true;
             focus = Some(folder);
@@ -143,32 +153,42 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         // Si el usuario cancela, PerformOperations devuelve error: no es una falla real.
         let performed = fo.PerformOperations();
         let aborted = fo.GetAnyOperationsAborted().map(|b| b.as_bool()).unwrap_or(false);
-        if let Err(e) = performed {
-            if !aborted {
-                // Solo se quita si quedó vacía.
-                if let Some(folder) = &created_folder {
-                    let _ = std::fs::remove_dir(folder);
-                }
+        if let Err(e) = performed
+            && !aborted
+        {
+            // «Carpeta nueva con la selección» sigue: lo que ya se movió necesita su deshacer.
+            if created_folder.is_none() {
                 return Err(e);
             }
+            perform_error = Some(e.message().to_string());
         }
     }
 
     let log = recorder_log(&recorder);
     let mut select = Vec::new();
     let undo = match op {
-        Op::Duplicate { .. } => {
-            select = log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect::<Vec<_>>();
+        Op::Duplicate { sources } => {
+            // Solo las copias de primer nivel (las de una carpeta copiada también avisan).
+            let parents: Vec<&Path> = sources.iter().filter_map(|s| s.parent()).collect();
+            select = log
+                .iter()
+                .filter_map(|r| r.created.clone())
+                .map(PathBuf::from)
+                .filter(|c| c.parent().is_some_and(|p| parents.contains(&p)))
+                .collect::<Vec<_>>();
             focus = select.last().cloned();
             Some(Undo::Created(select.clone()))
         }
         Op::NewFolderWith { .. } => {
-            let moved: Vec<(PathBuf, PathBuf)> =
-                log.iter().filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?))).collect();
             let folder = created_folder.clone().unwrap_or_default();
+            let moved: Vec<(PathBuf, PathBuf)> = log
+                .iter()
+                .filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?)))
+                .filter(|(now, _)| now.parent() == Some(folder.as_path()))
+                .collect();
             if moved.is_empty() {
                 let _ = std::fs::remove_dir(&folder);
-                return Err(Error::new(E_FAIL, "No se movió ningún elemento"));
+                return Err(Error::new(E_FAIL, perform_error.as_deref().unwrap_or("No se movió ningún elemento")));
             }
             Some(Undo::Batch(vec![Undo::CreatedFolder(folder), Undo::Moved(moved)]))
         }
@@ -203,7 +223,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Recycled(v) => !v.is_empty(),
         Undo::Rename { .. } | Undo::Batch(_) | Undo::CreatedFolder(_) => true,
     });
-    Ok(OpResult { undo, focus, rename_after, error: None, select })
+    Ok(OpResult { undo, focus, rename_after, error: perform_error, select })
 }
 
 /// «Crear acceso directo»: un `.lnk` junto a cada uno («nombre - Acceso directo.lnk», « (2)»…).

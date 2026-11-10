@@ -10,11 +10,36 @@ el nombre de la función de Rust que lo dibuja.
 |---|---|---|
 | **Tokens** | `crates/xdir-core/src/theme.rs`, `crates/xdir-core/src/xtree/colors.rs` | Colecciones de variables: **Tema** (modos Oscuro y Claro: background, surface, surface_alt, border, text, text_dim, text_secondary, accent, focus_fill, hover, selection, scrollbar, advertencia (ámbar #FAC74D en oscuro, #B7791F en claro), carpeta (amarillo fijo), ok/peligro y tres neutros del mapa), **Acentos** (los 12 `PRESETS`), **Mapa** (`WHEEL` y `CATS`) y **Medidas** (constantes de `crates/xdir-core/src/xtree/view.rs` y `crates/xdir-core/src/ui.rs`). Estilos de texto `Texto/ui`, `ui_bold`, `title`, `small`, `small_bold`: los `FontId::{Ui, UiBold, Title, Small, SmallBold}` de `crates/xdir-core/src/paint.rs`. |
 | **Componentes** | `crates/xdir-core/src/ui.rs` y la vista de xtree | De xtree: `xtree::view::top_bar`, `table_row`, `folder_block`, `file_block`, `card`, `drive_menu`, `disk_bar` y `legend`. De xdir: `ui::draw_status` (14 variantes: xtree encendido o apagado y los 5 layouts, y con 2 paneles el indicador de xtree en progreso, giro, terminado y aviso), `ui::draw_group_bar` (píldora de grupo en 5 estados y botón «+»), `pane::Pane::draw_tabs`, `pane::Pane::draw_search`, `pane::Pane::draw_favs`, `list::FileList::draw` (fila en 6 estados y encabezado), `list::FileList::draw_cell` (cuadrícula), `tree::Tree::draw` (fijado, colapsado y fijado con la entrada «xtree»), `palette::Palette::draw` (comandos, carpetas, nombre de grupo), `typed::Suggest::draw`, `about::draw`, `ui::draw_picker` y `ui::draw_terminal_menu`. De la tanda B (sección «Tanda B: organizar la lista»): `list::FileList::draw_group_header` (encabezado de grupo expandido, plegado y con foco), `list::FileList::draw_checkbox` (casilla vacía, marcada y parcial), `list::FileList::draw_filter_menu` (desplegable del filtro de columna), `list::FileList::draw_content_row` (fila de la vista Contenido en 5 variantes) y `list::FileList::draw_list_cell` (celda de la vista Lista en 5 variantes). De la sección «Estado de xtree y cartel de ayuda»: `ui::draw_xtree_badge` (indicador de 14×14: progreso con anillo al 37 %, giro, terminado en `ok` y aviso en `warning`/advertencia) y `app::tooltip` (cartel de ayuda: `surface_alt`, borde `border`, radio 4, texto Small, 6 de margen, alto 26). De la tanda C (sección «Tanda C: vista previa»): `ui::draw_preview_toggle` (botón de la columna de vista previa: apagado, bajo el mouse y encendido; cartel «Vista previa (Alt+P)» / «Vista previa (⌥⌘P)»), tres variantes más de `ui::draw_status` con ese botón (`Vista previa=Encendida/Apagada`), `preview::draw` (la columna en 6 variantes: imagen, texto, carpeta, varios seleccionados, sin vista previa o solo en línea y cargando), `preview::draw_details` (el bloque de detalles en las mismas 6), `list::FileList::draw_strip_cell` (celda de la tira de la Galería: normal, bajo el mouse, seleccionada, seleccionada con foco y con casilla) y `quicklook::draw_title_bar` (barra de título de la vista rápida de Windows). Las variantes (estado, tipo, sistema) son propiedades del componente. |
-| **Pantallas · xtree** | la vista de xtree dentro de xdir | 9 pantallas de 1400×820, cada una en tema oscuro (izquierda) y claro (derecha): T01 escaneando con mapa en vivo, T02 fase MFT con %, T03 completo (color por carpeta), T04 color por tipo con leyenda, T05 menú de discos abierto, T06 aviso de carpetas sin permiso (macOS), T07 aviso de administrador (Windows), T08 cronómetro y porcentaje («Escaneando… 37 % · 0:42» y barra de avance de 3 px en acento bajo la barra superior), T09 «Análisis completado en 1:23». |
-| **Pantallas · xdir** | `crates/xdir-core/src/app/paint.rs` y lo que dibuja | 31 pantallas X01–X31 de la ventana principal que xdir ya tiene hoy, 6 pantallas X32–X37 de la tanda B, la X38 del estado de xtree y las X39–X44 de la tanda C (vista previa, Galería y vista rápida), todas ya programadas, en oscuro y claro (ver los inventarios). |
+| **Pantallas · xtree** | la vista de xtree dentro de xdir | 9 pantallas de 1400×820, cada una en tema oscuro y claro, en dos grupos («Vista de xtree (T01–T07)» y «Estado de xtree: cronómetro y porcentaje (T08–T09)»; ver «Cómo están ordenadas las pantallas»): T01 escaneando con mapa en vivo, T02 fase MFT con %, T03 completo (color por carpeta), T04 color por tipo con leyenda, T05 menú de discos abierto, T06 aviso de carpetas sin permiso (macOS), T07 aviso de administrador (Windows), T08 cronómetro y porcentaje («Escaneando… 37 % · 0:42» y barra de avance de 3 px en acento bajo la barra superior), T09 «Análisis completado en 1:23». |
+| **Pantallas · xdir** | `crates/xdir-core/src/app/paint.rs` y lo que dibuja | 31 pantallas X01–X31 de la ventana principal que xdir ya tiene hoy, 6 pantallas X32–X37 de la tanda B, la X38 del estado de xtree y las X39–X44 de la tanda C (vista previa, Galería y vista rápida), todas ya programadas, en oscuro y claro, en cuatro grupos: «Ventana principal (X01–X31)», «Tanda B: organizar la lista (X32–X37)», «Estado de xtree (X38)» y «Tanda C: vista previa, Galería y vista rápida (X39–X44)» (ver los inventarios y «Cómo están ordenadas las pantallas»). |
 
 Las pantallas usan **instancias** de los componentes (barra de estado, píldoras de grupo, filas y celdas de la lista, favoritos, árbol, paleta, desplegable de rutas, acerca de, panel de acento, menú de consola; en xtree, barra superior, filas, tarjeta, menú, barra de datos, leyenda). Los bloques del mapa se dibujan a medida con la misma receta que
 `folder_block` y `file_block`; el marco del panel (pestañas, barra de dirección con migas, caja de búsqueda, pie) y las filas con columnas distintas de las de fábrica también se dibujan a medida con la receta de `pane::Pane::draw` y `list::FileList::draw`, porque dependen del ancho. El tema se elige con el modo de la variable en el marco de cada pantalla.
+
+### Cómo están ordenadas las pantallas
+
+En las dos páginas de pantallas cada tema (una tanda o una parte de la app) es un **grupo** con su título arriba: Inter
+SemiBold **120** en ámbar (la familia, el peso y el color de los títulos de sección de Componentes, `S:3`, pero sin el
+estilo, que es de 16, para que se lea con la página entera a la vista); caja de 145 de alto. Dentro del grupo las
+pantallas van en orden, lado a lado, en **filas de hasta 6**; debajo de cada fila oscura va la misma fila en claro, y después
+la siguiente tanda de 6 (oscura, clara…). Medidas: margen 60 alrededor de todo; el título arriba del grupo y su primera fila 225 más abajo (145 del título + 80 de aire);
+200 entre pantallas, a lo ancho y a lo alto (también entre la fila oscura y la clara); **400 entre grupos**. Con pantallas
+de 1400×820 la fila llena mide 9400 y el marco de la página 9520 de ancho; el alto se ajusta al último grupo
+(Pantallas · xdir: 19780; Pantallas · xtree: 6690). No hay marcos de grupo: títulos y pantallas son hijos directos del
+marco de la página, y en la lista de capas van en ese orden (título, fila oscura, fila clara…).
+
+| Página | Grupo | y del título | Filas (oscura / clara) |
+|---|---|---|---|
+| Pantallas · xdir | Ventana principal (X01–X31) | 60 | 6 pares (X01–X06 … X25–X30, X31 sola) |
+| Pantallas · xdir | Tanda B: organizar la lista (X32–X37) | 12725 | 1 par |
+| Pantallas · xdir | Estado de xtree (X38) | 15190 | 1 par |
+| Pantallas · xdir | Tanda C: vista previa, Galería y vista rápida (X39–X44) | 17655 | 1 par |
+| Pantallas · xtree | Vista de xtree (T01–T07) | 60 | 2 pares (T01–T06, T07 sola) |
+| Pantallas · xtree | Estado de xtree: cronómetro y porcentaje (T08–T09) | 4565 | 1 par |
+
+Pantallas nuevas (la tanda D en adelante): van como **un grupo nuevo al final** de su página, 400 debajo del último,
+con la misma regla (título, filas de 6, la clara debajo de la oscura) y agrandando el alto del marco para que quede 60 de
+margen abajo. No se intercalan pantallas en grupos viejos.
 
 ## Lo que muestran las pantallas
 
@@ -68,7 +93,7 @@ Leído de `crates/xdir-core/src/app/paint.rs` (orden de dibujo), `ui.rs`, `pane.
 ## Inventario de pantallas de la tanda B (X32–X37)
 
 Diseñadas antes de programar y ya programadas (spec `docs/superpowers/specs/2026-11-09-explorador-tanda-b-design.md`): fijan el layout de los
-encabezados de grupo, el desplegable de filtros, las vistas Lista y Contenido y las casillas. Van debajo de X31, con la base
+encabezados de grupo, el desplegable de filtros, las vistas Lista y Contenido y las casillas. Son el grupo «Tanda B: organizar la lista (X32–X37)», con la base
 de X02 (un panel) y en oscuro y claro.
 
 | N.º | Pantalla | Qué muestra | Qué se hace | Rust |
@@ -108,8 +133,8 @@ Notas de X38, T08 y T09:
 
 ## Tanda C: vista previa, Galería y vista rápida (X39–X44)
 
-Diseñadas antes de programar (spec `docs/superpowers/specs/2026-11-09-explorador-tanda-c-design.md`) y ya programadas. Van debajo de X38
-(filas y = 34260…38760; marco de la página hasta 39800), en oscuro y claro.
+Diseñadas antes de programar (spec `docs/superpowers/specs/2026-11-09-explorador-tanda-c-design.md`) y ya programadas. Son el grupo
+«Tanda C: vista previa, Galería y vista rápida (X39–X44)», el último de la página (una fila oscura y su clara), en oscuro y claro.
 
 | N.º | Pantalla | Qué muestra | Qué se hace | Rust |
 |---|---|---|---|---|

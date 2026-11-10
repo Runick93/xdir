@@ -127,7 +127,8 @@ impl App {
     }
 
     /// Muestra el elemento (con su estado de nube ya sabido): lo solo en la nube no va al visor
-    /// del sistema, lo dibuja la `App` (y si el visor estaba abierto, se cierra).
+    /// del sistema, lo dibuja la `App` (y si el visor estaba abierto, se cierra), salvo que la
+    /// ventana del host tenga su propia tarjeta (`quick_look_shows_cloud`, Windows).
     fn present_quick_look(&mut self, item: QuickLookItem) {
         let Some(st) = &mut self.quick_look else { return };
         if st.pending.take().is_some() {
@@ -138,7 +139,7 @@ impl App {
         }
         let host = self.host.clone();
         let was_native = st.ql.native;
-        let native = !item.cloud_only && host.quick_look_show(&item);
+        let native = (!item.cloud_only || host.quick_look_shows_cloud()) && host.quick_look_show(&item);
         if was_native && !native {
             host.quick_look_close();
         }

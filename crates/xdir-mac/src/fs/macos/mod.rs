@@ -106,12 +106,12 @@ pub fn is_hidden(meta: &std::fs::Metadata, name: &OsStr) -> bool {
     name.to_string_lossy().starts_with('.') || meta.st_flags() & UF_HIDDEN != 0
 }
 
-/// Nombre del tipo de archivo como lo muestra el Finder ("Documento PDF"), cacheado por extensión.
 /// Tipo de una carpeta, el mismo que lleva en la lista.
 pub fn folder_type() -> Arc<str> {
     type_name(None, true, false)
 }
 
+/// Nombre del tipo de archivo como lo muestra el Finder ("Documento PDF"), cacheado por extensión.
 fn type_name(ext: Option<&str>, is_dir: bool, package: bool) -> Arc<str> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<str>>>> = OnceLock::new();
     let key = match (is_dir && !package, ext) {

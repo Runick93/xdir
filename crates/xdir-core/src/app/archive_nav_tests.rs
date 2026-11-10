@@ -327,7 +327,8 @@ fn crumb_icon_and_loading_drawn() {
     let host = FakeHost::new();
     let mut a = app(host.clone());
     let (_, zip) = fixture("dibujo", &[("d/a.txt", b"a")]);
-    go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
+    // En la raíz el último tramo (que siempre entra) es el del archivo.
+    go(&mut a, 0, root(&zip));
     a.paint();
     let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
     assert!(texts.iter().any(|t| t == crate::pane::ARCHIVE_GLYPH), "{texts:?}");
@@ -335,7 +336,7 @@ fn crumb_icon_and_loading_drawn() {
     assert!(!texts.iter().any(|t| t == "Cargando…"));
     // Una carga en curso (sin respuesta todavía): «Cargando…».
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
-    a.panes[0].tab_mut().navigate(hwnd, &tx, root(&zip));
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
     a.paint();
     let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
     assert!(texts.iter().any(|t| t == "Cargando…"), "{texts:?}");

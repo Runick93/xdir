@@ -24,6 +24,8 @@ pub const WM_APP_PREVIEW: u32 = crate::WM_APP + 24;
 /// Cuánto texto se lee como mucho (64 KB) y cuántas líneas se guardan.
 pub const TEXT_MAX: usize = 65_536;
 pub const TEXT_LINES: usize = 200;
+/// Caracteres que se guardan de cada línea (la columna no ajusta: lo demás no se vería).
+pub const LINE_MAX: usize = 1000;
 
 /// Lo que se mira para decidir si un archivo sin extensión de texto es texto.
 const SNIFF: usize = 4096;
@@ -158,7 +160,7 @@ fn file_body(path: &Path) -> PreviewBody {
     }
     if !text_ext {
         let head = &bytes[..bytes.len().min(SNIFF)];
-        if text::decode_text(head, bytes.len() > SNIFF).is_none() {
+        if text::decode(head, bytes.len() > SNIFF, false).is_none() {
             return PreviewBody::Image;
         }
         // Parece texto: se sigue leyendo hasta el límite.
@@ -168,15 +170,20 @@ fn file_body(path: &Path) -> PreviewBody {
     }
     let cut = bytes.len() > TEXT_MAX;
     bytes.truncate(TEXT_MAX);
-    text_body(&bytes, cut)
+    text_body(&bytes, cut, text_ext)
 }
 
-/// Las primeras líneas, o `Image` si no es texto (un `.txt` en otra codificación: el sistema
-/// quizás tenga cómo mostrarlo).
-fn text_body(bytes: &[u8], cut: bool) -> PreviewBody {
-    match text::decode_text(bytes, cut) {
+/// Las primeras líneas (cada una hasta `LINE_MAX` caracteres), o `Image` si no es texto (el
+/// sistema quizás tenga cómo mostrarlo).
+fn text_body(bytes: &[u8], cut: bool, text_ext: bool) -> PreviewBody {
+    match text::decode(bytes, cut, text_ext) {
         Some(mut lines) => {
             lines.truncate(TEXT_LINES);
+            for line in &mut lines {
+                if let Some((i, _)) = line.char_indices().nth(LINE_MAX) {
+                    line.truncate(i);
+                }
+            }
             PreviewBody::Text { lines }
         }
         None => PreviewBody::Image,

@@ -111,3 +111,4 @@ Poder ver qué es un archivo sin abrirlo, con lo mejor del Explorador (panel de 
 6. **Recorrido de la vista rápida**: sigue el orden visible de la lista (agrupada y filtrada), salteando encabezados. Si una actualización de la carpeta borra el elemento abierto, pasa al siguiente; si no queda ninguno, se cierra.
 7. **Qué muestra la columna**: siempre lo del último panel activo, aunque el foco esté en el árbol. Los resultados de búsqueda se comportan como cualquier carpeta. Con la vista de xtree abierta (pantalla completa), la columna no se ve.
 8. **Texto ilegible**: un corte de UTF-8 en el límite de 64 KB cuenta como texto válido. Archivos sin permiso o bloqueados: ícono del tipo y, en los detalles, «No se puede leer este archivo».
+9. **Carpetas solo en la nube**: responden «Disponible solo en línea» sin listarse (listarlas las bajaría).

@@ -198,3 +198,42 @@ fn fake_preview_serves_reads_and_delays() {
     assert!(FakePreview::take_requests().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Un `.txt` en Latin-1 se muestra (como Windows-1252); un binario sin extensión de texto, no.
+#[test]
+fn preview_text_ext_latin1() {
+    let dir = temp_dir("latin1");
+    let txt = dir.join("viejo.txt");
+    std::fs::write(&txt, b"ma\xF1ana\r\nca\xF1o").unwrap();
+    let body = answer_of(PreviewTarget::File(txt), &local).body;
+    assert_eq!(body, PreviewBody::Text { lines: vec!["mañana".into(), "caño".into()] });
+    let bin = dir.join("datos.bin");
+    std::fs::write(&bin, b"ma\xF1ana").unwrap();
+    assert_eq!(answer_of(PreviewTarget::File(bin), &local).body, PreviewBody::Image);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// UTF-16 con BOM (como los que guarda el Bloc de notas o PowerShell) es texto.
+#[test]
+fn preview_utf16_file() {
+    let dir = temp_dir("utf16");
+    let file = dir.join("salida.log");
+    let bytes: Vec<u8> = [0xFF, 0xFE].into_iter().chain("uno\r\ndos\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    std::fs::write(&file, bytes).unwrap();
+    let body = answer_of(PreviewTarget::File(file), &local).body;
+    assert_eq!(body, PreviewBody::Text { lines: vec!["uno".into(), "dos".into()] });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Una línea larguísima (un JSON minificado) se guarda cortada en `LINE_MAX` caracteres.
+#[test]
+fn preview_long_line_capped() {
+    let dir = temp_dir("larga");
+    let file = dir.join("min.json");
+    std::fs::write(&file, format!("{}\nfin", "ñ".repeat(5000))).unwrap();
+    let PreviewBody::Text { lines } = answer_of(PreviewTarget::File(file), &local).body else { panic!("texto") };
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].chars().count(), LINE_MAX);
+    assert_eq!(lines[1], "fin");
+    let _ = std::fs::remove_dir_all(&dir);
+}

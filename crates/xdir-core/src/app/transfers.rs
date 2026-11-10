@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
@@ -49,7 +50,9 @@ pub(super) struct Transfers {
     next: JobId,
     sched: Arc<Scheduler>,
     /// Sin ventana para preguntar: los conflictos se responden «Omitir» en el hilo del trabajo.
-    auto_skip: bool,
+    /// Lo leen también los hilos de los trabajos: si el host no puede abrir la ventana, los que ya
+    /// corren dejan de esperar respuesta.
+    auto_skip: Arc<AtomicBool>,
     /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco; varios
     /// pedidos esperan cada uno los suyos.
     pending_eject: Vec<(Vec<JobId>, AfterJobs)>,
@@ -86,7 +89,7 @@ impl Transfers {
             next: 1,
             sched: Arc::new(Scheduler::new()),
             // La plataforma con ventana de copia lo apaga (`set_auto_skip(false)`) y se pregunta.
-            auto_skip: true,
+            auto_skip: Arc::new(AtomicBool::new(true)),
             pending_eject: Vec::new(),
             window: CopyWindow::default(),
         }
@@ -233,7 +236,7 @@ impl App {
             apply_all: false,
         });
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, label, paths: paths.clone() });
-        let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip);
+        let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone());
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
             let send = |u: Update| {
@@ -248,7 +251,7 @@ impl App {
             }
             let _turn = Release(sched, id);
             transfer::run(spec, prims, &ctl, &mut |u| {
-                if auto_skip && matches!(u, Update::Conflict(_)) {
+                if auto_skip.load(Ordering::SeqCst) && matches!(u, Update::Conflict(_)) {
                     ctl.answer(Answer { choice: Choice::Skip, all: false });
                 }
                 send(u)
@@ -263,6 +266,9 @@ impl App {
         let now = Instant::now();
         let mut finished = Vec::new();
         let mut show = false;
+        let auto = self.auto_skip();
+        // Conflictos que llegaron sin a quién preguntar (el hilo los mandó antes de saberlo).
+        let mut skip_now = Vec::new();
         while let Ok((id, update)) = self.transfers.rx.try_recv() {
             let Some(v) = self.transfers.jobs.iter_mut().find(|j| j.id == id) else { continue };
             match update {
@@ -293,13 +299,15 @@ impl App {
                 Update::Conflict(info) => {
                     // El tiempo esperando la respuesta no cuenta para la velocidad promedio.
                     v.speed.pause(now);
-                    if !self.transfers.auto_skip {
+                    if !auto {
                         self.notice = Some(format!("Ya existe «{}» en «{}»", info.name, info.folder));
+                    } else {
+                        skip_now.push(id);
                     }
                     v.conflict = Some(info);
                     v.state = JobState::Conflict;
                     v.apply_all = false;
-                    show = show || !self.transfers.auto_skip;
+                    show = show || !auto;
                 }
                 Update::Finished(outcome) => {
                     v.state = JobState::Done;
@@ -309,6 +317,9 @@ impl App {
                     finished.push((id, outcome));
                 }
             }
+        }
+        for id in skip_now {
+            self.answer_job(id, Answer { choice: Choice::Skip, all: false });
         }
         for (id, outcome) in finished {
             // Terminó con errores o sin poder hacerlo: la ventana lo muestra enseguida.
@@ -363,8 +374,8 @@ impl App {
             host.aux_invalidate(AuxWindow::Transfers);
         } else {
             self.transfers.window.shown = false;
-            if !self.transfers.auto_skip {
-                self.transfers.auto_skip = true;
+            if !self.auto_skip() {
+                self.transfers.auto_skip.store(true, Ordering::SeqCst);
                 // Los que ya esperan una respuesta no tienen a quién preguntar.
                 let waiting: Vec<JobId> = self.transfers.jobs.iter().filter(|j| j.state == JobState::Conflict).map(|j| j.id).collect();
                 for id in waiting {
@@ -595,7 +606,7 @@ impl App {
             Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), first.message))
         } else if !outcome.skipped.is_empty() {
             Some(skipped_text(outcome.skipped.len()))
-        } else if !self.transfers.auto_skip
+        } else if !self.auto_skip()
             && let Some(c) = self.transfers.jobs.iter().find_map(|j| j.conflict.as_ref())
         {
             // Otro trabajo espera una respuesta: su aviso sigue a la vista.
@@ -628,7 +639,11 @@ impl App {
 
     /// Con la ventana de copia se pregunta; sin ella (hasta la Task 12), «Omitir».
     pub fn set_auto_skip(&mut self, on: bool) {
-        self.transfers.auto_skip = on;
+        self.transfers.auto_skip.store(on, Ordering::SeqCst);
+    }
+
+    fn auto_skip(&self) -> bool {
+        self.transfers.auto_skip.load(Ordering::SeqCst)
     }
 
     fn forget_job(&mut self, id: JobId) {

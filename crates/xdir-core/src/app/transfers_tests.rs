@@ -608,3 +608,23 @@ fn queued_title_counts_the_chosen_items() {
     a.cancel_job(second);
     wait(&mut a, idle);
 }
+
+#[test]
+fn running_job_skips_conflicts_once_there_is_no_window() {
+    // Un trabajo que empezó creyendo que había ventana: cuando el host no la puede abrir, sus
+    // conflictos posteriores se omiten solos (no espera para siempre).
+    let f = fake();
+    let JobSpec::Copy { mut sources, dest } = slow_copy(&f, "/app-nw", 10) else { unreachable!() };
+    f.add_file(&p("/app-nw/s/z.txt"), b"nuevo".to_vec());
+    f.add_file(&p("/app-nw/d/z.txt"), b"viejo".to_vec());
+    sources.push(p("/app-nw/s/z.txt"));
+    let (mut a, host) = app_window();
+    host.set_aux_native(false);
+    let id = a.start_transfer(JobSpec::Copy { sources, dest });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    f.set_slow(&p("/app-nw/s/grande.bin"), None);
+    wait(&mut a, idle);
+    assert_eq!(f.contents(&p("/app-nw/d/z.txt")).unwrap(), b"viejo");
+    assert_eq!(a.notice.as_deref(), Some("Se omitió 1 elemento que ya existía"));
+}

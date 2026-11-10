@@ -16,7 +16,7 @@ pub mod dialog;
 pub mod drives_dialog;
 pub mod places;
 
-pub use places::{NetFavorite, NetPlaces, NetRecent};
+pub use places::{NetFavorite, NetPlaces, NetRecent, PlacesWriter};
 
 /// Eventos de `Network::browse` (máquinas que aparecen o desaparecen en la red local).
 pub const WM_APP_NET: u32 = crate::WM_APP + 33;

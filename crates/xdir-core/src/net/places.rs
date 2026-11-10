@@ -118,10 +118,12 @@ impl NetPlaces {
         self.save_in(&dir)
     }
 
-    /// Escritura atómica: un temporal en la misma carpeta y renombrar.
+    /// Escritura atómica: un temporal propio de esta escritura en la misma carpeta y renombrar.
     pub fn save_in(&self, dir: &Path) -> std::io::Result<()> {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::fs::create_dir_all(dir)?;
-        let tmp = dir.join(format!("{FILE_NAME}.tmp"));
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("{FILE_NAME}.{}.{n}.tmp", std::process::id()));
         std::fs::write(&tmp, self.write())?;
         std::fs::rename(&tmp, dir.join(FILE_NAME)).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
@@ -172,6 +174,62 @@ impl NetPlaces {
 
     pub fn clear_recents(&mut self) {
         self.recents.clear();
+    }
+}
+
+/// Escribe `red.toml` en un solo hilo y en orden: si llegan varios cambios mientras escribe, el
+/// último gana (los del medio no se escriben). Así dos escrituras nunca se cruzan.
+#[derive(Clone, Default)]
+pub struct PlacesWriter(std::sync::Arc<std::sync::Mutex<WriterState>>);
+
+#[derive(Default)]
+struct WriterState {
+    pending: Option<(PathBuf, NetPlaces)>,
+    busy: bool,
+    /// Fecha del archivo después de la última escritura propia.
+    written: Option<std::time::SystemTime>,
+}
+
+impl PlacesWriter {
+    /// Encola la escritura de `places` en `dir` y vuelve enseguida.
+    pub fn submit(&self, dir: &Path, places: NetPlaces) {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        s.pending = Some((dir.to_path_buf(), places));
+        if s.busy {
+            return;
+        }
+        s.busy = true;
+        let me = self.clone();
+        std::thread::spawn(move || {
+            loop {
+                // Tomar lo pendiente y, si no hay, dejar de escribir: bajo el mismo candado, así
+                // un `submit` que llega justo ahora lanza otro hilo.
+                let (dir, places) = {
+                    let mut s = me.0.lock().unwrap_or_else(|e| e.into_inner());
+                    match s.pending.take() {
+                        Some(job) => job,
+                        None => {
+                            s.busy = false;
+                            break;
+                        }
+                    }
+                };
+                let _ = places.save_in(&dir);
+                let mtime = std::fs::metadata(dir.join(FILE_NAME)).and_then(|m| m.modified()).ok();
+                me.0.lock().unwrap_or_else(|e| e.into_inner()).written = mtime;
+            }
+        });
+    }
+
+    /// ¿Hay una escritura en curso o pendiente? (mientras tanto no se relee `red.toml`).
+    pub fn busy(&self) -> bool {
+        let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        s.busy || s.pending.is_some()
+    }
+
+    /// La fecha que dejó la última escritura propia.
+    pub fn written(&self) -> Option<std::time::SystemTime> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).written
     }
 }
 

@@ -94,3 +94,25 @@ fn ago_texts() {
     // Con la zona horaria: las 01:00 de hoy en UTC-3 son ayer.
     assert_eq!(ago(now, now - 10 * 3600, -3 * 3600), "ayer");
 }
+
+#[test]
+fn writes_are_serialized_last_wins() {
+    let dir = std::env::temp_dir().join(format!("xdir-red-serial-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let w = PlacesWriter::default();
+    let mut last = NetPlaces::default();
+    for i in 0..30 {
+        last.add_recent(&a(&format!("smb://nas/r{i}")), i);
+        w.submit(&dir, last.clone());
+    }
+    let t0 = std::time::Instant::now();
+    while w.busy() {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(NetPlaces::load_from(&dir), last);
+    assert!(w.written().is_some());
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+    assert!(leftovers.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

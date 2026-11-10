@@ -54,6 +54,8 @@ pub(super) struct NetState {
     pub unmap: Option<crate::net::drives_dialog::DisconnectDialog>,
     /// La sección «Red» de la configuración.
     pub page: super::network_page::PageState,
+    /// Quien escribe `red.toml`.
+    pub writer: net::PlacesWriter,
     /// Fecha de `red.toml` leída (para volver a leerlo si cambió).
     pub places_mtime: Option<std::time::SystemTime>,
     /// Hay un redibujo pedido para este momento (`WM_APP_NET_TICK`).
@@ -84,6 +86,14 @@ impl App {
 
     /// Vuelve a leer `red.toml` si su fecha no es `known` (la fecha se mira en un hilo).
     pub(super) fn reload_net_places(&self, known: Option<std::time::SystemTime>) {
+        // Con una escritura propia en curso no se relee (se leería un estado viejo).
+        if self.net.writer.busy() {
+            return;
+        }
+        let known = match (known, self.net.writer.written()) {
+            (Some(k), Some(w)) => Some(k.max(w)),
+            (k, w) => k.or(w),
+        };
         let Some(dir) = crate::session::config_dir() else { return };
         let first = known.is_none();
         self.spawn_task(move || {
@@ -105,13 +115,11 @@ impl App {
 
     /// Guarda `red.toml` en un hilo.
     pub(super) fn save_net_places(&self) {
-        // La carpeta se resuelve acá (sin E/S de red); la escritura va en un hilo.
-        let (places, dir) = (self.net.places.clone(), crate::session::config_dir());
-        std::thread::spawn(move || {
-            if let Some(dir) = dir {
-                let _ = places.save_in(&dir);
-            }
-        });
+        // La carpeta se resuelve acá (sin E/S de red); la escritura va en el hilo del escritor, en
+        // orden (la última gana).
+        if let Some(dir) = crate::session::config_dir() {
+            self.net.writer.submit(&dir, self.net.places.clone());
+        }
     }
 
     /// Conecta `addr` en un hilo; vuelve con `TaskDone::Connected { pane, tab, generation, .. }`.

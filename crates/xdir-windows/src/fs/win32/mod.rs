@@ -571,6 +571,11 @@ pub fn folder_icon() -> Option<i32> {
 }
 
 /// Nombre de tipo e ícono genérico por extensión, cacheados para todo el proceso.
+/// Tipo de una carpeta, el mismo que lleva en la lista.
+pub fn folder_type() -> Arc<str> {
+    type_info(None, true).0
+}
+
 fn type_info(ext: Option<&str>, is_dir: bool) -> (Arc<str>, i32) {
     let cache_cell = &TYPE_CACHE;
     let key = match (is_dir, ext) {

@@ -498,6 +498,10 @@ impl FileSystem for Win32FileSystem {
         fsp::folder_icon()
     }
 
+    fn folder_type(&self) -> Arc<str> {
+        fsp::folder_type()
+    }
+
     fn shell_location(&self, text: &str) -> Option<Location> {
         fsp::shell_location(text)
     }

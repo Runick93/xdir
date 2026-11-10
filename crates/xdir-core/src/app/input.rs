@@ -74,7 +74,7 @@ impl App {
             };
         }
         let temps: Vec<bool> = self.groups.items.iter().map(|g| g.temp).collect();
-        if let Some(g) = ui::group_bar_at(w, ui::GAP + self.tree_width(), &temps, x, y).filter(|_| self.groups_bar_h() > 0.0) {
+        if let Some(g) = ui::group_bar_at(w - self.preview_width(), ui::GAP + self.tree_width(), &temps, x, y).filter(|_| self.groups_bar_h() > 0.0) {
             return Hit::GroupBar(g);
         }
         let area = ui::panes_area(w, h, self.tree_width(), self.groups_bar_h(), self.preview_width());

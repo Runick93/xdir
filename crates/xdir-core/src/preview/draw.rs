@@ -124,11 +124,13 @@ pub fn draw(p: &dyn Painter, r: Rect, s: &Shown) {
         Shown::Many { count, keys, icons, bytes, kind } => {
             draw_fan(p, rect(left, top, right, top + ih), keys, icons, *count);
             let size = crate::format::size_short(*bytes);
+            let kb = crate::format::size_kb(*bytes);
             let subtitle = match kind {
                 Some(k) => format!("{size} · {k}"),
                 None => size.clone(),
             };
-            let mut rows = vec![("Tamaño", format!("{size} ({})", crate::format::size_kb(*bytes)))];
+            // El detalle en KB solo si dice algo más que el tamaño corto.
+            let mut rows = vec![("Tamaño", if kb == size { size.clone() } else { format!("{size} ({kb})") })];
             if let Some(k) = kind {
                 rows.push(("Tipo", k.to_string()));
             }
@@ -251,12 +253,13 @@ fn draw_fan(p: &dyn Painter, area: Rect, keys: &[thumbs::Key], icons: &[i32], co
     let th = p.theme();
     let cx = (area.left + area.right) / 2.0;
     let top = area.top - MARGIN;
-    // Atrás a la izquierda, atrás a la derecha y adelante (diseño: 150×112).
-    let spots = [(cx - 104.0, top + 79.0), (cx - 47.0, top + 60.5), (cx - 75.0, top + 68.0)];
+    // Atrás a la izquierda, atrás a la derecha (más chicas, corridas para que se vea parte de su
+    // miniatura) y adelante (diseño: 150×112).
+    let spots = [(cx - 128.0, top + 92.0, 128.0, 96.0), (cx, top + 52.0, 128.0, 96.0), (cx - 75.0, top + 68.0, 150.0, 112.0)];
     let n = keys.len().max(icons.len()).clamp(1, 3);
-    for (i, &(x, y)) in spots.iter().enumerate().skip(3 - n) {
+    for (i, &(x, y, cw, ch)) in spots.iter().enumerate().skip(3 - n) {
         let k = i + n - 3;
-        let card = rect(x, y, x + 150.0, y + 112.0);
+        let card = rect(x, y, x + cw, y + ch);
         p.round_fill(card, 6.0, th.surface_alt);
         p.round_stroke(card, 6.0, th.border);
         let inner = rect(card.left + 4.0, card.top + 4.0, card.right - 4.0, card.bottom - 4.0);
@@ -290,14 +293,11 @@ fn wrap(p: &dyn Painter, font: FontId, s: &str, width: f32, max: usize) -> Vec<S
             lines.push(rest.to_string());
             break;
         }
-        // El corte más largo que entra (al menos un carácter); mejor después de un espacio, punto o guion.
-        let mut cut = rest.char_indices().nth(1).map_or(rest.len(), |(i, _)| i);
-        for (i, _) in rest.char_indices().skip(1) {
-            if p.measure(font, &rest[..i]) > width {
-                break;
-            }
-            cut = i;
-        }
+        // El corte más largo que entra (al menos un carácter), por búsqueda binaria entre los
+        // límites de carácter; mejor después de un espacio, punto o guion.
+        let bounds: Vec<usize> = rest.char_indices().skip(1).map(|(i, _)| i).collect();
+        let fit = bounds.partition_point(|&i| p.measure(font, &rest[..i]) <= width);
+        let mut cut = if fit == 0 { bounds.first().copied().unwrap_or(rest.len()) } else { bounds[fit - 1] };
         if let Some(b) = rest[..cut].rfind([' ', '-', '_', '.']).filter(|&b| b > cut / 2) {
             cut = b + 1;
         }
@@ -404,6 +404,15 @@ mod tests {
         assert!(texts.contains(&"3 elementos seleccionados".to_string()), "{texts:?}");
         assert!(texts.contains(&format!("{size} · Imagen JPEG")), "{texts:?}");
         assert!(texts.contains(&"3".to_string()), "la cantidad en acento");
+        let kb = crate::format::size_kb(13_002_752);
+        assert!(texts.contains(&format!("{size} ({kb})")), "{texts:?}");
+        // 647 KB justos: el detalle en KB no agrega nada.
+        let p2 = painter();
+        draw(&p2, column(), &Shown::Many { count: 2, keys: vec![key("a"), key("b")], icons: vec![1, 2], bytes: 662_528, kind: None });
+        let texts2: Vec<String> = p2.texts().into_iter().map(|t| t.1).collect();
+        let short = crate::format::size_short(662_528);
+        assert!(texts2.contains(&short), "{texts2:?}");
+        assert!(!texts2.iter().any(|t| t.contains('(')), "sin paréntesis que repite: {texts2:?}");
         let p = painter();
         draw(&p, column(), &Shown::Many { count: 2, keys, icons: vec![1, 2], bytes: 10, kind: None });
         let texts: Vec<String> = p.texts().into_iter().map(|t| t.1).collect();

@@ -120,7 +120,7 @@ impl App {
                     Hit::GroupBar(g) => Some(g),
                     _ => None,
                 };
-                ui::draw_group_bar(p, w, area.left, &names, active_group, group_hover);
+                ui::draw_group_bar(p, w - preview_w, area.left, &names, active_group, group_hover);
             }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));

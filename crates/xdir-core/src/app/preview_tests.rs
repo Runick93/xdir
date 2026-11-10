@@ -229,6 +229,9 @@ fn preview_nothing_selected_shows_folder() {
     assert!(rows.contains(&("Contenido", "3 elementos".to_string())), "{rows:?}");
     assert!(rows.contains(&("Tamaño", size.clone())), "{rows:?}");
     assert!(rows.iter().any(|r| r.0 == "Modificado"), "{rows:?}");
+    assert!(rows.iter().any(|r| r.0 == "Último acceso"), "{rows:?}");
+    // El tipo es el que el sistema le da a una carpeta, no el de un hijo.
+    assert_eq!(rows[0], ("Tipo", sys::file_system().folder_type().to_string()));
     a.paint();
     assert!(host.drawn_texts().iter().any(|t| t.1 == format!("3 elementos · {size}")), "{:?}", host.drawn_texts());
 }
@@ -395,4 +398,127 @@ fn preview_refreshes_changed_file() {
     assert_eq!(FakePreview::take_requests(), [PreviewTarget::File(d.join("foto.png"))]);
     a.paint();
     assert!(a.preview.forget.is_empty());
+}
+
+/// Con xtree abierto, el botón (o el atajo) cierra xtree y muestra la columna, aunque ya
+/// estuviera prendida: nunca la apaga sin que se vea.
+#[test]
+fn toggle_with_xtree_open_shows_column() {
+    let d = fixture("toggle-xtree", &[("a.txt", "a")]);
+    let mut a = two_panes();
+    a.xtree = Some(Xtree::idle(d.clone()));
+    a.xtree_open = true;
+    a.run_command(Command::TogglePreview);
+    assert!(!a.xtree_open);
+    assert!(a.preview.on);
+    a.preview.on = false;
+    a.xtree_open = true;
+    let (w, h) = a.client_dips();
+    let r = ui::preview_rect(w, h);
+    a.on_left_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+    assert!(!a.xtree_open);
+    assert!(a.preview.on);
+    // Sin xtree, alterna como siempre.
+    a.run_command(Command::TogglePreview);
+    assert!(!a.preview.on);
+}
+
+/// Muchos grupos: las pestañas se achican para terminar antes de la columna (con más de los que
+/// entran al ancho mínimo, se recortan) y un clic sobre la columna no elige un grupo.
+#[test]
+fn group_tabs_stop_before_column() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    a.set_layout(Layout::TwoSide);
+    a.preview.on = true;
+    a.show_group_bar = true;
+    a.groups.items = (0..9).map(|i| crate::groups::Group { name: format!("grupo{i:02}"), layout: 1, split_x: 0.5, split_y: 0.5, panes: Vec::new(), temp: false }).collect();
+    a.paint();
+    let col = a.preview_column().expect("la columna se ve");
+    let names: Vec<_> = host.drawn_texts().into_iter().filter(|t| t.1.starts_with("grupo")).collect();
+    assert_eq!(names.len(), 9);
+    assert!(names.iter().all(|t| t.2.right <= col.left), "{names:?}");
+    a.groups.items = (0..30).map(|i| crate::groups::Group { name: format!("grupo{i:02}"), layout: 1, split_x: 0.5, split_y: 0.5, panes: Vec::new(), temp: false }).collect();
+    for dx in [2.0, 20.0, 200.0] {
+        let (x, y) = (col.left + dx, ui::GROUPBAR_H / 2.0);
+        assert!(!matches!(a.hit(x, y), Hit::GroupBar(_)), "{:?}", a.hit(x, y));
+    }
+}
+
+/// Ventana angosta: si ni la columna mínima entra con los paneles de 280, no se ve (ni pide) en
+/// ese cuadro; sigue prendida y el botón encendido.
+#[test]
+fn column_hidden_when_it_does_not_fit() {
+    let d = fixture("angosta", &[("a.txt", "a")]);
+    let host = FakeHost::new();
+    host.client.set((800.0, 700.0));
+    let mut a = app_with_host(host.clone());
+    a.set_layout(Layout::TwoSide);
+    a.preview.on = true;
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    select(&mut a, 0, "a.txt");
+    a.paint();
+    a.flush_preview();
+    let tree_w = a.tree_width();
+    assert!(!ui::preview_fits(800.0, tree_w, 2));
+    assert_eq!(a.preview_width(), 0.0);
+    assert!(a.preview_column().is_none());
+    assert!(FakePreview::take_requests().is_empty());
+    assert!(a.preview.on);
+    // Más ancha: aparece y pide.
+    host.client.set((1600.0, 700.0));
+    a.paint();
+    a.flush_preview();
+    assert!(a.preview_column().is_some());
+    assert_eq!(FakePreview::take_requests(), [PreviewTarget::File(d.join("a.txt"))]);
+}
+
+/// En «Este equipo», un archivo enfocado se pide como cualquier elemento.
+#[test]
+fn computer_focused_file_is_requested() {
+    let d = fixture("equipo-archivo", &[("nota.txt", "n")]);
+    let mut a = two_panes();
+    a.set_active(0);
+    pump(&mut a, 0);
+    let file = crate::fs::Entry {
+        name: "nota.txt".into(),
+        full: Some(d.join("nota.txt").into_os_string()),
+        group: 0,
+        pidl: None,
+        display: "nota.txt".into(),
+        sort_key: "nota.txt".into(),
+        is_dir: false,
+        size: 1,
+        modified: 0,
+        created: 0,
+        attrs: 0,
+        type_name: std::sync::Arc::from("Texto"),
+        icon: 0,
+        overlay: 0,
+        overlay_checked: true,
+    };
+    a.panes[0].tab_mut().list.append(vec![file]);
+    a.panes[0].tab_mut().list.select_pos(0);
+    a.paint();
+    a.flush_preview();
+    assert_eq!(FakePreview::take_requests(), [PreviewTarget::File(d.join("nota.txt"))]);
+}
+
+/// Renombrar el elemento que se muestra (misma posición, otra ruta) cambia el sujeto.
+#[test]
+fn rename_updates_subject() {
+    let d = fixture("renombra", &[("viejo.txt", "v")]);
+    let mut a = two_panes();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    select(&mut a, 0, "viejo.txt");
+    a.paint();
+    a.flush_preview();
+    FakePreview::take_requests();
+    let idx = a.panes[0].tab().list.focused_index().unwrap();
+    a.panes[0].tab_mut().list.entries[idx].name = "nuevo.txt".into();
+    a.paint();
+    a.flush_preview();
+    assert_eq!(FakePreview::take_requests(), [PreviewTarget::File(d.join("nuevo.txt"))]);
 }

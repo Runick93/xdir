@@ -6,6 +6,7 @@
 //! camino, como el guardado de `carpetas.toml`), así las flechas rápidas no lanzan un hilo de
 //! lectura por tecla. Cada pedido lleva una generación nueva y las respuestas viejas se descartan.
 
+use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,7 +39,7 @@ struct Fingerprint {
     tab: usize,
     location: Location,
     selected: usize,
-    entry: Option<(usize, u64, u64)>,
+    entry: Option<(usize, OsString, u64, u64)>,
     len: usize,
 }
 
@@ -105,7 +106,12 @@ fn source_of(tab: &Tab, idx: usize) -> thumbs::Source {
 impl App {
     /// ¿Se ve la columna? (prendida y sin la vista de xtree encima).
     pub(super) fn preview_visible(&self) -> bool {
-        self.preview.on && !self.xtree_open
+        if !self.preview.on || self.xtree_open {
+            return false;
+        }
+        // Si ni el mínimo entra sin achicar los paneles, no se ve en este cuadro (sigue prendida).
+        let (w, _) = self.client_dips();
+        ui::preview_fits(w, self.tree_width(), self.panes_across())
     }
 
     /// Paneles lado a lado (para no dejar ninguno por debajo de su mínimo).
@@ -152,6 +158,13 @@ impl App {
         self.preview.width = clamped.clamp(ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W);
     }
 
+    /// Prende la columna (venía de xtree, donde no se veía).
+    pub(super) fn show_preview(&mut self) {
+        self.preview.on = true;
+        self.sync_preview();
+        self.redraw();
+    }
+
     /// Prende o apaga la columna.
     pub(super) fn toggle_preview(&mut self) {
         self.begin_layout_anim();
@@ -191,7 +204,6 @@ impl App {
                     PreviewTarget::Folder(path)
                 }
             }
-            Location::Computer if list.selected_indices().next().is_none() => return (None, None),
             _ if e.is_dir => PreviewTarget::Folder(tab.entry_path(idx)),
             _ => PreviewTarget::File(tab.entry_path(idx)),
         };
@@ -227,7 +239,7 @@ impl App {
             tab: tab.id,
             location: tab.location.clone(),
             selected,
-            entry: entry.and_then(|i| list.entries.get(i)).map(|e| (entry.unwrap_or(0), e.modified, e.size)),
+            entry: entry.and_then(|i| list.entries.get(i)).map(|e| (entry.unwrap_or(0), e.name.clone(), e.modified, e.size)),
             len: list.entries.len(),
         };
         if self.preview.fingerprint.as_ref() == Some(&fp) {
@@ -347,10 +359,9 @@ impl App {
             None => {
                 let Location::Path(p) = &tab.location else { return Shown::Empty };
                 // La carpeta abierta: no es un elemento de la lista; sus fechas llegan con la vista previa.
-                let kind = list.entries.iter().find(|e| e.is_dir).map_or_else(|| "Carpeta".to_string(), |e| e.type_name.to_string());
-                let mut rows = vec![("Tipo", kind)];
+                let mut rows = vec![("Tipo", sys::file_system().folder_type().to_string())];
                 if let Some(i) = &info {
-                    for (label, ft) in [("Creado", i.created), ("Modificado", i.modified)] {
+                    for (label, ft) in [("Creado", i.created), ("Modificado", i.modified), ("Último acceso", i.accessed)] {
                         if ft != 0 {
                             rows.push((label, env.format_date(ft)));
                         }

@@ -107,14 +107,25 @@ pub fn preview_column_rect(w: f32, h: f32, top: f32, width: f32) -> Rect {
     rect(w - GAP - width, top, w - GAP, h - STATUSBAR_H)
 }
 
+/// ¿Entra la columna de vista previa con su mínimo sin dejar un panel (repartidos parejo) por
+/// debajo de `MIN_PANE_W`? Si no, no se muestra (sigue prendida).
+pub fn preview_fits(w: f32, left: f32, panes_across: usize) -> bool {
+    preview_room(w, left, panes_across) >= PREVIEW_MIN_W
+}
+
+/// Lo más ancha que puede ser la columna sin dejar un panel por debajo de `MIN_PANE_W`.
+fn preview_room(w: f32, left: f32, panes_across: usize) -> f32 {
+    let n = panes_across.max(1) as f32;
+    // Márgenes: el de la izquierda, la separación con la columna y el de la derecha.
+    w - GAP * 3.0 - left - n * MIN_PANE_W - (n - 1.0) * GAP
+}
+
 /// Ancho de la columna de vista previa para una ventana de `w` con `left` ocupado a la izquierda y
 /// `panes_across` paneles lado a lado: lo pedido entre `PREVIEW_MIN_W` y `PREVIEW_MAX_W`, sin dejar
 /// un panel por debajo de `MIN_PANE_W` (salvo que ni el mínimo entre: nunca menos de
 /// `PREVIEW_MIN_W`).
 pub fn clamp_preview_width(want: f32, w: f32, left: f32, panes_across: usize) -> f32 {
-    let n = panes_across.max(1) as f32;
-    // Márgenes: el de la izquierda, la separación con la columna y el de la derecha.
-    let room = w - GAP * 3.0 - left - n * MIN_PANE_W - (n - 1.0) * GAP;
+    let room = preview_room(w, left, panes_across);
     want.clamp(PREVIEW_MIN_W, PREVIEW_MAX_W).min(room).max(PREVIEW_MIN_W)
 }
 
@@ -127,7 +138,8 @@ const GROUP_TAB_MIN_W: f32 = 70.0;
 const GROUP_ADD_W: f32 = 28.0;
 
 /// Pestañas de los `n` grupos y botón «+» a su derecha. El ancho de las pestañas se achica para
-/// que entren todas.
+/// que entren todas. `w`: hasta dónde pueden llegar (el ancho de la ventana sin la columna de
+/// vista previa).
 pub fn group_tabs(w: f32, left: f32, n: usize) -> (Vec<Rect>, Rect) {
     let avail = (w - GAP - left - GROUP_ADD_W - 4.0).max(GROUP_TAB_MIN_W);
     let tab_w = (avail / n.max(1) as f32).clamp(GROUP_TAB_MIN_W.min(avail), GROUP_TAB_W);
@@ -158,6 +170,10 @@ fn group_close_rect(tab: Rect) -> Rect {
 
 /// `temps[i]`: la pestaña i está sin guardar (tiene ×).
 pub fn group_bar_at(w: f32, left: f32, temps: &[bool], x: f32, y: f32) -> Option<GroupHit> {
+    // Lo que no entra (muchos grupos) queda recortado: más allá del borde no hay pestañas.
+    if x > w - GAP {
+        return None;
+    }
     let (tabs, add) = group_tabs(w, left, temps.len());
     if contains(&add, x, y) {
         return Some(GroupHit::Add);
@@ -167,6 +183,12 @@ pub fn group_bar_at(w: f32, left: f32, temps: &[bool], x: f32, y: f32) -> Option
 }
 
 pub fn draw_group_bar(p: &dyn Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+    // Con tantos grupos que ni al ancho mínimo entran, se recortan en el borde (no se meten bajo
+    // la columna de vista previa).
+    p.clip(rect(0.0, 0.0, w - GAP, GROUPBAR_H), &mut || draw_group_tabs(p, w, left, names, active, hover));
+}
+
+fn draw_group_tabs(p: &dyn Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
     let th = p.theme();
     let (tabs, add) = group_tabs(w, left, names.len());
     for (i, (r, (name, temp))) in tabs.iter().zip(names).enumerate() {
@@ -836,8 +858,12 @@ mod tests {
         assert_eq!(clamp_preview_width(410.0, 1600.0, 0.0, 2), 410.0);
         assert_eq!(clamp_preview_width(100.0, 1600.0, 0.0, 2), PREVIEW_MIN_W);
         assert_eq!(clamp_preview_width(9999.0, 3000.0, 0.0, 1), PREVIEW_MAX_W);
-        // Muy angosta: el mínimo de la columna gana.
+        // Muy angosta: el mínimo de la columna gana, pero no entra (no se muestra).
         assert_eq!(clamp_preview_width(320.0, 600.0, 0.0, 2), PREVIEW_MIN_W);
+        assert!(!preview_fits(600.0, 0.0, 2));
+        assert!(preview_fits(w, 0.0, 2));
+        // 2 paneles de 280, 3 separaciones de 6 y una entre paneles: 240 justo con 824.
+        assert!(preview_fits(824.0, 0.0, 2) && !preview_fits(823.0, 0.0, 2));
     }
 
     fn status_with(badge: XtreeBadge) -> (RecordingPainter, Rect) {

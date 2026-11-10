@@ -279,6 +279,10 @@ pub trait FileSystem: Send + Sync {
     fn subfolders(&self, loc: &Location) -> Vec<(String, Location)>;
     /// Ícono genérico de carpeta.
     fn folder_icon(&self) -> Option<i32>;
+    /// Tipo que el sistema le da a una carpeta (el mismo que muestra la lista).
+    fn folder_type(&self) -> Arc<str> {
+        Arc::from("Carpeta")
+    }
     /// Lo escrito en la barra de dirección como lugar especial del Shell ("shell:RecycleBinFolder").
     fn shell_location(&self, text: &str) -> Option<Location>;
     /// Nombre de análisis de la Red del Explorador (vacío si no existe en el sistema).

@@ -12,7 +12,6 @@ use crate::ops::{OpResult, Undo};
 use crate::sys::ItemStat;
 
 pub mod engine;
-mod naming;
 pub mod sched;
 pub mod speed;
 pub mod view;

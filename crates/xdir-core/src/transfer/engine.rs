@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::naming::{copy_name, folder_with_name, free_name, numbered_name, replaced_name};
+use crate::names::{copy_name, folder_with_name, free_name, numbered_name, replaced_name};
 use super::walk::{Planned, totals, walk};
 use super::{Answer, Choice, ConflictInfo, Control, Flow, JobError, JobOutcome, JobSpec, Update};
 use crate::format::thousands;

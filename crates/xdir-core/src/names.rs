@@ -27,6 +27,13 @@ pub fn numbered_name(name: &str, is_dir: bool, n: u32) -> String {
     format!("{stem} {n}{ext}")
 }
 
+/// Lo apartado por «Reemplazar»: «informe (reemplazado).pdf» (n = 1), «informe (reemplazado
+/// 2).pdf» (n ≥ 2). A la vista y reconocible: si xdir se corta antes de tirarlo, queda ahí.
+pub fn replaced_name(name: &str, is_dir: bool, n: u32) -> String {
+    let (stem, ext) = split_ext(name, is_dir);
+    if n <= 1 { format!("{stem} (reemplazado){ext}") } else { format!("{stem} (reemplazado {n}){ext}") }
+}
+
 /// Cómo hace cada sistema sus accesos directos.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkStyle {
@@ -72,6 +79,13 @@ pub fn free_name(dir: &Path, make: &dyn Fn(u32) -> String, taken: &dyn Fn(&Path)
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn replaced_names() {
+        assert_eq!(replaced_name("informe.pdf", false, 1), "informe (reemplazado).pdf");
+        assert_eq!(replaced_name("informe.pdf", false, 2), "informe (reemplazado 2).pdf");
+        assert_eq!(replaced_name("Fotos.2024", true, 1), "Fotos.2024 (reemplazado)");
+    }
 
     #[test]
     fn copy_names() {

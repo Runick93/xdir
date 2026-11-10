@@ -38,6 +38,37 @@ fn file_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
 }
 
+/// Crea en `alias` un alias del Finder que apunta a `target` (bookmark de NSURL).
+pub fn create_alias(target: &Path, alias: &Path) -> std::result::Result<(), String> {
+    use objc2_foundation::{NSURLBookmarkCreationOptions, NSURLBookmarkFileCreationOptions};
+    let data = file_url(target)
+        .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+            NSURLBookmarkCreationOptions::SuitableForBookmarkFile,
+            None,
+            None,
+        )
+        .map_err(|e| format!("{}: {}", target.display(), e.localizedDescription()))?;
+    NSURL::writeBookmarkData_toURL_options_error(&data, &file_url(alias), 0 as NSURLBookmarkFileCreationOptions)
+        .map_err(|e| format!("{}: {}", alias.display(), e.localizedDescription()))
+}
+
+/// A dónde apunta un enlace simbólico o un alias del Finder (sin interfaz ni montar discos).
+pub fn link_target(path: &Path) -> Option<PathBuf> {
+    use objc2_foundation::NSURLBookmarkResolutionOptions;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() {
+        let to = std::fs::read_link(path).ok()?;
+        return Some(if to.is_absolute() { to } else { path.parent()?.join(to) });
+    }
+    if !crate::fs::is_alias(path) {
+        return None;
+    }
+    let options = NSURLBookmarkResolutionOptions::WithoutUI | NSURLBookmarkResolutionOptions::WithoutMounting;
+    let url = NSURL::URLByResolvingAliasFileAtURL_options_error(&file_url(path), options).ok()?;
+    let resolved = PathBuf::from(url.path()?.to_string());
+    (resolved != path).then_some(resolved)
+}
+
 // ---------- portapapeles ----------
 
 /// macOS no tiene "cortar" archivos: se copia y se recuerda que fue un corte (para mover al pegar,

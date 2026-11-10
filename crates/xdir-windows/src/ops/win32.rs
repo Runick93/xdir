@@ -52,6 +52,9 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     if let Op::Undo(undo) = &op {
         return undo_any(hwnd, undo);
     }
+    if let Op::Shortcuts { targets } = &op {
+        return create_shortcuts(targets);
+    }
     // En Windows «Devolver» lo hace el Shell (verbo `undelete` sobre la Papelera virtual).
     if let Op::Restore { .. } = &op {
         return Err(Error::new(E_FAIL, "Se devuelve desde la Papelera del Explorador"));
@@ -132,7 +135,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             }
         }
         Op::Undo(undo) => return undo_any(hwnd, undo),
-        Op::Restore { .. } => return Ok(OpResult::default()),
+        Op::Restore { .. } | Op::Shortcuts { .. } => return Ok(OpResult::default()),
     }
 
     unsafe {
@@ -191,7 +194,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             focus = created.first().cloned();
             Some(Undo::Created(created))
         }
-        Op::Undo(_) | Op::Restore { .. } => None,
+        Op::Undo(_) | Op::Restore { .. } | Op::Shortcuts { .. } => None,
     };
     // Nada que deshacer si no pasó nada (todo cancelado u omitido).
     let undo = undo.filter(|u| match u {
@@ -201,6 +204,28 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Rename { .. } | Undo::Batch(_) | Undo::CreatedFolder(_) => true,
     });
     Ok(OpResult { undo, focus, rename_after, error: None, select })
+}
+
+/// «Crear acceso directo»: un `.lnk` junto a cada uno («nombre - Acceso directo.lnk», « (2)»…).
+fn create_shortcuts(targets: &[PathBuf]) -> Result<OpResult> {
+    let (mut created, mut errors) = (Vec::new(), Vec::new());
+    for target in targets {
+        let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else { continue };
+        let name = name.to_string_lossy();
+        let lnk = names::free_name(parent, &|n| names::shortcut_name(&name, names::LinkStyle::Lnk, n), &|p| std::fs::symlink_metadata(p).is_ok());
+        match crate::shell::win32::create_lnk(target, &lnk) {
+            Ok(()) => created.push(lnk),
+            Err(e) => errors.push(format!("{}: {}", lnk.display(), e.message())),
+        }
+    }
+    let rename_after = created.len() == 1;
+    Ok(OpResult {
+        undo: (!created.is_empty()).then(|| Undo::Created(created.clone())),
+        focus: created.last().cloned(),
+        rename_after,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
+        select: created,
+    })
 }
 
 /// Deshace `undo`: los pasos de un `Batch` en orden inverso (juntando los errores) y una carpeta
@@ -399,5 +424,34 @@ impl IFileOperationProgressSink_Impl for Recorder_Impl {
     }
     fn ResumeTimer(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// «Crear acceso directo»: «a.txt - Acceso directo.lnk» (y « (2)»), que `link_target` resuelve.
+    #[test]
+    fn lnk_roundtrip() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let dir = std::env::temp_dir().join(format!("xdir-win-lnk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+        let r = create_shortcuts(std::slice::from_ref(&a)).unwrap();
+        let lnk = dir.join("a.txt - Acceso directo.lnk");
+        assert_eq!(r.error, None);
+        assert_eq!((r.focus.clone(), r.rename_after), (Some(lnk.clone()), true));
+        assert_eq!(r.undo, Some(Undo::Created(vec![lnk.clone()])));
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(crate::shell::win32::link_target(&lnk).map(|t| canon(&t)), Some(canon(&a)));
+        assert_eq!(crate::shell::win32::link_target(&a), None);
+        let r = create_shortcuts(std::slice::from_ref(&a)).unwrap();
+        assert_eq!(r.focus, Some(dir.join("a.txt - Acceso directo (2).lnk")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

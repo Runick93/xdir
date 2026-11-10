@@ -189,6 +189,11 @@ pub trait DiskScan: Send + Sync {
 /// abiertos (el menú del Shell de Windows) es estado de ese hilo dentro de la plataforma, no del
 /// servicio.
 pub trait Shell: Send + Sync {
+    /// Cómo son los accesos directos de este sistema.
+    fn link_style(&self) -> crate::names::LinkStyle;
+    /// A dónde apunta un acceso directo, alias o enlace (`None` si no es uno o no se resuelve).
+    /// Bloqueante: solo en hilos de trabajo. No lee el contenido del destino.
+    fn link_target(&self, path: &Path) -> Option<PathBuf>;
     /// Copia (o corta, con `cut`) los elementos al portapapeles de archivos.
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String>;
     /// Archivos del portapapeles y si se cortaron.

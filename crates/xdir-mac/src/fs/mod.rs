@@ -13,6 +13,7 @@ use xdir_core::sys;
 pub use xdir_core::fs::{Entry, LoadEvent, LoadMsg, Location, QuickItem, WM_APP_LOAD};
 
 pub(crate) mod macos;
+pub(crate) use macos::is_alias;
 
 /// ¿Es la misma ruta? (sin distinguir mayúsculas ni separador final). La usan las operaciones de
 /// macOS.

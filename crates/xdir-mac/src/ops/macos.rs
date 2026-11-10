@@ -196,6 +196,24 @@ fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
             r.select = restored;
             Ok(r)
         }
+        Op::Shortcuts { targets } => {
+            let (mut created, mut errors) = (Vec::new(), Vec::new());
+            for target in &targets {
+                let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else { continue };
+                let name = name.to_string_lossy();
+                let alias = names::free_name(parent, &|n| names::shortcut_name(&name, names::LinkStyle::Alias, n), &taken);
+                match crate::shell::macos::create_alias(target, &alias) {
+                    Ok(()) => created.push(alias),
+                    Err(e) => errors.push(e),
+                }
+            }
+            // Con uno solo, queda para renombrar.
+            let one = created.len() == 1;
+            let focus = created.last().cloned();
+            let mut r = ok((!created.is_empty()).then(|| Undo::Created(created.clone())), focus, one, errors)?;
+            r.select = created;
+            Ok(r)
+        }
         Op::Undo(undo) => undo_op(undo, hooks),
     }
 }
@@ -494,6 +512,31 @@ mod tests {
         // Deshacer: a vuelve a la Papelera.
         run_with(Op::Undo(r.undo.unwrap()), &h).unwrap();
         assert!(!a_to.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// «Crear acceso directo» hace un alias del Finder «a.txt alias» que `link_target` resuelve
+    /// y que la carga marca como enlace.
+    #[test]
+    fn alias_roundtrip() {
+        let dir = tmp("alias");
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+        let r = run(Op::Shortcuts { targets: vec![a.clone()] }).unwrap();
+        let alias = dir.join("a.txt alias");
+        assert_eq!(r.error, None);
+        assert_eq!((r.focus.clone(), r.rename_after), (Some(alias.clone()), true));
+        assert_eq!(r.select, std::slice::from_ref(&alias));
+        assert!(crate::fs::is_alias(&alias));
+        assert!(!crate::fs::is_alias(&a));
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(crate::shell::macos::link_target(&alias).map(|t| canon(&t)), Some(canon(&a)));
+        assert_eq!(crate::shell::macos::link_target(&a), None);
+        // Un segundo alias: «a.txt alias 2». Un enlace simbólico también se resuelve.
+        let r = run(Op::Shortcuts { targets: vec![a.clone()] }).unwrap();
+        assert_eq!(r.focus, Some(dir.join("a.txt alias 2")));
+        std::os::unix::fs::symlink("a.txt", dir.join("enlace")).unwrap();
+        assert_eq!(crate::shell::macos::link_target(&dir.join("enlace")), Some(dir.join("a.txt")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

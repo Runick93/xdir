@@ -42,7 +42,21 @@ pub fn volume_in(path: &Path, drives: &[PathBuf]) -> Option<OsString> {
 /// Integración con el escritorio de Linux (lo que instala `sys::install`).
 pub struct LinuxShell;
 
+/// A dónde apunta un enlace simbólico (relativo a su carpeta si no es absoluto).
+pub fn link_target(path: &Path) -> Option<PathBuf> {
+    let to = std::fs::read_link(path).ok()?;
+    Some(if to.is_absolute() { to } else { path.parent()?.join(to) })
+}
+
 impl Shell for LinuxShell {
+    fn link_style(&self) -> xdir_core::names::LinkStyle {
+        xdir_core::names::LinkStyle::Symlink
+    }
+
+    fn link_target(&self, path: &Path) -> Option<PathBuf> {
+        link_target(path)
+    }
+
     fn copy_files(&self, _items: &[Item], _cut: bool) -> Result<(), String> {
         Err(UNAVAILABLE.into())
     }

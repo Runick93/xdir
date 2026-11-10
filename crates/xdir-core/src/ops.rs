@@ -24,6 +24,8 @@ pub enum Op {
     NewFolderWith { parent: PathBuf, items: Vec<PathBuf> },
     /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux).
     Restore { items: Vec<PathBuf> },
+    /// Un acceso directo (alias, enlace) junto a cada uno (`names::shortcut_name`).
+    Shortcuts { targets: Vec<PathBuf> },
     Undo(Undo),
 }
 

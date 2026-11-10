@@ -79,6 +79,47 @@ fn item_array(items: &[Item]) -> Result<IShellItemArray> {
 }
 
 /// Objeto de datos del Shell para un grupo de archivos (portapapeles y arrastrar).
+/// Crea el acceso directo `lnk` (`.lnk`) a `target`, con `IShellLinkW` + `IPersistFile`. Necesita
+/// COM inicializado en el hilo.
+pub fn create_lnk(target: &Path, lnk: &Path) -> Result<()> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(PCWSTR(wide_path(target).as_ptr()))?;
+        if let Some(dir) = target.parent() {
+            link.SetWorkingDirectory(PCWSTR(wide_path(dir).as_ptr()))?;
+        }
+        let file: IPersistFile = link.cast()?;
+        file.Save(PCWSTR(wide_path(lnk).as_ptr()), true)
+    }
+}
+
+/// A dónde apunta un `.lnk` (sin buscarlo si se movió) o un enlace simbólico. Inicializa COM en
+/// el hilo si hace falta (corre en hilos de trabajo).
+pub fn link_target(path: &Path) -> Option<PathBuf> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile, STGM_READ};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+        && let Ok(to) = std::fs::read_link(path)
+    {
+        return Some(if to.is_absolute() { to } else { path.parent()?.join(to) });
+    }
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
+        return None;
+    }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let file: IPersistFile = link.cast().ok()?;
+        file.Load(PCWSTR(wide_path(path).as_ptr()), STGM_READ).ok()?;
+        let mut buf = vec![0u16; 32768];
+        link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        (len > 0).then(|| PathBuf::from(OsString::from_wide(&buf[..len])))
+    }
+}
+
 pub fn data_object(items: &[Item]) -> Result<IDataObject> {
     unsafe { item_array(items)?.BindToHandler(None, &BHID_DataObject) }
 }

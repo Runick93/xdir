@@ -9,6 +9,7 @@ mod events;
 mod favs;
 mod fileops;
 mod saved_groups;
+mod tasks;
 mod input;
 mod paint;
 mod quick_jump;
@@ -288,6 +289,9 @@ pub struct App {
     window_state: Option<([i32; 4], bool)>,
     ops_tx: Sender<OpResult>,
     ops_rx: Receiver<OpResult>,
+    /// Trabajos sueltos (`tasks.rs`).
+    task_tx: Sender<tasks::TaskDone>,
+    task_rx: Receiver<tasks::TaskDone>,
     undo: Vec<Undo>,
     rename: Option<Rename>,
     /// Carpeta recién creada sobre la que abrir el renombrado cuando aparezca en la lista.
@@ -476,6 +480,7 @@ impl App {
         let theme = Theme::from_system(session.accent, session.dark_mode);
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
+        let (task_tx, task_rx) = channel();
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
         let config_errors = config_errors.or_else(|| folder_views.errors.first().map(|e| format!("carpetas.toml, {e}")));
         let mut app = App {
@@ -512,6 +517,8 @@ impl App {
             window_state: session.window.map(|w| (w, session.maximized)),
             ops_tx,
             ops_rx,
+            task_tx,
+            task_rx,
             undo: Vec::new(),
             rename: None,
             pending_rename: None,

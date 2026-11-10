@@ -161,6 +161,8 @@ impl App {
             }
             Command::Recycle => self.delete_selection(true),
             Command::Restore => self.restore_selection(),
+            Command::CreateShortcut => self.create_shortcuts(),
+            Command::ShowOriginal => self.show_original(),
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.begin_rename(active),
             Command::Properties => {

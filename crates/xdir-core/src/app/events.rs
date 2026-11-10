@@ -101,6 +101,12 @@ impl App {
                 }
                 self.redraw();
             }
+            tasks::WM_APP_TASK => {
+                while let Ok(t) = self.task_rx.try_recv() {
+                    self.on_task_done(t);
+                }
+                self.redraw();
+            }
             _ => return false,
         }
         true

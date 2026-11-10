@@ -55,6 +55,10 @@ pub enum Command {
     Delete,
     /// Devolver de la Papelera a su lugar original.
     Restore,
+    /// Acceso directo (alias, enlace) junto a cada seleccionado.
+    CreateShortcut,
+    /// Abrir la carpeta del original de un acceso directo, con él seleccionado.
+    ShowOriginal,
     Rename,
     Properties,
     /// Copia de cada seleccionado a su lado («nombre copia»).
@@ -185,6 +189,8 @@ pub const ALL: &[Spec] = &[
     spec(Command::Recycle, "papelera", "Enviar a la papelera", &["Supr"]),
     spec(Command::Delete, "eliminar", "Eliminar definitivamente", &["Shift+Supr"]),
     spec(Command::Restore, "devolver", "Devolver", &[]),
+    spec(Command::CreateShortcut, "crear_acceso_directo", "Crear acceso directo", &[]),
+    spec(Command::ShowOriginal, "mostrar_original", "Mostrar el original", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
     spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),

@@ -184,6 +184,24 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
             r.select = restored;
             Ok(r)
         }
+        Op::Shortcuts { targets } => {
+            let (mut created, mut errors) = (Vec::new(), Vec::new());
+            for target in &targets {
+                let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else { continue };
+                let name = name.to_string_lossy();
+                let link = names::free_name(parent, &|n| names::shortcut_name(&name, names::LinkStyle::Symlink, n), &taken);
+                match std::os::unix::fs::symlink(target, &link) {
+                    Ok(()) => created.push(link),
+                    Err(e) => errors.push(err_at(&link, e)),
+                }
+            }
+            // Con uno solo, queda para renombrar.
+            let one = created.len() == 1;
+            let focus = created.last().cloned();
+            let mut r = ok((!created.is_empty()).then(|| Undo::Created(created.clone())), focus, one, errors)?;
+            r.select = created;
+            Ok(r)
+        }
         Op::Undo(undo) => undo_op(undo, trash),
     }
 }
@@ -522,6 +540,26 @@ mod tests {
         let r = run(Op::Undo(Undo::Created(vec![a.clone()])), Some(&trash)).unwrap();
         assert_eq!(r.error, None);
         assert!(!a.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// «Crear acceso directo» en Linux: un enlace simbólico «Enlace a a.txt» que se resuelve.
+    #[test]
+    fn symlink_shortcut_and_target() {
+        let dir = tmp("enlace");
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+        let r = run(Op::Shortcuts { targets: vec![a.clone()] }, None).unwrap();
+        let link = dir.join("Enlace a a.txt");
+        assert_eq!(r.error, None);
+        assert_eq!((r.focus.clone(), r.rename_after), (Some(link.clone()), true));
+        assert_eq!(r.undo, Some(Undo::Created(vec![link.clone()])));
+        assert_eq!(crate::shell::link_target(&link), Some(a.clone()));
+        assert_eq!(crate::shell::link_target(&a), None);
+        let r = run(Op::Shortcuts { targets: vec![a.clone()] }, None).unwrap();
+        assert_eq!(r.focus, Some(dir.join("Enlace a a.txt 2")));
+        std::os::unix::fs::symlink("a.txt", dir.join("rel")).unwrap();
+        assert_eq!(crate::shell::link_target(&dir.join("rel")), Some(a.clone()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

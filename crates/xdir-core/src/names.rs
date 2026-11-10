@@ -27,6 +27,29 @@ pub fn numbered_name(name: &str, is_dir: bool, n: u32) -> String {
     format!("{stem} {n}{ext}")
 }
 
+/// Cómo hace cada sistema sus accesos directos.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkStyle {
+    /// Windows: `.lnk` («informe.pdf - Acceso directo.lnk»).
+    Lnk,
+    /// macOS: alias del Finder («informe.pdf alias»).
+    Alias,
+    /// Linux: enlace simbólico («Enlace a informe.pdf»).
+    Symlink,
+}
+
+/// Nombre del acceso directo `n` (1, 2, …) a `name`, como lo nombra cada sistema.
+pub fn shortcut_name(name: &str, style: LinkStyle, n: u32) -> String {
+    match (style, n) {
+        (LinkStyle::Lnk, 0 | 1) => format!("{name} - Acceso directo.lnk"),
+        (LinkStyle::Lnk, n) => format!("{name} - Acceso directo ({n}).lnk"),
+        (LinkStyle::Alias, 0 | 1) => format!("{name} alias"),
+        (LinkStyle::Alias, n) => format!("{name} alias {n}"),
+        (LinkStyle::Symlink, 0 | 1) => format!("Enlace a {name}"),
+        (LinkStyle::Symlink, n) => format!("Enlace a {name} {n}"),
+    }
+}
+
 /// «Carpeta nueva con 3 elementos» («con 1 elemento»; si existe, `numbered_name` le suma « 2»…).
 pub fn folder_with_name(count: usize) -> String {
     if count == 1 { "Carpeta nueva con 1 elemento".to_string() } else { format!("Carpeta nueva con {count} elementos") }
@@ -75,6 +98,16 @@ mod tests {
         assert_eq!(folder_with_name(3), "Carpeta nueva con 3 elementos");
         assert_eq!(folder_with_name(1), "Carpeta nueva con 1 elemento");
         assert_eq!(numbered_name(&folder_with_name(3), true, 2), "Carpeta nueva con 3 elementos 2");
+    }
+
+    #[test]
+    fn shortcut_names() {
+        assert_eq!(shortcut_name("informe.pdf", LinkStyle::Lnk, 1), "informe.pdf - Acceso directo.lnk");
+        assert_eq!(shortcut_name("informe.pdf", LinkStyle::Lnk, 2), "informe.pdf - Acceso directo (2).lnk");
+        assert_eq!(shortcut_name("informe.pdf", LinkStyle::Alias, 1), "informe.pdf alias");
+        assert_eq!(shortcut_name("informe.pdf", LinkStyle::Alias, 2), "informe.pdf alias 2");
+        assert_eq!(shortcut_name("informe.pdf", LinkStyle::Symlink, 1), "Enlace a informe.pdf");
+        assert_eq!(shortcut_name("informe.pdf", LinkStyle::Symlink, 2), "Enlace a informe.pdf 2");
     }
 
     #[test]

@@ -362,7 +362,16 @@ fn paths(items: &[Item]) -> Vec<PathBuf> {
 /// ni carpeta elegida. El volumen de una ruta es su primer tramo en minúsculas (como Windows).
 pub struct FakeShell;
 
+/// Originales de los accesos directos del falso (de todo el proceso: `link_target` corre en un
+/// hilo de trabajo); cada test usa rutas propias.
+static LINK_TARGETS: Mutex<BTreeMap<PathBuf, Option<PathBuf>>> = Mutex::new(BTreeMap::new());
+
 impl FakeShell {
+    /// Desde ahora `link_target(link)` devuelve `target`.
+    pub fn set_link_target(link: &Path, target: Option<PathBuf>) {
+        LINK_TARGETS.lock().unwrap_or_else(|e| e.into_inner()).insert(link.to_path_buf(), target);
+    }
+
     /// Las llamadas hechas desde este hilo hasta ahora (y vacía el registro).
     pub fn take_calls() -> Vec<ShellCall> {
         shell_state(|s| std::mem::take(&mut s.calls))
@@ -394,6 +403,15 @@ fn outcome() -> Result<(), String> {
 }
 
 impl Shell for FakeShell {
+    /// Como Windows (el entorno falso también usa el estilo de Windows).
+    fn link_style(&self) -> crate::names::LinkStyle {
+        crate::names::LinkStyle::Lnk
+    }
+
+    fn link_target(&self, path: &Path) -> Option<PathBuf> {
+        LINK_TARGETS.lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned().flatten()
+    }
+
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
         record(ShellCall::CopyFiles { paths: paths(items), cut });
         outcome()?;

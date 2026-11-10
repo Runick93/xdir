@@ -341,3 +341,91 @@ fn restore_not_offered_outside_trash() {
     a.run_command(Command::Restore);
     assert_eq!(FakeFileOps::take_ops(), []);
 }
+
+// ---------- Crear acceso directo y Mostrar el original ----------
+
+/// Espera el trabajo suelto en curso y se lo entrega a la `App` (lo que haría `WM_APP_TASK`).
+fn wait_task(a: &mut App) {
+    let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("el trabajo termina");
+    a.on_task_done(t);
+}
+
+/// Marca una fila como enlace (lo que hacen las cargas de cada sistema con `ATTR_LINK`).
+fn mark_link(a: &mut App, name: &str) {
+    let list = &mut a.panes[0].tab_mut().list;
+    let idx = list.entries.iter().position(|e| e.name == name).unwrap();
+    list.entries[idx].attrs |= crate::fs::ATTR_LINK;
+}
+
+#[test]
+fn create_shortcut_spawns_op() {
+    let mut a = app();
+    let d = fixture("acceso", &["a.txt", "b.txt"]);
+    go(&mut a, &d);
+    select(&mut a, &["a.txt", "b.txt"]);
+    assert!(own_menu(&mut a).iter().any(|l| l == "Crear acceso directo"));
+    FakeFileOps::take_ops();
+    choose_menu(&mut a, "Crear acceso directo");
+    let ops = FakeFileOps::take_ops();
+    let [Op::Shortcuts { targets }] = ops.as_slice() else { panic!("{ops:?}") };
+    let mut targets = targets.clone();
+    targets.sort();
+    assert_eq!(targets, [d.join("a.txt"), d.join("b.txt")]);
+    let s = crate::commands::ALL.iter().find(|s| s.id == "crear_acceso_directo").unwrap();
+    assert_eq!((s.command, s.name, s.default_keys), (Command::CreateShortcut, "Crear acceso directo", &[][..]));
+    let s = crate::commands::ALL.iter().find(|s| s.id == "mostrar_original").unwrap();
+    assert_eq!((s.command, s.name, s.default_keys), (Command::ShowOriginal, "Mostrar el original", &[][..]));
+}
+
+/// «Mostrar el original» solo con un elemento que es enlace.
+#[test]
+fn show_original_menu_only_for_links() {
+    let mut a = app();
+    let d = fixture("original-menu", &["enlace", "comun.txt"]);
+    go(&mut a, &d);
+    mark_link(&mut a, "enlace");
+    select(&mut a, &["enlace"]);
+    assert!(own_menu(&mut a).iter().any(|l| l == "Mostrar el original"));
+    select(&mut a, &["comun.txt"]);
+    assert!(!own_menu(&mut a).iter().any(|l| l == "Mostrar el original"));
+    select(&mut a, &["enlace", "comun.txt"]);
+    assert!(!own_menu(&mut a).iter().any(|l| l == "Mostrar el original"));
+}
+
+/// Resuelto el original (en otro hilo), la pestaña activa va a su carpeta y lo enfoca.
+#[test]
+fn show_original_navigates() {
+    let mut a = app();
+    let d = fixture("original-va", &["enlace"]);
+    let dest = fixture("original-destino", &["x.txt", "real.txt"]);
+    FakeShell::set_link_target(&d.join("enlace"), Some(dest.join("real.txt")));
+    go(&mut a, &d);
+    mark_link(&mut a, "enlace");
+    select(&mut a, &["enlace"]);
+    a.run_command(Command::ShowOriginal);
+    wait_task(&mut a);
+    assert_eq!(a.panes[0].tab().location, Location::Path(dest.clone()));
+    pump(&mut a, 0);
+    assert_eq!(focused_name(&a), "real.txt");
+}
+
+/// Sin original (no se resuelve o ya no está): aviso, y la pestaña no se mueve.
+#[test]
+fn show_original_missing_notice() {
+    let mut a = app();
+    let d = fixture("original-falta", &["enlace"]);
+    FakeShell::set_link_target(&d.join("enlace"), None);
+    go(&mut a, &d);
+    mark_link(&mut a, "enlace");
+    select(&mut a, &["enlace"]);
+    a.run_command(Command::ShowOriginal);
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("No se encuentra el original de \"enlace\""));
+    assert_eq!(a.panes[0].tab().location, Location::Path(d.clone()));
+    // Un destino que ya no existe también es «no se encuentra».
+    FakeShell::set_link_target(&d.join("enlace"), Some(d.join("borrado.txt")));
+    a.notice = None;
+    a.run_command(Command::ShowOriginal);
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("No se encuentra el original de \"enlace\""));
+}

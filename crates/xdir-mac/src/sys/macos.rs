@@ -316,6 +316,14 @@ impl DiskScan for MacDiskScan {
 struct MacShell;
 
 impl Shell for MacShell {
+    fn link_style(&self) -> xdir_core::names::LinkStyle {
+        xdir_core::names::LinkStyle::Alias
+    }
+
+    fn link_target(&self, path: &Path) -> Option<PathBuf> {
+        sh::link_target(path)
+    }
+
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
         sh::copy_files(items, cut).map_err(|e| e.message())
     }

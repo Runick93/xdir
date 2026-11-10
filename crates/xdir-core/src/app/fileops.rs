@@ -355,7 +355,12 @@ impl App {
         // «Vista rápida» primero. «Copiar como ruta de acceso» usa las mismas comillas y saltos de
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
         let many = self.panes[self.active].tab().list.selected_indices().nth(1).is_some();
+        let link = self.selected_link().is_some();
         let mut entries = vec![item("Vista rápida", Command::QuickLook), item("Duplicar", Command::Duplicate)];
+        entries.push(item("Crear acceso directo", Command::CreateShortcut));
+        if link {
+            entries.push(item("Mostrar el original", Command::ShowOriginal));
+        }
         // Con dos o más: juntarlos en una carpeta nueva.
         if many {
             entries.push(item("Carpeta nueva con la selección", Command::NewFolderWithSelection));

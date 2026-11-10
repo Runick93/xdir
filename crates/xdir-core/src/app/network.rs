@@ -743,6 +743,32 @@ impl App {
                     self.net_changed();
                 }
             }
+            // La página Red de la configuración.
+            "agregar" => {
+                let n = self.net.places.favorites.len();
+                self.start_page_edit(n);
+            }
+            "editar" => self.start_page_edit(arg.parse().unwrap_or(0)),
+            "texto" => {
+                if let Some(b) = self.settings_field {
+                    self.host.text_set(b, arg);
+                }
+            }
+            "tab" => {
+                self.settings_field_tab(false);
+            }
+            "enter" => {
+                self.settings_field_done(true);
+            }
+            // Lo escrito en la barra de dirección (el desplegable de rutas), con el tiempo que tardó.
+            "sugerir" => {
+                let t0 = std::time::Instant::now();
+                let r = self.panes[self.active].address;
+                let mut sg = crate::typed::Suggest::new(r, "");
+                sg.set_query(arg);
+                self.suggest = Some(sg);
+                self.notice = Some(format!("Sugerencias para «{arg}» en {} ms", t0.elapsed().as_millis()));
+            }
             #[cfg(feature = "arbol")]
             "expandir" => {
                 let (hwnd, show) = (self.hwnd, self.show_hidden);

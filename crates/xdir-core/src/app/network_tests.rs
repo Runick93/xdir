@@ -994,7 +994,7 @@ mod red_page {
         let host = FakeHost::new();
         let mut a = page_app(host.clone());
         let texts = draw(&mut a);
-        for t in ["Red", "Favoritos", "NAS — fotos", "smb://nas-n8/fotos", "Oficina", "Recientes", "smb://srv-n8/respaldo", "hace 2 días", "Conectados ahora"] {
+        for t in ["Favoritos", "NAS — fotos", "smb://nas-n8/fotos", "Oficina", "Recientes", "smb://srv-n8/respaldo", "hace 2 días", "Conectados ahora"] {
             assert!(texts.iter().any(|x| x == t), "{t}: {texts:?}");
         }
         // Renombrar en línea: una caja, la del nombre.

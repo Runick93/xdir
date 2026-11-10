@@ -124,9 +124,12 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
     let right = (r.left + WIDTH).min(r.right);
     let mut hits: Vec<(Rect, PageHit)> = Vec::new();
     let hot = |b: Rect| hover.is_some_and(|(x, y)| contains(&b, x, y));
+    // El título de la página lo dibuja el marco de la configuración.
     let mut y = r.top;
-    p.text(FontId::Title, "Red", rect(left, y, right, y + 26.0), th.text);
-    y += 40.0;
+    // Columnas según el ancho: el nombre (o la dirección) y, a su derecha, la dirección (o la
+    // fecha / la letra); los botones van al final.
+    let col_a = left + 36.0;
+    let col_b = col_a + ((right - left - 36.0 - 120.0) * 0.4).max(80.0);
 
     // Favoritos.
     p.text(FontId::UiBold, "Favoritos", rect(left, y + 6.0, right - 120.0, y + 26.0), th.text_secondary);
@@ -144,8 +147,8 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         p.round_fill(row, 6.0, th.surface_alt);
         p.round_stroke(row, 6.0, if is_edit { th.accent } else { th.border });
         p.text(FontId::Glyphs, "\u{E735}", rect(left + 8.0, y + 11.0, left + 32.0, y + ROW - 9.0), th.accent);
-        let name_r = rect(left + 36.0, y + 6.0, left + 244.0, y + ROW - 6.0);
-        let addr_r = rect(left + 252.0, y + 6.0, right - 208.0, y + ROW - 6.0);
+        let name_r = rect(col_a, y + 6.0, col_b - 8.0, y + ROW - 6.0);
+        let addr_r = rect(col_b, y + 6.0, (right - 120.0).max(col_b + 40.0), y + ROW - 6.0);
         fields.push((name_r, addr_r));
         if let Some((_, on_address, name, address)) = editing.as_ref().filter(|_| is_edit) {
             // La caja abierta va encima de una de las dos; la otra muestra lo que tiene.
@@ -177,13 +180,13 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         }
         y += ROW + GAP;
         if let Some((_, e)) = app.net.page.error.as_ref().filter(|(j, _)| *j == i) {
-            p.text(FontId::Small, e, rect(left + 252.0, y - 2.0, right, y + 14.0), th.danger);
+            p.text(FontId::Small, e, rect(col_b, y - 2.0, right, y + 14.0), th.danger);
             y += 16.0;
         }
     }
     // Dónde iría uno nuevo (para «Agregar…»).
     if rows == nf {
-        fields.push((rect(left + 36.0, y + 6.0, left + 244.0, y + ROW - 6.0), rect(left + 252.0, y + 6.0, right - 208.0, y + ROW - 6.0)));
+        fields.push((rect(col_a, y + 6.0, col_b - 8.0, y + ROW - 6.0), rect(col_b, y + 6.0, (right - 120.0).max(col_b + 40.0), y + ROW - 6.0)));
     }
     if rows == 0 {
         p.text(FontId::Small, "Todavía no hay favoritos: la estrella de «Conectar a un servidor» los agrega.", rect(left, y, right, y + 18.0), th.text_dim);
@@ -205,8 +208,8 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         p.round_fill(row, 6.0, th.surface_alt);
         p.round_stroke(row, 6.0, th.border);
         p.circle_stroke(left + 18.0, y + ROW / 2.0, 6.0, th.text_dim, 1.2);
-        p.text(FontId::Ui, &shown(&rc.address, style), rect(left + 36.0, y + 12.0, right - 240.0, y + ROW), th.text);
-        p.text(FontId::UiRight, &crate::net::places::ago(now, rc.date, offset), rect(right - 236.0, y + 12.0, right - 76.0, y + ROW), th.text_dim);
+        p.text(FontId::Ui, &shown(&rc.address, style), rect(col_a, y + 12.0, (right - 190.0).max(col_a + 60.0), y + ROW), th.text);
+        p.text(FontId::UiRight, &crate::net::places::ago(now, rc.date, offset), rect(right - 186.0, y + 12.0, right - 70.0, y + ROW), th.text_dim);
         let star = rect(right - 64.0, y + 8.0, right - 38.0, y + ROW - 8.0);
         let fav = Address::parse(&rc.address).is_ok_and(|a| app.net.places.is_favorite(&a));
         icon_button(p, star, if fav { "\u{E735}" } else { "\u{E734}" }, hot(star));
@@ -231,13 +234,13 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         p.round_fill(row, 6.0, th.surface_alt);
         p.round_stroke(row, 6.0, th.border);
         p.text(FontId::Glyphs, "\u{E968}", rect(left + 8.0, y + 11.0, left + 32.0, y + ROW - 9.0), th.text_dim);
-        p.text(FontId::Ui, &shown(&c.address, style), rect(left + 36.0, y + 12.0, left + 244.0, y + ROW), th.text);
+        p.text(FontId::Ui, &shown(&c.address, style), rect(col_a, y + 12.0, col_b - 8.0, y + ROW), th.text);
         let where_ = match (c.letter, style) {
             (Some(l), _) => format!("{l}:"),
             (None, KeyStyle::Windows) => "sin letra".into(),
             (None, KeyStyle::Mac) => c.local.to_string_lossy().into_owned(),
         };
-        p.text(FontId::Ui, &where_, rect(left + 252.0, y + 12.0, right - 48.0, y + ROW), th.text_dim);
+        p.text(FontId::Ui, &where_, rect(col_b, y + 12.0, right - 48.0, y + ROW), th.text_dim);
         let e = rect(right - 36.0, y + 8.0, right - 10.0, y + ROW - 8.0);
         crate::list::draw_eject(p, e, hot(e));
         hits.push((e, PageHit::Eject(*i)));

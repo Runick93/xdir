@@ -75,6 +75,23 @@ pub enum Action {
     OpenInPanel { folder: PathBuf, select: Option<OsString> },
 }
 
+/// Estado del escaneo para el indicador junto al botón «xtree» de la barra de estado.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum XtreeBadge {
+    /// Sin escaneo, cancelado, o el resultado ya se vio en la vista: el botón de siempre.
+    #[default]
+    Idle,
+    /// Escaneando un volumen entero: porcentaje de avance.
+    Progress(u8),
+    /// Escaneando una carpeta (sin porcentaje) o reescaneando con permisos: fase del arco, que
+    /// avanza con cada aviso del escaneo.
+    Spinning(u8),
+    /// Terminado y todavía sin ver.
+    Done,
+    /// Terminado con carpetas sin permiso, todavía sin ver.
+    DoneWithIssues,
+}
+
 /// Rectángulos de cada zona de la vista.
 #[derive(Clone, Copy, Debug)]
 pub struct Ui {
@@ -195,8 +212,8 @@ pub struct Xtree {
     /// El escaneo se cortó antes de terminar (`cancel`).
     scan_stopped: bool,
     /// Reescaneo con permisos (tecla A) después de un análisis terminado: cronómetro del análisis
-    /// anterior (inicio, duración), para volver a él si el escaneo elevado no trae árbol.
-    before_elevate: Option<(Option<Instant>, Option<Duration>)>,
+    /// anterior (inicio, duración, ya visto), para volver a él si el escaneo elevado no trae árbol.
+    before_elevate: Option<(Option<Instant>, Option<Duration>, bool)>,
     /// Mayor porcentaje mostrado en este escaneo: no retrocede.
     pct_max: std::cell::Cell<u8>,
     /// Disco o carpeta elegida en el desplegable; se analiza al pulsar «Analizar».
@@ -206,6 +223,10 @@ pub struct Xtree {
     menu_hover: Option<usize>,
     /// Hay un escaneo con permisos elevados en curso (tecla A).
     elevating: Arc<AtomicBool>,
+    /// El resultado del último escaneo ya se vio en la vista: el indicador vuelve a `Idle`.
+    seen: bool,
+    /// Avisos del escaneo recibidos: fase del arco del indicador que gira.
+    ticks: u8,
 }
 
 impl Xtree {
@@ -247,6 +268,8 @@ impl Xtree {
             menu_open: false,
             menu_hover: None,
             elevating: Arc::new(AtomicBool::new(false)),
+            seen: false,
+            ticks: 0,
         }
     }
 
@@ -256,6 +279,12 @@ impl Xtree {
         // La vista avisa a la ventana con `Handle::post`: en las pruebas, al `Waker` falso.
         crate::sys::testing::install_fakes();
         Xtree::with_scan(Handle::default(), root, idle_scan())
+    }
+
+    /// Generación del escaneo en curso: la de sus avisos (`WM_APP_XTREE`). Pruebas de `App`.
+    #[cfg(test)]
+    pub fn scan_id(&self) -> usize {
+        self.scan.id
     }
 
     /// Reemplaza el árbol por uno terminado (pruebas).
@@ -320,14 +349,63 @@ impl Xtree {
         }
     }
 
+    /// Estado del escaneo para el indicador de la barra de estado (y de la columna izquierda).
+    pub fn badge(&self) -> XtreeBadge {
+        if self.scan_stopped {
+            XtreeBadge::Idle
+        } else if self.elevating.load(Ordering::Relaxed) || self.elevated_pending() {
+            // El reescaneo con permisos no informa bytes leídos: gira.
+            XtreeBadge::Spinning(self.ticks)
+        } else if self.scanning {
+            match self.percent() {
+                Some(p) => XtreeBadge::Progress(p),
+                None => XtreeBadge::Spinning(self.ticks),
+            }
+        } else if self.scan_elapsed.is_none() || self.seen {
+            XtreeBadge::Idle
+        } else if self.progress().denied.load(Ordering::Relaxed) > 0 {
+            XtreeBadge::DoneWithIssues
+        } else {
+            XtreeBadge::Done
+        }
+    }
+
+    /// Cartel del botón «xtree» con el detalle del indicador: «Escaneando / · 37 % · 0:42»,
+    /// «Escaneando ~/Proyectos · 0:12», «Análisis completado en 1:23 · 458 carpetas sin permiso».
+    /// Sin cartel cuando el indicador no se ve.
+    pub fn badge_tip(&self) -> Option<String> {
+        let t = fmt_elapsed(self.elapsed());
+        let root = self.root.display();
+        match self.badge() {
+            XtreeBadge::Idle => None,
+            XtreeBadge::Progress(p) => Some(format!("Escaneando {root} \u{B7} {p} % \u{B7} {t}")),
+            XtreeBadge::Spinning(_) => Some(format!("Escaneando {root} \u{B7} {t}")),
+            XtreeBadge::Done => Some(format!("Análisis completado en {t}")),
+            XtreeBadge::DoneWithIssues => {
+                let n = self.progress().denied.load(Ordering::Relaxed);
+                let what = if n == 1 { "carpeta" } else { "carpetas" };
+                Some(format!("Análisis completado en {t} \u{B7} {} {what} sin permiso", fmt_count(n)))
+            }
+        }
+    }
+
+    /// La vista se abrió (o está abierta): el resultado terminado ya se vio. Mientras escanea no
+    /// cuenta: al terminar, el indicador vuelve a mostrarse hasta que se vea.
+    pub fn mark_seen(&mut self) {
+        if !self.scanning && !self.elevated_pending() {
+            self.seen = true;
+        }
+    }
+
     /// Estado del análisis con el cronómetro: «Escaneando… 0:42», «Escaneando… 37 % · 0:42»,
     /// «Análisis completado en 1:23» o «Detenido a los 0:37».
     fn state_text(&self) -> String {
         let t = fmt_elapsed(self.elapsed());
         if self.scan_stopped {
             format!("Detenido a los {t}")
-        } else if self.elevated_pending() {
-            // El ayudante elevado no informa bytes leídos: solo el cronómetro.
+        } else if self.elevated_pending() || (self.scanning && self.elevating.load(Ordering::Relaxed)) {
+            // El ayudante elevado no informa bytes leídos: solo el cronómetro (como el indicador,
+            // que gira).
             format!("Escaneando\u{2026} {t}")
         } else if self.scanning {
             match self.percent() {
@@ -375,6 +453,7 @@ impl Xtree {
         self.scan_started = Some(Instant::now());
         self.scan_elapsed = None;
         self.scan_stopped = false;
+        self.seen = false;
         self.pct_max.set(0);
         self.vol = disk_scan().volume_space(&self.root);
         self.whole = disk_scan().whole_volume(&self.root);
@@ -447,6 +526,8 @@ impl Xtree {
             self.scan_elapsed = Some(self.elapsed());
         }
         self.scanning = false;
+        // Resultado nuevo: el indicador lo muestra hasta que se abra la vista.
+        self.seen = false;
         self.go(0);
         true
     }
@@ -456,6 +537,8 @@ impl Xtree {
         if wparam != self.scan.id {
             return false; // aviso de un escaneo que ya se reemplazó
         }
+        // Fase del arco del indicador que gira: avanza con cada aviso (cada 250 ms).
+        self.ticks = self.ticks.wrapping_add(1);
         if lparam == 1 {
             return self.take_result();
         }
@@ -465,10 +548,12 @@ impl Xtree {
         if !self.elevating.load(Ordering::Relaxed)
             && self.elevated_pending()
             && self.scan.result.lock().unwrap().is_none()
-            && let Some((started, elapsed)) = self.before_elevate.take()
+            && let Some((started, elapsed, seen)) = self.before_elevate.take()
         {
             self.scan_started = started;
             self.scan_elapsed = elapsed;
+            // Un resultado que ya se había visto no vuelve a aparecer como «terminado».
+            self.seen = seen;
         }
         // Avance: el mapa en vivo se recalcula con lo que lleva descubierto el escáner. También
         // llega cuando termina el escaneo elevado sin árbol: hay que repintar su aviso.
@@ -498,7 +583,7 @@ impl Xtree {
         // pedido de permisos) y, como el escáner ya no avisa, un hilo pide repintar cada 250 ms
         // mientras dure. Si el recorrido normal sigue, su tiempo ya incluye al ayudante.
         if !self.scanning && !self.scan_stopped && self.scan_elapsed.is_some() {
-            self.before_elevate = Some((self.scan_started, self.scan_elapsed));
+            self.before_elevate = Some((self.scan_started, self.scan_elapsed, self.seen));
             self.start_clock();
             let (elevating, cancel) = (self.elevating.clone(), self.scan.cancel.clone());
             let _ = std::thread::Builder::new().spawn(move || {
@@ -1448,5 +1533,161 @@ mod tests {
         assert!(x.take_result());
         x.cancel();
         assert!(x.status_text().contains("Análisis completado en 1:23"), "{}", x.status_text());
+    }
+
+    // ---------- indicador de la barra de estado ----------
+
+    /// Termina el escaneo de `x` con un árbol de un nodo (mismo camino que el aviso de entrega).
+    fn finish(x: &mut Xtree) {
+        let name = x.root.display().to_string();
+        *x.scan.result.lock().unwrap() = Some(vec![node(&name, NO_PARENT, 5, true, vec![])]);
+        assert!(x.on_message(x.scan.id, 1));
+    }
+
+    #[test]
+    fn badge_progress_while_scanning_volume() {
+        crate::sys::testing::install_fakes();
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
+        let x = scanning_since("disco-indicador", 42);
+        x.scan.progress.bytes.store(370, Ordering::Relaxed);
+        assert_eq!(x.badge(), XtreeBadge::Progress(37));
+        crate::sys::testing::FakeDiskScan::set_volume(None, false);
+    }
+
+    #[test]
+    fn badge_spins_for_folder_scan() {
+        crate::sys::testing::install_fakes();
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), false);
+        let mut x = scanning_since("carpeta-indicador", 12);
+        x.scan.progress.bytes.store(370, Ordering::Relaxed);
+        let XtreeBadge::Spinning(a) = x.badge() else { panic!("{:?}", x.badge()) };
+        // Cada aviso del escaneo avanza el arco.
+        assert!(x.on_message(x.scan.id, 0));
+        let XtreeBadge::Spinning(b) = x.badge() else { panic!("{:?}", x.badge()) };
+        assert_ne!(a, b);
+        // Un aviso de otro escaneo no lo mueve.
+        assert!(!x.on_message(x.scan.id + 1000, 0));
+        assert_eq!(x.badge(), XtreeBadge::Spinning(b));
+        crate::sys::testing::FakeDiskScan::set_volume(None, false);
+    }
+
+    /// Reescaneo con permisos (tecla A) después de terminar: giro, no porcentaje.
+    #[test]
+    fn badge_spins_while_elevating() {
+        crate::sys::testing::install_fakes();
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
+        let mut x = scanning_since("disco-elevado", 83);
+        finish(&mut x);
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); None }), Action::Redraw);
+        assert!(matches!(x.badge(), XtreeBadge::Spinning(_)), "{:?}", x.badge());
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        crate::sys::testing::FakeDiskScan::set_volume(None, false);
+    }
+
+    #[test]
+    fn badge_done_until_view_opened() {
+        let mut x = scanning_since("raiz-indicador", 83);
+        // Ver la vista mientras escanea no cuenta: el resultado todavía no se vio.
+        x.mark_seen();
+        finish(&mut x);
+        assert_eq!(x.badge(), XtreeBadge::Done);
+        assert_eq!(x.badge_tip().as_deref(), Some("Análisis completado en 1:23"));
+        x.mark_seen();
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+        assert_eq!(x.badge_tip(), None);
+        // Un escaneo nuevo vuelve a mostrar su avance.
+        x.rescan();
+        assert!(matches!(x.badge(), XtreeBadge::Spinning(_)), "{:?}", x.badge());
+        x.cancel();
+    }
+
+    #[test]
+    fn badge_done_with_issues_when_denied() {
+        let mut x = scanning_since("raiz-sin-permiso", 83);
+        x.scan.progress.denied.store(458, Ordering::Relaxed);
+        finish(&mut x);
+        assert_eq!(x.badge(), XtreeBadge::DoneWithIssues);
+        assert_eq!(x.badge_tip().as_deref(), Some("Análisis completado en 1:23 \u{B7} 458 carpetas sin permiso"));
+        x.scan.progress.denied.store(1, Ordering::Relaxed);
+        assert_eq!(x.badge_tip().as_deref(), Some("Análisis completado en 1:23 \u{B7} 1 carpeta sin permiso"));
+        x.mark_seen();
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+    }
+
+    #[test]
+    fn badge_idle_after_cancel() {
+        let mut x = scanning_since("raiz-cancelada", 37);
+        x.cancel();
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+        assert_eq!(x.badge_tip(), None);
+        // El árbol de un escaneo cancelado que llega tarde no marca «terminado».
+        *x.scan.result.lock().unwrap() = Some(vec![node("raiz-cancelada", NO_PARENT, 5, true, vec![])]);
+        let _ = x.on_message(x.scan.id, 1);
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+        // Escaneo nuevo encima de uno en curso: el viejo no deja nada pegado.
+        let mut x = scanning_since("raiz-a-indicador", 20);
+        x.pick = PathBuf::from("raiz-b-indicador");
+        x.scan_pick();
+        assert!(matches!(x.badge(), XtreeBadge::Spinning(_)), "{:?}", x.badge());
+        x.cancel();
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+    }
+
+    #[test]
+    fn badge_tip_texts() {
+        crate::sys::testing::install_fakes();
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
+        let x = scanning_since("/", 42);
+        x.scan.progress.bytes.store(370, Ordering::Relaxed);
+        assert_eq!(x.badge_tip().as_deref(), Some("Escaneando / \u{B7} 37 % \u{B7} 0:42"));
+        crate::sys::testing::FakeDiskScan::set_volume(None, false);
+        let x = scanning_since("~/Proyectos", 12);
+        assert_eq!(x.badge_tip().as_deref(), Some("Escaneando ~/Proyectos \u{B7} 0:12"));
+        let mut x = scanning_since("raiz-tip", 83);
+        finish(&mut x);
+        assert_eq!(x.badge_tip().as_deref(), Some("Análisis completado en 1:23"));
+        x.scan.progress.denied.store(458, Ordering::Relaxed);
+        assert_eq!(x.badge_tip().as_deref(), Some("Análisis completado en 1:23 \u{B7} 458 carpetas sin permiso"));
+    }
+
+    /// Si el reescaneo con permisos falla, un resultado que ya se había visto no vuelve a
+    /// aparecer como «terminado»; mientras dura, el indicador gira.
+    #[test]
+    fn badge_stays_seen_after_refused_elevation() {
+        let mut x = scanning_since("raiz-elev-visto", 83);
+        finish(&mut x);
+        x.mark_seen();
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); None }), Action::Redraw);
+        assert!(matches!(x.badge(), XtreeBadge::Spinning(_)), "{:?}", x.badge());
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        assert!(x.on_message(x.scan.id, 0));
+        assert_eq!(x.state_text(), "Análisis completado en 1:23");
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+    }
+
+    /// Reescaneo con permisos durante el escaneo de un volumen entero: el estado de la vista,
+    /// como el indicador, sin porcentaje.
+    #[test]
+    fn elevating_during_volume_scan_hides_percent() {
+        crate::sys::testing::install_fakes();
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
+        let mut x = scanning_since("disco-elevando", 42);
+        x.scan.progress.bytes.store(370, Ordering::Relaxed);
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 37 % \u{B7} 0:42");
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); None }), Action::Redraw);
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 0:42");
+        assert!(matches!(x.badge(), XtreeBadge::Spinning(_)), "{:?}", x.badge());
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        x.cancel();
+        crate::sys::testing::FakeDiskScan::set_volume(None, false);
     }
 }

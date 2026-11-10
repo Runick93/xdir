@@ -6,6 +6,7 @@ use crate::paint::{FontId, Painter};
 
 use crate::console::Console;
 use crate::theme::{Accent, PRESETS, alpha};
+pub use crate::xtree::view::XtreeBadge;
 
 pub const STATUSBAR_H: f32 = 30.0;
 /// Margen exterior y separación entre paneles (también es el área del divisor).
@@ -14,6 +15,10 @@ const LAYOUT_BTN_W: f32 = 30.0;
 const GEAR_W: f32 = 30.0;
 const GROUPS_W: f32 = 84.0;
 const XTREE_W: f32 = 74.0;
+/// Ancho del botón «xtree» con el porcentaje del escaneo («◔ 37 %  xtree»).
+const XTREE_WIDE_W: f32 = 105.0;
+/// Lado del indicador del escaneo de xtree.
+pub const BADGE: f32 = 14.0;
 const MIN_SPLIT: f32 = 0.15;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -247,10 +252,62 @@ pub fn groups_rect(w: f32, h: f32) -> Rect {
     rect(first.left - 10.0 - GROUPS_W, first.top, first.left - 10.0, first.bottom)
 }
 
-/// Botón que abre xtree (mapa de uso de disco), a la izquierda del de grupos.
-pub fn xtree_rect(w: f32, h: f32) -> Rect {
+/// Botón que abre xtree (mapa de uso de disco), a la izquierda del de grupos. Con el porcentaje
+/// del escaneo (`badge` en progreso) se ensancha hacia la izquierda.
+pub fn xtree_rect(w: f32, h: f32, badge: XtreeBadge) -> Rect {
     let g = groups_rect(w, h);
-    rect(g.left - 10.0 - XTREE_W, g.top, g.left - 10.0, g.bottom)
+    let bw = if matches!(badge, XtreeBadge::Progress(_)) { XTREE_WIDE_W } else { XTREE_W };
+    rect(g.left - 10.0 - bw, g.top, g.left - 10.0, g.bottom)
+}
+
+/// Puntos de un sector de anillo de `BADGE`×`BADGE` en `r` (radio interior 64 % del exterior),
+/// desde el ángulo `start` (radianes; 0 = derecha, sentido horario) y de largo `sweep`.
+fn ring_sector(r: Rect, start: f32, sweep: f32) -> Vec<(f32, f32, f32)> {
+    let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let outer = BADGE / 2.0;
+    let inner = outer * 0.64;
+    let steps = ((sweep.abs() / (std::f32::consts::PI / 18.0)).ceil() as usize).max(1);
+    let at = |radius: f32, i: usize| {
+        let a = start + sweep * i as f32 / steps as f32;
+        (cx + radius * a.cos(), cy + radius * a.sin(), 0.0)
+    };
+    let mut pts: Vec<_> = (0..=steps).map(|i| at(outer, i)).collect();
+    pts.extend((0..=steps).rev().map(|i| at(inner, i)));
+    pts
+}
+
+/// Indicador del escaneo de xtree (14×14 en `r`, que debe medir eso): anillo de avance en el
+/// acento, arco que gira, tilde en `ok` o aviso en `warning`. `Idle` no dibuja nada.
+pub fn draw_xtree_badge(p: &dyn Painter, r: Rect, badge: XtreeBadge) {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_6, TAU};
+    let th = p.theme();
+    let (l, t) = (r.left, r.top);
+    match badge {
+        XtreeBadge::Idle => {}
+        XtreeBadge::Progress(pct) => {
+            p.rounded_path(&ring_sector(r, -FRAC_PI_2, TAU), true, Some(th.border), None);
+            if pct > 0 {
+                p.rounded_path(&ring_sector(r, -FRAC_PI_2, TAU * pct.min(100) as f32 / 100.0), true, Some(th.accent), None);
+            }
+        }
+        XtreeBadge::Spinning(phase) => {
+            p.rounded_path(&ring_sector(r, -FRAC_PI_2, TAU), true, Some(th.border), None);
+            let start = -FRAC_PI_6 + FRAC_PI_4 * (phase % 8) as f32;
+            p.rounded_path(&ring_sector(r, start, FRAC_PI_2), true, Some(th.accent), None);
+        }
+        XtreeBadge::Done => {
+            p.circle(l + BADGE / 2.0, t + BADGE / 2.0, BADGE / 2.0, th.ok);
+            let tick = [(l + 3.25, t + 7.2, 0.0), (l + 5.875, t + 10.0, 0.0), (l + 10.75, t + 4.0, 0.0)];
+            p.rounded_path(&tick, false, None, Some((Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, 1.6)));
+        }
+        XtreeBadge::DoneWithIssues => {
+            p.circle(l + BADGE / 2.0, t + BADGE / 2.0, BADGE / 2.0, th.warning);
+            let (x0, x1, y0, y1) = (l + 6.25, l + 7.75, t + 3.0, t + 8.25);
+            let bar = [(x0, y0, 0.75), (x1, y0, 0.75), (x1, y1, 0.75), (x0, y1, 0.75)];
+            p.rounded_path(&bar, true, Some(th.background), None);
+            p.circle(l + 7.0, t + 10.25, 0.75, th.background);
+        }
+    }
 }
 
 /// Área de la vista de xtree: todo lo que está arriba de la barra de estado (los paneles, la
@@ -263,13 +320,25 @@ pub fn layout_at(w: f32, h: f32, x: f32, y: f32) -> Option<Layout> {
     layout_buttons(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(l, _)| l)
 }
 
-/// `xtree_on`: la vista de xtree está abierta (el botón queda encendido).
-#[allow(clippy::too_many_arguments)]
-pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, gear_hot: bool, groups_hot: bool, xtree_hot: bool, xtree_on: bool) {
+/// Estado de los botones de la barra de estado.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StatusButtons {
+    /// La rueda dentada está bajo el mouse o su panel abierto.
+    pub gear_hot: bool,
+    pub groups_hot: bool,
+    pub xtree_hot: bool,
+    /// La vista de xtree está abierta (el botón queda encendido).
+    pub xtree_on: bool,
+    /// Indicador del escaneo de xtree junto al botón.
+    pub xtree: XtreeBadge,
+}
+
+pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) {
+    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
-    let xtree = xtree_rect(w, h);
+    let xtree = xtree_rect(w, h, badge);
     let text_r = rect(GAP * 2.0, h - STATUSBAR_H, xtree.left - GAP, h);
     p.text(FontId::Ui, text, text_r, th.text_dim);
 
@@ -286,8 +355,23 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
         p.round_fill(xtree, 4.0, th.hover);
     }
     let color = if xtree_on { th.accent } else if xtree_hot { th.text } else { th.text_dim };
-    p.text(FontId::GlyphsSmall, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
-    p.text(FontId::Ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
+    let badge_top = (xtree.top + xtree.bottom - BADGE) / 2.0;
+    match badge {
+        XtreeBadge::Idle => {
+            p.text(FontId::GlyphsSmall, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
+            p.text(FontId::Ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
+        }
+        XtreeBadge::Progress(pct) => {
+            // El anillo reemplaza al ícono del mapa; el porcentaje va entre el anillo y «xtree».
+            draw_xtree_badge(p, rect(xtree.left + 6.0, badge_top, xtree.left + 6.0 + BADGE, badge_top + BADGE), badge);
+            p.text(FontId::Ui, &format!("{pct} %"), rect(xtree.left + 26.0, xtree.top, xtree.left + 63.0, xtree.bottom), color);
+            p.text(FontId::Ui, "xtree", rect(xtree.left + 67.0, xtree.top, xtree.right - 6.0, xtree.bottom), color);
+        }
+        _ => {
+            draw_xtree_badge(p, rect(xtree.left + 7.0, badge_top, xtree.left + 7.0 + BADGE, badge_top + BADGE), badge);
+            p.text(FontId::Ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
+        }
+    }
 
     let gear = gear_rect(w, h);
     if gear_hot {
@@ -629,6 +713,53 @@ pub fn draw_splitter(p: &dyn Painter, r: Rect) {
         rect(r.left + 4.0, cy - 1.0, r.right - 4.0, cy + 1.0)
     };
     p.round_fill(line, 1.0, alpha(th.accent, 0.8));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sys::testing::RecordingPainter;
+    use crate::theme::{DEFAULT_ACCENT, Theme};
+
+    fn status_with(badge: XtreeBadge) -> (RecordingPainter, Rect) {
+        let p = RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(true)));
+        let (w, h) = (1400.0, 800.0);
+        let buttons = StatusButtons { xtree: badge, ..StatusButtons::default() };
+        draw_status(&p, w, h, "15 elementos", Layout::TwoSide, None, buttons);
+        (p, xtree_rect(w, h, badge))
+    }
+
+    /// Escaneando un volumen: el anillo reemplaza al ícono del mapa, va el porcentaje y el botón se
+    /// ensancha; sin escaneo, el botón de siempre.
+    #[test]
+    fn status_bar_draws_ring_and_widens_button() {
+        let (p, r) = status_with(XtreeBadge::Progress(37));
+        assert_eq!(r.right - r.left, 105.0);
+        let texts = p.texts();
+        assert!(texts.iter().any(|(_, s, t)| s == "37 %" && t.left >= r.left && t.right <= r.right), "{texts:?}");
+        assert!(texts.iter().any(|(_, s, t)| s == "xtree" && t.left >= r.left && t.right <= r.right));
+        assert!(!texts.iter().any(|(_, s, _)| s == "\u{E9D9}"), "el anillo reemplaza al ícono del mapa");
+        // Anillo: la pista y el avance, dentro del cuadro de 14×14 del indicador.
+        let ring: Vec<_> = p.paths().into_iter().filter(|(pts, closed, _)| *closed && pts.iter().all(|&(x, _)| x >= r.left && x <= r.left + 30.0)).collect();
+        assert!(!ring.is_empty());
+        // El texto de estado termina antes del botón.
+        let status = texts.iter().find(|(_, s, _)| s == "15 elementos").unwrap();
+        assert!(status.2.right <= r.left);
+
+        let (p, r) = status_with(XtreeBadge::Idle);
+        assert_eq!(r.right - r.left, 74.0);
+        let texts = p.texts();
+        assert!(texts.iter().any(|(_, s, t)| s == "\u{E9D9}" && t.left >= r.left && t.right <= r.right));
+        assert!(!texts.iter().any(|(_, s, _)| s.ends_with(" %")));
+
+        // Giro, terminado y aviso: el indicador en lugar del ícono, sin ensanchar.
+        for badge in [XtreeBadge::Spinning(3), XtreeBadge::Done, XtreeBadge::DoneWithIssues] {
+            let (p, r) = status_with(badge);
+            assert_eq!(r.right - r.left, 74.0, "{badge:?}");
+            assert!(!p.texts().iter().any(|(_, s, _)| s == "\u{E9D9}"), "{badge:?}");
+            assert!(!p.paths().is_empty(), "{badge:?}");
+        }
+    }
 }
 
 #[cfg(test)]

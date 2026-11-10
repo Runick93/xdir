@@ -47,7 +47,7 @@ impl App {
         if contains(&ui::groups_rect(w, h), x, y) {
             return Hit::Groups;
         }
-        if contains(&ui::xtree_rect(w, h), x, y) {
+        if contains(&self.xtree_button_rect(), x, y) {
             return Hit::Xtree;
         }
         // La vista de xtree tapa los paneles, la franja de grupos y el árbol.
@@ -59,7 +59,13 @@ impl App {
         }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
-            return if self.tree.on_pin_button(x, y) { Hit::TreePin } else { Hit::None };
+            return if self.tree.on_pin_button(x, y) {
+                Hit::TreePin
+            } else if self.tree.xtree_at(x, y) {
+                Hit::TreeXtree
+            } else {
+                Hit::None
+            };
         }
         let temps: Vec<bool> = self.groups.items.iter().map(|g| g.temp).collect();
         if let Some(g) = ui::group_bar_at(w, ui::GAP + self.tree_width(), &temps, x, y).filter(|_| self.groups_bar_h() > 0.0) {
@@ -296,7 +302,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::FilterMenu(..) | Hit::TreePin => {}
+            Hit::None | Hit::About(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree => {}
         }
         self.redraw();
     }

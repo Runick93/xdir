@@ -37,6 +37,7 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        let xtree_badge = self.xtree_badge();
         // El ancho del árbol se anima al colapsar o expandir: se avanza antes de calcular el layout.
         let now = Instant::now();
         let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
@@ -144,7 +145,7 @@ impl App {
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
                     p.round_fill(geom::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
                 }
-                tree.draw(p, r, current_folder.as_deref());
+                tree.draw(p, r, current_folder.as_deref(), xtree_badge);
             }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);
@@ -164,7 +165,14 @@ impl App {
                 Hit::Layout(l) => Some(l),
                 _ => None,
             };
-            ui::draw_status(p, w, h, &status, layout, layout_hover, picker_open || hover == Hit::Gear, hover == Hit::Groups, hover == Hit::Xtree, xtree_open);
+            let buttons = ui::StatusButtons {
+                gear_hot: picker_open || hover == Hit::Gear,
+                groups_hot: hover == Hit::Groups,
+                xtree_hot: hover == Hit::Xtree,
+                xtree_on: xtree_open,
+                xtree: xtree_badge,
+            };
+            ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado
             // (entra en el área de su lista; en un panel muy bajo puede pasarse).
             for &(i, _) in rects {

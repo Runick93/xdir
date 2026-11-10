@@ -21,6 +21,10 @@ pub struct Theme {
     /// Filas seleccionadas.
     pub selection: Color,
     pub scrollbar: Color,
+    /// Algo salió bien (tilde de «terminado»).
+    pub ok: Color,
+    /// Advertencia (ámbar): terminado con problemas.
+    pub warning: Color,
 }
 
 /// Colores de acento predefinidos (rueda dentada de la barra de estado): (nombre, 0xRRGGBB).
@@ -81,6 +85,8 @@ impl Theme {
                 hover: rgba(0xFF, 0xFF, 0xFF, 0.05),
                 selection: alpha(accent, 0.26),
                 scrollbar: rgba(0xFF, 0xFF, 0xFF, 0.22),
+                ok: rgb(0x33, 0xB8, 0x61),
+                warning: rgb(0xFA, 0xC7, 0x4D),
             }
         } else {
             Self {
@@ -97,6 +103,8 @@ impl Theme {
                 hover: rgba(0x00, 0x00, 0x00, 0.045),
                 selection: alpha(accent, 0.20),
                 scrollbar: rgba(0x00, 0x00, 0x00, 0.28),
+                ok: rgb(0x33, 0xB8, 0x61),
+                warning: rgb(0xB7, 0x79, 0x1F),
             }
         }
     }

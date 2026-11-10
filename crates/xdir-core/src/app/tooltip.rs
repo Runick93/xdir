@@ -111,6 +111,11 @@ impl App {
         match hit {
             Hit::Gear if self.picker_open => return None,
             Hit::Pane(i, PaneHit::Terminal) if self.term_menu == Some(i) => return None,
+            // El botón «xtree» dice qué hace; el cartel lleva el estado del escaneo, si lo hay.
+            Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
+            // La entrada del árbol no dice qué es por sí sola cuando está en franja: sin escaneo,
+            // «xtree».
+            Hit::TreeXtree => return Some(self.xtree.as_ref().and_then(|x| x.badge_tip()).unwrap_or_else(|| "xtree".to_string())),
             _ => {}
         }
         let tab_path = |p: usize, t: usize| {

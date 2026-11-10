@@ -140,6 +140,8 @@ impl App {
             Command::Cut => self.copy_selection(true),
             Command::Paste => self.paste(),
             Command::ShowTransfers => self.show_transfers(),
+            // Dentro de un archivo comprimido, la ruta de adentro (la del menú).
+            Command::CopyPaths if self.in_archive() => self.copy_archive_paths(active),
             Command::CopyPaths => {
                 let paths = self.selection(active);
                 if !paths.is_empty() {

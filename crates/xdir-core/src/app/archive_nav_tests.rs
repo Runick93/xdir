@@ -342,3 +342,39 @@ fn crumb_icon_and_loading_drawn() {
     assert!(texts.iter().any(|t| t == "Cargando…"), "{texts:?}");
     pump(&mut a, 0);
 }
+
+/// Un nombre no permitido nunca se vuelve una ruta del disco: ni la ruta del elemento, ni la
+/// miniatura, ni la selección (Copiar como ruta, información, vista rápida). Los buenos quedan
+/// dentro de la temporal.
+#[test]
+fn unsafe_names_never_become_disk_paths() {
+    let mut a = app(FakeHost::new());
+    let (_, zip) = fixture("rutas", &[("/etc/hosts", b"h"), ("..\\x.txt", b"x"), ("\\\\srv\\s\\x.jpg", b"j"), ("C:\\x.jpg", b"c"), ("ok.jpg", b"o")]);
+    go(&mut a, 0, root(&zip));
+    a.set_active(0);
+    let run = crate::archive_nav::temps::global().dir_for(&zip, &[]);
+    let tab = a.panes[0].tab();
+    for (i, e) in tab.list.entries.iter().enumerate() {
+        let p = tab.entry_path(i);
+        let bad = e.attrs & crate::fs::ATTR_ARCHIVE_BAD != 0;
+        if bad {
+            assert_eq!(p, PathBuf::new(), "{:?}", e.name);
+            assert_eq!(tab.list.thumb_source(e), None, "{:?}", e.name);
+        } else {
+            assert!(p.starts_with(&run), "{p:?}");
+            assert_eq!(tab.list.thumb_source(e), Some(crate::thumbs::Source::Path(p)));
+        }
+    }
+    assert_eq!(tab.list.entries.iter().filter(|e| e.attrs & crate::fs::ATTR_ARCHIVE_BAD != 0).count(), 4);
+    a.panes[0].tab_mut().list.select_all();
+    let sel = a.selection(0);
+    assert_eq!(sel.len(), 1);
+    assert!(sel[0].starts_with(&run));
+    assert!(a.selection_items(0).iter().all(|i| i.path.starts_with(&run)));
+    // La información no lee nada de adentro.
+    assert!(a.info_wanted().0.is_empty());
+    // Copiar las rutas: la de adentro del archivo, nunca la del disco que eligió el autor.
+    a.run_command(Command::CopyPaths);
+    let copied: Vec<String> = FakeShell::take_calls().into_iter().filter_map(|c| if let ShellCall::CopyText(t) = c { Some(t) } else { None }).collect();
+    assert_eq!(copied, [format!("\"{}/ok.jpg\"", zip.display())]);
+}

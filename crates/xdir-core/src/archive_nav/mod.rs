@@ -228,8 +228,18 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
                 if current.load(Ordering::Relaxed) != generation {
                     return;
                 }
+                // Los buenos llevan su ruta temporal (de ahí salen miniaturas, vista previa y vista
+                // rápida); los de nombre no permitido no tienen ninguna ruta del disco.
+                let temps = temps::global();
+                let with_path = |c: &Child| {
+                    let mut e = entry_of(c);
+                    if !c.bad {
+                        e.full = temps.entry_path(file, nested, &crate::fs::inner_join(inner, &c.name)).map(PathBuf::into_os_string);
+                    }
+                    e
+                };
                 for chunk in rows.chunks(4096) {
-                    send(LoadMsg::Entries(chunk.iter().map(entry_of).collect()));
+                    send(LoadMsg::Entries(chunk.iter().map(with_path).collect()));
                 }
                 send(LoadMsg::Listed(Ok(())));
             }

@@ -574,11 +574,9 @@ impl Tab {
         }
         match &self.location {
             Location::Path(p) => p.join(&e.name),
-            // Dentro de un archivo comprimido: dónde queda (o quedaría) su extracción temporal.
-            Location::Archive { file, nested, inner } => {
-                let rel = fs::inner_join(inner, &e.name.to_string_lossy());
-                crate::archive_nav::temps::global().entry_path(file, nested, &rel).unwrap_or_else(|| file.join(&e.name))
-            }
+            // Dentro de un archivo comprimido, la ruta temporal llega en `full`; sin ella (nombre no
+            // permitido) no hay ninguna ruta del disco: nunca se arma una con el nombre crudo.
+            Location::Archive { .. } => PathBuf::new(),
             _ => PathBuf::from(&e.name),
         }
     }

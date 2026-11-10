@@ -687,11 +687,8 @@ impl Pane {
         let tab = &mut self.tabs[self.active];
         tab.list.folder = match &tab.location {
             Location::Path(p) => Some(p.clone()),
-            // Dentro de un archivo comprimido, la temporal: se ve lo que ya se extrajo.
-            Location::Archive { file, nested, inner } => {
-                let dir = crate::archive_nav::temps::global().dir_for(file, nested);
-                Some(inner.split('/').filter(|s| !s.is_empty()).fold(dir, |d, s| d.join(s)))
-            }
+            // Dentro de un archivo comprimido cada elemento bueno trae su ruta temporal en `full`
+            // (los de nombre no permitido, ninguna): nunca carpeta + nombre crudo.
             _ => None,
         };
         tab.list.draw(p, self.list, active_pane);

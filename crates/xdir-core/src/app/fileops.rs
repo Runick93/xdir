@@ -22,13 +22,13 @@ impl App {
     /// Rutas seleccionadas en la pestaña activa de un panel.
     pub(super) fn selection(&self, pane: usize) -> Vec<PathBuf> {
         let tab = self.panes[pane].tab();
-        tab.list.selected_indices().map(|i| tab.entry_path(i)).collect()
+        tab.list.selected_indices().filter(|&i| has_disk_path(tab, i)).map(|i| tab.entry_path(i)).collect()
     }
 
     /// Selección como elementos del Shell (con PIDL si son virtuales).
     pub(super) fn selection_items(&self, pane: usize) -> Vec<shell::Item> {
         let tab = self.panes[pane].tab();
-        tab.list.selected_indices().map(|i| tab.entry_item(i)).collect()
+        tab.list.selected_indices().filter(|&i| has_disk_path(tab, i)).map(|i| tab.entry_item(i)).collect()
     }
 
     /// Arrastra la selección hacia otras ventanas (o dentro de la misma). Si el sistema no puede
@@ -537,6 +537,12 @@ impl App {
         }
         self.redraw();
     }
+}
+
+/// ¿El elemento tiene ruta del disco? Dentro de un archivo comprimido, los de nombre no permitido
+/// no (se muestran, pero nada los lee ni los copia).
+fn has_disk_path(tab: &Tab, i: usize) -> bool {
+    !(tab.location.is_archive() && tab.list.entries[i].attrs & crate::fs::ATTR_ARCHIVE_BAD != 0)
 }
 
 /// Rutas entre comillas dobles, una por línea, como «Copiar como ruta de acceso» del Explorador

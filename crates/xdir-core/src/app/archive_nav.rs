@@ -293,18 +293,25 @@ impl App {
                 }
             }
             Do::Copy => self.run_command(Command::Copy),
-            Do::CopyPath => {
-                let tab = self.panes[pane].tab();
-                let text: Vec<String> = tab
-                    .list
-                    .selected_indices()
-                    .filter_map(|i| tab.location.archive_child(&tab.list.entries[i].name.to_string_lossy()))
-                    .map(|l| format!("\"{}\"", l.address_text()))
-                    .collect();
-                let _ = sys::shell().copy_text(self.hwnd, &text.join("\r\n"));
-            }
+            Do::CopyPath => self.copy_archive_paths(pane),
             Do::Refresh => self.run_command(Command::Refresh),
             Do::None => {}
+        }
+    }
+
+    /// «Copiar como ruta de acceso» dentro de un archivo comprimido: la ruta de adentro de cada uno
+    /// («/x/fotos.zip/2024/a.jpg»), sin los de nombre no permitido.
+    pub(super) fn copy_archive_paths(&mut self, pane: usize) {
+        let tab = self.panes[pane].tab();
+        let text: Vec<String> = tab
+            .list
+            .selected_indices()
+            .filter(|&i| tab.list.entries[i].attrs & ATTR_ARCHIVE_BAD == 0)
+            .filter_map(|i| tab.location.archive_child(&tab.list.entries[i].name.to_string_lossy()))
+            .map(|l| format!("\"{}\"", l.address_text()))
+            .collect();
+        if !text.is_empty() {
+            let _ = sys::shell().copy_text(self.hwnd, &text.join("\r\n"));
         }
     }
 

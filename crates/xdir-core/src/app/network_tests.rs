@@ -1363,3 +1363,22 @@ fn auth_retry_ignored_after_navigation() {
     assert_eq!(FakeFileSystem::loads(&local), loads, "no recarga la carpeta nueva");
     FakeFileSystem::set_load_error(&path, None);
 }
+
+/// I9: si la conexión vence (el usuario tardó en la ventana de credenciales del sistema) pero
+/// después termina bien, se acepta: el panel se cierra, se abre la carpeta y se avisa.
+#[test]
+fn late_success_after_timeout_is_accepted() {
+    let target = tmp_dir("r1-late-ok");
+    FakeNetwork::set_connect("nas-r1late", Ok(target.clone()));
+    FakeNetwork::hang("nas-r1late", Duration::from_millis(250));
+    let (mut a, _h) = open_with("smb://nas-r1late/fotos");
+    a.net.connect_limit = Some(Duration::from_millis(50));
+    let tabs = a.panes[a.active].tabs.len();
+    a.on_field_done(true);
+    wait_until(&mut a, |a| a.net.dialog.as_ref().is_some_and(|d| d.error.is_some()));
+    assert_eq!(a.net.dialog.as_ref().unwrap().error.as_deref(), Some("Se agotó el tiempo esperando a \"nas-r1late\""));
+    wait_until(&mut a, |a| a.net.dialog.is_none());
+    assert_eq!(a.panes[a.active].tabs.len(), tabs + 1);
+    assert_eq!(a.panes[a.active].tab().location, Location::Path(target));
+    assert_eq!(a.notice.as_deref(), Some("Se conectó \"fotos\""));
+}

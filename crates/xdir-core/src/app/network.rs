@@ -22,7 +22,6 @@ pub(super) const LIST_LIMIT: Duration = Duration::from_secs(10);
 pub(super) const DISCONNECT_LIMIT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
-#[allow(dead_code)] // `hosts` y `browse_cancel` los usa «Red» en el árbol.
 pub(super) struct NetState {
     pub places: NetPlaces,
     /// Lo conectado (lo último que dijo `Network::connections`).
@@ -54,6 +53,8 @@ pub(super) struct NetState {
     pub unmap: Option<crate::net::drives_dialog::DisconnectDialog>,
     /// La sección «Red» de la configuración.
     pub page: super::network_page::PageState,
+    /// Tiempo límite de conectar (`None`: 30 s; las pruebas lo achican).
+    pub connect_limit: Option<Duration>,
     /// Quien escribe `red.toml`.
     pub writer: net::PlacesWriter,
     /// Fecha de `red.toml` leída (para volver a leerlo si cambió).
@@ -127,14 +128,45 @@ impl App {
     pub(super) fn spawn_connect(&mut self, pane: usize, tab: Option<usize>, addr: Address, opts: ConnectOptions) -> u64 {
         self.net.generation += 1;
         let generation = self.net.generation;
-        let owner = self.hwnd;
+        let (owner, limit, late_tx) = (self.hwnd, self.net.connect_limit.unwrap_or(CONNECT_LIMIT), self.task_tx.clone());
         self.spawn_task(move || {
-            let host = addr.host.clone();
+            // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
+            // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda
+            // huérfano detrás de un error.
+            let (tx, rx) = std::sync::mpsc::channel();
             let a = addr.clone();
-            let result = net::with_timeout(CONNECT_LIMIT, &host, move || sys::network().connect(owner, &a, opts, &AtomicBool::new(false)));
+            std::thread::spawn(move || {
+                let r = sys::network().connect(owner, &a, opts, &AtomicBool::new(false));
+                if let Err(std::sync::mpsc::SendError(Ok(path))) = tx.send(r)
+                    && late_tx.send(TaskDone::LateConnected { addr: a, path }).is_ok()
+                {
+                    owner.post(super::tasks::WM_APP_TASK, 0, 0);
+                }
+            });
+            let result = match rx.recv_timeout(limit) {
+                Ok(r) => r,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NetError::Timeout { host: addr.host.clone() }),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NetError::Other("La conexión terminó sin respuesta".into())),
+            };
             TaskDone::Connected { pane, tab, generation, addr, result }
         });
         generation
+    }
+
+    /// Una conexión que había vencido terminó bien: se avisa, se suma a los recientes y, si el
+    /// panel sigue abierto con esa dirección, se cierra y se abre la carpeta.
+    pub(super) fn on_late_connected(&mut self, addr: Address, path: PathBuf) {
+        self.request_connections();
+        self.net.places.add_recent(&addr, unix_now());
+        self.save_net_places();
+        self.notice = Some(format!("Se conectó \"{}\"", addr.label()));
+        let same = self.net.dialog.as_ref().is_some_and(|d| d.busy.is_none()) && Address::parse(&self.connect_field_text()).is_ok_and(|a| a.same(&addr));
+        if same {
+            self.close_connect_dialog();
+            let pane = self.active;
+            self.new_tab(pane, Location::Path(path), true);
+        }
+        self.redraw();
     }
 
     /// Una carpeta UNC falló por credenciales: se conecta (el sistema pide usuario y contraseña)

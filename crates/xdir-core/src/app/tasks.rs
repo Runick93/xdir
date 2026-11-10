@@ -32,6 +32,8 @@ pub(super) enum TaskDone {
     /// Nombres de unidades de red, pedidos en otro hilo (para el árbol).
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     DriveLabels(Vec<(PathBuf, String)>),
+    /// Una conexión que había vencido terminó bien después.
+    LateConnected { addr: crate::net::Address, path: PathBuf },
     /// Las subcarpetas de la flecha `chevron` del panel `pane` (pedidas en otro hilo).
     Subfolders { pane: usize, chevron: usize, loc: Location, items: Vec<(String, Location)> },
     /// Terminó de desconectar `root` (`label`: el último tramo de la dirección; `force`: si fue
@@ -93,6 +95,7 @@ impl App {
             TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
             TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
             TaskDone::Subfolders { pane, chevron, loc, items } => self.on_subfolders(pane, chevron, loc, items),
+            TaskDone::LateConnected { addr, path } => self.on_late_connected(addr, path),
             TaskDone::Disconnected { root, label, force, result } => self.on_disconnected(root, label, force, result),
         }
     }

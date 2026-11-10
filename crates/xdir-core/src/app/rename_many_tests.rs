@@ -536,3 +536,23 @@ fn toggle_preview_closes_either_panel() {
     a.run_command(Command::TogglePreview);
     assert!(!a.info_open() && a.preview.on);
 }
+
+/// Si el hilo del renombrado entra en pánico igual llega el fin (con error): `renaming` vuelve a
+/// `false` y se puede renombrar otra vez; un deshacer que falla así vuelve a la pila.
+#[test]
+fn rename_thread_panic_still_finishes() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let dir = fixture("panico", &["a.txt"]);
+    go(&mut a, &dir);
+    a.spawn_renames(dir.clone(), None, || panic!("falla de prueba"));
+    assert!(a.renaming);
+    wait_renamed(&mut a);
+    assert!(!a.renaming, "se puede volver a renombrar");
+    assert!(a.notice.as_deref().is_some_and(|n| n.starts_with("No se pudo renombrar")), "{:?}", a.notice);
+    let back = vec![(dir.join("b.txt"), "a.txt".to_string())];
+    a.spawn_renames(dir.clone(), Some(back.clone()), || panic!("falla de prueba"));
+    wait_renamed(&mut a);
+    assert!(!a.renaming);
+    assert_eq!(a.undo.last(), Some(&Undo::Renames(back)));
+}

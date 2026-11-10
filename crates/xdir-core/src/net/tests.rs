@@ -213,3 +213,10 @@ fn panic_is_not_a_timeout() {
     let r = with_timeout(Duration::from_secs(5), "nas", || -> Result<(), NetError> { panic!("falla adentro") });
     assert!(matches!(r, Err(NetError::Other(_))), "{r:?}");
 }
+
+/// M13: en UNC un tramo no lleva `:`; una IPv6 va como la escribe Windows.
+#[test]
+fn unc_colon_and_ipv6() {
+    assert_eq!(Address::parse(r"\\srv\c:x"), Err(BAD_ADDRESS.to_string()));
+    assert_eq!(p("smb://[fe80::1]/x").to_unc().as_deref(), Some(r"\\fe80--1.ipv6-literal.net\x"));
+}

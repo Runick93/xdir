@@ -202,7 +202,8 @@ impl Address {
         let mut segments = Vec::new();
         for s in path.split(is_sep).filter(|s| !s.is_empty()) {
             let s = if unc { s.to_string() } else { decode(s)? };
-            if !valid_segment(&s) {
+            // En UNC un tramo con `:` sería un flujo alternativo de NTFS (`c:x`).
+            if !valid_segment(&s) || (unc && s.contains(':')) {
                 return Err(bad());
             }
             segments.push(s);
@@ -245,7 +246,9 @@ impl Address {
         if self.scheme != "smb" {
             return None;
         }
-        let mut out = format!(r"\\{}", self.host);
+        // Windows escribe una IPv6 en UNC como `fe80--1.ipv6-literal.net`.
+        let host = if self.host.contains(':') { format!("{}.ipv6-literal.net", self.host.replace(':', "-")) } else { self.host.clone() };
+        let mut out = format!(r"\\{host}");
         for s in self.share.iter().chain(self.rest.iter()) {
             out.push('\\');
             out += s;

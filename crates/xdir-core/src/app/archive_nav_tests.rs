@@ -522,3 +522,30 @@ fn escape_closes_other_things_before_cancelling_open() {
     assert_eq!(a.notice.as_deref(), Some("Se canceló la apertura"));
     task(&mut a);
 }
+
+/// Dos aperturas seguidas: la primera, reemplazada, no abre nada aunque haya terminado bien; solo
+/// la última. Y Escape corta siempre la última.
+#[test]
+fn superseded_open_never_opens() {
+    let mut a = app(FakeHost::new());
+    let (_, zip) = fixture("reemplazada", &[("uno.txt", b"1"), ("dos.txt", b"2")]);
+    go(&mut a, 0, root(&zip));
+    a.set_active(0);
+    let (uno, dos) = (idx_of(&a, 0, "uno.txt"), idx_of(&a, 0, "dos.txt"));
+    a.apply(0, Action::Open(uno));
+    a.apply(0, Action::Open(dos));
+    task(&mut a);
+    task(&mut a);
+    let opened: Vec<PathBuf> = FakeShell::take_calls().into_iter().filter_map(|c| if let ShellCall::OpenFile(p, _) = c { Some(p) } else { None }).collect();
+    let temp = |n: &str| crate::archive_nav::temps::global().entry_path(&zip, &[], n).unwrap();
+    assert_eq!(opened, [temp("dos.txt")]);
+    assert!(a.archive.opening.is_none());
+    // Escape después de dos aperturas: corta la última (y la primera ya estaba reemplazada).
+    a.apply(0, Action::Open(uno));
+    a.apply(0, Action::Open(dos));
+    a.on_key(VK_ESCAPE);
+    task(&mut a);
+    task(&mut a);
+    assert!(FakeShell::take_calls().iter().all(|c| !matches!(c, ShellCall::OpenFile(..))));
+    assert!(a.archive.opening.is_none());
+}

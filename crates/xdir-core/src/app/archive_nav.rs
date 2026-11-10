@@ -145,7 +145,7 @@ impl App {
         self.spawn_task(move || {
             let cancel = || stop.load(Ordering::Relaxed);
             let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
-            TaskDone::ArchiveOpened { name, with, result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
+            TaskDone::ArchiveOpened { name, with, token: stop.clone(), result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
         });
     }
 
@@ -159,16 +159,17 @@ impl App {
     }
 
     /// Terminó la extracción para abrir: se abre con su programa (o se avisa por qué no).
-    pub(super) fn on_archive_opened(&mut self, name: String, with: bool, result: Result<PathBuf, String>) {
-        // Cancelada con Escape, o reemplazada por otra apertura: no se abre nada.
-        if self.archive.opening.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
-            self.archive.opening = None;
-            return;
-        }
-        if matches!(&result, Err(m) if m == CANCELLED) {
+    /// `token`: el de esa apertura; solo la última (la de `opening`) abre algo.
+    pub(super) fn on_archive_opened(&mut self, name: String, with: bool, token: Arc<AtomicBool>, result: Result<PathBuf, String>) {
+        // Reemplazada por otra apertura: no se abre nada ni se toca la de ahora.
+        if !self.archive.opening.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &token)) {
             return;
         }
         self.archive.opening = None;
+        // Cancelada con Escape.
+        if token.load(Ordering::Relaxed) || matches!(&result, Err(m) if m == CANCELLED) {
+            return;
+        }
         match result {
             Ok(path) if with => {
                 self.notice = None;

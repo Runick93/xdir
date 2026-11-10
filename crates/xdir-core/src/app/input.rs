@@ -118,6 +118,8 @@ impl App {
         self.dismiss_tooltip();
         let hit = self.hit(x, y);
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        // Grabando un atajo, un clic fuera de su fila deja de grabar (y sigue su curso).
+        self.cancel_recording_unless(hit);
         self.info.focused = matches!(hit, Hit::Info(_));
         if self.about_open {
             match hit {

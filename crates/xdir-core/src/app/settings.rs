@@ -100,6 +100,9 @@ impl App {
         if let Some(e) = &self.config_error {
             items.push(Item::Error(format!("No se pudo guardar config.toml: {e}"), Some(("error_config", "Abrir config.toml".to_string()))));
         }
+        if section == Section::Keys {
+            items.extend(self.keys_items());
+        }
         for spec in options::of(section) {
             items.extend(self.option_items(spec));
         }
@@ -400,6 +403,8 @@ impl App {
                 }
             }
             ("portable", _) => self.toggle_portable(),
+            ("restablecer_atajos", _) => self.reset_all_shortcuts(),
+            (id, part) if commands::ALL.iter().any(|s| s.id == id) => self.shortcut_part(id, part),
             ("vista_previa_ancho", _) => {
                 self.host.capture_mouse();
                 self.drag = Drag::SettingsSlider(pane, id);
@@ -595,4 +600,206 @@ impl App {
         let page = self.panes[pane].tabs[index].settings.as_ref()?.page;
         Some(Self::page_id(page).to_string())
     }
+}
+
+// ---------- Atajos de teclado ----------
+
+use crate::commands::{self, Combo, Keymap};
+use crate::settings::draw::{PART_ADD, PART_CANCEL, PART_CHIP, PART_CHIP_REMOVE, PART_EDIT, PART_REASSIGN, PART_RESET};
+use crate::settings::keys::{self as skeys, Capture, Recording, RowState, ShortcutRow};
+
+impl App {
+    /// ¿Se está grabando un atajo? Mientras tanto ninguna tecla llega al `Keymap` ni a la lista
+    /// (la plataforma tampoco deja que el menú tome ⌘W o ⌘,).
+    pub fn capturing_keys(&self) -> bool {
+        self.recording().is_some()
+    }
+
+    fn recording(&self) -> Option<&Recording> {
+        let (pane, index) = self.settings_tab()?;
+        self.panes[pane].tabs[index].settings.as_ref()?.recording.as_ref()
+    }
+
+    fn recording_mut(&mut self) -> Option<&mut Option<Recording>> {
+        let (pane, index) = self.settings_tab()?;
+        Some(&mut self.panes[pane].tabs[index].settings.as_mut()?.recording)
+    }
+
+    fn set_recording(&mut self, r: Option<Recording>) {
+        if let Some(slot) = self.recording_mut() {
+            *slot = r;
+        }
+        self.redraw();
+    }
+
+    /// Lo de la página Atajos: «Restablecer todos», los errores de `[atajos]` y los comandos por
+    /// grupo, en el orden de `ALL`, con sus atajos de ahora.
+    fn keys_items(&self) -> Vec<Item> {
+        let mut items = vec![Item::Action("restablecer_atajos", "Restablecer todos".to_string())];
+        for e in &self.config.key_errors {
+            items.push(Item::Error(e.clone(), Some(("error_config", "Abrir config.toml".to_string()))));
+        }
+        let factory = Keymap::default();
+        let rec = self.recording();
+        for g in commands::Group::ALL {
+            let specs: Vec<&commands::Spec> = commands::ALL.iter().filter(|s| commands::group(s.command) == g && commands::available(s.command)).collect();
+            if specs.is_empty() {
+                continue;
+            }
+            items.push(Item::Heading(g.title().to_string()));
+            for spec in specs {
+                let combos = self.config.keymap.combos(spec.command);
+                let state = match rec.filter(|r| r.command == spec.command) {
+                    None => RowState::Normal,
+                    Some(r) => match (r.conflict, r.message) {
+                        (Some((k, other)), _) => RowState::Conflict(format!("{} ya es de \"{}\"", commands::combo_label(k), command_title(other))),
+                        (None, Some(m)) if m == skeys::SYSTEM_KEY && r.pressed.is_some() => {
+                            RowState::Rejected(format!("{} la usa el sistema", commands::combo_label(r.pressed.unwrap())))
+                        }
+                        (None, Some(m)) => RowState::Rejected(m.to_string()),
+                        (None, None) => RowState::Recording,
+                    },
+                };
+                items.push(Item::Shortcut(ShortcutRow {
+                    id: spec.id,
+                    title: spec.title().to_string(),
+                    chips: combos.iter().map(|c| commands::combo_label(*c)).collect(),
+                    changed: combos != factory.combos(spec.command),
+                    state,
+                }));
+            }
+        }
+        items
+    }
+
+    /// Un clic que no es en la fila que se está grabando cancela la grabación.
+    pub(super) fn cancel_recording_unless(&mut self, hit: Hit) {
+        let Some(c) = self.recording().map(|r| r.command) else { return };
+        let own = matches!(hit, Hit::Settings(_, SettingsHit::Part(id, _)) if id == spec_id(c));
+        if !own {
+            self.set_recording(None);
+        }
+    }
+
+    /// Un clic en una parte de la fila del comando `id`.
+    fn shortcut_part(&mut self, id: &str, part: usize) {
+        let Some(c) = commands::ALL.iter().find(|s| s.id == id).map(|s| s.command) else { return };
+        let combos = self.config.keymap.combos(c);
+        let recording_here = self.recording().is_some_and(|r| r.command == c);
+        match part {
+            // ✎ graba reemplazando el primero (o, grabando, deja de grabar).
+            PART_EDIT if recording_here => self.set_recording(None),
+            PART_EDIT => self.set_recording(Some(Recording::new(c, (!combos.is_empty()).then_some(0)))),
+            PART_ADD => self.set_recording(Some(Recording::new(c, None))),
+            PART_RESET => self.reset_shortcut(c),
+            PART_REASSIGN => {
+                if let Some((k, _)) = self.recording().and_then(|r| r.conflict) {
+                    let replace = self.recording().and_then(|r| r.replace);
+                    self.set_recording(None);
+                    self.assign_shortcut(c, k, replace);
+                }
+            }
+            PART_CANCEL => self.set_recording(None),
+            p if (PART_CHIP_REMOVE..PART_REASSIGN).contains(&p) => {
+                let i = p - PART_CHIP_REMOVE;
+                if i < combos.len() {
+                    let mut rest = combos.clone();
+                    rest.remove(i);
+                    self.set_shortcuts(c, rest);
+                }
+            }
+            // Un chip: grabar uno que lo reemplace.
+            p if (PART_CHIP..PART_CHIP_REMOVE).contains(&p) => self.set_recording(Some(Recording::new(c, Some(p - PART_CHIP)))),
+            _ => {}
+        }
+    }
+
+    /// Una tecla mientras se graba (lo primero de `on_key`). `None`: no se está grabando.
+    pub(super) fn settings_capture_key(&mut self, vk: Key, alt_down: bool) -> Option<bool> {
+        let rec = self.recording()?.clone();
+        let (ctrl, shift, meta) = (key_down(VK_CONTROL), key_down(VK_SHIFT), key_down(VK_LWIN));
+        let alt = alt_down || key_down(VK_MENU);
+        match skeys::classify(vk, ctrl, shift, alt, meta, sys::env().key_style()) {
+            Capture::Wait => {}
+            Capture::Cancel => self.set_recording(None),
+            Capture::Reject(m) => {
+                let pressed = Combo { vk: vk.0, ctrl, shift, alt, meta };
+                self.set_recording(Some(Recording { message: Some(m), pressed: Some(pressed), conflict: None, ..rec }));
+            }
+            Capture::Accept(k) => {
+                let combos = self.config.keymap.combos(rec.command);
+                match self.config.keymap.owner(k) {
+                    // La misma que ya tiene (en este chip u otro): nada cambia.
+                    _ if combos.contains(&k) => self.set_recording(None),
+                    Some(other) => self.set_recording(Some(Recording { conflict: Some((k, other)), message: None, pressed: Some(k), ..rec })),
+                    None => {
+                        self.set_recording(None);
+                        self.assign_shortcut(rec.command, k, rec.replace);
+                    }
+                }
+            }
+        }
+        Some(true)
+    }
+
+    /// Da `k` al comando: en el lugar del chip `replace` o como uno más.
+    fn assign_shortcut(&mut self, c: Command, k: Combo, replace: Option<usize>) {
+        let mut combos = self.config.keymap.combos(c);
+        match replace.filter(|&i| i < combos.len()) {
+            Some(i) => combos[i] = k,
+            None => combos.push(k),
+        }
+        self.set_shortcuts(c, combos);
+    }
+
+    /// Los atajos del comando pasan a ser `combos`: en memoria y en `config.toml` (su línea con la
+    /// lista completa, y la de cada comando que perdió una tecla con lo que le quedó).
+    fn set_shortcuts(&mut self, c: Command, combos: Vec<Combo>) {
+        let displaced = self.config.keymap.set(c, &combos);
+        let mut edits = vec![self.shortcut_line(c)];
+        for d in displaced {
+            if d != c && !edits.iter().any(|e| matches!(e, ConfigEdit::Set { key, .. } if key == spec_id(d))) {
+                edits.push(self.shortcut_line(d));
+            }
+        }
+        self.config.own_shortcuts += edits.len();
+        self.edit_config(edits);
+    }
+
+    fn shortcut_line(&self, c: Command) -> ConfigEdit {
+        let texts: Vec<String> = self.config.keymap.combos(c).into_iter().map(commands::combo_text).collect();
+        ConfigEdit::Set { section: "atajos", key: spec_id(c).to_string(), value: crate::toml_edit::str_value(&texts) }
+    }
+
+    /// ↺: el comando vuelve a los de fábrica (se quita su línea). Los de fábrica que ya tiene otro
+    /// comando quedan con ese (como al leer `config.toml`).
+    fn reset_shortcut(&mut self, c: Command) {
+        let factory = Keymap::default().combos(c);
+        let free: Vec<Combo> = factory.into_iter().filter(|k| self.config.keymap.owner(*k).is_none_or(|o| o == c)).collect();
+        self.config.keymap.set(c, &free);
+        self.edit_config(vec![ConfigEdit::Remove { section: "atajos", key: spec_id(c).to_string() }]);
+    }
+
+    /// «Restablecer todos»: pregunta y quita todas las líneas activas de `[atajos]`.
+    fn reset_all_shortcuts(&mut self) {
+        let n = self.config.own_shortcuts;
+        let text = format!("¿Volver todos los atajos a los de fábrica? Se borran {n} atajos propios.");
+        if !self.host.ask_yes_no("Atajos", &text) {
+            return;
+        }
+        self.set_recording(None);
+        self.config.keymap = Keymap::default();
+        self.config.own_shortcuts = 0;
+        self.edit_config(vec![ConfigEdit::RemoveAll { section: "atajos" }]);
+    }
+}
+
+/// Id de `config.toml` de un comando.
+fn spec_id(c: Command) -> &'static str {
+    commands::ALL.iter().find(|s| s.command == c).map_or("", |s| s.id)
+}
+
+/// Nombre de un comando en este sistema.
+fn command_title(c: Command) -> &'static str {
+    commands::ALL.iter().find(|s| s.command == c).map_or("", |s| s.title())
 }

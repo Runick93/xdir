@@ -566,3 +566,184 @@ fn portable_info_only_when_unsupported() {
     FakeEnv::set_portable_supported(true);
     assert_eq!(r.control, Control::None, "solo se informa");
 }
+
+// ---------- Atajos de teclado ----------
+
+use crate::keys::keys::{VK_ESCAPE, VK_TAB};
+use crate::settings::draw::{PART_ADD, PART_CHIP_REMOVE, PART_EDIT, PART_REASSIGN, PART_RESET};
+
+fn combo(text: &str) -> commands::Combo {
+    commands::parse_combo(text).unwrap()
+}
+
+fn keys_app() -> (App, Rc<FakeHost>) {
+    fresh_config();
+    settings_app(Section::Keys)
+}
+
+fn recording(a: &App) -> Option<crate::settings::keys::Recording> {
+    let (p, t) = a.settings_tab()?;
+    a.panes[p].tabs[t].settings.as_ref()?.recording.clone()
+}
+
+#[test]
+fn record_replaces_chip_and_writes_line() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    assert!(a.capturing_keys());
+    assert!(press(&mut a, &[VK_CONTROL, VK_SHIFT], Key(b'K' as u16)));
+    assert!(!a.capturing_keys());
+    assert_eq!(a.config.keymap.combos(Command::Duplicate), [combo("Ctrl+Shift+K")]);
+    wait_config(&mut a);
+    let text = config_text();
+    assert!(text.contains("\nduplicar = \"Ctrl+Shift+K\"\n"), "{text}");
+    assert_eq!(a.config.keymap.lookup(Key(b'K' as u16), true, true, false, false), Some(Command::Duplicate));
+}
+
+#[test]
+fn record_conflict_offers_reassign() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    press(&mut a, &[VK_CONTROL], Key(b'T' as u16));
+    assert_eq!(recording(&a).unwrap().conflict, Some((combo("Ctrl+T"), Command::NewTab)));
+    assert!(!a.config_saving, "nada escrito todavía");
+    let row = a.settings_items(Section::Keys).into_iter().find_map(|i| match i {
+        Item::Shortcut(s) if s.id == "duplicar" => Some(s),
+        _ => None,
+    });
+    assert_eq!(row.unwrap().state, crate::settings::keys::RowState::Conflict("Ctrl+T ya es de \"Pestaña nueva\"".into()));
+    a.settings_part(0, "duplicar", PART_REASSIGN, 0.0);
+    assert!(!a.capturing_keys());
+    wait_config(&mut a);
+    let text = config_text();
+    assert!(text.contains("\nduplicar = \"Ctrl+T\"\n") && text.contains("\npestana_nueva = \"\"\n"), "{text}");
+    assert_eq!(a.config.keymap.owner(combo("Ctrl+T")), Some(Command::Duplicate));
+    assert!(a.config.keymap.combos(Command::NewTab).is_empty());
+}
+
+#[test]
+fn record_own_combo_is_noop() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_ADD, 0.0);
+    press(&mut a, &[VK_CONTROL], Key(b'D' as u16));
+    assert!(recording(&a).is_none());
+    assert!(!a.config_saving && a.config_pending.is_empty(), "no se escribe nada");
+    assert_eq!(a.config.keymap.combos(Command::Duplicate), [combo("Ctrl+D")]);
+}
+
+#[test]
+fn add_second_shortcut() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_ADD, 0.0);
+    press(&mut a, &[], Key(0x72)); // F3
+    assert_eq!(a.config.keymap.combos(Command::Duplicate), [combo("Ctrl+D"), combo("F3")]);
+    wait_config(&mut a);
+    assert!(config_text().contains("\nduplicar = [\"Ctrl+D\", \"F3\"]\n"));
+}
+
+#[test]
+fn remove_chip_leaves_empty_string() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_CHIP_REMOVE, 0.0);
+    assert!(a.config.keymap.combos(Command::Duplicate).is_empty());
+    wait_config(&mut a);
+    assert!(config_text().contains("\nduplicar = \"\"\n"));
+}
+
+#[test]
+fn reset_one_removes_line() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_CHIP_REMOVE, 0.0);
+    wait_config(&mut a);
+    a.settings_part(0, "duplicar", PART_RESET, 0.0);
+    assert_eq!(a.config.keymap.combos(Command::Duplicate), [combo("Ctrl+D")]);
+    wait_config(&mut a);
+    assert_eq!(config_text(), config::template());
+}
+
+#[test]
+fn reset_all_asks_and_clears_active_lines() {
+    let (mut a, host) = keys_app();
+    a.settings_part(0, "duplicar", PART_CHIP_REMOVE, 0.0);
+    wait_config(&mut a);
+    a.settings_part(0, "copiar", PART_CHIP_REMOVE, 0.0);
+    wait_config(&mut a);
+    host.set_answer(Some(false));
+    a.settings_part(0, "restablecer_atajos", 0, 0.0);
+    assert_eq!(host.questions().last().unwrap(), &("Atajos".to_string(), "¿Volver todos los atajos a los de fábrica? Se borran 2 atajos propios.".to_string()));
+    assert!(a.config.keymap.combos(Command::Copy).is_empty(), "con No no cambia nada");
+    host.set_answer(Some(true));
+    a.settings_part(0, "restablecer_atajos", 0, 0.0);
+    assert_eq!(a.config.keymap.combos(Command::Copy), [combo("Ctrl+C")]);
+    wait_config(&mut a);
+    assert_eq!(config_text(), config::template(), "los comentarios quedan");
+}
+
+#[test]
+fn recording_swallows_keys() {
+    let (mut a, _) = keys_app();
+    a.set_layout(Layout::TwoSide);
+    let tabs = a.panes[0].tabs.len();
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    press(&mut a, &[VK_CONTROL], Key(b'W' as u16));
+    // Ctrl+W ya es de «Cerrar pestaña»: queda el choque, la pestaña no se cierra.
+    assert_eq!(a.panes[0].tabs.len(), tabs);
+    a.settings_part(0, "duplicar", crate::settings::draw::PART_CANCEL, 0.0);
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    press(&mut a, &[], VK_TAB);
+    assert_eq!(a.active, 0, "Tab no cambia de panel");
+    assert_eq!(recording(&a).unwrap().conflict, Some((combo("Tab"), Command::NextPane)));
+    press(&mut a, &[], Key(b'A' as u16));
+    assert_eq!(recording(&a).unwrap().message, Some(crate::settings::keys::LIST_KEY));
+    a.on_char('x');
+    assert!(a.capturing_keys());
+    // Un clic afuera cancela.
+    a.on_left_down(2.0, 2.0, false);
+    assert!(!a.capturing_keys());
+}
+
+#[test]
+fn escape_cancels_recording() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    press(&mut a, &[], VK_ESCAPE);
+    assert!(!a.capturing_keys());
+    assert_eq!(a.config.keymap.combos(Command::Duplicate), [combo("Ctrl+D")]);
+    assert!(a.panes[0].tab().is_settings(), "Esc no hizo otra cosa");
+}
+
+#[test]
+fn key_errors_shown_on_top() {
+    let mut init = Init::blank();
+    init.config = Config::parse("[atajos]\nduplicar = \"Ctrl+Hiper\"\n");
+    let a = App::new(init, FakeHost::new());
+    let items = a.settings_items(Section::Keys);
+    assert!(matches!(&items[0], Item::Action("restablecer_atajos", _)));
+    match &items[1] {
+        Item::Error(text, Some(("error_config", label))) => {
+            assert!(text.starts_with("config.toml, línea 2: ") && text.contains("Hiper"), "{text}");
+            assert_eq!(label, "Abrir config.toml");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn keys_page_mac_labels() {
+    FakeEnv::set_key_style(sys::KeyStyle::Mac);
+    let a = app();
+    let items = a.settings_items(Section::Keys);
+    FakeEnv::set_key_style(sys::KeyStyle::Windows);
+    let chips = |id: &str| {
+        items.iter().find_map(|i| match i {
+            Item::Shortcut(s) if s.id == id => Some(s.chips.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(chips("ir_a_carpeta").unwrap(), ["⌘P"]);
+    assert_eq!(chips("pestana_nueva").unwrap(), ["⌘T"]);
+    // Los grupos en el orden de la wiki, solo con comandos.
+    let headings: Vec<&str> = items.iter().filter_map(|i| if let Item::Heading(h) = i { Some(h.as_str()) } else { None }).collect();
+    assert_eq!(headings[0], "Navegación");
+    assert_eq!(headings.last().copied(), Some("Otros"));
+}

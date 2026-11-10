@@ -306,6 +306,9 @@ impl App {
     /// largo (Alt+F4, Alt+Espacio). Devuelve si se usó.
     pub fn on_alt_key(&mut self, vk: Key) -> bool {
         self.dismiss_tooltip();
+        if let Some(used) = self.settings_capture_key(vk, true) {
+            return used;
+        }
         match self.config.keymap.lookup(vk, key_down(VK_CONTROL), key_down(VK_SHIFT), true, key_down(VK_LWIN)) {
             Some(c) => {
                 self.run_command(c);
@@ -318,6 +321,10 @@ impl App {
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
         self.dismiss_tooltip();
+        // Grabando un atajo, lo escrito no va a la lista.
+        if self.capturing_keys() {
+            return;
+        }
         // El espacio de la tecla que abrió, cerró o plegó (Windows manda la tecla y después el
         // carácter) no entra en la búsqueda por tipeo.
         if std::mem::take(&mut self.swallow_space) && c == ' ' {

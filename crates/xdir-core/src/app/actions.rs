@@ -14,6 +14,10 @@ impl App {
         let meta = key_down(VK_LWIN);
         // El Espacio solo se traga si es el carácter que sigue a esta tecla.
         self.swallow_space = false;
+        // Grabando un atajo en la configuración, la tecla es para eso (ni ⌘W ni Tab llegan).
+        if let Some(used) = self.settings_capture_key(vk, alt) {
+            return used;
+        }
         // La vista rápida va antes que los atajos: Espacio la abre o la cierra, Esc la cierra y
         // las flechas la recorren.
         if let Some(used) = self.quick_look_key(vk, ctrl, shift, alt) {

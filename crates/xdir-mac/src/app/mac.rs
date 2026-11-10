@@ -512,6 +512,23 @@ define_class!(
             crate::quicklook::end(panel);
         }
 
+        /// Grabando un atajo en la configuración, las combinaciones con ⌘ (⌘W, ⌘,) son para la
+        /// grabación: no las toma el menú.
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            let mut capturing = false;
+            with_app(|app| capturing = app.capturing_keys());
+            match translate_key(event).filter(|_| capturing) {
+                Some(key) => {
+                    with_app(|app| {
+                        app.on_key(key);
+                    });
+                    true
+                }
+                None => unsafe { msg_send![super(self), performKeyEquivalent: event] },
+            }
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let flags = event.modifierFlags();

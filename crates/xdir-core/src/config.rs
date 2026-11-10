@@ -98,6 +98,11 @@ pub struct Config {
     pub xtree_open: XtreeOpen,
     /// Problemas al leer el archivo, para avisar en la barra de estado.
     pub errors: Vec<String>,
+    /// Los problemas de `[atajos]`, como se muestran arriba de la página Atajos
+    /// («config.toml, línea 12: tecla desconocida «Hiper»»); también están en `errors`.
+    pub key_errors: Vec<String>,
+    /// Cuántas líneas activas tiene `[atajos]` (los atajos propios; «Restablecer todos» las quita).
+    pub own_shortcuts: usize,
     /// Cuántas de `colors` son del usuario (van primero; el resto son las de fábrica).
     pub own_colors: usize,
     /// Fecha del archivo leído, para saber si cambió.
@@ -106,7 +111,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, errors: Vec::new(), own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, errors: Vec::new(), key_errors: Vec::new(), own_shortcuts: 0, own_colors: 0, modified: None }
     }
 }
 
@@ -215,6 +220,9 @@ impl Config {
                     }
                 }
                 "atajos" => {
+                    c.own_shortcuts += section.entries.len();
+                    let before = c.errors.len();
+                    let error_lines: Vec<usize> = doc.errors.iter().map(|(l, _)| *l).filter(|l| *l > section.line && section_end(&doc, section) > *l).collect();
                     for e in &section.entries {
                         let Some(spec) = commands::ALL.iter().find(|s| s.id == e.key) else {
                             c.errors.push(format!("línea {}: acción desconocida «{}»", e.line, e.key));
@@ -240,6 +248,9 @@ impl Config {
                             c.keymap.set(spec.command, &combos);
                         }
                     }
+                    let mut keys: Vec<String> = doc.errors.iter().filter(|(l, _)| error_lines.contains(l)).map(|(l, e)| format!("línea {l}: {e}")).collect();
+                    keys.extend(c.errors[before..].iter().cloned());
+                    c.key_errors.extend(keys.into_iter().map(|e| format!("config.toml, {e}")));
                 }
                 "colores" => {
                     for e in &section.entries {
@@ -293,6 +304,11 @@ pub fn rule_label(r: &ColorRule) -> String {
         ColorMatch::Names(p) => p.join("; "),
         ColorMatch::Attr(a) => format!("@{}", ATTRS.iter().find(|(_, x)| x == a).map_or("", |(n, _)| *n)),
     }
+}
+
+/// Primera línea después de la sección (la del encabezado siguiente, o el final).
+fn section_end(doc: &toml::Document, section: &toml::Section) -> usize {
+    doc.sections.iter().map(|s| s.line).filter(|l| *l > section.line).min().unwrap_or(usize::MAX)
 }
 
 /// Color del nombre según la primera regla que coincide. `name` en minúsculas.
@@ -591,6 +607,16 @@ mod tests {
         assert_eq!(color_for(&c.colors, "a.pdf", false, 0).map(|c| c.r), Some(1.0));
         let lines: Vec<&str> = c.errors.iter().map(|e| e.split(':').next().unwrap()).collect();
         assert_eq!(lines, ["línea 3", "línea 4", "línea 8", "línea 9", "línea 10"], "{:?}", c.errors);
+    }
+
+    #[test]
+    fn key_errors_only_from_shortcuts() {
+        crate::sys::testing::install_fakes();
+        let c = Config::parse("[atajos]\nduplicar = \"Ctrl+Hiper\"\nroto\n[colores]\n\"*.x\" = \"rojo\"\n");
+        assert_eq!(c.key_errors.len(), 2, "{:?}", c.key_errors);
+        assert!(c.key_errors.iter().any(|e| e.starts_with("config.toml, línea 2: ") && e.contains("Hiper")), "{:?}", c.key_errors);
+        assert!(c.key_errors.iter().any(|e| e.starts_with("config.toml, línea 3: ")));
+        assert_eq!(c.errors.len(), 3);
     }
 
     #[test]

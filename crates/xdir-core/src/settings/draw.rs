@@ -309,14 +309,15 @@ fn draw_shortcut(p: &dyn Painter, r: Rect, s: &ShortcutRow, hover: Option<Settin
     let row_hot = matches!(hover, Some(SettingsHit::Part(h, _)) if h == id);
     if s.state != RowState::Normal {
         p.round_fill(r, 6.0, th.surface_alt);
-        p.round_stroke(r, 6.0, if matches!(s.state, RowState::Recording) { th.accent } else { th.border });
+        p.round_stroke(r, 6.0, if matches!(s.state, RowState::Recording | RowState::Rejected(_)) { th.accent } else { th.border });
     } else if row_hot {
         p.round_fill(line, 6.0, th.hover);
     }
     p.text(FontId::Ui, &s.title, rect(r.left + 12.0, line.top, r.left + CHIPS_X - 12.0, line.bottom), th.text);
     let cy = (line.top + line.bottom) / 2.0;
     let mut x = r.left + CHIPS_X;
-    if s.state == RowState::Recording {
+    let recording = matches!(s.state, RowState::Recording | RowState::Rejected(_));
+    if recording {
         let box_r = rect(x, cy - CHIP_H / 2.0, x + CHIP_W * 2.0 + 8.0, cy + CHIP_H / 2.0);
         p.round_fill(box_r, 6.0, alpha(th.accent, 0.15));
         p.round_stroke(box_r, 6.0, th.accent);
@@ -358,13 +359,13 @@ fn draw_shortcut(p: &dyn Painter, r: Rect, s: &ShortcutRow, hover: Option<Settin
         if part == PART_RESET && !s.changed {
             continue;
         }
-        if s.state == RowState::Recording && part != PART_EDIT {
+        if recording && part != PART_EDIT {
             continue;
         }
         if hot(hover, id, part) {
             p.round_fill(b, 4.0, alpha(th.text, 0.12));
         }
-        let glyph = if s.state == RowState::Recording { "\u{E711}" } else { glyph };
+        let glyph = if recording { "\u{E711}" } else { glyph };
         p.text(FontId::GlyphsSmall, glyph, b, th.text_dim);
         hits.push((b, SettingsHit::Part(id, part)));
     }

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 
 /// De qué elemento: una ruta de disco o un PIDL absoluto (elementos virtuales del Shell).
@@ -93,11 +94,70 @@ impl<V> BigCache<V> {
         self.items.clear();
         self.used = 0;
     }
+
+    /// Lo que se dibuja para `key` y si hay que pedirlo: el justo (sin pedir) o, si no está, el
+    /// escalón más grande que haya con su lado. Se pide salvo que ese ya sea igual o más grande
+    /// que el pedido o que `key` haya fallado hace menos de `BIG_RETRY`.
+    pub fn lookup(&mut self, key: &Key, failures: &mut BigFailures, now: Instant) -> (Option<(u32, &V)>, bool) {
+        let t = self.touch();
+        let best = if self.items.contains_key(key) {
+            Some(key.clone())
+        } else {
+            self.items.keys().filter(|(s, _)| *s == key.0).max_by_key(|(_, side)| *side).cloned()
+        };
+        let ask = best.as_ref().is_none_or(|(_, side)| *side < key.1) && !failures.blocked(key, now);
+        let hit = best.and_then(|k| {
+            let item = self.items.get_mut(&k)?;
+            item.2 = t;
+            Some((k.1, &item.0))
+        });
+        (hit, ask)
+    }
+}
+
+/// Cuánto se espera para volver a pedir una imagen grande que falló (un archivo que se estaba
+/// copiando, uno de la nube que ya se bajó, un error pasajero del sistema).
+pub const BIG_RETRY: Duration = Duration::from_secs(10);
+
+/// Imágenes grandes que fallaron y cuándo: no se vuelven a pedir hasta `BIG_RETRY` después.
+#[derive(Default)]
+pub struct BigFailures {
+    at: HashMap<Key, Instant>,
+}
+
+impl BigFailures {
+    /// Anota que `key` falló en `now`.
+    pub fn fail(&mut self, key: Key, now: Instant) {
+        if self.at.len() > 256 {
+            self.at.retain(|_, t| now.saturating_duration_since(*t) <= BIG_RETRY);
+        }
+        self.at.insert(key, now);
+    }
+
+    /// ¿`key` falló hace menos de `BIG_RETRY`? Si ya venció, la olvida.
+    pub fn blocked(&mut self, key: &Key, now: Instant) -> bool {
+        match self.at.get(key) {
+            Some(t) if now.saturating_duration_since(*t) <= BIG_RETRY => true,
+            Some(_) => {
+                self.at.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+}
+
+/// Factor para dibujar una imagen de escalón `side` (lado mayor `img_max` píxeles) en lugar de la
+/// del escalón `want`: `want / side` si llenaba su escalón (se ve del tamaño que tendrá la justa);
+/// 1 si es más chica que su escalón (su tamaño real, el mismo que tendrá la justa).
+pub fn big_grow(img_max: f32, side: u32, want: u32) -> f32 {
+    if side == 0 || img_max < side as f32 * 0.9 { 1.0 } else { want as f32 / side as f32 }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn key(name: &str, side: u32) -> Key {
         (Source::Path(PathBuf::from(name)), side)
@@ -140,5 +200,52 @@ mod tests {
         assert_eq!(c.best_for(&Source::Path(PathBuf::from("a"))), Some(&1024));
         assert_eq!(c.best_for(&Source::Path(PathBuf::from("b"))), Some(&2048));
         assert_eq!(c.best_for(&Source::Path(PathBuf::from("z"))), None);
+    }
+
+    /// Una imagen grande que falló no se vuelve a pedir enseguida (si no, pedir → falla →
+    /// pintar → pedir sería un bucle), pero sí pasado `BIG_RETRY`.
+    #[test]
+    fn big_failure_retried_after_ttl() {
+        let t0 = Instant::now();
+        let mut f = BigFailures::default();
+        let k = key("a", 512);
+        assert!(!f.blocked(&k, t0));
+        f.fail(k.clone(), t0);
+        assert!(f.blocked(&k, t0 + Duration::from_secs(1)));
+        assert!(!f.blocked(&key("a", 256), t0), "otro escalón no");
+        assert!(!f.blocked(&k, t0 + BIG_RETRY + Duration::from_millis(1)), "vencido: se reintenta");
+        assert!(!f.blocked(&k, t0), "y se olvidó");
+    }
+
+    /// Buscar: el justo sin pedir; si no, pide y da el más grande que haya; uno más grande que
+    /// el escalón ya alcanza (no se pide el chico); una falla reciente no se pide.
+    #[test]
+    fn big_lookup_requests_only_when_needed() {
+        let t0 = Instant::now();
+        let mut c = BigCache::new(BIG_CACHE_BYTES);
+        let mut f = BigFailures::default();
+        let (hit, ask) = c.lookup(&key("a", 512), &mut f, t0);
+        assert_eq!((hit, ask), (None, true));
+        c.insert(key("a", 256), 'p', 1);
+        assert_eq!(c.lookup(&key("a", 512), &mut f, t0), (Some((256, &'p')), true));
+        c.insert(key("a", 512), 'm', 1);
+        assert_eq!(c.lookup(&key("a", 512), &mut f, t0), (Some((512, &'m')), false));
+        c.insert(key("c", 1024), 'g', 1);
+        assert_eq!(c.lookup(&key("c", 512), &mut f, t0), (Some((1024, &'g')), false), "el grande alcanza");
+        f.fail(key("b", 512), t0);
+        assert_eq!(c.lookup(&key("b", 512), &mut f, t0), (None, false));
+        assert_eq!(c.lookup(&key("b", 512), &mut f, t0 + BIG_RETRY * 2), (None, true));
+    }
+
+    /// El escalón provisorio se agranda como se vería el justo solo si llenaba su escalón; una
+    /// imagen más chica que su escalón queda en su tamaño (no salta al llegar la justa).
+    #[test]
+    fn big_grow_only_when_step_filled() {
+        assert_eq!(big_grow(256.0, 256, 512), 2.0);
+        assert_eq!(big_grow(240.0, 256, 1024), 4.0);
+        assert_eq!(big_grow(100.0, 256, 512), 1.0);
+        assert_eq!(big_grow(512.0, 512, 512), 1.0);
+        assert_eq!(big_grow(1024.0, 1024, 512), 0.5, "uno más grande se ve como el justo");
+        assert_eq!(big_grow(100.0, 1024, 512), 1.0);
     }
 }

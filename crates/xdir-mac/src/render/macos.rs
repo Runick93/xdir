@@ -3,7 +3,8 @@
 //! (equivalentes a los glifos de Segoe Fluent Icons que usa Windows).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -55,24 +56,28 @@ pub struct Renderer {
 #[derive(Default)]
 struct Images {
     thumbs: HashMap<thumbs::Key, Option<CFRetained<CGImage>>>,
-    /// Imágenes grandes (vista previa, Galería), con su escalón; LRU por bytes.
-    big: thumbs::BigCache<BigImage>,
-    /// Imágenes grandes que no se pudieron obtener (no se vuelven a pedir).
-    big_failed: HashSet<thumbs::Key>,
+    /// Imágenes grandes (vista previa, Galería); LRU por bytes.
+    big: thumbs::BigCache<CFRetained<CGImage>>,
+    /// Imágenes grandes que fallaron hace poco (no se vuelven a pedir hasta `BIG_RETRY`).
+    big_failed: thumbs::BigFailures,
     logo: Option<CFRetained<CGImage>>,
     /// SF Symbols por (glifo, tamaño, color).
     symbols: HashMap<(char, u32, [u8; 4]), Option<Retained<NSImage>>>,
     handle: Handle,
 }
 
-/// Una imagen grande y el escalón que se pidió (para escalarla si se dibuja en lugar de otro).
-struct BigImage {
-    image: CFRetained<CGImage>,
-    side: u32,
+impl Images {
+    /// Pasa a la caché las imágenes grandes que terminaron (las fallidas, a `big_failed`).
+    fn absorb_big(&mut self) {
+        let now = Instant::now();
+        for (key, px) in thumbs::take_done_big() {
+            match px.and_then(|px| cgimage_from(&px).map(|img| (img, px.data.len()))) {
+                Some((image, bytes)) => self.big.insert(key, image, bytes),
+                None => self.big_failed.fail(key, now),
+            }
+        }
+    }
 }
-
-/// Más imágenes grandes fallidas que esto y se olvidan (se vuelven a intentar).
-const MAX_BIG_FAILED: usize = 500;
 
 /// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
 const MAX_THUMBS: usize = 1500;
@@ -80,6 +85,14 @@ const MAX_THUMBS: usize = 1500;
 impl Renderer {
     pub fn new() -> Result<Self, String> {
         Ok(Self { fonts: Fonts::new(), size: (0.0, 0.0), scale: 2.0, images: RefCell::new(Images::default()) })
+    }
+
+    /// Pasa a la caché las imágenes grandes que terminaron (al llegar `WM_APP_ICONS`, aunque no se
+    /// dibuje ninguna: así no se acumulan con la columna oculta).
+    pub fn absorb_big(&self) {
+        if let Ok(mut images) = self.images.try_borrow_mut() {
+            images.absorb_big();
+        }
     }
 
     /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados).
@@ -334,33 +347,23 @@ impl paint::Painter for Painter<'_> {
     fn big_image(&self, key: &thumbs::Key, r: Rect) -> bool {
         let found = {
             let mut images = self.images.borrow_mut();
-            for ((src, side), px) in thumbs::take_done_big() {
-                match px.and_then(|px| cgimage_from(&px).map(|img| (img, px.data.len()))) {
-                    Some((image, bytes)) => images.big.insert((src, side), BigImage { image, side }, bytes),
-                    None => {
-                        if images.big_failed.len() > MAX_BIG_FAILED {
-                            images.big_failed.clear();
-                        }
-                        images.big_failed.insert((src, side));
-                    }
-                }
+            images.absorb_big();
+            let now = Instant::now();
+            let Images { big, big_failed, handle, .. } = &mut *images;
+            let (hit, ask) = big.lookup(key, big_failed, now);
+            let hit = hit.map(|(side, img)| (side, img.clone()));
+            if ask {
+                thumbs::request_big(*handle, key.clone());
             }
-            if let Some(hit) = images.big.get(key) {
-                Some((hit.image.clone(), hit.side))
-            } else {
-                if !images.big_failed.contains(key) {
-                    thumbs::request_big(images.handle, key.clone());
-                }
-                images.big.best_for(&key.0).map(|b| (b.image.clone(), b.side))
-            }
+            hit
         };
-        let Some((image, side)) = found else { return false };
+        let Some((side, image)) = found else { return false };
         let (bw, bh) = (CGImage::width(Some(&image)) as f32, CGImage::height(Some(&image)) as f32);
-        if bw <= 0.0 || bh <= 0.0 || side == 0 {
+        if bw <= 0.0 || bh <= 0.0 {
             return false;
         }
         // Sin agrandar más que su tamaño en píxeles; la de otro escalón, como se vería la justa.
-        let grow = key.1 as f32 / side as f32;
+        let grow = thumbs::big_grow(bw.max(bh), side, key.1);
         let k = ((r.right - r.left) / bw).min((r.bottom - r.top) / bh).min(grow / self.scale.max(0.01));
         let (w, h) = (bw * k, bh * k);
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);

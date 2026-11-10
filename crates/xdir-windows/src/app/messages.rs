@@ -11,6 +11,12 @@ use crate::shell;
 
 /// Atiende un mensaje de la ventana `hwnd` (la de `app`).
 pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Las imágenes grandes terminadas pasan a la caché aunque no se dibuje ninguna.
+    if msg == xdir_core::paint::WM_APP_ICONS
+        && let Some(host) = Win32Host::current()
+    {
+        host.absorb_big();
+    }
     if msg >= WM_APP && app.on_app_message(msg, wparam.0, lparam.0) {
         return LRESULT(0);
     }

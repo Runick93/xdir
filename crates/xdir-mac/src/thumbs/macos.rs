@@ -4,10 +4,12 @@
 //! lista de pendientes y terminadas; los archivos solo en la nube no se piden (los bajaría).
 
 use std::collections::HashSet;
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::RcBlock;
 use objc2::AnyThread;
+use objc2::rc::autoreleasepool;
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo};
 use objc2_foundation::{NSError, NSString, NSURL};
@@ -53,18 +55,42 @@ fn done_big() -> &'static Done {
 }
 
 /// Encarga una imagen grande (`key.1` es el escalón). Un archivo solo en la nube termina sin
-/// imagen y sin pedirla: QuickLook lo bajaría entero.
+/// imagen y sin pedirla: QuickLook lo bajaría entero. El chequeo de nube (`lstat`/`stat`) se hace
+/// en un hilo propio, no en el de interfaz (que llega acá desde el dibujo): un disco de red
+/// colgado no traba la ventana.
 pub fn request_big(hwnd: Handle, key: Key) {
     if !pending_big().lock().unwrap().insert(key.clone()) {
         return;
     }
+    static W: OnceLock<Mutex<Sender<(Handle, Key)>>> = OnceLock::new();
+    let worker = W.get_or_init(|| {
+        let (tx, rx) = channel::<(Handle, Key)>();
+        std::thread::Builder::new()
+            .name("xdir-imagen-grande".into())
+            .spawn(move || {
+                while let Ok((hwnd, key)) = rx.recv() {
+                    start_big(hwnd, key);
+                }
+            })
+            .expect("hilo de imágenes grandes");
+        Mutex::new(tx)
+    });
+    if let Err(e) = worker.lock().unwrap().send((hwnd, key)) {
+        let (hwnd, key) = e.0;
+        finish_big(hwnd, key, None);
+    }
+}
+
+/// En el hilo de imágenes grandes: mira la nube y, si el archivo está en el disco, se lo pide a
+/// QuickLook (que responde en su propia cola).
+fn start_big(hwnd: Handle, key: Key) {
     if let Source::Path(path) = &key.0
         && crate::metadata::cloud_only(path)
     {
         finish_big(hwnd, key, None);
         return;
     }
-    generate(key, move |key, px| finish_big(hwnd, key, px));
+    autoreleasepool(|_| generate(key, move |key, px| finish_big(hwnd, key, px)));
 }
 
 /// Imágenes grandes que terminaron desde la última vez. `None`: no se pudo obtener.

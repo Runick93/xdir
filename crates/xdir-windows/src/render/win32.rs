@@ -2,9 +2,10 @@
 //! Todas las coordenadas están en DIPs (1 DIP = 1 px a 96 DPI); Direct2D escala según el DPI.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -116,6 +117,17 @@ impl Renderer {
 
     /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
     /// necesitar un cuadro en curso.
+    /// Pasa a la caché las imágenes grandes que terminaron (al llegar `WM_APP_ICONS`, aunque no se
+    /// dibuje ninguna: así no se acumulan con la columna oculta). Sin dispositivo se descartan (se
+    /// vuelven a pedir al dibujar).
+    pub fn absorb_big(&self) {
+        let Ok(mut icons) = self.icons.try_borrow_mut() else { return };
+        match &self.target {
+            Some(t) => icons.absorb_big(&t.gpu.ctx),
+            None => drop(thumbs::take_done_big()),
+        }
+    }
+
     pub fn text_width(&self, s: &str, bold: bool) -> f32 {
         measure(&self.dwrite, if bold { self.fonts.get(FontId::UiBold) } else { self.fonts.get(FontId::Ui) }, s)
     }
@@ -421,12 +433,12 @@ impl paint::Painter for Painter<'_> {
         let Some((bitmap, side)) = self.icons.borrow_mut().big(self.ctx, key) else { return false };
         let size = unsafe { bitmap.GetPixelSize() };
         let (bw, bh) = (size.width as f32, size.height as f32);
-        if bw <= 0.0 || bh <= 0.0 || side == 0 {
+        if bw <= 0.0 || bh <= 0.0 {
             return false;
         }
         // Sin agrandar más que su tamaño en píxeles; la de otro escalón, como se vería la justa.
         let dpi_k = self.icons.borrow().dpi_k;
-        let grow = key.1 as f32 / side as f32;
+        let grow = thumbs::big_grow(bw.max(bh), side, key.1);
         let k = ((r.right - r.left) / bw).min((r.bottom - r.top) / bh).min(grow / dpi_k.max(0.01));
         let (w, h) = (bw * k, bh * k);
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
@@ -597,19 +609,16 @@ struct Icons {
     dpi_k: f32,
     /// Miniaturas ya convertidas (o que no se pudieron obtener).
     thumbs: HashMap<thumbs::Key, Option<ID2D1Bitmap1>>,
-    /// Imágenes grandes (vista previa, Galería) con el escalón pedido; LRU por bytes.
-    big: thumbs::BigCache<(ID2D1Bitmap1, u32)>,
-    /// Imágenes grandes que no se pudieron obtener (no se vuelven a pedir).
-    big_failed: HashSet<thumbs::Key>,
+    /// Imágenes grandes (vista previa, Galería); LRU por bytes.
+    big: thumbs::BigCache<ID2D1Bitmap1>,
+    /// Imágenes grandes que fallaron hace poco (no se vuelven a pedir hasta `BIG_RETRY`).
+    big_failed: thumbs::BigFailures,
     /// Logo del diálogo "Acerca de", creado la primera vez que se muestra.
     logo: Option<ID2D1Bitmap1>,
 }
 
 /// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
 const MAX_THUMBS: usize = 1500;
-
-/// Más imágenes grandes fallidas que esto y se olvidan (se vuelven a intentar).
-const MAX_BIG_FAILED: usize = 500;
 
 impl Icons {
     fn new(dpi: u32) -> Self {
@@ -622,35 +631,32 @@ impl Icons {
             dpi_k: dpi as f32 / 96.0,
             thumbs: HashMap::new(),
             big: thumbs::BigCache::default(),
-            big_failed: HashSet::new(),
+            big_failed: thumbs::BigFailures::default(),
             logo: None,
         }
     }
 
-    /// Imagen grande de `key` con su escalón; si no está, la encarga y devuelve la más grande
-    /// que haya de la misma fuente.
-    fn big(&mut self, ctx: &ID2D1DeviceContext, key: &thumbs::Key) -> Option<(ID2D1Bitmap1, u32)> {
+    /// Pasa a la caché las imágenes grandes que terminaron (las fallidas, a `big_failed`).
+    fn absorb_big(&mut self, ctx: &ID2D1DeviceContext) {
+        let now = Instant::now();
         for (k, px) in thumbs::take_done_big() {
             match px.and_then(|px| bitmap_from(ctx, &px).map(|b| (b, px.data.len()))) {
-                Some((bitmap, bytes)) => {
-                    let side = k.1;
-                    self.big.insert(k, (bitmap, side), bytes);
-                }
-                None => {
-                    if self.big_failed.len() > MAX_BIG_FAILED {
-                        self.big_failed.clear();
-                    }
-                    self.big_failed.insert(k);
-                }
+                Some((bitmap, bytes)) => self.big.insert(k, bitmap, bytes),
+                None => self.big_failed.fail(k, now),
             }
         }
-        if let Some(hit) = self.big.get(key) {
-            return Some(hit.clone());
-        }
-        if !self.big_failed.contains(key) {
+    }
+
+    /// Imagen grande de `key` con su escalón; si no está, la encarga (salvo que ya haya una más
+    /// grande o que haya fallado hace poco) y devuelve la más grande que haya de la misma fuente.
+    fn big(&mut self, ctx: &ID2D1DeviceContext, key: &thumbs::Key) -> Option<(ID2D1Bitmap1, u32)> {
+        self.absorb_big(ctx);
+        let (hit, ask) = self.big.lookup(key, &mut self.big_failed, Instant::now());
+        let hit = hit.map(|(side, b)| (b.clone(), side));
+        if ask {
             thumbs::request_big(self.hwnd, key.clone());
         }
-        self.big.best_for(&key.0).cloned()
+        hit
     }
 
     /// Miniatura del elemento; si no está, la encarga y devuelve None.

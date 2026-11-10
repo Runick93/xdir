@@ -100,6 +100,13 @@ impl Win32Host {
         HOST.with(|h| h.borrow().clone())
     }
 
+    /// Pasa a la caché las imágenes grandes que terminaron (al llegar `WM_APP_ICONS`).
+    pub(super) fn absorb_big(&self) {
+        if let Ok(r) = self.renderer.try_borrow() {
+            r.absorb_big();
+        }
+    }
+
     /// Saca el host del `thread_local` y lo suelta, en el hilo de la ventana y antes de que
     /// termine `run`: así el renderizador (D3D/DXGI/DComp/D2D) no queda para los destructores de
     /// `ExitProcess`. Se llama cuando la `App` ya se soltó (`WM_NCDESTROY`) y no queda otra copia.

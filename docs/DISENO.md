@@ -137,6 +137,16 @@ Notas de X39–X44:
   del sistema (gris oscuro o claro según el modo de Windows).
 - En macOS la vista rápida es el `QLPreviewPanel` del sistema: no se dibuja. Los elementos solo en la nube no se le pasan;
   xdir muestra su tarjeta «Disponible solo en línea» (la variante de X41).
+- Galería (X42) en la app, a propósito distinta del diseño:
+  - Si todas las celdas entran en la tira, se centra el conjunto y no el enfocado. X42 tiene 12 celdas que entran y centra
+    el enfocado.
+  - La tira se centra en el enfocado con el teclado, la rueda y la búsqueda por tipeo. Un clic no la mueve, para que el
+    doble clic caiga en la misma celda; solo la corre lo justo si la celda cliqueada no se ve entera.
+  - `list::CellState` tiene un estado más que el componente: `Focus`, el foco sin selección que deja Ctrl+flecha. Se
+    dibuja con el fondo `focus_fill` y el borde del acento, como en la lista.
+  - En el panel inactivo, la selección de la tira es el gris de la lista (`text_dim` al 18 %), no `selection`.
+  - La imagen grande y las miniaturas de la tira se dibujan con esquinas rectas, no con radio 6 y 4: `Painter` todavía no
+    recorta imágenes con esquinas redondeadas.
 
 ### Lo nativo, que no se dibuja
 

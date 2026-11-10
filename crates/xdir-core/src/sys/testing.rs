@@ -886,7 +886,7 @@ impl Overlays for FakeOverlays {
 
 /// `Painter` que no dibuja: registra cada `text` (fuente, texto y rectángulo) para que los tests
 /// vean qué se escribió y con qué formato. `measure` da 7 DIPs por carácter; `clip` solo llama a
-/// la clausura; íconos y miniaturas no hacen nada (`thumbnail` da `false`). `big_image` anota la
+/// la clausura; los íconos se anotan (`icons`) y las miniaturas no hacen nada (`thumbnail` da `false`). `big_image` anota la
 /// clave (`big_requests`) y devuelve lo fijado con `set_big_ready` (de entrada, `false`).
 pub struct RecordingPainter {
     theme: Theme,
@@ -896,6 +896,7 @@ pub struct RecordingPainter {
     big: RefCell<Vec<(thumbs::Key, Rect)>>,
     big_ready: Cell<bool>,
     forgotten: RefCell<Vec<thumbs::Source>>,
+    icons: RefCell<Vec<(f32, f32, f32)>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -911,6 +912,7 @@ impl RecordingPainter {
             big: RefCell::new(Vec::new()),
             big_ready: Cell::new(false),
             forgotten: RefCell::new(Vec::new()),
+            icons: RefCell::new(Vec::new()),
         }
     }
 
@@ -944,6 +946,11 @@ impl RecordingPainter {
         self.strokes.borrow().clone()
     }
 
+    /// Íconos dibujados con `shell_icon` (x, y, lado), en orden.
+    pub fn icons(&self) -> Vec<(f32, f32, f32)> {
+        self.icons.borrow().clone()
+    }
+
     /// Los textos dibujados, en orden.
     pub fn texts(&self) -> Vec<(FontId, String, Rect)> {
         self.texts.borrow().clone()
@@ -971,7 +978,9 @@ impl Painter for RecordingPainter {
         7.0 * s.chars().count() as f32
     }
 
-    fn shell_icon(&self, _index: i32, _overlay: u8, _x: f32, _y: f32, _size: f32) {}
+    fn shell_icon(&self, _index: i32, _overlay: u8, x: f32, y: f32, size: f32) {
+        self.icons.borrow_mut().push((x, y, size));
+    }
 
     fn thumbnail(&self, _key: &thumbs::Key, _r: Rect) -> bool {
         false

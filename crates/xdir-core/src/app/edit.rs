@@ -275,11 +275,9 @@ impl App {
         if path.is_dir() {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).
             tab.navigate(hwnd, &tx, Location::Path(sys::file_system().true_case(&path)));
-        } else if fs::is_zip(&path) && path.is_file() {
-            // Un .zip escrito en la barra: se entra como carpeta.
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let parent = path.parent().map(|p| Box::new(Location::Path(p.to_path_buf())));
-            tab.navigate(hwnd, &tx, Location::Shell { parsing: path.to_string_lossy().into_owned(), name, parent });
+        } else if path.file_name().is_some_and(|n| crate::archive_nav::is_navigable_archive(&n.to_string_lossy())) && path.is_file() {
+            // Un archivo comprimido escrito en la barra: se entra como carpeta.
+            tab.navigate(hwnd, &tx, Location::Archive { file: path, nested: Vec::new(), inner: String::new() });
         } else if path.is_file() {
             // Un archivo: se abre su carpeta con el archivo enfocado.
             if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {

@@ -8,6 +8,7 @@ pub mod a11y;
 pub mod app;
 pub mod about;
 pub mod anim;
+pub mod archive;
 pub mod commands;
 pub mod config;
 pub mod console;
@@ -37,12 +38,16 @@ pub mod rename_many;
 /// El panel de Renombrar varios: dibujo y hit-test.
 pub mod rename_many_draw;
 pub mod session;
+/// La pestaña Configuración: secciones, controles y dibujo.
+pub mod settings;
 pub mod shell;
 pub mod sys;
 pub mod tab;
 pub mod theme;
 pub mod thumbs;
 pub mod toml;
+/// Cambiar `config.toml` por líneas sin perder lo escrito a mano.
+pub mod toml_edit;
 /// Árbol de carpetas lateral (solo con la feature `arbol`).
 #[cfg(feature = "arbol")]
 pub mod tree;

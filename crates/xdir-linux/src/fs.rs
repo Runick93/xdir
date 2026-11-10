@@ -181,22 +181,30 @@ impl FileSystem for LinuxFileSystem {
     }
 }
 
-fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Renombra sin pisar nunca lo que haya en `to`: `renameat2` con `RENAME_NOREPLACE` (por
+/// `syscall`, así no depende de la versión de glibc). Donde el disco no lo admite (`EINVAL`,
+/// `ENOSYS`) se mira antes si el destino existe y se usa `rename`. Si ya existe, el error es
+/// `EEXIST` (tipo `AlreadyExists`) en los dos caminos. La única versión: la usan renombrar, la
+/// papelera, deshacer y el motor de copia.
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    let cstr = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let cstr = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ruta inválida"));
     let (f, t) = (cstr(from)?, cstr(to)?);
-    let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    // SAFETY: dos cadenas C válidas; AT_FDCWD como carpeta de las dos.
+    let r = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
     if r == 0 {
         return Ok(());
     }
     let e = std::io::Error::last_os_error();
-    if matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS)) {
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+    match e.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOSYS) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from_raw_os_error(libc::EEXIST));
+            }
+            std::fs::rename(from, to)
         }
-        return std::fs::rename(from, to);
+        _ => Err(e),
     }
-    Err(e)
 }
 
 #[cfg(test)]

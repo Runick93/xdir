@@ -715,3 +715,16 @@ fn eject_waits_for_copy_on_the_volume() {
     assert!(!f.exists(&e.join("destino/grande.bin")));
     assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"USB (E:)\" con seguridad"));
 }
+
+/// En «Este equipo» el menú de los discos no ofrece crear cosas (Duplicar, accesos, carpeta con la
+/// selección): solo valen en una carpeta del disco.
+#[test]
+fn computer_menu_has_no_create_entries() {
+    let host = FakeHost::new();
+    let (mut a, _e, _c) = computer_with_drives(host, "sin-crear");
+    a.panes[0].tab_mut().list.select_all();
+    let menu = own_menu(&mut a);
+    for label in ["Duplicar", "Crear acceso directo", "Carpeta nueva con la selección", "Comprimir"] {
+        assert!(!menu.iter().any(|l| l == label), "«{label}» no va en Este equipo: {menu:?}");
+    }
+}

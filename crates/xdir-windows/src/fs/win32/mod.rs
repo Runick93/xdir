@@ -79,6 +79,8 @@ pub fn spawn_load(
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
             Location::Shell { parsing, .. } => list_shell(&mut out, parsing),
+            // La configuración no se carga (la dibuja el núcleo).
+            Location::Settings => out.send(LoadMsg::Listed(Ok(()))),
         }
     });
 }
@@ -654,7 +656,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } => Vec::new(),
+        Location::Shell { .. } | Location::Settings => Vec::new(),
     }
 }
 

@@ -23,7 +23,9 @@ use crate::xtree::tree::Node;
 
 pub mod testing;
 mod copy;
+mod archives;
 
+pub use archives::{Archives, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
     CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
     starts_with_folded,
@@ -152,6 +154,15 @@ pub trait SystemEnv: Send + Sync {
     /// Fecha de hoy en hora local. Por defecto, en UTC; cada sistema la da con su zona horaria.
     fn local_now(&self) -> LocalNow {
         LocalNow::now_with_offset(0)
+    }
+    /// ¿Se puede activar el modo portable desde la configuración? (en macOS el ejecutable está
+    /// dentro del `.app` firmado: solo se informa).
+    fn portable_supported(&self) -> bool {
+        true
+    }
+    /// Cómo se llama el explorador de archivos del sistema («Mostrar en el Explorador»).
+    fn file_manager_name(&self) -> &'static str {
+        "el Explorador"
     }
 }
 
@@ -480,6 +491,8 @@ pub struct Services {
     pub preview: Box<dyn Preview>,
     /// Primitivas del motor de copia (`transfer`).
     pub copy_prims: Box<dyn CopyPrims>,
+    /// Comprimir y extraer (la crate `xdir-archive`).
+    pub archives: Box<dyn Archives>,
     pub info: Box<dyn Info>,
     /// Conexiones de red (`Network`).
     pub network: Box<dyn Network>,
@@ -545,6 +558,10 @@ pub fn preview() -> &'static dyn Preview {
 
 pub fn copy_prims() -> &'static dyn CopyPrims {
     &*services().copy_prims
+}
+
+pub fn archives() -> &'static dyn Archives {
+    &*services().archives
 }
 
 pub fn info() -> &'static dyn Info {

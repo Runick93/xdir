@@ -12,6 +12,8 @@ mod info;
 mod network;
 mod network_page;
 mod saved_groups;
+mod settings;
+mod settings_pages;
 mod input;
 mod paint;
 mod quick_jump;
@@ -34,11 +36,15 @@ mod quick_look_tests;
 #[cfg(test)]
 mod transfers_tests;
 #[cfg(test)]
+mod archive_tests;
+#[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
 mod rename_many_tests;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod settings_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -167,6 +173,8 @@ enum Hit {
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
+    /// La pestaña Configuración de un panel: una parte de su vista.
+    Settings(usize, crate::settings::SettingsHit),
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
@@ -215,6 +223,8 @@ enum Drag {
     #[cfg(feature = "arbol")]
     TreeBar(tree::Bar, f32),
     Button(usize, Button),
+    /// El deslizador de una fila de la configuración: (panel, id de la fila).
+    SettingsSlider(usize, &'static str),
     /// Un favorito de la barra: clic al soltar sin mover, si no reordenar.
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
 }
@@ -401,6 +411,25 @@ pub struct App {
     picker_open: bool,
     /// Diálogo "Acerca de" abierto.
     about_open: bool,
+    /// Campo de texto abierto por una página extra de la configuración (Red): su `field_done`
+    /// recibe esta caja al terminar.
+    settings_field: Option<TextBox>,
+    /// Hay una escritura de `config.toml` en camino (una sola a la vez).
+    config_saving: bool,
+    /// Cambios de la configuración esperando a que termine la escritura en camino.
+    config_pending: Vec<config::ConfigEdit>,
+    /// La última escritura de `config.toml` falló: el error, para la pestaña Configuración.
+    config_error: Option<String>,
+    /// Cómo terminó el último cambio del modo portable (para la sección Avanzado).
+    portable_msg: Option<String>,
+    /// Carpeta del ejecutable (donde va `xdir.portable`); en pruebas, una temporal.
+    exe_dir: Option<PathBuf>,
+    /// Los archivos de esta ejecución se guardan junto a xdir (se decidió al arrancar).
+    portable_now: bool,
+    /// Está la marca `xdir.portable` (lo que valdrá al volver a abrir xdir).
+    portable_marker: bool,
+    /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`), de la sesión.
+    xtree_last: Option<PathBuf>,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -599,6 +628,15 @@ impl App {
             dark_mode: session.dark_mode,
             picker_open: false,
             about_open: false,
+            settings_field: None,
+            config_saving: false,
+            config_pending: Vec::new(),
+            config_error: None,
+            portable_msg: None,
+            exe_dir: session::exe_dir(),
+            portable_now: session::portable_active(),
+            portable_marker: session::portable_active(),
+            xtree_last: session.xtree_last.clone(),
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

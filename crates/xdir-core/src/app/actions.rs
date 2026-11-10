@@ -14,6 +14,10 @@ impl App {
         let meta = key_down(VK_LWIN);
         // El Espacio solo se traga si es el carácter que sigue a esta tecla.
         self.swallow_space = false;
+        // Grabando un atajo en la configuración, la tecla es para eso (ni ⌘W ni Tab llegan).
+        if let Some(used) = self.settings_capture_key(vk, alt) {
+            return used;
+        }
         // La vista rápida va antes que los atajos: Espacio la abre o la cierra, Esc la cierra y
         // las flechas la recorren.
         if let Some(used) = self.quick_look_key(vk, ctrl, shift, alt) {
@@ -65,13 +69,20 @@ impl App {
         if self.xtree_open && !keeps_xtree(c) {
             self.close_xtree();
         }
+        // Un comando (del menú, de la paleta, de un botón) termina la grabación de un atajo.
+        self.end_recording();
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
+        // Con la configuración a la vista, lo que necesita una carpeta no hace nada.
+        if self.panes[active].tab().is_settings() && needs_folder(c) {
+            self.redraw();
+            return;
+        }
         match c {
             Command::JumpTo => self.open_palette(PaletteMode::Folders),
             Command::Palette => self.open_palette(PaletteMode::All),
             Command::NewTab => {
-                let loc = self.panes[active].tab().location.clone();
+                let loc = input::new_tab_location(&self.panes[active].tab().location);
                 self.new_tab(active, loc, true);
             }
             Command::CloseTab => {
@@ -79,8 +90,11 @@ impl App {
                 self.close_tab(active, i);
             }
             Command::ReopenTab => {
-                if let Some(loc) = self.panes[active].pop_closed() {
-                    self.new_tab(active, loc, true);
+                match self.panes[active].pop_closed() {
+                    // Hay una sola configuración: si ya está abierta, se enfoca.
+                    Some(Location::Settings) => self.open_settings(None),
+                    Some(loc) => self.new_tab(active, loc, true),
+                    None => {}
                 }
             }
             Command::NextTab | Command::PrevTab => {
@@ -166,7 +180,10 @@ impl App {
                 }
             }
             Command::NewFolderWithSelection => self.new_folder_with_selection(),
-            // En la Papelera de la Mac, ⌘⌫ devuelve (como el Finder).
+            // En la Papelera de la Mac, `Recycle` devuelve (como ⌘⌫ en el Finder). Es el mismo
+            // comando con sus dos atajos, ⌘⌫ y Supr (fn+⌫): los dos devuelven, a propósito (borrar
+            // definitivamente desde la Papelera sigue siendo `Delete`: ⌥⌘⌫ o ⇧Supr). En Windows y
+            // Linux, Supr en la Papelera sigue siendo borrar.
             Command::Recycle if sys::env().key_style() == sys::KeyStyle::Mac && sys::file_system().is_trash(&self.panes[active].tab().location) => {
                 self.restore_selection()
             }
@@ -174,6 +191,9 @@ impl App {
             Command::Restore => self.restore_selection(),
             Command::CreateShortcut => self.create_shortcuts(),
             Command::ShowOriginal => self.show_original(),
+            Command::Compress => self.compress_selection(),
+            Command::ExtractHere => self.extract_selection(false),
+            Command::ExtractInto => self.extract_selection(true),
             Command::Eject => {
                 if let Some(root) = self.eject_target() {
                     self.eject(root);
@@ -252,6 +272,8 @@ impl App {
             Command::TogglePreview if from_xtree => self.show_preview(),
             Command::TogglePreview => self.toggle_preview(),
             Command::QuickLook => self.toggle_quick_look(),
+            Command::Settings => self.open_settings(None),
+            Command::SettingsKeys => self.open_settings(Some(crate::settings::PageId::Builtin(crate::settings::Section::Keys))),
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {
@@ -298,11 +320,9 @@ impl App {
             self.close_xtree();
         } else {
             if self.xtree.is_none() {
-                let root = match &self.panes[self.active].tab().location {
-                    Location::Path(p) => p.clone(),
-                    _ => crate::sys::disk_scan().default_root(),
-                };
-                self.xtree = Some(Xtree::new(self.hwnd, root));
+                let root = self.xtree_root();
+                self.xtree_last = Some(root.clone());
+                self.xtree = Some(Xtree::new(self.hwnd, root, self.config.xtree_by_type));
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.close_quick_look();
@@ -320,6 +340,21 @@ impl App {
         }
         self.hover = Hit::None;
         self.redraw();
+    }
+
+    /// Qué analiza xtree al abrirse (`[opciones] xtree_abrir`): la carpeta del panel (si no es una
+    /// carpeta, el disco del sistema), el disco del sistema o la última analizada (si ya no existe,
+    /// la del panel).
+    pub(super) fn xtree_root(&self) -> PathBuf {
+        let pane = || match &self.panes[self.active].tab().location {
+            Location::Path(p) => p.clone(),
+            _ => crate::sys::disk_scan().default_root(),
+        };
+        match self.config.xtree_open {
+            config::XtreeOpen::Pane => pane(),
+            config::XtreeOpen::System => crate::sys::disk_scan().default_root(),
+            config::XtreeOpen::Last => self.xtree_last.clone().filter(|p| p.is_dir()).unwrap_or_else(pane),
+        }
     }
 
     /// Cierra la vista de xtree (el escaneo sigue) y su menú de discos.
@@ -459,5 +494,51 @@ fn keeps_xtree(c: Command) -> bool {
             | Command::ToggleDarkMode
             | Command::About
             | Command::OpenConfig
+    )
+}
+
+/// Comandos que trabajan sobre la carpeta o la lista del panel: con la pestaña Configuración a
+/// la vista no hacen nada.
+fn needs_folder(c: Command) -> bool {
+    matches!(
+        c,
+        Command::Back
+            | Command::Forward
+            | Command::Up
+            | Command::Refresh
+            | Command::SelectAll
+            | Command::InvertSelection
+            | Command::SelectPattern
+            | Command::DeselectPattern
+            | Command::Copy
+            | Command::Cut
+            | Command::Paste
+            | Command::CopyPaths
+            | Command::NewFolder
+            | Command::NewTextFile
+            | Command::NewFolderWithSelection
+            | Command::Recycle
+            | Command::Delete
+            | Command::Restore
+            | Command::CreateShortcut
+            | Command::ShowOriginal
+            | Command::Rename
+            | Command::RenameMany
+            | Command::Properties
+            | Command::Duplicate
+            | Command::Compress
+            | Command::ExtractHere
+            | Command::ExtractInto
+            | Command::ToggleFavorite
+            | Command::PowerShell
+            | Command::Cmd
+            | Command::View(_)
+            | Command::SortBy(_)
+            | Command::GroupBy(_)
+            | Command::ApplyViewToAll
+            | Command::ResetFolderView
+            | Command::ClearFilters
+            | Command::QuickLook
+            | Command::ToggleQuickPin
     )
 }

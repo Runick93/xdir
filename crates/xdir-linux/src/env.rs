@@ -30,7 +30,7 @@ const SECS_1601_TO_1970: i64 = 11_644_473_600;
 
 /// Diferencia con UTC (en segundos) de la hora local en el instante `unix` (segundos desde 1970),
 /// según la zona horaria del sistema; 0 si no se puede saber.
-fn utc_offset(unix: i64) -> i64 {
+pub(crate) fn utc_offset(unix: i64) -> i64 {
     let t = unix as libc::time_t;
     // SAFETY: `localtime_r` escribe en `tm`, que es nuestro (la versión `_r` no usa memoria
     // compartida entre hilos).
@@ -48,6 +48,11 @@ impl SystemEnv for LinuxEnv {
     /// Las unidades de red con letra son solo de Windows.
     fn command_available(&self, c: xdir_core::commands::Command) -> bool {
         !matches!(c, xdir_core::commands::Command::MapNetworkDrive | xdir_core::commands::Command::DisconnectNetworkDrive)
+    }
+
+    /// Cada escritorio tiene su gestor de archivos: «Mostrar en la carpeta».
+    fn file_manager_name(&self) -> &'static str {
+        "la carpeta"
     }
 
     /// Sin interfaz no hay tema del sistema: claro.

@@ -1,7 +1,7 @@
-//! Operaciones de archivos de Linux (`xdir_core::sys::FileOps`): copiar, mover, borrar (a la
-//! papelera de `crate::trash` o definitivamente), renombrar, carpeta nueva, archivo de texto nuevo
-//! y deshacer. Cada operación corre en su propio hilo y avisa con `WM_APP_OP_DONE`. Los nombres
-//! repetidos se resuelven como en macOS ("informe copia.txt", "informe copia 2.txt").
+//! Operaciones de archivos de Linux (`xdir_core::sys::FileOps`): borrar (a la papelera de
+//! `crate::trash` o definitivamente), renombrar, carpeta nueva, archivo de texto nuevo, accesos
+//! directos y deshacer. Cada operación corre en su propio hilo y avisa con `WM_APP_OP_DONE`. Copiar,
+//! mover y devolver de la Papelera son del motor de copia (`prims`).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use xdir_core::names;
 use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use xdir_core::sys::{FileOps, Handle};
 
+use crate::fs::rename_noreplace;
 use crate::trash;
 
 type Result<T> = std::result::Result<T, String>;
@@ -78,37 +79,6 @@ fn to_trash(p: &Path, trash: Option<&Path>) -> Result<String> {
 /// vez de borrar definitivamente).
 pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
     match op {
-        Op::Copy { sources, dest } => {
-            let (mut created, mut errors) = (Vec::new(), Vec::new());
-            for src in &sources {
-                if dest.starts_with(src) && std::fs::symlink_metadata(src).is_ok_and(|m| m.is_dir()) {
-                    errors.push(err_at(src, "no se puede copiar una carpeta dentro de sí misma"));
-                    continue;
-                }
-                let target = copy_target(&dest, src, src.parent() == Some(dest.as_path()));
-                match copy_new(src, &target) {
-                    Ok(()) => created.push(target),
-                    Err(e) => errors.push(err_at(src, e)),
-                }
-            }
-            let focus = created.last().cloned();
-            ok((!created.is_empty()).then(|| Undo::Created(created)), focus, false, errors)
-        }
-        Op::Move { sources, dest } => {
-            let (mut moved, mut errors) = (Vec::new(), Vec::new());
-            for src in &sources {
-                if src.parent() == Some(dest.as_path()) || dest.starts_with(src) {
-                    continue;
-                }
-                let target = copy_target(&dest, src, false);
-                match move_path(src, &target) {
-                    Ok(()) => moved.push((target, src.clone())),
-                    Err(e) => errors.push(err_at(src, e)),
-                }
-            }
-            let focus = moved.last().map(|(t, _)| t.clone());
-            ok((!moved.is_empty()).then(|| Undo::Moved(moved)), focus, false, errors)
-        }
         Op::Delete { paths, recycle } => {
             let (mut recycled, mut errors) = (Vec::new(), Vec::new());
             for p in &paths {
@@ -149,19 +119,6 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
             let target = create_new_file(&parent).map_err(|e| err_at(&parent, e))?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
-        Op::Restore { items } => {
-            let (mut restored, mut errors) = (Vec::new(), Vec::new());
-            for item in &items {
-                match restore_item(item) {
-                    Ok(to) => restored.push(to),
-                    Err(e) => errors.push(e),
-                }
-            }
-            let focus = restored.last().cloned();
-            let mut r = ok((!restored.is_empty()).then(|| Undo::Created(restored.clone())), focus, false, errors)?;
-            r.select = restored;
-            Ok(r)
-        }
         Op::Shortcuts { targets } => {
             let (mut created, mut errors) = (Vec::new(), Vec::new());
             for target in &targets {
@@ -184,28 +141,9 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
     }
 }
 
-/// Devuelve `<papelera>/files/<nombre>` a su lugar (de su `.trashinfo`), creando la carpeta si ya
-/// no está; nunca pisa.
-fn restore_item(item: &Path) -> Result<PathBuf> {
-    let name = item.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let unknown = || format!("No se sabe de dónde vino «{name}»");
-    let files = item.parent().filter(|p| p.file_name().is_some_and(|n| n == "files")).ok_or_else(unknown)?;
-    let trash = files.parent().ok_or_else(unknown)?;
-    let to = trash::origin(&name, trash).map_err(|_| unknown())?;
-    let parent = to.parent().ok_or_else(unknown)?;
-    if taken(&to) {
-        let folder = parent.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| parent.display().to_string());
-        let shown = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        return Err(format!("Ya existe «{shown}» en «{folder}»"));
-    }
-    prepare_restore_parent(trash, parent, true)?;
-    trash::restore(&name, &to, trash).map_err(|e| err_at(item, e))?;
-    Ok(to)
-}
-
 /// Deja lista para «Devolver» la carpeta `parent` de algo de la papelera `trash`. La papelera de un
 /// disco (no la del usuario) solo devuelve dentro de ese disco; y en ningún caso se siguen enlaces
-/// en las carpetas del camino. La usan `Op::Restore` y el motor de copia.
+/// en las carpetas del camino. La usa el motor de copia (`prims::prepare_restore`).
 pub(crate) fn prepare_restore_parent(trash: &Path, parent: &Path, create: bool) -> Result<()> {
     let home = trash::data_home().map(|d| trash::trash_dir(&d));
     let root = if home.as_deref() == Some(trash) { PathBuf::from("/") } else { trash::topdir(trash) };
@@ -372,18 +310,6 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
     ok(None, None, false, errors)
 }
 
-/// Dónde copiar o mover `src` dentro de `dest`: el mismo nombre, o "nombre copia", "nombre copia
-/// 2"... (`always_copy`: copiar en la misma carpeta siempre lleva "copia"; ver `names`).
-fn copy_target(dest: &Path, src: &Path, always_copy: bool) -> PathBuf {
-    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let first = dest.join(&name);
-    if !always_copy && !taken(&first) {
-        return first;
-    }
-    let is_dir = std::fs::symlink_metadata(src).is_ok_and(|m| m.is_dir());
-    names::free_name(dest, &|n| names::copy_name(&name, is_dir, n), &taken)
-}
-
 /// ¿Hay algo con ese nombre? (también un enlace roto).
 fn taken(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok()
@@ -440,29 +366,6 @@ fn copy_tracked(src: &Path, dst: &Path, created: &mut bool) -> io::Result<()> {
     }
 }
 
-/// Renombra sin pisar nunca lo que haya en `to` (`renameat2` con `RENAME_NOREPLACE`). Si el
-/// sistema de archivos no lo admite, mira antes y renombra (como siempre).
-fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let bad = |_| io::Error::other("ruta inválida");
-    let (a, b) = (std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(bad)?, std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(bad)?);
-    // SAFETY: dos cadenas C válidas; AT_FDCWD como carpeta de las dos.
-    let r = unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
-    if r == 0 {
-        return Ok(());
-    }
-    let e = io::Error::last_os_error();
-    match e.raw_os_error() {
-        Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-            if taken(to) {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "ya existe, no se pisa"));
-            }
-            std::fs::rename(from, to)
-        }
-        _ => Err(e),
-    }
-}
-
 /// Borra definitivamente un archivo, enlace o carpeta entera (sin seguir enlaces).
 fn remove_item(p: &Path) -> io::Result<()> {
     if std::fs::symlink_metadata(p)?.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) }
@@ -487,7 +390,8 @@ impl std::fmt::Display for MoveError {
     }
 }
 
-/// Mueve: renombra si es el mismo disco; si no (`EXDEV`), copia y borra el original.
+/// Mueve (deshacer un `Undo::Moved`): renombra si es el mismo disco; si no (`EXDEV`), copia y
+/// borra el original.
 pub fn move_path(src: &Path, dst: &Path) -> std::result::Result<(), MoveError> {
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
@@ -516,36 +420,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn copy_renames_on_conflict() {
-        let dir = tmp("copia");
-        let src = dir.join("informe.txt");
-        std::fs::write(&src, "datos").unwrap();
-        // En la misma carpeta siempre lleva "copia"; la segunda vez, "copia 2".
-        let r = run(Op::Copy { sources: vec![src.clone()], dest: dir.clone() }, None).unwrap();
-        assert_eq!(r.error, None);
-        assert_eq!(r.focus, Some(dir.join("informe copia.txt")));
-        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![dir.join("informe copia.txt")])));
-        run(Op::Copy { sources: vec![src.clone()], dest: dir.clone() }, None).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("informe copia 2.txt")).unwrap(), "datos");
-        // En otra carpeta, el mismo nombre si está libre; si no, "copia". Las carpetas se copian enteras.
-        let otra = dir.join("otra");
-        std::fs::create_dir_all(otra.join("sub")).unwrap();
-        std::fs::write(otra.join("sub/x"), "x").unwrap();
-        let dest = dir.join("dest");
-        std::fs::create_dir(&dest).unwrap();
-        std::fs::write(dest.join("informe.txt"), "viejo").unwrap();
-        let r = run(Op::Copy { sources: vec![src.clone(), otra.clone()], dest: dest.clone() }, None).unwrap();
-        assert_eq!(r.error, None);
-        assert_eq!(std::fs::read_to_string(dest.join("informe.txt")).unwrap(), "viejo");
-        assert_eq!(std::fs::read_to_string(dest.join("informe copia.txt")).unwrap(), "datos");
-        assert_eq!(std::fs::read_to_string(dest.join("otra/sub/x")).unwrap(), "x");
-        // Una carpeta dentro de sí misma no se copia (no termina nunca).
-        let r = run(Op::Copy { sources: vec![otra.clone()], dest: otra.join("sub") }, None).unwrap();
-        assert!(r.error.is_some());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Si después de crearla se agregó algo a la carpeta, deshacer devuelve lo movido y la deja.
@@ -611,39 +485,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Devolver desde la Papelera: vuelve a su carpeta (creándola si se borró), no pisa lo que
-    /// haya, y el deshacer los manda otra vez a la Papelera.
-    #[test]
-    fn restore_op_returns_undo_created() {
-        let dir = tmp("devolver");
-        let trash = dir.join("Trash");
-        let sub = dir.join("sub");
-        std::fs::create_dir_all(&sub).unwrap();
-        let (a, b) = (sub.join("a.txt"), dir.join("b.txt"));
-        std::fs::write(&a, "a").unwrap();
-        std::fs::write(&b, "b").unwrap();
-        let na = trash::recycle(&a, &trash).unwrap();
-        let nb = trash::recycle(&b, &trash).unwrap();
-        std::fs::remove_dir(&sub).unwrap();
-        std::fs::write(&b, "nuevo").unwrap();
-        let items = vec![trash.join("files").join(&na), trash.join("files").join(&nb)];
-        let r = run(Op::Restore { items }, Some(&trash)).unwrap();
-        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
-        assert_eq!(std::fs::read_to_string(&b).unwrap(), "nuevo");
-        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![a.clone()])));
-        assert_eq!(r.select, [a.clone()]);
-        assert!(r.error.unwrap().contains("Ya existe «b.txt» en «"));
-        assert!(trash.join("files").join(&nb).exists());
-        // Sin `.trashinfo` no se sabe de dónde vino.
-        std::fs::write(trash.join("files/suelto"), "s").unwrap();
-        let r = run(Op::Restore { items: vec![trash.join("files/suelto")] }, Some(&trash)).unwrap();
-        assert_eq!(r.error.as_deref(), Some("No se sabe de dónde vino «suelto»"));
-        let r = run(Op::Undo(Undo::Created(vec![a.clone()])), Some(&trash)).unwrap();
-        assert_eq!(r.error, None);
-        assert!(!a.exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// «Crear acceso directo» en Linux: un enlace simbólico «Enlace a a.txt» que se resuelve.
     #[test]
     fn symlink_shortcut_and_target() {
@@ -661,30 +502,6 @@ mod tests {
         assert_eq!(r.focus, Some(dir.join("Enlace a a.txt 2")));
         std::os::unix::fs::symlink("a.txt", dir.join("rel")).unwrap();
         assert_eq!(crate::shell::link_target(&dir.join("rel")), Some(a.clone()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// La papelera de un disco no devuelve a través de un enlace («docs» → otra carpeta) ni a una
-    /// ruta absoluta fuera del disco.
-    #[test]
-    fn restore_refuses_symlinked_folder_and_outside_paths() {
-        let dir = tmp("devolver-enlace");
-        let (top, outside) = (dir.join("usb"), dir.join("autostart"));
-        let trash = top.join(".Trash-1000");
-        std::fs::create_dir_all(trash.join("files")).unwrap();
-        std::fs::create_dir_all(trash.join("info")).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, top.join("docs")).unwrap();
-        for (name, path) in [("a", "docs/a".to_string()), ("b", outside.join("b").display().to_string())] {
-            std::fs::write(trash.join("files").join(name), name).unwrap();
-            std::fs::write(trash.join("info").join(format!("{name}.trashinfo")), format!("[Trash Info]\nPath={path}\n")).unwrap();
-        }
-        let items = vec![trash.join("files/a"), trash.join("files/b")];
-        let r = run(Op::Restore { items }, None).unwrap();
-        assert!(r.select.is_empty(), "{:?}", r.select);
-        assert!(r.error.is_some());
-        assert!(!outside.join("a").exists() && !outside.join("b").exists());
-        assert!(trash.join("files/a").exists() && trash.join("files/b").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -773,10 +590,9 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
         std::fs::write(a.join("a.txt"), "viejo").unwrap();
-        let r = run(Op::Move { sources: vec![a.join("a.txt")], dest: b.clone() }, None).unwrap();
-        assert_eq!(r.error, None);
+        std::fs::rename(a.join("a.txt"), b.join("a.txt")).unwrap();
         std::fs::write(a.join("a.txt"), "nuevo").unwrap();
-        let r = run(Op::Undo(r.undo.unwrap()), None).unwrap();
+        let r = run(Op::Undo(Undo::Moved(vec![(b.join("a.txt"), a.join("a.txt"))])), None).unwrap();
         assert!(r.error.is_some());
         assert_eq!(std::fs::read_to_string(a.join("a.txt")).unwrap(), "nuevo");
         assert_eq!(std::fs::read_to_string(b.join("a.txt")).unwrap(), "viejo");

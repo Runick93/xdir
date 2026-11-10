@@ -115,13 +115,7 @@ impl SystemEnv for Win32Env {
     /// (`SystemTimeToTzSpecificLocalTime`); la diferencia entre las dos es la de la zona.
     fn local_now(&self) -> LocalNow {
         let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        let ft = ((unix + 11_644_473_600) as u64) * 10_000_000;
-        let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
-        let mut utc = SYSTEMTIME::default();
-        let mut local = SYSTEMTIME::default();
-        let ok = unsafe { FileTimeToSystemTime(&ft, &mut utc).is_ok() && SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_ok() };
-        let offset = if ok { system_time_secs(&local) - system_time_secs(&utc) } else { 0 };
-        LocalNow::from_unix(unix, offset)
+        LocalNow::from_unix(unix, utc_offset(unix))
     }
 
     /// Como lo muestra el Explorador: "1.234 KB".
@@ -671,6 +665,8 @@ pub fn install() {
         metadata: Box::new(Win32Metadata),
         preview: Box::new(Win32Preview),
         copy_prims: Box::new(crate::ops::WinCopyPrims),
+        // Windows: solo zip (tar.gz, en macOS y Linux).
+        archives: Box::new(xdir_archive::Service { tar_gz: false, utc_offset }),
         info: Box::new(crate::info::Win32Info),
         network: Box::new(crate::net::WinNetwork::new()),
     });
@@ -678,6 +674,18 @@ pub fn install() {
 
 /// Segundos desde 1970 de un SYSTEMTIME (sin zona: el que se le pasa). Días por el algoritmo de
 /// Howard Hinnant.
+/// Diferencia con UTC (en segundos) de la hora local en el instante `unix` (segundos desde 1970):
+/// la hora UTC llevada a la zona del sistema (`SystemTimeToTzSpecificLocalTime`, con el horario de
+/// verano de esa fecha); 0 si no se puede saber.
+fn utc_offset(unix: i64) -> i64 {
+    let Ok(ft) = u64::try_from(unix + 11_644_473_600).map(|s| s * 10_000_000) else { return 0 };
+    let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    let ok = unsafe { FileTimeToSystemTime(&ft, &mut utc).is_ok() && SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_ok() };
+    if ok { system_time_secs(&local) - system_time_secs(&utc) } else { 0 }
+}
+
 fn system_time_secs(t: &SYSTEMTIME) -> i64 {
     let (y, m, d) = (i64::from(t.wYear), i64::from(t.wMonth), i64::from(t.wDay));
     let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };

@@ -98,6 +98,8 @@ impl Document {
 
 pub fn parse(text: &str) -> Document {
     let mut doc = Document { sections: vec![Section { name: String::new(), array: false, line: 0, entries: Vec::new() }], errors: Vec::new() };
+    // La marca de orden de bytes (UTF-8 con BOM, como guarda el Bloc de notas viejo) no es texto.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (i, raw) in text.lines().enumerate() {
         let line_no = i + 1;
         let line = strip_comment(raw).trim();
@@ -121,7 +123,7 @@ pub fn parse(text: &str) -> Document {
 }
 
 /// Saca el comentario del final, respetando los `#` dentro de strings.
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     let mut quote: Option<char> = None;
     let mut escaped = false;
     for (i, c) in line.char_indices() {
@@ -138,7 +140,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-fn parse_entry(line: &str) -> Result<(String, Value), String> {
+pub(crate) fn parse_entry(line: &str) -> Result<(String, Value), String> {
     let mut chars = Chars::new(line);
     let key = if matches!(chars.peek(), Some('"') | Some('\'')) {
         chars.string()?
@@ -329,6 +331,13 @@ activo = true
         assert_eq!(lines, [2, 3, 4, 5]);
         assert!(doc.errors[1].1.contains("comillas simples"));
         assert_eq!(doc.sections[0].get("ok"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn bom_is_ignored() {
+        let doc = parse("\u{feff}[atajos]\r\nx = 1\r\n");
+        assert!(doc.errors.is_empty(), "{:?}", doc.errors);
+        assert_eq!(doc.sections("atajos").next().unwrap().get("x"), Some(&Value::Int(1)));
     }
 
     #[test]

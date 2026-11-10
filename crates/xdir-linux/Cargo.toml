@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 xdir-core = { path = "../xdir-core" }
+xdir-archive = { path = "../xdir-archive" }
 
 # Linux: llamadas al sistema y vigilancia de carpetas (inotify).
 [target.'cfg(target_os = "linux")'.dependencies]

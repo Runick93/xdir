@@ -44,7 +44,7 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
         match &location {
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
-            Location::Shell { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en macOS".into()))),
+            Location::Shell { .. } | Location::Settings => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en macOS".into()))),
         }
     });
 }
@@ -402,7 +402,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } => Vec::new(),
+        Location::Shell { .. } | Location::Settings => Vec::new(),
     }
 }
 

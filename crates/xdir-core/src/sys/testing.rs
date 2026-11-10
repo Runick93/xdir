@@ -28,7 +28,9 @@ use crate::thumbs;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::Node;
 
+mod archive_fake;
 mod copy_fake;
+pub use archive_fake::FakeArchives;
 pub use copy_fake::FakeCopyPrims;
 mod net_fake;
 pub use net_fake::FakeNetwork;
@@ -47,6 +49,7 @@ pub fn install_fakes() {
         metadata: Box::new(FakeMetadata),
         preview: Box::new(FakePreview),
         copy_prims: Box::new(FakeCopyPrims::shared()),
+        archives: Box::new(FakeArchives::shared()),
         info: Box::new(FakeInfo),
         network: Box::new(FakeNetwork),
     });
@@ -82,6 +85,7 @@ thread_local! {
     static LOCAL_NOW: Cell<LocalNow> = const { Cell::new(FakeEnv::DEFAULT_NOW) };
     /// Estilo de los atajos que informa el falso (por hilo; ver `FakeEnv::set_key_style`).
     static KEY_STYLE: Cell<super::KeyStyle> = const { Cell::new(super::KeyStyle::Windows) };
+    static PORTABLE_SUPPORTED: Cell<bool> = const { Cell::new(true) };
 }
 
 /// `SystemEnv` falso: tema claro, sin animaciones, sin teclas apretadas salvo las de `hold_keys`, una carpeta de
@@ -100,6 +104,11 @@ impl FakeEnv {
     /// Desde ahora (en este hilo) `key_style` devuelve este estilo (por defecto, Windows).
     pub fn set_key_style(style: super::KeyStyle) {
         KEY_STYLE.with(|k| k.set(style));
+    }
+
+    /// Desde ahora (en este hilo) `portable_supported` devuelve esto (por defecto, sí).
+    pub fn set_portable_supported(on: bool) {
+        PORTABLE_SUPPORTED.with(|p| p.set(on));
     }
 
     /// Desde ahora (en este hilo) `local_now` devuelve esta fecha.
@@ -127,6 +136,10 @@ impl SystemEnv for FakeEnv {
 
     fn key_style(&self) -> super::KeyStyle {
         KEY_STYLE.with(Cell::get)
+    }
+
+    fn portable_supported(&self) -> bool {
+        PORTABLE_SUPPORTED.with(Cell::get)
     }
 
     /// En pruebas la configuración nunca es la real: cada hilo de prueba tiene su propia carpeta
@@ -691,8 +704,14 @@ fn fake_list(path: &Path, cancelled: impl Fn() -> bool, send: impl Fn(LoadMsg)) 
 
 impl FileSystem for FakeFileSystem {
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
-        if let Location::Path(p) = &location {
-            *LOADS.lock().unwrap_or_else(|e| e.into_inner()).entry(p.clone()).or_insert(0) += 1;
+        // La pestaña Configuración nunca se carga: si llega, queda anotada como "xdir:configuracion".
+        let counted = match &location {
+            Location::Path(p) => Some(p.clone()),
+            Location::Settings => Some(PathBuf::from("xdir:configuracion")),
+            _ => None,
+        };
+        if let Some(p) = counted {
+            *LOADS.lock().unwrap_or_else(|e| e.into_inner()).entry(p).or_insert(0) += 1;
         }
         std::thread::spawn(move || {
             let send = |msg: LoadMsg| {
@@ -713,7 +732,7 @@ impl FileSystem for FakeFileSystem {
                     }
                 }
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
-                Location::Computer => send(LoadMsg::Listed(Ok(()))),
+                Location::Computer | Location::Settings => send(LoadMsg::Listed(Ok(()))),
                 Location::Shell { parsing, .. } => {
                     let items = SHELL_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).get(parsing).cloned();
                     let Some(names) = items else { return send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))) };
@@ -1521,8 +1540,9 @@ impl WindowHost for FakeHost {
         self.answer.get()
     }
 
-    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No.
-    fn ask_yes_no(&self, _title: &str, _text: &str) -> bool {
+    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No. Se anota en `questions`.
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        self.questions.borrow_mut().push((title.to_string(), text.to_string()));
         self.answer.get() == Some(true)
     }
 

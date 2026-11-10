@@ -329,7 +329,7 @@ define_class!(
 
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
-            with_app(|app| app.run_command(Command::OpenConfig));
+            with_app(|app| app.run_command(Command::Settings));
         }
     }
 );
@@ -510,6 +510,23 @@ define_class!(
         #[unsafe(method(endPreviewPanelControl:))]
         fn end_preview_panel_control(&self, panel: Option<&QLPreviewPanel>) {
             crate::quicklook::end(panel);
+        }
+
+        /// Grabando un atajo en la configuración, las combinaciones con ⌘ (⌘W, ⌘,) son para la
+        /// grabación: no las toma el menú.
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            let mut capturing = false;
+            with_app(|app| capturing = app.capturing_keys());
+            match translate_key(event).filter(|_| capturing) {
+                Some(key) => {
+                    with_app(|app| {
+                        app.on_key(key);
+                    });
+                    true
+                }
+                None => unsafe { msg_send![super(self), performKeyEquivalent: event] },
+            }
         }
 
         #[unsafe(method(keyDown:))]

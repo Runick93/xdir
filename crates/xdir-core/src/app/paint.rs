@@ -129,49 +129,49 @@ impl App {
             let fav = crate::net::Address::parse(&self.connect_field_text()).is_ok_and(|a| self.net.places.is_favorite(&a));
             (style, self.net_example(), dates, fav)
         });
-        let (map_view, unmap_view) = (self.net.map.as_ref(), self.net.unmap.as_ref());
-        let connect_view = self.net.dialog.as_ref().zip(connect_extra).map(|(d, x)| (d, &self.net.places, x));
-        #[cfg(feature = "arbol")]
-        let tree = &mut self.tree;
-        let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
+        // Las migas de la configuración dicen la página.
+        for i in self.shown_panes() {
+            let page = self.panes[i].tab().settings.as_ref().map(|v| v.page);
+            if let Some(page) = page
+                && let Some(v) = self.settings_view_mut(i)
+            {
+                v.page_title = Self::page_title(page).to_string();
+            }
+        }
+        let (layout, splits, active, maximized) = (self.layout, self.splits, self.active, self.maximized);
         let (hover, drag, edit_pane) = (self.hover, self.drag, self.edit.map(|(_, p)| p));
-        let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
+        let (show_favorites, fav_drop) = (self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
         let about_open = self.about_open;
-        let (groups, group_name) = (&self.groups, &self.group_name);
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
-        let palette = self.palette.as_ref().map(|(p, _)| p);
-        // Vista rápida sin visor del sistema: la tarjeta de xdir encima de los paneles.
-        let quick_look = self.quick_look.as_ref().filter(|s| !s.ql.native);
-        let suggest = self.suggest.as_ref();
         // Vista de xtree abierta: se dibuja en lugar de los paneles, la franja de grupos y el árbol.
         let xtree_open = self.xtree_open;
-        let mut xtree = self.xtree.as_mut().filter(|_| xtree_open);
-        let (marks, started) = (&mut self.marks, self.started);
-        let info_layout = &self.info.layout;
-        // El host crea el destino de dibujo en el primer cuadro y recién ahí llama a la clausura:
-        // las marcas de `--probe` "render target" e "inicio frame con la carpeta" se toman al
-        // empezar a dibujar, en el mismo orden que antes. Los campos de `App` se prestan por
-        // separado (el host también es un campo), así que no hace falta clonar el `Rc`.
-        let result = self.host.draw(&self.theme, if self.file_colors { &self.config.colors } else { &[] }, &mut |p, w, h| {
+        let started = self.started;
+        // El host dibuja con una copia del tema y de las reglas de color: así la clausura puede
+        // tomar la `App` entera (la configuración dibuja con ella).
+        let host = self.host.clone();
+        let theme = self.theme;
+        let colors = if self.file_colors { self.config.colors.clone() } else { Vec::new() };
+        let result = host.draw(&theme, &colors, &mut |p, w, h| {
             if first_frame {
-                marks.push(("render target", ms_since(started)));
+                self.marks.push(("render target", ms_since(started)));
             }
             if mark_list_frame {
-                marks.push(("inicio frame con la carpeta", ms_since(started)));
+                self.marks.push(("inicio frame con la carpeta", ms_since(started)));
             }
             let area = ui::panes_area(w, h, tree_w, groups_h, preview_w);
             for src in &preview_forget {
                 p.forget_big(src);
             }
-            let rects = if xtree.is_some() { &[][..] } else { &rects[..] };
-            if let Some(v) = xtree.as_deref_mut() {
+            let xtree_shown = xtree_open && self.xtree.is_some();
+            let rects = if xtree_shown { &[][..] } else { &rects[..] };
+            if let Some(v) = self.xtree.as_mut().filter(|_| xtree_open) {
                 v.paint(p, ui::xtree_area(w, h));
             } else if groups_h > 0.0 {
-                let names: Vec<(&str, bool)> = groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
-                let active_group = group_name.as_deref().and_then(|n| groups.find(n));
+                let names: Vec<(&str, bool)> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
+                let active_group = self.group_name.as_deref().and_then(|n| self.groups.find(n));
                 let group_hover = match hover {
                     Hit::GroupBar(g) => Some(g),
                     _ => None,
@@ -189,24 +189,30 @@ impl App {
                     Drag::Button(j, b) if j == i => PaneHit::Button(b),
                     _ => PaneHit::None,
                 };
-                let favs = show_favorites.then(|| (favorites, fav_drop.filter(|(j, _)| *j == i).map(|(_, d)| d)));
-                let tab = panes[i].tab();
+                let favs = show_favorites.then(|| (&self.favorites, fav_drop.filter(|(j, _)| *j == i).map(|(_, d)| d)));
+                let tab = self.panes[i].tab();
                 let query = tab.search_query().to_string();
+                let is_settings = tab.is_settings();
                 let search = SearchView {
                     text: &query,
                     editing: filter_pane == Some(i),
                     running: tab.search.as_ref().filter(|s| !s.done).map(|s| s.progress),
                     enabled: true,
+                    placeholder: if is_settings { "Buscar en la configuración" } else { "Buscar" },
                 };
-                panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), search);
+                self.panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), search);
+                if is_settings {
+                    self.draw_settings(p, i);
+                }
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
-                    panes[i].draw_tab_drop(p, at);
+                    self.panes[i].draw_tab_drop(p, at);
                 }
             }
             // El árbol ocupa su lugar a la izquierda de los paneles: fijo, con su ancho; suelto, una
             // franja de íconos que al asomar el mouse se expande encima de los paneles (con sombra).
             #[cfg(feature = "arbol")]
-            if tree.visible && !xtree_open {
+            if self.tree.visible && !xtree_open {
+                let tree = &mut self.tree;
                 let r = geom::rect(ui::GAP, area.top - groups_h, ui::GAP + tree.width_now(), area.bottom);
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
                     p.round_fill(geom::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
@@ -220,7 +226,7 @@ impl App {
                 crate::rename_many_draw::draw(p, r, st, rename_hover);
             }
             if info_shown && preview_col.is_some() {
-                crate::info::draw::draw(p, info_layout, info_hover);
+                crate::info::draw::draw(p, &self.info.layout, info_hover);
             }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);
@@ -260,14 +266,14 @@ impl App {
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado
             // (entra en el área de su lista; en un panel muy bajo puede pasarse).
             for &(i, _) in rects {
-                panes[i].tab().list.draw_filter_menu(p);
+                self.panes[i].tab().list.draw_filter_menu(p);
             }
             if let Some(pane) = term_menu {
                 let term_hover = match hover {
                     Hit::TermMenu(c) => c,
                     _ => None,
                 };
-                ui::draw_terminal_menu(p, panes[pane].terminal_rect(), w, term_hover);
+                ui::draw_terminal_menu(p, self.panes[pane].terminal_rect(), w, term_hover);
             }
             if picker_open {
                 let picker_hover = match hover {
@@ -276,13 +282,14 @@ impl App {
                 };
                 ui::draw_picker(p, w, h, accent, picker_hover, switches);
             }
-            if let Some(st) = quick_look {
+            // Vista rápida sin visor del sistema: la tarjeta de xdir encima de los paneles.
+            if let Some(st) = self.quick_look.as_ref().filter(|s| !s.ql.native) {
                 quick_look::paint_quick_look(p, w, h, st, hover);
             }
-            if let Some(sg) = suggest {
+            if let Some(sg) = &self.suggest {
                 sg.draw(p);
             }
-            if let Some(pal) = palette {
+            if let Some((pal, _)) = &self.palette {
                 pal.draw(p, w);
             }
             if about_open {
@@ -292,7 +299,8 @@ impl App {
                 };
                 about::draw(p, w, h, about_hover);
             }
-            if let Some((d, places, (style, example, dates, fav))) = &connect_view {
+            if let (Some(d), Some((style, example, dates, fav))) = (&self.net.dialog, &connect_extra) {
+                let places = &self.net.places;
                 let hover = match hover {
                     Hit::Connect(k) => Some(k),
                     _ => None,
@@ -304,10 +312,10 @@ impl App {
                 Hit::Drives(k) => Some(k),
                 _ => None,
             };
-            if let Some(m) = map_view {
+            if let Some(m) = &self.net.map {
                 crate::net::drives_dialog::map_draw(p, w, h, m, drives_hover);
             }
-            if let Some(u) = unmap_view {
+            if let Some(u) = &self.net.unmap {
                 crate::net::drives_dialog::unmap_draw(p, w, h, u, drives_style, drives_hover);
             }
             // El cartel de ayuda va último: encima de todo.

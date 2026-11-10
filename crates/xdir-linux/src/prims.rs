@@ -260,6 +260,11 @@ impl CopyPrims for LinuxCopyPrims {
         std::fs::create_dir(dst).map_err(|e| err(e, dst))
     }
 
+    fn create_private_dir(&self, dst: &Path) -> Result<(), CopyError> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(dst).map_err(|e| err(e, dst))
+    }
+
     /// Nunca sigue enlaces: `dst` se abre con `O_NOFOLLOW | O_DIRECTORY` y todo (atributos, fechas,
     /// permisos) se pone por ese descriptor.
     fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError> {
@@ -272,23 +277,10 @@ impl CopyPrims for LinuxCopyPrims {
     }
 
     fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
-        let (f, t) = (c_path(from)?, c_path(to)?);
-        let r = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-        if r == 0 {
-            return Ok(());
-        }
-        let e = io::Error::last_os_error();
-        match e.raw_os_error() {
-            // Discos sin `RENAME_NOREPLACE`: se comprueba y se renombra.
-            Some(libc::EINVAL | libc::ENOSYS) => {
-                if std::fs::symlink_metadata(to).is_ok() {
-                    return Err(CopyError::new(ErrKind::Exists, to));
-                }
-                std::fs::rename(from, to).map_err(|e| err(e, from))
-            }
-            Some(libc::EEXIST) => Err(CopyError::new(ErrKind::Exists, to)),
-            _ => Err(err(e, from)),
-        }
+        crate::fs::rename_noreplace(from, to).map_err(|e| match e.raw_os_error() {
+            Some(libc::EEXIST) => CopyError::new(ErrKind::Exists, to),
+            _ => err(e, from),
+        })
     }
 
     fn replace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
@@ -329,7 +321,7 @@ impl CopyPrims for LinuxCopyPrims {
         trash::origin(&name, trash).ok()
     }
 
-    /// Las reglas de «Devolver» de `Op::Restore` (`ops::prepare_restore_parent`): la papelera de
+    /// Las reglas de «Devolver» (`ops::prepare_restore_parent`): la papelera de
     /// un disco solo devuelve dentro de ese disco y nunca se siguen enlaces (salvo los de root del
     /// primer nivel del disco de arranque).
     fn prepare_restore(&self, in_trash: &Path, dir: &Path, create: bool) -> Result<(), CopyError> {

@@ -1,0 +1,10 @@
+[package]
+name = "xdir-archive"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xdir-core = { path = "../xdir-core" }
+zip = { version = "9.5.0", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4.46", default-features = false }

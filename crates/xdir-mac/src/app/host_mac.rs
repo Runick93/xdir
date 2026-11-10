@@ -214,6 +214,15 @@ impl WindowHost for MacHost {
     }
 
     fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        // Pruebas: como `ask_yes_no_cancel`.
+        #[cfg(feature = "pruebas")]
+        if let Some(log) = std::env::var_os("XDIR_PRUEBAS_RESPONDER_SI") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+                let _ = writeln!(f, "{title}: {text}");
+            }
+            return true;
+        }
         let Some(mtm) = MainThreadMarker::new() else { return false };
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(title));

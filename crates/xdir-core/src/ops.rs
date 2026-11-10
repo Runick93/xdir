@@ -1,6 +1,8 @@
-//! Tipos de las operaciones de archivos (copiar, mover, borrar, renombrar, carpeta nueva, archivo
-//! de texto nuevo y deshacer). Cada operación corre en su propio hilo (la implementa cada sistema detrás de
-//! `sys::FileOps`) y al terminar avisa a la ventana con `WM_APP_OP_DONE`.
+//! Tipos de las operaciones de archivos (borrar, renombrar, carpeta nueva, archivo de texto nuevo,
+//! accesos directos y deshacer). Copiar, mover, duplicar, «Carpeta nueva con la selección» y
+//! devolver de la Papelera son del motor de copia (`transfer`). Cada operación corre en su propio
+//! hilo (la implementa cada sistema detrás de `sys::FileOps`) y al terminar avisa a la ventana con
+//! `WM_APP_OP_DONE`.
 
 use std::path::PathBuf;
 
@@ -11,17 +13,11 @@ pub const WM_APP_OP_DONE: u32 = WM_APP + 4;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
-    Copy { sources: Vec<PathBuf>, dest: PathBuf },
-    Move { sources: Vec<PathBuf>, dest: PathBuf },
     Delete { paths: Vec<PathBuf>, recycle: bool },
     Rename { path: PathBuf, new_name: String },
     NewFolder { parent: PathBuf },
     /// Archivo de texto vacío «Nuevo documento de texto.txt» (« (2)», « (3)»… si ya existe).
     NewFile { parent: PathBuf },
-    /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux). La `App` lo hace con
-    /// el motor de copia (`JobSpec::Restore`); queda como respaldo, como `Copy` y `Move`. Duplicar
-    /// y «Carpeta nueva con la selección» son solo del motor.
-    Restore { items: Vec<PathBuf> },
     /// Un acceso directo (alias, enlace) junto a cada uno (`names::shortcut_name`).
     Shortcuts { targets: Vec<PathBuf> },
     Undo(Undo),

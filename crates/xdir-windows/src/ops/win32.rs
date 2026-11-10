@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::{
     SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, PostMessageW};
-use windows::core::{AsImpl, Error, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s, w};
+use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s, w};
 
 use crate::platform::{Handle, HandleExt};
 use crate::fs::wide_path;
@@ -55,10 +55,6 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     if let Op::Shortcuts { targets } = &op {
         return create_shortcuts(targets);
     }
-    // En Windows «Devolver» lo hace el Shell (verbo `undelete` sobre la Papelera virtual).
-    if let Op::Restore { .. } = &op {
-        return Err(Error::new(E_FAIL, "Se devuelve desde la Papelera del Explorador"));
-    }
     let fo: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
     let recorder: IFileOperationProgressSink = Recorder::default().into();
     unsafe {
@@ -72,19 +68,6 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     // Error de `PerformOperations` cuando igual hay algo hecho que deshacer.
 
     match &op {
-        Op::Copy { sources, dest } | Op::Move { sources, dest } => {
-            let dest_item = item(dest)?;
-            for src in sources {
-                let src_item = item(src)?;
-                unsafe {
-                    if matches!(op, Op::Copy { .. }) {
-                        fo.CopyItem(&src_item, &dest_item, PCWSTR::null(), None)?;
-                    } else {
-                        fo.MoveItem(&src_item, &dest_item, PCWSTR::null(), None)?;
-                    }
-                }
-            }
-        }
         Op::Delete { paths, recycle } => {
             flags = if *recycle { FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE } else { FILEOPERATION_FLAGS(0) };
             for p in paths {
@@ -111,7 +94,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             }
         }
         Op::Undo(undo) => return undo_any(hwnd, undo),
-        Op::Restore { .. } | Op::Shortcuts { .. } => return Ok(OpResult::default()),
+        Op::Shortcuts { .. } => return Ok(OpResult::default()),
     }
 
     unsafe {
@@ -129,10 +112,6 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     let log = recorder_log(&recorder);
     let select = Vec::new();
     let undo = match op {
-        Op::Copy { .. } => Some(Undo::Created(log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect())),
-        Op::Move { .. } => Some(Undo::Moved(
-            log.iter().filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?))).collect(),
-        )),
         Op::Delete { recycle: true, .. } => Some(Undo::Recycled(
             log.iter().filter_map(|r| Some((r.created.clone()?, r.source.clone()?))).collect(),
         )),
@@ -151,7 +130,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             focus = created.first().cloned();
             Some(Undo::Created(created))
         }
-        Op::Undo(_) | Op::Restore { .. } | Op::Shortcuts { .. } => None,
+        Op::Undo(_) | Op::Shortcuts { .. } => None,
     };
     // Nada que deshacer si no pasó nada (todo cancelado u omitido).
     let undo = undo.filter(|u| match u {

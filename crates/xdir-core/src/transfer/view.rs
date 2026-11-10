@@ -463,7 +463,7 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
                         if k > 0 {
                             p.fill(rect(list.left, y, list.right, y + 1.0), th.border);
                         }
-                        let name = e.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| e.src.display().to_string());
+                        let name = e.shown_name();
                         let folder = error_folder(&e.src, &j.route);
                         p.text(FontId::GlyphsSmall, "\u{E8A5}", rect(list.left + 12.0, y + 12.0, list.left + 28.0, y + 30.0), th.text_dim);
                         let mw = p.measure(FontId::Ui, &e.message).min(220.0);

@@ -19,6 +19,9 @@ pub const WM_APP_LOAD: u32 = WM_APP + 1;
 /// Cambió algo en la carpeta vigilada. `wparam` = panel, `lparam` = generación.
 pub const WM_APP_CHANGED: u32 = WM_APP + 2;
 
+/// Título de la pestaña Configuración.
+pub const SETTINGS_TITLE: &str = "Configuración";
+
 /// Lugar que muestra un panel.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Location {
@@ -33,12 +36,15 @@ pub enum Location {
         /// De dónde se llegó, para "subir"; sin él, se sube a "Este equipo".
         parent: Option<Box<Location>>,
     },
+    /// La pestaña Configuración: no se carga ni se vigila; dibuja `settings::draw` en vez de la
+    /// lista (su página y su estado van en `Tab::settings`).
+    Settings,
 }
 
 impl Location {
     pub fn parent(&self) -> Option<Location> {
         match self {
-            Location::Computer => None,
+            Location::Computer | Location::Settings => None,
             Location::Path(p) => Some(match p.parent() {
                 Some(parent) => Location::Path(parent.to_path_buf()),
                 None => Location::Computer,
@@ -57,6 +63,7 @@ impl Location {
     pub fn title_in(&self, env: &dyn FileSystem) -> String {
         match self {
             Location::Computer => "Este equipo".into(),
+            Location::Settings => SETTINGS_TITLE.into(),
             Location::Path(p) => match p.file_name() {
                 Some(name) => name.to_string_lossy().into_owned(),
                 None => env.root_title(p).unwrap_or_else(|| p.to_string_lossy().trim_end_matches('\\').to_string()),
@@ -72,9 +79,12 @@ impl Location {
 
     /// Segmentos de la barra de dirección con el sistema de archivos `env`.
     pub fn crumbs_in(&self, env: &dyn FileSystem) -> Vec<(String, Location)> {
+        if *self == Location::Settings {
+            return vec![(SETTINGS_TITLE.to_string(), Location::Settings)];
+        }
         let mut out = vec![("Este equipo".to_string(), Location::Computer)];
         match self {
-            Location::Computer => {}
+            Location::Computer | Location::Settings => {}
             Location::Path(p) => {
                 let mut acc = PathBuf::new();
                 for comp in p.components() {
@@ -113,7 +123,7 @@ impl Location {
     /// Ruta o nombre de análisis que entiende `IFileOperation` como destino (pegar, soltar).
     pub fn target(&self) -> Option<PathBuf> {
         match self {
-            Location::Computer => None,
+            Location::Computer | Location::Settings => None,
             Location::Path(p) => Some(p.clone()),
             Location::Shell { parsing, .. } => Some(PathBuf::from(parsing)),
         }

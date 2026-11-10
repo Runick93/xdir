@@ -10,6 +10,10 @@ pub const WM_APP_TASK: u32 = crate::WM_APP + 26;
 
 /// Lo que devuelve un trabajo suelto.
 pub(super) enum TaskDone {
+    /// Terminó de escribir `config.toml` (la pestaña Configuración): lo que quedó, o el error.
+    ConfigSaved { result: Result<Config, String> },
+    /// Terminó de activar (`on`) o desactivar el modo portable.
+    Portable { on: bool, result: Result<(), String> },
     /// El original de un acceso directo (`None`: no se resolvió o ya no existe).
     Original { pane: usize, link: PathBuf, target: Option<PathBuf> },
     /// Los discos que se pueden expulsar.
@@ -64,6 +68,8 @@ impl App {
 
     pub(super) fn on_task_done(&mut self, t: TaskDone) {
         match t {
+            TaskDone::ConfigSaved { result } => self.on_config_saved(result),
+            TaskDone::Portable { on, result } => self.on_portable_done(on, result),
             TaskDone::Renamed { dir, result, undoing } => self.on_renamed(dir, result, undoing),
             TaskDone::CaseInfo { dir, case_insensitive } => self.on_case_info(&dir, case_insensitive),
             TaskDone::Original { pane, link, target } => {
@@ -160,8 +166,10 @@ impl App {
 
     /// Suelta lo que xdir tiene abierto en el disco de `root`: las pestañas en ese disco pasan a
     /// «Este equipo» (y sueltan su guardián), se cierra xtree si su raíz está ahí y se vacía la
-    /// vista previa.
-    pub(super) fn release_volume(&mut self, root: &std::path::Path) {
+    /// vista previa. El panel de información suelta lo de ese disco y corta la suma de carpeta:
+    /// devuelve su hilo para esperar a que cierre la carpeta que tenía abierta (sale enseguida:
+    /// mira el corte en cada elemento y antes de abrir cada carpeta).
+    pub(super) fn release_volume(&mut self, root: &std::path::Path) -> Option<std::thread::JoinHandle<()>> {
         // La vista rápida de un archivo de ese disco se cierra primero (suelta el archivo). Las
         // miniaturas no guardan nada abierto: con las pestañas fuera del disco no se piden más.
         if self.quick_look_under(root) {
@@ -178,6 +186,7 @@ impl App {
             self.xtree = None;
         }
         self.clear_preview_subject();
+        self.release_info_under(root)
     }
 
     /// Expulsa el disco de `root`. Con operaciones de copia sobre ese disco pregunta si se
@@ -198,10 +207,13 @@ impl App {
 
     /// Suelta lo de xdir en el disco y lo expulsa en otro hilo (sin trabajos de copia encima).
     fn eject_now(&mut self, root: PathBuf) {
-        self.release_volume(&root);
+        let summing = self.release_volume(&root);
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
         self.spawn_task(move || {
+            if let Some(h) = summing {
+                let _ = h.join();
+            }
             let result = sys::shell().eject(&root);
             TaskDone::Ejected { root, label, result }
         });

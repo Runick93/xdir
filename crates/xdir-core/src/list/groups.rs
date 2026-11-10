@@ -124,10 +124,13 @@ fn date_group(ft: u64, now: LocalNow) -> GroupKey {
     }
 }
 
-/// Tipo: un grupo por tipo; las carpetas primero.
+/// Tipo: un grupo por tipo; las carpetas primero. Sin tipo (carpeta o archivo), un solo grupo
+/// «Sin valor» al final, como en las otras columnas.
 fn type_group(e: &Entry) -> GroupKey {
-    let order = if e.is_dir { PINNED_FIRST - 1 } else { 1 };
-    if e.type_name.is_empty() { key(order, "Sin valor") } else { key(order, &e.type_name) }
+    if e.type_name.is_empty() {
+        return key(PINNED_LAST, "Sin valor");
+    }
+    key(if e.is_dir { PINNED_FIRST - 1 } else { 1 }, &e.type_name)
 }
 
 /// Tamaño: de chico a grande; las carpetas aparte, primero.
@@ -595,6 +598,19 @@ mod tests {
         assert_eq!((d.label.as_str(), j.label.as_str(), a.label.as_str()), ("Carpeta de archivos", "Imagen JPEG", "Archivo AAC"));
         assert!(d < a && d < j, "las carpetas antes que cualquier tipo");
         assert!(d.order < PINNED_FIRST);
+    }
+
+    /// Sin tipo, carpeta o archivo, van al mismo grupo «Sin valor», al final.
+    #[test]
+    fn group_key_type_without_value_is_one_group() {
+        let mut dir = entry("raro");
+        dir.is_dir = true;
+        dir.type_name = Arc::from("");
+        let mut file = entry("x");
+        file.type_name = Arc::from("");
+        let (d, f) = (group_key(Column::Type, &dir, None, FakeNow::now()), group_key(Column::Type, &file, None, FakeNow::now()));
+        assert_eq!(d, f);
+        assert_eq!((d.label.as_str(), d.order), ("Sin valor", PINNED_LAST));
     }
 
     /// Fecha fija para los tests que no dependen de ella.

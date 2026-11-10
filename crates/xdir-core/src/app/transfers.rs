@@ -123,6 +123,16 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
     out
 }
 
+/// Cuántos elementos eligió el usuario (el título antes de recorrer).
+fn spec_count(spec: &JobSpec) -> u64 {
+    (match spec {
+        JobSpec::Copy { sources, .. } | JobSpec::Move { sources, .. } | JobSpec::Duplicate { sources } => sources.len(),
+        JobSpec::NewFolderWith { items, .. } | JobSpec::Restore { items } => items.len(),
+        JobSpec::Retry { pairs, .. } => pairs.len(),
+        JobSpec::Undo(_) => 0,
+    }) as u64
+}
+
 fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
     match spec {
         JobSpec::Copy { .. } => ("Copiar", false),
@@ -207,7 +217,8 @@ impl App {
         let now = Instant::now();
         t.jobs.push(JobView {
             id,
-            title: transfer::title(&spec, 0),
+            // Hasta que termine el recorrido, el título cuenta lo elegido.
+            title: transfer::title(&spec, spec_count(&spec)),
             state: JobState::Preparing,
             items: (0, 0),
             bytes: (0, 0),
@@ -482,6 +493,62 @@ impl App {
         win.hover = None;
         win.pressed = None;
         self.redraw();
+    }
+
+    /// Comandos de prueba (feature `pruebas`): `copiar <destino>|<origen>|…` y `mover …` lanzan un
+    /// trabajo; `ventana <control>` hace clic en la ventana de copia sobre el control del primer
+    /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `detalles`, `reemplazar`, `ambos`,
+    /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`).
+    #[cfg(feature = "pruebas")]
+    pub(super) fn transfer_test(&mut self, verb: &str, rest: &str) {
+        let parts: Vec<PathBuf> = rest.trim().split('|').map(PathBuf::from).collect();
+        match verb {
+            "copiar" | "mover" if parts.len() >= 2 => {
+                let (dest, sources) = (parts[0].clone(), parts[1..].to_vec());
+                self.start_transfer(if verb == "mover" { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
+            }
+            "ventana" => {
+                let what = rest.trim();
+                let wanted = |id: JobId| -> Option<ViewHit> {
+                    Some(match what {
+                        "pausa" => ViewHit::Pause(id),
+                        "reanudar" => ViewHit::Resume(id),
+                        "cancelar" => ViewHit::Cancel(id),
+                        "detalles" => ViewHit::Expand(id),
+                        "reemplazar" => ViewHit::Choose(id, Choice::Replace),
+                        "ambos" => ViewHit::Choose(id, Choice::KeepBoth),
+                        "omitir" => ViewHit::Choose(id, Choice::Skip),
+                        "combinar" => ViewHit::Choose(id, Choice::Merge),
+                        "todos" => ViewHit::ApplyAll(id),
+                        "reintentar" => ViewHit::Retry(id),
+                        "cerrar" => ViewHit::Dismiss(id),
+                        _ => return None,
+                    })
+                };
+                let (w, h) = self.transfers_size();
+                let r = rect(0.0, 0.0, w, h);
+                let jobs = self.transfers.jobs.clone();
+                let expanded = self.transfers_expanded();
+                for j in &jobs {
+                    let Some(target) = wanted(j.id) else { return };
+                    let mut y = 0.0;
+                    while y < h {
+                        let mut x = 0.0;
+                        while x < w {
+                            if view::hit(r, &jobs, expanded, x, y) == Some(target) {
+                                for ev in [AuxMouse::Move, AuxMouse::Down, AuxMouse::Up] {
+                                    self.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, ev);
+                                }
+                                return;
+                            }
+                            x += 4.0;
+                        }
+                        y += 4.0;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Antes de cerrar xdir: con trabajos en curso pregunta si se cancelan; si sí, los cancela y

@@ -575,3 +575,17 @@ fn confirm_close_with_jobs() {
     assert_eq!(super::transfers::close_question(2), "Hay 2 operaciones en curso. ¿Cancelarlas y salir?");
     assert_eq!(super::transfers::close_question(1), "Hay 1 operación en curso. ¿Cancelarla y salir?");
 }
+
+#[test]
+fn queued_title_counts_the_chosen_items() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let first = a.start_transfer(slow_copy(&f, "/app-wt", 20));
+    f.add_file(&p("/app-wt/s/b.txt"), b"b".to_vec());
+    let second = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wt/s/b.txt")], dest: p("/app-wt/d") });
+    let title = &a.jobs().iter().find(|j| j.id == second).unwrap().title;
+    assert_eq!(title, "Copiando «b.txt» a \"d\"");
+    a.cancel_job(first);
+    a.cancel_job(second);
+    wait(&mut a, idle);
+}

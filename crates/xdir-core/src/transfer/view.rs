@@ -274,6 +274,9 @@ fn graph_with(p: &dyn Painter, r: Rect, graph: &[f32], average: Option<f64>, _re
         p.rounded_path(&pts[1..pts.len() - 1], false, None, Some((th.accent, 1.5)));
     }
     if let Some(avg) = average {
+        // La línea del promedio, tenue; la de la velocidad actual va encima.
+        let y = y_of(avg as f32);
+        p.fill(rect(inner.left, y, inner.right, y + 1.0), alpha(th.text_dim, 0.7));
         p.text(FontId::Small, &format!("Promedio: {}", speed(avg)), rect(r.left + 8.0, r.top + 5.0, r.right - 8.0, r.top + 21.0), th.text_dim);
     }
     if let Some(&now) = graph.last() {

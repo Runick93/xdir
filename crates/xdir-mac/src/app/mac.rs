@@ -779,6 +779,12 @@ mod pruebas {
         match (verb, nums.as_slice()) {
             ("captura", _) => capture(Path::new(rest)),
             ("pantalla", _) => capture_screen(Path::new(rest)),
+            // Solo la ventana de copia, con su barra de título.
+            ("captura_copia", _) => {
+                if let Some(n) = crate::auxwin::window_number() {
+                    capture_window(n, Path::new(rest));
+                }
+            }
             // El panel de la vista rápida con el foco: una tecla (código físico) que le llega a
             // él, o su botón de cerrar.
             ("tecla_panel", [code]) => quick_look_panel_key(*code as u16),
@@ -878,6 +884,21 @@ mod pruebas {
         let f = screen.frame();
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(f.size.width, f.size.height));
         let Some(image) = CGWindowListCreateImage(bounds, CGWindowListOption::OptionOnScreenOnly, 0, CGWindowImageOption::BestResolution) else { return };
+        let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
+        let props = objc2_foundation::NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+        if let Some(data) = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) } {
+            let _ = std::fs::write(path, data.to_vec());
+        }
+    }
+
+    /// Guarda una sola ventana de xdir (con su barra de título y su sombra) en un PNG.
+    #[allow(deprecated)]
+    fn capture_window(number: isize, path: &Path) {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey};
+        use objc2_core_graphics::{CGWindowImageOption, CGWindowListCreateImage, CGWindowListOption};
+        // Un rectángulo nulo: el de la ventana.
+        let null = unsafe { objc2_core_graphics::CGRectNull };
+        let Some(image) = CGWindowListCreateImage(null, CGWindowListOption::OptionIncludingWindow, number as u32, CGWindowImageOption::BestResolution) else { return };
         let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
         let props = objc2_foundation::NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
         if let Some(data) = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) } {

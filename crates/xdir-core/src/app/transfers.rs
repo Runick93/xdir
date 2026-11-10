@@ -57,7 +57,7 @@ pub(super) struct Transfers {
     auto_skip: Arc<AtomicBool>,
     /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco; varios
     /// pedidos esperan cada uno los suyos.
-    pending_eject: Vec<(Vec<JobId>, AfterJobs)>,
+    pending_eject: Vec<PendingEject>,
     window: CopyWindow,
     /// Lo que se lanzó (pruebas).
     #[cfg(test)]
@@ -82,6 +82,15 @@ struct CopyWindow {
 
 /// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
 pub type AfterJobs = Box<dyn FnOnce(&mut App)>;
+
+/// Un «Expulsar» que espera a que terminen (y limpien) los trabajos sobre el disco: mientras
+/// tanto no empiezan otros que lo usen.
+struct PendingEject {
+    root: PathBuf,
+    label: String,
+    jobs: Vec<JobId>,
+    then: AfterJobs,
+}
 
 impl Transfers {
     pub(super) fn new() -> Transfers {
@@ -242,9 +251,17 @@ fn plural_errors(n: usize) -> String {
 
 impl App {
     /// Lanza un trabajo del motor en su hilo y vuelve enseguida.
+    /// Si toca un disco que se está por expulsar (espera a que limpien sus trabajos), no empieza:
+    /// lo avisa y devuelve 0.
     pub fn start_transfer(&mut self, spec: JobSpec) -> JobId {
         #[cfg(test)]
         self.transfers.started.push(spec.clone());
+        let paths = spec_paths(&spec);
+        if let Some(e) = self.transfers.pending_eject.iter().find(|e| paths.iter().any(|p| p.starts_with(&e.root))) {
+            self.notice = Some(format!("Se está expulsando \"{}\"", e.label));
+            self.redraw();
+            return 0;
+        }
         let t = &mut self.transfers;
         let id = t.next;
         t.next += 1;
@@ -680,14 +697,14 @@ impl App {
         let pending = std::mem::take(&mut self.transfers.pending_eject);
         let (ready, waiting): (Vec<_>, Vec<_>) = pending
             .into_iter()
-            .partition(|(ids, _)| !ids.iter().any(|id| self.transfers.jobs.iter().any(|j| j.id == *id && j.state != JobState::Done)));
+            .partition(|e| !e.jobs.iter().any(|id| self.transfers.jobs.iter().any(|j| j.id == *id && j.state != JobState::Done)));
         self.transfers.pending_eject = waiting;
-        for (_, then) in ready {
-            then(self);
+        for e in ready {
+            (e.then)(self);
         }
     }
 
-    /// Con la ventana de copia se pregunta; sin ella (hasta la Task 12), «Omitir».
+    /// Con la ventana de copia se pregunta; sin ella (Linux sin interfaz), «Omitir».
     pub fn set_auto_skip(&mut self, on: bool) {
         self.transfers.auto_skip.store(on, Ordering::SeqCst);
     }
@@ -820,7 +837,7 @@ impl App {
                 c.cancel();
             }
         }
-        self.transfers.pending_eject.push((ids, then));
+        self.transfers.pending_eject.push(PendingEject { root: root.to_path_buf(), label: label.to_string(), jobs: ids, then });
         true
     }
 }

@@ -670,3 +670,26 @@ fn retry_of_a_restore_is_a_restore() {
     assert!(f.exists(&p("/app-rt/Docs/x.txt")));
     assert_eq!(f.restored(), vec![p("/app-rt/.Trash/x.txt")]);
 }
+
+#[test]
+fn no_new_copies_onto_a_disk_being_ejected() {
+    // Revisión del cableado (M1): mientras se espera para expulsar un disco, no empiezan copias
+    // nuevas que lo usen.
+    let f = fake();
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let spec = slow_copy(&f, "/app-ejn", 20);
+    a.start_transfer(spec);
+    host.set_answer(Some(true));
+    assert!(a.eject_after_jobs(Path::new("/app-ejn"), "USB (F:)", Box::new(|_: &mut App| {})));
+    f.add_file(&p("/app-ejn/s/otro.txt"), b"o".to_vec());
+    let before = a.jobs().len();
+    a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejn/s/otro.txt")], dest: p("/app-ejn/d") });
+    assert_eq!(a.jobs().len(), before, "no se lanzó");
+    assert_eq!(a.notice.as_deref(), Some("Se está expulsando \"USB (F:)\""));
+    wait(&mut a, idle);
+    // Ya expulsado (o no): se puede de nuevo.
+    a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejn/s/otro.txt")], dest: p("/app-ejn/d") });
+    wait(&mut a, idle);
+    assert!(f.exists(&p("/app-ejn/d/otro.txt")));
+}

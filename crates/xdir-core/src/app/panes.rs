@@ -443,7 +443,7 @@ impl App {
     /// Comandos de prueba (feature `pruebas`): `cmd <id>` ejecuta una acción de `commands::ALL`;
     /// `picker`, `term <panel>`, `tabdrop <panel> <pos>`, `droptarget <panel> <pos>`,
     /// `select <panel> <pos>`, `addsel <panel> <pos>`, `hover <panel> <x> <y>`, `casillas`,
-    /// `active <panel>` y `notice <texto>` dejan la interfaz en un estado que se quiere mostrar.
+    /// `active <panel>`, `info <qué>` (un clic en el panel de información) y `notice <texto>` dejan la interfaz en un estado que se quiere mostrar.
     #[cfg(feature = "pruebas")]
     pub fn test_hook(&mut self, text: &str) {
         let mut it = text.splitn(3, ' ');
@@ -482,6 +482,7 @@ impl App {
             "active" => self.set_active(na),
             "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
             "close" => self.close_palette(),
+            "info" => self.info_test(a, nb),
             _ => {}
         }
         self.redraw();

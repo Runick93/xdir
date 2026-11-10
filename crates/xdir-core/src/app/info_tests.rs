@@ -457,3 +457,26 @@ fn info_tags_add_remove() {
     a.on_app_message(WM_APP_INFO_EDIT_DONE, 1, 0);
     assert_eq!(FakeInfo::take_applied(), [InfoChange::Tags { paths: vec![d.join("a.jpg")], add: vec!["Bariloche".into()], remove: vec![] }]);
 }
+
+/// La respuesta de un cambio que llega después de otra relectura (otro cambio la pidió) igual vale
+/// mientras el sujeto sea el mismo.
+#[test]
+fn info_late_applied_still_counts() {
+    let d = fixture("tarde", &[("a.txt", "x")]);
+    let (mut a, host) = app();
+    go(&mut a, 0, &d);
+    a.set_active(0);
+    select(&mut a, 0, "a.txt");
+    open_on(&mut a);
+    let g0 = a.info.generation;
+    FakeInfo::take_requests();
+    a.info.tx.send(InfoReply::Applied { generation: g0, section: Section::Tags, error: None }).unwrap();
+    deliver(&mut a);
+    assert_eq!(FakeInfo::take_requests().len(), 1, "un cambio que anduvo vuelve a leer");
+    assert!(a.info.generation > g0);
+    a.info.tx.send(InfoReply::Applied { generation: g0, section: Section::Comments, error: Some("Tarde".into()) }).unwrap();
+    deliver(&mut a);
+    a.info.sections |= Section::Comments.bit();
+    a.paint();
+    assert!(texts(&host).iter().any(|x| x == "Tarde"), "{:?}", texts(&host));
+}

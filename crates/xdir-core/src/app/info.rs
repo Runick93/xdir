@@ -44,6 +44,9 @@ pub(super) struct InfoState {
     /// Secciones abiertas (bits de `Section`), se guardan en la sesión.
     pub sections: u32,
     pub(super) generation: u64,
+    /// Generación con que empezó el sujeto actual: las respuestas de los cambios desde ahí valen
+    /// (aunque después se haya vuelto a leer).
+    since: u64,
     current: Arc<AtomicU64>,
     pub(super) tx: Sender<InfoReply>,
     rx: Receiver<InfoReply>,
@@ -74,6 +77,7 @@ impl InfoState {
         InfoState {
             sections,
             generation: 0,
+            since: 0,
             current: Arc::new(AtomicU64::new(0)),
             tx,
             rx,
@@ -231,9 +235,13 @@ impl App {
             st.scroll = 0.0;
         }
         let st = &mut self.info;
+        let same = paths == st.subject;
         st.subject = paths;
         st.stamps = stamps;
         st.bump();
+        if !same {
+            st.since = st.generation;
+        }
         if st.subject.is_empty() {
             st.pending = false;
             return;
@@ -306,7 +314,7 @@ impl App {
                         got = true;
                     }
                 }
-                InfoReply::Applied { generation, section, error } if generation == self.info.generation => {
+                InfoReply::Applied { generation, section, error } if generation >= self.info.since && !self.info.subject.is_empty() => {
                     self.info.errors.retain(|(s, _)| *s != section);
                     match error {
                         Some(e) => self.info.errors.push((section, e)),
@@ -330,7 +338,8 @@ impl App {
             return;
         }
         let path = item.path.clone();
-        if self.info.folder.as_ref().is_some_and(|f| f.path == path) {
+        // Ya sumada: queda. A medio sumar con una generación vieja (se volvió a leer): se empieza de nuevo.
+        if self.info.folder.as_ref().is_some_and(|f| f.path == path && f.done) {
             return;
         }
         if let Some(bytes) = self.xtree.as_ref().and_then(|x| x.size_of(&path)) {
@@ -789,6 +798,35 @@ impl App {
             }
         }
         self.redraw();
+    }
+}
+
+impl App {
+    /// Pruebas (`info <qué> [n]`): un clic en el panel de información sin buscar coordenadas:
+    /// `oculto`, `bloqueado`, `comentario`, `nombre`, `etiqueta`, `cerrar`, `mas`,
+    /// `seccion <n>` (plegar o abrir la sección n) o `bajar <px>` (desplazar).
+    #[cfg(feature = "pruebas")]
+    pub(super) fn info_test(&mut self, what: &str, n: usize) {
+        let h = match what {
+            "oculto" => InfoHit::Flag(crate::info::Flag::Hidden),
+            "bloqueado" => InfoHit::Flag(crate::info::Flag::Locked),
+            "comentario" => InfoHit::CommentField,
+            "nombre" => InfoHit::NameField,
+            "etiqueta" => InfoHit::TagAdd,
+            "cerrar" => InfoHit::Close,
+            "mas" => InfoHit::MoreInSystem,
+            "seccion" => match Section::ALL.get(n) {
+                Some(&s) => InfoHit::Toggle(s),
+                None => return,
+            },
+            "bajar" => {
+                self.info.scroll += n as f32;
+                self.redraw();
+                return;
+            }
+            _ => return,
+        };
+        self.info_click(h);
     }
 }
 

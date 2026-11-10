@@ -206,6 +206,22 @@ impl App {
         }
     }
 
+    /// El submenú «Ver» de la carpeta del panel (lo comparten el menú del fondo y el del encabezado
+    /// de columnas); `item` arma cada ítem.
+    pub(super) fn views_submenu(&self, pane: usize, item: &mut dyn FnMut(&str, Command, bool, bool) -> shell::Entry) -> shell::Entry {
+        use shell::Entry;
+        let list = &self.panes[pane].tab().list;
+        // En el orden de `CYCLE` (de lo más compacto a lo más grande); el comando lleva el índice
+        // de `VIEWS`.
+        let mut views: Vec<Entry> =
+            list::CYCLE.iter().map(|&view| item(view.name(), Command::View(view.index() as u8), true, view == list.view)).collect();
+        // La vista es de cada carpeta: pasarla a todas o volver a la por defecto.
+        views.push(Entry::Sep);
+        views.push(item("Usar esta vista en todas las carpetas", Command::ApplyViewToAll, true, false));
+        views.push(item("Restablecer la vista de esta carpeta", Command::ResetFolderView, true, false));
+        Entry::Sub("Ver".into(), views)
+    }
+
     /// Los submenús «Ordenar por» y «Agrupar por» de la carpeta del panel (los comparten el menú
     /// del fondo y el del encabezado de columnas); `item` arma cada ítem.
     pub(super) fn sort_group_submenus(
@@ -235,25 +251,17 @@ impl App {
     /// Entradas propias del menú del fondo de una carpeta; `cmds` recibe el comando de cada id.
     pub(super) fn background_entries(&self, pane: usize, cmds: &mut Vec<Command>) -> Vec<shell::Entry> {
         use shell::Entry;
-        let list = &self.panes[pane].tab().list;
         let mut item = |label: &str, command: Command, enabled: bool, checked: bool| {
             cmds.push(command);
             Entry::Item { id: cmds.len() as u32 - 1, label: label.to_string(), enabled, checked }
         };
-        // En el orden de `CYCLE` (de lo más compacto a lo más grande); el comando lleva el índice
-        // de `VIEWS`.
-        let mut views: Vec<Entry> =
-            list::CYCLE.iter().map(|&view| item(view.name(), Command::View(view.index() as u8), true, view == list.view)).collect();
-        // La vista es de cada carpeta: pasarla a todas o volver a la por defecto.
-        views.push(Entry::Sep);
-        views.push(item("Usar esta vista en todas las carpetas", Command::ApplyViewToAll, true, false));
-        views.push(item("Restablecer la vista de esta carpeta", Command::ResetFolderView, true, false));
+        let views = self.views_submenu(pane, &mut item);
         let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
         let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
         // Sin el árbol no se agrega nada después.
         #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
         let mut entries = vec![
-            Entry::Sub("Ver".into(), views),
+            views,
             sorts,
             groupings,
             item("Actualizar", Command::Refresh, true, false),

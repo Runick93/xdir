@@ -2429,10 +2429,11 @@ fn header_menu_has_sort_and_group_submenus() {
     let menu = host.menus().pop().unwrap();
     let subs = header_subs(&menu);
     let names: Vec<&str> = subs.iter().map(|s| s.1.as_str()).collect();
-    assert_eq!(names, ["Ordenar por", "Agrupar por"]);
+    assert_eq!(names, ["Ver", "Ordenar por", "Agrupar por"]);
     assert!(matches!(menu[subs[0].0 - 1], shell::Entry::Sep));
     assert_eq!(subs[1].0, subs[0].0 + 1);
-    assert!(matches!(&menu[subs[1].0 + 2], shell::Entry::Item { label, .. } if label == "Columnas de fábrica"));
+    assert_eq!(subs[2].0, subs[1].0 + 1);
+    assert!(matches!(&menu[subs[2].0 + 2], shell::Entry::Item { label, .. } if label == "Columnas de fábrica"));
     // Mismos textos que el menú del fondo.
     FakeShell::choose(None);
     FakeShell::take_calls();
@@ -2440,8 +2441,8 @@ fn header_menu_has_sort_and_group_submenus() {
     a.on_context_menu(Some((10.0, 20.0)));
     let calls = FakeShell::take_calls();
     let [ShellCall::ContextMenu { own, .. }] = calls.as_slice() else { panic!("se esperaba un menú: {calls:?}") };
-    let bg: Vec<_> = header_subs(own).into_iter().filter(|s| s.1 != "Ver").collect();
-    assert_eq!(bg.len(), 2);
+    let bg = header_subs(own);
+    assert_eq!(bg.len(), 3);
     for (h, b) in subs.iter().zip(bg.iter()) {
         assert_eq!(h.1, b.1);
         let (hl, bl): (Vec<_>, Vec<_>) = (h.2.iter().map(|x| &x.0).collect(), b.2.iter().map(|x| &x.0).collect());
@@ -2454,6 +2455,66 @@ fn header_menu_has_sort_and_group_submenus() {
             assert!(!(1..=list::COLUMNS.len() as u32).contains(id) && *id != 100, "id {id}");
         }
     }
+}
+
+/// «Ver ▸ Iconos» del encabezado del panel 0 cambia la vista del 0 aunque el activo sea el 1.
+#[test]
+fn header_menu_view_applies_to_clicked_pane() {
+    let (x, y) = (fixture("encabezado-ver-x"), fixture("encabezado-ver-y"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(x));
+    go(&mut a, 1, Location::Path(y));
+    a.set_active(1);
+    let before = a.panes[1].tab().list.view;
+    host.set_menu_choice(None);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let subs = header_subs(&host.menus().pop().unwrap());
+    assert_eq!(subs[0].1, "Ver");
+    let name = list::View::Icons.name();
+    assert_ne!(a.panes[0].tab().list.view, list::View::Icons);
+    let id = subs[0].2.iter().find(|(l, _)| l == name).unwrap().1;
+    host.set_menu_choice(Some(id));
+    a.show_columns_menu(0, (10.0, 10.0));
+    assert_eq!(a.panes[0].tab().list.view, list::View::Icons);
+    assert_eq!(a.panes[1].tab().list.view, before);
+}
+
+/// «Usar esta vista en todas las carpetas» y «Restablecer…» desde el encabezado actúan sobre el
+/// panel clickeado (con la misma confirmación).
+#[test]
+fn header_menu_view_all_and_reset_act_on_clicked_pane() {
+    let (x, y) = (fixture("encabezado-todas-x"), fixture("encabezado-todas-y"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    go(&mut a, 0, Location::Path(x));
+    a.set_view(0, list::View::Thumbnails);
+    go(&mut a, 1, Location::Path(y));
+    a.set_view(1, list::View::Icons);
+    a.set_active(1);
+    host.set_menu_choice(None);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let subs = header_subs(&host.menus().pop().unwrap());
+    let all = subs[0].2.iter().find(|(l, _)| l == "Usar esta vista en todas las carpetas").unwrap().1;
+    let reset = subs[0].2.iter().find(|(l, _)| l == "Restablecer la vista de esta carpeta").unwrap().1;
+    // Con «No» no cambia nada.
+    host.set_answer(Some(false));
+    host.set_menu_choice(Some(all));
+    a.show_columns_menu(0, (10.0, 10.0));
+    assert_eq!(a.folder_views.len(), 2);
+    // Con «Sí», la vista por defecto es la del panel 0, no la del activo.
+    host.set_answer(Some(true));
+    a.show_columns_menu(0, (10.0, 10.0));
+    assert!(a.folder_views.is_empty());
+    assert_eq!(a.folder_views.default_view().view, list::View::Thumbnails);
+    // Restablecer actúa sobre la carpeta del panel 0.
+    a.set_view(0, list::View::LargeIcons);
+    a.set_view(1, list::View::Icons);
+    let (k0, k1) = (view_key(&a, 0), view_key(&a, 1));
+    host.set_menu_choice(Some(reset));
+    a.show_columns_menu(0, (10.0, 10.0));
+    assert!(!a.folder_views.contains(&k0));
+    assert!(a.folder_views.contains(&k1));
 }
 
 /// «Ordenar por» del encabezado lista la columna de orden actual aunque sea de metadatos y esté
@@ -2493,7 +2554,7 @@ fn header_menu_group_by_type_groups_list() {
     host.set_menu_choice(None);
     a.show_columns_menu(0, (10.0, 10.0));
     let subs = header_subs(&host.menus().pop().unwrap());
-    let tipo = subs[1].2.iter().find(|(l, _)| l == "Tipo").unwrap().1;
+    let tipo = subs[2].2.iter().find(|(l, _)| l == "Tipo").unwrap().1;
     host.set_menu_choice(Some(tipo));
     a.show_columns_menu(0, (10.0, 10.0));
     let list = &a.panes[0].tab().list;
@@ -2515,7 +2576,7 @@ fn header_menu_sort_applies_to_clicked_pane() {
     host.set_menu_choice(None);
     a.show_columns_menu(0, (10.0, 10.0));
     let subs = header_subs(&host.menus().pop().unwrap());
-    let size = subs[0].2.iter().find(|(l, _)| l == "Tamaño").unwrap().1;
+    let size = subs[1].2.iter().find(|(l, _)| l == "Tamaño").unwrap().1;
     host.set_menu_choice(Some(size));
     a.show_columns_menu(0, (10.0, 10.0));
     assert_eq!(a.panes[0].tab().list.sort, list::Column::Size);

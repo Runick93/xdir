@@ -148,6 +148,17 @@ impl FileList {
         }
     }
 
+    /// Filtro por nombre (lo escrito en el buscador, con `name_matcher`) sobre lo que la lista ya
+    /// tiene: la búsqueda en una carpeta virtual, que no se recorre. Se aplica también a lo que
+    /// llegue después (carga o recarga) hasta quitarlo con `None`; vaciar la lista lo quita.
+    pub fn set_name_filter(&mut self, query: Option<&str>) {
+        if query.is_none() && self.name_filter.is_none() {
+            return;
+        }
+        self.name_filter = query.map(|q| Box::new(super::name_matcher(q)) as super::NameFilter);
+        self.refilter();
+    }
+
     /// Rearma lo que se ve después de cambiar los filtros, conservando el foco si se puede.
     pub(super) fn refilter(&mut self) {
         let focus = self.focused_index();

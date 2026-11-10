@@ -199,6 +199,8 @@ type FakeDir = (Vec<String>, Vec<(String, u64)>);
 /// (el escáner lista desde sus propios hilos, no desde el del test): cada test usa rutas propias.
 static FAKE_DIRS: Mutex<BTreeMap<PathBuf, FakeDir>> = Mutex::new(BTreeMap::new());
 static LISTED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// Contenido de las carpetas virtuales falsas, por nombre de análisis (ver `set_shell_items`).
+static SHELL_ITEMS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
 
 thread_local! {
     /// Volumen del falso en este hilo: espacio (total, libre) y si la raíz es un volumen entero;
@@ -490,6 +492,13 @@ impl FakeFileSystem {
         LOADS.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied().unwrap_or(0)
     }
 
+    /// Lo que lista la carpeta virtual `parsing` (archivos con esos nombres para mostrar, como
+    /// los de la Papelera: el nombre de análisis no es el que se ve). Sin esto, abrir una
+    /// carpeta virtual da error.
+    pub fn set_shell_items(parsing: &str, names: &[&str]) {
+        SHELL_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).insert(parsing.to_string(), names.iter().map(|n| n.to_string()).collect());
+    }
+
     /// (creados, soltados) de los guardianes de `path` (en todo el proceso).
     pub fn watches(path: &Path) -> (usize, usize) {
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied().unwrap_or((0, 0))
@@ -560,7 +569,35 @@ impl FileSystem for FakeFileSystem {
                 Location::Path(p) => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
                 Location::Computer => send(LoadMsg::Listed(Ok(()))),
-                Location::Shell { .. } => send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
+                Location::Shell { parsing, .. } => {
+                    let items = SHELL_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).get(parsing).cloned();
+                    let Some(names) = items else { return send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))) };
+                    let batch: Vec<FsEntry> = names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, display)| FsEntry {
+                            name: format!("$R{i:04}").into(),
+                            full: Some(format!("{parsing}\\$R{i:04}").into()),
+                            group: 0,
+                            pidl: None,
+                            sort_key: display.to_lowercase(),
+                            display: display.clone(),
+                            is_dir: false,
+                            size: 0,
+                            modified: 0,
+                            created: 0,
+                            attrs: 0,
+                            type_name: Arc::from("Archivo"),
+                            icon: 0,
+                            overlay: 0,
+                            overlay_checked: true,
+                        })
+                        .collect();
+                    if !batch.is_empty() {
+                        send(LoadMsg::Entries(batch));
+                    }
+                    send(LoadMsg::Listed(Ok(())));
+                }
             }
         });
     }

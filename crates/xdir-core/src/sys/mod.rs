@@ -22,7 +22,9 @@ use crate::xtree::tree::Node;
 
 pub mod testing;
 mod copy;
+mod archives;
 
+pub use archives::{Archives, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo};
 
 #[cfg(test)]
@@ -402,6 +404,8 @@ pub struct Services {
     pub preview: Box<dyn Preview>,
     /// Primitivas del motor de copia (`transfer`).
     pub copy_prims: Box<dyn CopyPrims>,
+    /// Comprimir y extraer (la crate `xdir-archive`).
+    pub archives: Box<dyn Archives>,
     pub info: Box<dyn Info>,
 }
 
@@ -465,6 +469,10 @@ pub fn preview() -> &'static dyn Preview {
 
 pub fn copy_prims() -> &'static dyn CopyPrims {
     &*services().copy_prims
+}
+
+pub fn archives() -> &'static dyn Archives {
+    &*services().archives
 }
 
 pub fn info() -> &'static dyn Info {

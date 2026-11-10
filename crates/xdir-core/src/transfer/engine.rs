@@ -19,12 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::archive::{EntryKind, archive_name, declared_total, extract_folder_name};
 use crate::names::{copy_name, folder_with_name, free_name, numbered_name, replaced_name};
 use super::walk::{Planned, totals, walk};
 use super::{Answer, Choice, ConflictInfo, Control, Flow, JobError, JobOutcome, JobSpec, Update};
 use crate::format::thousands;
 use crate::ops::{OpResult, Undo};
-use crate::sys::{self, CopyError, CopyPrims, ErrKind, ItemKind, ItemStat};
+use crate::sys::{self, Archives, CopyError, CopyPrims, ErrKind, ItemKind, ItemStat, NoArchives, PASSWORD, UNSUPPORTED};
 
 /// Como mucho un aviso de progreso cada tanto por trabajo.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
@@ -36,6 +37,10 @@ const NO_ORIGIN: &str = "No se sabe de dónde vino";
 const NOT_THE_SAME: &str = "Ahí ya no está lo que se había creado: no se manda a la Papelera";
 const REPLACE_PARENT: &str = "No se puede reemplazar una carpeta que contiene lo que se copia";
 const CHANGED: &str = "El original cambió durante la copia";
+
+/// Extraer más que esto (o más de 100 veces lo que ocupa el archivo) se pregunta antes.
+const BIG_EXPANSION: u64 = 10 * 1024 * 1024 * 1024;
+const BIG_RATIO: u64 = 100;
 
 /// Título del trabajo para la ventana de copia; `items`: cuántos elementos de arriba.
 pub fn title(spec: &JobSpec, items: u64) -> String {
@@ -58,12 +63,25 @@ pub fn title(spec: &JobSpec, items: u64) -> String {
         JobSpec::NewFolderWith { .. } => count("Moviendo"),
         JobSpec::Restore { .. } => count("Devolviendo"),
         JobSpec::Undo(_) => "Deshaciendo".into(),
+        JobSpec::Compress { .. } => count("Comprimiendo"),
+        JobSpec::Extract { archive, .. } => format!("Extrayendo «{}»", name(archive)),
     }
 }
 
-/// Corre el trabajo hasta el final (o hasta que se cancele) y manda `Update::Finished`.
+/// Corre el trabajo hasta el final (o hasta que se cancele) y manda `Update::Finished`. Comprimir
+/// y extraer usan `sys::archives()`.
 pub fn run(spec: JobSpec, prims: &dyn CopyPrims, ctl: &Control, out: &mut dyn FnMut(Update)) {
+    if matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }) {
+        run_with(spec, prims, sys::archives(), ctl, out);
+    } else {
+        run_with(spec, prims, &NoArchives, ctl, out);
+    }
+}
+
+/// `run` con el servicio de archivos comprimidos dado.
+pub fn run_with(spec: JobSpec, prims: &dyn CopyPrims, archives: &dyn Archives, ctl: &Control, out: &mut dyn FnMut(Update)) {
     let mut job = Job::new(prims, ctl, out);
+    job.archives = archives;
     match spec {
         JobSpec::Copy { sources, dest } => {
             let t = title(&JobSpec::Copy { sources: sources.clone(), dest: dest.clone() }, sources.len() as u64);
@@ -89,6 +107,8 @@ pub fn run(spec: JobSpec, prims: &dyn CopyPrims, ctl: &Control, out: &mut dyn Fn
             job.run_items(t, items, moving);
         }
         JobSpec::NewFolderWith { parent, items } => job.new_folder_with(&parent, &items),
+        JobSpec::Compress { sources } => job.compress(&sources),
+        JobSpec::Extract { archive, into_folder } => job.extract(&archive, into_folder),
         JobSpec::Restore { items } => job.restore(&items),
         JobSpec::Undo(undo) => {
             job.start("Deshaciendo".into(), count_steps(&undo), 0);
@@ -243,6 +263,7 @@ fn name_of(p: &Path) -> String {
 
 struct Job<'a> {
     prims: &'a dyn CopyPrims,
+    archives: &'a dyn Archives,
     ctl: &'a Control,
     out: &'a mut dyn FnMut(Update),
     items_done: u64,
@@ -273,12 +294,15 @@ struct Job<'a> {
     index: usize,
     /// «Devolver»: lo movido se deshace mandándolo de nuevo a la Papelera.
     moves_as_created: bool,
+    /// Extraer: lo que no se pudo crear (`JobOutcome::omitted`).
+    omitted: usize,
 }
 
 impl<'a> Job<'a> {
     fn new(prims: &'a dyn CopyPrims, ctl: &'a Control, out: &'a mut dyn FnMut(Update)) -> Job<'a> {
         Job {
             prims,
+            archives: &NoArchives,
             ctl,
             out,
             items_done: 0,
@@ -302,6 +326,7 @@ impl<'a> Job<'a> {
             restore_guard: None,
             index: 0,
             moves_as_created: false,
+            omitted: 0,
         }
     }
 
@@ -349,6 +374,7 @@ impl<'a> Job<'a> {
             cancelled: self.cancelled,
             skipped: std::mem::take(&mut self.skipped),
             done_items: self.ok_items,
+            omitted: self.omitted,
         };
         (self.out)(Update::Finished(outcome));
     }
@@ -1416,6 +1442,283 @@ impl<'a> Job<'a> {
             let Some(item) = self.restore_item(&src, &origin) else { continue };
             self.process(item, true);
         }
+    }
+
+    // ---------- comprimir ----------
+
+    /// Un zip con `sources` en la carpeta del primero: se recorre (solo metadatos), se escribe con
+    /// un nombre parcial y recién entero toma su nombre libre. Leer el contenido baja lo que está
+    /// solo en la nube.
+    fn compress(&mut self, sources: &[PathBuf]) {
+        let t = title(&JobSpec::Compress { sources: vec![] }, sources.len() as u64);
+        let Some(dir) = sources.first().and_then(|s| s.parent()).map(Path::to_path_buf) else { return };
+        let names: Vec<String> = sources.iter().map(|s| name_of(s)).collect();
+        let name = archive_name(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let hint = dir.join(&name);
+        // (ruta, nombre adentro, tamaño) de cada elemento, en preorden.
+        let mut items: Vec<(PathBuf, String)> = Vec::new();
+        let mut sizes: Vec<u64> = Vec::new();
+        let mut seen = 0u64;
+        for src in sources {
+            let mut on_seen = |n: u64| (self.out)(Update::Preparing { items: seen + n });
+            match walk(self.prims, src, self.ctl, &mut on_seen) {
+                Ok((plan, errors)) => {
+                    seen += plan.len() as u64;
+                    for e in errors {
+                        let at = e.path.clone();
+                        self.fail(&at, &hint, e);
+                    }
+                    for pl in plan {
+                        let mut inside = pl.rel.iter().map(|c| c.to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
+                        if pl.stat.kind == ItemKind::Dir {
+                            inside.push('/');
+                        }
+                        sizes.push(if pl.stat.kind == ItemKind::File { pl.stat.size } else { 0 });
+                        items.push((pl.src, inside));
+                    }
+                }
+                Err(e) => self.fail(src, &hint, e),
+            }
+            if self.halted() {
+                return;
+            }
+        }
+        if items.is_empty() {
+            return;
+        }
+        let total: u64 = sizes.iter().sum();
+        self.start(t, items.len() as u64, total);
+        // Dónde termina cada elemento en los bytes leídos (para el nombre del actual).
+        let ends: Vec<u64> = sizes.iter().scan(0u64, |acc, s| {
+            *acc += s;
+            Some(*acc)
+        }).collect();
+        let zip = free_name(&dir, &|n| numbered_name(&name, false, n), &|p| self.exists(p).is_some());
+        let archives = self.archives;
+        let mut part = part_name(&zip, &|p| self.exists(p).is_some());
+        let mut written = Err(CopyError::new(ErrKind::Cancelled, &part));
+        for attempt in 0..2 {
+            if attempt == 1 {
+                // El disco no acepta el nombre largo del parcial: uno corto del motor.
+                part = short_part_name(&zip);
+            }
+            let mut on_bytes = |b: u64| {
+                let i = ends.partition_point(|&e| e < b).min(items.len() - 1);
+                self.current = name_of(&items[i].0);
+                self.items_done = ends.partition_point(|&e| e <= b) as u64;
+                self.progress(b, false);
+                self.ctl.checkpoint()
+            };
+            written = archives.create(&part, &items, &mut on_bytes);
+            if !matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+                break;
+            }
+        }
+        if let Err(e) = written {
+            if e.kind != ErrKind::Exists {
+                let _ = self.prims.remove(&part);
+            }
+            // El error del parcial se muestra con el nombre del zip.
+            let at = if e.path == part { zip.clone() } else { e.path.clone() };
+            self.fail(&at, &zip, e);
+            return;
+        }
+        if self.halted() || self.ctl.is_cancelled() {
+            let _ = self.prims.remove(&part);
+            self.cancelled = true;
+            return;
+        }
+        // Si algo ocupó el nombre mientras se escribía, el siguiente libre.
+        let mut zip = zip;
+        let mut renamed = self.rename_final(&part, &zip);
+        for _ in 0..3 {
+            if !matches!(&renamed, Err(e) if e.kind == ErrKind::Exists) {
+                break;
+            }
+            zip = free_name(&dir, &|n| numbered_name(&name, false, n), &|p| self.exists(p).is_some());
+            renamed = self.rename_final(&part, &zip);
+        }
+        if let Err(e) = renamed {
+            let _ = self.prims.remove(&part);
+            self.fail(&zip, &zip, e);
+            return;
+        }
+        self.items_done = items.len() as u64;
+        self.bytes_done = total;
+        self.ok_items = sources.len() as u64;
+        self.record(Undo::Created(vec![zip.clone()]));
+        self.select.push(zip);
+    }
+
+    // ---------- extraer ----------
+
+    /// Un error de todo el archivo (no se puede leer, tiene contraseña…): se ofrece «Reintentar»
+    /// salvo cuando sería lo mismo.
+    fn fail_archive(&mut self, archive: &Path, dir: &Path, e: CopyError) {
+        let again = !matches!(&e.kind, ErrKind::Other(m) if m == PASSWORD || m == UNSUPPORTED);
+        let before = self.errors.len();
+        self.fail(archive, dir, e);
+        if let Some(err) = self.errors.get_mut(before) {
+            err.retry = again;
+        }
+    }
+
+    /// Extrae `archive`. Todo se escribe primero en una carpeta oculta del motor al lado del
+    /// archivo (así lo que está a medias nunca se ve con su nombre y cancelar lo borra entero);
+    /// después esa carpeta toma el nombre libre («fotos», «fotos 2») o, para «Extraer aquí», lo de
+    /// adentro se mueve a la carpeta del archivo con los conflictos de siempre (renombrando: no se
+    /// vuelve a escribir).
+    fn extract(&mut self, archive: &Path, into_folder: bool) {
+        let t = title(&JobSpec::Extract { archive: archive.to_path_buf(), into_folder }, 1);
+        let Some(dir) = archive.parent().map(Path::to_path_buf) else { return };
+        let archives = self.archives;
+        let ctl = self.ctl;
+        let entries = match archives.list(archive, &mut || ctl.checkpoint()) {
+            Ok(v) => v,
+            Err(e) if e.kind == ErrKind::Cancelled => {
+                self.cancelled = true;
+                return;
+            }
+            Err(e) => {
+                self.fail_archive(archive, &dir, e);
+                return;
+            }
+        };
+        let declared = declared_total(&entries);
+        let count = entries.iter().filter(|e| e.kind != EntryKind::Omitted).count() as u64;
+        // Espacio: si no alcanza lo que declara, no empieza.
+        if let Some(v) = self.prims.volume(&dir)
+            && declared > v.free
+        {
+            let missing = sys::env().format_size_short(declared - v.free);
+            self.stopped = Some(format!("Faltan {missing} en \"{}\"", v.label));
+            return;
+        }
+        // Un archivo que se expande muchísimo (o a muchos GB) se pregunta antes.
+        let packed = self.prims.stat(archive).map(|s| s.size).unwrap_or(0);
+        if declared > BIG_EXPANSION || declared > packed.saturating_mul(BIG_RATIO) {
+            let q = format!("Este archivo se expande a {}. ¿Seguir?", sys::env().format_size_short(declared));
+            (self.out)(Update::Confirm(q));
+            if !self.ctl.wait_confirm() {
+                self.cancelled = true;
+                return;
+            }
+        }
+        self.start(t, count, declared);
+        self.current = name_of(archive);
+        let staging = tmp_in(&dir);
+        if let Err(e) = self.prims.create_dir(&staging) {
+            self.fail_archive(archive, &dir, e);
+            return;
+        }
+        let mut failed: Vec<(String, CopyError)> = Vec::new();
+        let mut written = 0u64;
+        let res = {
+            let mut on_bytes = |b: u64| {
+                written = b;
+                self.progress(b, false);
+                self.ctl.checkpoint()
+            };
+            archives.extract_all(archive, &staging, &mut on_bytes, &mut |name, e| failed.push((name.to_string(), e)))
+        };
+        // Cada entrada que no se pudo extraer: con su nombre (sin reintento: sería lo mismo).
+        for (name, e) in failed {
+            let rel = name.trim_start_matches(['/', '\\']);
+            let message = e.message();
+            self.errors.push(super::JobError { src: archive.join(rel), dst: dir.join(rel), message, retry: false });
+        }
+        match res {
+            Ok(n) => self.omitted = n,
+            Err(e) => {
+                self.remove_tree(&staging);
+                if e.kind == ErrKind::Cancelled {
+                    self.cancelled = true;
+                } else {
+                    self.fail_archive(archive, &dir, e);
+                }
+                return;
+            }
+        }
+        if self.ctl.is_cancelled() {
+            self.remove_tree(&staging);
+            self.cancelled = true;
+            return;
+        }
+        self.items_done = count;
+        self.bytes_done = written;
+        self.progress(0, true);
+        if into_folder {
+            self.extract_into_folder(archive, &dir, &staging, count);
+        } else {
+            self.extract_here(&dir, &staging);
+        }
+        self.items_done = count;
+    }
+
+    /// «Extraer en "fotos"»: la carpeta del motor toma el primer nombre libre.
+    fn extract_into_folder(&mut self, archive: &Path, dir: &Path, staging: &Path, count: u64) {
+        let base = extract_folder_name(&name_of(archive));
+        let mut renamed = Err(CopyError::new(ErrKind::Exists, staging));
+        let mut folder = PathBuf::new();
+        for _ in 0..5 {
+            folder = free_name(dir, &|n| numbered_name(&base, true, n), &|p| self.exists(p).is_some());
+            renamed = self.rename_final(staging, &folder);
+            if !matches!(&renamed, Err(e) if e.kind == ErrKind::Exists) {
+                break;
+            }
+        }
+        if let Err(e) = renamed {
+            self.remove_tree(staging);
+            self.fail_archive(archive, dir, e);
+            return;
+        }
+        self.ok_items = count;
+        self.record(Undo::Created(vec![folder.clone()]));
+        self.select.push(folder);
+    }
+
+    /// «Extraer aquí»: lo de adentro de la carpeta del motor va a `dir` renombrando, con los
+    /// conflictos de siempre (Reemplazar, Conservar ambos, Omitir, Combinar). Lo que queda en la
+    /// carpeta del motor (lo omitido) se borra. Si se cancela, lo que ya llegó se saca y lo
+    /// reemplazado vuelve.
+    fn extract_here(&mut self, dir: &Path, staging: &Path) {
+        let mut names = self.prims.read_dir(staging).unwrap_or_default();
+        names.sort();
+        self.moves_as_created = true;
+        let items: Vec<Item> = names.iter().map(|n| Item::new(&staging.join(n), Target::Fixed(dir.join(n)), How::Rename)).collect();
+        self.ahead = items.iter().map(|i| self.ahead_of(&i.src, &self.target_hint(i))).collect();
+        for (i, item) in items.into_iter().enumerate() {
+            self.index = i;
+            if self.should_stop() {
+                break;
+            }
+            self.process(item, true);
+        }
+        if self.cancelled {
+            self.take_back();
+        }
+        self.remove_tree(staging);
+    }
+
+    /// Cancelar «Extraer aquí» a mitad: lo que llegó (solo lo de este trabajo) se borra y lo
+    /// reemplazado vuelve de la Papelera, en orden inverso.
+    fn take_back(&mut self) {
+        for step in std::mem::take(&mut self.undo).into_iter().rev() {
+            match step {
+                Undo::Created(paths) => paths.iter().rev().for_each(|p| self.remove_tree(p)),
+                Undo::CreatedIds(items) => items.iter().rev().for_each(|(p, _)| self.remove_tree(p)),
+                Undo::Recycled(pairs) => {
+                    for (name, original) in pairs.into_iter().rev() {
+                        if let Err(e) = self.prims.untrash(&name, &original) {
+                            self.fail(&original, &original, e);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.select.clear();
+        self.ok_items = 0;
     }
 
     // ---------- deshacer ----------

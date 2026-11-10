@@ -28,7 +28,9 @@ use crate::thumbs;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::Node;
 
+mod archive_fake;
 mod copy_fake;
+pub use archive_fake::FakeArchives;
 pub use copy_fake::FakeCopyPrims;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
@@ -45,6 +47,7 @@ pub fn install_fakes() {
         metadata: Box::new(FakeMetadata),
         preview: Box::new(FakePreview),
         copy_prims: Box::new(FakeCopyPrims::shared()),
+        archives: Box::new(FakeArchives::shared()),
         info: Box::new(FakeInfo),
     });
 }

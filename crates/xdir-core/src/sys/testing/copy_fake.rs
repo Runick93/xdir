@@ -305,6 +305,20 @@ impl FakeCopyPrims {
         }
     }
 
+    /// Lee el contenido como lo haría otro programa (comprimir): cuenta como lectura y respeta
+    /// los fallos de `fail`.
+    pub fn read_content(&self, path: &Path) -> Result<Vec<u8>, CopyError> {
+        let mut fs = self.fs();
+        fs.check_fail(path)?;
+        let data = match fs.node(path) {
+            Some(Node::File { data, .. }) => data.clone(),
+            Some(_) => return Err(CopyError::new(ErrKind::Other("No es un archivo".into()), path)),
+            None => return Err(CopyError::new(ErrKind::NotFound, path)),
+        };
+        *fs.reads.entry(path.to_path_buf()).or_insert(0) += 1;
+        Ok(data)
+    }
+
     pub fn exists(&self, path: &Path) -> bool {
         self.fs().key(path).is_some()
     }

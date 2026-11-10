@@ -10,6 +10,36 @@ pub enum ArchiveFormat {
     TarGz,
 }
 
+/// Qué es una entrada de un archivo comprimido.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    /// Enlace duro, dispositivo o FIFO de un tar: se lista pero no se crea (se avisa como omitido).
+    Omitted,
+}
+
+/// Una entrada del archivo, tal como figura adentro (sin sanear: quien extrae la valida con
+/// `safe_entry_path`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ArchiveEntry {
+    pub index: usize,
+    pub name: String,
+    pub size: u64,
+    pub kind: EntryKind,
+    /// Destino del enlace simbólico.
+    pub link: Option<String>,
+    /// Segundos desde 1970 (0 si no figura).
+    pub modified: u64,
+}
+
+/// Bytes que declara el archivo para sus archivos (lo que ocupará extraído). No se confía (quien
+/// extrae corta si una entrada escribe más), pero sirve para avisar antes de empezar.
+pub fn declared_total(entries: &[ArchiveEntry]) -> u64 {
+    entries.iter().filter(|e| e.kind == EntryKind::File).map(|e| e.size).sum()
+}
+
 /// Formato según la extensión (sin distinguir mayúsculas): `.zip`, `.tar.gz` o `.tgz`.
 pub fn format_of(name: &str) -> Option<ArchiveFormat> {
     let lower = name.to_lowercase();

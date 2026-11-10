@@ -139,6 +139,7 @@ impl App {
         self.panes[pane].tab_mut().list.set_view(view);
         self.sync_folder_views();
         self.notice = Some(format!("Vista: {}", view.name().to_lowercase()));
+        self.view_notice = Some((pane, self.panes[pane].tab().view_key(), view));
         self.redraw();
     }
 
@@ -166,6 +167,24 @@ impl App {
         }
         if changed {
             self.schedule_views_save();
+        }
+        self.expire_view_notice();
+    }
+
+    /// Borra el aviso «Vista: …» si quedó viejo: se navegó a otra carpeta, cambió la vista o la
+    /// lista activa es otra. Si otro aviso lo reemplazó, ese no se toca.
+    fn expire_view_notice(&mut self) {
+        let Some((pane, key, view)) = &self.view_notice else { return };
+        let text = format!("Vista: {}", view.name().to_lowercase());
+        if self.notice.as_deref() != Some(text.as_str()) {
+            self.view_notice = None;
+            return;
+        }
+        let still = *pane == self.active
+            && self.panes.get(*pane).is_some_and(|p| p.tab().view_key() == *key && p.tab().list.view == *view);
+        if !still {
+            self.notice = None;
+            self.view_notice = None;
         }
     }
 
@@ -244,6 +263,8 @@ impl App {
     /// `at`: punto del clic derecho, en DIPs del área de la ventana.
     pub(super) fn show_columns_menu(&mut self, pane: usize, at: (f32, f32)) {
         const RESET: usize = 100;
+        // Ids de «Ordenar por» y «Agrupar por»: después de las columnas y de RESET.
+        const SUB_BASE: u32 = 200;
         let current = self.panes[pane].tab().list.columns.clone();
         let mut entries: Vec<shell::Entry> = list::COLUMNS
             .iter()
@@ -258,10 +279,33 @@ impl App {
             })
             .collect();
         entries.push(shell::Entry::Sep);
+        let mut cmds = Vec::new();
+        let mut item = |label: &str, command: Command, enabled: bool, checked: bool| {
+            cmds.push(command);
+            shell::Entry::Item { id: SUB_BASE + cmds.len() as u32 - 1, label: label.to_string(), enabled, checked }
+        };
+        let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
+        entries.push(sorts);
+        entries.push(groupings);
+        entries.push(shell::Entry::Sep);
         entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
         let cmd = self.host.popup_menu(&entries, MenuPos::At(at.0, at.1), None, None).map_or(0, |c| c as usize);
         let list = &mut self.panes[pane].tab_mut().list;
         match cmd {
+            c if c >= SUB_BASE as usize => {
+                // Lo mismo que en el menú del fondo, pero sobre el panel del encabezado.
+                match cmds.get(c - SUB_BASE as usize) {
+                    Some(&Command::SortBy(i)) => match list::COLUMNS.get(i as usize) {
+                        Some(&(col, ..)) => list.set_sort(col),
+                        None => return,
+                    },
+                    Some(&Command::GroupBy(i)) => match list::GROUPINGS.get(i as usize) {
+                        Some(&col) => list.set_group(col),
+                        None => return,
+                    },
+                    _ => return,
+                }
+            }
             RESET => {
                 // La columna de carpeta de una búsqueda se queda donde está.
                 let folder = list.columns.iter().position(|c| c.col == list::Column::Folder).map(|i| (i, list.columns[i]));

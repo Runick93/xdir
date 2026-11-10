@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Overlays, Services, Shell, SystemEnv, Watch, Waker};
-use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, QuickItem, WM_APP_LOAD};
+use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
 use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
 use crate::geom::{Color, Rect};
@@ -37,6 +37,7 @@ pub fn install_fakes() {
         shell: Box::new(FakeShell),
         file_system: Box::new(FakeFileSystem),
         overlays: Box::new(FakeOverlays),
+        metadata: Box::new(FakeMetadata),
     });
 }
 
@@ -198,6 +199,8 @@ type FakeDir = (Vec<String>, Vec<(String, u64)>);
 /// (el escáner lista desde sus propios hilos, no desde el del test): cada test usa rutas propias.
 static FAKE_DIRS: Mutex<BTreeMap<PathBuf, FakeDir>> = Mutex::new(BTreeMap::new());
 static LISTED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// Contenido de las carpetas virtuales falsas, por nombre de análisis (ver `set_shell_items`).
+static SHELL_ITEMS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
 
 thread_local! {
     /// Volumen del falso en este hilo: espacio (total, libre) y si la raíz es un volumen entero;
@@ -489,6 +492,13 @@ impl FakeFileSystem {
         LOADS.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied().unwrap_or(0)
     }
 
+    /// Lo que lista la carpeta virtual `parsing` (archivos con esos nombres para mostrar, como
+    /// los de la Papelera: el nombre de análisis no es el que se ve). Sin esto, abrir una
+    /// carpeta virtual da error.
+    pub fn set_shell_items(parsing: &str, names: &[&str]) {
+        SHELL_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).insert(parsing.to_string(), names.iter().map(|n| n.to_string()).collect());
+    }
+
     /// (creados, soltados) de los guardianes de `path` (en todo el proceso).
     pub fn watches(path: &Path) -> (usize, usize) {
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied().unwrap_or((0, 0))
@@ -559,7 +569,35 @@ impl FileSystem for FakeFileSystem {
                 Location::Path(p) => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
                 Location::Computer => send(LoadMsg::Listed(Ok(()))),
-                Location::Shell { .. } => send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
+                Location::Shell { parsing, .. } => {
+                    let items = SHELL_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).get(parsing).cloned();
+                    let Some(names) = items else { return send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))) };
+                    let batch: Vec<FsEntry> = names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, display)| FsEntry {
+                            name: format!("$R{i:04}").into(),
+                            full: Some(format!("{parsing}\\$R{i:04}").into()),
+                            group: 0,
+                            pidl: None,
+                            sort_key: display.to_lowercase(),
+                            display: display.clone(),
+                            is_dir: false,
+                            size: 0,
+                            modified: 0,
+                            created: 0,
+                            attrs: 0,
+                            type_name: Arc::from("Archivo"),
+                            icon: 0,
+                            overlay: 0,
+                            overlay_checked: true,
+                        })
+                        .collect();
+                    if !batch.is_empty() {
+                        send(LoadMsg::Entries(batch));
+                    }
+                    send(LoadMsg::Listed(Ok(())));
+                }
             }
         });
     }
@@ -712,6 +750,59 @@ impl Drop for FakeWatch {
     }
 }
 
+/// Un pedido de metadatos visto por el falso: (índice, ruta) de cada elemento y campos pedidos.
+pub type MetaRequestRecord = (Vec<(usize, PathBuf)>, Vec<MetaField>);
+
+thread_local! {
+    /// Metadatos que devuelve el falso, por ruta (por hilo de prueba).
+    static META_DATA: RefCell<HashMap<PathBuf, Meta>> = RefCell::new(HashMap::new());
+    /// Pedidos recibidos: (índice, ruta) de cada elemento y campos pedidos.
+    static META_REQUESTS: RefCell<Vec<MetaRequestRecord>> = const { RefCell::new(Vec::new()) };
+    /// Demora de la respuesta: `None` responde en el mismo hilo, al pedir.
+    static META_DELAY: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+}
+
+/// `Metadata` falso: anota cada pedido y responde con lo cargado con `serve` para cada ruta (o
+/// vacío), en un solo lote, en el mismo hilo o, con `set_delay`, desde otro hilo después de la
+/// demora. Todo es por hilo de prueba.
+pub struct FakeMetadata;
+
+impl FakeMetadata {
+    /// Desde ahora (en este hilo) la ruta tiene estos metadatos.
+    pub fn serve(path: &Path, meta: Meta) {
+        META_DATA.with(|d| d.borrow_mut().insert(path.to_path_buf(), meta));
+    }
+
+    /// Pedidos recibidos hasta ahora (y los olvida): elementos y campos de cada uno.
+    pub fn take_requests() -> Vec<MetaRequestRecord> {
+        META_REQUESTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// Demora de las respuestas (`None`: en el mismo hilo, al pedir).
+    pub fn set_delay(delay: Option<std::time::Duration>) {
+        META_DELAY.with(|d| d.set(delay));
+    }
+}
+
+impl Metadata for FakeMetadata {
+    fn request(&self, req: MetadataRequest) {
+        META_REQUESTS.with(|r| r.borrow_mut().push((req.items.clone(), req.fields.clone())));
+        let batch: Vec<(usize, Meta)> =
+            META_DATA.with(|d| req.items.iter().map(|(i, p)| (*i, d.borrow().get(p).cloned().unwrap_or_default())).collect());
+        match META_DELAY.with(Cell::get) {
+            None => {
+                req.send(batch);
+            }
+            Some(delay) => {
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    req.send(batch);
+                });
+            }
+        }
+    }
+}
+
 /// `Overlays` falso: no hay superposiciones (no responde nada).
 pub struct FakeOverlays;
 
@@ -726,6 +817,7 @@ pub struct RecordingPainter {
     theme: Theme,
     texts: RefCell<Vec<(FontId, String, Rect)>>,
     paths: RefCell<Vec<RecordedPath>>,
+    strokes: RefCell<Vec<(Rect, Color)>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -733,12 +825,17 @@ pub type RecordedPath = (Vec<(f32, f32)>, bool, Option<Color>);
 
 impl RecordingPainter {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, texts: RefCell::new(Vec::new()), paths: RefCell::new(Vec::new()) }
+        Self { theme, texts: RefCell::new(Vec::new()), paths: RefCell::new(Vec::new()), strokes: RefCell::new(Vec::new()) }
     }
 
     /// Los trazos dibujados con `rounded_path`, en orden.
     pub fn paths(&self) -> Vec<RecordedPath> {
         self.paths.borrow().clone()
+    }
+
+    /// Los bordes dibujados con `round_stroke_w` (rectángulo y color), en orden.
+    pub fn strokes(&self) -> Vec<(Rect, Color)> {
+        self.strokes.borrow().clone()
     }
 
     /// Los textos dibujados, en orden.
@@ -755,7 +852,9 @@ impl Painter for RecordingPainter {
     }
     fn circle(&self, _cx: f32, _cy: f32, _radius: f32, _fill: Color) {}
     fn circle_stroke(&self, _cx: f32, _cy: f32, _radius: f32, _c: Color, _width: f32) {}
-    fn round_stroke_w(&self, _r: Rect, _radius: f32, _c: Color, _width: f32) {}
+    fn round_stroke_w(&self, r: Rect, _radius: f32, c: Color, _width: f32) {
+        self.strokes.borrow_mut().push((r, c));
+    }
     fn round_stroke(&self, _r: Rect, _radius: f32, _c: Color) {}
 
     fn text(&self, font: FontId, s: &str, r: Rect, _c: Color) {

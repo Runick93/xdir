@@ -206,6 +206,32 @@ impl App {
         }
     }
 
+    /// Los submenús «Ordenar por» y «Agrupar por» de la carpeta del panel (los comparten el menú
+    /// del fondo y el del encabezado de columnas); `item` arma cada ítem.
+    pub(super) fn sort_group_submenus(
+        &self,
+        pane: usize,
+        item: &mut dyn FnMut(&str, Command, bool, bool) -> shell::Entry,
+    ) -> (shell::Entry, shell::Entry) {
+        use shell::Entry;
+        let list = &self.panes[pane].tab().list;
+        // Las columnas de metadatos, solo si están a la vista (son muchas y casi siempre vacías) o
+        // si la lista está ordenada por ella.
+        let sorts = list::COLUMNS
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.0.is_meta() || c.0 == list.sort || list.columns.iter().any(|s| s.col == c.0))
+            .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
+            .collect();
+        // «Agrupar por»: los criterios con el título de su columna y «(Ninguno)».
+        let groupings = list::GROUPINGS
+            .iter()
+            .enumerate()
+            .map(|(i, &col)| item(col.map_or("(Ninguno)", |c| c.title()), Command::GroupBy(i as u8), true, col == list.group_by))
+            .collect();
+        (Entry::Sub("Ordenar por".into(), sorts), Entry::Sub("Agrupar por".into(), groupings))
+    }
+
     /// Entradas propias del menú del fondo de una carpeta; `cmds` recibe el comando de cada id.
     pub(super) fn background_entries(&self, pane: usize, cmds: &mut Vec<Command>) -> Vec<shell::Entry> {
         use shell::Entry;
@@ -222,24 +248,14 @@ impl App {
         views.push(Entry::Sep);
         views.push(item("Usar esta vista en todas las carpetas", Command::ApplyViewToAll, true, false));
         views.push(item("Restablecer la vista de esta carpeta", Command::ResetFolderView, true, false));
-        let sorts = list::COLUMNS
-            .iter()
-            .enumerate()
-            .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
-            .collect();
-        // «Agrupar por»: los criterios con el título de su columna y «(Ninguno)».
-        let groupings = list::GROUPINGS
-            .iter()
-            .enumerate()
-            .map(|(i, &col)| item(col.map_or("(Ninguno)", |c| c.title()), Command::GroupBy(i as u8), true, col == list.group_by))
-            .collect();
+        let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
         let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
         // Sin el árbol no se agrega nada después.
         #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
         let mut entries = vec![
             Entry::Sub("Ver".into(), views),
-            Entry::Sub("Ordenar por".into(), sorts),
-            Entry::Sub("Agrupar por".into(), groupings),
+            sorts,
+            groupings,
             item("Actualizar", Command::Refresh, true, false),
             Entry::Sep,
             item("Pegar", Command::Paste, true, false),

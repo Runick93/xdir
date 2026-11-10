@@ -25,6 +25,9 @@ pub struct Search {
     /// Cuándo empezó y cuándo terminó (para mostrar cuánto tardó).
     pub started: Instant,
     pub finished: Option<Instant>,
+    /// Carpeta virtual (Papelera, Acceso rápido...): no se recorre; se filtra por nombre lo que
+    /// la carpeta muestra (`FileList::set_name_filter`), sin columna «Carpeta» ni vista propia.
+    pub in_place: bool,
 }
 
 pub struct Tab {
@@ -154,7 +157,7 @@ impl Tab {
     /// Clave de la vista de lo que muestra la pestaña: la carpeta, la ubicación especial o, con
     /// una búsqueda, la carpeta buscada (ver `folder_views::folder_key`).
     pub fn view_key(&self) -> String {
-        match (&self.search, self.list.search_root.as_deref()) {
+        match (self.recursive_search(), self.list.search_root.as_deref()) {
             (Some(_), Some(root)) => folder_views::folder_key(&self.location, Some(root)),
             (Some(_), None) => folder_views::computer_search_key(),
             (None, _) => folder_views::folder_key(&self.location, None),
@@ -166,11 +169,12 @@ impl Tab {
     /// la carpeta buscada (el filtro rápido se aplica sobre lo que dejan pasar); sin búsqueda, sin
     /// esa columna.
     fn view_here(&self, mut v: ViewSettings) -> ViewSettings {
-        if self.search.is_some() {
+        let searching = self.recursive_search().is_some();
+        if searching {
             v.filters = self.list.filters.clone();
         }
         let folder = v.columns.iter().position(|c| c.col == Column::Folder);
-        match (self.search.is_some(), folder) {
+        match (searching, folder) {
             (true, None) => {
                 let at = v.columns.iter().position(|c| c.col == Column::Name).map_or(0, |i| i + 1);
                 v.columns.insert(at, ColumnSpec { col: Column::Folder, width: list::COLUMNS[7].3 });
@@ -234,7 +238,13 @@ impl Tab {
 
     /// Con una búsqueda, la clave de la carpeta buscada: los filtros por columna son de ella.
     fn search_folder_key(&self) -> Option<String> {
-        self.search.is_some().then(|| folder_views::folder_key(&self.location, None))
+        self.recursive_search().map(|_| folder_views::folder_key(&self.location, None))
+    }
+
+    /// La búsqueda en curso si recorre subcarpetas (con sus resultados en lugar de la carpeta);
+    /// la de una carpeta virtual solo filtra lo que la carpeta muestra.
+    fn recursive_search(&self) -> Option<&Search> {
+        self.search.as_ref().filter(|s| !s.in_place)
     }
 
     pub fn can_back(&self) -> bool {
@@ -330,19 +340,28 @@ impl Tab {
     pub fn reload(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, silent: bool) {
         // Con una búsqueda a la vista: recargar es repetirla; las recargas silenciosas (cambios
         // en la carpeta) no la interrumpen.
-        if let Some(query) = self.search.as_ref().map(|s| s.query.clone()) {
+        if let Some(query) = self.recursive_search().map(|s| s.query.clone()) {
             if !silent {
                 self.search(hwnd, tx, &query);
             }
             return;
         }
+        // En una carpeta virtual se recarga la carpeta y el filtro sigue (en la recarga silenciosa
+        // la lista lo conserva; la otra la vacía y se vuelve a poner).
+        let in_place = self.search.as_ref().map(|s| s.query.clone());
         if silent {
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            // Los lotes de metadatos en camino traen la generación vieja y se descartan: lo que no
+            // llegó se vuelve a pedir (si la recarga falla, la lista sigue igual y sin «Leyendo…» colgado).
+            self.list.forget_unanswered_meta();
             self.reload_buf = Some(Vec::new());
             sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
         } else {
             self.focus_after_load = self.list.focused_index().map(|i| self.list.entries[i].name.clone());
             self.start(hwnd, tx);
+            if let Some(query) = in_place {
+                self.search(hwnd, tx, &query);
+            }
         }
     }
 
@@ -352,7 +371,8 @@ impl Tab {
     }
 
     /// Busca `query` en la carpeta de la pestaña y todas sus subcarpetas ("Este equipo": en
-    /// todas las unidades). Los resultados van apareciendo en la lista. Con el texto vacío,
+    /// todas las unidades). Los resultados van apareciendo en la lista. En una carpeta virtual
+    /// (Papelera...) no se recorre nada: se filtra por nombre lo que muestra. Con el texto vacío,
     /// termina la búsqueda y vuelve a la carpeta.
     pub fn search(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, query: &str) {
         if query.trim().is_empty() {
@@ -362,12 +382,19 @@ impl Tab {
         let (roots, root) = match &self.location {
             Location::Path(p) => (vec![p.clone()], Some(p.clone())),
             Location::Computer => (sys::file_system().drives(), None),
-            // Las carpetas virtuales no se recorren.
-            Location::Shell { .. } => return,
+            // Las carpetas virtuales no se recorren: se filtra lo que muestran.
+            Location::Shell { .. } => {
+                let now = Instant::now();
+                self.search = Some(Search { query: query.to_string(), scanned: 0, progress: 1.0, done: true, started: now, finished: Some(now), in_place: true });
+                self.list.set_name_filter(Some(query));
+                return;
+            }
         };
         self.leave_view();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.list.clear();
+        // Los resultados llevan su ruta completa: de ahí se leen los metadatos.
+        self.list.meta_enabled = true;
         self.list.search_root = root;
         if !self.list.columns.iter().any(|c| c.col == Column::Folder) {
             let at = self.list.columns.iter().position(|c| c.col == Column::Name).map_or(0, |i| i + 1);
@@ -378,14 +405,17 @@ impl Tab {
         self.reload_buf = None;
         self.focus_after_load = None;
         self.counts_as_visit = false;
-        self.search = Some(Search { query: query.to_string(), scanned: 0, progress: 0.0, done: false, started: Instant::now(), finished: None });
+        self.search = Some(Search { query: query.to_string(), scanned: 0, progress: 0.0, done: false, started: Instant::now(), finished: None, in_place: false });
         fs::spawn_search(hwnd, tx.clone(), self.id, generation, self.generation.clone(), roots, self.list.show_hidden, list::name_matcher(query));
     }
 
     /// Termina la búsqueda (si había) y vuelve a mostrar la carpeta.
     pub fn end_search(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
-        if self.search.is_some() {
-            self.start(hwnd, tx);
+        match &self.search {
+            // La carpeta virtual ya está en la lista: alcanza con quitar el filtro.
+            Some(s) if s.in_place => self.drop_search(),
+            Some(_) => self.start(hwnd, tx),
+            None => {}
         }
     }
 
@@ -397,6 +427,7 @@ impl Tab {
     /// Saca de la lista lo propio de la búsqueda (la columna de carpeta).
     fn drop_search(&mut self) {
         self.search = None;
+        self.list.set_name_filter(None);
         self.list.search_root = None;
         self.list.columns.retain(|c| c.col != Column::Folder);
     }
@@ -409,6 +440,8 @@ impl Tab {
         // Quien navega la vuelve a marcar como visita después; una recarga no cuenta.
         self.counts_as_visit = false;
         self.list.clear();
+        // Solo las carpetas de disco tienen de dónde leer metadatos.
+        self.list.meta_enabled = matches!(self.location, Location::Path(_));
         self.loading = true;
         self.error = None;
         self.reload_buf = None;
@@ -421,7 +454,7 @@ impl Tab {
 
     /// Aviso del vigilante: recarga silenciosa si sigue siendo la misma navegación.
     pub fn on_changed(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, nav_id: u64) {
-        if nav_id == self.nav_id && !self.loading && self.search.is_none() {
+        if nav_id == self.nav_id && !self.loading && self.recursive_search().is_none() {
             self.reload(hwnd, tx, true);
         }
     }
@@ -474,6 +507,13 @@ impl Tab {
                 }
                 self.list.set_overlays(&overlays);
             }
+            // Los índices son de la lista actual; los de una recarga sin aplicar se vuelven a pedir.
+            LoadMsg::Metadata(batch) => {
+                if self.reload_buf.is_some() {
+                    return false;
+                }
+                self.list.set_meta(batch);
+            }
             LoadMsg::Icons(icons) => match &mut self.reload_buf {
                 // Íconos de una recarga que todavía no se aplicó.
                 Some(buf) => {
@@ -519,6 +559,30 @@ impl Tab {
             generation: self.generation.load(Ordering::Relaxed),
             items,
         });
+    }
+
+    /// Pide los metadatos que la lista necesita (columnas de metadatos a la vista, o la carpeta
+    /// entera si se agrupa, ordena o filtra por una), en pedidos de hasta `fs::META_BATCH`.
+    pub fn request_metadata(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        if self.reload_buf.is_some() {
+            return;
+        }
+        let idxs = self.list.take_meta_request();
+        if idxs.is_empty() {
+            return;
+        }
+        let generation = self.generation.load(Ordering::Relaxed);
+        for chunk in idxs.chunks(fs::META_BATCH) {
+            sys::metadata().request(fs::MetadataRequest {
+                hwnd,
+                tx: tx.clone(),
+                panel: self.id,
+                generation,
+                current: self.generation.clone(),
+                items: chunk.iter().map(|&i| (i, self.entry_path(i))).collect(),
+                fields: fs::MetaField::ALL.to_vec(),
+            });
+        }
     }
 
     pub fn entry_item(&self, idx: usize) -> crate::shell::Item {
@@ -586,7 +650,10 @@ impl Tab {
             let found = self.list.total();
             let found = if found == 1 { "1 encontrado".to_string() } else { format!("{found} encontrados") };
             let scanned = crate::format::thousands(s.scanned);
-            let mut text = if s.done {
+            // En una carpeta virtual no se revisa nada: solo cuántos coinciden.
+            let mut text = if s.in_place {
+                format!("Búsqueda «{}»: {found}", s.query)
+            } else if s.done {
                 let secs = s.finished.unwrap_or(s.started).duration_since(s.started).as_secs_f32();
                 format!("Búsqueda «{}»: {found} · {scanned} elementos revisados en {secs:.1} s", s.query)
             } else {

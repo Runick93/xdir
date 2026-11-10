@@ -276,6 +276,9 @@ pub struct App {
     new_watch: Option<NewWatch>,
     /// Mensaje para la barra de estado (errores de operaciones).
     notice: Option<String>,
+    /// El aviso «Vista: …» que está en `notice`: el panel, la carpeta (`Tab::view_key`) y la vista
+    /// que anunció. Se borra cuando la lista activa deja de ser esa (`sync_folder_views`).
+    view_notice: Option<(usize, String, list::View)>,
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
     transparent: bool,
     favorites: Favorites,
@@ -489,6 +492,7 @@ impl App {
             pending_rename: None,
             new_watch: None,
             notice: config_errors,
+            view_notice: None,
             transparent: false,
             favorites,
             history,

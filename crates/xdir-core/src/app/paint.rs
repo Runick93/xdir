@@ -130,7 +130,7 @@ impl App {
                     text: &query,
                     editing: filter_pane == Some(i),
                     running: tab.search.as_ref().filter(|s| !s.done).map(|s| s.progress),
-                    enabled: !matches!(tab.location, Location::Shell { .. }),
+                    enabled: true,
                 };
                 panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), search);
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
@@ -223,10 +223,11 @@ impl App {
             self.redraw();
         }
         self.notify_a11y_focus();
-        // Superposiciones de las filas recién dibujadas.
+        // Superposiciones y metadatos de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for i in self.shown_panes() {
             self.panes[i].tab_mut().request_overlays(hwnd, &tx);
+            self.panes[i].tab_mut().request_metadata(hwnd, &tx);
         }
 
         if self.first_frame_ms.is_none() {

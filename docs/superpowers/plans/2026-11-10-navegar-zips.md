@@ -80,3 +80,10 @@
 - Más de 100.000 entradas: se listan las primeras 100.000, sin aviso.
 - «Cargando…» aparece apenas empieza la lectura (sin la espera de 0,5 s de la carpeta remota de la tanda D+, que todavía no está en `develop`).
 - La flecha de subcarpetas de la barra no lista nada dentro de un zip.
+
+## Ronda 1 de revisión: lo que queda para después
+
+- M3: lo que se edita en un programa externo sobre la temporal se pierde al salir o si el archivo cambia (no se marcan solo lectura ni se avisa).
+- M6: en la Galería solo se extrae el elemento enfocado; con varios elegidos la vista rápida no extrae.
+- M9: carrera corta al arrancar (otra instancia puede ver la carpeta de una ejecución nueva antes de que tome su candado).
+- M12: Deshacer no se frena dentro de un zip (no toca el zip; correcto así).

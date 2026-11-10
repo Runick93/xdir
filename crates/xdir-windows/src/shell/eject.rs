@@ -18,7 +18,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::EventLog::{EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender, EvtRenderEventXml};
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
-    GUID_DEVINTERFACE_CDROM, GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery,
+    GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery,
     STORAGE_DEVICE_DESCRIPTOR, STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
 };
 use windows::core::{GUID, HSTRING, PCWSTR, w};
@@ -187,16 +187,111 @@ pub fn process_from_event_xml(xml: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// Cómo se expulsa una unidad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EjectPlan {
+    /// Lectora de CD/DVD: se traba y desmonta el volumen y se saca el disco
+    /// (`IOCTL_STORAGE_EJECT_MEDIA`); el dispositivo queda.
+    Media,
+    /// Imagen ISO/VHD montada (bus de archivo virtual): «Expulsar» del Shell, que la desmonta.
+    ShellVerb,
+    /// Disco extraíble: `CM_Request_Device_EjectW` sobre el primer nodo extraíble, subiendo desde
+    /// el disco (nunca más arriba).
+    Device,
+}
+
+/// Qué hacer según el tipo de unidad (`GetDriveTypeW`) y el bus del disco.
+pub fn eject_plan(drive_type: u32, bus: Option<u32>) -> EjectPlan {
+    match (drive_type, bus) {
+        (_, Some(15)) => EjectPlan::ShellVerb,
+        (DRIVE_CDROM, _) => EjectPlan::Media,
+        _ => EjectPlan::Device,
+    }
+}
+
+/// El primer nodo extraíble desde `start` (incluido) subiendo por los padres, hasta `max` niveles.
+/// Sin ninguno extraíble, `None`: no se expulsa un controlador o concentrador de más arriba.
+pub fn first_removable(start: u32, removable: &dyn Fn(u32) -> bool, parent: &dyn Fn(u32) -> Option<u32>, max: usize) -> Option<u32> {
+    let mut node = start;
+    for _ in 0..max {
+        if removable(node) {
+            return Some(node);
+        }
+        node = parent(node)?;
+    }
+    None
+}
+
+/// ¿El nodo se puede quitar? (`DN_REMOVABLE` en su estado).
+fn devnode_removable(node: u32) -> bool {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{CM_DEVNODE_STATUS_FLAGS, CM_Get_DevNode_Status, CM_PROB, DN_REMOVABLE};
+    let (mut status, mut problem) = (CM_DEVNODE_STATUS_FLAGS(0), CM_PROB(0));
+    unsafe { CM_Get_DevNode_Status(&mut status, &mut problem, node, 0) == CR_SUCCESS && status.0 & DN_REMOVABLE.0 != 0 }
+}
+
+fn devnode_parent(node: u32) -> Option<u32> {
+    let mut parent = 0u32;
+    (unsafe { CM_Get_Parent(&mut parent, node, 0) } == CR_SUCCESS).then_some(parent)
+}
+
+/// Saca el disco de una lectora: traba el volumen (si alguien lo usa, está ocupado), lo desmonta
+/// y lo expulsa.
+fn eject_media(root: &Path) -> Result<(), EjectError> {
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA};
+    let device = volume_device(root).ok_or_else(|| fail("no es una unidad"))?;
+    let h = unsafe {
+        CreateFileW(&device, (GENERIC_READ | GENERIC_WRITE).0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
+    }
+    .map_err(|e| fail(&e.message()))?;
+    let ioctl = |code: u32| unsafe { DeviceIoControl(h, code, None, 0, None, 0, None, None) };
+    let mut locked = false;
+    for _ in 0..3 {
+        if ioctl(FSCTL_LOCK_VOLUME).is_ok() {
+            locked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    let result = if !locked {
+        Err(EjectError { busy_by: None, busy: true, message: "la unidad está en uso".into() })
+    } else {
+        let _ = ioctl(FSCTL_DISMOUNT_VOLUME);
+        ioctl(IOCTL_STORAGE_EJECT_MEDIA).map_err(|e| fail(&e.message()))
+    };
+    unsafe {
+        let _ = CloseHandle(h);
+    }
+    result
+}
+
+/// «Expulsar» del Shell sobre la unidad (imágenes ISO/VHD montadas). Corre en un hilo de trabajo:
+/// inicializa COM.
+fn eject_with_shell(root: &Path) -> Result<(), EjectError> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+    let item = xdir_core::shell::Item::from(root.to_path_buf());
+    crate::shell::win32::invoke_verb(xdir_core::sys::Handle(0), &xdir_core::fs::Location::Computer, &[item], "eject").map_err(|e| fail(&e.message()))
+}
+
+fn fail(message: &str) -> EjectError {
+    EjectError { busy_by: None, busy: false, message: message.to_string() }
+}
+
 /// Expulsa la unidad de `root`.
 pub fn eject(root: &Path) -> Result<(), EjectError> {
-    let fail = |message: &str| EjectError { busy_by: None, busy: false, message: message.to_string() };
+    let kind = unsafe { GetDriveTypeW(&HSTRING::from(root.as_os_str())) };
+    match eject_plan(kind, bus_type(root)) {
+        EjectPlan::Media => return eject_media(root),
+        EjectPlan::ShellVerb => return eject_with_shell(root),
+        EjectPlan::Device => {}
+    }
     let device = volume_device(root).ok_or_else(|| fail("no es una unidad"))?;
     let number = device_number(&device).ok_or_else(|| fail("no se pudo abrir la unidad"))?;
-    let kind = unsafe { GetDriveTypeW(&HSTRING::from(root.as_os_str())) };
-    let class = if kind == DRIVE_CDROM { GUID_DEVINTERFACE_CDROM } else { GUID_DEVINTERFACE_DISK };
-    let disk = disk_instance(&class, number).ok_or_else(|| fail("no se encontró el dispositivo"))?;
-    let mut parent = 0u32;
-    let target = if unsafe { CM_Get_Parent(&mut parent, disk, 0) } == CR_SUCCESS { parent } else { disk };
+    let disk = disk_instance(&GUID_DEVINTERFACE_DISK, number).ok_or_else(|| fail("no se encontró el dispositivo"))?;
+    let target = first_removable(disk, &devnode_removable, &devnode_parent, 4).ok_or_else(|| fail("el disco no se puede quitar"))?;
     // Se intenta un par de veces: a veces el sistema tarda en soltar el volumen.
     let mut veto = PNP_VetoTypeUnknown;
     for _ in 0..3 {
@@ -224,6 +319,28 @@ mod tests {
         for bus in [0, 1, 3, 11, 17] {
             assert!(!bus_is_external(bus), "{bus}");
         }
+    }
+
+    /// Lectoras: sacar el disco; imágenes montadas: el Shell; el resto, el dispositivo.
+    #[test]
+    fn eject_plans() {
+        assert_eq!(eject_plan(DRIVE_CDROM, Some(1)), EjectPlan::Media);
+        assert_eq!(eject_plan(DRIVE_CDROM, None), EjectPlan::Media);
+        assert_eq!(eject_plan(DRIVE_CDROM, Some(15)), EjectPlan::ShellVerb);
+        assert_eq!(eject_plan(DRIVE_FIXED, Some(15)), EjectPlan::ShellVerb);
+        assert_eq!(eject_plan(DRIVE_REMOVABLE, Some(7)), EjectPlan::Device);
+        assert_eq!(eject_plan(DRIVE_FIXED, Some(7)), EjectPlan::Device);
+    }
+
+    /// Se sube solo hasta el primer nodo extraíble; si no hay ninguno cerca, nada.
+    #[test]
+    fn walks_up_to_first_removable() {
+        // 10 (disco) → 20 (USB, extraíble) → 30 (concentrador) → 40 (controlador).
+        let parent = |n: u32| (n < 40).then_some(n + 10);
+        assert_eq!(first_removable(10, &|n| n == 20, &parent, 4), Some(20));
+        assert_eq!(first_removable(10, &|n| n == 10 || n == 20, &parent, 4), Some(10));
+        assert_eq!(first_removable(10, &|_| false, &parent, 4), None);
+        assert_eq!(first_removable(10, &|n| n == 40, &parent, 2), None, "no sube más de lo permitido");
     }
 
     #[test]

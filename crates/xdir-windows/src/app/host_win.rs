@@ -326,6 +326,8 @@ impl WindowHost for Win32Host {
     }
 
     fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool> {
+        // La ventana de copia no toma clics mientras la `App` espera esto.
+        let _modal = crate::auxwin::Modal::begin();
         let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let answer =
@@ -340,6 +342,8 @@ impl WindowHost for Win32Host {
     }
 
     fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        // La ventana de copia no toma clics mientras la `App` espera esto.
+        let _modal = crate::auxwin::Modal::begin();
         let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         unsafe { MessageBoxW(Some(self.hwnd()), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNO | MB_ICONQUESTION) == IDYES }
@@ -434,6 +438,8 @@ impl WindowHost for Win32Host {
 
     /// El selector de color de Windows (espectro, RGB y HSL), modal.
     fn choose_color(&self, current: u32) -> Option<u32> {
+        // La ventana de copia no toma clics mientras la `App` espera esto.
+        let _modal = crate::auxwin::Modal::begin();
         // COLORREF es 0x00BBGGRR.
         let bgr = |c: u32| COLORREF((c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16));
         let mut cc = CHOOSECOLORW {
@@ -454,6 +460,8 @@ impl WindowHost for Win32Host {
     /// Arrastre del Shell (bucle modal: mientras dura, los eventos de soltar llegan por
     /// `WM_APP_DRAG`). Cancelar con Esc no es un error; que Windows no pueda arrastrar, sí.
     fn start_drag(&self, items: &[shell::Item]) -> Result<(), String> {
+        // La ventana de copia no toma clics mientras la `App` espera esto.
+        let _modal = crate::auxwin::Modal::begin();
         let obj = shell::win32::data_object(items).map_err(|e| e.to_string())?;
         unsafe {
             let _ = ReleaseCapture();
@@ -613,6 +621,7 @@ impl WindowHost for Win32Host {
     /// Menú emergente modal (`TrackPopupMenuEx`). Con `on_context`, el clic derecho dentro del
     /// menú llega por `WM_MENURBUTTONUP` a `on_menu_right_click`.
     fn popup_menu(&self, entries: &[Entry], pos: MenuPos, dot: Option<(u32, Color)>, on_context: Option<xdir_core::host::OnContext<'_>>) -> Option<u32> {
+        let _modal = crate::auxwin::Modal::begin();
         /// Agrega las entradas a `hmenu`. `path`: camino del submenú; `positions`: dónde anotar
         /// el camino de cada elemento (solo si hace falta para el clic derecho). En los menús, "&"
         /// marca el atajo: se duplica.

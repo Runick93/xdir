@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
@@ -67,6 +67,48 @@ pub fn client_to_window_size(client: SIZE, border: RECT) -> SIZE {
     SIZE { cx: client.cx + (border.right - border.left), cy: client.cy + (border.bottom - border.top) }
 }
 
+/// ¿La ventana de copia puede pasarle el mouse y el teclado a la `App`? No mientras la principal
+/// está deshabilitada (un cuadro de mensaje suyo) ni mientras el host está adentro de un diálogo,
+/// un menú o un arrastre (`Modal`): la `App` está ocupada esperando esa respuesta y no se le
+/// puede entrar de nuevo.
+pub fn accepts_input(main_enabled: bool, modal_depth: u32) -> bool {
+    main_enabled && modal_depth == 0
+}
+
+/// Mientras existe, la ventana de copia no toma mouse ni teclado (y se ve deshabilitada): lo
+/// crea el host alrededor de sus diálogos, menús y arrastres.
+pub struct Modal;
+
+impl Modal {
+    pub fn begin() -> Modal {
+        if MODAL.with(|m| m.replace(m.get() + 1)) == 0
+            && let Some(hwnd) = with(|a| a.hwnd)
+        {
+            unsafe {
+                let _ = EnableWindow(hwnd, false);
+            }
+        }
+        Modal
+    }
+}
+
+impl Drop for Modal {
+    fn drop(&mut self) {
+        if MODAL.with(|m| m.replace(m.get().saturating_sub(1))) == 1
+            && let Some(hwnd) = with(|a| a.hwnd)
+        {
+            unsafe {
+                let _ = EnableWindow(hwnd, true);
+            }
+        }
+    }
+}
+
+/// ¿Se le puede pasar una entrada a la `App` ahora?
+fn input_ok(main: HWND) -> bool {
+    accepts_input(unsafe { IsWindowEnabled(main) }.as_bool(), MODAL.with(|m| m.get()))
+}
+
 struct Aux {
     main: HWND,
     hwnd: HWND,
@@ -82,6 +124,8 @@ thread_local! {
     static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
     /// Dónde la dejó el usuario (esquina de arriba a la izquierda, en pantalla), para la sesión.
     static PLACE: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+    /// Diálogos, menús o arrastres del host abiertos ahora (`Modal`).
+    static MODAL: Cell<u32> = const { Cell::new(0) };
 }
 
 fn with<R>(f: impl FnOnce(&mut Aux) -> R) -> Option<R> {
@@ -328,6 +372,9 @@ fn mouse_dips(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
 
 fn mouse(hwnd: HWND, lparam: LPARAM, ev: AuxMouse) {
     let Some(main) = with(|a| a.main) else { return };
+    if !input_ok(main) {
+        return;
+    }
     let (x, y) = mouse_dips(hwnd, lparam);
     with_app(main, |app| app.aux_mouse(AuxWindow::Transfers, x, y, ev));
 }
@@ -386,12 +433,14 @@ unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             WM_KEYDOWN => {
                 let mut used = false;
-                if let Some(main) = with(|a| a.main) {
+                if let Some(main) = with(|a| a.main).filter(|m| input_ok(*m)) {
                     with_app(main, |app| used = app.aux_key(AuxWindow::Transfers, Key(wparam.0 as u16)));
                 }
                 if used { LRESULT(0) } else { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
             // Cerrar (la ✕ o Alt+F4) la oculta: los trabajos siguen y queda el indicador.
+            // Con la `App` ocupada en un diálogo, cerrar espera (no se le puede avisar ahora).
+            WM_CLOSE if with(|a| a.main).is_some_and(|m| !input_ok(m)) => LRESULT(0),
             WM_CLOSE => {
                 remember(hwnd);
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -432,6 +481,16 @@ mod tests {
         // Más grande que el área: queda pegada arriba a la izquierda.
         let r = initial_rect(RECT { left: 0, top: 0, right: 400, bottom: 300 }, RECT { left: 0, top: 0, right: 400, bottom: 300 }, size);
         assert_eq!((r.left, r.top), (0, 0));
+    }
+
+    #[test]
+    fn input_only_when_the_app_is_free() {
+        // Con la principal habilitada y sin diálogos ni menús abiertos, sí.
+        assert!(accepts_input(true, 0));
+        // Un cuadro de mensaje de la principal (la deshabilita) o un menú o arrastre abierto: no.
+        assert!(!accepts_input(false, 0));
+        assert!(!accepts_input(true, 1));
+        assert!(!accepts_input(false, 2));
     }
 
     #[test]

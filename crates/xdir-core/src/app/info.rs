@@ -193,13 +193,14 @@ impl App {
         if self.info_open() {
             return;
         }
-        // Hay un solo panel a la vez: Renombrar varios se cierra (sin dejar ver la vista previa).
+        // Hay un solo panel a la vez: Renombrar varios se cierra. El dueño pasa a ser la
+        // información antes de cerrarlo, así la vista previa no llega a pedir nada en el medio.
         let shown = self.preview_visible();
+        self.preview.owner = RightPanel::Info;
         self.close_rename_many();
         if !shown {
             self.begin_layout_anim();
         }
-        self.preview.owner = RightPanel::Info;
         self.info.scroll = 0.0;
         self.sync_info();
         self.redraw();

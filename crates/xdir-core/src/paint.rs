@@ -90,6 +90,30 @@ pub trait Painter {
     fn file_colors(&self) -> &[ColorRule];
 }
 
+/// `s` cortado con "…" al final para que mida a lo sumo `max` DIPs en `font` (entero si entra).
+/// Para centrar a mano un texto de una línea: el ancho medido es el del texto que se dibuja.
+pub fn ellipsize<'a>(p: &dyn Painter, font: FontId, s: &'a str, max: f32) -> std::borrow::Cow<'a, str> {
+    if p.measure(font, s) <= max {
+        return s.into();
+    }
+    // Búsqueda binaria de cuántos caracteres entran antes de "…".
+    let ends: Vec<usize> = s.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(s.len())).collect();
+    let fits = |n: usize| n == 0 || p.measure(font, &format!("{}…", s[..ends[n - 1]].trim_end())) <= max;
+    let (mut lo, mut hi) = (0, ends.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo == 0 {
+        return if p.measure(font, "…") <= max { "…".into() } else { "".into() };
+    }
+    format!("{}…", s[..ends[lo - 1]].trim_end()).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +121,19 @@ mod tests {
     use crate::sys::testing::RecordingPainter;
     use crate::theme::{DEFAULT_ACCENT, Theme};
     use std::collections::HashSet;
+
+    /// Con el pintor de prueba (7 DIPs por carácter): entero si entra; si no, cortado con "…"
+    /// dentro del ancho.
+    #[test]
+    fn ellipsize_fits_width() {
+        let p = RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(true)));
+        assert_eq!(ellipsize(&p, FontId::Small, "abc", 21.0), "abc");
+        assert_eq!(ellipsize(&p, FontId::Small, "abcdef", 35.0), "abcd…");
+        assert_eq!(ellipsize(&p, FontId::Small, "ab cdef", 28.0), "ab…");
+        assert_eq!(ellipsize(&p, FontId::Small, "ñandú", 14.0), "ñ…");
+        assert_eq!(ellipsize(&p, FontId::Small, "abc", 7.0), "…");
+        assert_eq!(ellipsize(&p, FontId::Small, "abc", 3.0), "");
+    }
 
     #[test]
     fn font_ids_are_distinct() {

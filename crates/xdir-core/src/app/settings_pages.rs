@@ -38,4 +38,13 @@ pub(super) struct ExtraPage {
 // ni lanza trabajos.
 
 /// Las páginas extra, en el orden en que aparecen después de su sección.
-pub(super) const PAGES: &[ExtraPage] = &[];
+pub(super) const PAGES: &[ExtraPage] = &[ExtraPage {
+    id: "red",
+    title: "Red",
+    after: Section::Keys,
+    search: super::network_page::search,
+    draw: super::network_page::draw,
+    click: super::network_page::click,
+    field_done: super::network_page::field_done,
+    field_tab: super::network_page::field_tab,
+}];

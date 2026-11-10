@@ -3,11 +3,8 @@
 //! ⏏, el aviso de que xdir no guarda contraseñas y, en macOS sin permiso de «Red local», cómo
 //! darlo. Cada cambio guarda `red.toml` en un hilo.
 //!
-//! Las cuatro funciones tienen la firma de las páginas extra de la configuración (`ExtraPage`, de
-//! la corriente S); se enchufan en `settings_pages::PAGES` al juntar las dos.
-
-// Hasta que la pestaña de configuración (corriente S) enchufe la página, solo la usan las pruebas.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Es una página extra de la configuración (`settings_pages::PAGES`): su caja abierta va en
+//! `App::settings_field` (una a la vez) y `draw` solo dibuja (anota su geometría).
 
 use crate::geom::{Rect, contains, rect};
 use crate::host::{TextBox, TextKind};
@@ -20,13 +17,7 @@ use crate::theme::alpha;
 use super::App;
 use super::network::unix_now;
 
-/// Un resultado del buscador de la configuración (el `SearchItem` de S; F1 lo reemplaza).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SearchItem {
-    pub title: String,
-    pub desc: String,
-    pub keywords: Vec<String>,
-}
+use crate::settings::SearchItem;
 
 /// Lo que se puede tocar en la página.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +58,8 @@ pub(super) struct PageState {
     /// nuevo).
     pub hits: Vec<(Rect, PageHit)>,
     pub fields: Vec<(Rect, Rect)>,
+    /// La página se ve ahora (para pedir lo conectado al abrirla).
+    pub open: bool,
 }
 
 const ROW: f32 = 40.0;
@@ -338,7 +331,7 @@ pub(super) fn click(app: &mut App, x: f32, y: f32) -> bool {
 
 /// Enter (`commit`) o Esc en la caja de la página: `true` si era de acá.
 pub(super) fn field_done(app: &mut App, b: TextBox, commit: bool) -> bool {
-    if app.net.page.editing.as_ref().is_none_or(|e| e.field != b) {
+    if app.net.page.editing.as_ref().is_none_or(|e| e.field != b) || app.settings_field != Some(b) {
         return false;
     }
     if !commit {
@@ -381,7 +374,7 @@ pub(super) fn field_done(app: &mut App, b: TextBox, commit: bool) -> bool {
 
 /// Tab (o Shift+Tab) en la caja de la página: pasa del nombre a la dirección y al revés.
 pub(super) fn field_tab(app: &mut App, b: TextBox, _back: bool) -> bool {
-    if app.net.page.editing.as_ref().is_none_or(|e| e.field != b) {
+    if app.net.page.editing.as_ref().is_none_or(|e| e.field != b) || app.settings_field != Some(b) {
         return false;
     }
     app.switch_page_field();
@@ -396,6 +389,7 @@ impl App {
         let (name, address) = self.net.places.favorites.get(i).map_or((String::new(), String::new()), |f| (f.name.clone(), shown(&f.address, self.net_style())));
         let on_address = i >= self.net.places.favorites.len();
         let Some(field) = self.page_box(i, on_address, if on_address { &address } else { &name }) else { return };
+        self.settings_field = Some(field);
         self.net.page.editing = Some(Editing { index: i, on_address, name, address, field });
         self.redraw();
     }
@@ -425,8 +419,10 @@ impl App {
         let (i, on_address, old) = (e.index, !e.on_address, e.field);
         let text = if on_address { e.address.clone() } else { e.name.clone() };
         self.host.text_destroy(old);
+        self.settings_field = None;
         match self.page_box(i, on_address, &text) {
             Some(b) => {
+                self.settings_field = Some(b);
                 if let Some(e) = &mut self.net.page.editing {
                     e.field = b;
                     e.on_address = on_address;
@@ -439,8 +435,27 @@ impl App {
 
     pub(super) fn end_page_edit(&mut self) {
         if let Some(e) = self.net.page.editing.take() {
-            self.host.text_destroy(e.field);
-            self.host.focus_main();
+            // Si la configuración dejó de verse, la `App` ya destruyó la caja.
+            if self.settings_field == Some(e.field) {
+                self.settings_field = None;
+                self.host.text_destroy(e.field);
+                self.host.focus_main();
+            }
         }
+    }
+
+    /// Antes de dibujar: si la página Red se acaba de abrir, pide lo conectado (en otro hilo);
+    /// si dejó de verse (otra página, otra pestaña), suelta la caja abierta.
+    pub(super) fn sync_red_page(&mut self) {
+        let shown = self.shown_panes().into_iter().any(|p| {
+            self.panes[p].tab().settings.as_ref().is_some_and(|v| v.page == crate::settings::PageId::Extra("red"))
+        });
+        if shown && !self.net.page.open {
+            self.request_connections();
+        }
+        if !shown && self.net.page.editing.is_some() {
+            self.end_page_edit();
+        }
+        self.net.page.open = shown;
     }
 }

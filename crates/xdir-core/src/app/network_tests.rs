@@ -1002,21 +1002,21 @@ mod red_page {
         let field = |a: &App| a.net.page.editing.as_ref().unwrap().field;
         assert_eq!(host.text_boxes_of(crate::host::TextKind::Field).len(), 1);
         crate::host::WindowHost::text_set(&*host, field(&a), "Oficina centro");
-        a.on_field_done(true);
+        a.settings_field_done(true);
         assert_eq!(a.net.places.favorites[1].name, "Oficina centro");
         assert!(a.net.page.editing.is_none());
         assert!(host.text_boxes_of(crate::host::TextKind::Field).is_empty());
         // Tab pasa a la dirección; una inválida deja el error en la fila y sigue editando.
         draw(&mut a);
         click(&mut a, PageHit::EditFavorite(0));
-        a.on_field_tab(false);
+        a.settings_field_tab(false);
         assert!(a.net.page.editing.as_ref().unwrap().on_address);
         assert_eq!(host.text_boxes_of(crate::host::TextKind::Field).len(), 1);
         crate::host::WindowHost::text_set(&*host, field(&a), "smb://na s");
-        a.on_field_done(true);
+        a.settings_field_done(true);
         assert_eq!(a.net.page.error, Some((0, "Escribí una dirección como smb://servidor/recurso".to_string())));
         assert!(draw(&mut a).iter().any(|t| t == "Escribí una dirección como smb://servidor/recurso"));
-        a.on_field_done(false);
+        a.settings_field_done(false);
         assert!(a.net.page.editing.is_none());
         // ↑ cambia el orden de `places` y del árbol.
         draw(&mut a);
@@ -1030,7 +1030,7 @@ mod red_page {
         let e = a.net.page.editing.as_ref().unwrap();
         assert_eq!((e.index, e.on_address), (2, true));
         crate::host::WindowHost::text_set(&*host, field(&a), r"\\nuevo-n8\x");
-        a.on_field_done(true);
+        a.settings_field_done(true);
         assert_eq!(a.net.places.favorites[2].address, "smb://nuevo-n8/x");
         assert_eq!(a.net.places.favorites[2].name, "smb://nuevo-n8/x");
         // ✕ quita.
@@ -1490,4 +1490,97 @@ fn network_root_ignores_case() {
     a.net.connections = vec![conn("smb://nas-r1m14/fotos", "/net-R1M14/Fotos")];
     assert!(a.network_root(Path::new("/net-r1m14/fotos/a")).is_some());
     assert!(a.network_root(Path::new("/net-r1m14/otra")).is_none());
+}
+
+// ---------- F1: la página «Red» en la configuración ----------
+
+mod settings_red {
+    use super::*;
+    use crate::app::network_page::PageHit;
+    use crate::settings::{PageId, Section};
+
+    fn red_app() -> (App, Rc<FakeHost>) {
+        let host = FakeHost::new();
+        host.client.set((1600.0, 1200.0));
+        let mut a = net_app_with(host.clone());
+        a.set_layout(crate::ui::Layout::One);
+        a.net.places.toggle_favorite(&Address::parse("smb://nas-f1/fotos").unwrap(), Some("NAS — fotos".into()));
+        a.open_settings(Some(PageId::Extra("red")));
+        a.paint();
+        (a, host)
+    }
+
+    fn page_click(a: &mut App, hit: PageHit) {
+        let (r, _) = *a.net.page.hits.iter().find(|(_, h)| *h == hit).unwrap_or_else(|| panic!("{hit:?}"));
+        a.on_left_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+        a.on_left_up((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    }
+
+    #[test]
+    fn settings_red_page_in_list() {
+        let (a, _h) = red_app();
+        let nav = a.settings_nav();
+        let keys = nav.iter().position(|p| *p == PageId::Builtin(Section::Keys)).unwrap();
+        assert_eq!(nav[keys + 1], PageId::Extra("red"));
+        assert_eq!(nav[keys + 2], PageId::Builtin(Section::Xtree));
+        // La sesión la recuerda.
+        let s = a.session();
+        assert_eq!(s.settings_page.as_deref(), Some("red"));
+        let mut init = Init::blank();
+        init.session = s;
+        let b = App::new(init, FakeHost::new());
+        let (p, t) = b.settings_tab().unwrap();
+        assert_eq!(b.panes[p].tabs[t].settings.as_ref().unwrap().page, PageId::Extra("red"));
+    }
+
+    #[test]
+    fn red_page_drawn_and_asks_connections() {
+        let calls = FakeNetwork::connections_calls();
+        let (mut a, host) = red_app();
+        let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+        assert!(texts.iter().any(|t| t == "NAS — fotos") && texts.iter().any(|t| t == "Conectados ahora"), "{texts:?}");
+        // Al abrir la página se pide lo conectado (una vez, en otro hilo).
+        wait_until(&mut a, |_| FakeNetwork::connections_calls() > calls);
+        assert!(a.net.page.open);
+        // Otra página: deja de estar abierta (la próxima vez se vuelve a pedir).
+        if let Some(v) = a.settings_view_mut(0) {
+            v.set_page(PageId::Builtin(Section::Tree));
+        }
+        a.paint();
+        assert!(!a.net.page.open);
+    }
+
+    #[test]
+    fn search_finds_red_items() {
+        let (a, _h) = red_app();
+        let (counts, _) = a.settings_results("contraseña", crate::app::settings_pages::PAGES);
+        assert!(counts.iter().any(|(p, n)| *p == PageId::Extra("red") && *n > 0), "{counts:?}");
+    }
+
+    #[test]
+    fn red_page_edit_uses_settings_field_and_releases_it() {
+        let (mut a, host) = red_app();
+        page_click(&mut a, PageHit::EditFavorite(0));
+        let b = a.settings_field.expect("la caja va en settings_field");
+        assert_eq!(host.text_boxes_of(crate::host::TextKind::Field).len(), 1);
+        // Tab pasa a la dirección: sigue habiendo una sola caja, la anotada.
+        assert!(a.settings_field_tab(false));
+        let b2 = a.settings_field.unwrap();
+        assert_ne!(b, b2);
+        assert_eq!(host.text_boxes_of(crate::host::TextKind::Field).len(), 1);
+        crate::host::WindowHost::text_set(&*host, b2, "smb://nas-f1/otra");
+        assert!(a.settings_field_done(true));
+        assert_eq!(a.net.places.favorites[0].address, "smb://nas-f1/otra");
+        assert!(a.settings_field.is_none());
+        // Cambiar de página suelta la caja.
+        page_click(&mut a, PageHit::EditFavorite(0));
+        assert!(a.settings_field.is_some());
+        if let Some(v) = a.settings_view_mut(0) {
+            v.set_page(PageId::Builtin(Section::Tree));
+        }
+        a.paint();
+        assert!(a.settings_field.is_none());
+        assert!(a.net.page.editing.is_none());
+        assert!(host.text_boxes_of(crate::host::TextKind::Field).is_empty());
+    }
 }

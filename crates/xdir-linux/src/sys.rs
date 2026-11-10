@@ -7,10 +7,7 @@
 
 use xdir_core::fs::{MetadataRequest, OverlayRequest};
 use xdir_core::preview::PreviewRequest;
-use std::sync::mpsc::Sender;
-use xdir_core::info::{InfoChange, InfoReply, InfoRequest};
-use xdir_core::shell::Item;
-use xdir_core::sys::{Handle, Info, Metadata, Overlays, Preview, Services, Waker};
+use xdir_core::sys::{Handle, Metadata, Overlays, Preview, Services, Waker};
 
 use crate::env::LinuxEnv;
 use crate::fs::LinuxFileSystem;
@@ -54,28 +51,6 @@ impl Preview for LinuxPreview {
     }
 }
 
-/// Panel de información: por ahora lo mínimo (`std::fs`). Linux no tiene diálogo propio.
-struct LinuxInfo;
-
-impl Info for LinuxInfo {
-    fn request(&self, req: InfoRequest) {
-        let spawned = std::thread::Builder::new().name("xdir-informacion".into()).spawn(move || xdir_core::info::answer(req, &|p| xdir_core::info::read_minimal(p, &|_| false)));
-        debug_assert!(spawned.is_ok(), "hilo de información");
-    }
-
-    fn apply(&self, owner: Handle, tx: Sender<InfoReply>, generation: u64, change: InfoChange) {
-        xdir_core::info::send_applied(owner, &tx, generation, change.section(), Some("Todavía no se puede cambiar desde xdir".into()));
-    }
-
-    fn more_in_system(&self, _owner: Handle, _items: &[Item]) -> bool {
-        false
-    }
-
-    fn has_more_in_system(&self) -> bool {
-        false
-    }
-}
-
 /// Instala los servicios de Linux en el registro del núcleo.
 pub fn install() {
     xdir_core::sys::install(Services {
@@ -88,7 +63,7 @@ pub fn install() {
         overlays: Box::new(LinuxOverlays),
         metadata: Box::new(LinuxMetadata),
         preview: Box::new(LinuxPreview),
-        info: Box::new(LinuxInfo),
+        info: Box::new(crate::info::LinuxInfo),
     });
 }
 

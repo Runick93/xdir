@@ -77,7 +77,9 @@ pub fn run() -> windows::core::Result<()> {
         // El renderizador vive en el host: crear sus fábricas es lo que mide esta marca.
         let host = Win32Host::install()?;
         init.marks.push(("fabricas d2d/dwrite", ms_since(started)));
-        let app = App::new(init, host.clone());
+        let mut app = App::new(init, host.clone());
+        // Con la ventana de copia, los conflictos se preguntan (sin ella se omiten solos).
+        app.set_auto_skip(false);
         let app = Box::into_raw(Box::new(app));
 
         // La ventana se crea oculta para aplicar tema y tamaño antes de mostrarla (sin flash blanco).

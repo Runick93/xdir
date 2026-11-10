@@ -230,6 +230,7 @@ impl WindowHost for Win32Host {
     fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
         self.theme.set(Some(*theme));
         crate::quicklook::set_theme(theme);
+        crate::auxwin::set_theme(theme);
         self.renderer
             .borrow_mut()
             .draw(self.hwnd.get(), self.dpi(), theme, file_colors, |p, w, h| paint(p, w, h))
@@ -723,6 +724,24 @@ impl WindowHost for Win32Host {
     /// Lo solo en la nube lo muestra la ventana propia (ícono y «Disponible solo en línea»).
     fn quick_look_shows_cloud(&self) -> bool {
         true
+    }
+
+    /// La ventana de copia (`crate::auxwin`).
+    fn aux_show(&self, w: xdir_core::host::AuxWindow, title: &str, size: (f32, f32)) -> bool {
+        let theme = self.theme.get().unwrap_or_else(|| Theme::from_system(xdir_core::theme::DEFAULT_ACCENT, None));
+        crate::auxwin::show(self.hwnd.get().hwnd(), w, title, size, &theme)
+    }
+
+    fn aux_resize(&self, w: xdir_core::host::AuxWindow, size: (f32, f32)) {
+        crate::auxwin::resize(w, size);
+    }
+
+    fn aux_invalidate(&self, w: xdir_core::host::AuxWindow) {
+        crate::auxwin::invalidate_aux(w);
+    }
+
+    fn aux_hide(&self, w: xdir_core::host::AuxWindow) {
+        crate::auxwin::hide(w);
     }
 }
 

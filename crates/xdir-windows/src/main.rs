@@ -6,6 +6,8 @@
 //! y sale), así `cargo build` y `cargo test` en la raíz del workspace andan en todos.
 
 #[cfg(windows)]
+mod auxwin;
+#[cfg(windows)]
 mod drop;
 #[cfg(windows)]
 mod fs;

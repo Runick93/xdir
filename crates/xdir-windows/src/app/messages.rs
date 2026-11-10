@@ -278,6 +278,7 @@ pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 );
                 let _ = RevokeDragDrop(hwnd);
                 crate::quicklook::shutdown();
+                crate::auxwin::shutdown();
                 if let Some(host) = Win32Host::current() {
                     host.release_drop_target();
                     host.release_edit_resources();

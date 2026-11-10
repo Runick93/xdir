@@ -230,7 +230,7 @@ fn move_item(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Manda a la Papelera; devuelve dónde quedó (para deshacer).
-fn trash(p: &Path) -> Result<PathBuf> {
+pub(super) fn trash(p: &Path) -> Result<PathBuf> {
     let fm = NSFileManager::defaultManager();
     let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
     let mut resulting: Option<Retained<NSURL>> = None;

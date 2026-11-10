@@ -17,7 +17,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::DeleteObject;
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromIDList, SHCreateItemFromParsingName, SIIGBF, SIIGBF_BIGGERSIZEOK, SIIGBF_INCACHEONLY,
@@ -155,15 +155,33 @@ fn bounded_image(key: &Key, flags: SIIGBF) -> Option<Pixels> {
     if !xdir_core::sys::network().is_remote(p) {
         return image(key, flags);
     }
-    let (k, host) = (key.clone(), xdir_core::tab::remote_host(p));
-    xdir_core::net::with_timeout(xdir_core::net::ITEM_LIMIT, &host, move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    // Un servidor que ya venció hace poco no se vuelve a esperar con cada miniatura.
+    static DEAD: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
+    let host = xdir_core::tab::remote_host(p.ancestors().last().unwrap_or(p));
+    let host = if xdir_core::fs::is_unc(p) { xdir_core::tab::remote_host(p) } else { host };
+    {
+        let mut dead = DEAD.lock().unwrap_or_else(|e| e.into_inner());
+        dead.retain(|(_, t)| t.elapsed() < std::time::Duration::from_secs(60));
+        if dead.iter().any(|(h, _)| *h == host) {
+            return None;
         }
-        Ok(image(&k, flags))
-    })
-    .ok()
-    .flatten()
+    }
+    let k = key.clone();
+    let r = xdir_core::net::with_timeout(xdir_core::net::ITEM_LIMIT, &host, move || {
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        let px = image(&k, flags);
+        if com {
+            unsafe { CoUninitialize() };
+        }
+        Ok(px)
+    });
+    match r {
+        Ok(px) => px,
+        Err(_) => {
+            DEAD.lock().unwrap_or_else(|e| e.into_inner()).push((host, std::time::Instant::now()));
+            None
+        }
+    }
 }
 
 fn image((source, px): &Key, flags: SIIGBF) -> Option<Pixels> {

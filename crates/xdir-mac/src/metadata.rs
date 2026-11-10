@@ -25,7 +25,8 @@ pub fn queue(req: MetadataRequest) {
             .spawn(move || {
                 // Un archivo de una carpeta de red que no responde no frena la cola.
                 while let Ok(req) = rx.recv() {
-                    req.answer_with(|p| xdir_core::net::remote_bounded(p, read));
+                    let mut budget = xdir_core::net::RemoteBudget::default();
+                    req.answer_with(|p| budget.read(p, read));
                 }
             })
             .expect("hilo de metadatos");

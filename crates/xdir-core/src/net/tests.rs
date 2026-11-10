@@ -184,3 +184,25 @@ fn bonjour_service_hosts() {
         assert!(Address::parse(bad).is_err(), "{bad}");
     }
 }
+
+/// M1: después del primer elemento que vence, los demás de ese servidor no esperan.
+#[test]
+fn remote_budget_stops_after_first_timeout() {
+    crate::sys::testing::install_fakes();
+    let remote = std::path::PathBuf::from("/net-r1budget");
+    crate::sys::testing::FakeNetwork::set_remote(&remote);
+    fn slow(_: &std::path::Path) -> u32 {
+        std::thread::sleep(Duration::from_secs(30));
+        7
+    }
+    let mut b = RemoteBudget::with_limit(Duration::from_millis(50));
+    let t0 = Instant::now();
+    for i in 0..20 {
+        assert_eq!(b.read(&remote.join(format!("{i}.jpg")), slow), 0);
+    }
+    assert!(t0.elapsed() < Duration::from_millis(500), "{:?}", t0.elapsed());
+    fn fast(_: &std::path::Path) -> u32 {
+        7
+    }
+    assert_eq!(b.read(std::path::Path::new("/local-r1budget/a"), fast), 7);
+}

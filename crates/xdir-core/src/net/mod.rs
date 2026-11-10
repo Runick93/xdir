@@ -427,5 +427,54 @@ pub fn remote_bounded<T: Default + Send + 'static>(path: &std::path::Path, f: fn
     with_timeout(ITEM_LIMIT, &host, move || Ok(f(&p))).unwrap_or_default()
 }
 
+/// Qué servidor es una ruta de red: `\\srv` en UNC; si no, la carpeta más alta que todavía es
+/// de red (el punto de montaje). Sin E/S.
+fn server_key(path: &std::path::Path) -> String {
+    if crate::fs::is_unc(path) {
+        return crate::tab::remote_host(path);
+    }
+    let mut ancestors: Vec<&std::path::Path> = path.ancestors().collect();
+    ancestors.reverse();
+    let net = crate::sys::network();
+    ancestors.into_iter().find(|a| net.is_remote(a)).unwrap_or(path).to_string_lossy().into_owned()
+}
+
+/// `remote_bounded` para una tanda (un pedido de metadatos): si un servidor ya venció, los
+/// demás elementos de ese servidor no esperan (quedan sin dato) y la cola sigue.
+pub struct RemoteBudget {
+    limit: Duration,
+    dead: Vec<String>,
+}
+
+impl Default for RemoteBudget {
+    fn default() -> Self {
+        Self::with_limit(ITEM_LIMIT)
+    }
+}
+
+impl RemoteBudget {
+    pub fn with_limit(limit: Duration) -> Self {
+        RemoteBudget { limit, dead: Vec::new() }
+    }
+
+    pub fn read<T: Default + Send + 'static>(&mut self, path: &std::path::Path, f: fn(&std::path::Path) -> T) -> T {
+        if !crate::sys::network().is_remote(path) {
+            return f(path);
+        }
+        let host = server_key(path);
+        if self.dead.contains(&host) {
+            return T::default();
+        }
+        let p = path.to_path_buf();
+        match with_timeout(self.limit, &host, move || Ok(f(&p))) {
+            Ok(v) => v,
+            Err(_) => {
+                self.dead.push(host);
+                T::default()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -835,3 +835,48 @@ fn keep_going_stops_on_password_and_cancel() {
         named
     }).unwrap()[0].name, "s.txt");
 }
+
+#[test]
+fn create_duplicate_names_are_a_clear_error() {
+    let t = Tmp::new();
+    fs::create_dir_all(t.p("x")).unwrap();
+    fs::create_dir_all(t.p("y")).unwrap();
+    fs::write(t.p("x/a.txt"), b"1").unwrap();
+    fs::write(t.p("y/a.txt"), b"2").unwrap();
+    let z = t.p("dup.zip");
+    let items = [(t.p("x/a.txt"), "a.txt".to_string()), (t.p("y/a.txt"), "a.txt".to_string())];
+    let err = svc().create(&z, &items, &mut |_| Flow::Continue).unwrap_err();
+    assert_eq!(err.message(), "Hay dos elementos con el mismo nombre: \"a.txt\"");
+    assert!(!z.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn links_outside_resolves_through_existing_links() {
+    let t = Tmp::new();
+    let root = t.p("in");
+    fs::create_dir_all(root.join("d")).unwrap();
+    fs::create_dir_all(t.p("outside")).unwrap();
+    std::os::unix::fs::symlink("../outside", root.join("b")).unwrap();
+    std::os::unix::fs::symlink("b/secret", root.join("y")).unwrap();
+    std::os::unix::fs::symlink("d", root.join("ok")).unwrap();
+    std::os::unix::fs::symlink("../x", root.join("d/sube")).unwrap();
+    std::os::unix::fs::symlink("/etc", root.join("abs")).unwrap();
+    // Subir más arriba de la carpeta (aunque vuelva a entrar) cuenta como afuera.
+    std::os::unix::fs::symlink("../../in/d", root.join("d/vuelve")).unwrap();
+    let all = ["y", "ok", "d/sube", "abs", "d/vuelve"].map(|n| root.join(n));
+    let out = Archives::links_outside(&svc(), &root, &all);
+    assert_eq!(out, vec![root.join("y"), root.join("abs"), root.join("d/vuelve")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn escaping_links_say_not_allowed() {
+    let t = Tmp::new();
+    let z = t.p("l.zip");
+    fs::write(&z, raw_zip(&[link_entry(b"l", b"../fuera")])).unwrap();
+    let root = t.p("r");
+    fs::create_dir_all(&root).unwrap();
+    let (_, failed) = extract_keep_going(&z, &root);
+    assert_eq!(failed, vec![("l".to_string(), xdir_core::sys::NOT_ALLOWED.to_string())]);
+}

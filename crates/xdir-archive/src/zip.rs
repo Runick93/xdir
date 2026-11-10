@@ -210,8 +210,13 @@ fn write_all(
     let zerr = |e: ZipError| map_zip(e, out);
     let mut done = 0u64;
     let mut buf = vec![0u8; 64 * 1024];
+    let mut seen = std::collections::HashSet::new();
     for (src, name) in items {
         let name = stored_name(name, src)?;
+        if !seen.insert(name.clone()) {
+            let shown = name.trim_end_matches('/');
+            return Err(other(&format!("Hay dos elementos con el mismo nombre: \"{shown}\""), src));
+        }
         let meta = std::fs::symlink_metadata(src).map_err(|e| io_err(e, src))?;
         let ft = meta.file_type();
         let is_dir_name = name.ends_with('/');

@@ -321,6 +321,15 @@ impl FakeCopyPrims {
         Ok(data)
     }
 
+    /// Borra `path` con todo lo de adentro (para preparar una prueba).
+    pub fn remove_all(&self, path: &Path) {
+        let mut fs = self.fs();
+        let Some(k) = fs.key(path) else { return };
+        for sub in fs.subtree(&k) {
+            fs.nodes.remove(&sub);
+        }
+    }
+
     pub fn exists(&self, path: &Path) -> bool {
         self.fs().key(path).is_some()
     }

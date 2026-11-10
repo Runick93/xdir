@@ -274,7 +274,7 @@ pub(crate) fn write_entry(src: Source, root: &Path, progress: &mut dyn FnMut(u64
                 return Err(other("Enlace no válido", &dst));
             };
             if !symlink_inside(src.rel, target) {
-                return Err(other("Enlace que apunta fuera de la carpeta", &dst));
+                return Err(other(NOT_ALLOWED, &dst));
             }
             make_symlink(target, root, &dst)?;
             Ok(0)
@@ -333,9 +333,24 @@ fn make_symlink(target: &str, root: &Path, dst: &Path) -> Result<(), Error> {
     // El texto puede quedar adentro y el camino real afuera: se resuelve con lo que hay.
     let parent = dst.parent().unwrap_or(dst);
     if !physically_inside(root, parent, target) {
-        return Err(other("Enlace que apunta fuera de la carpeta", dst));
+        return Err(other(NOT_ALLOWED, dst));
     }
     std::os::unix::fs::symlink(target, dst).map_err(|e| io_err(e, dst))
+}
+
+/// ¿El enlace `link` (ya creado) resuelve dentro de `root`, siguiendo lo que hay en el disco?
+#[cfg(unix)]
+fn link_inside(root: &Path, link: &Path) -> bool {
+    let Ok(target) = std::fs::read_link(link) else { return true };
+    let target = target.to_string_lossy();
+    let parent = link.parent().unwrap_or(link);
+    !target.starts_with('/') && physically_inside(root, parent, &target)
+}
+
+/// En Windows no se crean enlaces al extraer.
+#[cfg(not(unix))]
+fn link_inside(_root: &Path, _link: &Path) -> bool {
+    true
 }
 
 /// En Windows los enlaces simbólicos piden privilegios: no se crean.
@@ -442,6 +457,10 @@ impl Archives for Service {
             failed(name, e);
             Ok(())
         })
+    }
+
+    fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf> {
+        links.iter().filter(|l| !link_inside(root, l)).cloned().collect()
     }
 
     /// Siempre zip (el nombre puede ser un parcial del motor, sin `.zip`).

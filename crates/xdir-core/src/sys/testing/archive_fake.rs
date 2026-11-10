@@ -18,6 +18,8 @@ struct FakeEntry {
     kind: EntryKind,
     data: Vec<u8>,
     link: Option<String>,
+    /// Tamaño declarado si no es el del contenido.
+    size: Option<u64>,
 }
 
 #[derive(Default)]
@@ -69,6 +71,7 @@ impl FakeArchives {
                 kind: if n.ends_with('/') { EntryKind::Dir } else { EntryKind::File },
                 data: d.to_vec(),
                 link: None,
+                size: None,
             })
             .collect();
         self.disk.add_file(path, vec![0; packed]);
@@ -79,9 +82,17 @@ impl FakeArchives {
     /// Suma un enlace simbólico (o, con `target` = None, un elemento que no se puede crear).
     pub fn add_link(&self, archive: &Path, name: &str, target: Option<&str>) {
         let kind = if target.is_some() { EntryKind::Symlink } else { EntryKind::Omitted };
-        let e = FakeEntry { name: name.into(), kind, data: Vec::new(), link: target.map(String::from) };
+        let e = FakeEntry { name: name.into(), kind, data: Vec::new(), link: target.map(String::from), size: None };
         let id = self.id(archive).expect("primero add_archive");
         self.st().archives.entry(id).or_default().push(e);
+    }
+
+    /// El tamaño que declara la entrada `name` (sin guardar tanto contenido).
+    pub fn set_declared(&self, archive: &Path, name: &str, size: u64) {
+        let id = self.id(archive).expect("primero add_archive");
+        if let Some(e) = self.st().archives.get_mut(&id).and_then(|v| v.iter_mut().find(|e| e.name == name)) {
+            e.size = Some(size);
+        }
     }
 
     pub fn set_password(&self, archive: &Path) {
@@ -109,6 +120,33 @@ impl FakeArchives {
         }
         let id = self.disk.stat(archive)?.file_id.unwrap_or_default();
         self.st().archives.get(&id).cloned().ok_or_else(|| CopyError::new(ErrKind::Other("El zip está dañado".into()), archive))
+    }
+
+    /// Adónde lleva el enlace `link` siguiendo los enlaces del disco falso (`None`: un ciclo).
+    fn resolve(&self, link: &Path, depth: u32) -> Option<PathBuf> {
+        let target = self.disk.link_target(link)?;
+        if depth > 20 {
+            return None;
+        }
+        if target.is_absolute() {
+            return Some(target);
+        }
+        let mut cur = link.parent()?.to_path_buf();
+        for c in target.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    cur.pop();
+                }
+                std::path::Component::Normal(n) => {
+                    cur.push(n);
+                    if self.disk.link_target(&cur).is_some() {
+                        cur = self.resolve(&cur, depth + 1)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(cur)
     }
 
     /// Baja de `root` a la carpeta de `rel` creando las que faltan, sin pasar por enlaces.
@@ -140,7 +178,7 @@ impl Archives for FakeArchives {
             .entries(archive)?
             .into_iter()
             .enumerate()
-            .map(|(index, e)| ArchiveEntry { index, name: e.name, size: e.data.len() as u64, kind: e.kind, link: e.link, modified: 0 })
+            .map(|(index, e)| ArchiveEntry { index, name: e.name, size: e.size.unwrap_or(e.data.len() as u64), kind: e.kind, link: e.link, modified: 0 })
             .collect())
     }
 
@@ -220,6 +258,10 @@ impl Archives for FakeArchives {
         Ok(omitted)
     }
 
+    fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf> {
+        links.iter().filter(|l| !self.resolve(l, 0).is_some_and(|r| r.starts_with(root))).cloned().collect()
+    }
+
     fn create(&self, out: &Path, items: &[(PathBuf, String)], progress: &mut dyn FnMut(u64) -> Flow) -> Result<(), CopyError> {
         if self.disk.stat(out).is_ok() {
             return Err(CopyError::new(ErrKind::Exists, out));
@@ -249,7 +291,7 @@ impl Archives for FakeArchives {
                 }
             }
             let kind = if name.ends_with('/') { EntryKind::Dir } else { EntryKind::File };
-            list.push(FakeEntry { name: name.clone(), kind, data, link: None });
+            list.push(FakeEntry { name: name.clone(), kind, data, link: None, size: None });
             if progress(done) == Flow::Stop {
                 let _ = self.disk.remove(out);
                 return Err(CopyError::new(ErrKind::Cancelled, out));

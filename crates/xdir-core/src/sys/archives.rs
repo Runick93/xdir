@@ -35,6 +35,11 @@ pub trait Archives: Send + Sync {
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, CopyError),
     ) -> Result<usize, CopyError>;
+    /// De los enlaces simbólicos `links` (ya creados), los que resuelven fuera de `root` siguiendo
+    /// lo que hay de verdad en el disco (también enlaces que ya estaban). Lo extraído se valida al
+    /// escribirlo, pero al llevarlo a su lugar puede quedar al lado de un enlace del usuario que
+    /// apunta afuera: el motor lo vuelve a mirar ahí y borra los que salen.
+    fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf>;
     /// Crea un zip en `out` (no debe existir; el nombre puede ser un parcial). `items` = (ruta en
     /// el disco, nombre adentro con `/`; las carpetas terminan en `/`). `progress` recibe los
     /// bytes leídos en total; `Stop` corta y borra `out`. Si falla, también lo borra.
@@ -59,6 +64,9 @@ impl Archives for NoArchives {
         _failed: &mut dyn FnMut(&str, CopyError),
     ) -> Result<usize, CopyError> {
         Err(CopyError::new(ErrKind::Other(UNSUPPORTED.into()), archive))
+    }
+    fn links_outside(&self, _root: &Path, _links: &[PathBuf]) -> Vec<PathBuf> {
+        Vec::new()
     }
     fn create(&self, out: &Path, _items: &[(PathBuf, String)], _progress: &mut dyn FnMut(u64) -> Flow) -> Result<(), CopyError> {
         Err(CopyError::new(ErrKind::Other(UNSUPPORTED.into()), out))

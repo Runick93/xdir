@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVE_FILE_FLAGS, MoveFileExW};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
@@ -169,12 +169,12 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     let undo = match op {
         Op::Duplicate { sources } => {
             // Solo las copias de primer nivel (las de una carpeta copiada también avisan).
-            let parents: Vec<&Path> = sources.iter().filter_map(|s| s.parent()).collect();
+            let parents: Vec<String> = sources.iter().filter_map(|s| s.parent()).map(path_key).collect();
             select = log
                 .iter()
                 .filter_map(|r| r.created.clone())
                 .map(PathBuf::from)
-                .filter(|c| c.parent().is_some_and(|p| parents.contains(&p)))
+                .filter(|c| c.parent().is_some_and(|p| parents.contains(&path_key(p))))
                 .collect::<Vec<_>>();
             focus = select.last().cloned();
             Some(Undo::Created(select.clone()))
@@ -184,7 +184,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             let mut moved: Vec<(PathBuf, PathBuf)> = log
                 .iter()
                 .filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?)))
-                .filter(|(now, _)| now.parent() == Some(folder.as_path()))
+                .filter(|(now, _)| now.parent().map(path_key) == Some(path_key(&folder)))
                 .collect();
             if moved.is_empty() {
                 let _ = std::fs::remove_dir(&folder);
@@ -195,7 +195,12 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                 let base = names::folder_with_name(moved.len());
                 let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
                 let renamed = names::free_name(&parent, &|n| names::numbered_name(&base, true, n), &taken);
-                if !taken(&renamed) && std::fs::rename(&folder, &renamed).is_ok() {
+                // Sin MOVEFILE_REPLACE_EXISTING: nunca pisa algo que haya aparecido en el medio.
+                let moved_ok = unsafe {
+                    MoveFileExW(&HSTRING::from(folder.as_os_str()), &HSTRING::from(renamed.as_os_str()), MOVE_FILE_FLAGS(0))
+                }
+                .is_ok();
+                if moved_ok {
                     for (now, _) in &mut moved {
                         if let Some(name) = now.file_name() {
                             *now = renamed.join(name);
@@ -239,6 +244,14 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Rename { .. } | Undo::Batch(_) | Undo::CreatedFolder(_) => true,
     });
     Ok(OpResult { undo, focus, rename_after, error: perform_error, select })
+}
+
+/// Ruta para comparar como lo hace Windows: sin el prefijo `\\?\`, sin separador final y sin
+/// distinguir mayúsculas (el registro del Shell puede devolverla distinta a como se pidió).
+pub fn path_key(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let s = s.strip_prefix(r"\\?\UNC\").map(|r| format!(r"\\{r}")).unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+    s.trim_end_matches(['\\', '/']).replace('/', "\\").to_lowercase()
 }
 
 /// «Crear acceso directo»: un `.lnk` junto a cada uno («nombre - Acceso directo.lnk», « (2)»…).
@@ -465,6 +478,13 @@ impl IFileOperationProgressSink_Impl for Recorder_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_keys_compare_like_windows() {
+        assert_eq!(path_key(Path::new(r"\\?\C:\Users\Ana\Docs\")), path_key(Path::new(r"c:\users\ana\docs")));
+        assert_eq!(path_key(Path::new(r"\\?\UNC\srv\share\x")), path_key(Path::new(r"\\SRV\share\X")));
+        assert_ne!(path_key(Path::new(r"C:\a")), path_key(Path::new(r"C:\b")));
+    }
 
     /// «Crear acceso directo»: «a.txt - Acceso directo.lnk» (y « (2)»), que `link_target` resuelve.
     #[test]

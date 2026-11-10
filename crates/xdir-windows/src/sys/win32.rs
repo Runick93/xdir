@@ -528,6 +528,10 @@ impl FileSystem for Win32FileSystem {
         fsp::folder_type()
     }
 
+    fn archive_look(&self, name: &str, is_dir: bool) -> (i32, Arc<str>) {
+        fsp::archive_look(name, is_dir)
+    }
+
     fn shell_location(&self, text: &str) -> Option<Location> {
         fsp::shell_location(text)
     }

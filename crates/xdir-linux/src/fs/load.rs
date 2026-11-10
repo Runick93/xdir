@@ -92,6 +92,12 @@ pub fn is_hidden(name: &OsStr) -> bool {
     name.as_bytes().first() == Some(&b'.')
 }
 
+/// Ícono (ninguno todavía) y tipo de un elemento de adentro de un archivo comprimido.
+pub fn archive_look(name: &str, is_dir: bool) -> (i32, Arc<str>) {
+    let ext = if is_dir { None } else { extension(name) };
+    (0, type_name(ext.as_deref(), is_dir))
+}
+
 /// Nombre del tipo de archivo: "Carpeta", "Archivo PDF" o "Documento" (sin extensión).
 fn type_name(ext: Option<&str>, is_dir: bool) -> Arc<str> {
     Arc::from(match (is_dir, ext) {

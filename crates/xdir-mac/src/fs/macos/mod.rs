@@ -120,6 +120,19 @@ pub fn is_hidden(meta: &std::fs::Metadata, name: &OsStr) -> bool {
     name.to_string_lossy().starts_with('.') || meta.st_flags() & UF_HIDDEN != 0
 }
 
+/// Ícono y tipo de un elemento de adentro de un archivo comprimido, por su nombre.
+pub fn archive_look(name: &str, is_dir: bool) -> (i32, Arc<str>) {
+    if is_dir {
+        return (icons::index_of(IconKey::Folder), folder_type());
+    }
+    let ext = extension(name);
+    let icon = match &ext {
+        Some(e) => icons::index_of(IconKey::Ext(e.clone())),
+        None => icons::index_of(IconKey::File),
+    };
+    (icon, type_name(ext.as_deref(), false, false))
+}
+
 /// Tipo de una carpeta, el mismo que lleva en la lista.
 pub fn folder_type() -> Arc<str> {
     type_name(None, true, false)

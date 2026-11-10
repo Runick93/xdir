@@ -577,6 +577,19 @@ pub fn folder_icon() -> Option<i32> {
     TYPE_CACHE.get()?.lock().ok()?.get("\\dir").map(|v| v.1)
 }
 
+/// Ícono y tipo de un elemento de adentro de un archivo comprimido, por su nombre (el Shell los
+/// da por extensión, sin tocar el disco). Corre en el hilo que lista: COM queda iniciado en él
+/// mientras viva.
+pub fn archive_look(name: &str, is_dir: bool) -> (i32, Arc<str>) {
+    thread_local! {
+        static COM: ComGuard = ComGuard::new();
+    }
+    COM.with(|_| ());
+    let ext = if is_dir { None } else { extension(name) };
+    let (type_name, icon) = type_info(ext.as_deref(), is_dir);
+    (icon, type_name)
+}
+
 /// Tipo de una carpeta, el mismo que lleva en la lista.
 pub fn folder_type() -> Arc<str> {
     type_info(None, true).0

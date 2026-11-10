@@ -653,8 +653,14 @@ fn fake_list(path: &Path, cancelled: impl Fn() -> bool, send: impl Fn(LoadMsg)) 
 
 impl FileSystem for FakeFileSystem {
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
-        if let Location::Path(p) = &location {
-            *LOADS.lock().unwrap_or_else(|e| e.into_inner()).entry(p.clone()).or_insert(0) += 1;
+        // La pestaña Configuración nunca se carga: si llega, queda anotada como "xdir:configuracion".
+        let counted = match &location {
+            Location::Path(p) => Some(p.clone()),
+            Location::Settings => Some(PathBuf::from("xdir:configuracion")),
+            _ => None,
+        };
+        if let Some(p) = counted {
+            *LOADS.lock().unwrap_or_else(|e| e.into_inner()).entry(p).or_insert(0) += 1;
         }
         std::thread::spawn(move || {
             let send = |msg: LoadMsg| {
@@ -665,7 +671,7 @@ impl FileSystem for FakeFileSystem {
             match &location {
                 Location::Path(p) => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
-                Location::Computer => send(LoadMsg::Listed(Ok(()))),
+                Location::Computer | Location::Settings => send(LoadMsg::Listed(Ok(()))),
                 Location::Shell { parsing, .. } => {
                     let items = SHELL_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).get(parsing).cloned();
                     let Some(names) = items else { return send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))) };

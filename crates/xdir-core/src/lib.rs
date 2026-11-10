@@ -36,6 +36,8 @@ pub mod rename_many;
 /// El panel de Renombrar varios: dibujo y hit-test.
 pub mod rename_many_draw;
 pub mod session;
+/// La pestaña Configuración: secciones, controles y dibujo.
+pub mod settings;
 pub mod shell;
 pub mod sys;
 pub mod tab;

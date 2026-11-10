@@ -64,11 +64,16 @@ impl App {
         }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
+        // Con la configuración a la vista, lo que necesita una carpeta no hace nada.
+        if self.panes[active].tab().is_settings() && needs_folder(c) {
+            self.redraw();
+            return;
+        }
         match c {
             Command::JumpTo => self.open_palette(PaletteMode::Folders),
             Command::Palette => self.open_palette(PaletteMode::All),
             Command::NewTab => {
-                let loc = self.panes[active].tab().location.clone();
+                let loc = input::new_tab_location(&self.panes[active].tab().location);
                 self.new_tab(active, loc, true);
             }
             Command::CloseTab => {
@@ -76,8 +81,11 @@ impl App {
                 self.close_tab(active, i);
             }
             Command::ReopenTab => {
-                if let Some(loc) = self.panes[active].pop_closed() {
-                    self.new_tab(active, loc, true);
+                match self.panes[active].pop_closed() {
+                    // Hay una sola configuración: si ya está abierta, se enfoca.
+                    Some(Location::Settings) => self.open_settings(None),
+                    Some(loc) => self.new_tab(active, loc, true),
+                    None => {}
                 }
             }
             Command::NextTab | Command::PrevTab => {
@@ -246,6 +254,8 @@ impl App {
             Command::TogglePreview if from_xtree => self.show_preview(),
             Command::TogglePreview => self.toggle_preview(),
             Command::QuickLook => self.toggle_quick_look(),
+            Command::Settings => self.open_settings(None),
+            Command::SettingsKeys => self.open_settings(Some(crate::settings::PageId::Builtin(crate::settings::Section::Keys))),
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {
@@ -453,5 +463,48 @@ fn keeps_xtree(c: Command) -> bool {
             | Command::ToggleDarkMode
             | Command::About
             | Command::OpenConfig
+    )
+}
+
+/// Comandos que trabajan sobre la carpeta o la lista del panel: con la pestaña Configuración a
+/// la vista no hacen nada.
+fn needs_folder(c: Command) -> bool {
+    matches!(
+        c,
+        Command::Back
+            | Command::Forward
+            | Command::Up
+            | Command::Refresh
+            | Command::SelectAll
+            | Command::InvertSelection
+            | Command::SelectPattern
+            | Command::DeselectPattern
+            | Command::Copy
+            | Command::Cut
+            | Command::Paste
+            | Command::CopyPaths
+            | Command::NewFolder
+            | Command::NewTextFile
+            | Command::NewFolderWithSelection
+            | Command::Recycle
+            | Command::Delete
+            | Command::Restore
+            | Command::CreateShortcut
+            | Command::ShowOriginal
+            | Command::Rename
+            | Command::RenameMany
+            | Command::Properties
+            | Command::Duplicate
+            | Command::ToggleFavorite
+            | Command::PowerShell
+            | Command::Cmd
+            | Command::View(_)
+            | Command::SortBy(_)
+            | Command::GroupBy(_)
+            | Command::ApplyViewToAll
+            | Command::ResetFolderView
+            | Command::ClearFilters
+            | Command::QuickLook
+            | Command::ToggleQuickPin
     )
 }

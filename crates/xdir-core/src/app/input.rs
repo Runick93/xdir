@@ -104,6 +104,10 @@ impl App {
         for i in self.shown_panes() {
             match self.panes[i].hit(x, y) {
                 PaneHit::None => {}
+                // La configuración ocupa el lugar de la lista.
+                PaneHit::List if self.panes[i].tab().is_settings() => {
+                    return Hit::Settings(i, self.settings_hit(i, x, y).unwrap_or(crate::settings::SettingsHit::Body));
+                }
                 h => return Hit::Pane(i, h),
             }
         }
@@ -263,6 +267,11 @@ impl App {
             Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
+            Hit::Picker(ui::PickerHit::MoreOptions) => self.run_command(Command::Settings),
+            Hit::Settings(i, h) => {
+                self.set_active(i);
+                self.settings_click(i, h, x, y);
+            }
             Hit::Picker(ui::PickerHit::Panel) => {}
             Hit::Splitter(s) if double => {
                 self.begin_layout_anim();
@@ -289,7 +298,7 @@ impl App {
                     }
                     PaneHit::TabClose(j) => self.close_tab(i, j),
                     PaneHit::NewTab => {
-                        let loc = self.panes[i].tab().location.clone();
+                        let loc = new_tab_location(&self.panes[i].tab().location);
                         self.new_tab(i, loc, true);
                     }
                     PaneHit::Maximize => self.toggle_maximize(i),
@@ -307,6 +316,8 @@ impl App {
                         self.host.capture_mouse();
                         self.drag = Drag::Button(i, b);
                     }
+                    // Las migas de la configuración no llevan a otro lado.
+                    PaneHit::Crumb(_) if self.panes[i].tab().is_settings() => {}
                     PaneHit::Crumb(k) => {
                         if let Some(loc) = self.panes[i].crumb(k) {
                             self.panes[i].tab_mut().navigate(hwnd, &tx, loc);
@@ -579,5 +590,14 @@ impl App {
         if redraw {
             self.redraw();
         }
+    }
+}
+
+/// Dónde abre una pestaña nueva desde la pestaña `from`: la misma ubicación, salvo la
+/// configuración (hay una sola): «Este equipo».
+pub(super) fn new_tab_location(from: &Location) -> Location {
+    match from {
+        Location::Settings => Location::Computer,
+        other => other.clone(),
     }
 }

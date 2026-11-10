@@ -64,6 +64,8 @@ pub fn folder_key(loc: &Location, search_root: Option<&Path>) -> String {
     }
     match loc {
         Location::Computer => COMPUTER_KEY.to_string(),
+        // Nunca se guarda vista para ella (ver `Tab::sync_view`).
+        Location::Settings => "configuracion".to_string(),
         Location::Shell { parsing, .. } => format!("{SHELL_PREFIX}{parsing}"),
         Location::Path(p) => path_key(p),
     }

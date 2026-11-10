@@ -48,6 +48,7 @@ impl App {
             WM_APP_FAVEDIT_DONE => self.end_fav_edit(wparam == 1),
             WM_APP_FILTER_DONE => self.end_filter(wparam == 1),
             WM_APP_RENAME_DONE => self.end_rename(wparam == 1),
+            WM_APP_FIELD_DONE if self.settings_field_done(wparam == 1) => {}
             WM_APP_FIELD_DONE => self.on_field_done(wparam == 1),
             WM_APP_FIELD_TAB => self.on_field_tab(wparam == 1),
             tasks::WM_APP_TASK => self.on_tasks(),
@@ -383,6 +384,10 @@ impl App {
             }
             Hit::Info(_) => {
                 self.info_wheel(delta * lines);
+                return;
+            }
+            Hit::Settings(i, _) => {
+                self.settings_wheel(i, delta * lines);
                 return;
             }
             Hit::Pane(i, _) => i,

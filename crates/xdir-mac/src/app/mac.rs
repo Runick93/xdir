@@ -329,7 +329,7 @@ define_class!(
 
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
-            with_app(|app| app.run_command(Command::OpenConfig));
+            with_app(|app| app.run_command(Command::Settings));
         }
     }
 );

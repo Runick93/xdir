@@ -10,6 +10,8 @@ mod favs;
 mod fileops;
 mod info;
 mod saved_groups;
+mod settings;
+mod settings_pages;
 mod input;
 mod paint;
 mod quick_jump;
@@ -35,6 +37,8 @@ mod transfers_tests;
 mod ops_tests;
 #[cfg(test)]
 mod rename_many_tests;
+#[cfg(test)]
+mod settings_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -163,6 +167,8 @@ enum Hit {
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
+    /// La pestaña Configuración de un panel: una parte de su vista.
+    Settings(usize, crate::settings::SettingsHit),
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
@@ -393,6 +399,9 @@ pub struct App {
     picker_open: bool,
     /// Diálogo "Acerca de" abierto.
     about_open: bool,
+    /// Campo de texto abierto por una página extra de la configuración (Red): su `field_done`
+    /// recibe esta caja al terminar.
+    settings_field: Option<TextBox>,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -589,6 +598,7 @@ impl App {
             dark_mode: session.dark_mode,
             picker_open: false,
             about_open: false,
+            settings_field: None,
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

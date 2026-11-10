@@ -351,10 +351,22 @@ impl App {
 
     pub(super) fn restore_panes(&mut self, s: &Session, start_path: Option<PathBuf>) {
         let fallback = default_session();
+        let mut seen_settings = false;
         for i in 0..PANES {
             let state = s.panes.get(i).or(fallback.panes.get(i)).cloned().unwrap_or_default();
             let locations = if state.tabs.is_empty() { vec![Location::Computer] } else { state.tabs };
-            let tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
+            let mut tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
+            // Hay una sola configuración: si la sesión trae más de una, quedan carpetas.
+            for tab in &mut tabs {
+                if let Some(v) = &mut tab.settings {
+                    if seen_settings {
+                        *tab = Tab::new(tab.id, Location::Computer, self.show_hidden);
+                    } else {
+                        v.set_page(s.settings_page.as_deref().map_or(crate::settings::PageId::default(), Self::page_from_id));
+                    }
+                    seen_settings = true;
+                }
+            }
             self.panes.push(Pane::new(tabs, state.active));
         }
         self.active = s.active_pane.min(self.layout.panes() - 1);
@@ -387,6 +399,7 @@ impl App {
             preview_on: self.preview.on,
             preview_width: self.preview.width,
             info_sections: self.info.sections,
+            settings_page: self.settings_session_page(),
             // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
             columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),

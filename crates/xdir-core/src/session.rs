@@ -12,6 +12,8 @@ use crate::list::{Column, ColumnSpec, View, default_columns};
 use crate::theme::{Accent, DEFAULT_ACCENT};
 
 const COMPUTER: &str = "Este equipo";
+/// La pestaña Configuración; con su página: `xdir:configuracion#atajos`.
+const SETTINGS: &str = "xdir:configuracion";
 /// Carpetas virtuales: "shell:<nombre de análisis>|<nombre visible>".
 const SHELL_PREFIX: &str = "shell:";
 
@@ -41,6 +43,7 @@ pub fn resolve_config_dir(exe_dir: Option<&Path>, platform: impl FnOnce() -> Opt
 pub fn location_str(l: &Location) -> String {
     match l {
         Location::Computer => COMPUTER.to_string(),
+        Location::Settings => SETTINGS.to_string(),
         Location::Path(p) => p.to_string_lossy().into_owned(),
         Location::Shell { parsing, name, .. } => format!("{SHELL_PREFIX}{parsing}|{name}"),
     }
@@ -50,10 +53,23 @@ pub fn location_from(s: &str) -> Location {
     if s == COMPUTER {
         return Location::Computer;
     }
+    if settings_anchor(s).is_some() {
+        return Location::Settings;
+    }
     if let Some((parsing, name)) = s.strip_prefix(SHELL_PREFIX).and_then(|r| r.rsplit_once('|')) {
         return Location::Shell { parsing: parsing.to_string(), name: name.to_string(), parent: None };
     }
     Location::Path(PathBuf::from(s))
+}
+
+/// `xdir:configuracion` → `Some("")`; `xdir:configuracion#atajos` → `Some("atajos")`; otra
+/// cosa → `None`.
+pub fn settings_anchor(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix(SETTINGS)?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.strip_prefix('#')
 }
 
 const FILE_NAME: &str = "sesion.toml";
@@ -96,6 +112,9 @@ pub struct Session {
     pub preview_width: f32,
     /// Secciones abiertas del panel de información (un bit por `info::Section`).
     pub info_sections: u32,
+    /// Página de la pestaña Configuración (`atajos`); va pegada a su pestaña en el archivo
+    /// (`xdir:configuracion#atajos`).
+    pub settings_page: Option<String>,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha. Desde `carpetas.toml` (memoria por
     /// carpeta) solo se leen para la migración (`legacy_view`); se siguen escribiendo con las de
@@ -131,6 +150,7 @@ impl Default for Session {
             preview_on: false,
             preview_width: crate::ui::PREVIEW_W,
             info_sections: crate::info::DEFAULT_OPEN,
+            settings_page: None,
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -216,7 +236,14 @@ fn write(s: &Session) -> String {
     for pane in &s.panes {
         out += "\n[[panel]]\n";
         out += &format!("pestana_activa = {}\n", pane.active);
-        let tabs: Vec<String> = pane.tabs.iter().map(|t| quote(&location_str(t))).collect();
+        let tabs: Vec<String> = pane
+            .tabs
+            .iter()
+            .map(|t| match (t, &s.settings_page) {
+                (Location::Settings, Some(page)) => quote(&format!("{SETTINGS}#{page}")),
+                _ => quote(&location_str(t)),
+            })
+            .collect();
         out += &format!("pestanas = [{}]\n", tabs.join(", "));
     }
     out
@@ -241,7 +268,11 @@ fn parse(text: &str) -> Session {
         match (key, s.panes.last_mut()) {
             ("pestana_activa", Some(p)) => p.active = int().unwrap_or(0).max(0) as usize,
             ("pestanas", Some(p)) => {
-                p.tabs = parse_list(value).iter().map(|v| location_from(v)).collect();
+                let items = parse_list(value);
+                if let Some(page) = items.iter().find_map(|v| settings_anchor(v)).filter(|a| !a.is_empty()) {
+                    s.settings_page = Some(page.to_string());
+                }
+                p.tabs = items.iter().map(|v| location_from(v)).collect();
             }
             ("ventana", None) => {
                 let nums: Vec<i32> = parse_list(value).iter().filter_map(|v| v.parse().ok()).collect();
@@ -439,6 +470,7 @@ mod tests {
             preview_on: false,
             preview_width: 320.0,
             info_sections: 0b101,
+            settings_page: Some("atajos".into()),
             panes: vec![
                 PaneState {
                     tabs: vec![
@@ -452,7 +484,7 @@ mod tests {
                     ],
                     active: 1,
                 },
-                PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into())], active: 0 },
+                PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into()), Location::Settings], active: 0 },
             ],
             columns: vec![
                 ColumnSpec { col: Column::Size, width: 90.0 },
@@ -462,6 +494,11 @@ mod tests {
             views: vec![View::Thumbnails, View::Details, View::Icons],
         };
         assert_eq!(parse(&write(&s)), s);
+        assert!(write(&s).contains("\"xdir:configuracion#atajos\""));
+        // Sin página, solo la pestaña; una página que no existe la resuelve la `App`.
+        assert_eq!(location_from("xdir:configuracion"), Location::Settings);
+        assert_eq!(parse("[[panel]]\npestanas = [\"xdir:configuracion#nada\"]\n").settings_page.as_deref(), Some("nada"));
+        assert_eq!(location_from("xdir:configuracionx"), Location::Path("xdir:configuracionx".into()));
         // Sin la columna del nombre, las de fábrica.
         assert_eq!(parse("columnas = [\"tamano:90\"]\n").columns, default_columns());
         // Las sesiones de antes (sin la clave) muestran las extensiones.

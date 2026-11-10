@@ -75,6 +75,10 @@ pub enum Command {
     SaveGroup,
     ToggleGroupBar,
     OpenConfig,
+    /// La pestaña Configuración (una sola: abrirla de nuevo la enfoca).
+    Settings,
+    /// La pestaña Configuración en la página Atajos de teclado.
+    SettingsKeys,
     About,
     /// Vista N (índice de `list::VIEWS`).
     View(u8),
@@ -209,7 +213,9 @@ pub const ALL: &[Spec] = &[
     spec(Command::ToggleDarkMode, "modo_oscuro", "Cambiar entre modo claro y oscuro", &[]),
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),
     spec(Command::ToggleGroupBar, "barra_grupos", "Mostrar u ocultar la barra de grupos", &[]),
-    spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
+    spec(Command::OpenConfig, "abrir_configuracion", "Abrir config.toml", &[]),
+    spec(Command::Settings, "configuracion", "Configuración", &["Ctrl+Coma"]),
+    spec(Command::SettingsKeys, "configuracion_atajos", "Configuración: Atajos de teclado", &[]),
     spec(Command::TogglePreview, "vista_previa", "Mostrar u ocultar la vista previa", &["Alt+P"]),
     spec(Command::QuickLook, "vista_rapida", "Vista rápida", &["Espacio"]),
     spec(Command::ShowTransfers, "mostrar_operaciones", "Mostrar operaciones", &[]),

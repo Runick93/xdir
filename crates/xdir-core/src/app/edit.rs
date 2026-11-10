@@ -57,8 +57,14 @@ impl App {
             return;
         }
         self.set_active(pane);
+        // En la configuración no se escribe una ruta: Ctrl+L va al buscador.
+        if self.panes[pane].tab().is_settings() {
+            self.begin_filter(pane);
+            return;
+        }
         let text = match &self.panes[pane].tab().location {
             Location::Computer => "Este equipo".to_string(),
+            Location::Settings => return,
             Location::Path(p) => p.to_string_lossy().into_owned(),
             Location::Shell { parsing, .. } => parsing.clone(),
         };

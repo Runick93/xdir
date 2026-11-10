@@ -66,6 +66,8 @@ impl App {
         if self.xtree_open && !keeps_xtree(c) {
             self.close_xtree();
         }
+        // Un comando (del menú, de la paleta, de un botón) termina la grabación de un atajo.
+        self.end_recording();
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
         // Con la configuración a la vista, lo que necesita una carpeta no hace nada.

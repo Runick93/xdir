@@ -638,9 +638,29 @@ impl App {
         self.recording().is_some()
     }
 
+    /// La grabación en curso, solo si la configuración es la pestaña a la vista del panel activo
+    /// (si no, las teclas son de lo que se ve).
     fn recording(&self) -> Option<&Recording> {
-        let (pane, index) = self.settings_tab()?;
-        self.panes[pane].tabs[index].settings.as_ref()?.recording.as_ref()
+        if !self.shown_panes().contains(&self.active) {
+            return None;
+        }
+        self.panes[self.active].tab().settings.as_ref()?.recording.as_ref()
+    }
+
+    /// Deja de grabar (esté a la vista o no).
+    pub(super) fn end_recording(&mut self) {
+        if let Some(slot) = self.recording_mut()
+            && slot.take().is_some()
+        {
+            self.redraw();
+        }
+    }
+
+    /// Si la configuración dejó de ser lo que se ve en el panel activo, la grabación termina.
+    pub(super) fn end_hidden_recording(&mut self) {
+        if self.recording().is_none() {
+            self.end_recording();
+        }
     }
 
     fn recording_mut(&mut self) -> Option<&mut Option<Recording>> {

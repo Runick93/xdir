@@ -880,3 +880,44 @@ fn portable_applies_on_next_start() {
     assert_eq!(r.control, Control::Buttons(vec![("Desactivar".to_string(), true)]));
     let _ = std::fs::remove_dir_all(&exe);
 }
+
+/// La grabación termina cuando la pestaña deja de verse o se usa otra cosa: ⌘W / Ctrl+W y las
+/// demás teclas vuelven a funcionar.
+#[test]
+fn recording_ends_when_settings_not_in_front() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    // Un comando (del menú, de la paleta) la termina.
+    a.run_command(Command::NewTab);
+    assert!(!a.capturing_keys());
+    let tabs = a.panes[0].tabs.len();
+    press(&mut a, &[VK_CONTROL], Key(b'W' as u16));
+    assert_eq!(a.panes[0].tabs.len(), tabs - 1, "Ctrl+W cierra la pestaña");
+    // Cambiar a otra pestaña.
+    a.run_command(Command::Settings);
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    a.select_tab(0, 0);
+    assert!(!a.capturing_keys());
+    // La configuración en otro panel que no es el activo: las teclas no son para ella.
+    a.set_layout(Layout::TwoSide);
+    a.run_command(Command::Settings);
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    if let Some(v) = a.settings_view_mut(a.active) {
+        v.recording = Some(crate::settings::keys::Recording::new(Command::Duplicate, None));
+    }
+    let other = 1 - a.active;
+    a.set_active(other);
+    assert!(!a.capturing_keys());
+}
+
+/// Escribir en el buscador deja de grabar (M-12).
+#[test]
+fn typing_in_search_cancels_recording() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    a.search_typed(0, "dup");
+    assert!(!a.capturing_keys());
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    a.begin_filter(0);
+    assert!(!a.capturing_keys());
+}

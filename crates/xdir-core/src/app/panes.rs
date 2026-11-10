@@ -427,7 +427,9 @@ impl App {
                 tab.set_visible(hwnd, &tx, i < visible_panes && j == active);
             }
         }
-        // Cambió la pestaña a la vista (o el layout): Renombrar varios se recalcula o se cierra.
+        // Cambió la pestaña a la vista (o el layout): Renombrar varios se recalcula o se cierra,
+        // y una grabación de atajo que ya no se ve termina.
+        self.end_hidden_recording();
         self.refresh_rename_many();
         self.sync_rename_boxes();
     }
@@ -438,6 +440,8 @@ impl App {
             // Ir a otro panel restaura el layout si había uno maximizado.
             self.maximized = None;
             self.active = pane;
+            // Una grabación de atajo en el panel que se deja termina.
+            self.end_hidden_recording();
             self.redraw();
         }
     }

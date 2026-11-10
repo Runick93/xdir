@@ -65,7 +65,7 @@ pub fn install() {
         preview: Box::new(LinuxPreview),
         copy_prims: Box::new(crate::prims::LinuxCopyPrims),
         info: Box::new(crate::info::LinuxInfo),
-        network: Box::new(xdir_core::sys::NoNetwork),
+        network: Box::new(crate::net::LinuxNetwork::new()),
     });
 }
 

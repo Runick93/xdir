@@ -12,6 +12,8 @@ mod host;
 #[cfg(target_os = "linux")]
 mod info;
 #[cfg(target_os = "linux")]
+mod net;
+#[cfg(target_os = "linux")]
 mod ops;
 #[cfg(target_os = "linux")]
 mod prims;

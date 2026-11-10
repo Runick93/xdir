@@ -70,6 +70,22 @@ pub struct JobView {
     /// Desde cuándo se ve el conflicto (los clics de los primeros 400 ms no cuentan: venían para
     /// otra cosa que estaba ahí).
     pub conflict_since: Option<Instant>,
+    /// De dónde a dónde, para el resumen al terminar con errores.
+    pub route: JobRoute,
+}
+
+/// De dónde a dónde va un trabajo: «Se copiaron 1.281 de 1.284 elementos de «Descargas» a
+/// «Respaldo»» y la carpeta de cada error («Descargas\Facturas»).
+#[derive(Clone, Debug, Default)]
+pub struct JobRoute {
+    /// «Se copió» / «Se copiaron» (o «Se movió»…).
+    pub done_one: &'static str,
+    pub done_many: &'static str,
+    /// La carpeta de lo elegido y el destino (sus nombres).
+    pub from: Option<String>,
+    pub to: Option<String>,
+    /// Lo elegido.
+    pub sources: Vec<PathBuf>,
 }
 
 /// Un trabajo del motor.

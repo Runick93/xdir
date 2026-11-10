@@ -729,11 +729,11 @@ fn cancel_while_waiting_for_answer() {
 #[test]
 fn titles() {
     let copy = JobSpec::Copy { sources: vec![p("/x/Fotos/a.jpg"), p("/x/Fotos/b.jpg")], dest: p("/y/Backup") };
-    assert_eq!(title(&copy, 1240), "Copiando 1.240 elementos de \"Fotos\" a \"Backup\"");
+    assert_eq!(title(&copy, 1240), "Copiando 1.240 elementos de «Fotos» a «Backup»");
     let one = JobSpec::Move { sources: vec![p("/x/Docs/Proyecto")], dest: p("/y/Documentos") };
-    assert_eq!(title(&one, 1), "Moviendo «Proyecto» a \"Documentos\"");
+    assert_eq!(title(&one, 1), "Moviendo «Proyecto» a «Documentos»");
     let mv = JobSpec::Move { sources: vec![p("/x/a"), p("/x/b")], dest: p("/y/z") };
-    assert_eq!(title(&mv, 2), "Moviendo 2 elementos de \"x\" a \"z\"");
+    assert_eq!(title(&mv, 2), "Moviendo 2 elementos de «x» a «z»");
     assert_eq!(title(&JobSpec::Duplicate { sources: vec![p("/a"), p("/b")] }, 2), "Duplicando 2 elementos");
     assert_eq!(title(&JobSpec::Restore { items: vec![p("/a")] }, 1), "Devolviendo 1 elemento");
     assert_eq!(title(&JobSpec::Undo(Undo::Created(vec![])), 0), "Deshaciendo");

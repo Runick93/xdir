@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{Choice, JobId, JobState, JobView};
+use super::{Choice, JobId, JobRoute, JobState, JobView};
 use crate::format::thousands;
 use crate::geom::{Color, Rect, contains, rect};
 use crate::paint::{FontId, Painter, ellipsize};
@@ -293,10 +293,10 @@ fn job_glyph(j: &JobView) -> &'static str {
     if j.title.starts_with("Moviendo") || j.title.starts_with("Devolviendo") { "\u{E72A}" } else { "\u{E8C8}" }
 }
 
-fn header(p: &dyn Painter, r: Rect, top: f32, j: &JobView, big: &str, big_color: Color) {
+fn header(p: &dyn Painter, r: Rect, top: f32, title: &str, big: &str, big_color: Color) {
     let th = p.theme();
     let (l, rr) = (r.left + PAD, r.right - PAD);
-    p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &j.title, rr - l), rect(l, top + 12.0, rr, top + 30.0), th.text);
+    p.text(FontId::Ui, &ellipsize(p, FontId::Ui, title, rr - l), rect(l, top + 12.0, rr, top + 30.0), th.text);
     p.text(FontId::Title, big, rect(l, top + 34.0, rr - 2.0 * BTN_W - 16.0, top + 56.0), big_color);
 }
 
@@ -393,7 +393,7 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
                     _ if j.paused => format!("{} % · en pausa", percent(j)),
                     _ => format!("{} % completado", percent(j)),
                 };
-                header(p, r, top, j, &big, th.text);
+                header(p, r, top, &j.title, &big, th.text);
                 header_buttons(j.paused);
                 let g = rect(l, top + 71.0, rr, top + 71.0 + GRAPH_H);
                 graph_with(p, g, j.speed.graph(), j.speed.average(), j.speed.eta(now), &|rate| speed_text(env, rate));
@@ -418,7 +418,7 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
             }
             Block::Conflict => {
                 let Some(c) = &j.conflict else { continue };
-                header(p, r, top, j, &format!("{} % · en espera", percent(j)), th.text);
+                header(p, r, top, &j.title, &format!("{} % · en espera", percent(j)), th.text);
                 header_buttons(j.paused);
                 let bx = rect(l, top + 75.0, rr, top + 75.0 + 222.0);
                 p.round_fill(bx, 6.0, th.surface_alt);
@@ -452,7 +452,8 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
                 } else {
                     (format!("Terminó con {}", plural(j.errors.len(), "error", "errores")), th.danger)
                 };
-                header(p, r, top, j, &big, color);
+                let title = if j.errors.iter().any(|e| e.retry) && j.stopped.is_none() { done_line(j) } else { j.title.clone() };
+                header(p, r, top, &title, &big, color);
                 if !j.errors.is_empty() {
                     let list = rect(l, top + 76.0, rr, top + 76.0 + ERROR_ROW * shown_errors(j) as f32);
                     p.round_fill(list, 6.0, th.surface_alt);
@@ -463,7 +464,7 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
                             p.fill(rect(list.left, y, list.right, y + 1.0), th.border);
                         }
                         let name = e.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| e.src.display().to_string());
-                        let folder = e.src.parent().map(|d| d.display().to_string()).unwrap_or_default();
+                        let folder = error_folder(&e.src, &j.route);
                         p.text(FontId::GlyphsSmall, "\u{E8A5}", rect(list.left + 12.0, y + 12.0, list.left + 28.0, y + 30.0), th.text_dim);
                         let mw = p.measure(FontId::Ui, &e.message).min(220.0);
                         let nx = list.left + 38.0;
@@ -508,10 +509,41 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
     }
 }
 
+/// «Se copiaron 1.281 de 1.284 elementos de «Descargas» a «Respaldo»» (al terminar con errores).
+pub fn done_line(j: &JobView) -> String {
+    let total = j.items.1;
+    let done = total.saturating_sub(j.errors.iter().filter(|e| e.retry).count() as u64);
+    let r = &j.route;
+    let verb = if done == 1 { r.done_one } else { r.done_many };
+    let what = if total == 1 { "elemento" } else { "elementos" };
+    let route = match (&r.from, &r.to) {
+        (Some(f), Some(t)) => format!(" de «{f}» a «{t}»"),
+        (None, Some(t)) => format!(" a «{t}»"),
+        _ => String::new(),
+    };
+    format!("{verb} {} de {} {what}{route}", thousands(done), thousands(total))
+}
+
+/// La carpeta de un error desde la de lo elegido, con su nombre adelante («Descargas\Facturas»);
+/// si no está adentro de nada de lo elegido, la ruta entera.
+pub fn error_folder(src: &std::path::Path, route: &JobRoute) -> String {
+    let folder = src.parent().unwrap_or(std::path::Path::new(""));
+    for root in &route.sources {
+        let Some(base) = root.parent() else { continue };
+        if let (Ok(rel), Some(name)) = (folder.strip_prefix(base), base.file_name()) {
+            let shown = if rel.as_os_str().is_empty() { std::path::PathBuf::from(name) } else { std::path::Path::new(name).join(rel) };
+            return shown.display().to_string();
+        }
+    }
+    folder.display().to_string()
+}
+
 /// Título de la ventana al mostrarla: el conflicto, los errores o «Copiando…».
 pub fn window_title(jobs: &[JobView]) -> String {
-    if jobs.iter().any(|j| j.state == JobState::Conflict && j.conflict.is_some()) {
-        return "Copiando: un conflicto".into();
+    match jobs.iter().filter(|j| j.state == JobState::Conflict && j.conflict.is_some()).count() {
+        0 => {}
+        1 => return "Copiando: un conflicto".into(),
+        n => return format!("Copiando: {n} conflictos"),
     }
     if let Some(j) = jobs.iter().find(|j| j.state == JobState::Done && !j.errors.is_empty()) {
         return format!("Terminó con {}", plural(j.errors.len(), "error", "errores"));

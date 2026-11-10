@@ -41,8 +41,8 @@ pub fn title(spec: &JobSpec, items: u64) -> String {
     let folder = |p: &Path| p.parent().map(name).unwrap_or_default();
     let count = |verb: &str| if items == 1 { format!("{verb} 1 elemento") } else { format!("{verb} {} elementos", thousands(items)) };
     let between = |verb: &str, first: Option<&PathBuf>, dest: &Path| match first {
-        Some(one) if items == 1 => format!("{verb} «{}» a \"{}\"", name(one), name(dest)),
-        _ => format!("{} de \"{}\" a \"{}\"", count(verb), first.map(|f| folder(f)).unwrap_or_default(), name(dest)),
+        Some(one) if items == 1 => format!("{verb} «{}» a «{}»", name(one), name(dest)),
+        _ => format!("{} de «{}» a «{}»", count(verb), first.map(|f| folder(f)).unwrap_or_default(), name(dest)),
     };
     match spec {
         JobSpec::Copy { sources, dest } => between("Copiando", sources.first(), dest),

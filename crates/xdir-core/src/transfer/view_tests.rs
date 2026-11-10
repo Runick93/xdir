@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::speed::Speed;
 use super::view::{self, ViewHit};
-use super::{Choice, ConflictInfo, JobError, JobState, JobView};
+use super::{Choice, ConflictInfo, JobError, JobRoute, JobState, JobView};
 use crate::geom::{Rect, rect};
 use crate::sys::testing::{FakeEnv, RecordingPainter};
 use crate::sys::{ItemKind, ItemStat};
@@ -17,7 +17,7 @@ fn job(id: u64, state: JobState) -> JobView {
     let now = Instant::now();
     JobView {
         id,
-        title: format!("Copiando 1.284 elementos de \"Descargas\" a \"Respaldo\" ({id})"),
+        title: format!("Copiando 1.284 elementos de «Descargas» a «Respaldo» ({id})"),
         state,
         items: (0, 10),
         bytes: (0, 0),
@@ -30,6 +30,7 @@ fn job(id: u64, state: JobState) -> JobView {
         started: now,
         apply_all: false,
         conflict_since: None,
+        route: JobRoute { done_one: "Se copió", done_many: "Se copiaron", from: Some("Descargas".into()), to: Some("Respaldo".into()), sources: vec![PathBuf::from("/u/Descargas/Facturas"), PathBuf::from("/u/Descargas/Instalador-Rust.exe")] },
     }
 }
 
@@ -262,4 +263,39 @@ fn eta_texts() {
     assert_eq!(view::eta_short(Duration::from_secs(3900)), "quedan 1 h 5 min");
     assert_eq!(view::eta_long(Duration::from_secs(120)), "Unos 2 minutos");
     assert_eq!(view::eta_long(Duration::from_secs(20)), "Unos 20 segundos");
+}
+
+#[test]
+fn finished_header_counts_and_relative_folders() {
+    let mut j = job(1, JobState::Done);
+    j.items = (1284, 1284);
+    let err = |src: &str, why: &str| JobError { src: PathBuf::from(src), dst: PathBuf::from("/r/x"), message: why.into(), retry: true };
+    j.errors = vec![
+        err("/u/Descargas/Instalador-Rust.exe", "Lo está usando otro programa"),
+        err("/u/Descargas/Facturas/factura-0039.pdf", "No tenés permiso"),
+        err("/otro/lado/suelto.txt", "Ya no existe"),
+    ];
+    let t = texts(&[j], None);
+    assert!(t.iter().any(|s| s == "Se copiaron 1.281 de 1.284 elementos de «Descargas» a «Respaldo»"), "{t:?}");
+    // La carpeta de cada error, desde la carpeta de lo que se copió.
+    let facturas = std::path::Path::new("Descargas").join("Facturas").display().to_string();
+    assert!(t.iter().any(|s| *s == facturas), "{t:?}");
+    assert!(t.iter().any(|s| s == "Descargas"), "{t:?}");
+    // Fuera de lo elegido (no debería pasar): la ruta entera.
+    let full = std::path::Path::new("/otro/lado").display().to_string();
+    assert!(t.iter().any(|s| *s == full), "{t:?}");
+    // En singular.
+    let mut one = job(2, JobState::Done);
+    one.items = (1, 1);
+    one.route.to = Some("d".into());
+    one.route.from = None;
+    one.errors = vec![err("/u/Descargas/a.txt", "Ya no existe")];
+    assert!(texts(&[one], None).iter().any(|s| s == "Se copiaron 0 de 1 elemento a «d»"));
+}
+
+#[test]
+fn window_title_counts_waiting_conflicts() {
+    assert_eq!(view::window_title(&[running(1)]), "Copiando…");
+    assert_eq!(view::window_title(&[conflict(1, false), running(2)]), "Copiando: un conflicto");
+    assert_eq!(view::window_title(&[conflict(1, false), conflict(2, true)]), "Copiando: 2 conflictos");
 }

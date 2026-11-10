@@ -604,7 +604,7 @@ fn queued_title_counts_the_chosen_items() {
     f.add_file(&p("/app-wt/s/b.txt"), b"b".to_vec());
     let second = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wt/s/b.txt")], dest: p("/app-wt/d") });
     let title = &a.jobs().iter().find(|j| j.id == second).unwrap().title;
-    assert_eq!(title, "Copiando «b.txt» a \"d\"");
+    assert_eq!(title, "Copiando «b.txt» a «d»");
     a.cancel_job(first);
     a.cancel_job(second);
     wait(&mut a, idle);

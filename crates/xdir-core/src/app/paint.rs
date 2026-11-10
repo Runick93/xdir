@@ -39,6 +39,7 @@ impl App {
         }
         let xtree_badge = self.xtree_badge();
         let transfers = self.transfers_progress();
+        let transfers_failed = self.transfers_failed();
         // El ancho del árbol se anima al colapsar o expandir: se avanza antes de calcular el layout.
         let now = Instant::now();
         let dt = self.last_frame.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
@@ -219,6 +220,7 @@ impl App {
                 preview_hot: hover == Hit::PreviewToggle,
                 preview_on: preview_on && !xtree_open,
                 transfers,
+                transfers_failed,
                 transfers_hot: hover == Hit::Transfers,
             };
             ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);

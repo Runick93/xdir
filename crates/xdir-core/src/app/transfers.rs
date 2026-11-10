@@ -127,6 +127,27 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
     out
 }
 
+/// De dónde a dónde va un trabajo (el resumen al terminar con errores).
+fn spec_route(spec: &JobSpec) -> transfer::JobRoute {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    let folder = |v: &[PathBuf]| v.first().and_then(|p| p.parent()).and_then(name);
+    let (done_one, done_many, from, to, sources) = match spec {
+        JobSpec::Copy { sources, dest } => ("Se copió", "Se copiaron", folder(sources), name(dest), sources.clone()),
+        JobSpec::Move { sources, dest } => ("Se movió", "Se movieron", folder(sources), name(dest), sources.clone()),
+        JobSpec::Duplicate { sources } => ("Se duplicó", "Se duplicaron", None, None, sources.clone()),
+        JobSpec::NewFolderWith { parent, items } => ("Se movió", "Se movieron", None, name(parent), items.clone()),
+        JobSpec::Restore { items } => ("Se devolvió", "Se devolvieron", None, None, items.clone()),
+        JobSpec::Retry { moving, pairs } => {
+            let srcs: Vec<PathBuf> = pairs.iter().map(|(s, _)| s.clone()).collect();
+            let to = pairs.first().and_then(|(_, d)| d.parent()).and_then(name);
+            let (one, many) = if *moving { ("Se movió", "Se movieron") } else { ("Se copió", "Se copiaron") };
+            (one, many, folder(&srcs), to, srcs)
+        }
+        JobSpec::Undo(_) => ("Se deshizo", "Se deshicieron", None, None, Vec::new()),
+    };
+    transfer::JobRoute { done_one, done_many, from, to, sources }
+}
+
 /// Cuántos elementos eligió el usuario (el título antes de recorrer).
 fn spec_count(spec: &JobSpec) -> u64 {
     (match spec {
@@ -238,6 +259,7 @@ impl App {
             started: now,
             apply_all: false,
             conflict_since: None,
+            route: spec_route(&spec),
         });
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, label, paths: paths.clone() });
         let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone());
@@ -427,6 +449,11 @@ impl App {
         }
         let (done, total) = open.iter().fold((0u64, 0u64), |(d, t), j| (d + j.bytes.0.min(j.bytes.1), t + j.bytes.1));
         Some(if total == 0 { 0.0 } else { (done as f64 / total as f64) as f32 })
+    }
+
+    /// Solo quedan trabajos que terminaron con errores (el indicador lo marca en vez del 100 %).
+    pub(super) fn transfers_failed(&self) -> bool {
+        !self.transfers.jobs.is_empty() && self.transfers.jobs.iter().all(|j| j.state == JobState::Done)
     }
 
     /// La ventana de copia se pinta (la llama la plataforma desde su ventana).

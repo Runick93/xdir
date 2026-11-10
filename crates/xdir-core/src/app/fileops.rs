@@ -551,8 +551,15 @@ fn volume_id(p: &std::path::Path, net_roots: &[PathBuf]) -> Option<std::ffi::OsS
         return sys::shell().volume_of(p);
     }
     let root = net_roots.iter().filter(|r| !r.as_os_str().is_empty() && p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned();
-    let root = root.unwrap_or_else(|| p.components().take(if crate::fs::is_unc(p) { 1 } else { 3 }).collect());
+    let root = root.unwrap_or_else(|| fallback_net_root(p));
     Some(std::ffi::OsString::from(format!("red:{}", root.to_string_lossy().to_lowercase())))
+}
+
+/// La raíz de una ruta de red sin conexión conocida (todavía no llegó `connections`): con un
+/// prefijo de Windows (`Z:` o `\\srv\recurso`), el prefijo; si no, `/Volumes/x` (tres tramos).
+fn fallback_net_root(p: &std::path::Path) -> PathBuf {
+    let first_is_prefix = matches!(p.components().next(), Some(std::path::Component::Prefix(_)));
+    p.components().take(if first_is_prefix { 1 } else { 3 }).collect()
 }
 
 pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool, shift: bool, allowed: Effect, net_roots: &[PathBuf]) -> Effect {
@@ -579,6 +586,15 @@ pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool,
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// m3: sin las conexiones, `Z:\a` y `Z:\b` son el mismo volumen (la letra); un UNC, su recurso.
+    #[test]
+    fn fallback_net_root_uses_the_prefix() {
+        assert_eq!(fallback_net_root(std::path::Path::new(r"Z:\a\x")), fallback_net_root(std::path::Path::new(r"Z:\b")));
+        assert_eq!(fallback_net_root(std::path::Path::new(r"Z:\a\x")), PathBuf::from("Z:"));
+        let low = |p: &str| fallback_net_root(std::path::Path::new(p)).to_string_lossy().to_lowercase();
+        assert_eq!(low(r"\\srv\fotos\a"), low(r"\\SRV\fotos\b"));
+    }
 
     fn effect(sources: &[&str], dest: &str, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
         // `volume_of` pasa por el `Shell` del registro (el falso compara el primer tramo, como Windows).

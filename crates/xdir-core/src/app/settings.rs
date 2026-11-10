@@ -816,9 +816,14 @@ impl App {
 
     /// Una tecla mientras se graba (lo primero de `on_key`). `None`: no se está grabando.
     pub(super) fn settings_capture_key(&mut self, vk: Key, alt_down: bool) -> Option<bool> {
-        let rec = self.recording()?.clone();
         let (ctrl, shift, meta) = (key_down(VK_CONTROL), key_down(VK_SHIFT), key_down(VK_LWIN));
         let alt = alt_down || key_down(VK_MENU);
+        self.settings_capture(vk, ctrl, shift, alt, meta)
+    }
+
+    /// `settings_capture_key` con los modificadores dados.
+    pub(super) fn settings_capture(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<bool> {
+        let rec = self.recording()?.clone();
         match skeys::classify(vk, ctrl, shift, alt, meta, sys::env().key_style()) {
             Capture::Wait => {}
             Capture::Cancel => self.set_recording(None),

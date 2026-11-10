@@ -514,6 +514,13 @@ impl App {
                     v.set_page(page);
                 }
             }
+            // `buscar <texto>`: lo escrito en la caja de búsqueda del panel activo.
+            "buscar" => self.search_typed(self.active, text.strip_prefix("buscar").unwrap_or("").trim()),
+            // `grabar <tecla> <ctrl,shift,alt,meta>`: una tecla mientras se graba un atajo.
+            "grabar" => {
+                let has = |m: &str| b.split(',').any(|x| x == m);
+                self.settings_capture(crate::keys::Key(na as u16), has("ctrl"), has("shift"), has("alt"), has("meta"));
+            }
             "config_parte" => {
                 let id = crate::settings::options::OPTIONS
                     .iter()

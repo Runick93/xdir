@@ -198,8 +198,6 @@ fn real_escaping_link_is_gone_before_the_next_question_and_user_links_stay() {
 #[test]
 fn case_and_accent_twins_open_their_own_file() {
     use xdir_core::archive_nav::temps::{Limits, Temps};
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(crate::sys::install);
     let d = tmp();
     let zip = d.join("gemelos.zip");
     let (nfc, nfd) = ("caf\u{e9}.txt", "cafe\u{301}.txt");
@@ -216,7 +214,9 @@ fn case_and_accent_twins_open_their_own_file() {
     assert_eq!(names, ["A.txt", "a.txt", nfc, nfd]);
     let base = d.join("temporal");
     fs::create_dir(&base).unwrap();
-    let t = Temps::new(Some(&base));
+    // Las primitivas y el servicio de la Mac, sin instalarlos (otras pruebas instalan los falsos).
+    let real_svc: &'static xdir_archive::Service = Box::leak(Box::new(xdir_archive::Service { tar_gz: true, utc_offset: |_| 0, copy_origin: |_, _| {} }));
+    let t = Temps::with_services(Some(&base), &MacCopyPrims, real_svc);
     let lim = Limits::up_to(u64::MAX);
     for (name, want) in [("A.txt", "MAYUS"), ("a.txt", "minus"), (nfc, "NFC"), (nfd, "NFD"), ("a.txt", "minus"), ("A.txt", "MAYUS")] {
         let p = t.ensure(&zip, &[], name, &lim).unwrap();

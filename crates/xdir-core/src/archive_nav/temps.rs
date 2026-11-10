@@ -7,7 +7,8 @@
 //! disco (`entry_path`).
 //!
 //! Lo que se extrae pasa por `sys::archives()` y se mira con `sys::copy_prims()` (en las pruebas,
-//! el disco falso); la carpeta de la ejecución y su candado son del disco real.
+//! el disco falso; o los que se le den con `Temps::with_services`); la carpeta de la ejecución y su
+//! candado son del disco real.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::archive::safe_entry_path;
-use crate::sys::{self, CopyError, ErrKind, Flow, ItemKind, Pick};
+use crate::sys::{self, Archives, CopyError, CopyPrims, ErrKind, Flow, ItemKind, Pick};
 
 /// Nombre del candado dentro de la carpeta de cada ejecución.
 const LOCK: &str = ".candado";
@@ -63,6 +64,8 @@ pub struct Temps {
     done: Mutex<HashSet<PathBuf>>,
     /// Un candado por carpeta de archivo comprimido.
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    /// Primitivas y servicio propios (pruebas de una plataforma); sin ellos, los del sistema.
+    services: Option<(&'static dyn CopyPrims, &'static dyn Archives)>,
 }
 
 /// Las temporales del proceso, en la carpeta que da la plataforma
@@ -95,7 +98,22 @@ impl Temps {
             stamps: Mutex::new(HashMap::new()),
             done: Mutex::new(HashSet::new()),
             locks: Mutex::new(HashMap::new()),
+            services: None,
         }
+    }
+
+    /// Como `new`, con primitivas y servicio propios en lugar de los del sistema (para probar las
+    /// de una plataforma sin instalarlas).
+    pub fn with_services(base: Option<&Path>, prims: &'static dyn CopyPrims, archives: &'static dyn Archives) -> Temps {
+        Temps { services: Some((prims, archives)), ..Temps::new(base) }
+    }
+
+    fn prims(&self) -> &dyn CopyPrims {
+        self.services.map_or(sys::copy_prims(), |s| s.0)
+    }
+
+    fn archives(&self) -> &dyn Archives {
+        self.services.map_or(sys::archives(), |s| s.1)
     }
 
     fn unsafe_base() -> CopyError {
@@ -158,7 +176,7 @@ impl Temps {
             return;
         }
         // Lo extraído pasó por las primitivas del sistema (en las pruebas, el disco falso).
-        remove_tree(&self.run);
+        self.remove_tree(&self.run);
         let _ = std::fs::remove_dir_all(&self.run);
         self.stamps.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.done.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -202,7 +220,7 @@ impl Temps {
         let not_allowed = || CopyError::new(ErrKind::Other(sys::NOT_ALLOWED.into()), Path::new(rel));
         let target = safe_entry_path(rel).ok_or_else(not_allowed)?;
         self.run_dir().ok_or_else(Temps::unsafe_base)?;
-        let prims = sys::copy_prims();
+        let prims = self.prims();
         let dir = self.dir_for(file, nested);
         let lock = self.lock_for(&dir);
         let _one = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -211,12 +229,12 @@ impl Temps {
         {
             let mut stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
             if stamps.get(&dir) != Some(&stamp) {
-                remove_tree(&dir);
+                self.remove_tree(&dir);
                 // Y las carpetas de los gemelos (`<hash>~<n>`).
                 let prefix = format!("{}~", dir.file_name().unwrap_or_default().to_string_lossy());
                 for name in prims.read_dir(&self.run).unwrap_or_default() {
                     if name.to_string_lossy().starts_with(&prefix) {
-                        remove_tree(&self.run.join(name));
+                        self.remove_tree(&self.run.join(name));
                     }
                 }
                 self.done.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| !p.starts_with(&dir) && !p.to_string_lossy().contains(&prefix));
@@ -228,7 +246,7 @@ impl Temps {
         if self.done.lock().unwrap_or_else(|e| e.into_inner()).contains(&dst) && prims.stat(&dst).is_ok() {
             return Ok(dst);
         }
-        let entries = super::list_cached(&real, &mut || if (lim.cancel)() { Flow::Stop } else { Flow::Continue })?;
+        let entries = super::list_cached_with(prims, self.archives(), &real, &mut || if (lim.cancel)() { Flow::Stop } else { Flow::Continue })?;
         let Some(entry) = entries.iter().rev().find(|e| safe_entry_path(&e.name).as_deref() == Some(target.as_path())) else {
             return Err(CopyError::new(ErrKind::NotFound, &dst));
         };
@@ -266,7 +284,7 @@ impl Temps {
         }
         let mut failed = None;
         let mut too_big = false;
-        let res = sys::archives().extract_some(
+        let res = self.archives().extract_some(
             &real,
             &dir,
             &|i, _| if i == index { Pick::Last } else { Pick::Skip },
@@ -277,7 +295,7 @@ impl Temps {
             &mut |_, e| failed = Some(e),
         );
         if too_big {
-            remove_tree(&dst);
+            self.remove_tree(&dst);
             return Err(CopyError::new(ErrKind::Other(TOO_BIG.into()), &dst));
         }
         res?;
@@ -292,7 +310,7 @@ impl Temps {
                 // El origen del archivo (marca de la web, cuarentena) pasa a lo extraído y a las
                 // carpetas que se crearon para llegar.
                 let written: Vec<PathBuf> = dst.ancestors().take_while(|p| *p != dir).map(Path::to_path_buf).collect();
-                sys::archives().propagate_origin(&real, &written);
+                self.archives().propagate_origin(&real, &written);
                 Ok(dst)
             }
             Err(e) => Err(e),
@@ -311,16 +329,16 @@ impl Temps {
     fn lock_for(&self, dir: &Path) -> Arc<Mutex<()>> {
         self.locks.lock().unwrap_or_else(|e| e.into_inner()).entry(dir.to_path_buf()).or_default().clone()
     }
-}
 
-/// Borra `p` y lo de adentro (sin seguir enlaces), con las primitivas del sistema.
-fn remove_tree(p: &Path) {
-    let prims = sys::copy_prims();
-    let Ok(st) = prims.stat(p) else { return };
-    if st.kind == ItemKind::Dir {
-        for name in prims.read_dir(p).unwrap_or_default() {
-            remove_tree(&p.join(name));
+    /// Borra `p` y lo de adentro (sin seguir enlaces), con las primitivas del sistema.
+    fn remove_tree(&self, p: &Path) {
+        let prims = self.prims();
+        let Ok(st) = prims.stat(p) else { return };
+        if st.kind == ItemKind::Dir {
+            for name in prims.read_dir(p).unwrap_or_default() {
+                self.remove_tree(&p.join(name));
+            }
         }
+        let _ = prims.remove(p);
     }
-    let _ = prims.remove(p);
 }

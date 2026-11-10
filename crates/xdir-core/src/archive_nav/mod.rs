@@ -205,7 +205,17 @@ const LISTINGS_MAX_ENTRIES: usize = 2 * MAX_ENTRIES;
 /// Las entradas del archivo `real` (del disco o una extracción temporal), con la caché: como
 /// mucho `MAX_ENTRIES + 1` (si trae una de más, el archivo tiene más de las que se muestran).
 pub fn list_cached(real: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Arc<Vec<ArchiveEntry>>, CopyError> {
-    let stat = sys::copy_prims().stat(real)?;
+    list_cached_with(sys::copy_prims(), sys::archives(), real, cancel)
+}
+
+/// `list_cached` con primitivas y servicio dados.
+pub(crate) fn list_cached_with(
+    prims: &dyn sys::CopyPrims,
+    archives: &dyn sys::Archives,
+    real: &Path,
+    cancel: &mut dyn FnMut() -> Flow,
+) -> Result<Arc<Vec<ArchiveEntry>>, CopyError> {
+    let stat = prims.stat(real)?;
     let stamp = (stat.size, stat.modified);
     {
         let cache = LISTINGS.lock().unwrap_or_else(|e| e.into_inner());
@@ -213,7 +223,7 @@ pub fn list_cached(real: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Arc<
             return Ok(list.clone());
         }
     }
-    let list = Arc::new(sys::archives().list(real, MAX_ENTRIES, cancel)?);
+    let list = Arc::new(archives.list(real, MAX_ENTRIES, cancel)?);
     let mut cache = LISTINGS.lock().unwrap_or_else(|e| e.into_inner());
     cache.retain(|(p, _, _)| p != real);
     cache.insert(0, (real.to_path_buf(), stamp, list.clone()));

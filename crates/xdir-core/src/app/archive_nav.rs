@@ -106,16 +106,32 @@ impl App {
         if self.panes[pane].tab_mut().open(hwnd, &tx, idx) {
             return;
         }
+        self.open_from_archive(pane, idx, false);
+    }
+
+    /// Extrae el archivo `idx` de adentro a la temporal (en un hilo) y lo abre con su programa
+    /// (o, con `with`, con el «Abrir con…» del sistema).
+    pub(super) fn open_from_archive(&mut self, pane: usize, idx: usize, with: bool) {
         let tab = self.panes[pane].tab();
         let (Location::Archive { file, nested, .. }, Some(rel)) = (&tab.location, tab.archive_rel(idx)) else { return };
+        let e = &tab.list.entries[idx];
+        if e.is_dir || e.attrs & (ATTR_ARCHIVE_BAD | ATTR_LINK) != 0 {
+            return;
+        }
+        let name = e.name.to_string_lossy().into_owned();
         let (file, nested) = (file.clone(), nested.clone());
         self.notice = Some(format!("Abriendo «{name}»…"));
-        self.spawn_task(move || TaskDone::ArchiveOpened { name, result: temps::global().ensure(&file, &nested, &rel).map_err(|e| e.message()) });
+        self.spawn_task(move || TaskDone::ArchiveOpened { name, with, result: temps::global().ensure(&file, &nested, &rel).map_err(|e| e.message()) });
     }
 
     /// Terminó la extracción para abrir: se abre con su programa (o se avisa por qué no).
-    pub(super) fn on_archive_opened(&mut self, name: String, result: Result<PathBuf, String>) {
+    pub(super) fn on_archive_opened(&mut self, name: String, with: bool, result: Result<PathBuf, String>) {
         match result {
+            Ok(path) if with => {
+                self.notice = None;
+                let folder = Location::Path(path.parent().map(Path::to_path_buf).unwrap_or_default());
+                let _ = sys::shell().invoke_verb(self.hwnd, &folder, &[shell::Item::from(path)], "openas");
+            }
             Ok(path) => {
                 self.notice = None;
                 sys::shell().open_file(self.hwnd, &path, path.parent());
@@ -208,50 +224,103 @@ impl App {
         self.start_transfer(JobSpec::ExtractEntries { archive, entries, dest });
         self.set_active(pane);
     }
-
     /// Menú contextual dentro de un archivo comprimido (no hay menú del sistema para lo de
-    /// adentro): lo que se puede hacer y, deshabilitado, lo que escribe.
+    /// adentro, pantalla X69): abrir, extraer y copiar; deshabilitado lo que escribe.
     pub(super) fn archive_context_menu(&mut self, pane: usize) {
+        #[derive(Clone, Copy)]
+        enum Do {
+            Open,
+            OpenWith,
+            ExtractHere,
+            ExtractTo,
+            Copy,
+            CopyPath,
+            Refresh,
+            None,
+        }
         let has_items = self.panes[pane].tab().list.selected_indices().next().is_some();
-        let mut cmds: Vec<Command> = Vec::new();
-        let mut item = |label: &str, c: Command, enabled: bool| {
-            cmds.push(c);
-            shell::Entry::Item { id: cmds.len() as u32, label: label.into(), enabled, checked: false }
+        let mut acts: Vec<Do> = Vec::new();
+        let mut item = |label: &str, a: Do, enabled: bool| {
+            acts.push(a);
+            shell::Entry::Item { id: acts.len() as u32, label: label.into(), enabled, checked: false }
         };
+        let sep = || shell::Entry::Sep;
         let entries = if has_items {
             vec![
-                item("Abrir", Command::Refresh, true),
-                item("Vista rápida", Command::QuickLook, true),
-                shell::Entry::Sep,
-                item("Copiar", Command::Copy, true),
-                item("Cortar", Command::Cut, false),
-                item("Pegar", Command::Paste, false),
-                shell::Entry::Sep,
-                item("Renombrar", Command::Rename, false),
-                item("Duplicar", Command::Duplicate, false),
-                item("Comprimir", Command::Compress, false),
-                item("Eliminar", Command::Recycle, false),
+                item("Abrir", Do::Open, true),
+                item("Abrir con…", Do::OpenWith, true),
+                sep(),
+                item("Extraer aquí", Do::ExtractHere, true),
+                item("Extraer en…", Do::ExtractTo, true),
+                sep(),
+                item("Cortar", Do::None, false),
+                item("Copiar", Do::Copy, true),
+                item("Copiar como ruta de acceso", Do::CopyPath, true),
+                sep(),
+                item("Eliminar", Do::None, false),
+                item("Renombrar", Do::None, false),
+                sep(),
+                item("Nueva carpeta", Do::None, false),
+                item("Comprimir", Do::None, false),
             ]
         } else {
-            vec![
-                item("Actualizar", Command::Refresh, true),
-                shell::Entry::Sep,
-                item("Pegar", Command::Paste, false),
-                item("Carpeta nueva", Command::NewFolder, false),
-            ]
+            vec![item("Actualizar", Do::Refresh, true), sep(), item("Pegar", Do::None, false), item("Nueva carpeta", Do::None, false)]
         };
         let Some(id) = self.host.popup_menu(&entries, MenuPos::Cursor, None, None) else { return };
-        let Some(&c) = cmds.get((id as usize).wrapping_sub(1)) else { return };
-        // «Abrir» del menú de un elemento: el enfocado (o el primero elegido).
-        if has_items && id == 1 {
-            let first = self.panes[pane].tab().list.selected_indices().next();
-            if let Some(idx) = first {
-                self.open_entry(pane, idx);
+        let Some(&chosen) = acts.get((id as usize).wrapping_sub(1)) else { return };
+        let first = self.panes[pane].tab().list.selected_indices().next();
+        match chosen {
+            Do::Open => {
+                if let Some(idx) = first {
+                    self.open_entry(pane, idx);
+                }
             }
-            return;
+            Do::OpenWith => {
+                if let Some(idx) = first {
+                    self.open_from_archive(pane, idx, true);
+                }
+            }
+            Do::ExtractHere => {
+                if let Location::Archive { file, .. } = &self.panes[pane].tab().location
+                    && let Some(dir) = file.parent().map(Path::to_path_buf)
+                {
+                    self.extract_selection_to(pane, dir);
+                }
+            }
+            Do::ExtractTo => {
+                if let Some(dir) = sys::shell().pick_folder(self.hwnd, "Extraer en") {
+                    self.extract_selection_to(pane, dir);
+                }
+            }
+            Do::Copy => self.run_command(Command::Copy),
+            Do::CopyPath => {
+                let tab = self.panes[pane].tab();
+                let text: Vec<String> = tab
+                    .list
+                    .selected_indices()
+                    .filter_map(|i| tab.location.archive_child(&tab.list.entries[i].name.to_string_lossy()))
+                    .map(|l| format!("\"{}\"", l.address_text()))
+                    .collect();
+                let _ = sys::shell().copy_text(self.hwnd, &text.join("\r\n"));
+            }
+            Do::Refresh => self.run_command(Command::Refresh),
+            Do::None => {}
         }
-        self.run_command(c);
     }
+
+    /// Lo elegido en el panel `pane` (dentro de un archivo comprimido) se extrae en `dir` con el
+    /// motor («Extraer aquí» del menú: la carpeta del archivo; «Extraer en…»: la que se elija).
+    fn extract_selection_to(&mut self, pane: usize, dir: PathBuf) {
+        let tab = self.panes[pane].tab();
+        let Location::Archive { file, nested, .. } = &tab.location else { return };
+        let entries: Vec<String> =
+            tab.list.selected_indices().filter(|&i| tab.list.entries[i].attrs & ATTR_ARCHIVE_BAD == 0).filter_map(|i| tab.archive_rel(i)).collect();
+        if !entries.is_empty() {
+            let archive = real_archive(file, nested);
+            self.start_transfer(JobSpec::ExtractEntries { archive, entries, dest: dir });
+        }
+    }
+
 
     /// El elemento de un archivo comprimido que mostrarían la vista previa, la Galería o la vista
     /// rápida: se extrae a la temporal (si no pasa del tamaño que acepta la vista previa) y, al

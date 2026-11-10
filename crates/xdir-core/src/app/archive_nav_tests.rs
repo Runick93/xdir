@@ -218,10 +218,27 @@ fn context_menu_disables_writing_entries() {
         .collect();
     let enabled = |l: &str| items.iter().find(|(x, _)| x == l).map(|(_, e)| *e);
     assert_eq!(enabled("Copiar"), Some(true));
-    for l in ["Cortar", "Pegar", "Renombrar", "Eliminar", "Comprimir"] {
+    for l in ["Abrir", "Abrir con…", "Extraer aquí", "Extraer en…", "Copiar como ruta de acceso"] {
+        assert_eq!(enabled(l), Some(true), "{l}");
+    }
+    for l in ["Cortar", "Renombrar", "Eliminar", "Nueva carpeta", "Comprimir"] {
         assert_eq!(enabled(l), Some(false), "{l}");
     }
     assert!(FakeShell::take_calls().iter().all(|c| !matches!(c, ShellCall::ContextMenu { .. })));
+}
+
+/// «Extraer aquí» del menú de adentro: lo elegido va a la carpeta del archivo con el motor.
+#[test]
+fn context_menu_extract_here() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let (dir, zip) = fixture("menu-extraer", &[("d/a.txt", b"a")]);
+    go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
+    a.set_active(0);
+    select(&mut a, 0, "a.txt");
+    host.set_menu_choice(Some(3));
+    a.on_context_menu(Some((40.0, 80.0)));
+    assert_eq!(a.take_started(), [JobSpec::ExtractEntries { archive: zip, entries: vec!["d/a.txt".into()], dest: dir }]);
 }
 
 #[test]
@@ -301,4 +318,26 @@ fn middle_click_folder_in_archive_opens_tab_inside() {
     a.run_command(Command::NewTab);
     assert_eq!(a.panes[0].tabs.len(), before + 1);
     assert_eq!(a.panes[0].tab().location, root(&zip));
+}
+
+/// La barra muestra el archivo con su ícono (X68) y, mientras se lee, la lista dice «Cargando…»
+/// (X70).
+#[test]
+fn crumb_icon_and_loading_drawn() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let (_, zip) = fixture("dibujo", &[("d/a.txt", b"a")]);
+    go(&mut a, 0, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|t| t == crate::pane::ARCHIVE_GLYPH), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "fotos.zip"));
+    assert!(!texts.iter().any(|t| t == "Cargando…"));
+    // Una carga en curso (sin respuesta todavía): «Cargando…».
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, root(&zip));
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|t| t == "Cargando…"), "{texts:?}");
+    pump(&mut a, 0);
 }

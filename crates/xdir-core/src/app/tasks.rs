@@ -22,7 +22,7 @@ pub(super) enum TaskDone {
     /// Si el disco de `dir` distingue mayúsculas (para los choques de Renombrar varios).
     CaseInfo { dir: PathBuf, case_insensitive: bool },
     /// Se extrajo a la temporal un archivo de adentro de un archivo comprimido para abrirlo.
-    ArchiveOpened { name: String, result: Result<PathBuf, String> },
+    ArchiveOpened { name: String, with: bool, result: Result<PathBuf, String> },
     /// Se extrajo (o no) a la temporal un elemento para la vista previa.
     ArchivePrepared { path: PathBuf, ok: bool },
 }
@@ -50,7 +50,7 @@ impl App {
         match t {
             TaskDone::Renamed { dir, result, undoing } => self.on_renamed(dir, result, undoing),
             TaskDone::CaseInfo { dir, case_insensitive } => self.on_case_info(&dir, case_insensitive),
-            TaskDone::ArchiveOpened { name, result } => self.on_archive_opened(name, result),
+            TaskDone::ArchiveOpened { name, with, result } => self.on_archive_opened(name, with, result),
             TaskDone::ArchivePrepared { path, ok } => self.on_archive_prepared(path, ok),
             TaskDone::Original { pane, link, target } => {
                 let name = link.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

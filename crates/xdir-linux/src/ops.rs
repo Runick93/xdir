@@ -378,9 +378,11 @@ fn copy_new(src: &Path, dst: &Path) -> io::Result<()> {
     if taken(dst) {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "ya existe, no se pisa"));
     }
-    let r = copy_item(src, dst);
-    // Lo que apareció en el medio con ese nombre (AlreadyExists) no es nuestro: no se toca.
-    if r.as_ref().is_err_and(|e| e.kind() != io::ErrorKind::AlreadyExists) {
+    // Se borra solo si esta copia creó `dst` (aunque el error de adentro sea AlreadyExists); si
+    // lo que falló fue crearlo, lo que apareció en el medio no es nuestro y no se toca.
+    let mut created = false;
+    let r = copy_tracked(src, dst, &mut created);
+    if r.is_err() && created {
         let _ = remove_item(dst);
     }
     r
@@ -390,12 +392,20 @@ fn copy_new(src: &Path, dst: &Path) -> io::Result<()> {
 /// carpetas se ponen al final, así una carpeta de solo lectura igual se llena. Los archivos
 /// especiales (FIFO, sockets, dispositivos) no se copian: abrir una FIFO se queda esperando.
 fn copy_item(src: &Path, dst: &Path) -> io::Result<()> {
+    copy_tracked(src, dst, &mut false)
+}
+
+/// `copy_item` que pone `created` en cuanto crea `dst` (siempre de forma exclusiva).
+fn copy_tracked(src: &Path, dst: &Path, created: &mut bool) -> io::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     let ft = meta.file_type();
     if ft.is_symlink() {
-        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
+        *created = true;
+        Ok(())
     } else if ft.is_dir() {
         std::fs::create_dir(dst)?;
+        *created = true;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
             copy_item(&entry.path(), &dst.join(entry.file_name()))?;
@@ -405,6 +415,7 @@ fn copy_item(src: &Path, dst: &Path) -> io::Result<()> {
         // `create_new`: nunca pisa algo que haya aparecido en el medio.
         let mut from = std::fs::File::open(src)?;
         let mut to = std::fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
+        *created = true;
         io::copy(&mut from, &mut to)?;
         to.set_permissions(meta.permissions())
     } else {
@@ -671,6 +682,25 @@ mod tests {
         assert!(r.error.is_some());
         assert!(!outside.join("a").exists() && !outside.join("b").exists());
         assert!(trash.join("files/a").exists() && trash.join("files/b").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// La limpieza depende de quién creó el destino: lo creado por esta copia se quita aunque el
+    /// error de adentro sea AlreadyExists; lo que ya estaba no se toca.
+    #[test]
+    fn copy_cleanup_tracks_creation() {
+        let dir = tmp("copia-creada");
+        let src = dir.join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a"), "a").unwrap();
+        let mut created = false;
+        copy_tracked(&src, &dir.join("nueva"), &mut created).unwrap();
+        assert!(created);
+        let ya = dir.join("ya");
+        std::fs::create_dir(&ya).unwrap();
+        let mut created = false;
+        assert!(copy_tracked(&src, &ya, &mut created).is_err());
+        assert!(!created, "no la creó esta copia");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -408,7 +408,9 @@ pub fn with_timeout<T: Send + 'static>(
     }
     match rx.recv_timeout(limit) {
         Ok(r) => r,
-        Err(_) => Err(NetError::Timeout { host: host.to_string() }),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(NetError::Timeout { host: host.to_string() }),
+        // El hilo terminó sin respuesta (entró en pánico): no es que el servidor tarde.
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(NetError::Other("La operación de red falló".into())),
     }
 }
 

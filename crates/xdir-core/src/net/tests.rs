@@ -206,3 +206,10 @@ fn remote_budget_stops_after_first_timeout() {
     }
     assert_eq!(b.read(std::path::Path::new("/local-r1budget/a"), fast), 7);
 }
+
+/// M11: si la llamada entra en pánico no se informa como «Se agotó el tiempo».
+#[test]
+fn panic_is_not_a_timeout() {
+    let r = with_timeout(Duration::from_secs(5), "nas", || -> Result<(), NetError> { panic!("falla adentro") });
+    assert!(matches!(r, Err(NetError::Other(_))), "{r:?}");
+}

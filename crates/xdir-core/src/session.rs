@@ -26,8 +26,22 @@ pub struct PaneState {
 
 /// Carpeta de configuración: junto al ejecutable en modo portable (si ahí existe
 /// `xdir.portable`), si no la del usuario que da la plataforma.
+///
+/// Se decide una sola vez por proceso: activar o desactivar el modo portable (crear o borrar la
+/// marca) se aplica al volver a abrir xdir, así todo lo de esta ejecución va a la misma carpeta.
+/// En las pruebas del núcleo no se guarda: cada hilo tiene su carpeta (`FakeEnv`).
 pub fn config_dir() -> Option<PathBuf> {
-    resolve_config_dir(exe_dir().as_deref(), || crate::sys::env().config_dir())
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let platform = || crate::sys::env().config_dir();
+    if cfg!(test) {
+        return resolve_config_dir(exe_dir().as_deref(), platform);
+    }
+    config_dir_cached(&DIR, exe_dir().as_deref(), platform)
+}
+
+/// `config_dir` con la regla de `resolve_config_dir`, resuelta la primera vez y guardada en `cell`.
+pub fn config_dir_cached(cell: &std::sync::OnceLock<Option<PathBuf>>, exe_dir: Option<&Path>, platform: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    cell.get_or_init(|| resolve_config_dir(exe_dir, platform)).clone()
 }
 
 /// Marca del modo portable, junto al ejecutable.
@@ -485,6 +499,21 @@ mod tests {
         let err = portable_files(&from, &base.join("no-existe")).unwrap_err();
         assert!(err.starts_with("No se pudo escribir en "), "{err}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// La carpeta de configuración se decide una vez por proceso: crear o borrar `xdir.portable`
+    /// después no la cambia (se aplica al volver a abrir xdir).
+    #[test]
+    fn config_dir_resolved_once() {
+        let exe = std::env::temp_dir().join(format!("xdir-portable-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&exe);
+        std::fs::create_dir_all(&exe).unwrap();
+        let user = PathBuf::from("usuario");
+        let cell = std::sync::OnceLock::new();
+        assert_eq!(config_dir_cached(&cell, Some(&exe), || Some(user.clone())), Some(user.clone()));
+        std::fs::write(exe.join(PORTABLE_MARKER), "").unwrap();
+        assert_eq!(config_dir_cached(&cell, Some(&exe), || Some(user.clone())), Some(user.clone()), "sigue la del arranque");
+        let _ = std::fs::remove_dir_all(&exe);
     }
 
     #[test]

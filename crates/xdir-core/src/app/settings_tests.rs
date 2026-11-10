@@ -851,3 +851,32 @@ fn extra_page_items_searchable() {
     assert_eq!(counts[5].1, 1);
     assert!(matches!(&results[..], [Item::Heading(h), Item::Link(PageId::Extra("red"), t, _)] if h == "Red" && t == "Servidores favoritos"));
 }
+
+/// Activar el modo portable solo deja la marca: lo que se sigue guardando en esta ejecución va a
+/// la carpeta de siempre (se aplica al volver a abrir xdir). Si en la carpeta de xdir ya hay
+/// archivos de otra vez, la pregunta lo dice.
+#[test]
+fn portable_applies_on_next_start() {
+    fresh_config();
+    let (mut a, host) = settings_app(Section::Advanced);
+    let exe = std::env::temp_dir().join(format!("xdir-portable-app-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
+    let _ = std::fs::remove_dir_all(&exe);
+    std::fs::create_dir_all(&exe).unwrap();
+    std::fs::write(exe.join("config.toml"), "# de otra vez\n").unwrap();
+    a.exe_dir = Some(exe.clone());
+    host.set_answer(Some(true));
+    a.settings_part(0, "portable", 0, 0.0);
+    let (_, question) = host.questions().last().cloned().unwrap();
+    assert!(question.contains("Ya hay archivos de configuración"), "{question}");
+    let t = a.task_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    a.on_task_done(t);
+    assert!(exe.join(session::PORTABLE_MARKER).exists());
+    a.set_animations(Some(true));
+    wait_config(&mut a);
+    assert_eq!(std::fs::read_to_string(exe.join("config.toml")).unwrap(), "# de otra vez\n", "no se escribió en la carpeta de xdir");
+    assert!(config_text().contains("\nanimaciones = true\n"));
+    let r = row_of(&a.settings_items(Section::Advanced), "portable");
+    assert!(r.desc.contains("al volver a abrir xdir"), "{}", r.desc);
+    assert_eq!(r.control, Control::Buttons(vec![("Desactivar".to_string(), true)]));
+    let _ = std::fs::remove_dir_all(&exe);
+}

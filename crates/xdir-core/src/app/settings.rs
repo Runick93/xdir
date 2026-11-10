@@ -214,8 +214,8 @@ impl App {
                 one(row(Control::Table(rows)))
             }
             "portable" => {
-                let on = session::portable_active();
-                let mut desc = if on { "Los archivos se guardan junto a xdir" } else { "Los archivos se guardan en la carpeta del usuario" }.to_string();
+                let on = self.portable_marker;
+                let mut desc = if self.portable_now { "Los archivos se guardan junto a xdir" } else { "Los archivos se guardan en la carpeta del usuario" }.to_string();
                 if let Some(m) = &self.portable_msg {
                     desc = format!("{desc} · {m}");
                 }
@@ -456,10 +456,18 @@ impl App {
         if !sys::env().portable_supported() {
             return;
         }
-        let (Some(exe), Some(from)) = (session::exe_dir(), session::config_dir()) else { return };
-        let on = !session::portable_active();
+        let (Some(exe), Some(from)) = (self.exe_dir.clone(), session::config_dir()) else { return };
+        let on = !self.portable_marker;
         if on {
-            let question = format!("¿Activar el modo portable? Se copian los archivos de configuración a {} y se usan los de ahí.", exe.display());
+            let mut question = format!(
+                "¿Activar el modo portable? Se copian los archivos de configuración a {} y, al volver a abrir xdir, se usan los de ahí.",
+                exe.display()
+            );
+            // Lo que ya esté ahí (de otra vez) no se pisa: gana sobre lo de ahora.
+            let old: Vec<&str> = session::files(true).into_iter().map(|(n, _)| n).filter(|n| exe.join(n).is_file() && exe != from).collect();
+            if !old.is_empty() {
+                question += &format!(" Ya hay archivos de configuración en esa carpeta ({}): se usan esos y no se copian los de ahora.", old.join(", "));
+            }
             if !self.host.ask_yes_no("Modo portable", &question) {
                 return;
             }
@@ -469,6 +477,9 @@ impl App {
 
     /// Terminó de activar o desactivar el modo portable.
     pub(super) fn on_portable_done(&mut self, on: bool, result: Result<(), String>) {
+        if result.is_ok() {
+            self.portable_marker = on;
+        }
         self.portable_msg = Some(match result {
             Ok(()) if on => "Activado: se aplica al volver a abrir xdir".to_string(),
             Ok(()) => "Desactivado: se aplica al volver a abrir xdir".to_string(),

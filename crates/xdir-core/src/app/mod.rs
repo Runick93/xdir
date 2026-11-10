@@ -412,6 +412,12 @@ pub struct App {
     config_error: Option<String>,
     /// Cómo terminó el último cambio del modo portable (para la sección Avanzado).
     portable_msg: Option<String>,
+    /// Carpeta del ejecutable (donde va `xdir.portable`); en pruebas, una temporal.
+    exe_dir: Option<PathBuf>,
+    /// Los archivos de esta ejecución se guardan junto a xdir (se decidió al arrancar).
+    portable_now: bool,
+    /// Está la marca `xdir.portable` (lo que valdrá al volver a abrir xdir).
+    portable_marker: bool,
     /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`), de la sesión.
     xtree_last: Option<PathBuf>,
     /// Menú de consola abierto, en este panel.
@@ -615,6 +621,9 @@ impl App {
             config_pending: Vec::new(),
             config_error: None,
             portable_msg: None,
+            exe_dir: session::exe_dir(),
+            portable_now: session::portable_active(),
+            portable_marker: session::portable_active(),
             xtree_last: session.xtree_last.clone(),
             term_menu: None,
             term_ctx: None,

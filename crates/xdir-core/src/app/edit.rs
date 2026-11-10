@@ -57,6 +57,14 @@ impl App {
             return;
         }
         self.set_active(pane);
+        // En la configuración no se escribe una ruta: Ctrl+L va al buscador.
+        if self.panes[pane].tab().is_settings() {
+            self.begin_filter(pane);
+            return;
+        }
+        if matches!(self.panes[pane].tab().location, Location::Settings) {
+            return;
+        }
         let text = self.panes[pane].tab().location.address_text();
         let r = self.panes[pane].address;
         let (x, w) = (r.left + 10.0, r.right - r.left - 20.0 - pane::ADDRESS_CLEAR_W);
@@ -151,6 +159,7 @@ impl App {
 
     /// Pone el foco en la caja de búsqueda del panel (o se lo devuelve si ya está abierta).
     pub(super) fn begin_filter(&mut self, pane: usize) {
+        self.end_recording();
         if let Some((edit, p)) = self.filter_edit {
             if p == pane {
                 self.host.text_focus(edit);
@@ -203,6 +212,14 @@ impl App {
     /// (para no recorrer el disco con cada letra). Vacía, vuelve a la carpeta enseguida.
     pub(super) fn search_typed(&mut self, pane: usize, text: &str) {
         let text = text.trim().to_string();
+        // En la configuración se busca en memoria: al instante (y escribir ahí deja de grabar).
+        if self.panes[pane].tab().is_settings() {
+            self.end_recording();
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            self.panes[pane].tab_mut().search(hwnd, &tx, &text);
+            self.redraw();
+            return;
+        }
         if text.is_empty() {
             self.pending_search = None;
             let (hwnd, tx) = (self.hwnd, self.tx.clone());

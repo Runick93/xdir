@@ -569,6 +569,7 @@ fn symbol_name(ch: char) -> Option<&'static str> {
         0xE70D => "chevron.down",
         0xE70E => "chevron.up",
         0xE710 => "plus",
+        0xE70F => "pencil",
         0xE711 => "xmark",
         0xE7A7 => "arrow.uturn.backward",
         0xE712 => "ellipsis",

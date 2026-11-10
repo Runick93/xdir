@@ -12,6 +12,8 @@ use crate::list::{Column, ColumnSpec, View, default_columns};
 use crate::theme::{Accent, DEFAULT_ACCENT};
 
 const COMPUTER: &str = "Este equipo";
+/// La pestaña Configuración; con su página: `xdir:configuracion#atajos`.
+const SETTINGS: &str = "xdir:configuracion";
 /// Carpetas virtuales: "shell:<nombre de análisis>|<nombre visible>".
 const SHELL_PREFIX: &str = "shell:";
 /// Dentro de un archivo comprimido (ver `location_str`).
@@ -26,16 +28,82 @@ pub struct PaneState {
 
 /// Carpeta de configuración: junto al ejecutable en modo portable (si ahí existe
 /// `xdir.portable`), si no la del usuario que da la plataforma.
+///
+/// Se decide una sola vez por proceso: activar o desactivar el modo portable (crear o borrar la
+/// marca) se aplica al volver a abrir xdir, así todo lo de esta ejecución va a la misma carpeta.
+/// En las pruebas del núcleo no se guarda: cada hilo tiene su carpeta (`FakeEnv`).
 pub fn config_dir() -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
-    resolve_config_dir(exe_dir.as_deref(), || crate::sys::env().config_dir())
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let platform = || crate::sys::env().config_dir();
+    if cfg!(test) {
+        return resolve_config_dir(exe_dir().as_deref(), platform);
+    }
+    config_dir_cached(&DIR, exe_dir().as_deref(), platform)
+}
+
+/// `config_dir` con la regla de `resolve_config_dir`, resuelta la primera vez y guardada en `cell`.
+pub fn config_dir_cached(cell: &std::sync::OnceLock<Option<PathBuf>>, exe_dir: Option<&Path>, platform: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    cell.get_or_init(|| resolve_config_dir(exe_dir, platform)).clone()
+}
+
+/// Marca del modo portable, junto al ejecutable.
+pub const PORTABLE_MARKER: &str = "xdir.portable";
+
+/// Carpeta del ejecutable.
+pub fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf))
+}
+
+/// ¿Está el modo portable? (`xdir.portable` junto al ejecutable).
+pub fn portable_active() -> bool {
+    exe_dir().is_some_and(|d| d.join(PORTABLE_MARKER).exists())
+}
+
+/// Los archivos de la carpeta de configuración y qué guarda cada uno; `rutas.txt` es solo de
+/// macOS (en Windows las rutas escritas las guarda el sistema).
+pub fn files(mac: bool) -> Vec<(&'static str, &'static str)> {
+    let mut out = vec![
+        ("config.toml", "Atajos, colores por tipo y opciones (se edita a mano o desde acá)"),
+        ("sesion.toml", "Ventana, paneles, pestañas y los switches de la rueda dentada"),
+        ("carpetas.toml", "La vista de cada carpeta y la vista por defecto"),
+        ("favoritos.txt", "La barra de favoritos"),
+        ("grupos.toml", "Los grupos de paneles guardados"),
+        ("historial.txt", "Las carpetas visitadas, para el salto rápido"),
+        ("red.toml", "Servidores favoritos y recientes"),
+    ];
+    if mac {
+        out.push(("rutas.txt", "Las rutas escritas en la barra de dirección"));
+    }
+    out
+}
+
+/// Activa el modo portable: copia a `to` (la carpeta del ejecutable) los archivos de
+/// configuración de `from` que existan (sin pisar los que ya estén en `to`) y crea
+/// `xdir.portable`. Bloqueante: para un hilo de trabajo.
+pub fn portable_files(from: &Path, to: &Path) -> Result<(), String> {
+    let fail = |e: std::io::Error| format!("No se pudo escribir en {}: {e}", to.display());
+    for (name, _) in files(true) {
+        let (src, dst) = (from.join(name), to.join(name));
+        if src.is_file() && !dst.exists() && src != dst {
+            std::fs::copy(&src, &dst).map_err(fail)?;
+        }
+    }
+    std::fs::write(to.join(PORTABLE_MARKER), "").map_err(fail)
+}
+
+/// Desactiva el modo portable: borra `xdir.portable` de `dir` (los archivos quedan).
+pub fn portable_off(dir: &Path) -> Result<(), String> {
+    match std::fs::remove_file(dir.join(PORTABLE_MARKER)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("No se pudo borrar {}: {e}", dir.join(PORTABLE_MARKER).display())),
+        _ => Ok(()),
+    }
 }
 
 /// La regla de `config_dir`, sin efectos: `exe_dir` es la carpeta del ejecutable y `platform`
 /// la carpeta del usuario (solo se pide si no hay modo portable).
 pub fn resolve_config_dir(exe_dir: Option<&Path>, platform: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
     match exe_dir {
-        Some(dir) if dir.join("xdir.portable").exists() => Some(dir.to_path_buf()),
+        Some(dir) if dir.join(PORTABLE_MARKER).exists() => Some(dir.to_path_buf()),
         _ => platform(),
     }
 }
@@ -43,6 +111,7 @@ pub fn resolve_config_dir(exe_dir: Option<&Path>, platform: impl FnOnce() -> Opt
 pub fn location_str(l: &Location) -> String {
     match l {
         Location::Computer => COMPUTER.to_string(),
+        Location::Settings => SETTINGS.to_string(),
         Location::Path(p) => p.to_string_lossy().into_owned(),
         Location::Shell { parsing, name, .. } => format!("{SHELL_PREFIX}{parsing}|{name}"),
         // «comprimido:<archivo>//<anidado>//…//<carpeta interior>» (`//` no aparece en ninguna
@@ -70,10 +139,23 @@ pub fn location_from(s: &str) -> Location {
             return Location::Archive { file, nested: parts.into_iter().map(String::from).collect(), inner };
         }
     }
+    if settings_anchor(s).is_some() {
+        return Location::Settings;
+    }
     if let Some((parsing, name)) = s.strip_prefix(SHELL_PREFIX).and_then(|r| r.rsplit_once('|')) {
         return Location::Shell { parsing: parsing.to_string(), name: name.to_string(), parent: None };
     }
     Location::Path(PathBuf::from(s))
+}
+
+/// `xdir:configuracion` → `Some("")`; `xdir:configuracion#atajos` → `Some("atajos")`; otra
+/// cosa → `None`.
+pub fn settings_anchor(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix(SETTINGS)?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.strip_prefix('#')
 }
 
 const FILE_NAME: &str = "sesion.toml";
@@ -116,6 +198,11 @@ pub struct Session {
     pub preview_width: f32,
     /// Secciones abiertas del panel de información (un bit por `info::Section`).
     pub info_sections: u32,
+    /// Página de la pestaña Configuración (`atajos`); va pegada a su pestaña en el archivo
+    /// (`xdir:configuracion#atajos`).
+    pub settings_page: Option<String>,
+    /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`).
+    pub xtree_last: Option<PathBuf>,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha. Desde `carpetas.toml` (memoria por
     /// carpeta) solo se leen para la migración (`legacy_view`); se siguen escribiendo con las de
@@ -151,6 +238,8 @@ impl Default for Session {
             preview_on: false,
             preview_width: crate::ui::PREVIEW_W,
             info_sections: crate::info::DEFAULT_OPEN,
+            settings_page: None,
+            xtree_last: None,
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -211,6 +300,9 @@ fn write(s: &Session) -> String {
     out += &format!("vista_previa = {}\n", s.preview_on);
     out += &format!("vista_previa_ancho = {}\n", s.preview_width.round());
     out += &format!("informacion_secciones = {}\n", s.info_sections);
+    if let Some(p) = &s.xtree_last {
+        out += &format!("xtree_ultimo = {}\n", quote(&p.to_string_lossy()));
+    }
     if let Some(g) = &s.group {
         out += &format!("grupo = {}
 ", quote(g));
@@ -236,7 +328,14 @@ fn write(s: &Session) -> String {
     for pane in &s.panes {
         out += "\n[[panel]]\n";
         out += &format!("pestana_activa = {}\n", pane.active);
-        let tabs: Vec<String> = pane.tabs.iter().map(|t| quote(&location_str(t))).collect();
+        let tabs: Vec<String> = pane
+            .tabs
+            .iter()
+            .map(|t| match (t, &s.settings_page) {
+                (Location::Settings, Some(page)) => quote(&format!("{SETTINGS}#{page}")),
+                _ => quote(&location_str(t)),
+            })
+            .collect();
         out += &format!("pestanas = [{}]\n", tabs.join(", "));
     }
     out
@@ -261,7 +360,11 @@ fn parse(text: &str) -> Session {
         match (key, s.panes.last_mut()) {
             ("pestana_activa", Some(p)) => p.active = int().unwrap_or(0).max(0) as usize,
             ("pestanas", Some(p)) => {
-                p.tabs = parse_list(value).iter().map(|v| location_from(v)).collect();
+                let items = parse_list(value);
+                if let Some(page) = items.iter().find_map(|v| settings_anchor(v)).filter(|a| !a.is_empty()) {
+                    s.settings_page = Some(page.to_string());
+                }
+                p.tabs = items.iter().map(|v| location_from(v)).collect();
             }
             ("ventana", None) => {
                 let nums: Vec<i32> = parse_list(value).iter().filter_map(|v| v.parse().ok()).collect();
@@ -306,6 +409,7 @@ fn parse(text: &str) -> Session {
             }
             ("informacion_secciones", None) => s.info_sections = int().filter(|n| (0..128).contains(n)).map_or(crate::info::DEFAULT_OPEN, |n| n as u32),
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
+            ("xtree_ultimo", None) => s.xtree_last = parse_list(&format!("[{value}]")).into_iter().next().filter(|p| !p.is_empty()).map(PathBuf::from),
             ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
             ("barra_grupos", None) => s.group_bar = boolean().unwrap_or(false),
@@ -400,6 +504,48 @@ mod tests {
         }
     }
 
+    /// Activar copia los archivos que existan (sin pisar) y crea la marca; desactivar solo la
+    /// borra.
+    #[test]
+    fn portable_toggle_creates_and_removes_marker() {
+        let base = std::env::temp_dir().join(format!("xdir-portable-toggle-{}", std::process::id()));
+        let (from, exe) = (base.join("usuario"), base.join("exe"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::write(from.join("config.toml"), "# mío\n").unwrap();
+        std::fs::write(from.join("grupos.toml"), "de usuario").unwrap();
+        std::fs::write(exe.join("grupos.toml"), "ya estaba").unwrap();
+        portable_files(&from, &exe).unwrap();
+        assert_eq!(std::fs::read_to_string(exe.join("config.toml")).unwrap(), "# mío\n");
+        assert_eq!(std::fs::read_to_string(exe.join("grupos.toml")).unwrap(), "ya estaba", "no se pisa");
+        assert!(exe.join(PORTABLE_MARKER).exists());
+        assert!(!exe.join("sesion.toml").exists());
+        assert_eq!(resolve_config_dir(Some(&exe), || None), Some(exe.clone()));
+        portable_off(&exe).unwrap();
+        assert!(!exe.join(PORTABLE_MARKER).exists() && exe.join("config.toml").exists());
+        portable_off(&exe).unwrap();
+        // Una carpeta que no se puede escribir: el error dice dónde.
+        let err = portable_files(&from, &base.join("no-existe")).unwrap_err();
+        assert!(err.starts_with("No se pudo escribir en "), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// La carpeta de configuración se decide una vez por proceso: crear o borrar `xdir.portable`
+    /// después no la cambia (se aplica al volver a abrir xdir).
+    #[test]
+    fn config_dir_resolved_once() {
+        let exe = std::env::temp_dir().join(format!("xdir-portable-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&exe);
+        std::fs::create_dir_all(&exe).unwrap();
+        let user = PathBuf::from("usuario");
+        let cell = std::sync::OnceLock::new();
+        assert_eq!(config_dir_cached(&cell, Some(&exe), || Some(user.clone())), Some(user.clone()));
+        std::fs::write(exe.join(PORTABLE_MARKER), "").unwrap();
+        assert_eq!(config_dir_cached(&cell, Some(&exe), || Some(user.clone())), Some(user.clone()), "sigue la del arranque");
+        let _ = std::fs::remove_dir_all(&exe);
+    }
+
     #[test]
     fn portable_mode_wins() {
         let exe_dir = std::env::temp_dir().join(format!("xdir-portable-{}", std::process::id()));
@@ -469,6 +615,8 @@ mod tests {
             preview_on: false,
             preview_width: 320.0,
             info_sections: 0b101,
+            settings_page: Some("atajos".into()),
+            xtree_last: Some(r#"C:\datos "x""#.into()),
             panes: vec![
                 PaneState {
                     tabs: vec![
@@ -482,7 +630,7 @@ mod tests {
                     ],
                     active: 1,
                 },
-                PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into())], active: 0 },
+                PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into()), Location::Settings], active: 0 },
             ],
             columns: vec![
                 ColumnSpec { col: Column::Size, width: 90.0 },
@@ -492,6 +640,11 @@ mod tests {
             views: vec![View::Thumbnails, View::Details, View::Icons],
         };
         assert_eq!(parse(&write(&s)), s);
+        assert!(write(&s).contains("\"xdir:configuracion#atajos\""));
+        // Sin página, solo la pestaña; una página que no existe la resuelve la `App`.
+        assert_eq!(location_from("xdir:configuracion"), Location::Settings);
+        assert_eq!(parse("[[panel]]\npestanas = [\"xdir:configuracion#nada\"]\n").settings_page.as_deref(), Some("nada"));
+        assert_eq!(location_from("xdir:configuracionx"), Location::Path("xdir:configuracionx".into()));
         // Sin la columna del nombre, las de fábrica.
         assert_eq!(parse("columnas = [\"tamano:90\"]\n").columns, default_columns());
         // Las sesiones de antes (sin la clave) muestran las extensiones.

@@ -230,11 +230,13 @@ pub struct Xtree {
 }
 
 impl Xtree {
-    /// Abre la vista sobre `root` y empieza a analizarla.
-    pub fn new(hwnd: Handle, root: PathBuf) -> Xtree {
+    /// Abre la vista sobre `root` y empieza a analizarla; `by_type`: el mapa arranca coloreado por
+    /// tipo de archivo (`[opciones] xtree_por_tipo`; la tecla T lo sigue cambiando).
+    pub fn new(hwnd: Handle, root: PathBuf, by_type: bool) -> Xtree {
         let id = NEXT_SCAN.fetch_add(1, Ordering::Relaxed);
         let scan = scan::start(hwnd, id, root.clone());
         let mut x = Xtree::with_scan(hwnd, root, scan);
+        x.by_type = by_type;
         x.scanning = true;
         x.start_clock();
         x
@@ -341,6 +343,11 @@ impl Xtree {
     }
 
     /// Carpeta analizada.
+    /// ¿El mapa está coloreado por tipo de archivo?
+    pub fn by_type(&self) -> bool {
+        self.by_type
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

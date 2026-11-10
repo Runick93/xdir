@@ -76,6 +76,8 @@ pub fn folder_key(loc: &Location, search_root: Option<&Path>) -> String {
     }
     match loc {
         Location::Computer => COMPUTER_KEY.to_string(),
+        // Nunca se guarda vista para ella (ver `Tab::sync_view`).
+        Location::Settings => "configuracion".to_string(),
         Location::Shell { parsing, .. } => format!("{SHELL_PREFIX}{parsing}"),
         Location::Path(p) => path_key(p),
         // Todas las carpetas de adentro de los archivos comprimidos comparten una vista.
@@ -229,6 +231,15 @@ impl FolderViews {
         self.default = ViewSettings { collapsed: Vec::new(), filters: Vec::new(), ..v };
         self.entries.clear();
         self.dirty = true;
+    }
+
+    /// Cambia la vista (detalles, íconos…) por defecto: la toman las carpetas sin vista propia;
+    /// las que tienen una la conservan.
+    pub fn set_default_view(&mut self, v: crate::list::View) {
+        if self.default.view != v {
+            self.default.view = v;
+            self.dirty = true;
+        }
     }
 
     /// «Restablecer la vista de esta carpeta»: vuelve a la por defecto.

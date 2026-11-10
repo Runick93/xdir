@@ -529,6 +529,8 @@ pub enum PickerHit {
     Tree,
     /// Abre el diálogo "Acerca de".
     About,
+    /// «Más opciones…»: cierra la rueda y abre la pestaña Configuración.
+    MoreOptions,
     /// Dentro del panel pero sobre nada.
     Panel,
 }
@@ -593,8 +595,9 @@ const PICKER_LAYOUTS: [PickerLayout; 3] = [
 impl PickerLayout {
     fn height(&self) -> f32 {
         let rows = (PRESETS.len() / PICKER_COLS) as f32;
-        // Colores, dos botones, un separador, las filas de switches, otro separador y "Acerca de".
-        self.title + self.cell * rows + self.gap + self.btn * 2.0 + self.sep + self.btn * switch_rows() as f32 + self.sep + self.btn + self.pad
+        // Colores, dos botones, un separador, las filas de switches, otro separador, "Acerca de" y
+        // "Más opciones…".
+        self.title + self.cell * rows + self.gap + self.btn * 2.0 + self.sep + self.btn * switch_rows() as f32 + self.sep + self.btn * 2.0 + self.pad
     }
 }
 
@@ -638,6 +641,7 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     }
     let top = y + lay.btn * switch_rows() as f32 + lay.sep;
     out.push((PickerHit::About, rect(l, top, r, top + lay.btn)));
+    out.push((PickerHit::MoreOptions, rect(l, top + lay.btn, r, top + lay.btn * 2.0)));
     out
 }
 
@@ -749,6 +753,15 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                 p.text(FontId::Ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
                 p.text(FontId::UiRight, crate::about::VERSION, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
             }
+            PickerHit::MoreOptions => {
+                if hot {
+                    p.round_fill(r, 6.0, th.hover);
+                }
+                p.text(FontId::Glyphs, "\u{E713}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
+                p.text(FontId::Ui, "Más opciones…", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
+                let keys = crate::commands::combo_label(crate::commands::parse_combo("Ctrl+Coma").expect("atajo válido"));
+                p.text(FontId::UiRight, &keys, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
+            }
             PickerHit::Panel => {}
         }
     }
@@ -802,7 +815,7 @@ pub fn draw_terminal_menu(p: &dyn Painter, anchor: Rect, w: f32, hover: Option<C
     }
 }
 
-fn hex(c: u32) -> Color {
+pub(crate) fn hex(c: u32) -> Color {
     Color {
         r: (c >> 16) as f32 / 255.0,
         g: ((c >> 8) & 0xFF) as f32 / 255.0,

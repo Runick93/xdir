@@ -81,6 +81,10 @@ pub enum Command {
     SaveGroup,
     ToggleGroupBar,
     OpenConfig,
+    /// La pestaña Configuración (una sola: abrirla de nuevo la enfoca).
+    Settings,
+    /// La pestaña Configuración en la página Atajos de teclado.
+    SettingsKeys,
     About,
     /// Vista N (índice de `list::VIEWS`).
     View(u8),
@@ -218,7 +222,9 @@ pub const ALL: &[Spec] = &[
     spec(Command::ToggleDarkMode, "modo_oscuro", "Cambiar entre modo claro y oscuro", &[]),
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),
     spec(Command::ToggleGroupBar, "barra_grupos", "Mostrar u ocultar la barra de grupos", &[]),
-    spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
+    spec(Command::OpenConfig, "abrir_configuracion", "Abrir config.toml", &[]),
+    spec(Command::Settings, "configuracion", "Configuración", &["Ctrl+Coma"]),
+    spec(Command::SettingsKeys, "configuracion_atajos", "Configuración: Atajos de teclado", &[]),
     spec(Command::TogglePreview, "vista_previa", "Mostrar u ocultar la vista previa", &["Alt+P"]),
     spec(Command::QuickLook, "vista_rapida", "Vista rápida", &["Espacio"]),
     spec(Command::ShowTransfers, "mostrar_operaciones", "Mostrar operaciones", &[]),
@@ -250,6 +256,127 @@ pub const ALL: &[Spec] = &[
     spec(Command::ClearFilters, "quitar_filtros", "Quitar los filtros", &[]),
     spec(Command::ToggleTree, "arbol", "Mostrar u ocultar el árbol de carpetas (experimental)", &["Ctrl+Shift+E"]),
 ];
+
+/// Grupos de la página de atajos (la wiki y la configuración), en este orden.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Group {
+    Navigation,
+    TabsPanes,
+    Selection,
+    Files,
+    Views,
+    Preview,
+    Network,
+    Other,
+}
+
+impl Group {
+    pub const ALL: [Group; 8] = [Group::Navigation, Group::TabsPanes, Group::Selection, Group::Files, Group::Views, Group::Preview, Group::Network, Group::Other];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Group::Navigation => "Navegación",
+            Group::TabsPanes => "Pestañas y paneles",
+            Group::Selection => "Selección",
+            Group::Files => "Archivos",
+            Group::Views => "Vistas",
+            Group::Preview => "Vista previa y vista rápida",
+            Group::Network => "Red",
+            Group::Other => "Otros",
+        }
+    }
+}
+
+/// El grupo de cada comando (sin `_`: un comando nuevo tiene que elegir el suyo).
+pub fn group(c: Command) -> Group {
+    match c {
+        Command::JumpTo
+        | Command::Back
+        | Command::Forward
+        | Command::Up
+        | Command::Refresh
+        | Command::EditAddress
+        | Command::Filter
+        | Command::GoComputer
+        | Command::ToggleFavorite
+        | Command::ToggleFavBar
+        | Command::ToggleQuickPin => Group::Navigation,
+        Command::NewTab
+        | Command::CloseTab
+        | Command::ReopenTab
+        | Command::NextTab
+        | Command::PrevTab
+        | Command::NextGroup
+        | Command::PrevGroup
+        | Command::NextPane
+        | Command::PrevPane
+        | Command::FocusPane(_)
+        | Command::Layout(_)
+        | Command::Maximize
+        | Command::SaveGroup
+        | Command::ToggleGroupBar => Group::TabsPanes,
+        Command::SelectAll | Command::InvertSelection | Command::SelectPattern | Command::DeselectPattern => Group::Selection,
+        Command::Copy
+        | Command::Cut
+        | Command::Paste
+        | Command::CopyPaths
+        | Command::Undo
+        | Command::NewFolder
+        | Command::NewTextFile
+        | Command::NewFolderWithSelection
+        | Command::Recycle
+        | Command::Delete
+        | Command::Restore
+        | Command::CreateShortcut
+        | Command::ShowOriginal
+        | Command::Eject
+        | Command::Rename
+        | Command::RenameMany
+        | Command::Properties
+        | Command::Duplicate
+        | Command::Compress
+        | Command::ExtractHere
+        | Command::ExtractInto
+        | Command::ShowTransfers => Group::Files,
+        Command::View(_)
+        | Command::SortBy(_)
+        | Command::GroupBy(_)
+        | Command::ApplyViewToAll
+        | Command::ResetFolderView
+        | Command::ClearFilters
+        | Command::ToggleHidden
+        | Command::ToggleTree
+        | Command::ToggleTreePin
+        | Command::ToggleDarkMode => Group::Views,
+        Command::TogglePreview | Command::QuickLook => Group::Preview,
+        Command::Palette
+        | Command::PowerShell
+        | Command::Cmd
+        | Command::Xtree
+        | Command::OpenConfig
+        | Command::Settings
+        | Command::SettingsKeys
+        | Command::About => Group::Other,
+    }
+}
+
+/// Tabla de atajos para la wiki: por grupo, en el orden de `ALL`, solo lo que existe en `env`.
+pub fn markdown_table(env: &dyn SystemEnv) -> String {
+    let mut out = String::new();
+    for g in Group::ALL {
+        let specs: Vec<&Spec> = ALL.iter().filter(|s| group(s.command) == g && available_in(env, s.command)).collect();
+        if specs.is_empty() {
+            continue;
+        }
+        out += &format!("### {}\n\n| Acción | Atajo | Identificador |\n|---|---|---|\n", g.title());
+        for s in specs {
+            let keys: Vec<String> = s.keys_in(env).iter().filter_map(|k| parse_combo(k).ok()).map(|c| combo_label_in(env.key_style(), c)).collect();
+            out += &format!("| {} | {} | `{}` |\n", s.title_in(env), keys.join(", "), s.id);
+        }
+        out += "\n";
+    }
+    out
+}
 
 /// Tecla con modificadores.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -339,6 +466,63 @@ pub fn parse_combo(text: &str) -> Result<Combo, String> {
     Ok(combo)
 }
 
+/// Nombres de tecla como se escriben en `config.toml` (los de la plantilla), para las que no son
+/// una letra, un número ni F1..F24.
+const CONFIG_NAMES: &[(u16, &str)] = &[
+    (VK_TAB.0, "Tab"),
+    (VK_RETURN.0, "Enter"),
+    (VK_DELETE.0, "Supr"),
+    (VK_INSERT.0, "Insert"),
+    (VK_BACK.0, "Retroceso"),
+    (VK_ESCAPE.0, "Esc"),
+    (VK_SPACE.0, "Espacio"),
+    (VK_LEFT.0, "Izquierda"),
+    (VK_RIGHT.0, "Derecha"),
+    (VK_UP.0, "Arriba"),
+    (VK_DOWN.0, "Abajo"),
+    (VK_HOME.0, "Inicio"),
+    (VK_END.0, "Fin"),
+    (VK_PRIOR.0, "RePag"),
+    (VK_NEXT.0, "AvPag"),
+    (VK_BROWSER_BACK.0, "NavegadorAtras"),
+    (VK_BROWSER_FORWARD.0, "NavegadorAdelante"),
+    (0xBE, "Punto"),
+    (0xBC, "Coma"),
+    (0xDB, "["),
+    (0xDD, "]"),
+    (0xBB, "Más"),
+    (0xBD, "Menos"),
+    (0x6B, "MásNum"),
+    (0x6D, "MenosNum"),
+];
+
+/// ¿La tecla tiene nombre en `config.toml`? (las demás no se pueden escribir como atajo).
+pub fn nameable(vk: u16) -> bool {
+    CONFIG_NAMES.iter().any(|(k, _)| *k == vk)
+        || (VK_F1.0..VK_F1.0 + 24).contains(&vk)
+        || (b'A' as u16..=b'Z' as u16).contains(&vk)
+        || (b'0' as u16..=b'9' as u16).contains(&vk)
+}
+
+/// Combinación → texto de `config.toml` ("Meta+Ctrl+Shift+Alt+K", "Ctrl+Coma"): lo que
+/// `parse_combo` vuelve a leer igual.
+pub fn combo_text(c: Combo) -> String {
+    let mut s = String::new();
+    for (on, name) in [(c.meta, "Meta+"), (c.ctrl, "Ctrl+"), (c.shift, "Shift+"), (c.alt, "Alt+")] {
+        if on {
+            s.push_str(name);
+        }
+    }
+    if let Some((_, name)) = CONFIG_NAMES.iter().find(|(k, _)| *k == c.vk) {
+        s.push_str(name);
+    } else if (VK_F1.0..VK_F1.0 + 24).contains(&c.vk) {
+        s.push_str(&format!("F{}", c.vk - VK_F1.0 + 1));
+    } else {
+        s.push((c.vk as u8 as char).to_ascii_uppercase());
+    }
+    s
+}
+
 /// Combinación → texto para mostrar ("Ctrl+Shift+T", "Alt+←").
 pub fn combo_label(c: Combo) -> String {
     combo_label_in(env().key_style(), c)
@@ -415,6 +599,16 @@ impl Keymap {
         self.bindings.iter().find(|(k, _)| *k == combo).map(|(_, c)| *c)
     }
 
+    /// Los atajos de una acción, en orden (el primero es el principal).
+    pub fn combos(&self, command: Command) -> Vec<Combo> {
+        self.bindings.iter().filter(|(_, c)| *c == command).map(|(k, _)| *k).collect()
+    }
+
+    /// La acción que tiene esa combinación.
+    pub fn owner(&self, k: Combo) -> Option<Command> {
+        self.bindings.iter().find(|(b, _)| *b == k).map(|(_, c)| *c)
+    }
+
     /// Atajos de una acción, para mostrar en la paleta.
     pub fn label(&self, command: Command) -> String {
         let labels: Vec<String> = self.bindings.iter().filter(|(_, c)| *c == command).map(|(k, _)| combo_label(*k)).collect();
@@ -427,6 +621,58 @@ impl Keymap {
 mod tests {
     use super::*;
     use crate::sys::testing::install_fakes;
+
+    /// Todos los atajos de fábrica se escriben como `config.toml` y se vuelven a leer iguales.
+    #[test]
+    fn combo_text_roundtrip() {
+        install_fakes();
+        for spec in ALL {
+            for k in spec.default_keys {
+                let c = parse_combo(k).unwrap();
+                assert_eq!(parse_combo(&combo_text(c)), Ok(c), "{k} → {}", combo_text(c));
+            }
+        }
+        assert_eq!(combo_text(parse_combo("Ctrl+Coma").unwrap()), "Ctrl+Coma");
+        assert_eq!(combo_text(parse_combo("win+ctrl+n").unwrap()), "Meta+Ctrl+N");
+        assert_eq!(combo_text(parse_combo("alt+shift+ctrl+f12").unwrap()), "Ctrl+Shift+Alt+F12");
+        assert_eq!(combo_text(parse_combo("Ctrl+MásNum").unwrap()), "Ctrl+MásNum");
+        assert_eq!(combo_text(parse_combo("Ctrl+.").unwrap()), "Ctrl+Punto");
+        assert!(!nameable(0xBA) && nameable(b'K' as u16) && nameable(VK_F1.0 + 3));
+    }
+
+    /// Cada comando tiene grupo (el `match` no tiene `_`) y los de la wiki están donde van.
+    #[test]
+    fn every_command_has_group() {
+        assert_eq!(group(Command::Duplicate), Group::Files);
+        assert_eq!(group(Command::Eject), Group::Files);
+        for c in [Command::Settings, Command::SettingsKeys, Command::OpenConfig, Command::About] {
+            assert_eq!(group(c), Group::Other);
+        }
+        assert_eq!(Group::ALL.iter().map(|g| g.title()).collect::<Vec<_>>()[6], "Red");
+    }
+
+    #[test]
+    fn markdown_table_order() {
+        install_fakes();
+        let t = markdown_table(env());
+        let positions: Vec<usize> = Group::ALL.iter().filter_map(|g| t.find(&format!("### {}\n", g.title()))).collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{positions:?}");
+        assert!(t.contains("| Duplicar | Ctrl+D | `duplicar` |"));
+        assert!(t.contains("| Configuración | Ctrl+, | `configuracion` |"));
+        assert!(!t.contains("### Red"), "sin comandos de red todavía no hay grupo");
+    }
+
+    #[test]
+    fn keymap_combos_and_owner() {
+        install_fakes();
+        let mut km = Keymap::default();
+        let (k, f3) = (parse_combo("Ctrl+K").unwrap(), parse_combo("F3").unwrap());
+        km.set(Command::Duplicate, &[k, f3]);
+        assert_eq!(km.combos(Command::Duplicate), [k, f3]);
+        assert_eq!(km.owner(f3), Some(Command::Duplicate));
+        assert_eq!(km.owner(parse_combo("Ctrl+T").unwrap()), Some(Command::NewTab));
+        assert_eq!(km.owner(parse_combo("Ctrl+Alt+Shift+F24").unwrap()), None);
+    }
 
     #[test]
     fn combos_parse_and_print() {

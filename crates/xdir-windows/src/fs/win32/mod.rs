@@ -79,6 +79,8 @@ pub fn spawn_load(
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
             Location::Shell { parsing, .. } => list_shell(&mut out, parsing),
+            // La configuración no se carga (la dibuja el núcleo).
+            Location::Settings => out.send(LoadMsg::Listed(Ok(()))),
             // Dentro de un archivo comprimido lista el núcleo (`archive_nav`).
             Location::Archive { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
         }
@@ -674,7 +676,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } | Location::Archive { .. } => Vec::new(),
+        Location::Shell { .. } | Location::Settings | Location::Archive { .. } => Vec::new(),
     }
 }
 

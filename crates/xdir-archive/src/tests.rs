@@ -999,6 +999,13 @@ fn list_stops_at_max_and_honours_cancel() {
     assert_eq!(got.len(), 4);
     let err = xdir_core::sys::Archives::list(&svc(), &z, usize::MAX, &mut || Flow::Stop).unwrap_err();
     assert_eq!(err.kind, ErrKind::Cancelled);
+}
+
+/// Listar no lee el destino de un enlace guardado en el zip.
+#[cfg(unix)]
+#[test]
+fn list_does_not_read_link_targets() {
+    let t = Tmp::new();
     let l = t.p("enlace.zip");
     fs::write(&l, raw_zip(&[link_entry(b"l", b"destino")])).unwrap();
     let got = xdir_core::sys::Archives::list(&svc(), &l, usize::MAX, &mut || Flow::Continue).unwrap();

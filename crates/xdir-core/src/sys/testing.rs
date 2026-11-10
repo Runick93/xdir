@@ -1465,8 +1465,9 @@ impl WindowHost for FakeHost {
         self.answer.get()
     }
 
-    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No.
-    fn ask_yes_no(&self, _title: &str, _text: &str) -> bool {
+    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No. Se anota en `questions`.
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        self.questions.borrow_mut().push((title.to_string(), text.to_string()));
         self.answer.get() == Some(true)
     }
 

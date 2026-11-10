@@ -1,7 +1,20 @@
 //! Operaciones de archivos: portapapeles, borrar, arrastrar y soltar, menú contextual.
 
 use super::*;
+use crate::archive::{ArchiveFormat, extract_folder_name, format_of};
 use crate::transfer::JobSpec;
+
+/// Las entradas «Extraer aquí» y «Extraer en "nombre"» para un elemento (con el nombre real de la
+/// carpeta que se crearía), si es un archivo de un formato que este sistema sabe extraer.
+pub fn archive_menu(name: &str, is_dir: bool, formats: &[ArchiveFormat]) -> Vec<(String, Command)> {
+    if is_dir || !format_of(name).is_some_and(|f| formats.contains(&f)) {
+        return Vec::new();
+    }
+    vec![
+        ("Extraer aquí".to_string(), Command::ExtractHere),
+        (format!("Extraer en \"{}\"", extract_folder_name(name)), Command::ExtractInto),
+    ]
+}
 
 impl App {
     // ---------- operaciones de archivos ----------
@@ -75,6 +88,37 @@ impl App {
         let sources = self.selection(self.active);
         if !sources.is_empty() {
             self.start_transfer(JobSpec::Duplicate { sources });
+        }
+    }
+
+    /// El único seleccionado, si es un archivo que se sabe extraer: (ruta, nombre).
+    fn selected_archive(&self) -> Option<(PathBuf, String)> {
+        let tab = self.panes[self.active].tab();
+        if !matches!(tab.location, Location::Path(_)) || self.in_trash() {
+            return None;
+        }
+        let mut sel = tab.list.selected_indices();
+        let (Some(i), None) = (sel.next(), sel.next()) else { return None };
+        let e = &tab.list.entries[i];
+        let name = e.name.to_string_lossy().into_owned();
+        (!archive_menu(&name, e.is_dir, sys::archives().formats()).is_empty()).then(|| (tab.entry_path(i), name))
+    }
+
+    /// Comprimir: un zip con la selección en su carpeta (solo carpetas de disco, no la Papelera).
+    pub(super) fn compress_selection(&mut self) {
+        if !matches!(self.panes[self.active].tab().location, Location::Path(_)) || self.in_trash() {
+            return;
+        }
+        let sources = self.selection(self.active);
+        if !sources.is_empty() {
+            self.start_transfer(JobSpec::Compress { sources });
+        }
+    }
+
+    /// Extraer el archivo seleccionado: en su carpeta o en una nueva con su nombre.
+    pub(super) fn extract_selection(&mut self, into_folder: bool) {
+        if let Some((archive, _)) = self.selected_archive() {
+            self.start_transfer(JobSpec::Extract { archive, into_folder });
         }
     }
 
@@ -379,6 +423,15 @@ impl App {
         // Con dos o más: juntarlos en una carpeta nueva.
         if many && creates {
             entries.push(item("Carpeta nueva con la selección", Command::NewFolderWithSelection));
+        }
+        // Comprimir lo elegido; con un solo archivo comprimido, extraerlo (con el nombre real).
+        if creates && matches!(self.panes[self.active].tab().location, Location::Path(_)) {
+            entries.push(item("Comprimir", Command::Compress));
+            if let Some((_, name)) = self.selected_archive() {
+                for (label, c) in archive_menu(&name, false, sys::archives().formats()) {
+                    entries.push(item(&label, c));
+                }
+            }
         }
         entries.push(item("Copiar como ruta de acceso", Command::CopyPaths));
         // Con varios seleccionados en una carpeta del disco: Renombrar varios.

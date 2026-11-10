@@ -171,6 +171,9 @@ impl App {
             Command::Restore => self.restore_selection(),
             Command::CreateShortcut => self.create_shortcuts(),
             Command::ShowOriginal => self.show_original(),
+            Command::Compress => self.compress_selection(),
+            Command::ExtractHere => self.extract_selection(false),
+            Command::ExtractInto => self.extract_selection(true),
             Command::Eject => {
                 if let Some(root) = self.eject_target() {
                     self.eject(root);

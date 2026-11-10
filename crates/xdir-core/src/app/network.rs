@@ -1164,7 +1164,12 @@ impl App {
 
     /// La conexión que contiene `p` (la de ruta local más larga).
     pub(super) fn network_root(&self, p: &Path) -> Option<&NetConnection> {
-        self.net.connections.iter().filter(|c| c.connected && !c.local.as_os_str().is_empty() && p.starts_with(&c.local)).max_by_key(|c| c.local.as_os_str().len())
+        // Sin distinguir mayúsculas: en Windows `\\NAS\fotos` y `\\nas\fotos` son la misma.
+        self.net
+            .connections
+            .iter()
+            .filter(|c| c.connected && !c.local.as_os_str().is_empty() && crate::sys::starts_with_folded(p, &c.local))
+            .max_by_key(|c| c.local.as_os_str().len())
     }
 
     /// El nombre del servidor de una ruta de red: el de su conexión si se sabe, si no el de la

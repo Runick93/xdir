@@ -97,7 +97,7 @@ impl App {
                 Location::Computer => (0..tab.list.entries.len())
                     .filter(|&k| {
                         let p = tab.entry_path(k);
-                        self.ejectable.contains(&p) || self.net.connections.iter().any(|c| c.connected && c.local == p)
+                        self.ejectable.contains(&p) || self.net.connections.iter().any(|c| c.connected && crate::sys::same_path_folded(&c.local, &p))
                     })
                     .collect(),
                 _ => Vec::new(),

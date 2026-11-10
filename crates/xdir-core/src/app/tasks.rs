@@ -143,7 +143,7 @@ impl App {
         match &tab.location {
             Location::Computer => {
                 let idx = tab.list.selected_indices().next().or_else(|| tab.list.focused_index())?;
-                Some(tab.entry_path(idx)).filter(|p| self.ejectable.contains(p) || self.network_root(p).is_some_and(|c| &c.local == p))
+                Some(tab.entry_path(idx)).filter(|p| self.ejectable.contains(p) || self.network_root(p).is_some_and(|c| crate::sys::same_path_folded(&c.local, p)))
             }
             Location::Path(p) => {
                 let disk = self.ejectable.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned();

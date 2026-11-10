@@ -1470,3 +1470,13 @@ fn tree_network_nodes_recycled() {
     }
     assert!(a.tree.node_count() < base + 20, "{} nodos", a.tree.node_count());
 }
+
+/// M14: la conexión de una ruta se reconoce sin distinguir mayúsculas (`\\NAS\fotos` y
+/// `\\nas\fotos` son la misma).
+#[test]
+fn network_root_ignores_case() {
+    let mut a = net_app();
+    a.net.connections = vec![conn("smb://nas-r1m14/fotos", "/net-R1M14/Fotos")];
+    assert!(a.network_root(Path::new("/net-r1m14/fotos/a")).is_some());
+    assert!(a.network_root(Path::new("/net-r1m14/otra")).is_none());
+}

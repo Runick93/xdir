@@ -496,3 +496,18 @@ fn quick_look_follows_sort_change() {
     press(&mut a, VK_LEFT);
     assert_eq!(last_shown(&host).0, "b.txt");
 }
+
+/// Abrir xtree (pantalla completa) cierra la vista rápida: quedaría encima de la vista.
+#[test]
+fn xtree_closes_quick_look() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let d = fixture("xtree-cierra", &["a.txt", "b.txt"]);
+    go(&mut a, &d);
+    select(&mut a, "a.txt");
+    assert!(press(&mut a, VK_SPACE));
+    assert!(a.quick_look.is_some());
+    a.toggle_xtree();
+    assert!(a.quick_look.is_none());
+    assert_eq!(host.quick_look_closes(), 1);
+}

@@ -13,7 +13,7 @@ pub(super) enum TaskDone {
     /// El original de un acceso directo (`None`: no se resolvió o ya no existe).
     Original { pane: usize, link: PathBuf, target: Option<PathBuf> },
     /// Los discos que se pueden expulsar.
-    Ejectable(Vec<PathBuf>),
+    Ejectable(Vec<PathBuf>, Vec<(PathBuf, std::ffi::OsString)>),
     /// Terminó de expulsar `root` (`label`: su nombre para los avisos).
     Ejected { root: PathBuf, label: String, result: Result<(), crate::shell::EjectError> },
     /// Terminó Renombrar varios en la carpeta `dir`; si era un deshacer, `undoing` trae los pares
@@ -60,30 +60,39 @@ impl App {
                     None => self.notice = Some(format!("No se encuentra el original de \"{name}\"")),
                 }
             }
-            TaskDone::Ejectable(roots) => {
+            TaskDone::Ejectable(roots, ids) => {
                 self.ejectable = roots.into_iter().collect();
+                self.remember_volume_ids(ids);
                 #[cfg(feature = "arbol")]
                 {
                     self.tree.ejectable = self.ejectable.clone();
                 }
             }
-            TaskDone::Ejected { root, label, result } => match result {
-                Ok(()) => {
-                    self.notice = Some(format!("Se puede quitar \"{label}\" con seguridad"));
-                    self.ejectable.remove(&root);
+            TaskDone::Ejected { root, label, result } => {
+                self.eject_done(&root);
+                self.on_ejected(root, label, result);
+            }
+        }
+    }
+
+    /// Terminó de expulsar: el aviso, o la pregunta de reintentar si alguien lo está usando.
+    fn on_ejected(&mut self, root: PathBuf, label: String, result: Result<(), crate::shell::EjectError>) {
+        match result {
+            Ok(()) => {
+                self.notice = Some(format!("Se puede quitar \"{label}\" con seguridad"));
+                self.ejectable.remove(&root);
+            }
+            Err(e) => {
+                let who = e.busy_by.clone().unwrap_or_else(|| "otro programa".to_string());
+                let text = if e.busy || e.busy_by.is_some() {
+                    format!("No se pudo expulsar \"{label}\": lo está usando {who}. ¿Reintentar?")
+                } else {
+                    format!("No se pudo expulsar \"{label}\": {}. ¿Reintentar?", e.message)
+                };
+                if self.host.ask_yes_no_cancel("Expulsar", &text) == Some(true) {
+                    self.eject(root);
                 }
-                Err(e) => {
-                    let who = e.busy_by.clone().unwrap_or_else(|| "otro programa".to_string());
-                    let text = if e.busy || e.busy_by.is_some() {
-                        format!("No se pudo expulsar \"{label}\": lo está usando {who}. ¿Reintentar?")
-                    } else {
-                        format!("No se pudo expulsar \"{label}\": {}. ¿Reintentar?", e.message)
-                    };
-                    if self.host.ask_yes_no_cancel("Expulsar", &text) == Some(true) {
-                        self.eject(root);
-                    }
-                }
-            },
+            }
         }
     }
 
@@ -91,7 +100,12 @@ impl App {
     /// las unidades).
     pub(super) fn request_ejectable(&self) {
         let roots = sys::file_system().drives();
-        self.spawn_task(move || TaskDone::Ejectable(sys::shell().ejectable(&roots)));
+        self.spawn_task(move || {
+            let roots = sys::shell().ejectable(&roots);
+            // La identidad de cada uno (para reconocer sus trabajos por otro camino al expulsar).
+            let ids = roots.iter().filter_map(|r| sys::copy_prims().volume(r).map(|v| (r.clone(), v.id))).collect();
+            TaskDone::Ejectable(roots, ids)
+        });
     }
 
     /// El disco expulsable del que se habla: el enfocado (o seleccionado) en «Este equipo», o el

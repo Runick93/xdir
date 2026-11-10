@@ -60,9 +60,13 @@ pub(super) struct Transfers {
     /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco; varios
     /// pedidos esperan cada uno los suyos.
     pending_eject: Vec<PendingEject>,
-    /// Los discos (identidad y nombre) que se están por expulsar: los lee el hilo de cada trabajo
-    /// nuevo para no empezar sobre ellos.
-    ejecting: Arc<Mutex<Vec<(OsString, String)>>>,
+    /// Los discos que se están expulsando (desde que se pide hasta que termina, en otro hilo):
+    /// raíz, identidad (si se sabe) y nombre. Los lee la interfaz y el hilo de cada trabajo nuevo
+    /// para no empezar sobre ellos.
+    ejecting: Arc<Mutex<Vec<Ejecting>>>,
+    /// Identidad de cada disco expulsable (la calcula en su hilo la tarea que los lista): así la
+    /// interfaz nunca mira el disco.
+    root_ids: HashMap<PathBuf, OsString>,
     window: CopyWindow,
     /// Lo que se lanzó (pruebas).
     #[cfg(test)]
@@ -88,12 +92,17 @@ struct CopyWindow {
 /// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
 pub type AfterJobs = Box<dyn FnOnce(&mut App)>;
 
-/// Un «Expulsar» que espera a que terminen (y limpien) los trabajos sobre el disco: mientras
-/// tanto no empiezan otros que lo usen.
-struct PendingEject {
+/// Un disco que se está expulsando (desde que se pide hasta que termina): no empiezan trabajos
+/// que lo usen.
+#[derive(Clone)]
+struct Ejecting {
     root: PathBuf,
     volume: Option<OsString>,
     label: String,
+}
+
+/// Un «Expulsar» que espera a que terminen (y limpien) los trabajos sobre el disco.
+struct PendingEject {
     jobs: Vec<JobId>,
     then: AfterJobs,
 }
@@ -112,6 +121,7 @@ impl Transfers {
             auto_skip: Arc::new(AtomicBool::new(true)),
             pending_eject: Vec::new(),
             ejecting: Arc::new(Mutex::new(Vec::new())),
+            root_ids: HashMap::new(),
             window: CopyWindow::default(),
             #[cfg(test)]
             started: Vec::new(),
@@ -195,12 +205,6 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
     }
 }
 
-/// La identidad del disco de `root` (lo que se quiere expulsar). Es un `statfs` de la raíz de un
-/// disco montado: lo único de disco que hace la interfaz acá, al pedir expulsar.
-fn root_volume(root: &Path) -> Option<OsString> {
-    sys::copy_prims().volume(root).map(|v| v.id)
-}
-
 /// Discos que toca un trabajo (lee el disco: corre en el hilo del trabajo).
 fn volumes(prims: &dyn CopyPrims, paths: &[PathBuf]) -> Vec<OsString> {
     let mut out: Vec<OsString> = Vec::new();
@@ -271,7 +275,8 @@ impl App {
         #[cfg(test)]
         self.transfers.started.push(spec.clone());
         let paths = spec_paths(&spec);
-        if let Some(e) = self.transfers.pending_eject.iter().find(|e| paths.iter().any(|p| p.starts_with(&e.root))) {
+        let busy = self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|e| paths.iter().any(|p| p.starts_with(&e.root))).cloned();
+        if let Some(e) = busy {
             self.notice = Some(format!("Se está expulsando \"{}\"", e.label));
             self.redraw();
             return 0;
@@ -315,7 +320,12 @@ impl App {
             let vols = volumes(prims, &paths);
             send(Update::Volumes(vols.clone()));
             // Un disco que se está por expulsar (también por otro camino): no empieza.
-            let busy = ejecting.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(v, _)| vols.contains(v)).map(|(_, l)| l.clone());
+            let busy = ejecting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find(|e| e.volume.as_ref().is_some_and(|v| vols.contains(v)))
+                .map(|e| e.label.clone());
             if let Some(label) = busy {
                 send(Update::Finished(JobOutcome { stopped: Some(format!("Se está expulsando \"{label}\"")), ..Default::default() }));
                 return;
@@ -727,10 +737,6 @@ impl App {
             .into_iter()
             .partition(|e| !e.jobs.iter().any(|id| self.transfers.jobs.iter().any(|j| j.id == *id && j.state != JobState::Done)));
         self.transfers.pending_eject = waiting;
-        if !ready.is_empty() {
-            let still: Vec<Option<OsString>> = self.transfers.pending_eject.iter().map(|e| e.volume.clone()).collect();
-            self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).retain(|(v, _)| still.contains(&Some(v.clone())));
-        }
         for e in ready {
             (e.then)(self);
         }
@@ -850,7 +856,7 @@ impl App {
 
     /// Trabajos sin terminar que tocan algo dentro de `root` (un disco que se quiere expulsar).
     pub fn jobs_on_volume(&self, root: &Path) -> Vec<JobId> {
-        let id = root_volume(root);
+        let id = self.root_volume(root);
         self.transfers
             .jobs
             .iter()
@@ -864,6 +870,22 @@ impl App {
             .collect()
     }
 
+    /// La identidad del disco de `root`, de lo que dejó la tarea que lista los expulsables (sin
+    /// mirar el disco desde la interfaz). `None` si no se sabe: se compara solo por la ruta.
+    fn root_volume(&self, root: &Path) -> Option<OsString> {
+        self.transfers.root_ids.get(root).cloned()
+    }
+
+    /// Las identidades de los discos expulsables (las calcula la tarea que los lista, en su hilo).
+    pub(super) fn remember_volume_ids(&mut self, ids: Vec<(PathBuf, OsString)>) {
+        self.transfers.root_ids = ids.into_iter().collect();
+    }
+
+    /// Terminó de expulsar `root` (bien o mal): ya pueden empezar copias sobre él.
+    pub(super) fn eject_done(&mut self, root: &Path) {
+        self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| e.root != root);
+    }
+
     /// Antes de expulsar `root`: si hay trabajos sobre él, pregunta si se cancelan y, si sí, los
     /// cancela y espera que terminen (cancelar borra lo a medio copiar, en el disco) antes de
     /// seguir con `then` (soltar el disco). Sin trabajos, sigue enseguida. Nunca bloquea: `then`
@@ -871,7 +893,10 @@ impl App {
     /// expulsa (dijo que no).
     pub fn eject_after_jobs(&mut self, root: &Path, label: &str, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
+        let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string() };
         if ids.is_empty() {
+            // Hasta que termine de expulsar (`eject_done`) no empiezan copias sobre el disco.
+            self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push(ejecting);
             then(self);
             return true;
         }
@@ -884,11 +909,8 @@ impl App {
                 c.cancel();
             }
         }
-        let volume = root_volume(root);
-        if let Some(v) = &volume {
-            self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push((v.clone(), label.to_string()));
-        }
-        self.transfers.pending_eject.push(PendingEject { root: root.to_path_buf(), volume, label: label.to_string(), jobs: ids, then });
+        self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push(ejecting);
+        self.transfers.pending_eject.push(PendingEject { jobs: ids, then });
         true
     }
 }

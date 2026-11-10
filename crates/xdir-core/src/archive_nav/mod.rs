@@ -150,7 +150,12 @@ pub fn is_navigable_archive(name: &str) -> bool {
 /// ¿Ese error de listar se arregla abriéndolo con el sistema? (contraseña, formato que no se
 /// sabe leer o archivo dañado).
 pub fn offers_system(err: &str) -> bool {
-    err == sys::PASSWORD || err == sys::UNSUPPORTED || err.contains("dañado")
+    [sys::PASSWORD, sys::UNSUPPORTED, sys::DAMAGED_ZIP, sys::DAMAGED].contains(&err)
+}
+
+/// Aviso cuando el archivo tiene más entradas que las que se listan.
+pub fn capped_notice() -> String {
+    format!("Se muestran los primeros {} elementos", crate::format::thousands(MAX_ENTRIES as u64))
 }
 
 /// La fila de la lista de un elemento de adentro.
@@ -190,8 +195,11 @@ pub fn entry_of(c: &Child) -> Entry {
 type Listing = (PathBuf, (u64, u64), Arc<Vec<ArchiveEntry>>);
 static LISTINGS: Mutex<Vec<Listing>> = Mutex::new(Vec::new());
 const LISTINGS_KEPT: usize = 4;
+/// Entradas guardadas entre todos los listados de la caché (el más reciente siempre queda).
+const LISTINGS_MAX_ENTRIES: usize = 2 * MAX_ENTRIES;
 
-/// Las entradas del archivo `real` (del disco o una extracción temporal), con la caché.
+/// Las entradas del archivo `real` (del disco o una extracción temporal), con la caché: como
+/// mucho `MAX_ENTRIES + 1` (si trae una de más, el archivo tiene más de las que se muestran).
 pub fn list_cached(real: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Arc<Vec<ArchiveEntry>>, CopyError> {
     let stat = sys::copy_prims().stat(real)?;
     let stamp = (stat.size, stat.modified);
@@ -201,11 +209,14 @@ pub fn list_cached(real: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Arc<
             return Ok(list.clone());
         }
     }
-    let list = Arc::new(sys::archives().list(real, cancel)?);
+    let list = Arc::new(sys::archives().list(real, MAX_ENTRIES, cancel)?);
     let mut cache = LISTINGS.lock().unwrap_or_else(|e| e.into_inner());
     cache.retain(|(p, _, _)| p != real);
     cache.insert(0, (real.to_path_buf(), stamp, list.clone()));
     cache.truncate(LISTINGS_KEPT);
+    while cache.len() > 1 && cache.iter().map(|c| c.2.len()).sum::<usize>() > LISTINGS_MAX_ENTRIES {
+        cache.pop();
+    }
     Ok(list)
 }
 
@@ -224,9 +235,12 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
             return send(LoadMsg::Listed(Err("Esta ubicación no existe".into())));
         };
         match read(file, nested, inner, &|| current.load(Ordering::Relaxed) != generation) {
-            Ok(rows) => {
+            Ok((rows, capped)) => {
                 if current.load(Ordering::Relaxed) != generation {
                     return;
+                }
+                if capped {
+                    send(LoadMsg::Notice(capped_notice()));
                 }
                 // Los buenos llevan su ruta temporal (de ahí salen miniaturas, vista previa y vista
                 // rápida); los de nombre no permitido no tienen ninguna ruta del disco.
@@ -250,7 +264,8 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
 }
 
 /// Resuelve el archivo (con sus anidados), lo lista y arma la carpeta `inner`.
-fn read(file: &Path, nested: &[String], inner: &str, cancelled: &dyn Fn() -> bool) -> Result<Vec<Child>, CopyError> {
+/// Devuelve también si se cortó en `MAX_ENTRIES`.
+fn read(file: &Path, nested: &[String], inner: &str, cancelled: &dyn Fn() -> bool) -> Result<(Vec<Child>, bool), CopyError> {
     let real = temps::global().resolve(file, nested)?;
     let entries = list_cached(&real, &mut || if cancelled() { Flow::Stop } else { Flow::Continue })?;
     if entries.iter().any(|e| e.encrypted) {
@@ -259,5 +274,5 @@ fn read(file: &Path, nested: &[String], inner: &str, cancelled: &dyn Fn() -> boo
     if !folder_exists(&entries, inner) {
         return Err(CopyError::new(sys::ErrKind::Other(NO_FOLDER.into()), &real));
     }
-    Ok(children(&entries, inner))
+    Ok((children(&entries, inner), entries.len() > MAX_ENTRIES))
 }

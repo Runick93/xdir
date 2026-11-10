@@ -34,7 +34,7 @@ fn bad(e: std::io::Error, path: &Path) -> Error {
         std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
             if e.get_ref().is_none_or(|i| !i.is::<crate::Cancelled>()) =>
         {
-            other("El archivo está dañado", path)
+            other(xdir_core::sys::DAMAGED, path)
         }
         _ => io_err(e, path),
     }
@@ -46,10 +46,13 @@ fn link_of<R: std::io::Read>(e: &tar::Entry<'_, R>) -> Option<String> {
     (l.len() as u64 <= MAX_LINK).then_some(l)
 }
 
-pub fn list(path: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+pub fn list(path: &Path, max: usize, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
     let mut a = open(path, cancel)?;
     let mut out = Vec::new();
     for e in a.entries().map_err(|e| bad(e, path))? {
+        if out.len() > max {
+            break;
+        }
         let e = e.map_err(|e| bad(e, path))?;
         let kind = kind_of_type(e.header().entry_type());
         let name = e.path().map_err(|e| bad(e, path))?.to_string_lossy().into_owned();

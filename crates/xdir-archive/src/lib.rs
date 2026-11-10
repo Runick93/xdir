@@ -126,9 +126,14 @@ impl Service {
     /// Como `list`, pero consulta `cancel` mientras lee (un tar.gz grande se descomprime entero
     /// para listarlo); `Stop` da `ErrKind::Cancelled`.
     pub fn list_cancellable(&self, archive: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+        self.list_limited(archive, usize::MAX, true, cancel)
+    }
+
+    /// Como mucho `max + 1` entradas; `read_links`: leer el destino de los enlaces de un zip.
+    fn list_limited(&self, archive: &Path, max: usize, read_links: bool, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
         match self.format(archive)? {
-            ArchiveFormat::Zip => zip::list(archive, self.utc_offset),
-            ArchiveFormat::TarGz => targz::list(archive, cancel),
+            ArchiveFormat::Zip => zip::list(archive, self.utc_offset, zip::ListOpts { max, read_links, cancel }),
+            ArchiveFormat::TarGz => targz::list(archive, max, cancel),
         }
     }
 
@@ -330,7 +335,7 @@ fn copy_limited(
         }
         done += n as u64;
         if done > declared {
-            return Err(other("El archivo está dañado", path));
+            return Err(other(xdir_core::sys::DAMAGED, path));
         }
         w.write_all(&buf[..n]).map_err(|e| io_err(e, path))?;
         if progress(done) == Flow::Stop {
@@ -452,8 +457,8 @@ impl Archives for Service {
         Service::formats(self)
     }
 
-    fn list(&self, archive: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
-        self.list_cancellable(archive, cancel)
+    fn list(&self, archive: &Path, max: usize, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+        self.list_limited(archive, max, false, cancel)
     }
 
     fn extract_all(

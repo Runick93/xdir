@@ -288,6 +288,9 @@ pub enum LoadMsg {
     Metadata(Vec<(usize, Meta)>),
     /// Avance de una búsqueda: elementos revisados y fracción estimada del recorrido (0 a 1).
     Progress { scanned: u64, done: f32 },
+    /// Un aviso de la carga para la barra de estado («Se muestran los primeros 100.000
+    /// elementos»).
+    Notice(String),
 }
 
 pub struct LoadEvent {

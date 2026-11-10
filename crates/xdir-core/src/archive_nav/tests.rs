@@ -144,3 +144,13 @@ fn nested_chain_resolves() {
     assert_ne!(t.dir_for(&outer, &[]), t.dir_for(&outer, &["dir/adentro.zip".to_string()]));
     t.clean_own();
 }
+
+/// Solo los errores conocidos ofrecen abrir con el sistema (no un texto que diga «dañado»).
+#[test]
+fn offers_system_only_known_errors() {
+    for e in [crate::sys::PASSWORD, crate::sys::UNSUPPORTED, crate::sys::DAMAGED_ZIP, crate::sys::DAMAGED] {
+        assert!(offers_system(e), "{e}");
+    }
+    assert!(!offers_system("Error de E/S: el sector está dañado"));
+    assert!(!offers_system("Ya no existe"));
+}

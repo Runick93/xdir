@@ -10,7 +10,7 @@ use ::zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 use crate::{
     ArchiveEntry, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other, resolve_rel, stored_name, write_entry,
 };
-use xdir_core::sys::{PASSWORD, UNSUPPORTED};
+use xdir_core::sys::{DAMAGED_ZIP, PASSWORD, UNSUPPORTED};
 
 /// Desde acá la entrada se marca zip64.
 const ZIP64_AT: u64 = 0xF000_0000;
@@ -22,7 +22,7 @@ pub(crate) fn map_zip_ref(e: &ZipError, path: &Path) -> Error {
         ZipError::CompressionMethodNotSupported(_) | ZipError::UnsupportedArchive(_) => {
             other(UNSUPPORTED, path)
         }
-        _ => other("El zip está dañado", path),
+        _ => other(DAMAGED_ZIP, path),
     }
 }
 
@@ -34,7 +34,7 @@ fn map_zip(e: ZipError, path: &Path) -> Error {
         ZipError::CompressionMethodNotSupported(_) | ZipError::UnsupportedArchive(_) => {
             other(UNSUPPORTED, path)
         }
-        _ => other("El zip está dañado", path),
+        _ => other(DAMAGED_ZIP, path),
     }
 }
 
@@ -107,15 +107,27 @@ fn kind_of_file(f: &::zip::read::ZipFile<'_, BufReader<File>>) -> ItemKind {
     }
 }
 
-fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path, utc_offset: fn(i64) -> i64) -> Result<Vec<ArchiveEntry>, Error> {
-    let mut out = Vec::with_capacity(a.len());
-    for i in 0..a.len() {
+/// Opciones de `list_open`: cuántas entradas como mucho (más una), si se leen los destinos de
+/// los enlaces y qué consultar para cancelar.
+pub(crate) struct ListOpts<'a> {
+    pub max: usize,
+    pub read_links: bool,
+    pub cancel: &'a mut dyn FnMut() -> Flow,
+}
+
+fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path, utc_offset: fn(i64) -> i64, opts: ListOpts) -> Result<Vec<ArchiveEntry>, Error> {
+    let n = a.len().min(opts.max.saturating_add(1));
+    let mut out = Vec::with_capacity(n.min(4096));
+    for i in 0..n {
+        if (opts.cancel)() == Flow::Stop {
+            return Err(cancelled(path));
+        }
         // `by_index_raw` no descifra: así las entradas con contraseña también se listan.
         let (name, kind, size, modified, readable_link, packed, encrypted) = {
             let f = a.by_index_raw(i).map_err(|e| map_zip(e, path))?;
             let kind = kind_of_file(&f);
             let name = f.name().map_err(|e| map_zip(e, path))?.into_owned();
-            let ok = kind == ItemKind::Symlink && !f.encrypted() && f.size() <= MAX_LINK;
+            let ok = opts.read_links && kind == ItemKind::Symlink && !f.encrypted() && f.size() <= MAX_LINK;
             (name, kind, f.size(), epoch_of(f.last_modified(), utc_offset), ok, f.compressed_size(), f.encrypted())
         };
         let link = if readable_link {
@@ -129,9 +141,9 @@ fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path, utc_offset: fn(i6
     Ok(out)
 }
 
-pub fn list(path: &Path, utc_offset: fn(i64) -> i64) -> Result<Vec<ArchiveEntry>, Error> {
+pub fn list(path: &Path, utc_offset: fn(i64) -> i64, opts: ListOpts) -> Result<Vec<ArchiveEntry>, Error> {
     let mut a = open(path)?;
-    list_open(&mut a, path, utc_offset)
+    list_open(&mut a, path, utc_offset, opts)
 }
 
 /// Extrae la entrada `index` de un zip ya abierto; devuelve los bytes escritos.
@@ -184,7 +196,7 @@ pub fn extract_all(
 ) -> Result<usize, Error> {
     let mut a = open(archive)?;
     // La hora no se usa al extraer.
-    let entries = list_open(&mut a, archive, |_| 0)?;
+    let entries = list_open(&mut a, archive, |_| 0, ListOpts { max: usize::MAX, read_links: false, cancel: &mut || Flow::Continue })?;
     let sh = Shared::new(progress);
     let mut base = 0u64;
     let mut omitted = 0usize;

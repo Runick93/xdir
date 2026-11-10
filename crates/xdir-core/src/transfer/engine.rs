@@ -1626,7 +1626,7 @@ impl<'a> Job<'a> {
         let Some(dir) = archive.parent().map(Path::to_path_buf) else { return };
         let archives = self.archives;
         let ctl = self.ctl;
-        let entries = match archives.list(archive, &mut || ctl.checkpoint()) {
+        let entries = match archives.list(archive, usize::MAX, &mut || ctl.checkpoint()) {
             Ok(v) => v,
             Err(e) if e.kind == ErrKind::Cancelled => {
                 self.cancelled = true;
@@ -1731,7 +1731,7 @@ impl<'a> Job<'a> {
         let t = title(&JobSpec::ExtractEntries { archive: archive.to_path_buf(), entries: entries.to_vec(), dest: dest.to_path_buf() }, entries.len() as u64);
         let archives = self.archives;
         let ctl = self.ctl;
-        let list = match archives.list(archive, &mut || ctl.checkpoint()) {
+        let list = match archives.list(archive, usize::MAX, &mut || ctl.checkpoint()) {
             Ok(v) => v,
             Err(e) if e.kind == ErrKind::Cancelled => {
                 self.cancelled = true;

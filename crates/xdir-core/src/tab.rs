@@ -59,6 +59,8 @@ pub struct Tab {
     pub visited: Option<PathBuf>,
     /// Mientras hay una búsqueda, la lista muestra sus resultados en vez de la carpeta.
     pub search: Option<Search>,
+    /// Aviso de la última carga (un archivo comprimido con más entradas de las que se listan).
+    pub load_notice: Option<String>,
     /// Vista de la carpeta que tiene la lista: su clave y cómo era al aplicarla o al guardarla
     /// por última vez (`None`: falta aplicar la de la ubicación actual, ver `sync_view`).
     view_applied: Option<(String, ViewSettings)>,
@@ -152,6 +154,7 @@ impl Tab {
             auth_nav: 0,
             visited: None,
             search: None,
+            load_notice: None,
             view_applied: None,
             left_view: None,
         }
@@ -454,6 +457,7 @@ impl Tab {
         // Quien navega la vuelve a marcar como visita después; una recarga no cuenta.
         self.counts_as_visit = false;
         self.list.clear();
+        self.load_notice = None;
         // Solo las carpetas de disco tienen de dónde leer metadatos.
         self.list.meta_enabled = matches!(self.location, Location::Path(_));
         self.loading = true;
@@ -497,6 +501,7 @@ impl Tab {
                 }
                 None => self.list.append(batch),
             },
+            LoadMsg::Notice(text) => self.load_notice = Some(text),
             LoadMsg::Progress { scanned, done } => {
                 if let Some(s) = &mut self.search {
                     s.scanned = scanned;
@@ -743,6 +748,9 @@ impl Tab {
         if self.loading {
             s.push_str("   ·   cargando…");
         }
+        if let Some(n) = &self.load_notice {
+            s = format!("{n}   ·   {s}");
+        }
         if count > 0 {
             s.push_str("   ·   ");
             s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
@@ -896,6 +904,23 @@ mod tests {
         tab.go_up(Handle(0), &tx);
         assert_eq!(tab.location, Location::Path(dir.clone()));
         assert_eq!(tab.focus_after_load, Some("fotos.zip".into()));
+    }
+
+    /// Más entradas que el tope: se listan las primeras y la barra de estado lo dice.
+    #[test]
+    fn archive_cap_shows_notice() {
+        install_fakes();
+        let dir = std::env::temp_dir().join(format!("xdir-tab-zip-tope-{}", std::process::id()));
+        let zip = dir.join("muchos.zip");
+        let names: Vec<String> = (0..crate::archive_nav::MAX_ENTRIES + 3).map(|i| format!("f{i}")).collect();
+        let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b""[..])).collect();
+        crate::sys::testing::FakeArchives::shared().add_archive(&zip, &entries, 9);
+        let (tx, rx) = channel();
+        let mut tab = Tab::new(6, Location::Archive { file: zip, nested: vec![], inner: String::new() }, false);
+        tab.set_visible(Handle(0), &tx, true);
+        pump(&mut tab, &rx);
+        assert_eq!(tab.list.entries.len(), crate::archive_nav::MAX_ENTRIES);
+        assert!(tab.status().starts_with("Se muestran los primeros 100.000 elementos"), "{}", tab.status());
     }
 
     /// Una carpeta interior que ya no está, o un zip con contraseña: error de la carga.

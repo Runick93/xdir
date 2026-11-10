@@ -119,7 +119,7 @@ impl FakeArchives {
             return Err(CopyError::new(ErrKind::Other(UNSUPPORTED.into()), archive));
         }
         let id = self.disk.stat(archive)?.file_id.unwrap_or_default();
-        self.st().archives.get(&id).cloned().ok_or_else(|| CopyError::new(ErrKind::Other("El zip está dañado".into()), archive))
+        self.st().archives.get(&id).cloned().ok_or_else(|| CopyError::new(ErrKind::Other(crate::sys::DAMAGED_ZIP.into()), archive))
     }
 
     /// Adónde lleva el enlace `link` siguiendo los enlaces del disco falso (`None`: un ciclo).
@@ -173,11 +173,15 @@ impl Archives for FakeArchives {
         self.formats
     }
 
-    fn list(&self, archive: &Path, _cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError> {
+    fn list(&self, archive: &Path, max: usize, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError> {
         let encrypted = self.st().password.iter().any(|p| p == archive);
+        if cancel() == Flow::Stop {
+            return Err(CopyError::new(ErrKind::Cancelled, archive));
+        }
         Ok(self
             .entries(archive)?
             .into_iter()
+            .take(max.saturating_add(1))
             .enumerate()
             .map(|(index, e)| {
                 let size = e.size.unwrap_or(e.data.len() as u64);

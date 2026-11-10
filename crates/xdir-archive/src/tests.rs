@@ -985,3 +985,35 @@ fn extract_some_only_wanted_targz() {
     xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &want, &mut |_| Flow::Continue, &mut |_, _| {}).unwrap();
     assert_eq!(tree(&dst), [("d/".to_string(), None), ("d/b.txt".to_string(), Some(b"chau".to_vec()))]);
 }
+
+/// Listar para navegar corta en `max` (trae uno más para saber que se cortó), consulta `cancel`
+/// también en un zip y no lee el destino de los enlaces.
+#[test]
+fn list_stops_at_max_and_honours_cancel() {
+    let t = Tmp::new();
+    let z = t.p("muchos.zip");
+    let names: Vec<String> = (0..10).map(|i| format!("f{i}.txt")).collect();
+    let raws: Vec<Raw> = names.iter().map(|n| raw(n.as_bytes(), b"x")).collect();
+    fs::write(&z, raw_zip(&raws)).unwrap();
+    let got = xdir_core::sys::Archives::list(&svc(), &z, 3, &mut || Flow::Continue).unwrap();
+    assert_eq!(got.len(), 4);
+    let err = xdir_core::sys::Archives::list(&svc(), &z, usize::MAX, &mut || Flow::Stop).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
+    let l = t.p("enlace.zip");
+    fs::write(&l, raw_zip(&[link_entry(b"l", b"destino")])).unwrap();
+    let got = xdir_core::sys::Archives::list(&svc(), &l, usize::MAX, &mut || Flow::Continue).unwrap();
+    assert_eq!((got[0].kind, got[0].link.clone()), (ItemKind::Symlink, None));
+}
+
+#[cfg(unix)]
+#[test]
+fn targz_list_stops_at_max() {
+    let t = Tmp::new();
+    let z = t.p("m.tar.gz");
+    tar_gz(&z, |b| {
+        for i in 0..10 {
+            tar_entry(b, format!("f{i}").as_bytes(), tar::EntryType::Regular, None, b"x");
+        }
+    });
+    assert_eq!(xdir_core::sys::Archives::list(&svc(), &z, 3, &mut || Flow::Continue).unwrap().len(), 4);
+}

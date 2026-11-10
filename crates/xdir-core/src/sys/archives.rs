@@ -11,15 +11,21 @@ use crate::archive::{ArchiveEntry, ArchiveFormat};
 pub const PASSWORD: &str = "Este zip tiene contraseña";
 /// Texto del error de un formato o método que no se sabe leer.
 pub const UNSUPPORTED: &str = "Formato no soportado";
+/// Texto del error de un zip que no se puede leer.
+pub const DAMAGED_ZIP: &str = "El zip está dañado";
+/// Texto del error de un archivo (tar.gz) que no se puede leer, o que escribe más de lo que declara.
+pub const DAMAGED: &str = "El archivo está dañado";
 /// Texto del error de una entrada que saldría de la carpeta (o un enlace que apunta afuera).
 pub const NOT_ALLOWED: &str = "Ruta no permitida dentro del archivo";
 
 pub trait Archives: Send + Sync {
     /// Los formatos que este sistema sabe extraer (Windows: solo zip).
     fn formats(&self) -> &'static [ArchiveFormat];
-    /// Las entradas del archivo; `cancel` se consulta mientras se lee (un tar.gz se descomprime
-    /// entero para listarlo).
-    fn list(&self, archive: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError>;
+    /// Las entradas del archivo, como mucho `max + 1` (con una de más se sabe que hay más que
+    /// `max` sin leer el resto: un archivo con millones de entradas no infla la memoria). `cancel`
+    /// se consulta mientras se lee (entre entradas, y en un tar.gz también mientras se
+    /// descomprime). No lee el destino de los enlaces de un zip (`link` va vacío).
+    fn list(&self, archive: &Path, max: usize, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError>;
     /// Extrae todo bajo `root` (una carpeta recién creada y vacía): nunca escribe fuera de ella
     /// ni sigue enlaces, crea los enlaces simbólicos al final y solo si apuntan adentro (y fuera de
     /// Windows). `progress` recibe los bytes escritos en total. Una entrada que no se puede
@@ -66,7 +72,7 @@ impl Archives for NoArchives {
     fn formats(&self) -> &'static [ArchiveFormat] {
         &[]
     }
-    fn list(&self, archive: &Path, _cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError> {
+    fn list(&self, archive: &Path, _max: usize, _cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError> {
         Err(CopyError::new(ErrKind::Other(UNSUPPORTED.into()), archive))
     }
     fn extract_all(

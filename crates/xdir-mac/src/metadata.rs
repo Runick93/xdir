@@ -40,7 +40,7 @@ pub fn queue(req: MetadataRequest) {
 pub fn read(path: &Path) -> Meta {
     autoreleasepool(|_| {
         let mut meta = spotlight(path).unwrap_or_default();
-        if meta.width.is_none() && is_image(path)
+        if meta.width.is_none() && is_image(path) && !cloud_only(path)
             && let Some((w, h)) = image_dimensions(path)
         {
             (meta.width, meta.height) = (Some(w), Some(h));
@@ -87,6 +87,16 @@ fn spotlight_dimensions(path: &Path) -> Option<(u32, u32)> {
 fn dimensions_of(item: &MDItem) -> Option<(u32, u32)> {
     let side = |key: Option<&CFString>| unsafe { item.attribute(key) }.and_then(|v| number(&v)).filter(|n| *n >= 1.0).map(|n| n as u32);
     Some((side(unsafe { kMDItemPixelWidth })?, side(unsafe { kMDItemPixelHeight })?))
+}
+
+/// `SF_DATALESS` de `chflags`: el archivo solo está en la nube (iCloud y similares).
+const SF_DATALESS: u32 = 0x4000_0000;
+
+/// ¿El archivo solo está en la nube? Leer su cabecera haría que el sistema lo baje entero, así que
+/// no se busca en él lo que Spotlight no tenga. Con `lstat`: no sigue enlaces.
+fn cloud_only(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.st_flags() & SF_DATALESS != 0)
 }
 
 /// ¿La extensión es de una imagen? Así no se abre cada archivo de la carpeta para buscarle
@@ -199,6 +209,17 @@ mod tests {
         let mut tags = read(&file).tags;
         tags.sort();
         assert_eq!(tags, ["Rojo", "Trabajo"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un archivo en el disco no está «solo en la nube» (ni uno que no existe).
+    #[test]
+    fn local_file_is_not_cloud_only() {
+        let dir = temp_dir("nube");
+        let file = dir.join("local.png");
+        std::fs::write(&file, PNG_3X2).unwrap();
+        assert!(!cloud_only(&file));
+        assert!(!cloud_only(&dir.join("no-existe.png")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

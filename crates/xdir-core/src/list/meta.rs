@@ -303,6 +303,25 @@ impl FileList {
         self.meta_dirty = false;
     }
 
+    /// Después de una recarga silenciosa: los archivos que se ven quedan como no pedidos, para que
+    /// `take_meta_request` los vuelva a pedir. Conservan sus datos mientras tanto (nada pasa a
+    /// «Leyendo…»). Hace falta porque hay cambios que no tocan la fecha de modificación (las
+    /// etiquetas del Finder son un xattr) y la caché, con clave ruta + fecha, daría datos viejos.
+    /// Solo lo que se ve: el resto sale de la caché.
+    pub(super) fn reask_visible_meta(&mut self) {
+        if self.view_len() <= 0.0 || self.visible.is_empty() {
+            return;
+        }
+        self.meta_asked.resize(self.entries.len(), false);
+        let (first, last) = self.visible_range();
+        for &v in &self.visible[first..last] {
+            let i = v as usize;
+            if !self.entries[i].is_dir {
+                self.meta_asked[i] = false;
+            }
+        }
+    }
+
     /// ¿Faltan metadatos de elementos que cuentan en el desplegable de filtros de la columna?
     pub(super) fn filter_reading(&self, col: Column) -> bool {
         col.is_meta() && (0..self.entries.len()).any(|i| self.meta_of(i).is_none() && self.shows(&self.entries[i]))
@@ -422,6 +441,47 @@ mod tests {
         assert!(!items.is_empty() && items.len() < 30, "{}", items.len());
         assert_eq!(items[0], (0, PathBuf::from("/meta-visible").join("f000.jpg")));
         assert!(fields.contains(&MetaField::Dimensions));
+    }
+
+    /// Una recarga silenciosa (el watcher avisa, por ejemplo, al cambiar etiquetas del Finder, que no
+    /// cambian la fecha) vuelve a pedir lo que se ve, sin perder lo que ya se mostraba; lo que no
+    /// se ve sale de la caché y no se pide.
+    #[test]
+    fn silent_reload_reasks_visible_metadata() {
+        let all = names(100);
+        let (mut tab, tx, rx) = tab_with("/meta-recarga", &all);
+        for n in &all {
+            FakeMetadata::serve(&PathBuf::from("/meta-recarga").join(n), dims(10, 20));
+        }
+        tab.list.toggle_column(Column::Dimensions);
+        draw(&mut tab);
+        tab.request_metadata(Handle(0), &tx);
+        let first = FakeMetadata::take_requests();
+        let top: Vec<usize> = first[0].0.iter().map(|(i, _)| *i).collect();
+        deliver(&mut tab, &rx);
+        // Más abajo: se piden y llegan otros.
+        tab.list.on_wheel(-60.0);
+        tab.list.snap_scroll();
+        draw(&mut tab);
+        tab.request_metadata(Handle(0), &tx);
+        let below: Vec<usize> = FakeMetadata::take_requests()[0].0.iter().map(|(i, _)| *i).collect();
+        assert!(below.iter().all(|i| !top.contains(i)));
+        deliver(&mut tab, &rx);
+        // Arriba otra vez, y recarga silenciosa con los mismos elementos.
+        tab.list.on_wheel(200.0);
+        tab.list.snap_scroll();
+        draw(&mut tab);
+        tab.request_metadata(Handle(0), &tx);
+        assert!(requested().is_empty());
+        tab.list.replace(all.iter().map(|n| entry(n)).collect());
+        // Lo que se ve conserva sus datos (no vuelve a «Leyendo…»)...
+        assert!(top.iter().all(|&i| tab.list.meta_of(i) == Some(&dims(10, 20))));
+        assert!(draw(&mut tab).iter().any(|t| t == "10 × 20"));
+        // ...pero se vuelve a pedir; lo de más abajo no.
+        tab.request_metadata(Handle(0), &tx);
+        let again: Vec<usize> = FakeMetadata::take_requests()[0].0.iter().map(|(i, _)| *i).collect();
+        assert_eq!(again, top);
+        assert!(below.iter().all(|&i| tab.list.meta_of(i).is_some()));
     }
 
     /// Con «Dimensiones» a la vista se piden los visibles; al llegar, la celda dice «4032 × 3024».

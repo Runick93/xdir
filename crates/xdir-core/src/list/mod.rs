@@ -649,6 +649,7 @@ impl FileList {
         self.rebuild(focus);
         self.hover = None;
         self.clamp_scroll();
+        self.reask_visible_meta();
     }
 
     pub fn set_overlays(&mut self, overlays: &[(u32, u8)]) {

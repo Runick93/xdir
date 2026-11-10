@@ -15,7 +15,10 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PropVariantClear, PropVariantToStringAlloc, PropVariantToStringVectorAlloc, PropVariantToUInt32, PropVariantToUInt64,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
-use windows::Win32::UI::Shell::PropertiesSystem::{GPS_BESTEFFORT, IPropertyStore, SHGetPropertyStoreFromParsingName};
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+};
+use windows::Win32::UI::Shell::PropertiesSystem::{GPS_BESTEFFORT, GPS_FASTPROPERTIESONLY, IPropertyStore, SHGetPropertyStoreFromParsingName};
 use windows::core::{HSTRING, PWSTR};
 use xdir_core::fs::{Meta, MetadataRequest};
 
@@ -45,7 +48,11 @@ pub fn queue(req: MetadataRequest) {
 /// manejador de propiedades del archivo y no hay dimensiones ni duración. Sin `GPS_OPENSLOWITEM`,
 /// los archivos que están solo en la nube (OneDrive) no se descargan para leerlos.
 pub fn read(path: &Path) -> Meta {
-    let Ok(store) = (unsafe { SHGetPropertyStoreFromParsingName::<_, _, IPropertyStore>(&HSTRING::from(path), None, GPS_BESTEFFORT) }) else {
+    let path_w = HSTRING::from(path);
+    // Un archivo que solo está en la nube (OneDrive y similares) no se abre: el manejador de
+    // propiedades lo haría bajar. Solo lo que el Shell ya tiene sin leer el archivo.
+    let flags = if cloud_only(&path_w) { GPS_FASTPROPERTIESONLY } else { GPS_BESTEFFORT };
+    let Ok(store) = (unsafe { SHGetPropertyStoreFromParsingName::<_, _, IPropertyStore>(&path_w, None, flags) }) else {
         return Meta::default();
     };
     let get = |key: &PROPERTYKEY| unsafe { store.GetValue(key) }.ok().map(Value);
@@ -65,6 +72,13 @@ pub fn read(path: &Path) -> Meta {
     meta.artist = (!artists.is_empty()).then(|| artists.join("; "));
     meta.album = get(&PKEY_Music_AlbumTitle).and_then(|v| v.string());
     meta
+}
+
+/// ¿El archivo está solo en la nube (atributos sin conexión o «recuperar al abrir/leer»)?
+fn cloud_only(path: &HSTRING) -> bool {
+    let attrs = unsafe { GetFileAttributesW(path) };
+    attrs != INVALID_FILE_ATTRIBUTES
+        && attrs & (FILE_ATTRIBUTE_OFFLINE.0 | FILE_ATTRIBUTE_RECALL_ON_OPEN.0 | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0) != 0
 }
 
 /// Un PROPVARIANT que se libera al salir.
@@ -90,6 +104,9 @@ impl Value {
             }
             for i in 0..count as usize {
                 let p = *array.add(i);
+                if p.is_null() {
+                    continue;
+                }
                 if let Ok(s) = p.to_string()
                     && !s.is_empty()
                 {
@@ -147,6 +164,17 @@ mod tests {
         let meta = read(&png);
         assert_eq!((meta.width, meta.height), (Some(3), Some(2)));
         assert_eq!(meta.duration_ms, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un archivo en el disco no está «solo en la nube» (ni uno que no existe).
+    #[test]
+    fn local_file_is_not_cloud_only() {
+        let dir = temp_dir("nube");
+        let file = dir.join("local.png");
+        std::fs::write(&file, PNG_3X2).unwrap();
+        assert!(!cloud_only(&HSTRING::from(file.as_path())));
+        assert!(!cloud_only(&HSTRING::from(dir.join("no-existe.png").as_path())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

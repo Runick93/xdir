@@ -1,9 +1,10 @@
 //! `config.toml`: atajos y colores por tipo de archivo, editables a mano. Va junto a la sesión.
 //! La primera vez se escribe una plantilla comentada con todo lo que se puede cambiar; después
-//! xdir solo lo lee (nunca lo reescribe, para no perder lo que se editó) y lo vuelve a leer
-//! cuando cambia (al volver a la ventana), así los cambios se aplican sin reiniciar.
+//! xdir lo lee y lo vuelve a leer cuando cambia (al volver a la ventana), así los cambios se
+//! aplican sin reiniciar. La pestaña Configuración lo cambia por líneas (`toml_edit`): solo las
+//! líneas de lo que se tocó; lo escrito a mano queda.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::commands::{self, Keymap};
@@ -59,14 +60,64 @@ pub struct Config {
     pub tree_follows_pane: bool,
     /// Problemas al leer el archivo, para avisar en la barra de estado.
     pub errors: Vec<String>,
+    /// Cuántas de `colors` son del usuario (van primero; el resto son las de fábrica).
+    pub own_colors: usize,
     /// Fecha del archivo leído, para saber si cambió.
     modified: Option<SystemTime>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, errors: Vec::new(), modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, errors: Vec::new(), own_colors: 0, modified: None }
     }
+}
+
+/// Un cambio de la pestaña Configuración sobre `config.toml` (ver `toml_edit`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigEdit {
+    /// `key = value` en `[section]` (`value` ya escrito en TOML).
+    Set { section: &'static str, key: String, value: String },
+    /// Quitar las líneas activas de la clave (vuelve a lo de fábrica).
+    Remove { section: &'static str, key: String },
+    /// Quitar todas las líneas activas de la sección.
+    RemoveAll { section: &'static str },
+}
+
+/// Aplica los cambios en orden sobre el texto del archivo.
+pub fn apply_edits(text: &str, edits: &[ConfigEdit]) -> String {
+    let mut out = text.to_string();
+    for e in edits {
+        out = match e {
+            ConfigEdit::Set { section, key, value } => crate::toml_edit::set(&out, section, key, value),
+            ConfigEdit::Remove { section, key } => crate::toml_edit::remove(&out, section, key),
+            ConfigEdit::RemoveAll { section } => crate::toml_edit::remove_all(&out, section),
+        };
+    }
+    out
+}
+
+/// Lee `path` (o la plantilla, si no existe), aplica los cambios y lo reemplaza de forma atómica
+/// (temporal en la misma carpeta y renombrar). Devuelve lo que quedó, leído como `Config` y con
+/// su fecha, así no cuenta como un cambio de afuera. Si el archivo no se puede leer (no es texto,
+/// o no es un archivo), no se escribe nada.
+pub fn write_edits_at(path: &Path, edits: &[ConfigEdit]) -> Result<Config, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => template(),
+        Err(e) => return Err(e.to_string()),
+    };
+    let out = apply_edits(&text, edits);
+    let dir = path.parent().ok_or("ruta sin carpeta")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = dir.join(format!("{FILE_NAME}.tmp"));
+    std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    let mut c = Config::parse(&out);
+    c.modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    Ok(c)
 }
 
 pub fn file_path() -> Option<PathBuf> {
@@ -100,8 +151,15 @@ impl Config {
         modified_time() != self.modified
     }
 
+    /// Toma la fecha de `other` (lo que se acaba de escribir), así la escritura propia no cuenta
+    /// como un cambio de afuera.
+    pub fn take_modified(&mut self, other: &Config) {
+        self.modified = other.modified;
+    }
+
     pub fn parse(text: &str) -> Self {
         let mut c = Self::parse_rules(text);
+        c.own_colors = c.colors.len();
         // Las reglas propias van primero (gana la primera que coincide); las de fábrica, al final.
         c.colors.extend(Self::parse_rules(DEFAULT_COLORS).colors);
         c
@@ -182,6 +240,14 @@ impl Config {
             }
         }
         c
+    }
+}
+
+/// Una regla como se escribe en `config.toml`: los patrones separados por «; » o `@atributo`.
+pub fn rule_label(r: &ColorRule) -> String {
+    match &r.matches {
+        ColorMatch::Names(p) => p.join("; "),
+        ColorMatch::Attr(a) => format!("@{}", ATTRS.iter().find(|(_, x)| x == a).map_or("", |(n, _)| *n)),
     }
 }
 
@@ -310,6 +376,69 @@ pub fn template() -> String {
 mod tests {
     use super::*;
     use crate::keys::Key;
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdir-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(FILE_NAME)
+    }
+
+    #[test]
+    fn write_edits_keeps_hand_written_text() {
+        crate::sys::testing::install_fakes();
+        let path = temp_file("mano");
+        let text = "\u{feff}# mío\r\n[opciones]\r\nanimaciones = true # sí\r\nrara = 1\r\n[mia]\r\nx = [\r\n  1,\r\n]";
+        std::fs::write(&path, text).unwrap();
+        let edits = [
+            ConfigEdit::Set { section: "opciones", key: "animaciones".into(), value: "false".into() },
+            ConfigEdit::Set { section: "atajos", key: "duplicar".into(), value: "\"Ctrl+K\"".into() },
+        ];
+        let c = write_edits_at(&path, &edits).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(out, "\u{feff}# mío\r\n[opciones]\r\nanimaciones = false # sí\r\nrara = 1\r\n[mia]\r\nx = [\r\n  1,\r\n]\r\n\r\n[atajos]\r\nduplicar = \"Ctrl+K\"");
+        assert_eq!(c.animations, Some(false));
+        assert!(!path.with_extension("toml.tmp").exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn write_edits_starts_from_template() {
+        crate::sys::testing::install_fakes();
+        let path = temp_file("plantilla");
+        write_edits_at(&path, &[ConfigEdit::Set { section: "opciones", key: "animaciones".into(), value: "true".into() }]).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), crate::toml_edit::set(&template(), "opciones", "animaciones", "true"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Un archivo que no es texto (o no es un archivo) no se pisa: se informa.
+    #[test]
+    fn write_edits_never_overwrites_unreadable() {
+        crate::sys::testing::install_fakes();
+        let path = temp_file("binario");
+        let bytes = [b'#', b' ', 0xFF, 0xFE, b'\n'];
+        std::fs::write(&path, bytes).unwrap();
+        let edit = [ConfigEdit::RemoveAll { section: "atajos" }];
+        assert!(write_edits_at(&path, &edit).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_edits_at(&path, &edit).is_err());
+        assert!(path.is_dir());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn apply_edits_in_order() {
+        let t = "[atajos]\n# duplicar = \"Ctrl+D\"\ncopiar = \"F1\"\n";
+        let edits = [
+            ConfigEdit::Set { section: "atajos", key: "duplicar".into(), value: "\"F2\"".into() },
+            ConfigEdit::Set { section: "atajos", key: "duplicar".into(), value: "\"F3\"".into() },
+            ConfigEdit::Remove { section: "atajos", key: "copiar".into() },
+        ];
+        assert_eq!(apply_edits(t, &edits), "[atajos]\n# duplicar = \"Ctrl+D\"\nduplicar = \"F3\"\n");
+        assert_eq!(apply_edits(t, &[ConfigEdit::RemoveAll { section: "atajos" }]), "[atajos]\n# duplicar = \"Ctrl+D\"\n");
+    }
 
     #[test]
     fn template_parses_clean_and_keeps_defaults() {

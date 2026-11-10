@@ -3,7 +3,7 @@
 use super::*;
 use crate::keys::keys::{VK_CONTROL, VK_SHIFT};
 use crate::commands;
-use crate::settings::{PageId, Section, SettingsHit};
+use crate::settings::{AccentChoice, Control, Item, PageId, Section, SettingsHit};
 use crate::sys::testing::{FakeEnv, FakeFileSystem, FakeHost, FakeShell};
 
 fn app() -> App {
@@ -229,4 +229,246 @@ fn edit_address_focuses_settings_search() {
     assert!(a.edit.is_none());
     assert!(a.filter_edit.is_some());
     assert!(host.text_of(TextKind::Filter).is_some());
+}
+
+// ---------- Apariencia, Lista y vistas, Árbol, Vista previa y config.toml ----------
+
+/// La configuración abierta en un solo panel grande, ya dibujada (con sus lugares).
+fn settings_app(page: Section) -> (App, Rc<FakeHost>) {
+    let (mut a, host) = app_host();
+    host.client.set((1800.0, 1400.0));
+    a.set_layout(Layout::One);
+    a.run_command(Command::Settings);
+    if let Some(v) = a.settings_view_mut(0) {
+        v.set_page(PageId::Builtin(page));
+    }
+    a.paint();
+    (a, host)
+}
+
+/// Un clic en el centro de una parte de una fila (según el último cuadro).
+fn click(a: &mut App, id: &'static str, part: usize) {
+    let r = a.part_rect(0, id, part).unwrap_or_else(|| panic!("no se dibujó {id}/{part}"));
+    a.on_left_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+    a.on_left_up((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.paint();
+}
+
+/// Espera a que terminen las escrituras de `config.toml` en camino.
+fn wait_config(a: &mut App) {
+    while a.config_saving {
+        let t = a.task_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la escritura termina");
+        a.on_task_done(t);
+    }
+}
+
+fn config_text() -> String {
+    std::fs::read_to_string(config::file_path().unwrap()).unwrap_or_default()
+}
+
+/// Empieza sin `config.toml` (la carpeta de configuración es propia del hilo de la prueba).
+fn fresh_config() {
+    crate::sys::testing::install_fakes();
+    let _ = std::fs::remove_file(config::file_path().unwrap());
+}
+
+#[test]
+fn theme_three_states() {
+    let (mut a, _) = settings_app(Section::Appearance);
+    click(&mut a, "tema", 2);
+    assert_eq!(a.dark_mode, None);
+    click(&mut a, "tema", 1);
+    assert_eq!(a.dark_mode, Some(true));
+    click(&mut a, "tema", 0);
+    assert_eq!(a.dark_mode, Some(false));
+    // El switch de la rueda sigue fijando un modo.
+    a.set_theme_mode(None);
+    a.set_dark_mode(!a.theme.dark);
+    assert!(a.dark_mode.is_some());
+}
+
+#[test]
+fn accent_preset_and_system() {
+    let (mut a, host) = settings_app(Section::Appearance);
+    click(&mut a, "acento", 3);
+    assert_eq!(a.accent, Accent::Rgb(theme::PRESETS[3].1));
+    click(&mut a, "acento", theme::PRESETS.len());
+    assert_eq!(a.accent, Accent::System);
+    host.set_color_choice(Some(0x123456));
+    click(&mut a, "acento", theme::PRESETS.len() + 1);
+    assert_eq!(a.accent, Accent::Rgb(0x123456));
+    assert!(a.settings_items(Section::Appearance).iter().any(|i| matches!(i, Item::Row(r) if r.control == Control::Accent(AccentChoice::Other(0x123456)))));
+}
+
+#[test]
+fn animations_writes_and_removes_line() {
+    fresh_config();
+    let (mut a, _) = settings_app(Section::Appearance);
+    click(&mut a, "animaciones", 1);
+    assert_eq!(a.config.animations, Some(true));
+    wait_config(&mut a);
+    let text = config_text();
+    assert!(text.contains("# animaciones = true\nanimaciones = true\n"), "{text}");
+    click(&mut a, "animaciones", 0);
+    wait_config(&mut a);
+    assert_eq!(a.config.animations, None);
+    let text = config_text();
+    assert!(text.contains("# animaciones = true\n") && !text.contains("\nanimaciones = true"), "{text}");
+    assert_eq!(text, config::template(), "volver a Sistema deja la plantilla como estaba");
+}
+
+#[test]
+fn config_writes_are_serialized() {
+    fresh_config();
+    let (mut a, _) = settings_app(Section::Appearance);
+    a.set_animations(Some(true));
+    a.set_animations(Some(false));
+    a.set_animations(Some(true));
+    assert!(a.config_saving, "una escritura en camino");
+    assert_eq!(a.config_pending.len(), 2, "las otras esperan");
+    wait_config(&mut a);
+    assert!(a.config_pending.is_empty());
+    assert_eq!(a.config.animations, Some(true));
+    let text = config_text();
+    assert_eq!(text.matches("\nanimaciones = ").count(), 1, "{text}");
+    assert!(text.contains("\nanimaciones = true\n"));
+}
+
+#[test]
+fn edit_after_external_change_keeps_both() {
+    fresh_config();
+    let (mut a, _) = settings_app(Section::Appearance);
+    a.set_animations(Some(false));
+    wait_config(&mut a);
+    // Cambio a mano entre dos cambios de la pestaña, con \r\n y sin salto final.
+    let hand = config_text().replace('\n', "\r\n") + "\r\n[colores]\r\n\"*.log\" = \"#112233\" # mío";
+    std::fs::write(config::file_path().unwrap(), &hand).unwrap();
+    a.set_animations(Some(true));
+    wait_config(&mut a);
+    let text = config_text();
+    assert!(text.contains("[colores]\r\n\"*.log\" = \"#112233\" # mío"), "{text}");
+    assert!(text.contains("\r\nanimaciones = true\r\n"));
+    assert!(!text.ends_with('\n'));
+    assert!(a.config.colors.iter().any(|r| config::rule_label(r) == "*.log"));
+    assert_eq!(a.config.animations, Some(true));
+}
+
+#[test]
+fn config_write_error_shown() {
+    fresh_config();
+    let (mut a, host) = settings_app(Section::Appearance);
+    // Un archivo que no es texto: no se pisa y se avisa.
+    let path = config::file_path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, [0xFFu8, 0xFE, 0x00]).unwrap();
+    a.set_animations(Some(true));
+    wait_config(&mut a);
+    assert_eq!(std::fs::read(&path).unwrap(), [0xFFu8, 0xFE, 0x00]);
+    assert_eq!(a.config.animations, Some(true), "lo de memoria queda");
+    a.paint();
+    assert!(host.drawn_texts().iter().any(|(_, t, _)| t.starts_with("No se pudo guardar config.toml:")));
+    fresh_config();
+}
+
+#[test]
+fn own_write_not_reported_as_external() {
+    fresh_config();
+    let (mut a, _) = settings_app(Section::Appearance);
+    a.set_animations(Some(false));
+    wait_config(&mut a);
+    a.notice = None;
+    a.reload_config();
+    assert_eq!(a.notice, None);
+    assert!(!a.config.changed_on_disk());
+}
+
+#[test]
+fn list_switches_mirror_picker() {
+    let (mut a, _) = settings_app(Section::ListViews);
+    click(&mut a, "casillas", 0);
+    assert!(a.picker_switches().checkboxes);
+    assert!(a.panes[0].tabs.iter().all(|t| t.list.checkboxes));
+    click(&mut a, "extensiones", 0);
+    assert!(!a.picker_switches().extensions);
+    click(&mut a, "ocultos", 0);
+    assert!(a.picker_switches().hidden && a.show_hidden);
+    click(&mut a, "colores_tipo", 0);
+    assert!(a.file_colors);
+    // Y al revés: lo que cambia la rueda se ve en la pestaña.
+    a.set_checkboxes(false);
+    assert!(a.settings_items(Section::ListViews).iter().any(|i| matches!(i, Item::Row(r) if r.id == "casillas" && r.control == Control::Switch(false))));
+}
+
+#[test]
+fn default_view_keeps_custom_folders() {
+    let (mut a, host) = settings_app(Section::ListViews);
+    let own = std::env::temp_dir().join(format!("xdir-vista-propia-{}", std::process::id()));
+    std::fs::create_dir_all(&own).unwrap();
+    let key = crate::folder_views::folder_key(&Location::Path(own.clone()), None);
+    a.folder_views.set(&key, crate::folder_views::ViewSettings { view: list::View::Icons, ..Default::default() });
+    host.set_menu_choice(Some(5)); // Lista (quinta de list::VIEWS)
+    click(&mut a, "vista_defecto", 0);
+    assert_eq!(a.folder_views.default_view().view, list::View::List);
+    assert_eq!(a.folder_views.get(&key).view, list::View::Icons);
+    a.new_tab(0, Location::Path(own.clone()), true);
+    assert_eq!(a.panes[0].tab().list.view, list::View::Icons);
+    a.new_tab(0, Location::Path(std::env::temp_dir()), true);
+    assert_eq!(a.panes[0].tab().list.view, list::View::List);
+    // «Restablecer las vistas…» pregunta y vuelve todo a fábrica.
+    a.run_command(Command::Settings);
+    a.paint();
+    host.set_answer(Some(true));
+    click(&mut a, "vistas_carpetas", 1);
+    assert_eq!(a.folder_views.default_view().view, list::View::Details);
+    assert!(!a.folder_views.contains(&key));
+    let _ = std::fs::remove_dir_all(&own);
+}
+
+#[test]
+fn tree_follow_back_to_config() {
+    let (mut a, _) = settings_app(Section::Tree);
+    let before = a.tree_follows();
+    click(&mut a, "arbol_sigue", 0);
+    assert_eq!(a.tree_follow, Some(!before));
+    click(&mut a, "arbol_config", 0);
+    assert_eq!(a.tree_follow, None);
+    assert_eq!(a.tree_follows(), a.config.tree_follows_pane);
+    // Sin cambio propio el botón está apagado.
+    assert!(a.part_rect(0, "arbol_config", 0).is_none());
+}
+
+#[test]
+fn preview_width_slider_clamps() {
+    let (mut a, _) = settings_app(Section::Preview);
+    let r = a.part_rect(0, "vista_previa_ancho", 0).unwrap();
+    a.on_left_down(r.left + 20.0, (r.top + r.bottom) / 2.0, false);
+    a.on_mouse_move(r.left - 500.0, r.top);
+    assert_eq!(a.preview.width, 240.0);
+    a.on_mouse_move(r.right + 500.0, r.top);
+    assert_eq!(a.preview.width, 640.0);
+    a.on_left_up(r.right + 500.0, r.top);
+    assert_eq!(a.drag, Drag::None);
+}
+
+#[test]
+fn color_rules_listed_own_first() {
+    let mut init = Init::blank();
+    init.config = Config::parse("[colores]\n\"*.log\" = \"#112233\"\n");
+    let mut a = App::new(init, FakeHost::new());
+    a.run_command(Command::Settings);
+    let items = a.settings_items(Section::ListViews);
+    let rules = items
+        .iter()
+        .find_map(|i| match i {
+            Item::Row(r) if r.id == "reglas_color" => match &r.control {
+                Control::ColorRules(rules) => Some(rules.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(rules[0].0, "*.log");
+    assert!(rules[0].2, "propia");
+    assert_eq!(rules[1].0, "*.pdf");
+    assert!(!rules[1].2, "de fábrica");
 }

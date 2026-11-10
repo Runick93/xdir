@@ -3,9 +3,11 @@
 
 use super::settings_pages::PAGES;
 use super::*;
+use crate::config::ConfigEdit;
 use crate::paint::Painter;
 use crate::settings::draw::NavItem;
-use crate::settings::{Item, PageId, Section, SettingsHit};
+use crate::settings::options::{self, OptionSpec};
+use crate::settings::{AccentChoice, Control, Item, PageId, Row, Section, SettingsHit};
 
 impl App {
     /// Las páginas de la lista de la izquierda: las secciones propias con las extra (Red) después
@@ -75,7 +77,13 @@ impl App {
                 self.set_active(pane);
                 self.select_tab(pane, index);
             }
-            None => self.new_tab(self.active, Location::Settings, true),
+            None => {
+                let from = self.panes[self.active].tab().id;
+                self.new_tab(self.active, Location::Settings, true);
+                if let Some(v) = self.settings_view_mut(self.active) {
+                    v.from_tab = Some(from);
+                }
+            }
         }
         if let Some(page) = page
             && let Some(v) = self.settings_view_mut(self.active)
@@ -85,9 +93,290 @@ impl App {
         self.redraw();
     }
 
-    /// Lo que va en el contenido de una página propia (las opciones con sus valores de ahora).
-    pub(super) fn settings_items(&self, _section: Section) -> Vec<Item> {
-        Vec::new()
+    /// Lo que va en el contenido de una página propia (las opciones con sus valores de ahora),
+    /// en el orden de la tabla de opciones.
+    pub(super) fn settings_items(&self, section: Section) -> Vec<Item> {
+        let mut items = Vec::new();
+        if let Some(e) = &self.config_error {
+            items.push(Item::Error(format!("No se pudo guardar config.toml: {e}"), Some(("error_config", "Abrir config.toml".to_string()))));
+        }
+        for spec in options::of(section) {
+            items.extend(self.option_items(spec));
+        }
+        if section == Section::Appearance {
+            items.push(Item::Note("La rueda dentada de la barra de estado tiene los ajustes rápidos; lo que se cambia en un lugar se ve en el otro.".into()));
+        }
+        items
+    }
+
+    /// Las filas de una opción con sus valores de ahora (ninguna si no aplica en esta compilación).
+    pub(super) fn option_items(&self, spec: &'static OptionSpec) -> Vec<Item> {
+        let row = |control: Control| Row::new(spec.id, spec.title, spec.desc, control);
+        let one = |r: Row| vec![Item::Row(r)];
+        let arbol = cfg!(feature = "arbol");
+        match spec.id {
+            "tema" => {
+                let sel = match self.dark_mode {
+                    Some(false) => 0,
+                    Some(true) => 1,
+                    None => 2,
+                };
+                one(row(Control::Segmented(vec!["Claro", "Oscuro", "Sistema"], Some(sel))))
+            }
+            "acento" => {
+                let choice = match self.accent {
+                    Accent::System => AccentChoice::System,
+                    Accent::Rgb(c) => theme::PRESETS.iter().position(|(_, p)| *p == c).map_or(AccentChoice::Other(c), AccentChoice::Preset),
+                };
+                one(row(Control::Accent(choice)))
+            }
+            "animaciones" => {
+                let sel = match self.config.animations {
+                    None => 0,
+                    Some(true) => 1,
+                    Some(false) => 2,
+                };
+                one(row(Control::Segmented(vec!["Sistema", "Sí", "No"], Some(sel))))
+            }
+            "extensiones" => one(row(Control::Switch(self.show_extensions))),
+            "ocultos" => one(row(Control::Switch(self.show_hidden))),
+            "casillas" => one(row(Control::Switch(self.checkboxes))),
+            "barra_grupos" => one(row(Control::Switch(self.show_group_bar))),
+            "colores_tipo" => {
+                let rules = self
+                    .config
+                    .colors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (config::rule_label(r), r.color, i < self.config.own_colors))
+                    .collect();
+                vec![
+                    Item::Row(row(Control::Switch(self.file_colors))),
+                    Item::Row(Row::new("reglas_color", "Reglas activas", "Propias primero, después las de fábrica; se cambian en config.toml", Control::ColorRules(rules))),
+                ]
+            }
+            "vista_defecto" => {
+                let v = self.folder_views.default_view().view;
+                let name = list::VIEWS.iter().find(|x| x.0 == v).map_or("", |x| x.1);
+                one(row(Control::Dropdown(name.to_string())))
+            }
+            "vistas_carpetas" => {
+                let from = self.settings_from_tab();
+                let label = match &from {
+                    Some(t) => format!("Usar la vista de \"{}\" en todas", t.location.title()),
+                    None => "Usar la vista de la carpeta en todas".to_string(),
+                };
+                one(row(Control::Buttons(vec![(label, from.is_some()), ("Restablecer las vistas…".to_string(), true)])))
+            }
+            "arbol" if !arbol => Vec::new(),
+            "arbol" => one(row(Control::Switch(self.tree_visible()))),
+            "arbol_fijo" => one(Row { enabled: arbol, ..row(Control::Switch(self.tree_pinned())) }),
+            "arbol_sigue" => one(row(Control::Switch(self.tree_follows()))),
+            "arbol_config" => {
+                let now = if self.config.tree_follows_pane { "sí" } else { "no" };
+                let desc = format!("Ahora dice que {now}; una vez tocado el switch, manda el switch");
+                one(Row { desc, ..row(Control::Buttons(vec![("Volver a lo de config.toml".to_string(), self.tree_follow.is_some())])) })
+            }
+            "vista_previa" => one(row(Control::Switch(self.preview.on))),
+            "vista_previa_ancho" => one(row(Control::Slider { value: self.preview.width, min: ui::PREVIEW_MIN_W, max: ui::PREVIEW_MAX_W })),
+            _ => Vec::new(),
+        }
+    }
+
+    /// La pestaña de carpeta desde la que se abrió la configuración, si sigue abierta.
+    pub(super) fn settings_from_tab(&self) -> Option<&Tab> {
+        let (pane, index) = self.settings_tab()?;
+        let id = self.panes[pane].tabs[index].settings.as_ref()?.from_tab?;
+        self.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == id && !t.is_settings())
+    }
+
+    /// Dónde se dibujó una parte de una fila en el último cuadro.
+    pub(super) fn part_rect(&self, pane: usize, id: &'static str, part: usize) -> Option<geom::Rect> {
+        self.settings_view(pane)?.hits.iter().find(|(_, h)| *h == SettingsHit::Part(id, part)).map(|(r, _)| *r)
+    }
+
+    // ---------- escribir config.toml ----------
+
+    /// Guarda cambios en `config.toml` (lo de memoria ya cambió). Una sola escritura a la vez: si
+    /// hay una en camino, estos esperan y se escriben juntos cuando termine.
+    pub(super) fn edit_config(&mut self, edits: Vec<ConfigEdit>) {
+        self.config_pending.extend(edits);
+        if !self.config_saving {
+            self.flush_config();
+        }
+    }
+
+    fn flush_config(&mut self) {
+        if self.config_pending.is_empty() {
+            return;
+        }
+        let edits = std::mem::take(&mut self.config_pending);
+        self.config_saving = true;
+        // La ruta se resuelve acá (la carpeta de configuración es una sola para toda la ventana).
+        let path = config::file_path();
+        self.spawn_task(move || {
+            let result = match path {
+                Some(p) => config::write_edits_at(&p, &edits),
+                None => Err("no hay carpeta de configuración".to_string()),
+            };
+            tasks::TaskDone::ConfigSaved { result }
+        });
+    }
+
+    /// Terminó de escribir `config.toml`.
+    pub(super) fn on_config_saved(&mut self, result: Result<Config, String>) {
+        self.config_saving = false;
+        match result {
+            // Lo escrito (con lo que se haya cambiado a mano en el medio) pasa a ser la
+            // configuración; su fecha evita que `reload_config` lo tome como un cambio de afuera.
+            // Si hay más cambios esperando, la memoria ya los tiene: solo se toma la fecha.
+            Ok(c) if self.config_pending.is_empty() => {
+                self.config = c;
+                self.config_error = None;
+                self.apply_animation_setting();
+            }
+            Ok(c) => {
+                self.config.take_modified(&c);
+                self.config_error = None;
+            }
+            Err(e) => self.config_error = Some(e),
+        }
+        self.flush_config();
+        self.redraw();
+    }
+
+    // ---------- clics en las filas ----------
+
+    /// Tema: claro, oscuro o el del sistema.
+    pub(super) fn set_theme_mode(&mut self, mode: Option<bool>) {
+        self.dark_mode = mode;
+        self.theme = Theme::from_system(self.accent, self.dark_mode);
+        self.apply_window_theme();
+        sys::shell().set_menu_mode(self.dark_mode);
+        self.redraw();
+    }
+
+    /// Animaciones: `None` sigue al sistema (se quita la línea de `config.toml`).
+    pub(super) fn set_animations(&mut self, on: Option<bool>) {
+        self.config.animations = on;
+        self.apply_animation_setting();
+        let key = "animaciones".to_string();
+        self.edit_config(vec![match on {
+            None => ConfigEdit::Remove { section: "opciones", key },
+            Some(v) => ConfigEdit::Set { section: "opciones", key, value: v.to_string() },
+        }]);
+    }
+
+    /// El árbol sigue al panel (`None`: lo que diga `config.toml`).
+    pub(super) fn set_tree_follow_option(&mut self, on: Option<bool>) {
+        match on {
+            #[cfg(feature = "arbol")]
+            Some(v) => self.set_tree_follow(v),
+            _ => self.tree_follow = on,
+        }
+        self.redraw();
+    }
+
+    /// La vista por defecto de las carpetas sin vista propia.
+    pub(super) fn set_default_view(&mut self, v: list::View) {
+        self.folder_views.set_default_view(v);
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            tab.reload_view();
+        }
+        self.sync_folder_views();
+        self.schedule_views_save();
+    }
+
+    /// Un clic en una parte de una fila.
+    pub(super) fn settings_part(&mut self, pane: usize, id: &'static str, part: usize, x: f32) {
+        match (id, part) {
+            ("tema", 0) => self.set_theme_mode(Some(false)),
+            ("tema", 1) => self.set_theme_mode(Some(true)),
+            ("tema", _) => self.set_theme_mode(None),
+            ("acento", i) if i < theme::PRESETS.len() => self.set_accent(Accent::Rgb(theme::PRESETS[i].1)),
+            ("acento", i) if i == theme::PRESETS.len() => self.set_accent(Accent::System),
+            ("acento", _) => self.choose_custom_color(),
+            ("animaciones", 0) => self.set_animations(None),
+            ("animaciones", 1) => self.set_animations(Some(true)),
+            ("animaciones", _) => self.set_animations(Some(false)),
+            ("extensiones", _) => self.set_show_extensions(!self.show_extensions),
+            ("ocultos", _) => self.run_command(Command::ToggleHidden),
+            ("casillas", _) => self.set_checkboxes(!self.checkboxes),
+            ("barra_grupos", _) => self.run_command(Command::ToggleGroupBar),
+            ("colores_tipo", _) => self.file_colors = !self.file_colors,
+            ("reglas_color", _) | ("error_config", _) => self.run_command(Command::OpenConfig),
+            ("vista_defecto", _) => self.default_view_menu(pane),
+            ("vistas_carpetas", 0) => {
+                if let Some(id) = self.settings_from_tab().map(|t| t.id) {
+                    self.apply_view_of_tab_to_all(id);
+                }
+            }
+            ("vistas_carpetas", _) => {
+                if self.host.ask_yes_no("Vistas de las carpetas", "¿Volver todas las carpetas a la vista de fábrica?") {
+                    self.folder_views.apply_to_all(crate::folder_views::ViewSettings::default());
+                    for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+                        tab.reload_view();
+                    }
+                    self.sync_folder_views();
+                    self.schedule_views_save();
+                }
+            }
+            ("arbol", _) => self.run_command(Command::ToggleTree),
+            ("arbol_fijo", _) => self.run_command(Command::ToggleTreePin),
+            ("arbol_sigue", _) => self.set_tree_follow_option(Some(!self.tree_follows())),
+            ("arbol_config", _) => self.set_tree_follow_option(None),
+            ("vista_previa", _) => self.run_command(Command::TogglePreview),
+            ("vista_previa_ancho", _) => {
+                self.host.capture_mouse();
+                self.drag = Drag::SettingsSlider(pane, id);
+                self.settings_slider(pane, id, x);
+            }
+            _ => {}
+        }
+        self.redraw();
+    }
+
+    /// Arrastre del deslizador `id` del panel a la posición `x`.
+    pub(super) fn settings_slider(&mut self, pane: usize, id: &'static str, x: f32) {
+        let Some(r) = self.part_rect(pane, id, 0) else { return };
+        if id == "vista_previa_ancho" {
+            self.preview.width = crate::settings::controls::slider_value(r, x, ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W);
+        }
+        self.redraw();
+    }
+
+    /// El desplegable de la vista por defecto.
+    fn default_view_menu(&mut self, pane: usize) {
+        let current = self.folder_views.default_view().view;
+        let entries: Vec<shell::Entry> = list::VIEWS
+            .iter()
+            .enumerate()
+            .map(|(i, v)| shell::Entry::Item { id: i as u32 + 1, label: v.1.to_string(), enabled: true, checked: v.0 == current })
+            .collect();
+        let at = self.part_rect(pane, "vista_defecto", 0).map_or(MenuPos::Cursor, |r| MenuPos::At(r.left, r.bottom + 2.0));
+        if let Some(i) = self.host.popup_menu(&entries, at, None, None).and_then(|c| (c as usize).checked_sub(1))
+            && let Some(v) = list::VIEWS.get(i)
+        {
+            self.set_default_view(v.0);
+        }
+    }
+
+    /// «Usar la vista de "<carpeta>" en todas» con la pestaña `id` (como «Usar esta vista en todas
+    /// las carpetas», con la misma pregunta).
+    fn apply_view_of_tab_to_all(&mut self, id: usize) {
+        let Some(tab) = self.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == id) else { return };
+        let mut v = tab.list.view_settings();
+        let question = "¿Usar esta vista en todas las carpetas? Se pierden las vistas guardadas de cada carpeta.";
+        if self.host.ask_yes_no_cancel("Usar esta vista en todas las carpetas", question) != Some(true) {
+            return;
+        }
+        v.columns.retain(|c| c.col != list::Column::Folder);
+        self.folder_views.apply_to_all(v);
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            tab.reload_view();
+        }
+        self.sync_folder_views();
+        self.schedule_views_save();
     }
 
     /// Dibuja la pestaña Configuración del panel en el lugar de su lista (después de `Pane::draw`).
@@ -157,8 +446,6 @@ impl App {
         self.redraw();
     }
 
-    /// Un clic en una parte de una fila.
-    pub(super) fn settings_part(&mut self, _pane: usize, _id: &'static str, _part: usize, _x: f32) {}
 
     /// La rueda sobre la pestaña Configuración: mueve el contenido.
     pub(super) fn settings_wheel(&mut self, pane: usize, delta: f32) {

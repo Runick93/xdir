@@ -215,6 +215,15 @@ impl FolderViews {
         self.dirty = true;
     }
 
+    /// Cambia la vista (detalles, íconos…) por defecto: la toman las carpetas sin vista propia;
+    /// las que tienen una la conservan.
+    pub fn set_default_view(&mut self, v: crate::list::View) {
+        if self.default.view != v {
+            self.default.view = v;
+            self.dirty = true;
+        }
+    }
+
     /// «Restablecer la vista de esta carpeta»: vuelve a la por defecto.
     pub fn reset(&mut self, key: &str) {
         if self.entries.remove(key).is_some() {

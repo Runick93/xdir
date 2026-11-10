@@ -213,6 +213,8 @@ enum Drag {
     #[cfg(feature = "arbol")]
     TreeBar(tree::Bar, f32),
     Button(usize, Button),
+    /// El deslizador de una fila de la configuración: (panel, id de la fila).
+    SettingsSlider(usize, &'static str),
     /// Un favorito de la barra: clic al soltar sin mover, si no reordenar.
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
 }
@@ -402,6 +404,12 @@ pub struct App {
     /// Campo de texto abierto por una página extra de la configuración (Red): su `field_done`
     /// recibe esta caja al terminar.
     settings_field: Option<TextBox>,
+    /// Hay una escritura de `config.toml` en camino (una sola a la vez).
+    config_saving: bool,
+    /// Cambios de la configuración esperando a que termine la escritura en camino.
+    config_pending: Vec<config::ConfigEdit>,
+    /// La última escritura de `config.toml` falló: el error, para la pestaña Configuración.
+    config_error: Option<String>,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -599,6 +607,9 @@ impl App {
             picker_open: false,
             about_open: false,
             settings_field: None,
+            config_saving: false,
+            config_pending: Vec::new(),
+            config_error: None,
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

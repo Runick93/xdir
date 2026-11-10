@@ -502,6 +502,10 @@ impl App {
                 self.tree.drag_bar(bar, grab, x, y);
                 redraw = true;
             }
+            Drag::SettingsSlider(pane, id) => {
+                self.settings_slider(pane, id, x);
+                redraw = true;
+            }
             Drag::PreviewEdge(grab) => {
                 self.drag_preview_edge(x + grab);
                 self.sync_rename_boxes();

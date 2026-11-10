@@ -109,6 +109,9 @@ pub struct SettingsView {
     pub content: Rect,
     /// Nombre de la página, para las migas de la barra de dirección (lo pone la `App`).
     pub page_title: String,
+    /// La pestaña de carpeta que estaba activa en el panel al abrir la configuración (su id),
+    /// para «Usar la vista de "<carpeta>" en todas».
+    pub from_tab: Option<usize>,
 }
 
 impl SettingsView {
@@ -116,9 +119,10 @@ impl SettingsView {
         Self { page, ..Default::default() }
     }
 
-    /// Lo que hay en `(x, y)` según el último cuadro.
+    /// Lo que hay en `(x, y)` según el último cuadro (las partes se anotan de la más chica a
+    /// la más grande: gana la primera).
     pub fn hit_at(&self, x: f32, y: f32) -> Option<SettingsHit> {
-        self.hits.iter().rev().find(|(r, _)| crate::geom::contains(r, x, y)).map(|(_, h)| *h)
+        self.hits.iter().find(|(r, _)| crate::geom::contains(r, x, y)).map(|(_, h)| *h)
     }
 
     /// Mueve el contenido `dy` DIPs (positivo: hacia abajo), sin pasarse.

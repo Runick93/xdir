@@ -46,8 +46,15 @@ fn volume_flag(url: &NSURL, key: &objc2_foundation::NSURLResourceKey) -> Option<
     value?.downcast::<NSNumber>().ok().map(|n| n.boolValue())
 }
 
-/// De estas raíces, las que se expulsan como en el Finder: expulsables, extraíbles, no internas
-/// (imágenes de disco, discos externos) o de red. El disco de arranque nunca.
+/// ¿Se expulsa como un disco? Expulsables, extraíbles o no internos (imágenes de disco, discos
+/// externos), pero no los de red (`local == Some(false)`): su ⏏ sale de `Network::connections`
+/// (ruling de la tanda D+, como Windows), así un disco y una conexión no se confunden.
+pub fn ejectable_volume(ejectable: Option<bool>, removable: Option<bool>, internal: Option<bool>, local: Option<bool>) -> bool {
+    local != Some(false) && (ejectable == Some(true) || removable == Some(true) || internal == Some(false))
+}
+
+/// De estas raíces, las que se expulsan como en el Finder (`ejectable_volume`). El disco de
+/// arranque nunca.
 pub fn ejectable(roots: &[PathBuf]) -> Vec<PathBuf> {
     use objc2_foundation::{NSURLVolumeIsEjectableKey, NSURLVolumeIsInternalKey, NSURLVolumeIsLocalKey, NSURLVolumeIsRemovableKey};
     roots
@@ -64,7 +71,7 @@ pub fn ejectable(roots: &[PathBuf]) -> Vec<PathBuf> {
                     volume_flag(&url, NSURLVolumeIsLocalKey),
                 )
             };
-            ej == Some(true) || rem == Some(true) || int == Some(false) || local == Some(false)
+            ejectable_volume(ej, rem, int, local)
         })
         .cloned()
         .collect()

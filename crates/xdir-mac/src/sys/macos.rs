@@ -613,6 +613,6 @@ pub fn install() {
         preview: Box::new(MacPreview),
         copy_prims: Box::new(crate::ops::MacCopyPrims),
         info: Box::new(crate::info::MacInfo),
-        network: Box::new(xdir_core::sys::NoNetwork),
+        network: Box::new(crate::net::MacNetwork::new()),
     });
 }

@@ -17,6 +17,8 @@ mod info;
 #[cfg(target_os = "macos")]
 mod metadata;
 #[cfg(target_os = "macos")]
+mod net;
+#[cfg(target_os = "macos")]
 mod ops;
 #[cfg(target_os = "macos")]
 mod platform;

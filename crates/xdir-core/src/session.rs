@@ -483,6 +483,20 @@ mod tests {
         assert_eq!(back.default_view().view, View::Content);
         assert_eq!(back.get("/a").view, View::List);
         assert!(text.contains("\"lista\"") && text.contains("\"contenido\""), "{text}");
+
+        // La Galería (al final de `VIEWS`), igual.
+        assert_eq!(View::Gallery.id(), "galeria");
+        let s = Session { views: vec![View::Gallery, View::Details], ..Session::default() };
+        let text = write(&s);
+        assert!(text.contains("vistas = [\"galeria\", \"detalles\"]"), "{text}");
+        assert_eq!(parse(&text).views, s.views);
+        let mut fv = FolderViews::default();
+        fv.set("/fotos", ViewSettings { view: View::Gallery, ..ViewSettings::default() });
+        let text = crate::folder_views::write(&fv);
+        assert!(text.contains("\"galeria\""), "{text}");
+        let (back, errors) = crate::folder_views::parse(&text);
+        assert!(errors.is_empty(), "{errors:?}\n{text}");
+        assert_eq!(back.get("/fotos").view, View::Gallery);
     }
 
     /// La columna de vista previa: prendida y su ancho se guardan y vuelven; un ancho fuera de los

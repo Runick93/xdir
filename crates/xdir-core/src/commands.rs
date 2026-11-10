@@ -194,6 +194,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::View(3), "vista_miniaturas", "Vista: miniaturas", &["Ctrl+Shift+4"]),
     spec(Command::View(4), "vista_lista", "Vista: lista", &["Ctrl+Shift+5"]),
     spec(Command::View(5), "vista_contenido", "Vista: contenido", &["Ctrl+Shift+6"]),
+    spec(Command::View(6), "vista_galeria", "Vista: galería", &["Ctrl+Shift+7"]),
     spec(Command::SortBy(0), "ordenar_nombre", "Ordenar por nombre", &[]),
     spec(Command::SortBy(1), "ordenar_modificado", "Ordenar por fecha de modificación", &[]),
     spec(Command::SortBy(2), "ordenar_creado", "Ordenar por fecha de creación", &[]),
@@ -516,5 +517,19 @@ mod tests {
             assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(Command::View(i)), "{keys}");
         }
         assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Shift+5").unwrap()), "⇧⌘5");
+    }
+
+    /// Galería: `Command::View(6)` (índice de `list::VIEWS`), «Vista: galería», Ctrl+Shift+7
+    /// (⌥⌘7 en macOS, en la tabla de la Mac).
+    #[test]
+    fn gallery_shortcuts() {
+        install_fakes();
+        let km = Keymap::default();
+        let s = ALL.iter().find(|s| s.id == "vista_galeria").unwrap();
+        assert_eq!((s.command, s.name, s.default_keys), (Command::View(6), "Vista: galería", &["Ctrl+Shift+7"][..]));
+        assert_eq!(crate::list::VIEWS[6].0, crate::list::View::Gallery);
+        let c = parse_combo("Ctrl+Shift+7").unwrap();
+        assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(Command::View(6)));
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Alt+7").unwrap()), "⌥⌘7");
     }
 }

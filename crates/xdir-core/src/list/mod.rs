@@ -16,10 +16,12 @@ use crate::theme::alpha;
 use crate::thumbs;
 
 pub mod filters;
+pub mod gallery;
 pub mod groups;
 pub mod meta;
 
 pub use filters::ListHit;
+pub use gallery::{CellState, strip_offset};
 pub use groups::{GROUPINGS, GroupKey, LocalNow, Meta, Row, group_key};
 
 pub const ROW_H: f32 = 24.0;
@@ -118,22 +120,26 @@ pub enum View {
     Thumbnails,
     List,
     Content,
+    /// Imagen grande del enfocado y tira de miniaturas (ver `gallery`).
+    Gallery,
 }
 
 /// (vista, nombre, identificador para la sesión, lado del ícono en DIPs). El índice es el de
 /// `Command::View`: las vistas nuevas van al final para no cambiar los de antes.
-pub const VIEWS: [(View, &str, &str, f32); 6] = [
+pub const VIEWS: [(View, &str, &str, f32); 7] = [
     (View::Details, "Detalles", "detalles", 16.0),
     (View::Icons, "Íconos medianos", "iconos", 48.0),
     (View::LargeIcons, "Íconos grandes", "iconos_grandes", 96.0),
     (View::Thumbnails, "Miniaturas", "miniaturas", 160.0),
     (View::List, "Lista", "lista", 16.0),
     (View::Content, "Contenido", "contenido", 32.0),
+    (View::Gallery, "Galería", "galeria", 72.0),
 ];
 
 /// Orden de las vistas en el menú, con Ctrl+rueda y con el botón del pie del panel: de lo más
 /// compacto a lo más grande.
-pub const CYCLE: [View; 6] = [View::Details, View::List, View::Content, View::Icons, View::LargeIcons, View::Thumbnails];
+pub const CYCLE: [View; 7] =
+    [View::Details, View::List, View::Content, View::Icons, View::LargeIcons, View::Thumbnails, View::Gallery];
 
 impl View {
     pub fn index(self) -> usize {
@@ -397,6 +403,21 @@ pub struct FileList {
     /// Elementos (índices en `entries`) cuyos metadatos pidió alguien más que la lista (la columna
     /// de vista previa): entran en el próximo `take_meta_request`.
     meta_wanted: Vec<usize>,
+    /// Último punto del mouse sobre la lista (la rueda de la Galería solo actúa sobre la tira).
+    mouse_at: Option<(f32, f32)>,
+    /// Galería: corrimiento de la tira, el ancho con el que se calculó y si el panel estaba
+    /// activo al dibujarla (ver `gallery`).
+    strip_scroll: f32,
+    strip_w: f32,
+    strip_active: bool,
+    /// Galería: foco (posición) para el que vale `strip_scroll`; si el foco cambió por otro
+    /// camino, la tira se vuelve a centrar (`gallery::settle_strip`).
+    strip_focus: Option<usize>,
+    /// Galería: elemento (índice en `entries`) presionado en la tira con el último clic y si fue
+    /// en su casilla. El doble clic actúa sobre él aunque la tira se haya corrido entre medio.
+    gallery_press: Option<(usize, bool)>,
+    /// Galería: rueda acumulada que todavía no llegó a un paso (touchpad).
+    wheel_acc: f32,
 }
 
 /// Carpeta de un elemento con ruta completa (resultado de búsqueda).
@@ -500,6 +521,13 @@ impl Default for FileList {
             meta_enabled: true,
             meta_dirty: false,
             meta_wanted: Vec::new(),
+            mouse_at: None,
+            strip_scroll: 0.0,
+            strip_w: 0.0,
+            strip_active: true,
+            strip_focus: None,
+            gallery_press: None,
+            wheel_acc: 0.0,
         }
     }
 }
@@ -847,6 +875,11 @@ impl FileList {
             self.auto_focus = true;
         }
         self.anchor = self.focus;
+        // Galería: lo que se presionó antes de rearmar ya no vale, y la tira sigue al foco.
+        self.gallery_press = None;
+        if self.view == View::Gallery {
+            self.settle_strip();
+        }
     }
 
     // ---------- geometría ----------
@@ -932,6 +965,10 @@ impl FileList {
     /// vacías hacia abajo; una columna en la Lista), para poder hacer clic derecho en la carpeta
     /// o arrancar un rectángulo aunque los elementos llenen el panel.
     fn content_len(&self) -> f32 {
+        // La Galería no se desplaza: la tira se corre sola para centrar el enfocado.
+        if self.view == View::Gallery {
+            return 0.0;
+        }
         if self.horizontal() {
             let cols = self.visible.len().div_ceil(self.rows_per_col());
             return (cols + 1) as f32 * LIST_COL_W + LIST_PAD * 2.0;
@@ -953,6 +990,9 @@ impl FileList {
 
     /// Posiciones (en `visible`) a la vista: [primera, última).
     fn visible_range(&self) -> (usize, usize) {
+        if self.view == View::Gallery {
+            return self.strip_range();
+        }
         if let Some(layout) = &self.layout {
             let mut range: Option<(usize, usize)> = None;
             for l in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_len())] {
@@ -979,6 +1019,9 @@ impl FileList {
     /// Rectángulo de un elemento (fila en detalles y contenido, celda en las cuadrículas y en la
     /// Lista).
     fn item_rect(&self, pos: usize) -> Rect {
+        if self.view == View::Gallery {
+            return self.strip_cell_rect(pos);
+        }
         let rows = self.rows_area();
         if self.horizontal() {
             let per = self.rows_per_col();
@@ -1019,6 +1062,9 @@ impl FileList {
 
     /// Elemento bajo el punto (posición en `visible`).
     fn pos_at(&self, x: f32, y: f32) -> Option<usize> {
+        if self.view == View::Gallery {
+            return self.strip_pos_at(x, y);
+        }
         let rows = self.rows_area();
         if self.horizontal() {
             // La barra horizontal está abajo; las columnas, corridas por el desplazamiento.
@@ -1071,6 +1117,11 @@ impl FileList {
 
     /// Lleva el elemento a la vista (el destino del scroll; se llega suave, ver `tick`).
     fn ensure_visible(&mut self, pos: usize) {
+        // Galería: la tira se corre para centrarlo (teclado, rueda, búsqueda por tipeo).
+        if self.view == View::Gallery {
+            self.center_strip(pos);
+            return;
+        }
         if self.horizontal() {
             let left = LIST_PAD + (pos / self.rows_per_col()) as f32 * LIST_COL_W;
             self.ensure_span(left, LIST_COL_W);
@@ -1124,6 +1175,13 @@ impl FileList {
         self.hover = None;
         self.scroll = 0.0;
         self.scroll_target = 0.0;
+        if view == View::Gallery {
+            // La tira no tiene encabezados de grupo: el foco va a un elemento.
+            self.header_focus = None;
+            if self.focus.is_none_or(|f| f >= self.visible.len()) {
+                self.focus = (!self.visible.is_empty()).then_some(0);
+            }
+        }
         self.relayout();
         if let Some(f) = self.focus {
             self.ensure_visible(f);
@@ -1525,6 +1583,7 @@ impl FileList {
         }
         let (x, y) = match self.view {
             v if v.is_grid() => (item.left + 7.0, item.top + 7.0),
+            View::Gallery => (item.left + gallery::CHECK_INSET, item.top + gallery::CHECK_INSET),
             View::List => (item.left + 8.0, item.top + (ROW_H - CHECK) / 2.0),
             View::Content => (item.left + 14.0, item.top + (CONTENT_H - CHECK) / 2.0),
             _ => (name_left? + PAD, item.top + (ROW_H - CHECK) / 2.0),
@@ -1579,6 +1638,10 @@ impl FileList {
     pub fn on_key(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
         use crate::keys::Key;
         use crate::keys::keys::*;
+        // La Galería recorre `visible` sin encabezados, también con grupos.
+        if self.view == View::Gallery {
+            return self.on_key_gallery(vk, ctrl, shift);
+        }
         if self.layout.is_some() {
             return self.on_key_grouped(vk, ctrl, shift);
         }
@@ -1780,7 +1843,10 @@ impl FileList {
     /// Clic derecho: si cae en un elemento no seleccionado, lo selecciona solo a él.
     /// Devuelve si cayó sobre un elemento (menú de elementos) o no (menú del fondo).
     pub fn on_right_down(&mut self, x: f32, y: f32) -> bool {
-        match self.entry_at(x, y) {
+        // Galería: la imagen grande es el elemento con foco (menú de elementos).
+        let image = self.view == View::Gallery && contains(&self.gallery_image_rect(), x, y);
+        let hit = if image { self.focused_index() } else { self.entry_at(x, y) };
+        match hit {
             Some(idx) => {
                 if !self.selected[idx] {
                     let pos = self.visible.iter().position(|&v| v as usize == idx).unwrap();
@@ -1816,6 +1882,12 @@ impl FileList {
         }
         let cell = self.item_rect(pos);
         match self.view {
+            // Galería: arriba de la celda, centrado (la tira no tiene nombres).
+            View::Gallery => {
+                let cx = (cell.left + cell.right) / 2.0;
+                let (l, r) = ((cx - 120.0).max(self.area.left + 4.0), (cx + 120.0).min(self.area.right - 4.0));
+                return Some(rect(l, cell.top - 30.0, r.max(l + 40.0), cell.top - 8.0));
+            }
             // Donde va el nombre en la celda (`draw_list_cell`) y en la fila (`draw_content_row`).
             View::List => return Some(rect(cell.left + self.check_shift() + LIST_TEXT_X - 4.0, cell.top + 1.0, cell.right - 4.0, cell.bottom - 1.0)),
             View::Content => {
@@ -1843,6 +1915,9 @@ impl FileList {
     }
 
     pub fn on_wheel(&mut self, rows: f32) -> Action {
+        if self.view == View::Gallery {
+            return self.gallery_wheel(rows);
+        }
         let before = self.scroll_target;
         // En la cuadrícula, una muesca de la rueda mueve media celda por "línea" de la rueda; en
         // la Lista la rueda vertical desplaza a los costados, una columna por muesca (3 líneas).
@@ -1864,6 +1939,7 @@ impl FileList {
 
     /// Botón izquierdo. Devuelve si hay que capturar el mouse (arrastre de la barra).
     pub fn on_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, shift: bool) -> (Action, bool) {
+        self.gallery_press = None;
         // Casilla del encabezado: selecciona todo lo que está a la vista, o quita todo.
         if self.header_checkbox_rect().is_some_and(|r| contains(&grow(r, CHECK_SLOP), x, y)) {
             self.toggle_all_checked();
@@ -1915,12 +1991,27 @@ impl FileList {
         // Casilla de un elemento: lo suma o lo quita de la selección sin tocar los demás (Ctrl+clic).
         if let Some(pos) = self.checkbox_at(x, y) {
             self.toggle(pos);
+            if self.view == View::Gallery {
+                self.gallery_press = Some((self.visible[pos] as usize, true));
+                self.reveal_strip(pos);
+            }
             return (Action::Redraw, false);
         }
         // En detalles, el hueco a la derecha del nombre cuenta como vacío: arma el rectángulo en
         // vez de arrastrar el archivo (como en el Explorador).
         let hit = self.pos_at(x, y).filter(|&pos| !self.in_name_blank(pos, x));
         match hit {
+            // Galería: un clic no centra la tira (el doble clic tiene que caer en la misma celda);
+            // solo la corre si la celda no se ve entera.
+            Some(pos) if self.view == View::Gallery && (ctrl || shift) => {
+                self.gallery_press = Some((self.visible[pos] as usize, false));
+                if ctrl {
+                    self.toggle(pos);
+                } else {
+                    self.select_range(pos, false);
+                }
+                self.reveal_strip(pos);
+            }
             Some(pos) if ctrl => self.toggle(pos),
             Some(pos) if shift => self.select_range(pos, false),
             Some(pos) => {
@@ -1937,7 +2028,14 @@ impl FileList {
                 } else {
                     self.press = Some((x, y));
                 }
+                if self.view == View::Gallery {
+                    self.gallery_press = Some((idx, false));
+                    self.reveal_strip(pos);
+                }
             }
+            // En la Galería no hay rectángulo de selección: la imagen grande y los huecos de la
+            // tira no hacen nada.
+            None if self.view == View::Gallery => return (Action::None, false),
             None if contains(&self.rows_area(), x, y) => {
                 // Un hueco: empieza el rectángulo (con Ctrl suma a lo que había).
                 let base = if ctrl { self.selected.clone() } else { vec![false; self.selected.len()] };
@@ -1978,6 +2076,20 @@ impl FileList {
     }
 
     pub fn on_double_click(&mut self, x: f32, y: f32) -> Action {
+        // Galería: el segundo clic va a la celda del primero (si la tira se corrió para mostrarla
+        // entera, el punto puede caer ahora sobre la vecina).
+        if let Some((idx, checkbox)) = self.gallery_press.take()
+            && self.view == View::Gallery
+            && contains(&self.strip_rect(), x, y)
+            && let Some(pos) = self.visible.iter().position(|&v| v as usize == idx)
+        {
+            if checkbox {
+                self.toggle(pos);
+                return Action::Redraw;
+            }
+            self.select_only(pos);
+            return Action::Open(idx);
+        }
         if self.scrollbar().is_some_and(|(track, _)| contains(&track, x, y)) {
             return Action::None;
         }
@@ -2001,11 +2113,16 @@ impl FileList {
                 self.select_only(pos);
                 Action::Open(self.visible[pos] as usize)
             }
+            // Galería: doble clic en la imagen grande abre el enfocado.
+            None if self.view == View::Gallery && contains(&self.gallery_image_rect(), x, y) => {
+                self.focused_index().map_or(Action::None, Action::Open)
+            }
             None => Action::None,
         }
     }
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) -> Action {
+        self.mouse_at = Some((x, y));
         match self.header_drag {
             Some(HeaderDrag::Resize { index, start_x, start_w }) => {
                 self.set_width(index, start_w + (x - start_x));
@@ -2079,6 +2196,7 @@ impl FileList {
     }
 
     pub fn on_mouse_leave(&mut self) -> Action {
+        self.mouse_at = None;
         let header = self.header_hover.take().is_some();
         if self.hover.take().is_some() || header { Action::Redraw } else { Action::None }
     }
@@ -2103,6 +2221,10 @@ impl FileList {
         let cols = self.columns();
 
         p.fill(area, th.surface);
+        if self.view == View::Gallery {
+            self.draw_gallery(p, area, active);
+            return;
+        }
 
         // Encabezado (solo en detalles).
         let header = rect(area.left, area.top, area.right, area.top + HEADER_H);

@@ -409,7 +409,8 @@ impl FileList {
     /// Recalcula la geometría de la lista agrupada (al cambiar las filas, la vista o los elementos
     /// por línea).
     pub(super) fn relayout(&mut self) {
-        if self.group_by.is_none() {
+        // La Galería no dibuja encabezados: la tira recorre `visible` (sin geometría agrupada).
+        if self.group_by.is_none() || self.view == View::Gallery {
             self.layout = None;
             return;
         }

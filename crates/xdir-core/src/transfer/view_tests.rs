@@ -199,7 +199,7 @@ fn conflict_view_buttons() {
 }
 
 fn error(name: &str, why: &str, retry: bool) -> JobError {
-    JobError { src: PathBuf::from(format!("/d/Descargas/{name}")), dst: PathBuf::from(format!("/r/{name}")), message: why.into(), retry }
+    JobError { src: PathBuf::from(format!("/d/Descargas/{name}")), dst: PathBuf::from(format!("/r/{name}")), message: why.into(), retry, entry: None }
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn eta_texts() {
 fn finished_header_counts_and_relative_folders() {
     let mut j = job(1, JobState::Done);
     j.items = (1284, 1284);
-    let err = |src: &str, why: &str| JobError { src: PathBuf::from(src), dst: PathBuf::from("/r/x"), message: why.into(), retry: true };
+    let err = |src: &str, why: &str| JobError { src: PathBuf::from(src), dst: PathBuf::from("/r/x"), message: why.into(), retry: true, entry: None };
     j.errors = vec![
         err("/u/Descargas/Instalador-Rust.exe", "Lo está usando otro programa"),
         err("/u/Descargas/Facturas/factura-0039.pdf", "No tenés permiso"),

@@ -28,7 +28,9 @@ use crate::thumbs;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::Node;
 
+mod archive_fake;
 mod copy_fake;
+pub use archive_fake::FakeArchives;
 pub use copy_fake::FakeCopyPrims;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
@@ -45,6 +47,7 @@ pub fn install_fakes() {
         metadata: Box::new(FakeMetadata),
         preview: Box::new(FakePreview),
         copy_prims: Box::new(FakeCopyPrims::shared()),
+        archives: Box::new(FakeArchives::shared()),
         info: Box::new(FakeInfo),
     });
 }
@@ -1462,8 +1465,9 @@ impl WindowHost for FakeHost {
         self.answer.get()
     }
 
-    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No.
-    fn ask_yes_no(&self, _title: &str, _text: &str) -> bool {
+    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No. Se anota en `questions`.
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        self.questions.borrow_mut().push((title.to_string(), text.to_string()));
         self.answer.get() == Some(true)
     }
 

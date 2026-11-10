@@ -8,3 +8,6 @@ mod macos;
 mod prims;
 pub(crate) use self::macos::spawn as spawn_native;
 pub(crate) use self::prims::MacCopyPrims;
+
+#[cfg(test)]
+mod archive_real_tests;

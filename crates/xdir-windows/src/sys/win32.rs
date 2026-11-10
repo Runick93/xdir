@@ -675,6 +675,8 @@ pub fn install() {
         metadata: Box::new(Win32Metadata),
         preview: Box::new(Win32Preview),
         copy_prims: Box::new(crate::ops::WinCopyPrims),
+        // Windows: solo zip (tar.gz, en macOS y Linux).
+        archives: Box::new(xdir_archive::Service { tar_gz: false }),
         info: Box::new(crate::info::Win32Info),
     });
 }

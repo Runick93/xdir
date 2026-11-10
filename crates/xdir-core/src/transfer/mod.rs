@@ -17,8 +17,10 @@ pub mod speed;
 pub mod view;
 pub mod walk;
 
-pub use engine::{run, title};
+pub use engine::{run, run_with, title};
 
+#[cfg(test)]
+mod archive_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
@@ -104,6 +106,12 @@ pub enum JobSpec {
     Undo(Undo),
     /// Vuelve a intentar lo que falló: (origen, destino ya decidido).
     Retry { moving: bool, pairs: Vec<(PathBuf, PathBuf)> },
+    /// Un zip con lo elegido, en la carpeta del primero («informe.pdf.zip», «Archivo.zip», con
+    /// « 2» si ya existe).
+    Compress { sources: Vec<PathBuf> },
+    /// Extrae `archive` en su carpeta (con los conflictos de siempre) o, con `into_folder`, en
+    /// una carpeta nueva con su nombre («fotos», « 2» si existe).
+    Extract { archive: PathBuf, into_folder: bool },
 }
 
 /// Lo que manda el hilo de un trabajo al de interfaz.
@@ -121,6 +129,9 @@ pub enum Update {
     Progress { items: u64, bytes: u64, current: String },
     /// El destino ya existe: el trabajo espera `Control::answer`.
     Conflict(ConflictInfo),
+    /// Una pregunta de sí o no antes de seguir («Este archivo se expande a 40 GB. ¿Seguir?»): el
+    /// trabajo espera `Control::confirm`.
+    Confirm(String),
     Finished(JobOutcome),
 }
 
@@ -149,6 +160,16 @@ pub struct JobError {
     pub message: String,
     /// Se puede «Reintentar» (no, si es un aviso de lo que quedó con otro nombre).
     pub retry: bool,
+    /// Al extraer: el nombre de la entrada tal como figura en el archivo (`src` es el archivo).
+    /// Se muestra en lugar del nombre de `src`.
+    pub entry: Option<String>,
+}
+
+impl JobError {
+    /// El nombre que se muestra: el de la entrada del archivo, o el de `src`.
+    pub fn shown_name(&self) -> String {
+        self.entry.clone().unwrap_or_else(|| self.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.src.display().to_string()))
+    }
 }
 
 /// Cómo terminó un trabajo.
@@ -165,6 +186,9 @@ pub struct JobOutcome {
     /// Elementos que llegaron (para «Se copiaron N de M»): no cuenta lo omitido ni lo que falló,
     /// tampoco lo de adentro de una carpeta que no se pudo crear.
     pub done_items: u64,
+    /// Lo que no se pudo crear al extraer (enlaces en Windows, enlaces duros y dispositivos de
+    /// un tar): se avisa.
+    pub omitted: usize,
 }
 
 /// Qué hacer con un conflicto (el destino ya existe).
@@ -190,6 +214,7 @@ struct ControlState {
     paused: bool,
     cancelled: bool,
     answer: Option<Answer>,
+    confirm: Option<bool>,
 }
 
 /// Mando de un trabajo, compartido entre el hilo de interfaz (pausa, cancelar, responder) y el
@@ -237,6 +262,25 @@ impl Control {
     /// Responde el conflicto que está esperando el trabajo.
     pub fn answer(&self, a: Answer) {
         self.update(|s| s.answer = Some(a));
+    }
+
+    /// Responde la pregunta (`Update::Confirm`) que está esperando el trabajo.
+    pub fn confirm(&self, yes: bool) {
+        self.update(|s| s.confirm = Some(yes));
+    }
+
+    /// Espera la respuesta a `Update::Confirm`; `false` si se canceló.
+    pub(crate) fn wait_confirm(&self) -> bool {
+        let mut s = self.lock();
+        loop {
+            if s.cancelled {
+                return false;
+            }
+            if let Some(yes) = s.confirm.take() {
+                return yes;
+            }
+            s = self.changed.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     /// Olvida una respuesta vieja (antes de preguntar de nuevo).

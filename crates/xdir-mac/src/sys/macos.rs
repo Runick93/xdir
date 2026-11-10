@@ -568,5 +568,6 @@ pub fn install() {
         overlays: Box::new(MacOverlays),
         metadata: Box::new(MacMetadata),
         preview: Box::new(MacPreview),
+        copy_prims: Box::new(xdir_core::sys::UnimplementedCopyPrims),
     });
 }

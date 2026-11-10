@@ -20,6 +20,9 @@ use crate::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use crate::xtree::tree::Node;
 
 pub mod testing;
+mod copy;
+
+pub use copy::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo};
 
 #[cfg(test)]
 mod tests;
@@ -352,6 +355,8 @@ pub struct Services {
     pub overlays: Box<dyn Overlays>,
     pub metadata: Box<dyn Metadata>,
     pub preview: Box<dyn Preview>,
+    /// Primitivas del motor de copia (`transfer`).
+    pub copy_prims: Box<dyn CopyPrims>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -410,4 +415,8 @@ pub fn metadata() -> &'static dyn Metadata {
 
 pub fn preview() -> &'static dyn Preview {
     &*services().preview
+}
+
+pub fn copy_prims() -> &'static dyn CopyPrims {
+    &*services().copy_prims
 }

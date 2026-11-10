@@ -164,10 +164,6 @@ impl App {
         }
         self.end_edit(false);
         self.set_active(pane);
-        if matches!(self.panes[pane].tab().location, Location::Shell { .. }) {
-            self.host.beep();
-            return;
-        }
         let r = self.panes[pane].search_text_rect();
         let y = (r.top + r.bottom) / 2.0 - 10.0;
         let text = self.panes[pane].tab().search_query().to_string();

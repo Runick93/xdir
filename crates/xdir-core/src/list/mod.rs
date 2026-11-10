@@ -350,6 +350,9 @@ pub struct FileList {
     pub folder: Option<std::path::PathBuf>,
     /// Carpeta en la que se busca, mientras la lista muestra resultados de una búsqueda.
     pub search_root: Option<std::path::PathBuf>,
+    /// Filtro por nombre de lo que ya está en la lista: la búsqueda en una carpeta virtual, que
+    /// no se recorre (ver `filters::set_name_filter`). No es parte de la vista de la carpeta.
+    name_filter: Option<NameFilter>,
     header_drag: Option<HeaderDrag>,
     band: Option<Band>,
     /// Se dibuja el marcador de foco. Un clic en un hueco limpia la selección y lo oculta, para
@@ -378,6 +381,9 @@ fn relative_folder(root: Option<&std::path::Path>, e: &Entry) -> String {
         None => parent.to_string_lossy().into_owned(),
     }
 }
+
+/// Comparador de `name_matcher` guardado en la lista.
+type NameFilter = Box<dyn Fn(&str) -> bool + Send>;
 
 /// Comparador de nombres para lo escrito en el buscador: partes separadas por `;`, cada una un
 /// patrón con `*` y `?` o un texto que el nombre contiene (sin distinguir mayúsculas). El
@@ -448,6 +454,7 @@ impl Default for FileList {
             header_hover: None,
             folder: None,
             search_root: None,
+            name_filter: None,
             header_drag: None,
             band: None,
             focus_visible: true,
@@ -477,9 +484,9 @@ fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
 }
 
 impl FileList {
-    /// ¿Se ve el elemento con la configuración actual (ocultos)?
+    /// ¿Se ve el elemento con la configuración actual (ocultos y filtro por nombre)?
     fn shows(&self, e: &Entry) -> bool {
-        self.show_hidden || !e.is_hidden()
+        (self.show_hidden || !e.is_hidden()) && self.name_filter.as_ref().is_none_or(|f| f(&e.sort_key))
     }
 
     /// Vacía la lista (navegación a otra carpeta).

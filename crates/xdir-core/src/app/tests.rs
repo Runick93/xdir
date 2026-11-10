@@ -2470,3 +2470,132 @@ fn tree_xtree_tooltip() {
     assert!(tip.starts_with(&format!("Escaneando {}", dir.display())), "{tip}");
     a.on_closing();
 }
+
+// ---------- buscador en carpetas virtuales (Papelera) ----------
+
+/// Una Papelera falsa con nombre propio (los tests corren en paralelo).
+fn trash(tag: &str, names: &[&str]) -> Location {
+    let parsing = format!("::{{bin}}-{tag}");
+    crate::sys::testing::FakeFileSystem::set_shell_items(&parsing, names);
+    Location::Shell { parsing, name: "Papelera".into(), parent: None }
+}
+
+fn shown_names(a: &App, pane: usize) -> Vec<String> {
+    let list = &a.panes[pane].tab().list;
+    let mut names: Vec<String> = (0..list.count()).map(|p| list.entries[list.entry_of_pos(p).unwrap()].display.clone()).collect();
+    names.sort();
+    names
+}
+
+/// Buscar en la Papelera filtra por nombre lo que muestra (el nombre que se ve, no el de
+/// análisis), sin recorrer nada, sin la columna «Carpeta» y sin vista propia de búsqueda.
+#[test]
+fn search_in_trash_filters_by_name() {
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, trash("filtra", &["foto playa.jpg", "Foto nieve.png", "notas.txt", "informe.pdf"]));
+    assert_eq!(a.panes[0].tab().list.count(), 4);
+    let folder_key = view_key(&a, 0);
+    let Location::Shell { parsing, .. } = a.panes[0].tab().location.clone() else { unreachable!() };
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "foto");
+    pump(&mut a, 0);
+    a.sync_folder_views();
+    // Lo que se cambie de la vista mientras se busca es de la Papelera.
+    a.panes[0].tab_mut().list.set_sort(list::Column::Size);
+    a.sync_folder_views();
+    assert_eq!(a.folder_views.get(&folder_key).sort, list::Column::Size);
+    assert_eq!(shown_names(&a, 0), ["Foto nieve.png", "foto playa.jpg"]);
+    assert_eq!(a.panes[0].tab().search_query(), "foto");
+    assert!(!a.panes[0].tab().list.columns.iter().any(|c| c.col == list::Column::Folder), "sin columna Carpeta");
+    assert_eq!(view_key(&a, 0), folder_key, "sin vista de búsqueda");
+    for key in [format!("busqueda:{parsing}"), format!("busqueda:shell:{parsing}"), crate::folder_views::computer_search_key()] {
+        assert!(!a.folder_views.contains(&key), "{key}");
+    }
+    assert_eq!(a.panes[0].tab().status(), "Búsqueda «foto»: 2 encontrados");
+    // El mismo comparador que la búsqueda recursiva: comodines y partes con `;`.
+    a.panes[0].tab_mut().search(hwnd, &tx, "*.txt; informe");
+    pump(&mut a, 0);
+    assert_eq!(shown_names(&a, 0), ["informe.pdf", "notas.txt"]);
+    // `$R` está en los nombres de análisis, no en los que se ven.
+    a.panes[0].tab_mut().search(hwnd, &tx, "$r");
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.count(), 0);
+    assert_eq!(a.panes[0].tab().status(), "Búsqueda «$r»: 0 encontrados");
+}
+
+/// La caja de búsqueda se abre en una carpeta virtual (sin pitido) y Enter busca.
+#[test]
+fn search_box_opens_in_virtual_folder() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.set_active(0);
+    go(&mut a, 0, trash("caja", &["foto.jpg", "notas.txt"]));
+    a.paint();
+    a.begin_filter(0);
+    assert_eq!(host.beeps(), 0);
+    let (edit, pane) = a.filter_edit.expect("caja de búsqueda abierta");
+    assert_eq!(pane, 0);
+    let (sx, sy) = center(&a.panes[0].search_text_rect());
+    assert_eq!(a.panes[0].hit(sx, sy), PaneHit::Search, "la caja se dibuja habilitada");
+    crate::host::WindowHost::text_set(&*host, edit, "notas");
+    a.end_filter(true);
+    pump(&mut a, 0);
+    assert_eq!(shown_names(&a, 0), ["notas.txt"]);
+}
+
+/// Escape (o la cruz) termina la búsqueda y vuelve a mostrar toda la Papelera.
+#[test]
+fn escape_restores_trash_listing() {
+    let mut a = app();
+    a.set_active(0);
+    go(&mut a, 0, trash("escape", &["foto.jpg", "notas.txt", "otra foto.png"]));
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "foto");
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.count(), 2);
+    assert!(a.on_key(VK_ESCAPE));
+    pump(&mut a, 0);
+    assert!(a.panes[0].tab().search.is_none());
+    assert_eq!(a.panes[0].tab().search_query(), "");
+    assert_eq!(shown_names(&a, 0), ["foto.jpg", "notas.txt", "otra foto.png"]);
+    assert!(!a.panes[0].tab().status().contains("Búsqueda"));
+    // La cruz de la caja hace lo mismo.
+    a.panes[0].tab_mut().search(hwnd, &tx, "notas");
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.count(), 1);
+    a.clear_filter(0);
+    pump(&mut a, 0);
+    assert_eq!(a.panes[0].tab().list.count(), 3);
+}
+
+/// Una recarga de la Papelera (después de una operación) mientras se busca trae lo nuevo y
+/// mantiene el filtro.
+#[test]
+fn refresh_keeps_trash_search() {
+    let mut a = app();
+    a.set_active(0);
+    let bin = trash("recarga", &["foto.jpg", "notas.txt"]);
+    let Location::Shell { parsing, .. } = &bin else { unreachable!() };
+    let parsing = parsing.clone();
+    go(&mut a, 0, bin);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "foto");
+    pump(&mut a, 0);
+    assert_eq!(shown_names(&a, 0), ["foto.jpg"]);
+    crate::sys::testing::FakeFileSystem::set_shell_items(&parsing, &["foto.jpg", "notas.txt", "foto nueva.png", "otro.txt"]);
+    a.reload_shell_tabs();
+    // La recarga silenciosa no marca la pestaña como cargando: se espera el lote.
+    let ev = a.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la recarga llega");
+    a.on_load_event(ev);
+    while let Ok(ev) = a.rx.recv_timeout(std::time::Duration::from_millis(200)) {
+        a.on_load_event(ev);
+    }
+    assert_eq!(shown_names(&a, 0), ["foto nueva.png", "foto.jpg"]);
+    assert_eq!(a.panes[0].tab().search_query(), "foto");
+    // F5 (recarga con la lista vacía) también la mantiene.
+    a.panes[0].tab_mut().reload(hwnd, &tx, false);
+    pump(&mut a, 0);
+    assert_eq!(shown_names(&a, 0), ["foto nueva.png", "foto.jpg"]);
+    assert_eq!(a.panes[0].tab().status(), "Búsqueda «foto»: 2 encontrados");
+}

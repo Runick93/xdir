@@ -130,7 +130,7 @@ impl App {
                     text: &query,
                     editing: filter_pane == Some(i),
                     running: tab.search.as_ref().filter(|s| !s.done).map(|s| s.progress),
-                    enabled: !matches!(tab.location, Location::Shell { .. }),
+                    enabled: true,
                 };
                 panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), search);
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {

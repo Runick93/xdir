@@ -68,12 +68,40 @@ fn pixels(m: Option<&Meta>) -> Option<u64> {
     Some(u64::from(m.width?) * u64::from(m.height?))
 }
 
-/// Orden por una columna de metadatos (sin datos, primero).
+/// La primera etiqueta en orden alfabético (la que da el grupo).
+fn first_tag(m: &Meta) -> Option<&str> {
+    m.tags.iter().min_by(|a, b| crate::format::caseless_cmp(a, b)).map(String::as_str)
+}
+
+/// Dos listas de textos, elemento por elemento, sin distinguir mayúsculas.
+fn list_cmp(a: &[String], b: &[String]) -> std::cmp::Ordering {
+    for (x, y) in a.iter().zip(b) {
+        let o = crate::format::caseless_cmp(x, y);
+        if o.is_ne() {
+            return o;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Orden por una columna de metadatos (sin datos, primero). No arma textos: se llama en cada
+/// comparación al ordenar carpetas enteras.
 pub(super) fn meta_cmp(col: Column, a: Option<&Meta>, b: Option<&Meta>) -> std::cmp::Ordering {
+    fn text(col: Column, m: Option<&Meta>) -> &str {
+        let Some(m) = m else { return "" };
+        match col {
+            Column::Tags => first_tag(m),
+            Column::Artist => m.artist.as_deref(),
+            Column::Album => m.album.as_deref(),
+            _ => None,
+        }
+        .unwrap_or("")
+    }
     match col {
         Column::Dimensions => pixels(a).cmp(&pixels(b)),
         Column::Duration => a.and_then(|m| m.duration_ms).cmp(&b.and_then(|m| m.duration_ms)),
-        _ => crate::format::caseless_cmp(&meta_text(col, a), &meta_text(col, b)),
+        Column::Authors => list_cmp(a.map_or(&[], |m| m.authors.as_slice()), b.map_or(&[], |m| m.authors.as_slice())),
+        _ => crate::format::caseless_cmp(text(col, a), text(col, b)),
     }
 }
 
@@ -108,7 +136,7 @@ pub(super) fn meta_group(col: Column, m: Option<&Meta>) -> GroupKey {
             Some(_) => key(3, "Larga (> 30 min)"),
         },
         // Varias etiquetas: el grupo de la primera en orden alfabético.
-        Column::Tags => value_group(m.tags.iter().min_by(|a, b| crate::format::caseless_cmp(a, b)).map_or("", |t| t.as_str())),
+        Column::Tags => value_group(first_tag(m).unwrap_or("")),
         _ => value_group(&meta_text(col, Some(m))),
     }
 }
@@ -193,9 +221,8 @@ impl FileList {
         candidates.into_iter().filter(|&i| !std::mem::replace(&mut self.meta_asked[i], true)).collect()
     }
 
-    /// Llegó un lote de metadatos: se guardan y, si se agrupa, ordena o filtra por una columna de
-    /// metadatos, se rearma lo que se ve. El foco se queda en su elemento y el desplazamiento no
-    /// se mueve (salvo que ya no entre).
+    /// Llegó un lote de metadatos: solo se guardan. Lo que se ve se rearma una vez, con
+    /// `flush_meta`, después de entregar todos los lotes que llegaron juntos.
     pub fn set_meta(&mut self, batch: Vec<(usize, Meta)>) {
         let n = self.entries.len();
         self.meta.resize(n, None);
@@ -212,34 +239,68 @@ impl FileList {
         if changed.is_empty() {
             return;
         }
-        let group = self.group_by.filter(|c| c.is_meta());
-        if let Some(col) = group
+        if let Some(col) = self.group_by.filter(|c| c.is_meta())
             && self.keys_for == Some(col)
-            && self.entry_keys.len() == n
         {
-            for &i in &changed {
-                let k = meta_group(col, self.meta_of(i));
-                self.entry_keys[i] = self.intern_key(k);
+            if self.entry_keys.len() == n {
+                for &i in &changed {
+                    let k = meta_group(col, self.meta_of(i));
+                    self.entry_keys[i] = self.intern_key(k);
+                }
+            } else {
+                // Faltan claves: se vuelven a calcular todas con los datos nuevos.
+                self.entry_keys.clear();
             }
+        }
+        self.meta_dirty = true;
+    }
+
+    /// Después de entregar lotes de metadatos (`set_meta`): si se agrupa, ordena o filtra por una
+    /// columna de metadatos, rearma lo que se ve, una sola vez. El foco se queda en su elemento y
+    /// el desplazamiento no se mueve (salvo que ya no entre).
+    pub fn flush_meta(&mut self) {
+        if !std::mem::take(&mut self.meta_dirty) {
+            return;
         }
         let focus = self.focused_index();
         if self.sort.is_meta() || self.filters.iter().any(|(c, _)| c.is_meta()) {
             self.rebuild(focus);
             self.clamp_scroll();
-        } else if group.is_some() {
+        } else if self.group_by.is_some_and(Column::is_meta) {
             self.regroup();
             self.restore_focus(focus);
             self.clamp_scroll();
+            self.refresh_filter_menu();
         } else if self.filter_menu().is_some_and(Column::is_meta) {
             self.refresh_filter_menu();
         }
     }
 
+    /// Una carga nueva dejó sin respuesta lo que estaba pedido (sus lotes se descartan): se vuelve a
+    /// pedir lo que no llegó.
+    pub fn forget_unanswered_meta(&mut self) {
+        for (asked, m) in self.meta_asked.iter_mut().zip(&self.meta) {
+            *asked &= m.is_some();
+        }
+    }
+
+    /// Metadatos de los elementos nuevos de un lote: las carpetas no tienen (no se piden).
+    pub(super) fn meta_for_new(&mut self, batch: &[Entry]) {
+        let empty = Arc::new(Meta::default());
+        self.meta.extend(batch.iter().map(|e| e.is_dir.then(|| empty.clone())));
+        self.meta_asked.extend(batch.iter().map(|e| e.is_dir));
+    }
+
     /// Metadatos de los elementos nuevos de una recarga: los que ya se tenían (misma ruta y fecha)
     /// se toman de la caché; el resto se vuelve a pedir.
+    /// La caché se queda solo con lo de los elementos que siguen.
     pub(super) fn meta_from_cache(&mut self) {
-        self.meta = self.entries.iter().map(|e| self.meta_cache.get(&cache_key(e)).cloned()).collect();
+        let keys: std::collections::HashSet<(OsString, u64)> = self.entries.iter().map(cache_key).collect();
+        self.meta_cache.retain(|k, _| keys.contains(k));
+        let empty = Arc::new(Meta::default());
+        self.meta = self.entries.iter().map(|e| if e.is_dir { Some(empty.clone()) } else { self.meta_cache.get(&cache_key(e)).cloned() }).collect();
         self.meta_asked = self.meta.iter().map(Option::is_some).collect();
+        self.meta_dirty = false;
     }
 
     /// ¿Faltan metadatos de elementos que cuentan en el desplegable de filtros de la columna?
@@ -306,11 +367,12 @@ mod tests {
         p.texts().into_iter().map(|t| t.1).collect()
     }
 
-    /// Entrega lo que haya llegado por el canal.
+    /// Entrega lo que haya llegado por el canal y rearma una vez, como la app al despertar.
     fn deliver(tab: &mut Tab, rx: &Receiver<LoadEvent>) {
         while let Ok(ev) = rx.try_recv() {
             tab.on_load(ev);
         }
+        tab.list.flush_meta();
     }
 
     fn headers(tab: &Tab) -> Vec<String> {
@@ -398,15 +460,83 @@ mod tests {
         assert_eq!(headers(&tab), ["Muy corta (< 1 min) (1)", "Corta (1–5 min) (1)", "Larga (> 30 min) (1)", "Sin valor (297)"]);
     }
 
-    /// Un lote de una carga anterior (otra generación) no cambia nada.
+    /// Un lote de una carga anterior (otra generación) no cambia nada: se pide, se recarga la
+    /// carpeta (la recarga falla: no existe) y recién después llega el lote viejo. Lo que no llegó
+    /// no queda colgado en «Leyendo…»: se vuelve a pedir.
     #[test]
     fn stale_metadata_batch_ignored() {
-        let (mut tab, _tx, _rx) = tab_with("/meta-vieja", &names(3));
+        let dir = "/meta-vieja-no-existe";
+        let (mut tab, tx, rx) = tab_with(dir, &names(3));
+        FakeMetadata::serve(&PathBuf::from(dir).join("f000.jpg"), dims(10, 10));
         tab.list.toggle_column(Column::Dimensions);
-        let stale = LoadEvent { panel: 11, generation: 41, msg: LoadMsg::Metadata(vec![(0, dims(10, 10))]) };
-        assert!(!tab.on_load(stale));
+        draw(&mut tab);
+        tab.request_metadata(Handle(0), &tx);
+        assert_eq!(requested(), [3]);
+        // El lote ya está en el canal, pero antes de entregarlo se recarga en silencio.
+        tab.reload(Handle(0), &tx, true);
+        let mut listed = false;
+        while !listed {
+            let ev = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la recarga termina");
+            listed = matches!(ev.msg, LoadMsg::Listed(_));
+            let was_meta = matches!(ev.msg, LoadMsg::Metadata(_));
+            let changed = tab.on_load(ev);
+            assert!(!(was_meta && changed), "un lote viejo no cambia nada");
+        }
+        tab.list.flush_meta();
         assert_eq!(tab.list.meta_of(0), None);
         assert!(!draw(&mut tab).iter().any(|t| t == "10 × 10"));
+        // La recarga falló: la lista sigue y lo que no llegó se vuelve a pedir.
+        assert_eq!(tab.list.entries.len(), 3);
+        tab.request_metadata(Handle(0), &tx);
+        assert_eq!(requested(), [3]);
+        deliver(&mut tab, &rx);
+        assert!(draw(&mut tab).iter().any(|t| t == "10 × 10"));
+
+        // Un lote de otra generación que llega solo, tampoco.
+        let stale = LoadEvent { panel: 11, generation: 41, msg: LoadMsg::Metadata(vec![(1, dims(20, 20))]) };
+        assert!(!tab.on_load(stale));
+        assert_eq!(tab.list.meta_of(1), Some(&Meta::default()));
+    }
+
+    /// Ordenando por duración, tres lotes que llegan en el mismo despertar rearman la lista una
+    /// sola vez (no una por lote), y quedan ordenados.
+    #[test]
+    fn metadata_batches_rebuild_once() {
+        let (mut tab, tx, rx) = tab_with("/meta-una-vez", &names(600));
+        for i in 0..600u64 {
+            FakeMetadata::serve(&PathBuf::from(format!("/meta-una-vez/f{i:03}.jpg")), duration((600 - i) * 1000));
+        }
+        tab.list.set_sort(Column::Duration);
+        assert!(!tab.list.descending);
+        draw(&mut tab);
+        tab.request_metadata(Handle(0), &tx);
+        assert_eq!(requested(), [200, 200, 200]);
+        let before = tab.list.rows_built;
+        deliver(&mut tab, &rx);
+        assert_eq!(tab.list.rows_built, before + 1);
+        // El más corto (f599, 1 s) primero.
+        assert_eq!(tab.list.entries[tab.list.visible[0] as usize].name, "f599.jpg");
+        draw(&mut tab);
+        assert_eq!(tab.list.rows_built, before + 1, "dibujar no vuelve a rearmar");
+    }
+
+    /// Las carpetas no se piden: no tienen esos datos y van directo a «Sin valor».
+    #[test]
+    fn folders_are_not_requested() {
+        let (mut tab, tx, rx) = tab_with("/meta-carpetas", &names(2));
+        let mut sub = entry("sub");
+        sub.is_dir = true;
+        tab.list.append(vec![sub]);
+        tab.list.set_group(Some(Column::Duration));
+        assert_eq!(headers(&tab), ["Sin valor (1)", "Leyendo… (2)"]);
+        draw(&mut tab);
+        tab.request_metadata(Handle(0), &tx);
+        let reqs = FakeMetadata::take_requests();
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].0.iter().all(|(_, p)| !p.ends_with("sub")), "{:?}", reqs[0].0);
+        assert_eq!(reqs[0].0.len(), 2);
+        deliver(&mut tab, &rx);
+        assert_eq!(headers(&tab), ["Sin valor (3)"]);
     }
 
     /// Al llegar los metadatos el foco se queda en su elemento y la lista no se desplaza, también

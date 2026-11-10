@@ -338,6 +338,9 @@ impl Tab {
         }
         if silent {
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            // Los lotes de metadatos en camino traen la generación vieja y se descartan: lo que no
+            // llegó se vuelve a pedir (si la recarga falla, la lista sigue igual y sin «Leyendo…» colgado).
+            self.list.forget_unanswered_meta();
             self.reload_buf = Some(Vec::new());
             sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
         } else {

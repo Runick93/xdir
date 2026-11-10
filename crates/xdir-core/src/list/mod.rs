@@ -386,6 +386,8 @@ pub struct FileList {
     /// Los elementos tienen ruta de disco de donde leer metadatos (carpetas y búsquedas; no «Este
     /// equipo» ni las carpetas virtuales). Lo fija la pestaña.
     pub meta_enabled: bool,
+    /// Llegaron metadatos y falta rearmar lo que se ve (`flush_meta`).
+    meta_dirty: bool,
 }
 
 /// Carpeta de un elemento con ruta completa (resultado de búsqueda).
@@ -482,6 +484,7 @@ impl Default for FileList {
             meta_asked: Vec::new(),
             meta_cache: std::collections::HashMap::new(),
             meta_enabled: true,
+            meta_dirty: false,
         }
     }
 }
@@ -592,8 +595,7 @@ impl FileList {
         self.selected.extend(std::iter::repeat_n(false, batch.len()));
         self.meta.resize(start as usize, None);
         self.meta_asked.resize(start as usize, false);
-        self.meta.extend(std::iter::repeat_n(None, batch.len()));
-        self.meta_asked.extend(std::iter::repeat_n(false, batch.len()));
+        self.meta_for_new(&batch);
         self.entries.extend(batch);
 
         // Primero los filtros por columna (ver `filters`); después se ordena y se agrupa.
@@ -2055,6 +2057,8 @@ impl FileList {
     // ---------- dibujo ----------
 
     pub fn draw(&mut self, p: &dyn Painter, area: Rect, active: bool) {
+        // Metadatos entregados sin rearmar todavía (la app ya lo hace al vaciar el canal).
+        self.flush_meta();
         self.area = area;
         // Con otro ancho entran otros elementos por línea: solo la geometría se recalcula.
         if !self.layout_current() {

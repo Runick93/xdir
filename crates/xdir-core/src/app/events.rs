@@ -25,6 +25,10 @@ impl App {
                 while let Ok(event) = self.rx.try_recv() {
                     changed |= self.on_load_event(event);
                 }
+                // Los lotes de metadatos que llegaron juntos rearman la lista una sola vez.
+                for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+                    tab.list.flush_meta();
+                }
                 self.ui_load_ms += ms_since(t0);
                 if changed {
                     self.try_pending_rename();

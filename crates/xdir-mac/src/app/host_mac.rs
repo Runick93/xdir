@@ -189,6 +189,15 @@ impl WindowHost for MacHost {
     }
 
     fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool> {
+        // Pruebas: «Sí» sin mostrar el cuadro (que frenaría el guion); la pregunta queda anotada.
+        #[cfg(feature = "pruebas")]
+        if let Some(log) = std::env::var_os("XDIR_PRUEBAS_RESPONDER_SI") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+                let _ = writeln!(f, "{title}: {text}");
+            }
+            return Some(true);
+        }
         let mtm = MainThreadMarker::new()?;
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(title));

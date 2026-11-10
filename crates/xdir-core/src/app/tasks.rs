@@ -41,7 +41,7 @@ pub(super) enum TaskDone {
     /// Las letras libres para una unidad de red.
     FreeLetters(Vec<char>),
     /// Una conexión que había vencido terminó bien después.
-    LateConnected { addr: crate::net::Address, path: PathBuf },
+    LateConnected { generation: u64, addr: crate::net::Address, path: PathBuf },
     /// Las subcarpetas de la flecha `chevron` del panel `pane` (pedidas en otro hilo).
     Subfolders { pane: usize, chevron: usize, loc: Location, items: Vec<(String, Location)> },
     /// Terminó de desconectar `root` (`label`: el último tramo de la dirección; `force`: si fue
@@ -106,7 +106,7 @@ impl App {
             TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
             TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
             TaskDone::Subfolders { pane, chevron, loc, items } => self.on_subfolders(pane, chevron, loc, items),
-            TaskDone::LateConnected { addr, path } => self.on_late_connected(addr, path),
+            TaskDone::LateConnected { generation, addr, path } => self.on_late_connected(generation, addr, path),
             TaskDone::FreeLetters(letters) => self.on_free_letters(letters),
             TaskDone::Disconnected { root, label, force, result } => self.on_disconnected(root, label, force, result),
         }

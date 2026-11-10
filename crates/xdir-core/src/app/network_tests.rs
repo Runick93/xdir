@@ -1651,3 +1651,19 @@ fn stale_red_toml_read_ignored() {
     a.on_net_places(Some((old, Some(std::time::UNIX_EPOCH))));
     assert_eq!(a.net.places.recents.len(), 1);
 }
+
+/// m2: si el usuario canceló, un éxito tardío solo avisa: no abre una pestaña.
+#[test]
+fn cancelled_late_success_only_notifies() {
+    FakeNetwork::set_connect("nas-r2m2", Ok(tmp_dir("r2-m2")));
+    FakeNetwork::hang("nas-r2m2", Duration::from_millis(250));
+    let (mut a, _h) = open_with("smb://nas-r2m2/fotos");
+    a.net.connect_limit = Some(Duration::from_millis(50));
+    let tabs = a.panes[a.active].tabs.len();
+    a.on_field_done(true);
+    a.connect_dialog_click(Some(DialogHit::Cancel), false);
+    wait_task(&mut a, |t| matches!(t, TaskDone::LateConnected { .. }));
+    assert_eq!(a.notice.as_deref(), Some("Se conectó \"fotos\""));
+    assert_eq!(a.panes[a.active].tabs.len(), tabs);
+    assert!(a.net.dialog.is_some());
+}

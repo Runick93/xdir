@@ -52,6 +52,8 @@ pub(super) struct NetState {
     /// Fila de «Red» del clic derecho en curso.
     #[cfg(feature = "arbol")]
     pub tree_ctx: Option<crate::tree::NetRow>,
+    /// Intentos de conectar que el usuario canceló (un éxito tardío de esos solo avisa).
+    pub cancelled: Vec<u64>,
     /// El reintento del conflicto 1219 en curso.
     pub conflict_retry: Option<ConflictRetry>,
     /// Credenciales pedidas por una pestaña (carpeta UNC): (pestaña, generación, navegación).
@@ -177,7 +179,7 @@ impl App {
             std::thread::spawn(move || {
                 let r = sys::network().connect(owner, &a, opts, &AtomicBool::new(false));
                 if let Err(std::sync::mpsc::SendError(Ok(path))) = tx.send(r)
-                    && late_tx.send(TaskDone::LateConnected { addr: a, path }).is_ok()
+                    && late_tx.send(TaskDone::LateConnected { generation, addr: a, path }).is_ok()
                 {
                     owner.post(super::tasks::WM_APP_TASK, 0, 0);
                 }
@@ -246,12 +248,15 @@ impl App {
 
     /// Una conexión que había vencido terminó bien: se avisa, se suma a los recientes y, si el
     /// panel sigue abierto con esa dirección, se cierra y se abre la carpeta.
-    pub(super) fn on_late_connected(&mut self, addr: Address, path: PathBuf) {
+    pub(super) fn on_late_connected(&mut self, generation: u64, addr: Address, path: PathBuf) {
         self.request_connections();
         self.net.places.add_recent(&addr, unix_now());
         self.save_net_places();
         self.notice = Some(format!("Se conectó \"{}\"", addr.label()));
-        let same = self.net.dialog.as_ref().is_some_and(|d| d.busy.is_none()) && Address::parse(&self.connect_field_text()).is_ok_and(|a| a.same(&addr));
+        // Un intento cancelado solo avisa: no abre nada.
+        let cancelled = self.net.cancelled.contains(&generation);
+        let same = !cancelled
+            && self.net.dialog.as_ref().is_some_and(|d| d.busy.is_none()) && Address::parse(&self.connect_field_text()).is_ok_and(|a| a.same(&addr));
         if same {
             self.close_connect_dialog();
             let pane = self.active;
@@ -999,7 +1004,9 @@ impl App {
     fn cancel_connect(&mut self, close: bool) {
         match &mut self.net.dialog {
             Some(d) if d.busy.is_some() && !close => {
-                d.busy = None;
+                if let Some(g) = d.busy.take() {
+                    self.net.cancelled.push(g);
+                }
                 self.redraw();
             }
             Some(_) => self.close_connect_dialog(),

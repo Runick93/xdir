@@ -39,7 +39,12 @@ pub fn origin_in(log: Option<&Path>, in_trash: &Path) -> Option<PathBuf> {
     }
     let dir = in_trash.parent()?;
     let name = in_trash.file_name()?.to_string_lossy().into_owned();
-    let bytes = std::fs::read(dir.join(".DS_Store")).ok()?;
+    // Un `.DS_Store` de Papelera pesa pocos KB: uno de más de 4 MB no se lee (origen desconocido).
+    let ds = dir.join(".DS_Store");
+    if std::fs::metadata(&ds).ok()?.len() > DS_STORE_MAX {
+        return None;
+    }
+    let bytes = std::fs::read(ds).ok()?;
     let (folder, original) = parse_ds_store(&bytes).remove(&name)?;
     safe_origin(&volume_root(dir), &folder, &original)
 }
@@ -58,6 +63,9 @@ pub fn safe_origin(root: &Path, folder: &str, name: &str) -> Option<PathBuf> {
     let out = root.join(folder).join(n);
     out.starts_with(root).then_some(out)
 }
+
+/// Tamaño máximo de un `.DS_Store` que se lee.
+const DS_STORE_MAX: u64 = 4 << 20;
 
 /// `<config>/papelera.tsv`.
 fn log_file() -> Option<PathBuf> {
@@ -239,17 +247,25 @@ fn read_records(b: &[u8], out: &mut HashMap<String, (Option<String>, Option<Stri
     };
     let db = block(dsdb?)?;
     let root_node = u32_at(b, db)? as usize;
-    // Topes: un nodo visitado dos veces (ciclo), más registros o nodos pendientes de los que
-    // puede tener una Papelera razonable → archivo armado o roto, sin resultado.
+    // Topes: un bloque leído dos veces (por id o por posición: ciclos y ids que apuntan al mismo
+    // lugar), más registros o nodos pendientes de los que puede tener una Papelera razonable, o
+    // más bytes leídos que los del archivo (un árbol válido lee cada byte una vez) → archivo
+    // armado o roto, sin resultado.
     const MAX: usize = 1 << 16;
     let mut stack = vec![root_node];
     let mut visited = std::collections::HashSet::new();
+    let mut offsets = std::collections::HashSet::new();
     let mut records = 0usize;
+    let mut parsed = 0usize;
     while let Some(node) = stack.pop() {
         if !visited.insert(node) {
             return None;
         }
-        let mut at = block(node)?;
+        let start = block(node)?;
+        if !offsets.insert(start) {
+            return None;
+        }
+        let mut at = start;
         let p = u32_at(b, at)?;
         let n = u32_at(b, at + 4)? as usize;
         records += n;
@@ -266,6 +282,10 @@ fn read_records(b: &[u8], out: &mut HashMap<String, (Option<String>, Option<Stri
                 at += 4;
             }
             at = read_record(b, at, out)?;
+        }
+        parsed += at - start;
+        if parsed > b.len() {
+            return None;
         }
         if p != 0 {
             stack.push(p as usize);
@@ -462,6 +482,71 @@ mod tests {
         let t = std::time::Instant::now();
         assert!(parse_ds_store(&b).is_empty());
         assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    /// Muchos ids de bloque que apuntan a la misma hoja con un nombre enorme (caso del revisor):
+    /// cada byte se lee una vez como mucho; termina enseguida y sin resultado.
+    #[test]
+    fn ds_store_block_aliasing_finishes() {
+        fn align(b: &mut Vec<u8>) {
+            while (b.len() - 4) % 32 != 0 {
+                b.push(0);
+            }
+        }
+        let (k, units) = (60000usize, 60000usize);
+        let count = 65536usize;
+        let mut b = Vec::new();
+        b.extend(1u32.to_be_bytes());
+        b.extend(b"Bud1");
+        b.extend(28u32.to_be_bytes());
+        b.resize(32, 0);
+        b.extend((count as u32).to_be_bytes());
+        b.extend(0u32.to_be_bytes());
+        let ap = b.len();
+        b.resize(ap + 4 * count, 0);
+        b.extend(1u32.to_be_bytes());
+        b.push(4);
+        b.extend(b"DSDB");
+        b.extend(0u32.to_be_bytes());
+        align(&mut b);
+        let db = b.len();
+        b.extend(1u32.to_be_bytes());
+        b.resize(db + 32, 0);
+        align(&mut b);
+        let root = b.len();
+        b.extend(2u32.to_be_bytes());
+        b.extend(((k - 1) as u32).to_be_bytes());
+        for i in 0..k - 1 {
+            b.extend(((3 + i) as u32).to_be_bytes());
+            b.extend(1u32.to_be_bytes());
+            b.extend(0x61u16.to_be_bytes());
+            b.extend(b"ptbL");
+            b.extend(b"bool");
+            b.push(1);
+        }
+        align(&mut b);
+        let leaf = b.len();
+        b.extend(0u32.to_be_bytes());
+        b.extend(1u32.to_be_bytes());
+        b.extend((units as u32).to_be_bytes());
+        for _ in 0..units {
+            b.extend(0x61u16.to_be_bytes());
+        }
+        b.extend(b"ptbL");
+        b.extend(b"bool");
+        b.push(1);
+        let mut set = |i: usize, off: usize| {
+            let a = (((off - 4) as u32) & !0x1f) | 5;
+            b[ap + 4 * i..ap + 4 * i + 4].copy_from_slice(&a.to_be_bytes());
+        };
+        set(0, db);
+        set(1, root);
+        for i in 2..k + 2 {
+            set(i, leaf);
+        }
+        let t = std::time::Instant::now();
+        assert!(parse_ds_store(&b).is_empty());
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
     }
 
     fn tmp(name: &str) -> PathBuf {

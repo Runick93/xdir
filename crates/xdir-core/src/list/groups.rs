@@ -304,21 +304,32 @@ impl FileList {
     /// reemplazaron los elementos).
     fn ensure_keys(&mut self) {
         let Some(col) = self.group_by else { return };
-        if self.keys_for != Some(col) || self.entry_keys.len() > self.entries.len() {
+        // La fecha de hoy solo hace falta para las fechas.
+        let now = if natural_descending(col) { crate::sys::env().local_now() } else { LocalNow::from_unix(0, 0) };
+        let new_day = natural_descending(col) && now.day != self.keys_day;
+        if self.keys_for != Some(col) || self.entry_keys.len() > self.entries.len() || new_day {
             self.entry_keys.clear();
             self.key_table.clear();
             self.key_index.clear();
             self.keys_for = Some(col);
+            self.keys_day = now.day;
         }
         if self.entry_keys.len() == self.entries.len() {
             return;
         }
-        // La fecha de hoy solo hace falta para las fechas.
-        let now = if natural_descending(col) { crate::sys::env().local_now() } else { LocalNow::from_unix(0, 0) };
         for i in self.entry_keys.len()..self.entries.len() {
             let k = group_key(col, &self.entries[i], self.meta_of(i), now);
             let id = self.intern_key(k);
             self.entry_keys.push(id);
+        }
+    }
+
+    /// Agrupada por fecha: si cambió el día desde que se calcularon los grupos (pasó la
+    /// medianoche), los rearma. Se llama al dibujar.
+    pub(super) fn regroup_if_day_changed(&mut self) {
+        let Some(col) = self.group_by.filter(|&c| natural_descending(c)) else { return };
+        if self.keys_for == Some(col) && !self.entry_keys.is_empty() && crate::sys::env().local_now().day != self.keys_day {
+            self.regroup_keep_focus();
         }
     }
 
@@ -754,6 +765,32 @@ mod list_tests {
         assert!(l.focused_header().is_some());
         l.on_key(VK_NEXT.0, false, false);
         assert_eq!(l.focus_pos(), Some((3 + page).min(7)));
+    }
+
+    /// Agrupada por fecha, pasada la medianoche los grupos se rearman con el día nuevo: lo de
+    /// «Hoy» pasa a «Ayer» en el siguiente dibujo.
+    #[test]
+    fn date_groups_follow_midnight() {
+        use crate::sys::testing::FakeEnv;
+        install_fakes();
+        let today = FakeEnv::DEFAULT_NOW;
+        let unix = today.day * 86_400 + 3_600;
+        let mut e = entry("a", 0);
+        e.modified = ((unix + 11_644_473_600) * 10_000_000) as u64;
+        let mut l = FileList::default();
+        l.area = rect(0.0, 0.0, 800.0, 600.0);
+        l.append(vec![e]);
+        l.set_group(Some(Column::Modified));
+        assert_eq!(headers(&l)[0].0, "Hoy");
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        let area = l.area;
+        l.draw(&p, area, true);
+        assert_eq!(headers(&l)[0].0, "Hoy");
+        FakeEnv::set_local_now(crate::sys::LocalNow { day: today.day + 1, weekday: today.weekday + 1, ..today });
+        l.draw(&p, area, true);
+        let label = headers(&l)[0].0.clone();
+        FakeEnv::set_local_now(today);
+        assert_eq!(label, "Ayer");
     }
 
     /// Ctrl+A (seleccionar todo) e invertir solo tocan lo que se ve.

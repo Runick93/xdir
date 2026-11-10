@@ -352,6 +352,9 @@ pub struct FileList {
     key_table: Vec<GroupKey>,
     key_index: std::collections::HashMap<GroupKey, u32>,
     keys_for: Option<Column>,
+    /// Día local (`LocalNow::day`) con el que se calcularon las claves de fecha: si cambia (pasó
+    /// la medianoche), se recalculan («Hoy» pasa a «Ayer»).
+    keys_day: i64,
     /// Geometría de la lista agrupada (líneas de encabezado y de elementos).
     layout: Option<groups::Layout>,
     /// El foco está en el encabezado de este grupo (en vez de en un elemento).
@@ -467,6 +470,7 @@ impl Default for FileList {
             key_table: Vec::new(),
             key_index: std::collections::HashMap::new(),
             keys_for: None,
+            keys_day: 0,
             layout: None,
             header_focus: None,
             rows_built: 0,
@@ -2068,6 +2072,7 @@ impl FileList {
     pub fn draw(&mut self, p: &dyn Painter, area: Rect, active: bool) {
         // Metadatos entregados sin rearmar todavía (la app ya lo hace al vaciar el canal).
         self.flush_meta();
+        self.regroup_if_day_changed();
         self.area = area;
         // Con otro ancho entran otros elementos por línea: solo la geometría se recalcula.
         if !self.layout_current() {

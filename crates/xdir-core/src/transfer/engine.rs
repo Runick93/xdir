@@ -56,6 +56,11 @@ fn is_mac_metadata(name: &str) -> bool {
     n == MAC_METADATA || n.starts_with("__MACOSX/") || n.starts_with("__MACOSX\\")
 }
 
+/// `p` relativo a `base`, con `/` (para mostrarlo como un nombre de dentro del archivo).
+fn shown_rel(base: &Path, p: &Path) -> String {
+    p.strip_prefix(base).map(|r| r.iter().map(|c| c.to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")).unwrap_or_else(|_| name_of(p))
+}
+
 /// Lo creado de un deshacer (rutas de `Created` y `CreatedIds`).
 fn created_paths(steps: &[Undo]) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -327,6 +332,9 @@ struct Job<'a> {
     /// Mover renombrando reintenta un rato si está ocupado (lo recién extraído puede tenerlo
     /// abierto un antivirus).
     retry_renames: bool,
+    /// Extraer: los enlaces que trajo este trabajo con su identidad (los únicos que se borran si
+    /// apuntan afuera).
+    arrived_links: Vec<(PathBuf, Option<(u64, u64)>)>,
 }
 
 impl<'a> Job<'a> {
@@ -359,6 +367,7 @@ impl<'a> Job<'a> {
             moves_as_created: false,
             omitted: 0,
             retry_renames: false,
+            arrived_links: Vec::new(),
         }
     }
 
@@ -1742,7 +1751,7 @@ impl<'a> Job<'a> {
         self.select.push(folder.clone());
         // Los enlaces, contra la carpeta nueva (si se subió la única carpeta, un «../x» ahora
         // podría salir).
-        self.drop_links_outside(archive, &folder, &folder, std::slice::from_ref(&folder));
+        self.check_arrived(archive, &folder, &folder, std::slice::from_ref(&folder));
     }
 
     /// «Extraer aquí»: lo de adentro de la raíz va a `dir` renombrando, con los conflictos de
@@ -1760,35 +1769,73 @@ impl<'a> Job<'a> {
             if self.should_stop() {
                 break;
             }
+            // Lo que llegó con este elemento (también adentro de una carpeta que se combinó) está
+            // anotado como creado: sus enlaces se miran enseguida, antes de la próxima pregunta.
+            let before = created_paths(&self.undo).len();
             self.process(item, true);
+            let landed: Vec<PathBuf> = created_paths(&self.undo).into_iter().skip(before).collect();
+            self.check_arrived(archive, dir, dir, &landed);
         }
         self.retry_renames = false;
         if self.cancelled {
             self.take_back();
             return;
         }
-        // Lo que llegó (también adentro de carpetas que se combinaron) está anotado como creado.
-        let arrived = created_paths(&self.undo);
-        self.drop_links_outside(archive, dir, dir, &arrived);
+        // Otra vez al final: algo que llegó (o cambió) después pudo hacer salir a uno anterior.
+        self.recheck_arrived(archive, dir, dir);
     }
 
-    /// Mira los enlaces simbólicos que hay en `arrived` (o debajo) contra `inside`: los que
-    /// resuelven afuera se borran y se anotan («Ruta no permitida dentro del archivo»), con el
-    /// nombre relativo a `base`.
-    fn drop_links_outside(&mut self, archive: &Path, base: &Path, inside: &Path, arrived: &[PathBuf]) {
+    /// Recién llegados `arrived` (o lo de adentro): anota la identidad de sus enlaces (son de
+    /// este trabajo) y borra los que resuelven fuera de `inside`. Lo que no se puede mirar se
+    /// avisa y no se toca.
+    fn check_arrived(&mut self, archive: &Path, base: &Path, inside: &Path, arrived: &[PathBuf]) {
         let never = Control::default();
         let mut links = Vec::new();
         for p in arrived {
-            if let Ok((items, _)) = walk(self.prims, p, &never, &mut |_| {}) {
-                links.extend(items.into_iter().filter(|i| i.stat.kind == ItemKind::Symlink).map(|i| i.src));
+            match walk(self.prims, p, &never, &mut |_| {}) {
+                Ok((items, errors)) => {
+                    for e in errors {
+                        let shown = shown_rel(base, &e.path);
+                        self.entry_error(archive, base, &shown, &e.message());
+                    }
+                    for i in items.into_iter().filter(|i| i.stat.kind == ItemKind::Symlink) {
+                        self.arrived_links.push((i.src.clone(), i.stat.file_id));
+                        links.push(i.src);
+                    }
+                }
+                // Ya no está (se canceló o lo sacó el usuario): nada que mirar.
+                Err(e) if e.kind == ErrKind::NotFound => {}
+                Err(e) => {
+                    let shown = shown_rel(base, p);
+                    self.entry_error(archive, base, &shown, &e.message());
+                }
             }
         }
+        self.drop_outside(archive, base, inside, links);
+    }
+
+    /// La última mirada: solo los enlaces que trajo este trabajo y que siguen siendo esos (la
+    /// misma identidad); lo que el usuario puso en su lugar no se toca.
+    fn recheck_arrived(&mut self, archive: &Path, base: &Path, inside: &Path) {
+        let ours: Vec<PathBuf> = self.arrived_links.iter().filter(|(p, id)| self.prims.stat(p).is_ok_and(|s| s.kind == ItemKind::Symlink && s.file_id == *id)).map(|(p, _)| p.clone()).collect();
+        self.drop_outside(archive, base, inside, ours);
+    }
+
+    /// Borra de `links` (de este trabajo) los que resuelven fuera de `inside`, si siguen siendo
+    /// los que llegaron, y los anota («Ruta no permitida dentro del archivo»).
+    fn drop_outside(&mut self, archive: &Path, base: &Path, inside: &Path, links: Vec<PathBuf>) {
         if links.is_empty() {
             return;
         }
         let dir = archive.parent().unwrap_or(base).to_path_buf();
         for bad in self.archives.links_outside(inside, &links) {
-            let shown = bad.strip_prefix(base).map(|r| r.iter().map(|c| c.to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")).unwrap_or_else(|_| name_of(&bad));
+            let Some(pos) = self.arrived_links.iter().position(|(p, _)| p == &bad) else { continue };
+            let (_, id) = self.arrived_links.remove(pos);
+            // Justo antes de borrar: tiene que ser el mismo enlace que llegó.
+            if !self.prims.stat(&bad).is_ok_and(|s| s.kind == ItemKind::Symlink && s.file_id == id) {
+                continue;
+            }
+            let shown = shown_rel(base, &bad);
             match self.prims.remove(&bad) {
                 Ok(()) => {
                     self.select.retain(|s| s != &bad);

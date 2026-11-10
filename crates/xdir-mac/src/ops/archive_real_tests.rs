@@ -71,12 +71,20 @@ fn raw_zip(entries: &[(&[u8], &[u8], u32)]) -> Vec<u8> {
 const LINK: u32 = 0o120777 << 16;
 
 fn run(spec: JobSpec, choice: Choice) -> (JobOutcome, Vec<String>) {
+    run_cb(spec, choice, || {})
+}
+
+/// Como `run`; `on_conflict` corre mientras el trabajo espera la respuesta.
+fn run_cb(spec: JobSpec, choice: Choice, mut on_conflict: impl FnMut()) -> (JobOutcome, Vec<String>) {
     let ctl: Arc<Control> = Control::new();
     let (mut fin, mut asked) = (None, Vec::new());
     let svc = xdir_archive::Service { tar_gz: true };
     let c2 = ctl.clone();
     run_with(spec, &MacCopyPrims, &svc as &dyn Archives, &ctl, &mut |u| match u {
-        Update::Conflict(_) => c2.answer(Answer { choice, all: true }),
+        Update::Conflict(_) => {
+            on_conflict();
+            c2.answer(Answer { choice, all: true })
+        }
         Update::Confirm(q) => {
             asked.push(q);
             c2.confirm(true)
@@ -144,5 +152,43 @@ fn real_many_empty_entries_do_not_ask() {
     assert!(asked.is_empty(), "{asked:?}");
     assert!(o.errors.is_empty());
     assert_eq!(fs::read_dir(t.join("many")).unwrap().count(), 20_000);
+    let _ = fs::remove_dir_all(&t);
+}
+
+#[test]
+fn real_escaping_link_is_gone_before_the_next_question_and_user_links_stay() {
+    let t = tmp();
+    let inn = t.join("in");
+    fs::create_dir_all(inn.join("a")).unwrap();
+    fs::create_dir_all(t.join("outside")).unwrap();
+    fs::write(t.join("outside/secret"), b"s").unwrap();
+    std::os::unix::fs::symlink("../outside", inn.join("b")).unwrap();
+    std::os::unix::fs::symlink("../../outside", inn.join("a/u")).unwrap();
+    fs::write(inn.join("z.txt"), b"mine").unwrap();
+    let z = inn.join("m.zip");
+    fs::write(&z, raw_zip(&[(b"a/", b"", 0), (b"a/w", b"../b/secret", LINK), (b"a/ok", b"u", LINK), (b"a_link", b"b/secret", LINK), (b"z.txt", b"theirs", 0)])).unwrap();
+    let mut visible = Vec::new();
+    let p = inn.join("a_link");
+    let (o, _) = run_cb(JobSpec::Extract { archive: z, into_folder: false }, Choice::Merge, || {
+        visible.push(fs::symlink_metadata(&p).is_ok());
+        // En la pregunta de «z.txt» (la segunda) el usuario pone uno suyo con ese nombre: no se
+        // toca.
+        if visible.len() == 2 {
+            std::os::unix::fs::symlink("../outside/secret", &p).unwrap();
+        }
+    });
+    // La primera pregunta es la carpeta «a» (Combinar); la de «z.txt», después de «a_link».
+    assert_eq!(visible, [false, false]);
+    assert_eq!(fs::read_link(&p).unwrap(), Path::new("../outside/secret"));
+    assert_eq!(fs::read_link(inn.join("a/u")).unwrap(), Path::new("../../outside"));
+    assert!(fs::symlink_metadata(inn.join("a/w")).is_err());
+    // «a/ok» → «u» (el enlace del usuario que sale): también sale, se borra.
+    assert!(fs::symlink_metadata(inn.join("a/ok")).is_err());
+    let mut bad: Vec<_> = o.errors.iter().filter(|e| e.message == NOT_ALLOWED).map(|e| e.entry.clone().unwrap()).collect();
+    bad.sort();
+    assert_eq!(bad, ["a/ok", "a/w", "a_link"]);
+    // «Combinar» con un archivo es «Conservar ambos».
+    assert_eq!(fs::read(inn.join("z.txt")).unwrap(), b"mine");
+    assert_eq!(fs::read(inn.join("z 2.txt")).unwrap(), b"theirs");
     let _ = fs::remove_dir_all(&t);
 }

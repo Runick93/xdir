@@ -418,3 +418,52 @@ fn extract_reports_omitted_and_password() {
     assert!(!disk.exists(&p("/x7/s.txt")));
     no_tmp_left(&disk, &p("/x7"));
 }
+
+#[test]
+fn extract_here_checks_each_item_when_it_lands() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    disk.add_file(&p("/w1/outside/secret"), b"s".to_vec());
+    disk.add_symlink(&p("/w1/in/b"), Path::new("../outside"));
+    disk.add_file(&p("/w1/in/z.txt"), b"mine".to_vec());
+    arch.add_archive(&p("/w1/in/m.zip"), &[("z.txt", b"theirs")], 5);
+    arch.add_link(&p("/w1/in/m.zip"), "a_link", Some("b/secret"));
+    arch.add_link(&p("/w1/in/m.zip"), "l", Some("q/x"));
+    let d = disk.clone();
+    let mut visible = None;
+    let skip = Answer { choice: Choice::Skip, all: false };
+    let r = go(&disk, &arch, JobSpec::Extract { archive: p("/w1/in/m.zip"), into_folder: false }, &[skip], true, &mut |u, _| {
+        if matches!(u, Update::Conflict(_)) {
+            // Mientras se pregunta, el enlace que sale ya no está a la vista.
+            visible = Some(d.exists(&p("/w1/in/a_link")));
+            // El usuario pone uno suyo con ese nombre y un enlace suyo que hace salir a «l».
+            d.add_symlink(&p("/w1/in/a_link"), Path::new("../outside/secret"));
+            d.add_symlink(&p("/w1/in/q"), Path::new("../outside"));
+        }
+    });
+    assert_eq!(visible, Some(false));
+    // Lo del usuario no se toca; «l» (de este trabajo) se borra al final.
+    assert_eq!(disk.link_target(&p("/w1/in/a_link")), Some(p("../outside/secret")));
+    assert_eq!(disk.link_target(&p("/w1/in/q")), Some(p("../outside")));
+    assert!(!disk.exists(&p("/w1/in/l")));
+    let mut bad: Vec<_> = r.out.errors.iter().map(|e| e.entry.clone().unwrap_or_default()).collect();
+    bad.sort();
+    assert_eq!(bad, ["a_link", "l"]);
+}
+
+#[test]
+fn extract_here_unreadable_arrival_is_reported_not_deleted() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    disk.add_dir(&p("/w2/outside"));
+    disk.add_symlink(&p("/w2/in/b"), Path::new("../outside"));
+    arch.add_archive(&p("/w2/in/m.zip"), &[("d/", b"")], 5);
+    arch.add_link(&p("/w2/in/m.zip"), "d/z", Some("../b/x"));
+    // Ya en su lugar, no se puede listar.
+    disk.fail_list(&p("/w2/in/d"), crate::sys::ErrKind::InUse, 1);
+    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/w2/in/m.zip"), into_folder: false });
+    assert!(r.out.errors.iter().any(|e| e.entry.as_deref() == Some("d") && e.message == "Lo está usando otro programa"), "{:?}", r.out.errors);
+    // Lo que no se pudo mirar no se borra a ciegas (y se avisa).
+    assert!(disk.exists(&p("/w2/in/d/z")));
+    assert!(!r.messages().contains(&NOT_ALLOWED.to_string()));
+}

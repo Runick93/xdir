@@ -37,6 +37,8 @@ struct FakeFs {
     /// Otros caminos a una carpeta: (alias, real).
     aliases: Vec<(PathBuf, PathBuf)>,
     fails: HashMap<PathBuf, (ErrKind, u32)>,
+    /// Fallos solo al listar.
+    list_fails: HashMap<PathBuf, (ErrKind, u32)>,
     fail_after: HashMap<PathBuf, (u64, ErrKind)>,
     short: HashMap<PathBuf, u64>,
     block: Option<u64>,
@@ -259,6 +261,11 @@ impl FakeCopyPrims {
         self.fs().fails.insert(path.to_path_buf(), (kind, times));
     }
 
+    /// Las próximas `times` veces que se liste `path` falla con `kind` (nada más).
+    pub fn fail_list(&self, path: &Path, kind: ErrKind, times: u32) {
+        self.fs().list_fails.insert(path.to_path_buf(), (kind, times));
+    }
+
     /// Copiar desde `path` escribe `bytes` y falla con `kind` (borrando lo escrito).
     pub fn fail_after(&self, path: &Path, bytes: u64, kind: ErrKind) {
         self.fs().fail_after.insert(path.to_path_buf(), (bytes, kind));
@@ -397,6 +404,12 @@ impl CopyPrims for FakeCopyPrims {
     fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> {
         let mut fs = self.fs();
         fs.check_fail(p)?;
+        if let Some((kind, times)) = fs.list_fails.get_mut(p)
+            && *times > 0
+        {
+            *times -= 1;
+            return Err(CopyError::new(kind.clone(), p));
+        }
         let key = fs.key(p).ok_or_else(|| CopyError::new(ErrKind::NotFound, p))?;
         if !matches!(fs.nodes[&key].node, Node::Dir { .. }) {
             return Err(CopyError::new(ErrKind::Other("No es una carpeta".into()), p));

@@ -357,6 +357,8 @@ impl App {
             accent: self.accent,
             dark_mode: self.dark_mode,
             group: self.group_name.clone(),
+            preview_on: self.preview.on,
+            preview_width: self.preview.width,
             // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
             columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),

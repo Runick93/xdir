@@ -1,7 +1,7 @@
 use xdir_core::commands::{ALL, Command, available_in, combo_label_in, parse_combo};
 use xdir_core::sys::SystemEnv;
 
-use super::{mac_consoles, platform_env, platform_file_system};
+use super::{mac_consoles, platform_env, platform_file_system, platform_preview};
 
 /// El menú de terminales empieza con Terminal, como antes; después iTerm si está instalada en
 /// esta máquina.
@@ -78,6 +78,23 @@ fn mac_view_shortcuts_avoid_screenshot_keys() {
     }
 }
 
+/// macOS: la columna de vista previa va con ⌥⌘P; ⇧⌘P sigue siendo la paleta y nadie más usa ⌥⌘P.
+#[test]
+fn mac_preview_shortcut_keeps_palette() {
+    let env = platform_env();
+    let label = |c: Command| -> Vec<String> {
+        env.command_keys(c).unwrap_or_else(|| ALL.iter().find(|s| s.command == c).unwrap().default_keys).iter().map(|k| combo_label_in(env.key_style(), parse_combo(k).unwrap())).collect()
+    };
+    assert_eq!(label(Command::TogglePreview), ["⌥⌘P"]);
+    assert_eq!(label(Command::Palette), ["⇧⌘P"]);
+    let p = parse_combo("Ctrl+Alt+P").unwrap();
+    for s in ALL.iter().filter(|s| s.command != Command::TogglePreview) {
+        for k in s.keys_in(&*env) {
+            assert_ne!(parse_combo(k).unwrap(), p, "{} usa ⌥⌘P", s.id);
+        }
+    }
+}
+
 /// En macOS no existen la consola CMD ni el Acceso rápido de Windows; el resto sí.
 #[test]
 fn mac_hides_cmd_and_quick_pin() {
@@ -88,7 +105,7 @@ fn mac_hides_cmd_and_quick_pin() {
     assert!(available_in(&*env, Command::Xtree));
 }
 
-const MAC_TABLE: &str = "ir_a_carpeta|Ctrl+P|Ir a una carpeta…|⌘P|true\npaleta|Ctrl+Shift+P|Paleta de comandos|⇧⌘P|true\npestana_nueva|Ctrl+T|Pestaña nueva|⌘T|true\ncerrar_pestana|Ctrl+W|Cerrar pestaña|⌘W|true\nreabrir_pestana|Ctrl+Shift+T|Reabrir la última pestaña cerrada|⇧⌘T|true\npestana_siguiente|Ctrl+AvPag|Pestaña siguiente|⌘⇟|true\npestana_anterior|Ctrl+RePag|Pestaña anterior|⌘⇞|true\ngrupo_siguiente|Ctrl+Tab|Grupo siguiente|⌘⇥|true\ngrupo_anterior|Ctrl+Shift+Tab|Grupo anterior|⇧⌘⇥|true\npanel_siguiente|Tab|Panel siguiente|⇥|true\npanel_anterior|Shift+Tab|Panel anterior|⇧⇥|true\npanel_1|Alt+1|Ir al panel 1|⌥1|true\npanel_2|Alt+2|Ir al panel 2|⌥2|true\npanel_3|Alt+3|Ir al panel 3|⌥3|true\npanel_4|Alt+4|Ir al panel 4|⌥4|true\nlayout_1|Ctrl+1|Layout: 1 panel|⌘1|true\nlayout_2_lado_a_lado|Ctrl+2|Layout: 2 paneles lado a lado|⌘2|true\nlayout_2_apilados|Ctrl+3|Layout: 2 paneles apilados|⌘3|true\nlayout_3|Ctrl+4|Layout: 3 paneles|⌘4|true\nlayout_4|Ctrl+5|Layout: 4 paneles|⌘5|true\nmaximizar_panel|Ctrl+M|Maximizar o restaurar el panel|⌘M|true\natras|Ctrl+[,Ctrl+Izquierda,NavegadorAtras|Atrás|⌘[,⌘←,Botón atrás del mouse|true\nadelante|Ctrl+],Ctrl+Derecha,NavegadorAdelante|Adelante|⌘],⌘→,Botón adelante del mouse|true\nsubir|Ctrl+Arriba,Retroceso|Subir a la carpeta superior|⌘↑,⌫|true\nrecargar|F5,Ctrl+R|Recargar|F5,⌘R|true\nescribir_ruta|Ctrl+L,Ctrl+Shift+G,F4|Escribir una ruta|⌘L,⇧⌘G,F4|true\nfiltrar|Ctrl+F|Buscar en la carpeta y sus subcarpetas|⌘F|true\neste_equipo||Ir a Este equipo||true\nmostrar_ocultos|Ctrl+Shift+.|Mostrar u ocultar archivos ocultos|⇧⌘.|true\nseleccionar_todo|Ctrl+A|Seleccionar todo|⌘A|true\ninvertir_seleccion|Ctrl+Alt+I|Invertir selección|⌥⌘I|true\nseleccionar_patron|Ctrl+Más,Ctrl+MásNum|Seleccionar por patrón…|⌘+,⌘+|true\ndeseleccionar_patron|Ctrl+Menos,Ctrl+MenosNum|Deseleccionar por patrón…|⌘-,⌘-|true\ncopiar|Ctrl+C|Copiar|⌘C|true\ncortar|Ctrl+X|Cortar|⌘X|true\npegar|Ctrl+V|Pegar|⌘V|true\ncopiar_rutas|Ctrl+Alt+C|Copiar las rutas como texto|⌥⌘C|true\ndeshacer|Ctrl+Z|Deshacer|⌘Z|true\ncarpeta_nueva|Ctrl+Shift+N|Carpeta nueva|⇧⌘N|true\narchivo_texto_nuevo|Ctrl+Alt+N|Archivo de texto nuevo|⌥⌘N|true\npapelera|Ctrl+Retroceso,Supr|Trasladar a la Papelera|⌘⌫,⌦|true\neliminar|Ctrl+Alt+Retroceso,Shift+Supr|Eliminar definitivamente|⌥⌘⌫,⇧⌦|true\nrenombrar|F2|Renombrar|F2|true\npropiedades|Ctrl+I|Obtener información|⌘I|true\nfavorito|Ctrl+D|Agregar o quitar de favoritos|⌘D|true\nbarra_favoritos|Ctrl+Shift+B|Mostrar u ocultar la barra de favoritos|⇧⌘B|true\npowershell||Abrir Terminal en la carpeta||true\ncmd||Abrir CMD en la carpeta||false\nmodo_oscuro||Cambiar entre modo claro y oscuro||true\nguardar_grupo||Guardar paneles y carpetas como grupo…||true\nbarra_grupos||Mostrar u ocultar la barra de grupos||true\nabrir_configuracion||Abrir la configuración (config.toml)||true\nxtree||Mapa de uso de disco (xtree)||true\nacerca_de||Acerca de xdir (versión y reportar un problema)||true\nvista_detalles|Ctrl+Alt+1|Vista: detalles|⌥⌘1|true\nvista_iconos|Ctrl+Alt+2|Vista: íconos medianos|⌥⌘2|true\nvista_iconos_grandes|Ctrl+Alt+3|Vista: íconos grandes|⌥⌘3|true\nvista_miniaturas|Ctrl+Alt+4|Vista: miniaturas|⌥⌘4|true\nvista_lista|Ctrl+Alt+5|Vista: lista|⌥⌘5|true\nvista_contenido|Ctrl+Alt+6|Vista: contenido|⌥⌘6|true\nordenar_nombre||Ordenar por nombre||true\nordenar_modificado||Ordenar por fecha de modificación||true\nordenar_creado||Ordenar por fecha de creación||true\nordenar_tipo||Ordenar por tipo||true\nordenar_extension||Ordenar por extensión||true\nordenar_tamano||Ordenar por tamaño||true\nagrupar_nombre||Agrupar por nombre||true\nagrupar_modificado||Agrupar por fecha de modificación||true\nagrupar_creado||Agrupar por fecha de creación||true\nagrupar_tipo||Agrupar por tipo||true\nagrupar_tamano||Agrupar por tamaño||true\nagrupar_dimensiones||Agrupar por dimensiones||true\nagrupar_duracion||Agrupar por duración||true\nno_agrupar||No agrupar||true\nvista_en_todas||Usar esta vista en todas las carpetas||true\nrestablecer_vista||Restablecer la vista de esta carpeta||true\nquitar_filtros||Quitar los filtros||true\narbol|Ctrl+Shift+E|Mostrar u ocultar el árbol de carpetas (experimental)|⇧⌘E|true\n";
+const MAC_TABLE: &str = "ir_a_carpeta|Ctrl+P|Ir a una carpeta…|⌘P|true\npaleta|Ctrl+Shift+P|Paleta de comandos|⇧⌘P|true\npestana_nueva|Ctrl+T|Pestaña nueva|⌘T|true\ncerrar_pestana|Ctrl+W|Cerrar pestaña|⌘W|true\nreabrir_pestana|Ctrl+Shift+T|Reabrir la última pestaña cerrada|⇧⌘T|true\npestana_siguiente|Ctrl+AvPag|Pestaña siguiente|⌘⇟|true\npestana_anterior|Ctrl+RePag|Pestaña anterior|⌘⇞|true\ngrupo_siguiente|Ctrl+Tab|Grupo siguiente|⌘⇥|true\ngrupo_anterior|Ctrl+Shift+Tab|Grupo anterior|⇧⌘⇥|true\npanel_siguiente|Tab|Panel siguiente|⇥|true\npanel_anterior|Shift+Tab|Panel anterior|⇧⇥|true\npanel_1|Alt+1|Ir al panel 1|⌥1|true\npanel_2|Alt+2|Ir al panel 2|⌥2|true\npanel_3|Alt+3|Ir al panel 3|⌥3|true\npanel_4|Alt+4|Ir al panel 4|⌥4|true\nlayout_1|Ctrl+1|Layout: 1 panel|⌘1|true\nlayout_2_lado_a_lado|Ctrl+2|Layout: 2 paneles lado a lado|⌘2|true\nlayout_2_apilados|Ctrl+3|Layout: 2 paneles apilados|⌘3|true\nlayout_3|Ctrl+4|Layout: 3 paneles|⌘4|true\nlayout_4|Ctrl+5|Layout: 4 paneles|⌘5|true\nmaximizar_panel|Ctrl+M|Maximizar o restaurar el panel|⌘M|true\natras|Ctrl+[,Ctrl+Izquierda,NavegadorAtras|Atrás|⌘[,⌘←,Botón atrás del mouse|true\nadelante|Ctrl+],Ctrl+Derecha,NavegadorAdelante|Adelante|⌘],⌘→,Botón adelante del mouse|true\nsubir|Ctrl+Arriba,Retroceso|Subir a la carpeta superior|⌘↑,⌫|true\nrecargar|F5,Ctrl+R|Recargar|F5,⌘R|true\nescribir_ruta|Ctrl+L,Ctrl+Shift+G,F4|Escribir una ruta|⌘L,⇧⌘G,F4|true\nfiltrar|Ctrl+F|Buscar en la carpeta y sus subcarpetas|⌘F|true\neste_equipo||Ir a Este equipo||true\nmostrar_ocultos|Ctrl+Shift+.|Mostrar u ocultar archivos ocultos|⇧⌘.|true\nseleccionar_todo|Ctrl+A|Seleccionar todo|⌘A|true\ninvertir_seleccion|Ctrl+Alt+I|Invertir selección|⌥⌘I|true\nseleccionar_patron|Ctrl+Más,Ctrl+MásNum|Seleccionar por patrón…|⌘+,⌘+|true\ndeseleccionar_patron|Ctrl+Menos,Ctrl+MenosNum|Deseleccionar por patrón…|⌘-,⌘-|true\ncopiar|Ctrl+C|Copiar|⌘C|true\ncortar|Ctrl+X|Cortar|⌘X|true\npegar|Ctrl+V|Pegar|⌘V|true\ncopiar_rutas|Ctrl+Alt+C|Copiar las rutas como texto|⌥⌘C|true\ndeshacer|Ctrl+Z|Deshacer|⌘Z|true\ncarpeta_nueva|Ctrl+Shift+N|Carpeta nueva|⇧⌘N|true\narchivo_texto_nuevo|Ctrl+Alt+N|Archivo de texto nuevo|⌥⌘N|true\npapelera|Ctrl+Retroceso,Supr|Trasladar a la Papelera|⌘⌫,⌦|true\neliminar|Ctrl+Alt+Retroceso,Shift+Supr|Eliminar definitivamente|⌥⌘⌫,⇧⌦|true\nrenombrar|F2|Renombrar|F2|true\npropiedades|Ctrl+I|Obtener información|⌘I|true\nfavorito|Ctrl+D|Agregar o quitar de favoritos|⌘D|true\nbarra_favoritos|Ctrl+Shift+B|Mostrar u ocultar la barra de favoritos|⇧⌘B|true\npowershell||Abrir Terminal en la carpeta||true\ncmd||Abrir CMD en la carpeta||false\nmodo_oscuro||Cambiar entre modo claro y oscuro||true\nguardar_grupo||Guardar paneles y carpetas como grupo…||true\nbarra_grupos||Mostrar u ocultar la barra de grupos||true\nabrir_configuracion||Abrir la configuración (config.toml)||true\nvista_previa|Ctrl+Alt+P|Mostrar u ocultar la vista previa|⌥⌘P|true\nxtree||Mapa de uso de disco (xtree)||true\nacerca_de||Acerca de xdir (versión y reportar un problema)||true\nvista_detalles|Ctrl+Alt+1|Vista: detalles|⌥⌘1|true\nvista_iconos|Ctrl+Alt+2|Vista: íconos medianos|⌥⌘2|true\nvista_iconos_grandes|Ctrl+Alt+3|Vista: íconos grandes|⌥⌘3|true\nvista_miniaturas|Ctrl+Alt+4|Vista: miniaturas|⌥⌘4|true\nvista_lista|Ctrl+Alt+5|Vista: lista|⌥⌘5|true\nvista_contenido|Ctrl+Alt+6|Vista: contenido|⌥⌘6|true\nordenar_nombre||Ordenar por nombre||true\nordenar_modificado||Ordenar por fecha de modificación||true\nordenar_creado||Ordenar por fecha de creación||true\nordenar_tipo||Ordenar por tipo||true\nordenar_extension||Ordenar por extensión||true\nordenar_tamano||Ordenar por tamaño||true\nagrupar_nombre||Agrupar por nombre||true\nagrupar_modificado||Agrupar por fecha de modificación||true\nagrupar_creado||Agrupar por fecha de creación||true\nagrupar_tipo||Agrupar por tipo||true\nagrupar_tamano||Agrupar por tamaño||true\nagrupar_dimensiones||Agrupar por dimensiones||true\nagrupar_duracion||Agrupar por duración||true\nno_agrupar||No agrupar||true\nvista_en_todas||Usar esta vista en todas las carpetas||true\nrestablecer_vista||Restablecer la vista de esta carpeta||true\nquitar_filtros||Quitar los filtros||true\narbol|Ctrl+Shift+E|Mostrar u ocultar el árbol de carpetas (experimental)|⇧⌘E|true\n";
 
 
 /// Título y migas de la raíz y de una carpeta con el sistema de archivos real: la unidad se nombra
@@ -165,4 +182,28 @@ fn search_finds_matches_with_the_real_file_system() {
     assert_eq!(names, [".oculta/informe.txt", "a/nada.txt", "informe.txt"]);
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// La vista previa responde desde su hilo con la lectura neutra; un archivo local no está en la
+/// nube.
+#[test]
+fn mac_preview_answers_from_thread() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use xdir_core::preview::{PreviewBody, PreviewRequest, PreviewTarget};
+    xdir_core::sys::testing::install_fakes();
+    let dir = std::env::temp_dir().join(format!("xdir-mac-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notas.md");
+    std::fs::write(&file, "# Hola\nmundo\n").unwrap();
+    assert!(!platform_file_system().cloud_only(&file));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = PreviewTarget::File(file);
+    platform_preview().request(PreviewRequest { hwnd: Default::default(), tx, generation: 2, current: Arc::new(AtomicU64::new(2)), target });
+    let reply = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("respuesta del hilo");
+    assert_eq!(reply.generation, 2);
+    assert_eq!(reply.info.body, PreviewBody::Text { lines: vec!["# Hola".into(), "mundo".into()] });
+    assert!(reply.info.accessed > 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }

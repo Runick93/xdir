@@ -95,7 +95,7 @@ const SF_DATALESS: u32 = 0x4000_0000;
 /// ¿El archivo solo está en la nube? Leer su cabecera haría que el sistema lo baje entero, así que
 /// no se busca en él lo que Spotlight no tenga. Mira el enlace y el archivo al que apunta: con
 /// cualquiera de los dos sin datos locales, está en la nube.
-fn cloud_only(path: &Path) -> bool {
+pub(crate) fn cloud_only(path: &Path) -> bool {
     file_flags(path).iter().any(|f| f & SF_DATALESS != 0)
 }
 

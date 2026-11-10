@@ -394,6 +394,9 @@ pub struct FileList {
     pub meta_enabled: bool,
     /// Llegaron metadatos y falta rearmar lo que se ve (`flush_meta`).
     meta_dirty: bool,
+    /// Elementos (índices en `entries`) cuyos metadatos pidió alguien más que la lista (la columna
+    /// de vista previa): entran en el próximo `take_meta_request`.
+    meta_wanted: Vec<usize>,
 }
 
 /// Carpeta de un elemento con ruta completa (resultado de búsqueda).
@@ -496,6 +499,7 @@ impl Default for FileList {
             meta_cache: std::collections::HashMap::new(),
             meta_enabled: true,
             meta_dirty: false,
+            meta_wanted: Vec::new(),
         }
     }
 }

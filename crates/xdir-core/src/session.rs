@@ -91,6 +91,9 @@ pub struct Session {
     pub quick_open: bool,
     /// Grupo de paneles activo (el que se guarda solo con cada cambio).
     pub group: Option<String>,
+    /// Columna de vista previa prendida, y su ancho (240–640).
+    pub preview_on: bool,
+    pub preview_width: f32,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha. Desde `carpetas.toml` (memoria por
     /// carpeta) solo se leen para la migración (`legacy_view`); se siguen escribiendo con las de
@@ -123,6 +126,8 @@ impl Default for Session {
             tree_pinned: true,
             quick_open: true,
             group: None,
+            preview_on: false,
+            preview_width: crate::ui::PREVIEW_W,
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -180,6 +185,8 @@ fn write(s: &Session) -> String {
 ", s.tree_pinned);
     out += &format!("arbol_rapido = {}
 ", s.quick_open);
+    out += &format!("vista_previa = {}\n", s.preview_on);
+    out += &format!("vista_previa_ancho = {}\n", s.preview_width.round());
     if let Some(g) = &s.group {
         out += &format!("grupo = {}
 ", quote(g));
@@ -269,6 +276,10 @@ fn parse(text: &str) -> Session {
             ("arbol_sigue", None) => s.tree_follow = boolean(),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(true),
             ("arbol_fijo", None) => s.tree_pinned = boolean().unwrap_or(true),
+            ("vista_previa", None) => s.preview_on = boolean().unwrap_or(false),
+            ("vista_previa_ancho", None) => {
+                s.preview_width = float().filter(|w| w.is_finite()).unwrap_or(crate::ui::PREVIEW_W).clamp(crate::ui::PREVIEW_MIN_W, crate::ui::PREVIEW_MAX_W);
+            }
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
@@ -420,6 +431,8 @@ mod tests {
             tree_pinned: false,
             quick_open: true,
             group: Some("Trabajo".into()),
+            preview_on: false,
+            preview_width: 320.0,
             panes: vec![
                 PaneState {
                     tabs: vec![
@@ -470,6 +483,21 @@ mod tests {
         assert_eq!(back.default_view().view, View::Content);
         assert_eq!(back.get("/a").view, View::List);
         assert!(text.contains("\"lista\"") && text.contains("\"contenido\""), "{text}");
+    }
+
+    /// La columna de vista previa: prendida y su ancho se guardan y vuelven; un ancho fuera de los
+    /// límites se recorta al leer; sin la clave, apagada y de 320.
+    #[test]
+    fn preview_session_roundtrip() {
+        let s = Session { preview_on: true, preview_width: 410.0, ..Session::default() };
+        let text = write(&s);
+        assert!(text.contains("vista_previa = true") && text.contains("vista_previa_ancho = 410"), "{text}");
+        let back = parse(&text);
+        assert_eq!((back.preview_on, back.preview_width), (true, 410.0));
+        assert_eq!(parse("vista_previa_ancho = 9999\n").preview_width, 640.0);
+        assert_eq!(parse("vista_previa_ancho = 10\n").preview_width, 240.0);
+        let d = parse("layout = 2\n");
+        assert_eq!((d.preview_on, d.preview_width), (false, 320.0));
     }
 
     #[test]

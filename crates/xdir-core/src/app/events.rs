@@ -53,6 +53,8 @@ impl App {
             WM_APP_SEARCH => self.on_search_due(lparam as u64),
             WM_APP_VIEWS_SAVE => self.on_views_save_due(),
             WM_APP_TOOLTIP => self.on_tooltip_due(lparam as u64),
+            crate::preview::WM_APP_PREVIEW => self.on_preview_reply(),
+            preview::WM_APP_PREVIEW_DUE => self.on_preview_due(),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {
                 self.tree.on_loaded();
@@ -175,6 +177,7 @@ impl App {
         let tree_edge = !self.xtree_open && (matches!(self.drag, Drag::TreeEdge) || (matches!(self.drag, Drag::None) && self.tree.edge_at(x, y)));
         #[cfg(not(feature = "arbol"))]
         let tree_edge = false;
+        let tree_edge = tree_edge || matches!(self.drag, Drag::PreviewEdge(_)) || (matches!(self.drag, Drag::None) && self.hit(x, y) == Hit::PreviewEdge);
         match splitter {
             Some(Splitter::Vertical) => CursorKind::SizeWE,
             Some(Splitter::Horizontal) => CursorKind::SizeNS,

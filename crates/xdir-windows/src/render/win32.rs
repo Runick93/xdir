@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -32,7 +33,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
-    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_TRIMMING_GRANULARITY_NONE,
     DWRITE_WORD_WRAPPING_EMERGENCY_BREAK, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
     IDWriteTextFormat,
 };
@@ -116,6 +117,17 @@ impl Renderer {
 
     /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
     /// necesitar un cuadro en curso.
+    /// Pasa a la caché las imágenes grandes que terminaron (al llegar `WM_APP_ICONS`, aunque no se
+    /// dibuje ninguna: así no se acumulan con la columna oculta). Sin dispositivo se descartan (se
+    /// vuelven a pedir al dibujar).
+    pub fn absorb_big(&self) {
+        let Ok(mut icons) = self.icons.try_borrow_mut() else { return };
+        match &self.target {
+            Some(t) => icons.absorb_big(&t.gpu.ctx),
+            None => drop(thumbs::take_done_big()),
+        }
+    }
+
     pub fn text_width(&self, s: &str, bold: bool) -> f32 {
         measure(&self.dwrite, if bold { self.fonts.get(FontId::UiBold) } else { self.fonts.get(FontId::Ui) }, s)
     }
@@ -228,6 +240,7 @@ impl Renderer {
         // Los bitmaps de íconos pertenecen al dispositivo perdido.
         self.icons.borrow_mut().bitmaps.clear();
         self.icons.borrow_mut().thumbs.clear();
+        self.icons.borrow_mut().big.clear();
         self.icons.borrow_mut().logo = None;
     }
 }
@@ -414,6 +427,34 @@ impl paint::Painter for Painter<'_> {
         true
     }
 
+    /// Imagen grande centrada en `r` sin deformar: la del escalón `key.1` o, mientras llega, la
+    /// más grande que haya de la misma fuente, escalada como se vería la justa.
+    fn big_image(&self, key: &thumbs::Key, r: Rect) -> bool {
+        let Some((bitmap, side)) = self.icons.borrow_mut().big(self.ctx, key) else { return false };
+        let size = unsafe { bitmap.GetPixelSize() };
+        let (bw, bh) = (size.width as f32, size.height as f32);
+        if bw <= 0.0 || bh <= 0.0 {
+            return false;
+        }
+        // Sin agrandar más que su tamaño en píxeles; la de otro escalón, como se vería la justa.
+        let dpi_k = self.icons.borrow().dpi_k;
+        let grow = thumbs::big_grow(bw.max(bh), side, key.1);
+        let k = ((r.right - r.left) / bw).min((r.bottom - r.top) / bh).min(grow / dpi_k.max(0.01));
+        let (w, h) = (bw * k, bh * k);
+        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        let dest = rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
+        unsafe {
+            self.ctx.DrawBitmap(&bitmap, Some(&d2r(dest)), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+        }
+        true
+    }
+
+    fn forget_big(&self, src: &thumbs::Source) {
+        let mut icons = self.icons.borrow_mut();
+        icons.absorb_big(self.ctx);
+        icons.big.forget(src);
+    }
+
     /// Logo de Runick centrado en `r` sin deformarlo (ni agrandarlo más que su tamaño de origen).
     fn logo(&self, r: Rect) {
         let mut icons = self.icons.borrow_mut();
@@ -482,6 +523,9 @@ impl Fonts {
             make(glyph_family, DWRITE_FONT_WEIGHT_NORMAL, 10.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
             // Label: nombre debajo de una miniatura, centrado, arriba y en varias líneas.
             label_format(dwrite, family)?,
+            // Mono: ancho fijo (Consolas 11,5), una línea que se corta sin "…" (texto de la
+            // vista previa).
+            mono_format(dwrite)?,
         ]))
     }
 
@@ -509,6 +553,13 @@ fn label_format(dwrite: &IDWriteFactory, family: PCWSTR) -> Result<IDWriteTextFo
         // Corta por palabras y, si una palabra sola no entra, en cualquier letra.
         f.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
     }
+    Ok(f)
+}
+
+fn mono_format(dwrite: &IDWriteFactory) -> Result<IDWriteTextFormat> {
+    let f = text_format(dwrite, w!("Consolas"), DWRITE_FONT_WEIGHT_NORMAL, 11.5, DWRITE_TEXT_ALIGNMENT_LEADING)?;
+    let none = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_NONE, delimiter: 0, delimiterCount: 0 };
+    unsafe { f.SetTrimming(&none, None)? };
     Ok(f)
 }
 
@@ -564,6 +615,10 @@ struct Icons {
     dpi_k: f32,
     /// Miniaturas ya convertidas (o que no se pudieron obtener).
     thumbs: HashMap<thumbs::Key, Option<ID2D1Bitmap1>>,
+    /// Imágenes grandes (vista previa, Galería); LRU por bytes.
+    big: thumbs::BigCache<ID2D1Bitmap1>,
+    /// Imágenes grandes que fallaron hace poco (no se vuelven a pedir hasta `BIG_RETRY`).
+    big_failed: thumbs::BigFailures,
     /// Logo del diálogo "Acerca de", creado la primera vez que se muestra.
     logo: Option<ID2D1Bitmap1>,
 }
@@ -575,7 +630,39 @@ impl Icons {
     fn new(dpi: u32) -> Self {
         let kind = icons::list_for_dpi(dpi);
         icons::prewarm(kind);
-        Self { kind, hwnd: Handle::default(), bitmaps: HashMap::new(), dpi_k: dpi as f32 / 96.0, thumbs: HashMap::new(), logo: None }
+        Self {
+            kind,
+            hwnd: Handle::default(),
+            bitmaps: HashMap::new(),
+            dpi_k: dpi as f32 / 96.0,
+            thumbs: HashMap::new(),
+            big: thumbs::BigCache::default(),
+            big_failed: thumbs::BigFailures::default(),
+            logo: None,
+        }
+    }
+
+    /// Pasa a la caché las imágenes grandes que terminaron (las fallidas, a `big_failed`).
+    fn absorb_big(&mut self, ctx: &ID2D1DeviceContext) {
+        let now = Instant::now();
+        for (k, px) in thumbs::take_done_big() {
+            match px.and_then(|px| bitmap_from(ctx, &px).map(|b| (b, px.data.len()))) {
+                Some((bitmap, bytes)) => self.big.insert(k, bitmap, bytes),
+                None => self.big_failed.fail(k, now),
+            }
+        }
+    }
+
+    /// Imagen grande de `key` con su escalón; si no está, la encarga (salvo que ya haya una más
+    /// grande o que haya fallado hace poco) y devuelve la más grande que haya de la misma fuente.
+    fn big(&mut self, ctx: &ID2D1DeviceContext, key: &thumbs::Key) -> Option<(ID2D1Bitmap1, u32)> {
+        self.absorb_big(ctx);
+        let (hit, ask) = self.big.lookup(key, &mut self.big_failed, Instant::now());
+        let hit = hit.map(|(side, b)| (b.clone(), side));
+        if ask {
+            thumbs::request_big(self.hwnd, key.clone());
+        }
+        hit
     }
 
     /// Miniatura del elemento; si no está, la encarga y devuelve None.

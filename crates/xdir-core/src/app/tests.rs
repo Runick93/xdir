@@ -313,7 +313,7 @@ fn status_bar_buttons_are_hit() {
 fn splitters_are_hit_unless_a_pane_is_maximized() {
     let mut a = app();
     let (w, h) = a.client_dips();
-    let area = ui::panes_area(w, h, a.tree_width(), a.groups_bar_h());
+    let area = ui::panes_area(w, h, a.tree_width(), a.groups_bar_h(), a.preview_width());
     let (s, r) = ui::splitter_rects(a.layout, area, a.splits)[0];
     let (x, y) = center(&r);
     assert_eq!(a.hit(x, y), Hit::Splitter(s));

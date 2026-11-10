@@ -50,12 +50,18 @@ impl App {
         if contains(&self.xtree_button_rect(), x, y) {
             return Hit::Xtree;
         }
+        if contains(&ui::preview_rect(w, h), x, y) {
+            return Hit::PreviewToggle;
+        }
         // La vista de xtree tapa los paneles, la franja de grupos y el árbol.
         if self.xtree_open {
             if let Some(l) = ui::layout_at(w, h, x, y) {
                 return Hit::Layout(l);
             }
             return if contains(&ui::xtree_area(w, h), x, y) { Hit::XtreeView } else { Hit::None };
+        }
+        if self.preview_edge_at(x, y) {
+            return Hit::PreviewEdge;
         }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
@@ -68,10 +74,10 @@ impl App {
             };
         }
         let temps: Vec<bool> = self.groups.items.iter().map(|g| g.temp).collect();
-        if let Some(g) = ui::group_bar_at(w, ui::GAP + self.tree_width(), &temps, x, y).filter(|_| self.groups_bar_h() > 0.0) {
+        if let Some(g) = ui::group_bar_at(w - self.preview_width(), ui::GAP + self.tree_width(), &temps, x, y).filter(|_| self.groups_bar_h() > 0.0) {
             return Hit::GroupBar(g);
         }
-        let area = ui::panes_area(w, h, self.tree_width(), self.groups_bar_h());
+        let area = ui::panes_area(w, h, self.tree_width(), self.groups_bar_h(), self.preview_width());
         if self.maximized.is_none() {
             for (s, r) in ui::splitter_rects(self.layout, area, self.splits) {
                 if contains(&r, x, y) {
@@ -179,6 +185,12 @@ impl App {
             Hit::Groups if self.groups_menu_closed.is_some_and(|t| t.elapsed().as_millis() < 300) => self.groups_menu_closed = None,
             Hit::Groups => self.show_groups_menu(),
             Hit::Xtree => self.toggle_xtree(),
+            Hit::PreviewToggle => self.run_command(Command::TogglePreview),
+            Hit::PreviewEdge => {
+                self.host.capture_mouse();
+                let grab = self.preview_column().map_or(0.0, |r| r.left - x);
+                self.drag = Drag::PreviewEdge(grab);
+            }
             Hit::XtreeView => {
                 let area = self.xtree_area();
                 let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_click(area, x, y, double));
@@ -371,7 +383,7 @@ impl App {
         match self.drag {
             Drag::Splitter(s) => {
                 let (w, h) = self.client_dips();
-                self.splits.set(s, ui::split_value(s, ui::panes_area(w, h, self.tree_width(), self.groups_bar_h()), x, y));
+                self.splits.set(s, ui::split_value(s, ui::panes_area(w, h, self.tree_width(), self.groups_bar_h(), self.preview_width()), x, y));
                 redraw = true;
             }
             Drag::Tab { pane, index, start_x, start_y, moved, grab } => {
@@ -439,6 +451,10 @@ impl App {
             #[cfg(feature = "arbol")]
             Drag::TreeBar(bar, grab) => {
                 self.tree.drag_bar(bar, grab, x, y);
+                redraw = true;
+            }
+            Drag::PreviewEdge(grab) => {
+                self.drag_preview_edge(x + grab);
                 redraw = true;
             }
             Drag::List(i) => {

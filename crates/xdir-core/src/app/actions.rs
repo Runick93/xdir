@@ -39,6 +39,7 @@ impl App {
     /// Ejecuta una acción sobre el panel activo (atajo de teclado o paleta de comandos).
     pub fn run_command(&mut self, c: Command) {
         // La vista de xtree tapa los paneles: lo que los cambia la cierra para que se vea el efecto.
+        let from_xtree = self.xtree_open;
         if self.xtree_open && !keeps_xtree(c) {
             self.close_xtree();
         }
@@ -207,6 +208,9 @@ impl App {
                 }
             }
             Command::Xtree => self.toggle_xtree(),
+            // Con xtree abierto la columna no se ve: el botón o el atajo cierran xtree y la muestran.
+            Command::TogglePreview if from_xtree => self.show_preview(),
+            Command::TogglePreview => self.toggle_preview(),
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {

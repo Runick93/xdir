@@ -69,6 +69,13 @@ impl MacHost {
         HOST.with(|h| h.borrow().clone())
     }
 
+    /// Pasa a la caché las imágenes grandes que terminaron (al llegar `WM_APP_ICONS`).
+    pub(super) fn absorb_big(&self) {
+        if let Ok(r) = self.renderer.try_borrow() {
+            r.absorb_big();
+        }
+    }
+
     /// Tamaño del área en puntos y píxeles por punto de la pantalla (lo fija la vista antes de
     /// dibujar).
     pub(super) fn set_size(&self, width: f32, height: f32, scale: f32) {

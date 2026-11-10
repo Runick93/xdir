@@ -75,7 +75,7 @@ pub fn read(path: &Path) -> Meta {
 }
 
 /// ¿El archivo está solo en la nube (atributos sin conexión o «recuperar al abrir/leer»)?
-fn cloud_only(path: &HSTRING) -> bool {
+pub(crate) fn cloud_only(path: &HSTRING) -> bool {
     let attrs = unsafe { GetFileAttributesW(path) };
     attrs != INVALID_FILE_ATTRIBUTES
         && attrs & (FILE_ATTRIBUTE_OFFLINE.0 | FILE_ATTRIBUTE_RECALL_ON_OPEN.0 | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0) != 0

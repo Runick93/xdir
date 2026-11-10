@@ -14,10 +14,11 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Metadata, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
 use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
+use xdir_core::preview::PreviewRequest;
 use xdir_core::shell::{Entry, Item};
 
 use crate::fs::macos as fsp;
@@ -95,6 +96,8 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::View(3), &["Ctrl+Alt+4"]),
     (Command::View(4), &["Ctrl+Alt+5"]),
     (Command::View(5), &["Ctrl+Alt+6"]),
+    // ⌥⌘P: la columna de vista previa (⇧⌘P es la paleta de comandos).
+    (Command::TogglePreview, &["Ctrl+Alt+P"]),
 ];
 
 /// macOS: nombres distintos a los de Windows.
@@ -447,6 +450,10 @@ impl FileSystem for MacFileSystem {
         fsp::folder_icon()
     }
 
+    fn folder_type(&self) -> Arc<str> {
+        fsp::folder_type()
+    }
+
     fn shell_location(&self, text: &str) -> Option<Location> {
         fsp::shell_location(text)
     }
@@ -498,6 +505,11 @@ impl FileSystem for MacFileSystem {
     fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
         fsp::Watcher::with_message(hwnd, msg, panel, lparam, path).map(|w| Box::new(w) as Box<dyn Watch>)
     }
+
+    /// `SF_DATALESS` en el elemento o en lo que apunta (ver `crate::metadata::cloud_only`).
+    fn cloud_only(&self, path: &Path) -> bool {
+        crate::metadata::cloud_only(path)
+    }
 }
 
 /// El sistema de archivos real de macOS (lo que instala `install`).
@@ -524,6 +536,25 @@ impl Metadata for MacMetadata {
     }
 }
 
+/// Vista previa de la columna: un hilo por pedido (una lectura lenta, de la red, no traba a la
+/// siguiente) con la lectura neutra del núcleo y el chequeo de nube (`SF_DATALESS`).
+struct MacPreview;
+
+impl Preview for MacPreview {
+    fn request(&self, req: PreviewRequest) {
+        let spawned = std::thread::Builder::new()
+            .name("xdir-vista-previa".into())
+            .spawn(move || xdir_core::preview::answer(req, &crate::metadata::cloud_only));
+        debug_assert!(spawned.is_ok(), "hilo de vista previa");
+    }
+}
+
+/// La vista previa real de macOS (lo que instala `install`).
+#[cfg(test)]
+pub fn platform_preview() -> Box<dyn Preview> {
+    Box::new(MacPreview)
+}
+
 /// Instala los servicios de macOS en el registro del núcleo.
 pub fn install() {
     xdir_core::sys::install(Services {
@@ -535,5 +566,6 @@ pub fn install() {
         file_system: Box::new(MacFileSystem),
         overlays: Box::new(MacOverlays),
         metadata: Box::new(MacMetadata),
+        preview: Box::new(MacPreview),
     });
 }

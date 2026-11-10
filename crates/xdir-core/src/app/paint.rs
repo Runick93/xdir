@@ -49,12 +49,19 @@ impl App {
         let tree_animating = false;
         let tree_w = self.tree_width();
         let groups_h = self.groups_bar_h();
+        // La columna de vista previa: lo que muestra (y su pedido, después de la pausa).
+        self.sync_preview();
+        let preview_w = self.preview_width();
+        let preview_col = self.preview_column();
+        let preview_shown = preview_col.map(|_| self.preview_shown());
+        let preview_forget = std::mem::take(&mut self.preview.forget);
+        let preview_on = self.preview.on;
         #[cfg(feature = "arbol")]
         let current_folder = self.panes[self.active].tab().location.target();
         // Animaciones: rectángulos de este frame (transición de layout) y scroll suave de las
         // listas a la vista. Mientras algo siga en curso se pide otro frame más abajo.
         let (cw, ch) = self.client_dips();
-        let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w, groups_h), self.splits);
+        let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w, groups_h, preview_w), self.splits);
         let (rects, mut animating) = self.animated_rects(target);
         animating |= tree_animating;
         for i in self.shown_panes() {
@@ -99,7 +106,10 @@ impl App {
             if mark_list_frame {
                 marks.push(("inicio frame con la carpeta", ms_since(started)));
             }
-            let area = ui::panes_area(w, h, tree_w, groups_h);
+            let area = ui::panes_area(w, h, tree_w, groups_h, preview_w);
+            for src in &preview_forget {
+                p.forget_big(src);
+            }
             let rects = if xtree.is_some() { &[][..] } else { &rects[..] };
             if let Some(v) = xtree.as_deref_mut() {
                 v.paint(p, ui::xtree_area(w, h));
@@ -110,7 +120,7 @@ impl App {
                     Hit::GroupBar(g) => Some(g),
                     _ => None,
                 };
-                ui::draw_group_bar(p, w, area.left, &names, active_group, group_hover);
+                ui::draw_group_bar(p, w - preview_w, area.left, &names, active_group, group_hover);
             }
             // Botón de maximizar solo si hay más de un panel; encendido en el maximizado.
             let max_button = |i: usize| (layout.panes() > 1).then_some(maximized == Some(i));
@@ -147,6 +157,9 @@ impl App {
                 }
                 tree.draw(p, r, current_folder.as_deref(), xtree_badge);
             }
+            if let (Some(r), Some(shown)) = (preview_col, &preview_shown) {
+                crate::preview::draw::draw(p, r, shown);
+            }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);
             }
@@ -154,6 +167,10 @@ impl App {
                 (Drag::Splitter(s), _) | (_, Hit::Splitter(s)) => Some(s),
                 _ => None,
             };
+            // El borde de la columna resaltado bajo el mouse o mientras se arrastra.
+            if let Some(r) = preview_col.filter(|_| matches!(drag, Drag::PreviewEdge(_)) || hover == Hit::PreviewEdge) {
+                ui::draw_splitter(p, geom::rect(r.left - ui::GAP, r.top, r.left, r.bottom));
+            }
             if let Some(s) = hot.filter(|_| maximized.is_none() && !xtree_open) {
                 for (which, r) in ui::splitter_rects(layout, area, splits) {
                     if which == s {
@@ -171,6 +188,8 @@ impl App {
                 xtree_hot: hover == Hit::Xtree,
                 xtree_on: xtree_open,
                 xtree: xtree_badge,
+                preview_hot: hover == Hit::PreviewToggle,
+                preview_on: preview_on && !xtree_open,
             };
             ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado

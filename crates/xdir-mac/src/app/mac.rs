@@ -155,9 +155,17 @@ fn on_message(msg: u32, wparam: usize, lparam: isize) {
         MSG_ACCENT => with_app(|app| app.set_accent(Accent::Rgb(lparam as u32))),
         #[cfg(feature = "pruebas")]
         MSG_TEST => pruebas::run_next(),
-        _ => with_app(|app| {
-            app.on_app_message(msg, wparam, lparam);
-        }),
+        _ => {
+            // Las imágenes grandes terminadas pasan a la caché aunque no se dibuje ninguna.
+            if msg == xdir_core::paint::WM_APP_ICONS
+                && let Some(host) = MacHost::current()
+            {
+                host.absorb_big();
+            }
+            with_app(|app| {
+                app.on_app_message(msg, wparam, lparam);
+            })
+        }
     }
 }
 

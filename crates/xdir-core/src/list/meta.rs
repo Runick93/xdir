@@ -199,15 +199,23 @@ impl FileList {
     /// una columna de metadatos a la vista, o todos si se agrupa, ordena o filtra por una. Quedan
     /// marcados como pedidos: no se vuelven a pedir.
     pub fn take_meta_request(&mut self) -> Vec<usize> {
+        let wanted = std::mem::take(&mut self.meta_wanted);
         if !self.meta_enabled {
             return Vec::new();
         }
         let whole = self.meta_whole();
         let shown = self.view.has_header() && self.columns.iter().any(|c| c.col.is_meta());
-        if !whole && !shown {
-            return Vec::new();
-        }
         let n = self.entries.len();
+        if !whole && !shown {
+            if wanted.is_empty() {
+                return Vec::new();
+            }
+            self.meta.resize(n, None);
+            self.meta_asked.resize(n, false);
+            let mut out: Vec<usize> = wanted.into_iter().filter(|&i| i < n && !std::mem::replace(&mut self.meta_asked[i], true)).collect();
+            out.dedup();
+            return out;
+        }
         self.meta.resize(n, None);
         self.meta_asked.resize(n, false);
         let candidates: Vec<usize> = if whole {
@@ -218,7 +226,16 @@ impl FileList {
         } else {
             Vec::new()
         };
-        candidates.into_iter().filter(|&i| !std::mem::replace(&mut self.meta_asked[i], true)).collect()
+        candidates.into_iter().chain(wanted.into_iter().filter(|&i| i < n)).filter(|&i| !std::mem::replace(&mut self.meta_asked[i], true)).collect()
+    }
+
+    /// Alguien más que la lista (la columna de vista previa) quiere los metadatos del elemento
+    /// `idx`: entra en el próximo `take_meta_request` (con todos los campos), aunque no haya
+    /// columnas de metadatos a la vista. Si ya se pidieron o llegaron, no hace nada.
+    pub fn want_meta(&mut self, idx: usize) {
+        if idx < self.entries.len() && !self.meta_asked.get(idx).copied().unwrap_or(false) && !self.meta_wanted.contains(&idx) {
+            self.meta_wanted.push(idx);
+        }
     }
 
     /// Llegó un lote de metadatos: solo se guardan. Lo que se ve se rearma una vez, con
@@ -415,6 +432,24 @@ mod tests {
         assert_eq!(duration_text(201_000), "0:03:21");
         assert_eq!(duration_text(3_723_000), "1:02:03");
         assert_eq!(duration_text(0), "0:00:00");
+    }
+
+    /// Lo que pide la columna de vista previa (`want_meta`) se pide aunque no haya columnas de
+    /// metadatos, una sola vez y con todos los campos.
+    #[test]
+    fn want_meta_requested_without_columns() {
+        let (mut tab, tx, _rx) = tab_with("/meta-wanted", &names(10));
+        draw(&mut tab);
+        tab.list.want_meta(4);
+        tab.list.want_meta(4);
+        tab.request_metadata(Handle(0), &tx);
+        let reqs = FakeMetadata::take_requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].0.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [4]);
+        assert_eq!(reqs[0].1, MetaField::ALL.to_vec());
+        tab.list.want_meta(4);
+        tab.request_metadata(Handle(0), &tx);
+        assert!(FakeMetadata::take_requests().is_empty(), "ya pedido");
     }
 
     /// Sin columnas de metadatos (ni agrupar ni filtrar por una) no se pide nada; con una a la

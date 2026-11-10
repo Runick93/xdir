@@ -260,6 +260,11 @@ impl CopyPrims for LinuxCopyPrims {
         std::fs::create_dir(dst).map_err(|e| err(e, dst))
     }
 
+    fn create_private_dir(&self, dst: &Path) -> Result<(), CopyError> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(dst).map_err(|e| err(e, dst))
+    }
+
     /// Nunca sigue enlaces: `dst` se abre con `O_NOFOLLOW | O_DIRECTORY` y todo (atributos, fechas,
     /// permisos) se pone por ese descriptor.
     fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError> {

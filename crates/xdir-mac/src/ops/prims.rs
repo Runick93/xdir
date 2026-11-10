@@ -206,6 +206,11 @@ impl CopyPrims for MacCopyPrims {
         std::fs::create_dir(dst).map_err(|e| err(e, dst))
     }
 
+    fn create_private_dir(&self, dst: &Path) -> Result<(), CopyError> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(dst).map_err(|e| err(e, dst))
+    }
+
     /// Nunca sigue enlaces: `dst` tiene que ser una carpeta (no un enlace que alguien puso en su
     /// lugar) y `copyfile` va con `COPYFILE_NOFOLLOW`.
     fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError> {

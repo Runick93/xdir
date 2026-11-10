@@ -742,7 +742,7 @@ impl App {
             Some(format!("{label}: {why}"))
         } else if !outcome.errors.is_empty() {
             let first = &outcome.errors[0];
-            let name = first.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = first.shown_name();
             Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), first.message))
         } else if !outcome.skipped.is_empty() {
             Some(skipped_text(outcome.skipped.len()))

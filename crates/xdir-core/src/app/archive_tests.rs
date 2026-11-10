@@ -173,6 +173,7 @@ fn extract_asks_before_big_expansion_and_reports_omitted() {
     let mut a = app(host.clone());
     let z = PathBuf::from("/app-zip-big/b.zip");
     FakeArchives::shared().add_archive(&z, &[("a.bin", &[0; 1000])], 5);
+    FakeArchives::shared().set_declared(&z, "a.bin", 2 << 30);
     a.start_transfer(JobSpec::Extract { archive: z.clone(), into_folder: true });
     wait_idle(&mut a);
     assert!(host.questions().iter().any(|(t, q)| t == "Extraer" && q.starts_with("Este archivo se expande a ")), "{:?}", host.questions());

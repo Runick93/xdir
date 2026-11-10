@@ -143,6 +143,11 @@ pub trait CopyPrims: Send + Sync {
     fn copy_symlink(&self, src: &Path, dst: &Path) -> Result<(), CopyError>;
     /// Crea la carpeta `dst` (falla con Exists si ya está).
     fn create_dir(&self, dst: &Path) -> Result<(), CopyError>;
+    /// Crea la carpeta `dst` solo para el usuario (0700 donde hay permisos): la carpeta oculta
+    /// donde el motor extrae antes de llevar las cosas a su lugar. Por defecto, `create_dir`.
+    fn create_private_dir(&self, dst: &Path) -> Result<(), CopyError> {
+        self.create_dir(dst)
+    }
     /// Pone a `dst` los atributos y las fechas de `like` (al terminar su contenido).
     fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError>;
     /// Renombra o mueve dentro del mismo disco; falla con Exists si `to` ya está (salvo que sea

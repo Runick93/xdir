@@ -207,7 +207,10 @@ fn extract_skips_escaping_entries() {
         let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/x3/in/m.zip"), into_folder });
         assert_eq!(r.messages(), [NOT_ALLOWED; 4], "{into_folder}");
         assert!(r.out.errors.iter().all(|e| !e.retry));
-        assert_eq!(r.out.errors[0].src.file_name().unwrap(), "evil.txt");
+        // Con el nombre que trae el archivo (la ruta del error es la del archivo).
+        assert_eq!(r.out.errors[0].entry.as_deref(), Some("../evil.txt"));
+        assert_eq!(r.out.errors[1].entry.as_deref(), Some("/etc/passwd"));
+        assert_eq!(r.out.errors[0].src, p("/x3/in/m.zip"));
     }
     // Nada fuera de la carpeta del archivo.
     let outside: Vec<_> = disk.list_all(&p("/")).into_iter().filter(|q| !q.starts_with("/x3/in")).filter(|q| q != &p("/x3")).collect();
@@ -277,18 +280,122 @@ fn extract_checks_space_and_asks_for_big_expansions() {
     assert!(r.out.stopped.as_deref().is_some_and(|s| s.starts_with("Faltan ") && s.ends_with("en \"USB\"")), "{:?}", r.out.stopped);
     assert_eq!(disk.list_all(&p("/x6")), vec![p("/x6/a.zip")]);
 
-    // 600 bytes de 5: más de 100 veces lo que ocupa. Se pregunta; «No» no extrae nada.
+    // 600 bytes de 5: más de 100 veces, pero poco: no se pregunta.
     disk.set_volume(&p("/x6"), VolumeInfo { id: "u".into(), label: "USB".into(), case_insensitive: false, has_trash: true, max_file: None, free: u64::MAX });
-    let r = go(&disk, &arch, JobSpec::Extract { archive: p("/x6/a.zip"), into_folder: true }, &[], false, &mut |_, _| {});
+    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/x6/a.zip"), into_folder: true });
+    assert!(!r.updates.iter().any(|u| matches!(u, Update::Confirm(_))));
+    assert!(disk.exists(&p("/x6/a/a.bin")));
+
+    // Más de 100 veces y más de 1 GiB: se pregunta; «No» no extrae nada.
+    arch.add_archive(&p("/x6/b.zip"), &[("b.bin", b"b")], 5);
+    arch.set_declared(&p("/x6/b.zip"), "b.bin", 2 << 30);
+    let r = go(&disk, &arch, JobSpec::Extract { archive: p("/x6/b.zip"), into_folder: true }, &[], false, &mut |_, _| {});
     let asked: Vec<&String> = r.updates.iter().filter_map(|u| if let Update::Confirm(q) = u { Some(q) } else { None }).collect();
     assert_eq!(asked.len(), 1);
     assert!(asked[0].starts_with("Este archivo se expande a ") && asked[0].ends_with(". ¿Seguir?"), "{}", asked[0]);
     assert!(r.out.cancelled);
-    assert_eq!(disk.list_all(&p("/x6")), vec![p("/x6/a.zip")]);
+    assert!(!disk.exists(&p("/x6/b")));
     // «Sí» sigue.
-    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/x6/a.zip"), into_folder: true });
+    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/x6/b.zip"), into_folder: true });
     assert!(r.out.errors.is_empty() && !r.out.cancelled);
-    assert!(disk.exists(&p("/x6/a/a.bin")));
+    assert!(disk.exists(&p("/x6/b/b.bin")));
+    // Más de 10 GiB aunque el archivo sea grande.
+    arch.add_archive(&p("/x6/c.zip"), &[("c.bin", b"c")], 5);
+    arch.set_declared(&p("/x6/c.zip"), "c.bin", 11 << 30);
+    disk.set_size(&p("/x6/c.zip"), 8 << 30);
+    let r = go(&disk, &arch, JobSpec::Extract { archive: p("/x6/c.zip"), into_folder: true }, &[], false, &mut |_, _| {});
+    assert!(r.updates.iter().any(|u| matches!(u, Update::Confirm(_))));
+    // Muchísimas entradas (vacías): también.
+    let many: Vec<String> = (0..100_001).map(|i| format!("d/f{i}")).collect();
+    let entries: Vec<(&str, &[u8])> = many.iter().map(|n| (n.as_str(), &b""[..])).collect();
+    arch.add_archive(&p("/x6/m.zip"), &entries, 5);
+    let r = go(&disk, &arch, JobSpec::Extract { archive: p("/x6/m.zip"), into_folder: true }, &[], false, &mut |_, _| {});
+    assert!(r.updates.iter().any(|u| matches!(u, Update::Confirm(_))));
+    // 20.000 vacías: no.
+    let entries: Vec<(&str, &[u8])> = many.iter().take(20_000).map(|n| (n.as_str(), &b""[..])).collect();
+    arch.add_archive(&p("/x6/n.zip"), &entries, 5);
+    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/x6/n.zip"), into_folder: true });
+    assert!(!r.updates.iter().any(|u| matches!(u, Update::Confirm(_))));
+}
+
+#[test]
+fn extract_here_removes_links_that_end_up_outside() {
+    // Un enlace del usuario apunta afuera; el del archivo era válido en la carpeta del motor,
+    // pero al llegar resuelve por el del usuario.
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    disk.add_file(&p("/l1/outside/secret"), b"s".to_vec());
+    disk.add_symlink(&p("/l1/in/b"), Path::new("../outside"));
+    arch.add_archive(&p("/l1/in/m.zip"), &[("b/", b""), ("b/secret", b"decoy"), ("d/", b"")], 5);
+    arch.add_link(&p("/l1/in/m.zip"), "y", Some("b/secret"));
+    arch.add_link(&p("/l1/in/m.zip"), "d/z", Some("../b/secret"));
+    arch.add_link(&p("/l1/in/m.zip"), "bien", Some("d"));
+    let keep = Answer { choice: Choice::KeepBoth, all: false };
+    let r = go(&disk, &arch, JobSpec::Extract { archive: p("/l1/in/m.zip"), into_folder: false }, &[keep], true, &mut |_, _| {});
+    assert!(!disk.exists(&p("/l1/in/y")) && !disk.exists(&p("/l1/in/d/z")));
+    assert_eq!(disk.link_target(&p("/l1/in/bien")), Some(p("d")));
+    assert_eq!(disk.contents(&p("/l1/in/b 2/secret")).unwrap(), b"decoy");
+    let mut bad: Vec<_> = r.out.errors.iter().map(|e| (e.entry.clone().unwrap_or_default(), e.message.clone())).collect();
+    bad.sort();
+    assert_eq!(bad, [("d/z".to_string(), NOT_ALLOWED.to_string()), ("y".to_string(), NOT_ALLOWED.to_string())]);
+    assert!(!r.out.result.select.contains(&p("/l1/in/y")));
+    // Lo mismo después de combinar con una carpeta que ya estaba.
+    disk.add_dir(&p("/l2/in/d"));
+    disk.add_symlink(&p("/l2/in/d/b"), Path::new("../../outside"));
+    arch.add_archive(&p("/l2/in/m.zip"), &[("d/", b"")], 5);
+    arch.add_link(&p("/l2/in/m.zip"), "d/y", Some("b"));
+    let merge = Answer { choice: Choice::Merge, all: false };
+    let r = go(&disk, &arch, JobSpec::Extract { archive: p("/l2/in/m.zip"), into_folder: false }, &[merge], true, &mut |_, _| {});
+    assert!(!disk.exists(&p("/l2/in/d/y")));
+    assert_eq!(r.messages(), [NOT_ALLOWED]);
+}
+
+#[test]
+fn extract_into_single_top_folder() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    arch.add_archive(&p("/s1/carpeta.zip"), &[("carpeta/", b""), ("carpeta/a.txt", b"a"), ("__MACOSX/", b""), ("__MACOSX/carpeta/._a.txt", b"x")], 5);
+    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/s1/carpeta.zip"), into_folder: true });
+    assert_eq!(disk.contents(&p("/s1/carpeta/a.txt")).unwrap(), b"a");
+    assert_eq!(disk.list_all(&p("/s1")), vec![p("/s1/carpeta"), p("/s1/carpeta/a.txt"), p("/s1/carpeta.zip")]);
+    assert_eq!(r.out.result.select, vec![p("/s1/carpeta")]);
+    // Otra vez: el nombre libre.
+    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/s1/carpeta.zip"), into_folder: true });
+    assert_eq!(r.out.result.select, vec![p("/s1/carpeta 2")]);
+    assert!(disk.exists(&p("/s1/carpeta 2/a.txt")));
+    // «Extraer aquí» tampoco trae __MACOSX.
+    disk.remove_all(&p("/s1/carpeta"));
+    simple(&disk, &arch, JobSpec::Extract { archive: p("/s1/carpeta.zip"), into_folder: false });
+    assert!(disk.exists(&p("/s1/carpeta/a.txt")) && !disk.exists(&p("/s1/__MACOSX")));
+    no_tmp_left(&disk, &p("/s1"));
+}
+
+#[test]
+fn extract_here_retries_a_busy_rename() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    arch.add_archive(&p("/r1/a.zip"), &[("a.txt", b"a")], 5);
+    disk.fail(&p("/r1/a.txt"), crate::sys::ErrKind::InUse, 1);
+    let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/r1/a.zip"), into_folder: false });
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(disk.contents(&p("/r1/a.txt")).unwrap(), b"a");
+}
+
+#[test]
+fn compress_walk_errors_abort_without_zip() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    disk.add_file(&p("/z5/F/sub/a.txt"), b"a".to_vec());
+    disk.add_file(&p("/z5/F/b.txt"), b"b".to_vec());
+    disk.fail(&p("/z5/F/sub"), crate::sys::ErrKind::Denied, 1);
+    let r = simple(&disk, &arch, JobSpec::Compress { sources: vec![p("/z5/F")] });
+    assert_eq!(r.messages(), ["No tenés permiso"]);
+    assert!(r.out.errors[0].retry);
+    assert!(!disk.exists(&p("/z5/F.zip")));
+    no_tmp_left(&disk, &p("/z5"));
+    // Reintentar (el mismo trabajo) va al mismo nombre.
+    let r = simple(&disk, &arch, JobSpec::Compress { sources: vec![p("/z5/F")] });
+    assert_eq!(r.out.result.select, vec![p("/z5/F.zip")]);
 }
 
 #[test]

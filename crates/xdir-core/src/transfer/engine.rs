@@ -25,7 +25,7 @@ use super::walk::{Planned, totals, walk};
 use super::{Answer, Choice, ConflictInfo, Control, Flow, JobError, JobOutcome, JobSpec, Update};
 use crate::format::thousands;
 use crate::ops::{OpResult, Undo};
-use crate::sys::{self, Archives, CopyError, CopyPrims, ErrKind, ItemKind, ItemStat, NoArchives, PASSWORD, UNSUPPORTED};
+use crate::sys::{self, Archives, CopyError, CopyPrims, ErrKind, ItemKind, ItemStat, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 
 /// Como mucho un aviso de progreso cada tanto por trabajo.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
@@ -41,6 +41,34 @@ const CHANGED: &str = "El original cambió durante la copia";
 /// Extraer más que esto (o más de 100 veces lo que ocupa el archivo) se pregunta antes.
 const BIG_EXPANSION: u64 = 10 * 1024 * 1024 * 1024;
 const BIG_RATIO: u64 = 100;
+/// La regla de las 100 veces solo desde este tamaño (un zip chico de texto se expande mucho).
+const BIG_RATIO_MIN: u64 = 1024 * 1024 * 1024;
+/// Más entradas que esto también se pregunta (aunque estén vacías).
+const BIG_ENTRIES: usize = 100_000;
+/// La carpeta de lo extraído dentro de la del motor.
+const STAGING_ROOT: &str = "x";
+/// Los metadatos que agrega el Finder al comprimir: no se extraen.
+const MAC_METADATA: &str = "__MACOSX";
+
+/// ¿Es una entrada de `__MACOSX/`?
+fn is_mac_metadata(name: &str) -> bool {
+    let n = name.trim_start_matches(['.', '/']);
+    n == MAC_METADATA || n.starts_with("__MACOSX/") || n.starts_with("__MACOSX\\")
+}
+
+/// Lo creado de un deshacer (rutas de `Created` y `CreatedIds`).
+fn created_paths(steps: &[Undo]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for u in steps {
+        match u {
+            Undo::Created(v) => out.extend(v.iter().cloned()),
+            Undo::CreatedIds(v) => out.extend(v.iter().map(|(p, _)| p.clone())),
+            Undo::Batch(v) => out.extend(created_paths(v)),
+            _ => {}
+        }
+    }
+    out
+}
 
 /// Título del trabajo para la ventana de copia; `items`: cuántos elementos de arriba.
 pub fn title(spec: &JobSpec, items: u64) -> String {
@@ -296,6 +324,9 @@ struct Job<'a> {
     moves_as_created: bool,
     /// Extraer: lo que no se pudo crear (`JobOutcome::omitted`).
     omitted: usize,
+    /// Mover renombrando reintenta un rato si está ocupado (lo recién extraído puede tenerlo
+    /// abierto un antivirus).
+    retry_renames: bool,
 }
 
 impl<'a> Job<'a> {
@@ -327,6 +358,7 @@ impl<'a> Job<'a> {
             index: 0,
             moves_as_created: false,
             omitted: 0,
+            retry_renames: false,
         }
     }
 
@@ -393,15 +425,15 @@ impl<'a> Job<'a> {
             ErrKind::Cancelled => self.cancelled = true,
             ErrKind::DiskFull => {
                 self.stopped = Some(e.message());
-                self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true });
+                self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None });
             }
-            _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true }),
+            _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None }),
         }
     }
 
     /// Un error con su texto; `retry`: «Reintentar» lo vuelve a intentar (no, si es un aviso).
     fn fail_msg(&mut self, src: &Path, dst: &Path, message: &str, retry: bool) {
-        self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: message.into(), retry });
+        self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: message.into(), retry, entry: None });
     }
 
     /// Anota un paso de deshacer, juntándolo con el anterior si es del mismo tipo.
@@ -1298,6 +1330,11 @@ impl<'a> Job<'a> {
 
     // ---------- mover en el mismo disco ----------
 
+    /// Renombra para mover; al extraer, con los reintentos de `rename_final`.
+    fn move_rename(&self, src: &Path, to: &Path) -> Result<(), CopyError> {
+        if self.retry_renames { self.rename_final(src, to) } else { self.prims.rename_noreplace(src, to) }
+    }
+
     /// Renombra `src` a `dst` (mismo disco), con conflictos.
     fn rename_tree(&mut self, src: &Path, dst: &Path) -> Renamed {
         let incoming = match self.prims.stat(src) {
@@ -1310,7 +1347,7 @@ impl<'a> Job<'a> {
         match self.decide(src, &incoming, dst, true) {
             Decision::Skip => Renamed::Done(None),
             Decision::Fresh(to) if !self.restore_still_safe(src, &to) => Renamed::Done(None),
-            Decision::Fresh(to) => match self.prims.rename_noreplace(src, &to) {
+            Decision::Fresh(to) => match self.move_rename(src, &to) {
                 Ok(()) => {
                     self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
                     Renamed::Done(Some(to))
@@ -1348,7 +1385,7 @@ impl<'a> Job<'a> {
                     self.put_back(&aside, &to);
                     return Renamed::Done(None);
                 }
-                match self.prims.rename_noreplace(src, &to) {
+                match self.move_rename(src, &to) {
                     Ok(()) => {
                         self.dispose_aside(&aside, &to);
                         self.record(Undo::Moved(vec![(to.clone(), src.to_path_buf())]));
@@ -1480,7 +1517,9 @@ impl<'a> Job<'a> {
                 return;
             }
         }
-        if items.is_empty() {
+        // Lo que no se pudo leer: no se arma un zip incompleto con el nombre de verdad (con
+        // «Reintentar» se vuelve a hacer entero, al mismo nombre).
+        if items.is_empty() || !self.errors.is_empty() {
             return;
         }
         let total: u64 = sizes.iter().sum();
@@ -1561,10 +1600,13 @@ impl<'a> Job<'a> {
     }
 
     /// Extrae `archive`. Todo se escribe primero en una carpeta oculta del motor al lado del
-    /// archivo (así lo que está a medias nunca se ve con su nombre y cancelar lo borra entero);
-    /// después esa carpeta toma el nombre libre («fotos», «fotos 2») o, para «Extraer aquí», lo de
-    /// adentro se mueve a la carpeta del archivo con los conflictos de siempre (renombrando: no se
-    /// vuelve a escribir).
+    /// archivo (privada: solo para el usuario), dentro de una carpeta común que es la raíz de lo
+    /// extraído; así lo que está a medias nunca se ve con su nombre y cancelar lo borra entero.
+    /// Después esa raíz (o, si adentro hay una sola carpeta, esa carpeta) toma el nombre libre
+    /// («fotos», «fotos 2»), o, para «Extraer aquí», lo de adentro se mueve a la carpeta del
+    /// archivo con los conflictos de siempre (renombrando: no se vuelve a escribir). Lo de
+    /// `__MACOSX` (los metadatos que agrega el Finder) no se trae. Al final se vuelven a mirar los
+    /// enlaces que llegaron: los que en su lugar final apuntan afuera se borran.
     fn extract(&mut self, archive: &Path, into_folder: bool) {
         let t = title(&JobSpec::Extract { archive: archive.to_path_buf(), into_folder }, 1);
         let Some(dir) = archive.parent().map(Path::to_path_buf) else { return };
@@ -1591,9 +1633,11 @@ impl<'a> Job<'a> {
             self.stopped = Some(format!("Faltan {missing} en \"{}\"", v.label));
             return;
         }
-        // Un archivo que se expande muchísimo (o a muchos GB) se pregunta antes.
+        // Un archivo que se expande muchísimo (o a muchos GB, o con muchísimas entradas) se
+        // pregunta antes.
         let packed = self.prims.stat(archive).map(|s| s.size).unwrap_or(0);
-        if declared > BIG_EXPANSION || declared > packed.saturating_mul(BIG_RATIO) {
+        let ratio = declared > packed.saturating_mul(BIG_RATIO) && declared > BIG_RATIO_MIN;
+        if declared > BIG_EXPANSION || ratio || entries.len() > BIG_ENTRIES {
             let q = format!("Este archivo se expande a {}. ¿Seguir?", sys::env().format_size_short(declared));
             (self.out)(Update::Confirm(q));
             if !self.ctl.wait_confirm() {
@@ -1604,7 +1648,15 @@ impl<'a> Job<'a> {
         self.start(t, count, declared);
         self.current = name_of(archive);
         let staging = tmp_in(&dir);
-        if let Err(e) = self.prims.create_dir(&staging) {
+        if let Err(e) = self.prims.create_private_dir(&staging) {
+            self.fail_archive(archive, &dir, e);
+            return;
+        }
+        // La raíz se crea como cualquier carpeta (con los permisos de siempre): es la que puede
+        // quedar a la vista con «Extraer en».
+        let root = staging.join(STAGING_ROOT);
+        if let Err(e) = self.prims.create_dir(&root) {
+            self.remove_tree(&staging);
             self.fail_archive(archive, &dir, e);
             return;
         }
@@ -1616,14 +1668,14 @@ impl<'a> Job<'a> {
                 self.progress(b, false);
                 self.ctl.checkpoint()
             };
-            archives.extract_all(archive, &staging, &mut on_bytes, &mut |name, e| failed.push((name.to_string(), e)))
+            archives.extract_all(archive, &root, &mut on_bytes, &mut |name, e| failed.push((name.to_string(), e)))
         };
-        // Cada entrada que no se pudo extraer: con su nombre, como si estuviera adentro del archivo
-        // (sin el camino que traía, que puede ser «../..»), y sin reintento (sería lo mismo).
+        // Cada entrada que no se pudo extraer: con su nombre tal como viene y sin reintento (sería
+        // lo mismo). Lo de `__MACOSX` no cuenta.
         for (name, e) in failed {
-            let last = name.rsplit(['/', '\\']).find(|c| !c.is_empty() && *c != "." && *c != "..").unwrap_or("?");
-            let message = e.message();
-            self.errors.push(super::JobError { src: archive.join(last), dst: dir.join(last), message, retry: false });
+            if !is_mac_metadata(&name) {
+                self.entry_error(archive, &dir, &name, &e.message());
+            }
         }
         match res {
             Ok(n) => self.omitted = n,
@@ -1642,48 +1694,66 @@ impl<'a> Job<'a> {
             self.cancelled = true;
             return;
         }
+        let mac = root.join(MAC_METADATA);
+        if self.exists(&mac).is_some() {
+            self.remove_tree(&mac);
+        }
         self.items_done = count;
         self.bytes_done = written;
         self.progress(0, true);
         if into_folder {
-            self.extract_into_folder(archive, &dir, &staging, count);
+            self.extract_into_folder(archive, &dir, &root, count);
         } else {
-            self.extract_here(&dir, &staging);
+            self.extract_here(archive, &dir, &root);
         }
+        self.remove_tree(&staging);
         self.items_done = count;
     }
 
-    /// «Extraer en "fotos"»: la carpeta del motor toma el primer nombre libre.
-    fn extract_into_folder(&mut self, archive: &Path, dir: &Path, staging: &Path, count: u64) {
+    /// Una entrada del archivo que no llegó.
+    fn entry_error(&mut self, archive: &Path, dir: &Path, name: &str, message: &str) {
+        self.errors.push(super::JobError { src: archive.to_path_buf(), dst: dir.to_path_buf(), message: message.into(), retry: false, entry: Some(name.into()) });
+    }
+
+    /// «Extraer en "fotos"»: la raíz de lo extraído (o la única carpeta que tiene adentro, como
+    /// hace la Utilidad de Archivo) toma el primer nombre libre.
+    fn extract_into_folder(&mut self, archive: &Path, dir: &Path, root: &Path, count: u64) {
         let base = extract_folder_name(&name_of(archive));
-        let mut renamed = Err(CopyError::new(ErrKind::Exists, staging));
+        let names = self.prims.read_dir(root).unwrap_or_default();
+        let from = match names.as_slice() {
+            [one] if self.exists(&root.join(one)).is_some_and(|s| s.kind == ItemKind::Dir) => root.join(one),
+            _ => root.to_path_buf(),
+        };
+        let mut renamed = Err(CopyError::new(ErrKind::Exists, root));
         let mut folder = PathBuf::new();
         for _ in 0..5 {
             folder = free_name(dir, &|n| numbered_name(&base, true, n), &|p| self.exists(p).is_some());
-            renamed = self.rename_final(staging, &folder);
+            renamed = self.rename_final(&from, &folder);
             if !matches!(&renamed, Err(e) if e.kind == ErrKind::Exists) {
                 break;
             }
         }
         if let Err(e) = renamed {
-            self.remove_tree(staging);
             self.fail_archive(archive, dir, e);
             return;
         }
         self.ok_items = count;
         self.record(Undo::Created(vec![folder.clone()]));
-        self.select.push(folder);
+        self.select.push(folder.clone());
+        // Los enlaces, contra la carpeta nueva (si se subió la única carpeta, un «../x» ahora
+        // podría salir).
+        self.drop_links_outside(archive, &folder, &folder, std::slice::from_ref(&folder));
     }
 
-    /// «Extraer aquí»: lo de adentro de la carpeta del motor va a `dir` renombrando, con los
-    /// conflictos de siempre (Reemplazar, Conservar ambos, Omitir, Combinar). Lo que queda en la
-    /// carpeta del motor (lo omitido) se borra. Si se cancela, lo que ya llegó se saca y lo
-    /// reemplazado vuelve.
-    fn extract_here(&mut self, dir: &Path, staging: &Path) {
-        let mut names = self.prims.read_dir(staging).unwrap_or_default();
+    /// «Extraer aquí»: lo de adentro de la raíz va a `dir` renombrando, con los conflictos de
+    /// siempre (Reemplazar, Conservar ambos, Omitir, Combinar). Lo que queda (lo omitido) se borra
+    /// con la carpeta del motor. Si se cancela, lo que ya llegó se saca y lo reemplazado vuelve.
+    fn extract_here(&mut self, archive: &Path, dir: &Path, root: &Path) {
+        let mut names = self.prims.read_dir(root).unwrap_or_default();
         names.sort();
         self.moves_as_created = true;
-        let items: Vec<Item> = names.iter().map(|n| Item::new(&staging.join(n), Target::Fixed(dir.join(n)), How::Rename)).collect();
+        self.retry_renames = true;
+        let items: Vec<Item> = names.iter().map(|n| Item::new(&root.join(n), Target::Fixed(dir.join(n)), How::Rename)).collect();
         self.ahead = items.iter().map(|i| self.ahead_of(&i.src, &self.target_hint(i))).collect();
         for (i, item) in items.into_iter().enumerate() {
             self.index = i;
@@ -1692,10 +1762,41 @@ impl<'a> Job<'a> {
             }
             self.process(item, true);
         }
+        self.retry_renames = false;
         if self.cancelled {
             self.take_back();
+            return;
         }
-        self.remove_tree(staging);
+        // Lo que llegó (también adentro de carpetas que se combinaron) está anotado como creado.
+        let arrived = created_paths(&self.undo);
+        self.drop_links_outside(archive, dir, dir, &arrived);
+    }
+
+    /// Mira los enlaces simbólicos que hay en `arrived` (o debajo) contra `inside`: los que
+    /// resuelven afuera se borran y se anotan («Ruta no permitida dentro del archivo»), con el
+    /// nombre relativo a `base`.
+    fn drop_links_outside(&mut self, archive: &Path, base: &Path, inside: &Path, arrived: &[PathBuf]) {
+        let never = Control::default();
+        let mut links = Vec::new();
+        for p in arrived {
+            if let Ok((items, _)) = walk(self.prims, p, &never, &mut |_| {}) {
+                links.extend(items.into_iter().filter(|i| i.stat.kind == ItemKind::Symlink).map(|i| i.src));
+            }
+        }
+        if links.is_empty() {
+            return;
+        }
+        let dir = archive.parent().unwrap_or(base).to_path_buf();
+        for bad in self.archives.links_outside(inside, &links) {
+            let shown = bad.strip_prefix(base).map(|r| r.iter().map(|c| c.to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")).unwrap_or_else(|_| name_of(&bad));
+            match self.prims.remove(&bad) {
+                Ok(()) => {
+                    self.select.retain(|s| s != &bad);
+                    self.entry_error(archive, &dir, &shown, NOT_ALLOWED);
+                }
+                Err(e) => self.entry_error(archive, &dir, &shown, &e.message()),
+            }
+        }
     }
 
     /// Cancelar «Extraer aquí» a mitad: lo que llegó (solo lo de este trabajo) se borra y lo

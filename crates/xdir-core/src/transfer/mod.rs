@@ -160,6 +160,16 @@ pub struct JobError {
     pub message: String,
     /// Se puede «Reintentar» (no, si es un aviso de lo que quedó con otro nombre).
     pub retry: bool,
+    /// Al extraer: el nombre de la entrada tal como figura en el archivo (`src` es el archivo).
+    /// Se muestra en lugar del nombre de `src`.
+    pub entry: Option<String>,
+}
+
+impl JobError {
+    /// El nombre que se muestra: el de la entrada del archivo, o el de `src`.
+    pub fn shown_name(&self) -> String {
+        self.entry.clone().unwrap_or_else(|| self.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.src.display().to_string()))
+    }
 }
 
 /// Cómo terminó un trabajo.

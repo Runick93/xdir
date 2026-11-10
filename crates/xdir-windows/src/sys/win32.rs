@@ -565,12 +565,13 @@ impl Overlays for Win32Overlays {
     }
 }
 
-/// Metadatos de archivos: provisorio, responde vacío hasta que se lean de `IPropertyStore`.
+/// Metadatos de archivos: los lee el hilo propio de `crate::metadata` (con COM), de
+/// `IPropertyStore`.
 struct Win32Metadata;
 
 impl Metadata for Win32Metadata {
     fn request(&self, req: MetadataRequest) {
-        req.answer_empty();
+        crate::metadata::queue(req)
     }
 }
 

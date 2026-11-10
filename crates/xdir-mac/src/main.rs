@@ -11,6 +11,8 @@ mod fs;
 #[cfg(target_os = "macos")]
 mod icons;
 #[cfg(target_os = "macos")]
+mod metadata;
+#[cfg(target_os = "macos")]
 mod ops;
 #[cfg(target_os = "macos")]
 mod platform;

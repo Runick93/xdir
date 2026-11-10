@@ -514,12 +514,13 @@ impl Overlays for MacOverlays {
     fn request(&self, _req: OverlayRequest) {}
 }
 
-/// Metadatos de archivos: provisorio, responde vacío hasta que se lean de Spotlight.
+/// Metadatos de archivos: los lee el hilo propio de `crate::metadata` (Spotlight, la cabecera
+/// de las imágenes y las etiquetas del Finder).
 struct MacMetadata;
 
 impl Metadata for MacMetadata {
     fn request(&self, req: MetadataRequest) {
-        req.answer_empty();
+        crate::metadata::queue(req)
     }
 }
 

@@ -552,6 +552,7 @@ impl Tab {
                 tx: tx.clone(),
                 panel: self.id,
                 generation,
+                current: self.generation.clone(),
                 items: chunk.iter().map(|&i| (i, self.entry_path(i))).collect(),
                 fields: fs::MetaField::ALL.to_vec(),
             });

@@ -236,6 +236,11 @@ impl MetaField {
 /// Cuántos elementos va como mucho en un pedido de metadatos (y en cada lote de respuesta).
 pub const META_BATCH: usize = 200;
 
+/// Las respuestas de un servicio real salen en lotes de hasta `META_REPLY_BATCH` elementos, o con
+/// lo que haya cada `META_REPLY_EVERY` (así una carpeta lenta igual se va llenando).
+pub const META_REPLY_BATCH: usize = 50;
+pub const META_REPLY_EVERY: Duration = Duration::from_millis(100);
+
 /// Pedido de metadatos para elementos de una pestaña (ver `sys::Metadata`). La respuesta vuelve
 /// como `LoadMsg::Metadata` por el canal de carga, en lotes, con la misma `generation`: si la
 /// pestaña ya cargó otra cosa, la descarta.
@@ -244,6 +249,9 @@ pub struct MetadataRequest {
     pub tx: Sender<LoadEvent>,
     pub panel: usize,
     pub generation: u64,
+    /// La generación actual de la pestaña: si ya no es `generation`, el pedido quedó viejo y se
+    /// deja de leer (ver `is_stale`).
+    pub current: Arc<AtomicU64>,
     /// (índice del elemento en la lista, ruta).
     pub items: Vec<(usize, PathBuf)>,
     pub fields: Vec<MetaField>,
@@ -258,6 +266,34 @@ impl MetadataRequest {
             self.hwnd.post(WM_APP_LOAD, self.panel, 0);
         }
         ok
+    }
+
+    /// ¿La pestaña ya cargó otra cosa? Entonces la respuesta se descartaría: no vale leer más.
+    pub fn is_stale(&self) -> bool {
+        self.current.load(Ordering::Relaxed) != self.generation
+    }
+
+    /// Responde leyendo cada elemento con `read` (en el hilo que llama, que no debe ser el de
+    /// interfaz): manda lotes de `META_REPLY_BATCH` o lo juntado cada `META_REPLY_EVERY`. Deja de
+    /// leer si el pedido quedó viejo o si la pestaña ya no escucha.
+    pub fn answer_with(self, mut read: impl FnMut(&Path) -> Meta) {
+        let mut batch = Vec::new();
+        let mut last = Instant::now();
+        for (i, path) in &self.items {
+            if self.is_stale() {
+                return;
+            }
+            batch.push((*i, read(path)));
+            if batch.len() >= META_REPLY_BATCH || last.elapsed() >= META_REPLY_EVERY {
+                if !self.send(std::mem::take(&mut batch)) {
+                    return;
+                }
+                last = Instant::now();
+            }
+        }
+        if !batch.is_empty() && !self.is_stale() {
+            self.send(batch);
+        }
     }
 
     /// Responde sin datos para todos los elementos (sistemas sin de dónde leerlos): las columnas
@@ -501,5 +537,80 @@ mod tests {
         assert!(path("/a/B/").is_path(Path::new("/A/b")));
         assert!(!path("/a/b").is_path(Path::new("/a/c")));
         assert!(!Location::Computer.is_path(Path::new("/")));
+    }
+
+    /// Pedido de metadatos de `n` elementos con su canal, para probar `answer_with`.
+    fn meta_request(n: usize) -> (MetadataRequest, std::sync::mpsc::Receiver<LoadEvent>, Arc<AtomicU64>) {
+        crate::sys::testing::install_fakes();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let current = Arc::new(AtomicU64::new(7));
+        let items = (0..n).map(|i| (i, PathBuf::from(format!("/m/{i}")))).collect();
+        let req = MetadataRequest { hwnd: Handle(0), tx, panel: 3, generation: 7, current: current.clone(), items, fields: MetaField::ALL.to_vec() };
+        (req, rx, current)
+    }
+
+    fn batch_sizes(rx: &std::sync::mpsc::Receiver<LoadEvent>) -> Vec<usize> {
+        rx.try_iter()
+            .map(|e| {
+                assert_eq!((e.panel, e.generation), (3, 7));
+                match e.msg {
+                    LoadMsg::Metadata(b) => b.len(),
+                    _ => panic!("se esperaba un lote de metadatos"),
+                }
+            })
+            .collect()
+    }
+
+    /// Lecturas rápidas: la respuesta va en lotes de 50, en orden, con lo que leyó cada ruta.
+    #[test]
+    fn metadata_answer_in_batches_of_50() {
+        let (req, rx, _) = meta_request(120);
+        req.answer_with(|p| Meta { width: p.file_name().and_then(|n| n.to_str()?.parse().ok()), ..Meta::default() });
+        let all: Vec<LoadEvent> = rx.try_iter().collect();
+        let sizes: Vec<usize> = all.iter().map(|e| if let LoadMsg::Metadata(b) = &e.msg { b.len() } else { 0 }).collect();
+        assert_eq!(sizes, [50, 50, 20]);
+        let got: Vec<(usize, Option<u32>)> =
+            all.into_iter().flat_map(|e| if let LoadMsg::Metadata(b) = e.msg { b } else { Vec::new() }).map(|(i, m)| (i, m.width)).collect();
+        assert_eq!(got, (0..120).map(|i| (i, Some(i as u32))).collect::<Vec<_>>());
+    }
+
+    /// Lecturas lentas: no se espera a juntar 50, se manda lo que haya cada 100 ms.
+    #[test]
+    fn metadata_answer_every_100ms() {
+        let (req, rx, _) = meta_request(3);
+        req.answer_with(|_| {
+            std::thread::sleep(Duration::from_millis(110));
+            Meta::default()
+        });
+        assert_eq!(batch_sizes(&rx), [1, 1, 1]);
+    }
+
+    /// Si la pestaña ya cargó otra cosa (otra generación), se deja de leer.
+    #[test]
+    fn metadata_answer_stops_when_stale() {
+        let (req, rx, current) = meta_request(120);
+        let mut reads = 0;
+        req.answer_with(|_| {
+            reads += 1;
+            if reads == 10 {
+                current.store(8, Ordering::Relaxed);
+            }
+            Meta::default()
+        });
+        assert_eq!(reads, 10);
+        assert!(batch_sizes(&rx).iter().sum::<usize>() <= 10);
+    }
+
+    /// Si la pestaña ya no escucha (canal cerrado), se deja de leer.
+    #[test]
+    fn metadata_answer_stops_when_nobody_listens() {
+        let (req, rx, _) = meta_request(200);
+        drop(rx);
+        let mut reads = 0;
+        req.answer_with(|_| {
+            reads += 1;
+            Meta::default()
+        });
+        assert_eq!(reads, 50);
     }
 }

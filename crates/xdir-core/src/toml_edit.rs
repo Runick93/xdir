@@ -212,59 +212,40 @@ impl Doc {
 
     fn classify(&self) -> Vec<Kind> {
         let mut kinds = Vec::with_capacity(self.lines.len());
-        // Dentro de algo de varias líneas: profundidad de corchetes o el delimitador del string.
+        // Dentro de algo de varias líneas que `toml::parse` no entiende (una lista o un string
+        // sin cerrar): profundidad de corchetes o el delimitador del string. Las líneas de adentro
+        // no se miran, salvo las que `parse` lee como encabezado o clave: ahí termina, así el
+        // editor ve lo mismo que `parse` (una línea rota no esconde lo de abajo).
         let mut depth = 0i32;
         let mut long_string: Option<&str> = None;
         for l in &self.lines {
-            if let Some(delim) = long_string {
-                if !l.text.matches(delim).count().is_multiple_of(2) {
+            let kind = line_kind(&l.text);
+            if long_string.is_some() || depth > 0 {
+                if matches!(kind, Kind::Header { .. } | Kind::Active(_)) {
                     long_string = None;
-                }
-                kinds.push(Kind::Opaque);
-                continue;
-            }
-            if depth > 0 {
-                depth += bracket_balance(&l.text);
-                kinds.push(Kind::Opaque);
-                continue;
-            }
-            let content = strip_comment(&l.text).trim();
-            if content.is_empty() {
-                let t = l.text.trim_start();
-                kinds.push(match t.strip_prefix('#') {
-                    None => Kind::Blank,
-                    Some(body) => {
-                        let body = strip_comment(body.trim_start_matches('#')).trim();
-                        match parse_entry(body) {
-                            Ok((k, _)) => Kind::Example(k),
-                            Err(_) => Kind::Comment,
-                        }
+                    depth = 0;
+                } else {
+                    match long_string {
+                        Some(delim) if !l.text.matches(delim).count().is_multiple_of(2) => long_string = None,
+                        Some(_) => {}
+                        None => depth += bracket_balance(&l.text),
                     }
-                });
-                continue;
-            }
-            if let Some(name) = content.strip_prefix("[[").and_then(|r| r.strip_suffix("]]")) {
-                kinds.push(Kind::Header { name: name.trim().to_string(), array: true });
-                continue;
-            }
-            if let Some(name) = content.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-                kinds.push(Kind::Header { name: name.trim().to_string(), array: false });
-                continue;
-            }
-            match parse_entry(content) {
-                Ok((k, _)) => kinds.push(Kind::Active(k)),
-                Err(_) => {
-                    for delim in ["\"\"\"", "'''"] {
-                        if !l.text.matches(delim).count().is_multiple_of(2) {
-                            long_string = Some(delim);
-                        }
-                    }
-                    if long_string.is_none() {
-                        depth = bracket_balance(&l.text).max(0);
-                    }
-                    kinds.push(Kind::Error);
+                    kinds.push(Kind::Opaque);
+                    continue;
                 }
             }
+            if kind == Kind::Error {
+                for delim in ["\"\"\"", "'''"] {
+                    if !l.text.matches(delim).count().is_multiple_of(2) {
+                        long_string = Some(delim);
+                    }
+                }
+                let unclosed_list = parse_entry(strip_comment(&l.text).trim()).is_err_and(|e| e.starts_with("falta cerrar la lista"));
+                if long_string.is_none() && unclosed_list {
+                    depth = bracket_balance(&l.text).max(0);
+                }
+            }
+            kinds.push(kind);
         }
         kinds
     }
@@ -303,6 +284,30 @@ impl Doc {
         self.lines.push(Line { text: String::new(), eol });
         self.lines.push(Line { text: header, eol });
         self.lines.push(Line { text: line, eol: final_eol });
+    }
+}
+
+/// Cómo lee `toml::parse` una línea suelta.
+fn line_kind(text: &str) -> Kind {
+    let content = strip_comment(text).trim();
+    if content.is_empty() {
+        return match text.trim_start().strip_prefix('#') {
+            None => Kind::Blank,
+            Some(body) => match parse_entry(strip_comment(body.trim_start_matches('#')).trim()) {
+                Ok((k, _)) => Kind::Example(k),
+                Err(_) => Kind::Comment,
+            },
+        };
+    }
+    if let Some(name) = content.strip_prefix("[[").and_then(|r| r.strip_suffix("]]")) {
+        return Kind::Header { name: name.trim().to_string(), array: true };
+    }
+    if let Some(name) = content.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return Kind::Header { name: name.trim().to_string(), array: false };
+    }
+    match parse_entry(content) {
+        Ok((k, _)) => Kind::Active(k),
+        Err(_) => Kind::Error,
     }
 }
 
@@ -447,15 +452,33 @@ mod tests {
 
     #[test]
     fn multiline_array_untouched() {
-        let t = "[atajos]\ncopiar = [\n  \"Ctrl+C\",\n  # duplicar = \"x\"\n  [\"raro\"]\n]\npegar = \"Ctrl+V\"\n";
-        // El ejemplo comentado de adentro no cuenta, ni el "[\"raro\"]" es una sección.
+        let t = "[atajos]\ncopiar = [\n  \"Ctrl+C\",\n  # duplicar = \"x\"\n]\npegar = \"Ctrl+V\"\n";
+        // El ejemplo comentado de adentro de la lista no cuenta.
         assert_eq!(
             set(t, "atajos", "duplicar", "\"F1\""),
-            "[atajos]\ncopiar = [\n  \"Ctrl+C\",\n  # duplicar = \"x\"\n  [\"raro\"]\n]\npegar = \"Ctrl+V\"\nduplicar = \"F1\"\n"
+            "[atajos]\ncopiar = [\n  \"Ctrl+C\",\n  # duplicar = \"x\"\n]\npegar = \"Ctrl+V\"\nduplicar = \"F1\"\n"
         );
-        assert_eq!(remove_all(t, "atajos"), "[atajos]\ncopiar = [\n  \"Ctrl+C\",\n  # duplicar = \"x\"\n  [\"raro\"]\n]\n");
-        let t = "[opciones]\nx = \"\"\"\n[atajos]\nduplicar = 1\n\"\"\"\n";
-        assert_eq!(set(t, "atajos", "duplicar", "2"), format!("{t}\n[atajos]\nduplicar = 2\n"));
+        assert_eq!(remove_all(t, "atajos"), "[atajos]\ncopiar = [\n  \"Ctrl+C\",\n  # duplicar = \"x\"\n]\n");
+    }
+
+    /// Lo que el editor ve es lo mismo que lee `toml::parse`: una línea mal escrita (un `[` sin
+    /// cerrar, un `"""` suelto, un encabezado sin `]`) no esconde las secciones de abajo.
+    #[test]
+    fn broken_line_does_not_hide_the_rest() {
+        let t = "[opciones]\nnombre = [1, 2\n[atajos]\nduplicar = \"Ctrl+K\"\n";
+        let once = set(t, "atajos", "duplicar", "\"F3\"");
+        assert_eq!(once, "[opciones]\nnombre = [1, 2\n[atajos]\nduplicar = \"F3\"\n");
+        let twice = set(&once, "atajos", "duplicar", "\"F4\"");
+        assert_eq!(twice.matches("[atajos]").count(), 1, "{twice}");
+        assert_eq!(remove(&twice, "atajos", "duplicar"), "[opciones]\nnombre = [1, 2\n[atajos]\n");
+        assert_eq!(count_active(t, "atajos"), 1);
+        assert_eq!(remove_all(t, "atajos"), "[opciones]\nnombre = [1, 2\n[atajos]\n");
+        // Un string de varias líneas suelto: lo de abajo se sigue viendo, como lo ve `parse`.
+        let t = "[opciones]\nx = \"\"\"\n[atajos]\nduplicar = 1\n";
+        assert_eq!(set(t, "atajos", "duplicar", "2"), "[opciones]\nx = \"\"\"\n[atajos]\nduplicar = 2\n");
+        // Un encabezado sin cerrar no es sección, y no tapa lo que sigue.
+        let t = "[atajos\nx = 1\n[atajos]\nduplicar = 1\n";
+        assert_eq!(remove(t, "atajos", "duplicar"), "[atajos\nx = 1\n[atajos]\n");
     }
 
     #[test]

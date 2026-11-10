@@ -677,6 +677,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ronda 2 (A): durante un «Combinar» de lo que se devuelve, una subcarpeta (la combinada o
+    /// una más adentro) cambia por un enlace a otro lado mientras se pregunta: no se escribe nada
+    /// del otro lado.
+    #[test]
+    fn zz_merge_subfolder_swap() {
+        for (case, nested) in [("top", false), ("nested", true)] {
+            let dir = tmp(&format!("motor-devolver-merge-{case}"));
+            let (vol, outside) = (dir.join("vol"), dir.join("LaunchAgents"));
+            let tr = vol.join(".Trashes/501/X");
+            let base = if nested { "X/sub" } else { "X" };
+            std::fs::create_dir_all(vol.join(".Trashes/501").join(base)).unwrap();
+            std::fs::create_dir_all(vol.join("docs").join(base)).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(vol.join(".Trashes/501").join(base).join("a"), "evil-a").unwrap();
+            std::fs::write(vol.join(".Trashes/501").join(base).join("b"), "evil-b").unwrap();
+            std::fs::write(vol.join("docs").join(base).join("a"), "old").unwrap();
+            let prims = Real { other: None, origin: Some(vol.join("docs/X")) };
+            let target = vol.join("docs").join(base);
+            let o2 = outside.clone();
+            let mut n = 0;
+            let swap_at = if nested { 3 } else { 1 };
+            let mut answers = vec![Answer { choice: Choice::Merge, all: false }];
+            if nested {
+                answers.push(Answer { choice: Choice::Merge, all: false });
+            }
+            answers.push(Answer { choice: Choice::KeepBoth, all: false });
+            let out = go(&prims, JobSpec::Restore { items: vec![tr.clone()] }, &answers, &Control::new(), &mut |u| {
+                if let Update::Conflict(_) = u {
+                    n += 1;
+                    if n == swap_at {
+                        std::fs::rename(&target, target.with_file_name("moved-real")).unwrap();
+                        std::os::unix::fs::symlink(&o2, &target).unwrap();
+                    }
+                }
+            });
+            let listing: Vec<_> = std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert!(listing.is_empty(), "{case}: escribió del otro lado: {listing:?}");
+            assert!(!out.errors.is_empty(), "{case}: tiene que avisar");
+            assert!(out.errors.iter().all(|e| !e.retry), "{case}: {:?}", out.errors);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Ronda 2 (B): «Reintentar» de una copia hecha desde la Papelera sigue siendo una copia al
+    /// destino elegido (no un «Devolver» que la saca de la Papelera).
+    #[test]
+    fn zz_retry_copy_from_trash_becomes_move() {
+        let dir = tmp("motor-retry-copia-papelera");
+        let vol = dir.join("vol");
+        std::fs::create_dir_all(vol.join(".Trashes/501")).unwrap();
+        std::fs::create_dir_all(vol.join("docs")).unwrap();
+        std::fs::create_dir_all(vol.join("Desktop")).unwrap();
+        let item = vol.join(".Trashes/501/f.txt");
+        std::fs::write(&item, "x").unwrap();
+        let prims = Real { other: None, origin: Some(vol.join("docs/f.txt")) };
+        let pairs = vec![(item.clone(), vol.join("Desktop/f.txt"))];
+        let out = go(&prims, JobSpec::Retry { moving: false, pairs }, &[], &Control::new(), &mut |_| {});
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert!(item.exists(), "sigue en la Papelera (era una copia)");
+        assert_eq!(std::fs::read_to_string(vol.join("Desktop/f.txt")).unwrap(), "x");
+        assert!(!vol.join("docs/f.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn engine_real_copy_tree() {
         let dir = tmp("motor");

@@ -1295,3 +1295,45 @@ fn busy_retries_cover_replace_and_set_aside_but_not_denied() {
     assert_eq!(r.messages(), vec!["No tenés permiso".to_string()]);
     no_tmp_left(&fake, &p("/br/d"));
 }
+
+#[test]
+fn restore_merge_rechecks_every_folder_on_the_way() {
+    // Ronda 2 (A): devolviendo una carpeta que se combina, la subcarpeta cambia por un enlace
+    // mientras se pregunta por un archivo de adentro: nada se escribe del otro lado.
+    let fake = FakeCopyPrims::new();
+    fake.add_dir(&p("/rm/afuera"));
+    fake.add_file(&p("/rm/vol/.Trash/X/sub/a"), b"nuevo-a".to_vec());
+    fake.add_file(&p("/rm/vol/.Trash/X/sub/b"), b"nuevo-b".to_vec());
+    fake.add_file(&p("/rm/vol/docs/X/sub/a"), b"viejo".to_vec());
+    fake.set_trash_origin(&p("/rm/vol/.Trash/X"), &p("/rm/vol/docs/X"));
+    let f2 = fake.clone();
+    let mut n = 0;
+    let answers = [answer(Choice::Merge), answer(Choice::Merge), answer(Choice::KeepBoth)];
+    let r = go_with(&fake, JobSpec::Restore { items: vec![p("/rm/vol/.Trash/X")] }, &answers, &Control::new(), &mut |u, _| {
+        if let Update::Conflict(_) = u {
+            n += 1;
+            if n == 3 {
+                crate::sys::CopyPrims::rename_noreplace(&f2, &p("/rm/vol/docs/X/sub"), &p("/rm/vol/docs/X/sub-real")).unwrap();
+                f2.add_symlink(&p("/rm/vol/docs/X/sub"), &p("/rm/afuera"));
+            }
+        }
+    });
+    assert!(fake.list_all(&p("/rm/afuera")).is_empty(), "{:?}", fake.list_all(&p("/rm/afuera")));
+    assert!(!r.out.errors.is_empty() && r.out.errors.iter().all(|e| !e.retry), "{:?}", r.messages());
+}
+
+#[test]
+fn retry_of_a_copy_from_the_trash_stays_a_copy() {
+    // Ronda 2 (B): copiar algo de la Papelera a otra carpeta y reintentarlo no lo «devuelve».
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/rc/.Trash/f.txt"), b"x".to_vec());
+    fake.set_trash_origin(&p("/rc/.Trash/f.txt"), &p("/rc/docs/f.txt"));
+    fake.add_dir(&p("/rc/docs"));
+    fake.add_dir(&p("/rc/Escritorio"));
+    let pairs = vec![(p("/rc/.Trash/f.txt"), p("/rc/Escritorio/f.txt"))];
+    let r = go(&fake, JobSpec::Retry { moving: false, pairs }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert!(fake.exists(&p("/rc/.Trash/f.txt")) && fake.exists(&p("/rc/Escritorio/f.txt")));
+    assert!(!fake.exists(&p("/rc/docs/f.txt")));
+    assert!(fake.restored().is_empty());
+}

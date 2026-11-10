@@ -494,8 +494,9 @@ impl<'a> Job<'a> {
                 self.fail_msg(src, dst, INTO_ITSELF, false);
                 continue;
             }
-            // Algo de la Papelera: siempre con las reglas de «Devolver» (nunca un mover común).
-            if self.prims.trash_origin(src).is_some() {
+            // Un «Devolver» (mover algo de la Papelera a su lugar original): siempre con sus reglas.
+            // Copiar o mover a otro lado desde la Papelera sigue siendo eso.
+            if moving && self.prims.trash_origin(src).as_deref() == Some(dst.as_path()) {
                 if let Some(item) = self.restore_item(src, dst) {
                     items.push(item);
                 }
@@ -519,15 +520,17 @@ impl<'a> Job<'a> {
         Some(item)
     }
 
-    /// Justo antes de escribir en `dst`: si se está devolviendo a esa carpeta, se vuelve a mirar
-    /// que siga siendo una carpeta de verdad del disco (pudo cambiar mientras se esperaba una
-    /// respuesta). Si no, error (sin reintento) y no se escribe nada.
+    /// Justo antes de escribir en `dst`: si se está devolviendo ahí, se vuelve a mirar el camino
+    /// entero hasta la carpeta de `dst` (también las de adentro que se combinan o que creó este
+    /// trabajo): ninguna puede ser un enlace (pudo cambiar mientras se esperaba una respuesta). Si
+    /// no, error (sin reintento) y no se escribe nada.
     fn restore_still_safe(&mut self, src: &Path, dst: &Path) -> bool {
         let Some((in_trash, dir)) = self.restore_guard.clone() else { return true };
         if !dst.starts_with(&dir) {
             return true;
         }
-        match self.prims.prepare_restore(&in_trash, &dir, false) {
+        let parent = dst.parent().unwrap_or(&dir);
+        match self.prims.prepare_restore(&in_trash, parent, false) {
             Ok(()) => true,
             Err(e) => {
                 self.fail_msg(src, dst, &e.message(), false);
@@ -1278,6 +1281,10 @@ impl<'a> Job<'a> {
             }
             Decision::Replace(to) => {
                 let Some(aside) = self.set_aside(src, &to) else { return Renamed::Done(None) };
+                if !self.restore_still_safe(src, &to) {
+                    self.put_back(&aside, &to);
+                    return Renamed::Done(None);
+                }
                 match self.prims.rename_noreplace(src, &to) {
                     Ok(()) => {
                         self.dispose_aside(&aside, &to);

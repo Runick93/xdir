@@ -29,6 +29,7 @@ struct FakeFs {
     short: HashMap<PathBuf, u64>,
     block: Option<u64>,
     delay: Option<Duration>,
+    slow: HashMap<PathBuf, Duration>,
     reads: HashMap<PathBuf, u32>,
     trash: Vec<Trashed>,
     origins: HashMap<PathBuf, PathBuf>,
@@ -207,6 +208,16 @@ impl FakeCopyPrims {
         self.fs().delay = delay;
     }
 
+    /// Demora por bloque al copiar desde `path` (para el disco de todo el proceso, donde
+    /// `set_delay` alcanzaría a las otras pruebas). `None` la quita.
+    pub fn set_slow(&self, path: &Path, delay: Option<Duration>) {
+        let mut fs = self.fs();
+        match delay {
+            Some(d) => fs.slow.insert(path.to_path_buf(), d),
+            None => fs.slow.remove(path),
+        };
+    }
+
     /// Lugar original de un elemento de la Papelera (para «Devolver»).
     pub fn set_trash_origin(&self, in_trash: &Path, original: &Path) {
         self.fs().origins.insert(in_trash.to_path_buf(), original.to_path_buf());
@@ -297,7 +308,7 @@ impl CopyPrims for FakeCopyPrims {
             fs.need_parent_dir(dst)?;
             *fs.reads.entry(src.to_path_buf()).or_insert(0) += 1;
             fs.nodes.insert(dst.to_path_buf(), Node::File { data: Vec::new(), modified, cloud: false, size: None });
-            (data, fs.block.unwrap_or(64 * 1024), fs.delay, fs.fail_after.get(src).cloned(), fs.short.get(src).copied())
+            (data, fs.block.unwrap_or(64 * 1024), fs.slow.get(src).copied().or(fs.delay), fs.fail_after.get(src).cloned(), fs.short.get(src).copied())
         };
         let total = short.unwrap_or(data.len() as u64).min(data.len() as u64);
         let mut done = 0u64;

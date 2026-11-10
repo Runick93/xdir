@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Instant;
 
 pub use crate::sys::Flow;
 use crate::ops::{OpResult, Undo};
@@ -12,6 +13,7 @@ use crate::sys::ItemStat;
 
 pub mod engine;
 mod naming;
+pub mod sched;
 pub mod speed;
 pub mod walk;
 
@@ -24,6 +26,39 @@ mod tests;
 
 /// Identifica un trabajo de la cola.
 pub type JobId = u64;
+
+/// Llegaron `Update`s de un trabajo al canal de la `App`.
+pub const WM_APP_TRANSFER: u32 = crate::WM_APP + 27;
+
+/// En qué está un trabajo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JobState {
+    Preparing,
+    /// «En cola»: espera a otro que usa el mismo disco.
+    Waiting,
+    Running,
+    /// Espera la respuesta a un conflicto.
+    Conflict,
+    Done,
+}
+
+/// Lo que la interfaz sabe de un trabajo (lo arma la `App` con los `Update`s).
+#[derive(Clone, Debug)]
+pub struct JobView {
+    pub id: JobId,
+    pub title: String,
+    pub state: JobState,
+    /// (hechos, total) de elementos y de bytes.
+    pub items: (u64, u64),
+    pub bytes: (u64, u64),
+    pub current: String,
+    pub speed: speed::Speed,
+    pub conflict: Option<ConflictInfo>,
+    pub errors: Vec<JobError>,
+    pub stopped: Option<String>,
+    pub paused: bool,
+    pub started: Instant,
+}
 
 /// Un trabajo del motor.
 #[derive(Clone, PartialEq, Debug)]

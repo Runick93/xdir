@@ -138,8 +138,13 @@ impl App {
                 }
             }
             Command::Undo => {
-                if let Some(undo) = self.undo.pop() {
-                    sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::Undo(undo));
+                match self.undo.pop() {
+                    // Lo que armó el motor de copia lo deshace el motor (un paso, con su progreso).
+                    Some(undo @ (Undo::Batch(_) | Undo::CreatedFolder(_))) => {
+                        self.start_transfer(crate::transfer::JobSpec::Undo(undo));
+                    }
+                    Some(undo) => sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::Undo(undo)),
+                    None => {}
                 }
             }
             Command::NewFolder => {

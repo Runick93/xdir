@@ -16,6 +16,7 @@ mod quick_look;
 mod panes;
 mod preview;
 mod tooltip;
+mod transfers;
 
 #[cfg(test)]
 mod tests;
@@ -23,9 +24,12 @@ mod tests;
 mod preview_tests;
 #[cfg(test)]
 mod quick_look_tests;
+#[cfg(test)]
+mod transfers_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
+pub use transfers::eject_question;
 use tooltip::{Tip, WM_APP_TOOLTIP};
 #[cfg(test)]
 use tooltip::{tooltip_for, tooltip_rect};
@@ -385,6 +389,8 @@ pub struct App {
     quick_look: Option<quick_look::QlState>,
     /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
     swallow_space: bool,
+    /// Trabajos del motor de copia (cola, estado de cada uno).
+    transfers: transfers::Transfers,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -561,6 +567,7 @@ impl App {
             preview: preview::PreviewState::new(session.preview_on, session.preview_width),
             quick_look: None,
             swallow_space: false,
+            transfers: transfers::Transfers::new(),
         };
         app.restore_panes(&session, start_path);
         app.sync_folder_views();

@@ -95,6 +95,10 @@ impl App {
                     }
                 }
             }
+            crate::transfer::WM_APP_TRANSFER => {
+                self.on_transfer_updates();
+                self.redraw();
+            }
             WM_APP_OP_DONE => {
                 while let Ok(result) = self.ops_rx.try_recv() {
                     self.on_op_done(result);

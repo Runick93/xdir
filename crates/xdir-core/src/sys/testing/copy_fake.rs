@@ -418,6 +418,10 @@ impl CopyPrims for FakeCopyPrims {
     }
 
     fn volume(&self, p: &Path) -> Option<VolumeInfo> {
+        // Un recurso de red colgado (`FakeNetwork::hang`) no responde.
+        if let Some(d) = super::FakeNetwork::hang_for(&p.to_string_lossy()) {
+            std::thread::sleep(d);
+        }
         let fs = self.fs();
         if fs.hidden.iter().any(|h| p.starts_with(h)) {
             return None;

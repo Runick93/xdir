@@ -18,6 +18,8 @@ mod info;
 #[cfg(windows)]
 mod metadata;
 #[cfg(windows)]
+mod net;
+#[cfg(windows)]
 mod ops;
 #[cfg(windows)]
 mod origin;

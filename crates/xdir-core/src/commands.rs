@@ -67,6 +67,12 @@ pub enum Command {
     ExtractInto,
     /// Expulsar el disco enfocado en «Este equipo» o el de la carpeta del panel.
     Eject,
+    /// Conectar a un servidor… (el panel con la dirección, favoritos y recientes).
+    ConnectServer,
+    /// Conectar unidad de red… (solo Windows).
+    MapNetworkDrive,
+    /// Desconectar unidad de red… (solo Windows).
+    DisconnectNetworkDrive,
     Rename,
     /// Renombrar varios: el panel de la derecha con la vista previa en la lista.
     RenameMany,
@@ -211,6 +217,9 @@ pub const ALL: &[Spec] = &[
     spec(Command::ExtractHere, "extraer_aqui", "Extraer aquí", &[]),
     spec(Command::ExtractInto, "extraer_en", "Extraer en una carpeta", &[]),
     spec(Command::Eject, "expulsar", "Expulsar", &[]),
+    spec(Command::ConnectServer, "conectar_servidor", "Conectar a un servidor…", &["Ctrl+K"]),
+    spec(Command::MapNetworkDrive, "conectar_unidad_red", "Conectar unidad de red…", &[]),
+    spec(Command::DisconnectNetworkDrive, "desconectar_unidad_red", "Desconectar unidad de red…", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::RenameMany, "renombrar_varios", "Renombrar varios…", &[]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
@@ -349,6 +358,7 @@ pub fn group(c: Command) -> Group {
         | Command::ToggleTreePin
         | Command::ToggleDarkMode => Group::Views,
         Command::TogglePreview | Command::QuickLook => Group::Preview,
+        Command::ConnectServer | Command::MapNetworkDrive | Command::DisconnectNetworkDrive => Group::Network,
         Command::Palette
         | Command::PowerShell
         | Command::Cmd
@@ -651,6 +661,14 @@ mod tests {
         assert_eq!(Group::ALL.iter().map(|g| g.title()).collect::<Vec<_>>()[6], "Red");
     }
 
+    /// F1: los comandos de red van en el grupo «Red».
+    #[test]
+    fn network_commands_grouped() {
+        for c in [Command::ConnectServer, Command::MapNetworkDrive, Command::DisconnectNetworkDrive] {
+            assert_eq!(group(c), Group::Network);
+        }
+    }
+
     #[test]
     fn markdown_table_order() {
         install_fakes();
@@ -659,7 +677,8 @@ mod tests {
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{positions:?}");
         assert!(t.contains("| Duplicar | Ctrl+D | `duplicar` |"));
         assert!(t.contains("| Configuración | Ctrl+, | `configuracion` |"));
-        assert!(!t.contains("### Red"), "sin comandos de red todavía no hay grupo");
+        assert!(t.contains("### Red\n"));
+        assert!(t.contains("| Conectar a un servidor… | Ctrl+K | `conectar_servidor` |"), "{t}");
     }
 
     #[test]
@@ -797,9 +816,10 @@ mod tests {
         let mut km = Keymap::default();
         let ctrl_k = parse_combo("Ctrl+K").unwrap();
         let ctrl_w = parse_combo("Ctrl+W").unwrap();
-        // pestana_nueva = ["Ctrl+K", "Ctrl+W"]: Ctrl+T deja de funcionar y Ctrl+W se le saca a cerrar.
+        // pestana_nueva = ["Ctrl+K", "Ctrl+W"]: Ctrl+T deja de funcionar, y Ctrl+K y Ctrl+W se les
+        // sacan a conectar a un servidor y a cerrar.
         let displaced = km.set(Command::NewTab, &[ctrl_k, ctrl_w]);
-        assert_eq!(displaced, [Command::CloseTab]);
+        assert_eq!(displaced, [Command::ConnectServer, Command::CloseTab]);
         assert_eq!(km.lookup(Key(b'K' as u16), true, false, false, false), Some(Command::NewTab));
         assert_eq!(km.lookup(Key(b'W' as u16), true, false, false, false), Some(Command::NewTab));
         assert_eq!(km.lookup(Key(b'T' as u16), true, false, false, false), None);

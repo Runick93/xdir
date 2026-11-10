@@ -25,6 +25,7 @@ pub mod jump;
 pub mod keys;
 pub mod list;
 pub mod names;
+pub mod net;
 pub mod ops;
 pub mod transfer;
 pub mod paint;

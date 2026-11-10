@@ -295,6 +295,20 @@ Notas de X54–X67:
 - La rueda de X67 y el árbol de X65/X66 son copias desacopladas (como en X37 y X52).
 - X59 es una hoja de contenido, no una ventana: ocupa el marco de 1400×820 con fondo `surface`.
 
+Cómo quedó la parte de red programada (X57, X60–X66), donde difiere del diseño:
+- X57: la fila en edición abre una caja a la vez (nombre o dirección; Tab pasa de una a otra), como pide el contrato de
+  las páginas de la configuración; la otra se ve como texto. El aviso es una línea, «xdir no guarda contraseñas: las
+  guarda el sistema (Llavero / Administrador de credenciales / llavero del escritorio)», con el botón «Abrir». En macOS
+  «Conectados ahora» muestra la carpeta montada en lugar de «sin letra».
+- X60–X62: la caja del campo es la del sistema y las direcciones se muestran como URL en macOS y Linux (UNC solo en
+  Windows); el ejemplo suma `afp://…` en macOS y `sftp://…` en Linux.
+- X63: el desplegable de letras es el menú del sistema; el autocompletar se muestra debajo de la carpeta como «…
+  (clic para completar)».
+- X65: las máquinas de Bonjour se muestran con el nombre que anuncian («MacBook de Ana») y se conectan por su servicio
+  SMB; las conexiones se titulan «fotos (nas.local)» / «compartido (Z:)».
+- X66: los textos usan las comillas del spec («Conectando con "nas"…», «"nas" no responde»); también aparece al
+  conectar desde la barra de dirección.
+
 ## Navegar archivos comprimidos (X68–X71)
 
 Diseñadas antes de programar (spec `docs/superpowers/specs/2026-11-10-navegar-zips-design.md`). Son el grupo

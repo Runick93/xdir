@@ -94,7 +94,7 @@ impl App {
             }
             Target::Folder(loc) => {
                 if let Location::Path(p) = &loc {
-                    if !p.is_dir() {
+                    if crate::fs::probe_dir(p) == Some(false) {
                         // Ya no existe: sale del historial.
                         self.history.forget(p);
                         self.notice = Some(format!("No existe: {}", p.display()));

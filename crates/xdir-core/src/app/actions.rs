@@ -34,6 +34,9 @@ impl App {
         let active = self.active;
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
+            VK_ESCAPE if self.net.dialog.is_some() => self.close_connect_dialog(),
+            VK_ESCAPE if self.net.map.is_some() => self.close_map_dialog(),
+            VK_ESCAPE if self.net.unmap.is_some() => self.net.unmap = None,
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
             VK_ESCAPE if self.filter_menu_pane().is_some() => {
@@ -206,6 +209,9 @@ impl App {
                     self.eject(root);
                 }
             }
+            Command::ConnectServer => self.open_connect_dialog(),
+            Command::MapNetworkDrive => self.open_map_dialog(),
+            Command::DisconnectNetworkDrive => self.open_unmap_dialog(),
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.rename_command(active),
             Command::RenameMany => self.open_rename_many(active),
@@ -357,7 +363,8 @@ impl App {
         match self.config.xtree_open {
             config::XtreeOpen::Pane => pane(),
             config::XtreeOpen::System => crate::sys::disk_scan().default_root(),
-            config::XtreeOpen::Last => self.xtree_last.clone().filter(|p| p.is_dir()).unwrap_or_else(pane),
+            // El último analizado, si sigue (sin mirar el disco si es de red).
+            config::XtreeOpen::Last => self.xtree_last.clone().filter(|p| crate::fs::probe_dir(p) != Some(false)).unwrap_or_else(pane),
         }
     }
 

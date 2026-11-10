@@ -681,7 +681,13 @@ fn attach_requests_ejectable() {
     FakeFileSystem::set_drives(&[(&e, "USB (E:)")]);
     FakeShell::set_ejectable(std::slice::from_ref(&e));
     a.attach(crate::sys::Handle(7), 96);
-    wait_task(&mut a);
+    // `attach` también pide los favoritos de red y lo conectado: llegan tres trabajos.
+    for _ in 0..3 {
+        if a.ejectable.contains(&e) {
+            break;
+        }
+        wait_task(&mut a);
+    }
     assert!(a.ejectable.contains(&e));
 }
 

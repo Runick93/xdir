@@ -638,7 +638,8 @@ mod tests {
         assert!(c.errors.is_empty(), "{:?}", c.errors);
         let k = Key(b'K' as u16);
         assert_eq!(c.keymap.lookup(k, true, false, false, true), Some(commands::Command::NewFolderWithSelection));
-        assert_eq!(c.keymap.lookup(k, true, false, false, false), None);
+        // Ctrl+K sin Meta sigue siendo «Conectar a un servidor…».
+        assert_eq!(c.keymap.lookup(k, true, false, false, false), Some(commands::Command::ConnectServer));
     }
 
     #[test]

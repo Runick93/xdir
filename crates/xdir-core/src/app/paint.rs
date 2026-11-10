@@ -93,7 +93,13 @@ impl App {
             // ⏏ en los discos expulsables de «Este equipo».
             let tab = self.panes[i].tab();
             let ejects: Vec<usize> = match tab.location {
-                Location::Computer => (0..tab.list.entries.len()).filter(|&k| self.ejectable.contains(&tab.entry_path(k))).collect(),
+                // Los discos y las conexiones de red (`Network::connections`).
+                Location::Computer => (0..tab.list.entries.len())
+                    .filter(|&k| {
+                        let p = tab.entry_path(k);
+                        self.ejectable.contains(&p) || self.net.connections.iter().any(|c| c.connected && crate::sys::same_path_folded(&c.local, &p))
+                    })
+                    .collect(),
                 _ => Vec::new(),
             };
             self.panes[i].tab_mut().list.eject_rows = ejects;
@@ -109,6 +115,21 @@ impl App {
         // El texto del cartel de ayuda se arma antes de prestar los campos de `App` por separado.
         let tooltip = self.visible_tooltip();
         let switches = self.picker_switches();
+        // «Conectar a un servidor»: las cajas en su lugar y lo que se dibuja, antes de prestar
+        // los campos por separado.
+        self.sync_connect_boxes();
+        self.sync_map_boxes();
+        let drives_style = self.net_style();
+        self.update_placeholders();
+        self.sync_browse();
+        self.sync_red_page();
+        let connect_extra = self.net.dialog.as_ref().map(|_| {
+            let style = self.net_style();
+            let (now, offset) = (super::network::unix_now(), sys::env().local_now().offset);
+            let dates: Vec<String> = self.net.places.recents.iter().map(|r| crate::net::places::ago(now, r.date, offset)).collect();
+            let fav = crate::net::Address::parse(&self.connect_field_text()).is_ok_and(|a| self.net.places.is_favorite(&a));
+            (style, self.net_example(), dates, fav)
+        });
         // Las migas de la configuración dicen la página.
         for i in self.shown_panes() {
             let page = self.panes[i].tab().settings.as_ref().map(|v| v.page);
@@ -278,6 +299,25 @@ impl App {
                     _ => None,
                 };
                 about::draw(p, w, h, about_hover);
+            }
+            if let (Some(d), Some((style, example, dates, fav))) = (&self.net.dialog, &connect_extra) {
+                let places = &self.net.places;
+                let hover = match hover {
+                    Hit::Connect(k) => Some(k),
+                    _ => None,
+                };
+                let args = crate::net::dialog::DrawArgs { style: *style, example, recent_dates: dates, is_favorite: *fav, hover };
+                crate::net::dialog::draw(p, w, h, d, places, &args);
+            }
+            let drives_hover = match hover {
+                Hit::Drives(k) => Some(k),
+                _ => None,
+            };
+            if let Some(m) = &self.net.map {
+                crate::net::drives_dialog::map_draw(p, w, h, m, drives_hover);
+            }
+            if let Some(u) = &self.net.unmap {
+                crate::net::drives_dialog::unmap_draw(p, w, h, u, drives_style, drives_hover);
             }
             // El cartel de ayuda va último: encima de todo.
             if let Some((text, x, y)) = &tooltip {

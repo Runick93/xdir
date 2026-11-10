@@ -313,7 +313,10 @@ impl App {
             _ => self.drop_folder(x, y),
         };
         ev.effect = match (&target, ev.paths) {
-            (Some((_, _, dest)), Some(paths)) => drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed),
+            (Some((_, _, dest)), Some(paths)) => {
+                let roots: Vec<PathBuf> = self.net.connections.iter().map(|c| c.local.clone()).collect();
+                drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed, &roots)
+            }
             _ => Effect::NONE,
         };
 
@@ -493,6 +496,19 @@ impl App {
             cmds.push(Command::Eject);
             own.push(shell::Entry::Item { id: cmds.len() as u32 - 1, label: "Expulsar".into(), enabled: true, checked: false });
         }
+        // El fondo de «Este equipo»: conectar a un servidor (y las unidades de red de Windows).
+        if matches!(location, Location::Computer) && items.is_empty() {
+            for (c, label) in [
+                (Command::ConnectServer, "Conectar a un servidor…"),
+                (Command::MapNetworkDrive, "Conectar unidad de red…"),
+                (Command::DisconnectNetworkDrive, "Desconectar unidad de red…"),
+            ] {
+                if crate::commands::available(c) {
+                    cmds.push(c);
+                    own.push(shell::Entry::Item { id: cmds.len() as u32 - 1, label: label.into(), enabled: true, checked: false });
+                }
+            }
+        }
         own.extend(match (items.is_empty(), intercept) {
             (true, true) => self.background_entries(pane, &mut cmds),
             (false, true) => self.item_entries(&mut cmds),
@@ -503,7 +519,7 @@ impl App {
         // Una sola carpeta anclada: su menú dice "Desanclar de Acceso rápido".
         #[cfg(feature = "arbol")]
         let pinned_one = match items.as_slice() {
-            [one] if one.pidl.is_none() && one.path.is_dir() => self.tree.is_pinned(&one.path).then(|| one.path.clone()),
+            [one] if one.pidl.is_none() && crate::fs::probe_dir(&one.path) == Some(true) => self.tree.is_pinned(&one.path).then(|| one.path.clone()),
             _ => None,
         };
         #[cfg(not(feature = "arbol"))]
@@ -559,11 +575,30 @@ pub fn quoted_paths(paths: &[PathBuf]) -> String {
 /// Efecto al soltar como en el Explorador: Ctrl copia, Shift mueve; sin teclas, mueve dentro
 /// de la misma unidad y copia entre unidades. Soltar en la misma carpeta (o dentro de sí
 /// misma) no hace nada.
-pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
+/// El volumen de una ruta para decidir mover o copiar. Una ruta de red no se pregunta al sistema
+/// (iría al servidor con cada movimiento del mouse): su volumen es la conexión que la contiene
+/// (`net_roots`) o, en UNC, `\\servidor\recurso`.
+fn volume_id(p: &std::path::Path, net_roots: &[PathBuf]) -> Option<std::ffi::OsString> {
+    if !sys::network().is_remote(p) {
+        return sys::shell().volume_of(p);
+    }
+    let root = net_roots.iter().filter(|r| !r.as_os_str().is_empty() && p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned();
+    let root = root.unwrap_or_else(|| fallback_net_root(p));
+    Some(std::ffi::OsString::from(format!("red:{}", root.to_string_lossy().to_lowercase())))
+}
+
+/// La raíz de una ruta de red sin conexión conocida (todavía no llegó `connections`): con un
+/// prefijo de Windows (`Z:` o `\\srv\recurso`), el prefijo; si no, `/Volumes/x` (tres tramos).
+fn fallback_net_root(p: &std::path::Path) -> PathBuf {
+    let first_is_prefix = matches!(p.components().next(), Some(std::path::Component::Prefix(_)));
+    p.components().take(if first_is_prefix { 1 } else { 3 }).collect()
+}
+
+pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool, shift: bool, allowed: Effect, net_roots: &[PathBuf]) -> Effect {
     if paths.iter().any(|p| p.parent() == Some(dest) || dest.starts_with(p)) {
         return Effect::NONE;
     }
-    let same_volume = paths.first().and_then(|p| sys::shell().volume_of(p)) == sys::shell().volume_of(dest);
+    let same_volume = paths.first().and_then(|p| volume_id(p, net_roots)) == volume_id(dest, net_roots);
     let want = if ctrl {
         Effect::COPY
     } else if shift || same_volume {
@@ -584,11 +619,20 @@ pub(super) fn drop_effect(paths: &[PathBuf], dest: &std::path::Path, ctrl: bool,
 mod tests {
     use super::*;
 
+    /// m3: sin las conexiones, `Z:\a` y `Z:\b` son el mismo volumen (la letra); un UNC, su recurso.
+    #[test]
+    fn fallback_net_root_uses_the_prefix() {
+        assert_eq!(fallback_net_root(std::path::Path::new(r"Z:\a\x")), fallback_net_root(std::path::Path::new(r"Z:\b")));
+        assert_eq!(fallback_net_root(std::path::Path::new(r"Z:\a\x")), PathBuf::from("Z:"));
+        let low = |p: &str| fallback_net_root(std::path::Path::new(p)).to_string_lossy().to_lowercase();
+        assert_eq!(low(r"\\srv\fotos\a"), low(r"\\SRV\fotos\b"));
+    }
+
     fn effect(sources: &[&str], dest: &str, ctrl: bool, shift: bool, allowed: Effect) -> Effect {
         // `volume_of` pasa por el `Shell` del registro (el falso compara el primer tramo, como Windows).
         crate::sys::testing::install_fakes();
         let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
-        drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed)
+        drop_effect(&paths, std::path::Path::new(dest), ctrl, shift, allowed, &[])
     }
 
     #[test]

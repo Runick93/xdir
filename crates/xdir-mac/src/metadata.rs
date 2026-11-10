@@ -23,8 +23,10 @@ pub fn queue(req: MetadataRequest) {
         std::thread::Builder::new()
             .name("xdir-metadatos".into())
             .spawn(move || {
+                // Un archivo de una carpeta de red que no responde no frena la cola.
                 while let Ok(req) = rx.recv() {
-                    req.answer_with(read);
+                    let mut budget = xdir_core::net::RemoteBudget::default();
+                    req.answer_with(|p| budget.read(p, read));
                 }
             })
             .expect("hilo de metadatos");

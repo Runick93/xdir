@@ -25,6 +25,28 @@ pub(super) enum TaskDone {
     Renamed { dir: PathBuf, result: Result<Undo, String>, undoing: Option<Vec<(PathBuf, String)>> },
     /// Si el disco de `dir` distingue mayúsculas (para los choques de Renombrar varios).
     CaseInfo { dir: PathBuf, case_insensitive: bool },
+    /// Se leyó `red.toml` (con su fecha); `None`: no cambió.
+    NetPlaces(Option<(crate::net::NetPlaces, Option<std::time::SystemTime>)>),
+    /// Lo conectado (`Network::connections`).
+    NetConnections(Result<Vec<crate::net::NetConnection>, crate::net::NetError>),
+    /// La identidad del volumen de cada conexión (pedida aparte).
+    NetVolumeIds(Vec<(PathBuf, std::ffi::OsString)>),
+    /// Terminó de conectar `addr` (`tab`: la pestaña que lo pidió al fallar por credenciales;
+    /// `None`: abrir el resultado en una pestaña nueva del panel `pane`).
+    /// `generation`: la del intento (los cancelados se descartan).
+    Connected { pane: usize, tab: Option<usize>, generation: u64, addr: crate::net::Address, result: Result<PathBuf, crate::net::NetError> },
+    /// Nombres de unidades de red, pedidos en otro hilo (para el árbol).
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    DriveLabels(Vec<(PathBuf, String)>),
+    /// Las letras libres para una unidad de red.
+    FreeLetters(Vec<char>),
+    /// Una conexión que había vencido terminó bien después.
+    LateConnected { generation: u64, addr: crate::net::Address, path: PathBuf },
+    /// Las subcarpetas de la flecha `chevron` del panel `pane` (pedidas en otro hilo).
+    Subfolders { pane: usize, chevron: usize, loc: Location, items: Vec<(String, Location)> },
+    /// Terminó de desconectar `root` (`label`: el último tramo de la dirección; `force`: si fue
+    /// a la fuerza).
+    Disconnected { root: PathBuf, label: String, force: bool, result: Result<(), crate::net::NetError> },
     /// Se extrajo a la temporal un archivo de adentro de un archivo comprimido para abrirlo.
     ArchiveOpened { name: String, with: bool, token: std::sync::Arc<std::sync::atomic::AtomicBool>, result: Result<PathBuf, String> },
     /// Se extrajo (o no) a la temporal un elemento para la vista previa.
@@ -85,6 +107,15 @@ impl App {
                 self.eject_done(&root);
                 self.on_ejected(root, label, result);
             }
+            TaskDone::NetPlaces(places) => self.on_net_places(places),
+            TaskDone::NetConnections(result) => self.on_net_connections(result),
+            TaskDone::NetVolumeIds(ids) => self.remember_net_volume_ids(ids),
+            TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
+            TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
+            TaskDone::Subfolders { pane, chevron, loc, items } => self.on_subfolders(pane, chevron, loc, items),
+            TaskDone::LateConnected { generation, addr, path } => self.on_late_connected(generation, addr, path),
+            TaskDone::FreeLetters(letters) => self.on_free_letters(letters),
+            TaskDone::Disconnected { root, label, force, result } => self.on_disconnected(root, label, force, result),
         }
     }
 
@@ -128,10 +159,16 @@ impl App {
         match &tab.location {
             Location::Computer => {
                 let idx = tab.list.selected_indices().next().or_else(|| tab.list.focused_index())?;
-                Some(tab.entry_path(idx)).filter(|p| self.ejectable.contains(p))
+                Some(tab.entry_path(idx)).filter(|p| self.ejectable.contains(p) || self.network_root(p).is_some_and(|c| crate::sys::same_path_folded(&c.local, p)))
             }
             Location::Path(p) => {
-                self.ejectable.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned()
+                let disk = self.ejectable.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned();
+                // Una carpeta de red: su conexión (la más adentro gana).
+                let net = self.network_root(p).map(|c| c.local.clone());
+                match (disk, net) {
+                    (Some(d), Some(n)) => Some(if n.as_os_str().len() >= d.as_os_str().len() { n } else { d }),
+                    (d, n) => n.or(d),
+                }
             }
             _ => None,
         }
@@ -166,10 +203,16 @@ impl App {
     /// cancelan y espera a que limpien lo a medio copiar (`eject_after_jobs`); después suelta lo
     /// de xdir y expulsa en otro hilo.
     pub(super) fn eject(&mut self, root: PathBuf) {
+        // Una conexión de red se desconecta (mismo flujo: trabajos, soltar, en otro hilo).
+        if let Some(c) = self.network_root(&root) {
+            let local = c.local.clone();
+            self.disconnect(local);
+            return;
+        }
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
         let at = root.clone();
-        self.eject_after_jobs(&at, &label, Box::new(move |app: &mut App| app.eject_now(root)));
+        self.eject_after_jobs(&at, &label, super::transfers::Verb::Eject, Box::new(move |app: &mut App| app.eject_now(root)));
     }
 
     /// Suelta lo de xdir en el disco y lo expulsa en otro hilo (sin trabajos de copia encima).

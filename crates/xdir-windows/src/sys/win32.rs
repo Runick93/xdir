@@ -576,10 +576,6 @@ impl FileSystem for Win32FileSystem {
         fsp::true_case(path)
     }
 
-    fn connect_share(&self, owner: Handle, path: &Path) -> bool {
-        fsp::connect_share(owner, path)
-    }
-
     fn same_path(&self, a: &Path, b: &Path) -> bool {
         fsp::same_path(a, b)
     }
@@ -680,6 +676,7 @@ pub fn install() {
         // Windows: solo zip (tar.gz, en macOS y Linux).
         archives: Box::new(xdir_archive::Service { tar_gz: false, utc_offset, copy_origin: crate::origin::copy_origin }),
         info: Box::new(crate::info::Win32Info),
+        network: Box::new(crate::net::WinNetwork::new()),
     });
 }
 

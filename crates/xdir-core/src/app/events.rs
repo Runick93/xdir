@@ -53,6 +53,8 @@ impl App {
             WM_APP_FIELD_TAB if self.settings_field_tab(wparam == 1) => {}
             WM_APP_FIELD_TAB => self.on_field_tab(wparam == 1),
             tasks::WM_APP_TASK => self.on_tasks(),
+            crate::net::WM_APP_NET_TICK => self.on_net_tick(),
+            crate::net::WM_APP_NET => self.on_net_hosts(),
             WM_APP_SUGGEST_KEY => self.on_suggest_key(Key(wparam as u16)),
             WM_APP_PALETTE_KEY => self.on_palette_key(Key(wparam as u16), lparam == 1),
             WM_APP_TEXT_CHANGED => self.on_text_changed(lparam),
@@ -123,7 +125,6 @@ impl App {
     /// carpeta si acaba de cambiar de ubicación (así los elementos llegan ya con su orden).
     /// Devuelve si hay que redibujar.
     pub(super) fn on_load_event(&mut self, event: fs::LoadEvent) -> bool {
-        let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let views = &mut self.folder_views;
         let Some(tab) = self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == event.panel) else { return false };
         // Terminó de cargar «Este equipo»: se averigua qué discos se pueden expulsar.
@@ -137,7 +138,7 @@ impl App {
         };
         let tab_id = tab.id;
         let changed = tab.on_load(event);
-        tab.retry_with_credentials(hwnd, &tx);
+        let retry = tab.retry_with_credentials().map(|p| (tab.id, p));
         if let Some(path) = tab.visited.take() {
             self.history.record(&path, jump::now());
         }
@@ -151,6 +152,9 @@ impl App {
         if computer_listed {
             self.request_ejectable();
         }
+        if let Some((id, path)) = retry {
+            self.connect_for_tab(id, &path);
+        }
         if listed {
             self.after_archive_load(tab_id);
         }
@@ -163,7 +167,7 @@ impl App {
     /// Cambió el texto de una caja de edición: el filtro y la paleta se actualizan con cada tecla,
     /// y la barra de dirección actualiza el desplegable de rutas.
     pub fn on_text_changed(&mut self, id: isize) {
-        if self.rename_text_changed(id) {
+        if self.rename_text_changed(id) || self.map_text_changed(id) {
             return;
         }
         if let Some((edit, pane)) = self.filter_edit {
@@ -253,6 +257,7 @@ impl App {
         #[cfg(feature = "arbol")]
         {
             self.tree_ctx = self.tree.contains(x, y).then(|| self.tree.path_at(x, y));
+            self.net.tree_ctx = self.tree.net_at(x, y);
         }
         match self.hit(x, y) {
             Hit::Pane(i, PaneHit::List) if self.panes[i].tab().list.in_header(x, y) => {
@@ -297,6 +302,12 @@ impl App {
         }
         if let Some((pane, console)) = self.term_ctx.take().filter(|_| at.is_some()) {
             self.console_context_menu(pane, console);
+            return;
+        }
+        #[cfg(feature = "arbol")]
+        if let Some(row) = self.net.tree_ctx.take().filter(|_| at.is_some()) {
+            self.tree_ctx = None;
+            self.net_tree_menu(row);
             return;
         }
         #[cfg(feature = "arbol")]

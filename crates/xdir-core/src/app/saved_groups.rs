@@ -107,12 +107,15 @@ impl App {
         sys::file_system().forget_drive_labels();
         #[cfg(feature = "arbol")]
         self.tree.refresh_drives();
+        #[cfg(feature = "arbol")]
+        self.request_remote_drive_labels();
         self.request_ejectable();
+        self.request_connections();
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
             match &tab.location {
                 Location::Computer => tab.reload(hwnd, &tx, true),
-                Location::Path(p) if sys::file_system().drive_missing(p) => tab.navigate(hwnd, &tx, Location::Computer),
+                Location::Path(p) if !sys::network().is_remote(p) && sys::file_system().drive_missing(p) => tab.navigate(hwnd, &tx, Location::Computer),
                 _ => {}
             }
         }
@@ -231,5 +234,7 @@ impl App {
         if groups != self.groups {
             self.groups = groups;
         }
+        // `red.toml`: si cambió su fecha (mirada en un hilo).
+        self.reload_net_places(self.net.places_mtime.or(Some(std::time::UNIX_EPOCH)));
     }
 }

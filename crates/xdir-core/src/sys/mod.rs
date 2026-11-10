@@ -1,7 +1,7 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
 //! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
-//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()`, `preview()` e `info()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()`, `preview()`, `info()` y `network()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirEntry, Metadata as FsMetadata};
@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 use crate::commands::Command;
 use crate::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
 use crate::keys::Key;
+use crate::net::{Address, ConnectOptions, NetConnection, NetError};
 use crate::ops::{Op, OpResult};
 use crate::info::{InfoChange, InfoReply, InfoRequest};
 use crate::preview::PreviewRequest;
@@ -347,8 +348,6 @@ pub trait FileSystem: Send + Sync {
     fn long_path(&self, path: &Path) -> PathBuf;
     /// Ruta escrita a mano con las mayúsculas reales del disco.
     fn true_case(&self, path: &Path) -> PathBuf;
-    /// Conecta con el recurso de red de `path` pidiendo credenciales si hace falta.
-    fn connect_share(&self, owner: Handle, path: &Path) -> bool;
     /// ¿Es la misma ruta? (sin distinguir mayúsculas ni separador final).
     fn same_path(&self, a: &Path, b: &Path) -> bool;
     /// Vigila la carpeta `path` y avisa a `hwnd` con `msg` (`wparam` = `panel`, `lparam`) cuando
@@ -415,6 +414,82 @@ pub trait Info: Send + Sync {
     }
 }
 
+/// Una máquina que aparece (`Up`) o deja de anunciarse (`Down`) en la red local (`Network::browse`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostEvent {
+    Up(String),
+    Down(String),
+}
+
+/// Conexiones de red del sistema: conectar a un servidor, lo conectado, desconectar, descubrir
+/// máquinas de la red local. Todo lo que puede esperar a un servidor es **bloqueante y corre
+/// solo en hilos de trabajo** (con `net::with_timeout`); `is_remote` no hace E/S y es lo único
+/// que se pregunta desde el hilo de interfaz.
+pub trait Network: Send + Sync {
+    /// ¿Se puede conectar a direcciones con este esquema (`smb`, `afp`, `sftp`)?
+    fn supports(&self, scheme: &str) -> bool;
+    /// Conecta o monta y devuelve la ruta para abrir. Bloqueante: solo en hilos de trabajo.
+    /// `cancel` lo miran los sistemas que pueden interrumpir (los demás se abandonan).
+    fn connect(&self, owner: Handle, addr: &Address, opts: ConnectOptions, cancel: &AtomicBool) -> Result<PathBuf, NetError>;
+    /// Lo conectado ahora (y en Windows las unidades recordadas). Bloqueante.
+    fn connections(&self) -> Result<Vec<NetConnection>, NetError>;
+    /// Desconecta lo montado en `local` (`force`: aunque haya archivos abiertos). Bloqueante.
+    fn disconnect(&self, local: &Path, force: bool) -> Result<(), NetError>;
+    /// Manda `HostEvent`s a medida que aparecen y desaparecen máquinas, avisando a `hwnd` con
+    /// `net::WM_APP_NET`; corre (bloqueante, en su hilo) hasta `cancel`.
+    fn browse(&self, hwnd: Handle, tx: Sender<HostEvent>, cancel: Arc<AtomicBool>);
+    /// ¿`path` está en una conexión de red? Sin E/S: mira la lista que mantiene el servicio (UNC
+    /// y letras de red; puntos de montaje de red).
+    fn is_remote(&self, path: &Path) -> bool;
+    /// Vuelve a leer esa lista (en un hilo de trabajo, al cambiar los discos).
+    fn refresh_remote(&self);
+    /// Letras libres para una unidad de red, de Z hacia abajo (Windows).
+    fn free_drive_letters(&self) -> Vec<char> {
+        Vec::new()
+    }
+    /// ¿Se puede desconectar a la fuerza (con archivos abiertos)?
+    fn can_force(&self) -> bool {
+        false
+    }
+    /// macOS: ¿se negó el permiso de «Red local»? (sin E/S).
+    fn local_network_denied(&self) -> bool {
+        false
+    }
+    /// Abre el lugar del sistema donde se guardan las contraseñas; false si no hay uno.
+    fn open_credentials_place(&self, _owner: Handle) -> bool {
+        false
+    }
+    /// ¿Hay un lugar del sistema para las contraseñas? (si no, la página Red no muestra «Abrir»).
+    fn has_credentials_place(&self) -> bool {
+        false
+    }
+    /// macOS: abre el ajuste de privacidad de «Red local».
+    fn open_local_network_settings(&self, _owner: Handle) {}
+}
+
+/// `Network` para lo que todavía no tiene una propia: no conecta nada y solo reconoce rutas UNC.
+pub struct NoNetwork;
+
+impl Network for NoNetwork {
+    fn supports(&self, _scheme: &str) -> bool {
+        false
+    }
+    fn connect(&self, _owner: Handle, _addr: &Address, _opts: ConnectOptions, _cancel: &AtomicBool) -> Result<PathBuf, NetError> {
+        Err(NetError::Other("sin implementar".into()))
+    }
+    fn connections(&self) -> Result<Vec<NetConnection>, NetError> {
+        Ok(Vec::new())
+    }
+    fn disconnect(&self, _local: &Path, _force: bool) -> Result<(), NetError> {
+        Err(NetError::Other("sin implementar".into()))
+    }
+    fn browse(&self, _hwnd: Handle, _tx: Sender<HostEvent>, _cancel: Arc<AtomicBool>) {}
+    fn is_remote(&self, path: &Path) -> bool {
+        crate::fs::is_unc(path)
+    }
+    fn refresh_remote(&self) {}
+}
+
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {
     pub waker: Box<dyn Waker>,
@@ -431,6 +506,8 @@ pub struct Services {
     /// Comprimir y extraer (la crate `xdir-archive`).
     pub archives: Box<dyn Archives>,
     pub info: Box<dyn Info>,
+    /// Conexiones de red (`Network`).
+    pub network: Box<dyn Network>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -501,4 +578,8 @@ pub fn archives() -> &'static dyn Archives {
 
 pub fn info() -> &'static dyn Info {
     &*services().info
+}
+
+pub fn network() -> &'static dyn Network {
+    &*services().network
 }

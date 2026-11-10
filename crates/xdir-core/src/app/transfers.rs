@@ -69,6 +69,8 @@ pub(super) struct Transfers {
     /// Identidad de cada disco expulsable (la calcula en su hilo la tarea que los lista): así la
     /// interfaz nunca mira el disco.
     root_ids: HashMap<PathBuf, OsString>,
+    /// Lo mismo para las conexiones de red (las calcula `request_connections`, en su hilo).
+    net_root_ids: HashMap<PathBuf, OsString>,
     window: CopyWindow,
     /// Lo que se lanzó (pruebas).
     #[cfg(test)]
@@ -124,6 +126,7 @@ impl Transfers {
             pending_eject: Vec::new(),
             ejecting: Arc::new(Mutex::new(Vec::new())),
             root_ids: HashMap::new(),
+            net_root_ids: HashMap::new(),
             window: CopyWindow::default(),
             #[cfg(test)]
             started: Vec::new(),
@@ -240,6 +243,22 @@ struct Release(Arc<Scheduler>, JobId);
 impl Drop for Release {
     fn drop(&mut self) {
         self.0.release(self.1);
+    }
+}
+
+/// Qué se hace con el disco o la conexión después de los trabajos (`eject_after_jobs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verb {
+    Eject,
+    Disconnect,
+}
+
+/// «Hay 1 operación sobre "fotos". ¿Cancelarla y desconectar?»
+pub fn disconnect_question(jobs: usize, label: &str) -> String {
+    if jobs == 1 {
+        format!("Hay 1 operación sobre \"{label}\". ¿Cancelarla y desconectar?")
+    } else {
+        format!("Hay {jobs} operaciones sobre \"{label}\". ¿Cancelarlas y desconectar?")
     }
 }
 
@@ -932,7 +951,12 @@ impl App {
     /// La identidad del disco de `root`, de lo que dejó la tarea que lista los expulsables (sin
     /// mirar el disco desde la interfaz). `None` si no se sabe: se compara solo por la ruta.
     fn root_volume(&self, root: &Path) -> Option<OsString> {
-        self.transfers.root_ids.get(root).cloned()
+        self.transfers.root_ids.get(root).or_else(|| self.transfers.net_root_ids.get(root)).cloned()
+    }
+
+    /// Las identidades de los volúmenes de las conexiones de red.
+    pub(super) fn remember_net_volume_ids(&mut self, ids: Vec<(PathBuf, OsString)>) {
+        self.transfers.net_root_ids = ids.into_iter().collect();
     }
 
     /// Las identidades de los discos expulsables (las calcula la tarea que los lista, en su hilo).
@@ -950,7 +974,7 @@ impl App {
     /// seguir con `then` (soltar el disco). Sin trabajos, sigue enseguida. Nunca bloquea: `then`
     /// corre desde `on_transfer_updates` cuando llega el último `Finished`. `false` si no se
     /// expulsa (dijo que no).
-    pub fn eject_after_jobs(&mut self, root: &Path, label: &str, then: AfterJobs) -> bool {
+    pub fn eject_after_jobs(&mut self, root: &Path, label: &str, verb: Verb, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
         let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string() };
         if ids.is_empty() {
@@ -960,7 +984,11 @@ impl App {
             return true;
         }
         let host = self.host.clone();
-        if host.ask_yes_no_cancel("Expulsar", &eject_question(ids.len(), label)) != Some(true) {
+        let (title, question) = match verb {
+            Verb::Eject => ("Expulsar", eject_question(ids.len(), label)),
+            Verb::Disconnect => ("Desconectar", disconnect_question(ids.len(), label)),
+        };
+        if host.ask_yes_no_cancel(title, &question) != Some(true) {
             return false;
         }
         for &id in &ids {

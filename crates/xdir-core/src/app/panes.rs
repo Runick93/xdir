@@ -134,6 +134,8 @@ impl App {
             // Como el botón «xtree» de la barra: abre la vista sobre la carpeta del panel activo
             // o la cierra si está abierta. No navega el panel.
             tree::TreeHit::Xtree => self.toggle_xtree(),
+            tree::TreeHit::ConnectFavorite(address) => self.open_net_address(&address),
+            tree::TreeHit::ConnectHost(host) => self.open_net_address(&crate::net::host_address(&host)),
             tree::TreeHit::Nothing => {}
         }
         self.redraw();
@@ -487,6 +489,9 @@ impl App {
             }
             "picker" => self.picker_open = true,
             "go" => self.go_to_text(na, b),
+            // red campo <texto> | red conectar | red fav <dirección> | red reciente <dirección> |
+            // red expandir: lo de la red sin teclado (la caja de texto es del sistema).
+            "red" => self.net_test(a, b),
             // band <panel> <x0> <y0> <x1> <y1>: arrastre con rectángulo (en DIPs de la ventana).
             "band" => {
                 let n: Vec<f32> = text.split_whitespace().skip(2).filter_map(|v| v.parse().ok()).collect();

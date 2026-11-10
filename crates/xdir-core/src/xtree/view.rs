@@ -203,6 +203,8 @@ pub struct Xtree {
     by_type: bool,
     /// Espacio del volumen que contiene la carpeta: (total, libre).
     vol: Option<(u64, u64)>,
+    /// El espacio de un volumen de red, pedido en otro hilo (llega acá).
+    vol_remote: std::sync::Arc<std::sync::Mutex<Option<(u64, u64)>>>,
     /// La raíz es un volumen entero: se muestra el porcentaje de avance.
     whole: bool,
     /// Inicio del escaneo en curso (o del último).
@@ -260,6 +262,7 @@ impl Xtree {
             scroll: 0.0,
             by_type: false,
             vol: None,
+            vol_remote: Default::default(),
             whole: false,
             scan_started: None,
             scan_elapsed: None,
@@ -463,7 +466,7 @@ impl Xtree {
         if !self.whole {
             return None;
         }
-        let (total, free) = self.vol?;
+        let (total, free) = self.volume()?;
         // En Windows, si el escaneo rápido (MFT) pide administrador, el escáner vuelve a empezar
         // con el recorrido normal y los bytes leídos vuelven a 0: el porcentaje queda en `pct_max`
         // hasta que el recorrido lo alcanza (no retrocede).
@@ -473,6 +476,29 @@ impl Xtree {
         Some(p)
     }
 
+    /// El espacio del volumen: directo si es local; de uno de red, en otro hilo (con tiempo
+    /// límite), así el hilo de la ventana no espera al servidor.
+    fn read_volume(&mut self) {
+        if !crate::sys::network().is_remote(&self.root) {
+            self.vol = disk_scan().volume_space(&self.root);
+            return;
+        }
+        let (root, slot) = (self.root.clone(), self.vol_remote.clone());
+        std::thread::spawn(move || {
+            let host = crate::tab::remote_host(&root);
+            if let Ok(Some(v)) = crate::net::with_timeout(crate::net::ITEM_LIMIT, &host, move || Ok(disk_scan().volume_space(&root)))
+                && let Ok(mut s) = slot.lock()
+            {
+                *s = Some(v);
+            }
+        });
+    }
+
+    /// El espacio del volumen que se sabe (el de red, cuando llegó).
+    fn volume(&self) -> Option<(u64, u64)> {
+        self.vol.or_else(|| self.vol_remote.lock().ok().and_then(|s| *s))
+    }
+
     /// Arranca el cronómetro de un escaneo nuevo (de 0) y toma los datos del volumen.
     fn start_clock(&mut self) {
         self.scan_started = Some(Instant::now());
@@ -480,8 +506,8 @@ impl Xtree {
         self.scan_stopped = false;
         self.seen = false;
         self.pct_max.set(0);
-        self.vol = disk_scan().volume_space(&self.root);
-        self.whole = disk_scan().whole_volume(&self.root);
+        self.read_volume();
+        self.whole = !crate::sys::network().is_remote(&self.root) && disk_scan().whole_volume(&self.root);
     }
 
     /// Aviso de la barra de datos: escaneo elevado en curso o permisos que faltan (tecla A).
@@ -543,7 +569,7 @@ impl Xtree {
         let Some(arena) = self.scan.result.lock().unwrap().take() else { return false };
         self.arena = arena;
         // El espacio libre cambió mientras se escaneaba.
-        self.vol = disk_scan().volume_space(&self.root);
+        self.read_volume();
         // Primer árbol de este escaneo: queda fijo el tiempo total. Un árbol elevado que llega
         // durante el recorrido normal lo reemplaza sin cambiar el tiempo; el de un reescaneo con
         // permisos (análisis ya terminado) siempre fija el tiempo de ese reescaneo.
@@ -1170,7 +1196,7 @@ impl Xtree {
         } else {
             cols.push(("Analizado", fmt_size(progress.bytes.load(Ordering::Relaxed))));
         }
-        if let Some((total, free)) = self.vol {
+        if let Some((total, free)) = self.volume() {
             let free = free.min(total);
             let used = total - free;
             cols.push(("Espacio total", fmt_size(total)));

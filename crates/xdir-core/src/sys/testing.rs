@@ -32,6 +32,8 @@ mod archive_fake;
 mod copy_fake;
 pub use archive_fake::FakeArchives;
 pub use copy_fake::FakeCopyPrims;
+mod net_fake;
+pub use net_fake::FakeNetwork;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
 /// instala, y si ya había servicios instalados no hace nada.
@@ -49,6 +51,7 @@ pub fn install_fakes() {
         copy_prims: Box::new(FakeCopyPrims::shared()),
         archives: Box::new(FakeArchives::shared()),
         info: Box::new(FakeInfo),
+        network: Box::new(FakeNetwork),
     });
 }
 
@@ -308,7 +311,8 @@ impl DiskScan for FakeDiskScan {
         Vec::new()
     }
 
-    fn volume_space(&self, _path: &Path) -> Option<(u64, u64)> {
+    fn volume_space(&self, path: &Path) -> Option<(u64, u64)> {
+        FakeNetwork::note_io("volume_space", path);
         VOLUME.with(|v| v.get().0)
     }
 
@@ -547,6 +551,7 @@ impl Shell for FakeShell {
     }
 
     fn volume_of(&self, path: &Path) -> Option<OsString> {
+        FakeNetwork::note_io("volume_of", path);
         path.components().next().map(|c| c.as_os_str().to_ascii_lowercase())
     }
 }
@@ -555,6 +560,15 @@ impl Shell for FakeShell {
 /// el proceso (las lecturas corren en sus propios hilos): cada test usa rutas propias.
 static LOADS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
 static WATCHES: Mutex<BTreeMap<PathBuf, (usize, usize)>> = Mutex::new(BTreeMap::new());
+/// Subcarpetas de cada carpeta virtual (y cuántas veces se pidieron), de todo el proceso.
+static SHELL_SUBFOLDERS: Mutex<BTreeMap<String, (usize, Vec<(String, PathBuf)>)>> = Mutex::new(BTreeMap::new());
+/// El nombre de análisis de la Red del falso cuando está prendida (`set_network_place`).
+pub const FAKE_NETWORK_PLACE: &str = "::{RED-FALSA}";
+thread_local! {
+    static NET_PLACE: Cell<bool> = const { Cell::new(false) };
+}
+/// Cargas que fallan con ese texto (ver `FakeFileSystem::set_load_error`).
+static LOAD_ERRORS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
 thread_local! {
     /// Unidades del falso en este hilo (ruta y nombre); vacío salvo `FakeFileSystem::set_drives`.
@@ -602,6 +616,30 @@ impl FakeFileSystem {
                 c.remove(path);
             }
         });
+    }
+
+    /// Desde ahora (en este hilo) hay Red del Shell (`network_place` no vacío), como en Windows.
+    pub fn set_network_place(on: bool) {
+        NET_PLACE.with(|c| c.set(on));
+    }
+
+    /// Las subcarpetas de la carpeta virtual `parsing` y cuántas veces se pidieron.
+    pub fn set_shell_subfolders(parsing: &str, items: Vec<(String, PathBuf)>) {
+        SHELL_SUBFOLDERS.lock().unwrap_or_else(|e| e.into_inner()).insert(parsing.to_string(), (0, items));
+    }
+
+    pub fn shell_subfolder_calls(parsing: &str) -> usize {
+        SHELL_SUBFOLDERS.lock().unwrap_or_else(|e| e.into_inner()).get(parsing).map_or(0, |e| e.0)
+    }
+
+    /// Desde ahora (en todo el proceso) la carga de `path` falla con `error` (o vuelve a leer el
+    /// disco con `None`).
+    pub fn set_load_error(path: &Path, error: Option<&str>) {
+        let mut m = LOAD_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+        match error {
+            Some(e) => m.insert(path.to_path_buf(), e.to_string()),
+            None => m.remove(path),
+        };
     }
 
     /// Cuántas lecturas de `path` se pidieron (en todo el proceso).
@@ -690,7 +728,17 @@ impl FileSystem for FakeFileSystem {
                 }
             };
             match &location {
-                Location::Path(p) => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
+                Location::Path(p) => {
+                    // Una carpeta de red colgada (`FakeNetwork::hang`) no responde por un rato.
+                    if let Some(d) = FakeNetwork::hang_for(&p.to_string_lossy()) {
+                        std::thread::sleep(d);
+                    }
+                    let error = LOAD_ERRORS.lock().unwrap_or_else(|e| e.into_inner()).get(p).cloned();
+                    match error {
+                        Some(e) => send(LoadMsg::Listed(Err(e))),
+                        None => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
+                    }
+                }
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
                 Location::Computer | Location::Settings => send(LoadMsg::Listed(Ok(()))),
                 // Lo lista el núcleo (`archive_nav`), nunca el sistema.
@@ -769,13 +817,15 @@ impl FileSystem for FakeFileSystem {
 
     /// El nombre de `set_drives` (si la unidad es de este hilo); si no, el mismo texto.
     fn drive_label(&self, drive: &str) -> String {
+        FakeNetwork::note_io("drive_label", Path::new(drive));
         DRIVES.with(|d| d.borrow().iter().find(|(p, _)| p.to_string_lossy() == drive).map(|(_, n)| n.clone()))
             .unwrap_or_else(|| drive.to_string())
     }
 
     fn forget_drive_labels(&self) {}
 
-    fn drive_missing(&self, _path: &Path) -> bool {
+    fn drive_missing(&self, path: &Path) -> bool {
+        FakeNetwork::note_io("drive_missing", path);
         false
     }
 
@@ -786,6 +836,7 @@ impl FileSystem for FakeFileSystem {
 
     fn subfolders(&self, loc: &Location) -> Vec<(String, Location)> {
         let Location::Path(dir) = loc else { return Vec::new() };
+        FakeNetwork::note_io("subfolders", dir);
         let mut out: Vec<(String, Location)> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -811,7 +862,7 @@ impl FileSystem for FakeFileSystem {
     }
 
     fn network_place(&self) -> &'static str {
-        ""
+        if NET_PLACE.with(Cell::get) { FAKE_NETWORK_PLACE } else { "" }
     }
 
     fn linux_place(&self) -> &'static str {
@@ -822,8 +873,11 @@ impl FileSystem for FakeFileSystem {
         false
     }
 
-    fn shell_subfolders(&self, _parsing: &str) -> Vec<(String, PathBuf)> {
-        Vec::new()
+    fn shell_subfolders(&self, parsing: &str) -> Vec<(String, PathBuf)> {
+        let mut m = SHELL_SUBFOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+        let e = m.entry(parsing.to_string()).or_insert((0, Vec::new()));
+        e.0 += 1;
+        e.1.clone()
     }
 
     fn quick_access(&self) -> Vec<QuickItem> {
@@ -839,15 +893,13 @@ impl FileSystem for FakeFileSystem {
     }
 
     fn long_path(&self, path: &Path) -> PathBuf {
+        FakeNetwork::note_io("long_path", path);
         path.to_path_buf()
     }
 
     fn true_case(&self, path: &Path) -> PathBuf {
+        FakeNetwork::note_io("true_case", path);
         path.to_path_buf()
-    }
-
-    fn connect_share(&self, _owner: Handle, _path: &Path) -> bool {
-        false
     }
 
     fn same_path(&self, a: &Path, b: &Path) -> bool {
@@ -862,7 +914,9 @@ impl FileSystem for FakeFileSystem {
     /// Un guardián que no vigila nada: solo cuenta altas y bajas por ruta. `None` si la carpeta
     /// no existe (como los reales).
     fn watch(&self, _hwnd: Handle, _msg: u32, _panel: usize, _lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
-        if !path.is_dir() {
+        FakeNetwork::note_io("watch", path);
+        // Una carpeta «de red» del falso (`FakeNetwork::set_remote`) se vigila aunque no exista.
+        if !path.is_dir() && !crate::sys::network().is_remote(path) {
             return None;
         }
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(path.to_path_buf()).or_insert((0, 0)).0 += 1;
@@ -871,6 +925,7 @@ impl FileSystem for FakeFileSystem {
 
     /// Solo lo marcado con `set_cloud_only` en este hilo.
     fn cloud_only(&self, path: &Path) -> bool {
+        FakeNetwork::note_io("cloud_only", path);
         CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
         CLOUD.with(|c| c.borrow().contains(path))
     }
@@ -906,6 +961,10 @@ impl Watch for FakeWatch {}
 
 impl Drop for FakeWatch {
     fn drop(&mut self) {
+        // Soltar el guardián de una carpeta de red colgada espera al servidor (como Windows).
+        if let Some(d) = FakeNetwork::hang_for(&self.0.to_string_lossy()) {
+            std::thread::sleep(d);
+        }
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(self.0.clone()).or_insert((0, 0)).1 += 1;
     }
 }

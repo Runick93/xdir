@@ -81,8 +81,49 @@ impl App {
     /// Flecha de la barra de dirección: menú con las subcarpetas del tramo anterior (o las unidades,
     /// si es "Este equipo"); elegir una navega a ella.
     pub(super) fn show_subfolder_menu(&mut self, pane: usize, k: usize) {
-        let Some((r, loc)) = self.panes[pane].chevron(k) else { return };
+        let Some((_, loc)) = self.panes[pane].chevron(k) else { return };
+        // Una carpeta de red (o «Este equipo», con los nombres de las unidades de red) se lista en
+        // otro hilo: el menú se abre al volver (`TaskDone::Subfolders`).
+        let remote = match &loc {
+            Location::Path(p) => sys::network().is_remote(p),
+            Location::Computer => true,
+            _ => false,
+        };
+        if remote {
+            self.set_active(pane);
+            self.panes[pane].open_chevron = Some(k);
+            self.redraw();
+            let l = loc.clone();
+            self.spawn_task(move || {
+                let host = match &l {
+                    Location::Path(p) => crate::tab::remote_host(p),
+                    _ => String::new(),
+                };
+                let q = l.clone();
+                let items = crate::net::with_timeout(super::network::LIST_LIMIT, &host, move || Ok(sys::file_system().subfolders(&q))).unwrap_or_default();
+                super::tasks::TaskDone::Subfolders { pane, chevron: k, loc: l, items }
+            });
+            return;
+        }
         let items = sys::file_system().subfolders(&loc);
+        self.show_subfolder_items(pane, k, &loc, items);
+    }
+
+    /// Volvieron las subcarpetas de una flecha: el menú, si la flecha sigue siendo de ese lugar.
+    pub(super) fn on_subfolders(&mut self, pane: usize, k: usize, loc: Location, items: Vec<(String, Location)>) {
+        let still = self.panes.get(pane).and_then(|p| p.chevron(k)).is_some_and(|(_, l)| l == loc);
+        if !still || self.panes[pane].open_chevron != Some(k) {
+            if let Some(p) = self.panes.get_mut(pane) {
+                p.open_chevron = None;
+            }
+            self.redraw();
+            return;
+        }
+        self.show_subfolder_items(pane, k, &loc, items);
+    }
+
+    fn show_subfolder_items(&mut self, pane: usize, k: usize, _loc: &Location, items: Vec<(String, Location)>) {
+        let Some((r, _)) = self.panes[pane].chevron(k) else { return };
         self.set_active(pane);
         self.panes[pane].open_chevron = Some(k);
         self.redraw();
@@ -149,7 +190,8 @@ impl App {
         if commit {
             self.go_to_text(pane, &text);
             let typed = text.trim().trim_matches('"');
-            if std::path::Path::new(typed).exists() {
+            // Una ruta de red no se mira acá: se anota igual.
+            if fs::probe_exists(std::path::Path::new(typed)) != Some(false) {
                 typed::push(typed);
             }
         }
@@ -253,6 +295,11 @@ impl App {
 
     /// Navega a lo que se escribió en la barra de dirección.
     pub(super) fn go_to_text(&mut self, pane: usize, text: &str) {
+        // `smb://…`, `afp://…`, `sftp://…`: se conecta en otro hilo, en esta misma pestaña.
+        if super::network::is_server_url(text.trim().trim_matches('"')) {
+            self.connect_from_bar(pane, text.trim().trim_matches('"'));
+            return;
+        }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let tab = self.panes[pane].tab_mut();
         let text = text.trim().trim_matches('"');
@@ -280,19 +327,22 @@ impl App {
         }
         // "..", "." y "a\..\b": se resuelven acá (Windows los acepta, pero la pestaña mostraría la ruta sucia).
         path = fs::normalize_lexical(&path);
-        // Un recurso de red que pide usuario y contraseña (o que no se verifica): se muestra el
-        // diálogo de Windows. Si igual no se puede ver, se navega y la barra de estado dice por qué.
-        if fs::is_unc(&path) && !path.exists() {
-            sys::file_system().connect_share(hwnd, &path);
-            if !path.exists() {
-                tab.navigate(hwnd, &tx, Location::Path(path));
-                return;
-            }
+        // Un recurso de red: se navega sin tocarlo en este hilo. Si pide usuario y contraseña, la
+        // carga falla por credenciales y la `App` conecta en otro hilo (diálogo del sistema).
+        if fs::is_unc(&path) {
+            tab.navigate(hwnd, &tx, Location::Path(path));
+            return;
         }
-        if path.is_dir() {
+        // Una ruta de red no se toca en este hilo: se navega y la carga (en su hilo) decide.
+        let is_dir = fs::probe_dir(&path);
+        let archive_name = path.file_name().is_some_and(|n| crate::archive_nav::is_navigable_archive(&n.to_string_lossy()));
+        if is_dir.is_none() && archive_name {
+            // Un comprimido en una carpeta de red: se entra sin mirarlo (lo lee la carga, en su hilo).
+            tab.navigate(hwnd, &tx, Location::Archive { file: path, nested: Vec::new(), inner: String::new() });
+        } else if is_dir != Some(false) {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).
-            tab.navigate(hwnd, &tx, Location::Path(sys::file_system().true_case(&path)));
-        } else if path.file_name().is_some_and(|n| crate::archive_nav::is_navigable_archive(&n.to_string_lossy())) && path.is_file() {
+            tab.navigate(hwnd, &tx, Location::Path(fs::true_case_local(&path)));
+        } else if archive_name && path.is_file() {
             // Un archivo comprimido escrito en la barra: se entra como carpeta.
             tab.navigate(hwnd, &tx, Location::Archive { file: path, nested: Vec::new(), inner: String::new() });
         } else if path.is_file() {

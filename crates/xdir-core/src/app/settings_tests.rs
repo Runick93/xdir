@@ -203,6 +203,8 @@ fn settings_command_shortcuts() {
 #[test]
 fn draw_settings_frame() {
     let (mut a, host) = app_host();
+    // Un solo panel: con «Red» la lista de secciones es más larga.
+    a.set_layout(Layout::One);
     a.run_command(Command::Settings);
     a.paint();
     let texts: Vec<String> = host.drawn_texts().into_iter().map(|(_, t, _)| t).collect();

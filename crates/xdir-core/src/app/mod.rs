@@ -10,6 +10,8 @@ mod events;
 mod favs;
 mod fileops;
 mod info;
+mod network;
+mod network_page;
 mod saved_groups;
 mod settings;
 mod settings_pages;
@@ -43,11 +45,13 @@ mod ops_tests;
 #[cfg(test)]
 mod rename_many_tests;
 #[cfg(test)]
+mod network_tests;
+#[cfg(test)]
 mod settings_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
-pub use transfers::eject_question;
+pub use transfers::{disconnect_question, eject_question};
 use tooltip::{Tip, WM_APP_TOOLTIP};
 #[cfg(test)]
 use tooltip::{tooltip_for, tooltip_rect};
@@ -178,6 +182,10 @@ enum Hit {
     RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
+    /// «Conectar a un servidor» abierto: un control, o el panel sin nada debajo.
+    Connect(crate::net::dialog::DialogHit),
+    /// Los paneles de unidades de red (Windows).
+    Drives(crate::net::drives_dialog::DrivesHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.
@@ -451,6 +459,8 @@ pub struct App {
     swallow_space: bool,
     /// Trabajos del motor de copia (cola, estado de cada uno).
     transfers: transfers::Transfers,
+    /// Red: favoritos y recientes, lo conectado y la red local.
+    net: network::NetState,
     /// Dentro de archivos comprimidos: lo copiado y las extracciones para la vista previa.
     archive: archive_nav::ArchiveState,
 }
@@ -474,7 +484,7 @@ pub fn parse_args(args: &[String]) -> (bool, Option<String>, Option<PathBuf>) {
         .enumerate()
         .find(|(i, a)| !a.starts_with("--") && (*i == 0 || args[i - 1] != "--probe"))
         .map(|(_, a)| PathBuf::from(a))
-        .filter(|p| p.is_dir());
+        .filter(|p| crate::fs::probe_dir(p) != Some(false));
     (probe.is_some(), probe, start_path)
 }
 
@@ -650,6 +660,7 @@ impl App {
             renaming: false,
             swallow_space: false,
             transfers: transfers::Transfers::new(),
+            net: network::NetState::default(),
             archive: archive_nav::ArchiveState::default(),
         };
         app.restore_panes(&session, start_path);
@@ -674,6 +685,10 @@ impl App {
         self.host.attach(window);
         // Qué discos se pueden expulsar (en otro hilo; vuelve con `WM_APP_TASK`).
         self.request_ejectable();
+        // Favoritos y recientes de red, y lo conectado (en otros hilos).
+        self.load_net_places();
+        self.request_connections();
+        self.request_remote_drive_labels();
     }
 
     /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).

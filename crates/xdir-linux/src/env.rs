@@ -45,6 +45,11 @@ pub(crate) fn utc_offset(unix: i64) -> i64 {
 pub struct LinuxEnv;
 
 impl SystemEnv for LinuxEnv {
+    /// Las unidades de red con letra son solo de Windows.
+    fn command_available(&self, c: xdir_core::commands::Command) -> bool {
+        !matches!(c, xdir_core::commands::Command::MapNetworkDrive | xdir_core::commands::Command::DisconnectNetworkDrive)
+    }
+
     /// Cada escritorio tiene su gestor de archivos: «Mostrar en la carpeta».
     fn file_manager_name(&self) -> &'static str {
         "la carpeta"

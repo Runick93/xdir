@@ -19,6 +19,7 @@ pub mod filters;
 pub mod gallery;
 pub mod groups;
 pub mod meta;
+pub mod placeholder;
 mod rename_preview;
 
 pub use filters::ListHit;
@@ -437,6 +438,12 @@ pub struct FileList {
     /// renombra; la columna Nombre (o la etiqueta) muestra el nombre nuevo. Lo fija la `App` con
     /// `set_rename_preview` (queda ordenado por posición).
     pub rename_preview: Option<Vec<(usize, String, Option<crate::rename_many::Clash>)>>,
+    /// Carpeta de red que tarda: se dibuja esto en lugar de la lista vacía (lo pone la `App`).
+    pub placeholder: Option<placeholder::Placeholder>,
+    /// Dónde quedaron los botones del aviso en el último cuadro.
+    pub placeholder_buttons: Vec<(Rect, placeholder::PlaceholderButton)>,
+    /// Botón del aviso bajo el mouse (lo pone la `App`).
+    pub placeholder_hover: Option<placeholder::PlaceholderButton>,
 }
 
 /// Carpeta de un elemento con ruta completa (resultado de búsqueda).
@@ -551,6 +558,9 @@ impl Default for FileList {
             gallery_press: None,
             wheel_acc: 0.0,
             rename_preview: None,
+            placeholder: None,
+            placeholder_buttons: Vec::new(),
+            placeholder_hover: None,
         }
     }
 }

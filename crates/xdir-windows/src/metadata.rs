@@ -14,7 +14,7 @@ use windows::Win32::Storage::EnhancedStorage::{
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PropVariantClear, PropVariantToStringAlloc, PropVariantToStringVectorAlloc, PropVariantToUInt32, PropVariantToUInt64,
 };
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
 };
@@ -33,14 +33,28 @@ pub fn queue(req: MetadataRequest) {
                 unsafe {
                     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
                 }
+                // Un archivo de una carpeta de red que no responde no frena la cola: tiempo límite
+                // por elemento remoto y, si un servidor venció, el resto de ese pedido sin datos.
                 while let Ok(req) = rx.recv() {
-                    req.answer_with(read);
+                    let mut budget = xdir_core::net::RemoteBudget::default();
+                    req.answer_with(|p| if xdir_core::sys::network().is_remote(p) { budget.read(p, read_in_thread) } else { read(p) });
                 }
             })
             .expect("hilo de metadatos");
         Mutex::new(tx)
     });
     let _ = worker.lock().unwrap().send(req);
+}
+
+/// `read` en un hilo propio (el de la red con tiempo límite): inicia COM en ese hilo y lo cierra
+/// al terminar.
+fn read_in_thread(path: &Path) -> Meta {
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let meta = read(path);
+    if com {
+        unsafe { CoUninitialize() };
+    }
+    meta
 }
 
 /// Metadatos de un archivo (con COM ya inicializado en el hilo). `Meta::default()` si no hay

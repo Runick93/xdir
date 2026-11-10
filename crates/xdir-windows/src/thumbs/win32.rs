@@ -17,7 +17,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::DeleteObject;
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromIDList, SHCreateItemFromParsingName, SIIGBF, SIIGBF_BIGGERSIZEOK, SIIGBF_INCACHEONLY,
@@ -132,7 +132,7 @@ fn run() {
             (_, true) => big_flags(false),
             (_, false) => SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK,
         };
-        let pixels = image(&key, flags).map(Arc::new);
+        let pixels = bounded_image(&key, flags).map(Arc::new);
         {
             let (lock, _) = queue();
             lock.lock().unwrap().pending.remove(&((key.clone(), big), hwnd));
@@ -144,6 +144,42 @@ fn run() {
         }
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_ICONS, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// `image` con tiempo límite si el archivo está en una carpeta de red: sin respuesta, sin
+/// miniatura y la cola sigue (el hilo se abandona).
+fn bounded_image(key: &Key, flags: SIIGBF) -> Option<Pixels> {
+    let Source::Path(p) = &key.0 else { return image(key, flags) };
+    if !xdir_core::sys::network().is_remote(p) {
+        return image(key, flags);
+    }
+    // Un servidor que ya venció hace poco no se vuelve a esperar con cada miniatura.
+    static DEAD: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
+    let host = xdir_core::tab::remote_host(p.ancestors().last().unwrap_or(p));
+    let host = if xdir_core::fs::is_unc(p) { xdir_core::tab::remote_host(p) } else { host };
+    {
+        let mut dead = DEAD.lock().unwrap_or_else(|e| e.into_inner());
+        dead.retain(|(_, t)| t.elapsed() < std::time::Duration::from_secs(60));
+        if dead.iter().any(|(h, _)| *h == host) {
+            return None;
+        }
+    }
+    let k = key.clone();
+    let r = xdir_core::net::with_timeout(xdir_core::net::ITEM_LIMIT, &host, move || {
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        let px = image(&k, flags);
+        if com {
+            unsafe { CoUninitialize() };
+        }
+        Ok(px)
+    });
+    match r {
+        Ok(px) => px,
+        Err(_) => {
+            DEAD.lock().unwrap_or_else(|e| e.into_inner()).push((host, std::time::Instant::now()));
+            None
         }
     }
 }

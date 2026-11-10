@@ -235,7 +235,7 @@ impl SystemEnv for MacEnv {
     /// En macOS no hay CMD (el comando abre la consola principal, Terminal) y no existe el Acceso
     /// rápido de Windows.
     fn command_available(&self, c: Command) -> bool {
-        !matches!(c, Command::Cmd | Command::ToggleQuickPin)
+        !matches!(c, Command::Cmd | Command::ToggleQuickPin | Command::MapNetworkDrive | Command::DisconnectNetworkDrive)
     }
 
     /// Abre Terminal o iTerm en la carpeta con `open -a` (el verbo no aplica).
@@ -533,10 +533,6 @@ impl FileSystem for MacFileSystem {
         fsp::true_case(path)
     }
 
-    fn connect_share(&self, owner: Handle, path: &Path) -> bool {
-        fsp::connect_share(owner, path)
-    }
-
     fn same_path(&self, a: &Path, b: &Path) -> bool {
         fsp::same_path(a, b)
     }
@@ -630,6 +626,7 @@ pub fn install() {
         copy_prims: Box::new(crate::ops::MacCopyPrims),
         archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset, copy_origin: crate::origin::copy_origin }),
         info: Box::new(crate::info::MacInfo),
+        network: Box::new(crate::net::MacNetwork::new()),
     });
 }
 

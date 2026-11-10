@@ -26,6 +26,7 @@ pub mod ops;
 pub mod paint;
 pub mod palette;
 pub mod pane;
+pub mod info;
 pub mod preview;
 pub mod quicklook;
 pub mod session;

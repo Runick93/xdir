@@ -63,6 +63,7 @@ pub fn install() {
         overlays: Box::new(LinuxOverlays),
         metadata: Box::new(LinuxMetadata),
         preview: Box::new(LinuxPreview),
+        info: Box::new(crate::info::LinuxInfo),
     });
 }
 

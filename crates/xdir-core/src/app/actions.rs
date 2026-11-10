@@ -33,6 +33,7 @@ impl App {
             VK_ESCAPE if self.filter_menu_pane().is_some() => {
                 self.close_filter_menus();
             }
+            VK_ESCAPE if self.info_open() && self.info.focused => self.close_info(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
@@ -155,14 +156,8 @@ impl App {
             Command::Recycle => self.delete_selection(true),
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.begin_rename(active),
-            Command::Properties => {
-                // De la selección, o de la carpeta si no hay nada seleccionado.
-                let items = self.selection_items(active);
-                match (&items[..], &self.panes[active].tab().location) {
-                    ([], Location::Path(p)) => sys::shell().properties(hwnd, &[p.clone().into()]),
-                    _ => sys::shell().properties(hwnd, &items),
-                }
-            }
+            // El panel de información (lo de la selección, la carpeta o el disco enfocado).
+            Command::Properties => self.toggle_info(),
             Command::ToggleFavorite => self.toggle_favorite(active),
             Command::ToggleFavBar => self.show_favorites = !self.show_favorites,
             Command::ToggleGroupBar => {

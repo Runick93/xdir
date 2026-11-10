@@ -618,6 +618,7 @@ pub fn install() {
         overlays: Box::new(Win32Overlays),
         metadata: Box::new(Win32Metadata),
         preview: Box::new(Win32Preview),
+        info: Box::new(crate::info::Win32Info),
     });
 }
 

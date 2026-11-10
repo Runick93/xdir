@@ -67,6 +67,9 @@ impl App {
         if self.preview_edge_at(x, y) {
             return Hit::PreviewEdge;
         }
+        if let Some(h) = self.info_hit(x, y) {
+            return Hit::Info(h);
+        }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
             return if self.tree.on_pin_button(x, y) {
@@ -105,6 +108,7 @@ impl App {
         self.dismiss_tooltip();
         let hit = self.hit(x, y);
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        self.info.focused = matches!(hit, Hit::Info(_));
         if self.about_open {
             match hit {
                 Hit::About(about::AboutHit::Report) => self.host.open_url(about::ISSUES_URL),
@@ -195,6 +199,7 @@ impl App {
             Hit::Groups => self.show_groups_menu(),
             Hit::Xtree => self.toggle_xtree(),
             Hit::PreviewToggle => self.run_command(Command::TogglePreview),
+            Hit::Info(h) => self.info_click(h),
             Hit::PreviewEdge => {
                 self.host.capture_mouse();
                 let grab = self.preview_column().map_or(0.0, |r| r.left - x);

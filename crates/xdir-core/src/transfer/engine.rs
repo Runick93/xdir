@@ -44,7 +44,7 @@ const BIG_RATIO: u64 = 100;
 /// La regla de las 100 veces solo desde este tamaño (un zip chico de texto se expande mucho).
 const BIG_RATIO_MIN: u64 = 1024 * 1024 * 1024;
 /// Más entradas que esto también se pregunta (aunque estén vacías).
-const BIG_ENTRIES: usize = 100_000;
+pub(crate) const BIG_ENTRIES: usize = 100_000;
 /// La carpeta de lo extraído dentro de la del motor.
 const STAGING_ROOT: &str = "x";
 /// Los metadatos que agrega el Finder al comprimir: no se extraen.

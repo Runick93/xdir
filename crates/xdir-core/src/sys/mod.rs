@@ -301,6 +301,11 @@ pub trait FileSystem: Send + Sync {
     fn folder_type(&self) -> Arc<str> {
         Arc::from("Carpeta")
     }
+    /// Ícono y tipo de un elemento de adentro de un archivo comprimido, solo por su nombre (no
+    /// existe en el disco). Corre en el hilo que lista. Por defecto, el de carpeta o ninguno.
+    fn archive_look(&self, _name: &str, is_dir: bool) -> (i32, Arc<str>) {
+        if is_dir { (self.folder_icon().unwrap_or(0), self.folder_type()) } else { (0, Arc::from("Archivo")) }
+    }
     /// ¿Es la Papelera? (sin E/S: solo mira la ruta). Windows: la carpeta virtual de la
     /// Papelera; macOS: `~/.Trash` o `/Volumes/*/.Trashes/<uid>`; Linux: `<datos>/Trash/files`.
     fn is_trash(&self, _loc: &Location) -> bool {

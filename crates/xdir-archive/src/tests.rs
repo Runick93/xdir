@@ -658,3 +658,95 @@ fn targz_list_is_cancellable_and_extract_all_one_pass() {
     assert_eq!(fs::read(root2.join("b.txt")).unwrap(), b"mundo");
     assert_eq!(svc().declared_total(&z).unwrap(), 9);
 }
+
+// ---- Ronda de arreglos 2 ----
+
+#[test]
+fn zip_with_dot_root_entries_extracts() {
+    let t = Tmp::new();
+    let z = t.p("punto.zip");
+    fs::write(&z, raw_zip(&[raw(b"./", b""), raw(b"./a.txt", b"hola"), raw(b"b/../", b"")])).unwrap();
+    let root = t.p("r");
+    fs::create_dir(&root).unwrap();
+    assert_eq!(extract_all(&z, &root), Ok(()));
+    assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"hola");
+    // También entrada por entrada.
+    let root2 = t.p("r2");
+    fs::create_dir(&root2).unwrap();
+    for e in svc().list(&z).unwrap() {
+        svc().extract(&z, &e, &root2, None, &mut |_| Flow::Continue).unwrap();
+    }
+    assert_eq!(fs::read(root2.join("a.txt")).unwrap(), b"hola");
+    // Un archivo (no carpeta) que se llama «.» sigue siendo error, y el error lleva su nombre.
+    let z2 = t.p("p2.zip");
+    fs::write(&z2, raw_zip(&[raw(b"a/..", b"x")])).unwrap();
+    let err = extract_all(&z2, &root).unwrap_err();
+    assert_eq!(err.path, Path::new("a/.."));
+}
+
+#[test]
+fn errors_carry_the_entry_name() {
+    let t = Tmp::new();
+    let z = t.p("m.zip");
+    fs::write(&z, raw_zip(&[raw(b"../evil.txt", b"x")])).unwrap();
+    let root = t.p("r");
+    fs::create_dir(&root).unwrap();
+    assert_eq!(extract_all(&z, &root).unwrap_err().path, Path::new("../evil.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn targz_with_dot_root_entries_extracts() {
+    let t = Tmp::new();
+    let z = t.p("punto.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"./", tar::EntryType::Directory, None, b"");
+        tar_entry(b, b"./a.txt", tar::EntryType::Regular, None, b"hola");
+        tar_entry(b, b"./d/", tar::EntryType::Directory, None, b"");
+    });
+    let root = t.p("r");
+    fs::create_dir(&root).unwrap();
+    assert_eq!(svc().extract_all(&z, &root, &mut |_| Flow::Continue).unwrap(), 0);
+    assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"hola");
+    assert!(root.join("d").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn targz_special_entries_are_listed_as_omitted() {
+    let t = Tmp::new();
+    let z = t.p("raro.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"a.txt", tar::EntryType::Regular, None, b"hola");
+        tar_entry(b, b"duro", tar::EntryType::Link, Some(b"a.txt"), b"");
+        tar_entry(b, b"fifo", tar::EntryType::Fifo, None, b"");
+        tar_entry(b, b"dev", tar::EntryType::Char, None, b"");
+    });
+    let list = svc().list(&z).unwrap();
+    assert_eq!(list.len(), 4);
+    assert_eq!(list[1].kind, ItemKind::Omitted);
+    assert_eq!(list[3].kind, ItemKind::Omitted);
+    let root = t.p("r");
+    fs::create_dir(&root).unwrap();
+    assert_eq!(svc().extract_all(&z, &root, &mut |_| Flow::Continue).unwrap(), 3);
+    assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"hola");
+    assert!(fs::symlink_metadata(root.join("duro")).is_err());
+    let err = svc().extract(&z, &list[2], &root, None, &mut |_| Flow::Continue).unwrap_err();
+    assert!(matches!(err.kind, ErrKind::Other(_)));
+    assert_eq!(svc().declared_total(&z).unwrap(), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn create_keeps_colons_in_names() {
+    let t = Tmp::new();
+    let f = t.p("a:b.txt");
+    fs::write(&f, b"x").unwrap();
+    let z = t.p("o.zip");
+    svc().create(&z, &[(f, "dir:1/a:b.txt".to_string())], &mut |_| Flow::Continue).unwrap();
+    assert_eq!(svc().list(&z).unwrap()[0].name, "dir:1/a:b.txt");
+    // Al extraer, ':' se rechaza en todos los sistemas.
+    let root = t.p("r");
+    fs::create_dir(&root).unwrap();
+    assert!(extract_all(&z, &root).is_err());
+}

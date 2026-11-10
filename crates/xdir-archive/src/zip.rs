@@ -147,8 +147,10 @@ fn extract_index(
     let mut z = a.by_index(index).map_err(|e| map_zip(e, archive))?;
     // Lo que manda es el nombre guardado en el zip, no el que trae el llamador.
     let name = z.name().map_err(|e| map_zip(e, archive))?.into_owned();
-    let rel = resolve_rel(&name, override_name, archive)?;
     let kind = kind_of_file(&z);
+    let Some(rel) = resolve_rel(&name, override_name, kind == ItemKind::Dir)? else {
+        return Ok(0);
+    };
     let (mode, declared) = (z.unix_mode(), z.size());
     let link = if kind == ItemKind::Symlink { read_link(&mut z) } else { None };
     write_entry(Source { kind, rel: &rel, link: link.as_deref(), declared, mode, reader: &mut z }, root, progress)

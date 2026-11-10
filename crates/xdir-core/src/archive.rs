@@ -27,10 +27,22 @@ fn has_drive(s: &str) -> bool {
     b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
-/// Ruta relativa y segura de una entrada, o `None` si es absoluta, con unidad o UNC, con `..`
-/// que sale de la carpeta, con un byte nulo o vacía, y también cualquier componente con `:` o hecho solo de puntos y espacios. `\` cuenta como separador; `.` y los
-/// separadores repetidos se descartan.
-pub fn safe_entry_path(name: &str) -> Option<PathBuf> {
+/// Nombres de dispositivo de Windows: no se pueden usar como archivo, con o sin extensión.
+fn is_reserved(c: &str) -> bool {
+    let stem = c.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    let n = stem.chars().count();
+    n == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.chars().last().is_some_and(|d| matches!(d, '1'..='9' | '¹' | '²' | '³'))
+}
+
+/// Componentes de la ruta sin `.` ni separadores repetidos, o `None` si es insegura (absoluta,
+/// con unidad, UNC, `..` que sale, byte nulo, `:`, solo puntos y espacios, nombre reservado).
+/// Puede devolver una lista vacía: la entrada es la propia carpeta de extracción.
+fn sanitize(name: &str) -> Option<Vec<String>> {
     if name.contains('\0') {
         return None;
     }
@@ -47,14 +59,30 @@ pub fn safe_entry_path(name: &str) -> Option<PathBuf> {
             }
             // «C:x», «C:/x» y «a:flujo» son unidades o flujos alternativos en Windows; Windows
             // también ignora los puntos y espacios del final («...» o «. » serían «» o «..»).
-            c if c.contains(':') || c.trim_end_matches(['.', ' ']).is_empty() => return None,
+            c if c.contains(':') || c.trim_end_matches(['.', ' ']).is_empty() || is_reserved(c) => return None,
             c => parts.push(c),
         }
     }
+    Some(parts.into_iter().map(String::from).collect())
+}
+
+/// Ruta relativa y segura de una entrada, o `None` si es absoluta, con unidad o UNC, con `..`
+/// que sale de la carpeta, con un byte nulo o vacía; también si algún componente tiene `:`, está
+/// hecho solo de puntos y espacios o es un nombre de dispositivo de Windows (CON, NUL, COM1…),
+/// igual en todos los sistemas para que un archivo se comporte igual en todos. `\` cuenta como
+/// separador; `.` y los separadores repetidos se descartan.
+pub fn safe_entry_path(name: &str) -> Option<PathBuf> {
+    let parts = sanitize(name)?;
     if parts.is_empty() {
         return None;
     }
     Some(parts.iter().collect())
+}
+
+/// ¿La entrada es la propia carpeta de extracción («./», «a/../»)? Los tar hechos con
+/// `tar czf x -C dir .` empiezan así: se salta, no es un error.
+pub fn is_root_entry(name: &str) -> bool {
+    !name.is_empty() && sanitize(name).is_some_and(|p| p.is_empty())
 }
 
 /// ¿El destino de un enlace simbólico (relativo a la carpeta de `entry`) queda dentro de la
@@ -111,13 +139,27 @@ mod tests {
 
     #[test]
     fn safe_entry_rejects_escapes() {
-        for bad in ["/etc/x", "C:\\x", "c:/x", "\\\\srv\\x", "a/../../x", "..", "", ".", "a\\..\\..\\x", "a\0b", "a/C:x", "a/C:/x", "a/b:stream", "a/.../b", "a/ /b", "a/.. /b", "a/. ./b"] {
+        for bad in ["/etc/x", "C:\\x", "c:/x", "\\\\srv\\x", "a/../../x", "..", "", ".", "a\\..\\..\\x", "a\0b", "a/C:x", "a/C:/x", "a/b:stream", "a/.../b", "a/ /b", "a/.. /b", "a/. ./b", "CON", "con.txt", "a/Nul.tar.gz", "PRN", "aux", "COM1", "lpt9.x", "a/com5 /b", "a/con ./b", "a/CON.", "COM¹"] {
             assert_eq!(safe_entry_path(bad), None, "{bad:?}");
         }
         assert_eq!(safe_entry_path("a/./b"), Some(PathBuf::from("a/b")));
         assert_eq!(safe_entry_path("a/b/../c"), Some(PathBuf::from("a/c")));
         assert_eq!(safe_entry_path("a\\b"), Some(PathBuf::from("a/b")));
         assert_eq!(safe_entry_path("dir/"), Some(PathBuf::from("dir")));
+        // Parecidos a los reservados, pero no lo son.
+        for ok in ["console", "COM0", "COM10", "LPT", "a/auxiliar.txt", "nul_x", "com"] {
+            assert!(safe_entry_path(ok).is_some(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn root_entries() {
+        for r in ["./", ".", "a/../", "./.", "a/./.."] {
+            assert!(is_root_entry(r), "{r}");
+        }
+        for n in ["", "/", "../", "a", "C:", "a/../..", "CON"] {
+            assert!(!is_root_entry(n), "{n}");
+        }
     }
 
     #[test]

@@ -13,13 +13,13 @@ use crate::{
 
 type Reader<'a> = CancelRead<'a, GzDecoder<BufReader<File>>>;
 
-fn kind_of_type(t: EntryType) -> Option<ItemKind> {
+fn kind_of_type(t: EntryType) -> ItemKind {
     match t {
-        EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => Some(ItemKind::File),
-        EntryType::Directory => Some(ItemKind::Dir),
-        EntryType::Symlink => Some(ItemKind::Symlink),
-        // Enlaces duros, dispositivos, fifos: no se extraen ni se listan.
-        _ => None,
+        EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => ItemKind::File,
+        EntryType::Directory => ItemKind::Dir,
+        EntryType::Symlink => ItemKind::Symlink,
+        // Enlaces duros, dispositivos, fifos: se listan pero no se extraen.
+        _ => ItemKind::Omitted,
     }
 }
 
@@ -51,7 +51,7 @@ pub fn list(path: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<Archive
     let mut out = Vec::new();
     for e in a.entries().map_err(|e| bad(e, path))? {
         let e = e.map_err(|e| bad(e, path))?;
-        let Some(kind) = kind_of_type(e.header().entry_type()) else { continue };
+        let kind = kind_of_type(e.header().entry_type());
         let name = e.path().map_err(|e| bad(e, path))?.to_string_lossy().into_owned();
         let link = if kind == ItemKind::Symlink { link_of(&e) } else { None };
         out.push(ArchiveEntry {
@@ -82,13 +82,18 @@ pub fn extract(
     let mut n = 0usize;
     for e in a.entries().map_err(|e| bad(e, archive))? {
         let mut e = e.map_err(|e| bad(e, archive))?;
-        let Some(kind) = kind_of_type(e.header().entry_type()) else { continue };
+        let kind = kind_of_type(e.header().entry_type());
         if n != entry.index {
             n += 1;
             continue;
         }
         let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
-        let rel = resolve_rel(&name, override_name, archive)?;
+        if kind == ItemKind::Omitted {
+            return Err(Error::other("Tipo de elemento no soportado", Path::new(&name)));
+        }
+        let Some(rel) = resolve_rel(&name, override_name, kind == ItemKind::Dir)? else {
+            return Ok(());
+        };
         let link = if kind == ItemKind::Symlink { link_of(&e) } else { None };
         let (declared, mode) = (e.size(), e.header().mode().ok());
         return write_entry(
@@ -107,12 +112,19 @@ pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) ->
     let mut check = || sh.check();
     let mut a = open(archive, &mut check)?;
     let mut base = 0u64;
+    let mut omitted = 0usize;
     let mut links: Vec<(std::path::PathBuf, Option<String>)> = Vec::new();
     for e in a.entries().map_err(|e| bad(e, archive))? {
         let mut e = e.map_err(|e| bad(e, archive))?;
-        let Some(kind) = kind_of_type(e.header().entry_type()) else { continue };
+        let kind = kind_of_type(e.header().entry_type());
+        if kind == ItemKind::Omitted {
+            omitted += 1;
+            continue;
+        }
         let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
-        let rel = resolve_rel(&name, None, archive)?;
+        let Some(rel) = resolve_rel(&name, None, kind == ItemKind::Dir)? else {
+            continue;
+        };
         if kind == ItemKind::Symlink {
             links.push((rel, link_of(&e)));
             continue;
@@ -129,7 +141,6 @@ pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) ->
         }
     }
     drop(a);
-    let mut omitted = 0usize;
     for (rel, link) in links {
         if cfg!(not(unix)) {
             omitted += 1;

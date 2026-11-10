@@ -10,7 +10,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use xdir_core::archive::{ArchiveFormat, format_of, safe_entry_path, symlink_inside};
+use xdir_core::archive::{ArchiveFormat, format_of, is_root_entry, safe_entry_path, symlink_inside};
 
 mod targz;
 mod zip;
@@ -126,6 +126,8 @@ pub enum ItemKind {
     File,
     Dir,
     Symlink,
+    /// Enlace duro, dispositivo o FIFO: se lista pero no se extrae (se cuenta como omitido).
+    Omitted,
 }
 
 /// Una entrada del archivo, tal como figura adentro (sin sanear: `extract` la valida).
@@ -233,9 +235,15 @@ impl Service {
 }
 
 /// Ruta relativa final de una entrada: la segura del nombre, con el último componente cambiado
-/// si hay `override_name`. Todos los componentes son normales.
-pub(crate) fn resolve_rel(name: &str, override_name: Option<&OsStr>, at: &Path) -> Result<PathBuf, Error> {
+/// si hay `override_name`. Todos los componentes son normales. `None` si es la propia carpeta de
+/// extracción y la entrada es una carpeta (no hay nada que hacer). Los errores llevan el nombre
+/// de la entrada.
+pub(crate) fn resolve_rel(name: &str, override_name: Option<&OsStr>, is_dir: bool) -> Result<Option<PathBuf>, Error> {
+    let at = Path::new(name);
     let bad = || Error::other(NOT_ALLOWED, at);
+    if is_dir && is_root_entry(name) {
+        return Ok(None);
+    }
     let mut rel = safe_entry_path(name).ok_or_else(bad)?;
     if let Some(o) = override_name {
         let o = o.to_str().ok_or_else(bad)?;
@@ -248,7 +256,7 @@ pub(crate) fn resolve_rel(name: &str, override_name: Option<&OsStr>, at: &Path) 
     if !rel.is_relative() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(bad());
     }
-    Ok(rel)
+    Ok(Some(rel))
 }
 
 /// Lo común de extraer una entrada.
@@ -305,6 +313,7 @@ pub(crate) fn write_entry(src: Source, root: &Path, progress: &mut dyn FnMut(u64
             }
             Ok(0)
         }
+        ItemKind::Omitted => Err(Error::other("Tipo de elemento no soportado", &dst)),
         ItemKind::Symlink => {
             let Some(target) = src.link else {
                 return Err(Error::other("Enlace no válido", &dst));
@@ -409,14 +418,26 @@ fn physically_inside(root: &Path, parent: &Path, target: &str) -> bool {
     cur.starts_with(&root)
 }
 
-/// Nombre de una entrada al crear: sin `\`, `.` ni `..`, normalizado y con `/`.
+/// Nombre de una entrada al crear: sin `\`, `.` ni `..`, normalizado y con `/`. A propósito no
+/// usa `safe_entry_path`: en macOS y Linux `:` y los nombres como «con» son legales; se guardan
+/// tal cual y se rechazan recién al extraer (en cualquier sistema).
 pub(crate) fn stored_name(name: &str, at: &Path) -> Result<String, Error> {
     let bad = || Error::other("Nombre no permitido dentro del zip", at);
-    if name.contains(['\\', '\0']) || name.split('/').any(|c| c == "." || c == "..") {
+    if name.contains(['\\', '\0']) || name.starts_with('/') {
         return Err(bad());
     }
-    let rel = safe_entry_path(name).ok_or_else(bad)?;
-    let mut s = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
+    let mut parts = Vec::new();
+    for c in name.split('/') {
+        match c {
+            "" => {}
+            "." | ".." => return Err(bad()),
+            c => parts.push(c),
+        }
+    }
+    if parts.is_empty() {
+        return Err(bad());
+    }
+    let mut s = parts.join("/");
     if name.ends_with('/') {
         s.push('/');
     }

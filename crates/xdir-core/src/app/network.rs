@@ -110,7 +110,14 @@ impl App {
         self.spawn_task(|| {
             let net = sys::network();
             net.refresh_remote();
-            TaskDone::NetConnections(net::with_timeout(LIST_LIMIT, "", move || sys::network().connections()))
+            // Con la identidad de cada volumen: un trabajo sobre la misma conexión por otro camino
+            // también cuenta al desconectar (como los discos de la tanda D).
+            let r = net::with_timeout(LIST_LIMIT, "", move || {
+                let list = sys::network().connections()?;
+                let ids = list.iter().filter(|c| c.connected).filter_map(|c| sys::copy_prims().volume(&c.local).map(|v| (c.local.clone(), v.id))).collect();
+                Ok((list, ids))
+            });
+            TaskDone::NetConnections(r)
         });
     }
 
@@ -188,8 +195,9 @@ impl App {
         }
     }
 
-    pub(super) fn on_net_connections(&mut self, result: Result<Vec<NetConnection>, NetError>) {
-        if let Ok(list) = result {
+    pub(super) fn on_net_connections(&mut self, result: Result<(Vec<NetConnection>, Vec<(PathBuf, std::ffi::OsString)>), NetError>) {
+        if let Ok((list, ids)) = result {
+            self.remember_net_volume_ids(ids);
             self.net.connections = list;
             // «Desconectar unidad de red» abierto: la lista al día, con lo marcado.
             if let Some(u) = &mut self.net.unmap {

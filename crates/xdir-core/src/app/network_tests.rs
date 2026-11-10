@@ -1382,3 +1382,43 @@ fn late_success_after_timeout_is_accepted() {
     assert_eq!(a.panes[a.active].tab().location, Location::Path(target));
     assert_eq!(a.notice.as_deref(), Some("Se conectó \"fotos\""));
 }
+
+/// M2: una copia sobre la misma conexión por otro camino (en Windows `\\srv\fotos` contra `Z:\`)
+/// también cuenta al desconectar: por la identidad del volumen, como en la tanda D.
+#[test]
+fn disconnect_finds_jobs_by_volume_identity() {
+    use crate::sys::{VolumeInfo, testing::FakeCopyPrims};
+    use crate::transfer::JobSpec;
+    let root = PathBuf::from("/net-r1m2/fotos");
+    let alias = PathBuf::from("/net-r1m2-alias/fotos");
+    let f = FakeCopyPrims::shared();
+    let vol = VolumeInfo { id: "r1m2".into(), label: "fotos".into(), case_insensitive: false, has_trash: false, max_file: None, free: u64::MAX };
+    f.set_volume(&root, vol.clone());
+    f.set_volume(&alias, vol);
+    f.add_file(&alias.join("grande.bin"), vec![1; 64 * 1024 * 20]);
+    f.add_dir(&alias.join("d"));
+    f.set_slow(&alias.join("grande.bin"), Some(Duration::from_millis(20)));
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    FakeNetwork::set_connections("nas-r1m2", vec![conn("smb://nas-r1m2/fotos", "/net-r1m2/fotos")]);
+    FakeNetwork::set_remote(Path::new("/net-r1m2"));
+    a.request_connections();
+    wait_until(&mut a, |a| a.net.connections.iter().any(|c| c.local == Path::new("/net-r1m2/fotos")));
+    a.start_transfer(JobSpec::Copy { sources: vec![alias.join("grande.bin")], dest: alias.join("d") });
+    // La identidad de los volúmenes del trabajo llega por su canal.
+    std::thread::sleep(Duration::from_millis(60));
+    a.on_transfer_updates();
+    host.set_answer(Some(false));
+    a.eject(root.clone());
+    assert_eq!(host.questions().last().map(|q| q.1.clone()).as_deref(), Some("Hay 1 operación sobre \"fotos\". ¿Cancelarla y desconectar?"));
+    host.set_answer(Some(true));
+    a.eject(root.clone());
+    for _ in 0..500 {
+        a.on_transfer_updates();
+        if a.running_jobs() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
+}

@@ -67,6 +67,8 @@ pub(super) struct Transfers {
     /// Identidad de cada disco expulsable (la calcula en su hilo la tarea que los lista): así la
     /// interfaz nunca mira el disco.
     root_ids: HashMap<PathBuf, OsString>,
+    /// Lo mismo para las conexiones de red (las calcula `request_connections`, en su hilo).
+    net_root_ids: HashMap<PathBuf, OsString>,
     window: CopyWindow,
     /// Lo que se lanzó (pruebas).
     #[cfg(test)]
@@ -122,6 +124,7 @@ impl Transfers {
             pending_eject: Vec::new(),
             ejecting: Arc::new(Mutex::new(Vec::new())),
             root_ids: HashMap::new(),
+            net_root_ids: HashMap::new(),
             window: CopyWindow::default(),
             #[cfg(test)]
             started: Vec::new(),
@@ -889,7 +892,12 @@ impl App {
     /// La identidad del disco de `root`, de lo que dejó la tarea que lista los expulsables (sin
     /// mirar el disco desde la interfaz). `None` si no se sabe: se compara solo por la ruta.
     fn root_volume(&self, root: &Path) -> Option<OsString> {
-        self.transfers.root_ids.get(root).cloned()
+        self.transfers.root_ids.get(root).or_else(|| self.transfers.net_root_ids.get(root)).cloned()
+    }
+
+    /// Las identidades de los volúmenes de las conexiones de red.
+    pub(super) fn remember_net_volume_ids(&mut self, ids: Vec<(PathBuf, OsString)>) {
+        self.transfers.net_root_ids = ids.into_iter().collect();
     }
 
     /// Las identidades de los discos expulsables (las calcula la tarea que los lista, en su hilo).

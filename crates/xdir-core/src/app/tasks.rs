@@ -24,7 +24,7 @@ pub(super) enum TaskDone {
     /// Se leyó `red.toml` (con su fecha); `None`: no cambió.
     NetPlaces(Option<(crate::net::NetPlaces, Option<std::time::SystemTime>)>),
     /// Lo conectado (`Network::connections`).
-    NetConnections(Result<Vec<crate::net::NetConnection>, crate::net::NetError>),
+    NetConnections(Result<(Vec<crate::net::NetConnection>, Vec<(PathBuf, std::ffi::OsString)>), crate::net::NetError>),
     /// Terminó de conectar `addr` (`tab`: la pestaña que lo pidió al fallar por credenciales;
     /// `None`: abrir el resultado en una pestaña nueva del panel `pane`).
     /// `generation`: la del intento (los cancelados se descartan).

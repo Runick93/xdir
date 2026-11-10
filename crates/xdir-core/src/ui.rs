@@ -411,6 +411,12 @@ pub enum PickerHit {
     FileColors,
     /// Switch «Mostrar extensiones» (nombres de archivo con su extensión).
     Extensions,
+    /// Switch «Casillas de selección» de las listas.
+    Checkboxes,
+    /// Switch «El árbol sigue al panel» (solo con la feature `arbol`).
+    TreeFollow,
+    /// Switch «Mostrar archivos ocultos» (el mismo estado que el comando `mostrar_ocultos`).
+    Hidden,
     /// Switch de la barra de pestañas de grupos.
     GroupBar,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
@@ -428,48 +434,104 @@ const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
 const PICKER_SEP_H: f32 = 13.0;
 
-/// Switches del panel: modo oscuro, colores por tipo, extensiones, barra de grupos y, si se
-/// compiló, el árbol.
+/// Estado de los switches del panel de la rueda dentada (el modo oscuro sale del tema).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PickerSwitches {
+    pub file_colors: bool,
+    pub extensions: bool,
+    pub checkboxes: bool,
+    pub tree_follow: bool,
+    pub hidden: bool,
+    pub group_bar: bool,
+    pub tree: bool,
+}
+
+/// Switches del panel, de arriba abajo: modo oscuro, colores por tipo, extensiones, casillas,
+/// el árbol sigue al panel (si se compiló el árbol), archivos ocultos, barra de grupos y el árbol.
+fn switch_kinds() -> Vec<PickerHit> {
+    let arbol = cfg!(feature = "arbol");
+    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors, PickerHit::Extensions, PickerHit::Checkboxes];
+    if arbol {
+        kinds.push(PickerHit::TreeFollow);
+    }
+    kinds.extend([PickerHit::Hidden, PickerHit::GroupBar]);
+    if arbol {
+        kinds.push(PickerHit::Tree);
+    }
+    kinds
+}
+
 fn switch_rows() -> usize {
-    4 + usize::from(cfg!(feature = "arbol"))
+    switch_kinds().len()
+}
+
+/// Medidas verticales del panel de la rueda dentada. Se elige la primera que entra en la ventana;
+/// si ni la más compacta entra (alturas menores a ~330 DIPs) el panel se pega arriba (top >= 0)
+/// y las últimas filas pueden quedar cortadas. La ventana mínima (360) entra con la compacta.
+#[derive(Clone, Copy)]
+struct PickerLayout {
+    title: f32,
+    cell: f32,
+    btn: f32,
+    sep: f32,
+    pad: f32,
+    gap: f32,
+}
+
+const PICKER_LAYOUTS: [PickerLayout; 3] = [
+    PickerLayout { title: PICKER_TITLE_H, cell: PICKER_CELL, btn: PICKER_BTN_H, sep: PICKER_SEP_H, pad: PICKER_PAD, gap: 8.0 },
+    PickerLayout { title: 28.0, cell: 30.0, btn: 24.0, sep: 8.0, pad: 10.0, gap: 6.0 },
+    PickerLayout { title: 24.0, cell: 26.0, btn: 20.0, sep: 6.0, pad: 6.0, gap: 4.0 },
+];
+
+impl PickerLayout {
+    fn height(&self) -> f32 {
+        let rows = (PRESETS.len() / PICKER_COLS) as f32;
+        // Colores, dos botones, un separador, las filas de switches, otro separador y "Acerca de".
+        self.title + self.cell * rows + self.gap + self.btn * 2.0 + self.sep + self.btn * switch_rows() as f32 + self.sep + self.btn + self.pad
+    }
+}
+
+/// Margen mínimo entre el panel y el borde superior de la ventana.
+const PICKER_TOP_MARGIN: f32 = 4.0;
+
+fn picker_layout(h: f32) -> PickerLayout {
+    let avail = h - STATUSBAR_H - 4.0 - PICKER_TOP_MARGIN;
+    PICKER_LAYOUTS.into_iter().find(|l| l.height() <= avail).unwrap_or(PICKER_LAYOUTS[PICKER_LAYOUTS.len() - 1])
 }
 
 /// Panel flotante sobre la rueda dentada.
 pub fn picker_rect(w: f32, h: f32) -> Rect {
-    let rows = (PRESETS.len() / PICKER_COLS) as f32;
+    let l = picker_layout(h);
     let width = PICKER_CELL * PICKER_COLS as f32 + PICKER_PAD * 2.0;
-    // Colores, dos botones, un separador y las filas de switches.
-    let height = PICKER_TITLE_H + PICKER_CELL * rows + 8.0 + PICKER_BTN_H * 2.0 + PICKER_SEP_H + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H + PICKER_BTN_H + PICKER_PAD;
     let right = w - GAP * 2.0;
-    let bottom = h - STATUSBAR_H - 4.0;
-    rect(right - width, bottom - height, right, bottom)
+    let bottom = (h - STATUSBAR_H - 4.0).max(l.height());
+    rect(right - width, bottom - l.height(), right, bottom)
 }
 
 fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     let panel = picker_rect(w, h);
+    let lay = picker_layout(h);
     let mut out = Vec::new();
+    let x0 = panel.left + (panel.right - panel.left - lay.cell * PICKER_COLS as f32) / 2.0;
     for i in 0..PRESETS.len() {
         let (col, row) = ((i % PICKER_COLS) as f32, (i / PICKER_COLS) as f32);
-        let x = panel.left + PICKER_PAD + col * PICKER_CELL;
-        let y = panel.top + PICKER_TITLE_H + row * PICKER_CELL;
-        out.push((PickerHit::Preset(i), rect(x, y, x + PICKER_CELL, y + PICKER_CELL)));
+        let x = x0 + col * lay.cell;
+        let y = panel.top + lay.title + row * lay.cell;
+        out.push((PickerHit::Preset(i), rect(x, y, x + lay.cell, y + lay.cell)));
     }
     let rows = (PRESETS.len() / PICKER_COLS) as f32;
-    let y = panel.top + PICKER_TITLE_H + PICKER_CELL * rows + 8.0;
+    let y = panel.top + lay.title + lay.cell * rows + lay.gap;
     let (l, r) = (panel.left + PICKER_PAD - 6.0, panel.right - PICKER_PAD + 6.0);
-    out.push((PickerHit::System, rect(l, y, r, y + PICKER_BTN_H)));
-    out.push((PickerHit::Custom, rect(l, y + PICKER_BTN_H, r, y + PICKER_BTN_H * 2.0)));
-    let y = y + PICKER_BTN_H * 2.0 + PICKER_SEP_H;
-    let mut kinds = vec![PickerHit::DarkMode, PickerHit::FileColors, PickerHit::Extensions, PickerHit::GroupBar];
-    if cfg!(feature = "arbol") {
-        kinds.push(PickerHit::Tree);
+    out.push((PickerHit::System, rect(l, y, r, y + lay.btn)));
+    out.push((PickerHit::Custom, rect(l, y + lay.btn, r, y + lay.btn * 2.0)));
+    let y = y + lay.btn * 2.0 + lay.sep;
+    for (i, kind) in switch_kinds().into_iter().enumerate() {
+        let top = y + lay.btn * i as f32;
+        out.push((kind, rect(l, top, r, top + lay.btn)));
     }
-    for (i, kind) in kinds.into_iter().enumerate() {
-        let top = y + PICKER_BTN_H * i as f32;
-        out.push((kind, rect(l, top, r, top + PICKER_BTN_H)));
-    }
-    let top = y + PICKER_BTN_H * switch_rows() as f32 + PICKER_SEP_H;
-    out.push((PickerHit::About, rect(l, top, r, top + PICKER_BTN_H)));
+    let top = y + lay.btn * switch_rows() as f32 + lay.sep;
+    out.push((PickerHit::About, rect(l, top, r, top + lay.btn)));
     out
 }
 
@@ -480,15 +542,15 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
     Some(picker_items(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(k, _)| k).unwrap_or(PickerHit::Panel))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, file_colors: bool, extensions: bool, group_bar: bool, tree: bool) {
+pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, sw: PickerSwitches) {
     let th = p.theme();
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
     p.round_fill(rect(panel.left - 2.0, panel.top, panel.right + 2.0, panel.bottom + 4.0), 12.0, alpha(th.background, 0.5));
     p.round_fill(panel, 10.0, th.surface_alt);
     p.round_stroke(panel, 10.0, th.border);
-    let title = rect(panel.left + PICKER_PAD, panel.top + 4.0, panel.right - PICKER_PAD, panel.top + PICKER_TITLE_H);
+    let lay = picker_layout(h);
+    let title = rect(panel.left + PICKER_PAD, panel.top + 4.0, panel.right - PICKER_PAD, panel.top + lay.title);
     p.text(FontId::UiBold, "Color de acento", title, th.text);
 
     let is_preset = PRESETS.iter().any(|(_, c)| current == Accent::Rgb(*c));
@@ -499,11 +561,11 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                 let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
                 let c = hex(PRESETS[i].1);
                 if current == Accent::Rgb(PRESETS[i].1) {
-                    p.circle_stroke(cx, cy, 15.0, th.text, 2.0);
+                    p.circle_stroke(cx, cy, lay.cell * 15.0 / PICKER_CELL, th.text, 2.0);
                 } else if hot {
-                    p.circle_stroke(cx, cy, 15.0, th.text_dim, 1.0);
+                    p.circle_stroke(cx, cy, lay.cell * 15.0 / PICKER_CELL, th.text_dim, 1.0);
                 }
-                p.circle(cx, cy, 11.0, c);
+                p.circle(cx, cy, lay.cell * 11.0 / PICKER_CELL, c);
             }
             PickerHit::System | PickerHit::Custom => {
                 if hot {
@@ -529,40 +591,51 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                     p.text(FontId::GlyphsSmall, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
                 }
             }
-            PickerHit::DarkMode | PickerHit::FileColors | PickerHit::Extensions | PickerHit::GroupBar | PickerHit::Tree => {
+            PickerHit::DarkMode
+            | PickerHit::FileColors
+            | PickerHit::Extensions
+            | PickerHit::Checkboxes
+            | PickerHit::TreeFollow
+            | PickerHit::Hidden
+            | PickerHit::GroupBar
+            | PickerHit::Tree => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
                 let (glyph, label, on) = match kind {
                     PickerHit::DarkMode => ("\u{E708}", "Modo oscuro", th.dark),
-                    PickerHit::FileColors => ("\u{E790}", "Colores por tipo", file_colors),
-                    PickerHit::Extensions => ("\u{E8EC}", "Mostrar extensiones", extensions),
-                    PickerHit::GroupBar => ("\u{E8A9}", "Barra de grupos", group_bar),
-                    _ => ("\u{E8B7}", "Árbol de carpetas", tree),
+                    PickerHit::FileColors => ("\u{E790}", "Colores por tipo", sw.file_colors),
+                    PickerHit::Extensions => ("\u{E8EC}", "Mostrar extensiones", sw.extensions),
+                    PickerHit::Checkboxes => ("\u{E739}", "Casillas de selección", sw.checkboxes),
+                    PickerHit::TreeFollow => ("\u{E71B}", "El árbol sigue al panel", sw.tree_follow),
+                    PickerHit::Hidden => ("\u{E7B3}", "Mostrar archivos ocultos", sw.hidden),
+                    PickerHit::GroupBar => ("\u{E8A9}", "Barra de grupos", sw.group_bar),
+                    _ => ("\u{E8B7}", "Árbol de carpetas", sw.tree),
                 };
                 if kind == PickerHit::DarkMode {
                     // Separador sobre la primera fila de switches.
-                    let sy = r.top - PICKER_SEP_H / 2.0;
+                    let sy = r.top - lay.sep / 2.0;
                     p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 }
                 p.text(FontId::Glyphs, glyph, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
                 p.text(FontId::Ui, label, rect(r.left + 34.0, r.top, r.right - 56.0, r.bottom), th.text);
                 // Switch: pastilla de acento con la perilla a la derecha cuando está encendido.
                 let cy = (r.top + r.bottom) / 2.0;
-                let track = rect(r.right - 50.0, cy - 10.0, r.right - 10.0, cy + 10.0);
+                let half = 10.0_f32.min(lay.btn / 2.0 - 2.0);
+                let track = rect(r.right - 50.0, cy - half, r.right - 10.0, cy + half);
                 if on {
-                    p.round_fill(track, 10.0, th.accent);
+                    p.round_fill(track, half, th.accent);
                 } else {
-                    p.round_stroke_w(track, 10.0, th.text_dim, 1.5);
+                    p.round_stroke_w(track, half, th.text_dim, 1.5);
                 }
-                let (kx, kr) = if on { (track.right - 10.0, 6.0) } else { (track.left + 10.0, 5.0) };
+                let (kx, kr) = if on { (track.right - half, half - 4.0) } else { (track.left + half, half - 5.0) };
                 p.circle(kx, cy, kr, if on { th.background } else { th.text_dim });
             }
             PickerHit::About => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
-                let sy = r.top - PICKER_SEP_H / 2.0;
+                let sy = r.top - lay.sep / 2.0;
                 p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 p.text(FontId::Glyphs, "\u{E946}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
                 p.text(FontId::Ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
@@ -685,6 +758,35 @@ mod tests {
             assert_eq!(r.right - r.left, 74.0, "{badge:?}");
             assert!(!p.texts().iter().any(|(_, s, _)| s == "\u{E9D9}"), "{badge:?}");
             assert!(!p.paths().is_empty(), "{badge:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    #[test]
+    fn el_panel_entra_en_ventanas_chicas() {
+        for h in [360.0, 400.0, 480.0, 544.0, 700.0] {
+            let r = picker_rect(900.0, h);
+            assert!(r.top >= 0.0, "top {} con h {h}", r.top);
+            assert!(r.bottom <= h, "bottom {} con h {h}", r.bottom);
+            for (kind, it) in picker_items(900.0, h) {
+                assert!(it.top >= r.top && it.bottom <= r.bottom + 0.01, "{kind:?} fuera del panel con h {h}");
+            }
+        }
+    }
+
+    #[test]
+    fn el_primero_y_el_ultimo_switch_se_clickean_en_ventana_chica() {
+        let (w, h) = (900.0, 360.0);
+        let kinds = switch_kinds();
+        let items = picker_items(w, h);
+        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::About, PickerHit::Preset(0)] {
+            let (_, r) = items.iter().find(|(k, _)| *k == want).unwrap();
+            let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+            assert_eq!(picker_at(w, h, x, y), Some(want));
         }
     }
 }

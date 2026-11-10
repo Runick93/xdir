@@ -206,6 +206,13 @@ impl App {
                 self.redraw();
             }
             Hit::Picker(ui::PickerHit::Extensions) => self.set_show_extensions(!self.show_extensions),
+            Hit::Picker(ui::PickerHit::Checkboxes) => self.set_checkboxes(!self.checkboxes),
+            #[cfg(feature = "arbol")]
+            Hit::Picker(ui::PickerHit::TreeFollow) => self.set_tree_follow(!self.tree_follows()),
+            #[cfg(not(feature = "arbol"))]
+            Hit::Picker(ui::PickerHit::TreeFollow) => {}
+            // El mismo estado que Ctrl+H: correr el comando.
+            Hit::Picker(ui::PickerHit::Hidden) => self.run_command(Command::ToggleHidden),
             Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),

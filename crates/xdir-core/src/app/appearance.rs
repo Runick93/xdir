@@ -54,6 +54,44 @@ impl App {
         self.redraw();
     }
 
+    /// Switch «Casillas de selección»: en todas las pestañas a la vez (las nuevas lo toman en
+    /// `make_tab`).
+    pub(super) fn set_checkboxes(&mut self, on: bool) {
+        self.checkboxes = on;
+        for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+            tab.list.checkboxes = on;
+        }
+        self.redraw();
+    }
+
+    /// El árbol sigue al panel activo: lo que eligió el usuario en la rueda dentada o, si nunca lo
+    /// tocó, `arbol_sigue_panel` de `config.toml`.
+    pub(super) fn tree_follows(&self) -> bool {
+        self.tree_follow.unwrap_or(self.config.tree_follows_pane)
+    }
+
+    /// Switch «El árbol sigue al panel»: desde ahora manda lo elegido (se guarda en la sesión).
+    #[cfg(feature = "arbol")]
+    pub(super) fn set_tree_follow(&mut self, on: bool) {
+        self.tree_follow = Some(on);
+        // Al prenderlo, el árbol va enseguida a la carpeta del panel.
+        self.tree_followed = None;
+        self.redraw();
+    }
+
+    /// Estado de los switches de la rueda dentada.
+    pub(super) fn picker_switches(&self) -> ui::PickerSwitches {
+        ui::PickerSwitches {
+            file_colors: self.file_colors,
+            extensions: self.show_extensions,
+            checkboxes: self.checkboxes,
+            tree_follow: self.tree_follows(),
+            hidden: self.show_hidden,
+            group_bar: self.show_group_bar,
+            tree: self.tree_visible(),
+        }
+    }
+
     /// Switch del panel de la rueda dentada: fija oscuro o claro (deja de seguir a Windows).
     pub(super) fn set_dark_mode(&mut self, dark: bool) {
         self.dark_mode = Some(dark);

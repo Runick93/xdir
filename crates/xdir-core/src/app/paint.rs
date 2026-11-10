@@ -49,7 +49,6 @@ impl App {
         let tree_animating = false;
         let tree_w = self.tree_width();
         let groups_h = self.groups_bar_h();
-        let tree_on = self.tree_visible();
         #[cfg(feature = "arbol")]
         let current_folder = self.panes[self.active].tab().location.target();
         // Animaciones: rectángulos de este frame (transición de layout) y scroll suave de las
@@ -71,6 +70,7 @@ impl App {
         let ghost = self.ghost.as_ref().map(|g| (g.title.clone(), geom::rect(g.x, g.y, g.x + g.w, g.y + pane::TABSTRIP_H - 3.0), g.detach));
         // El texto del cartel de ayuda se arma antes de prestar los campos de `App` por separado.
         let tooltip = self.visible_tooltip();
+        let switches = self.picker_switches();
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
@@ -78,8 +78,7 @@ impl App {
         let (favorites, show_favorites, fav_drop) = (&self.favorites, self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
         let about_open = self.about_open;
-        let (file_colors, show_extensions) = (self.file_colors, self.show_extensions);
-        let (groups, group_name, show_group_bar) = (&self.groups, &self.group_name, self.show_group_bar);
+        let (groups, group_name) = (&self.groups, &self.group_name);
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
@@ -191,7 +190,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, accent, picker_hover, file_colors, show_extensions, show_group_bar, tree_on);
+                ui::draw_picker(p, w, h, accent, picker_hover, switches);
             }
             if let Some(sg) = suggest {
                 sg.draw(p);

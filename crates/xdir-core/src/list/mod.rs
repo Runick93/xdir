@@ -182,6 +182,22 @@ const GRID_PAD: f32 = 8.0;
 const MIN_COL_W: f32 = 48.0;
 /// Distancia al borde de un encabezado que cuenta como "agarrar el borde" para cambiar el ancho.
 const EDGE_GRAB: f32 = 5.0;
+/// Casilla de selección (diseño `list::FileList::draw_checkbox` y pantalla X36): lado, cuánto
+/// corre al ícono y al nombre en las vistas por filas, y cuánto se agranda su zona de clic.
+const CHECK: f32 = 14.0;
+const CHECK_SHIFT: f32 = 22.0;
+const CHECK_SLOP: f32 = 4.0;
+/// Tilde blanca sobre el acento, como en el diseño (en los dos modos).
+const CHECK_MARK: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+
+/// Estado de una casilla de selección.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CheckState {
+    Empty,
+    Checked,
+    /// Solo en el encabezado: algunos de los elementos a la vista, no todos.
+    Partial,
+}
 
 /// Arrastre en el encabezado.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -283,6 +299,8 @@ pub struct FileList {
     pub show_hidden: bool,
     /// Nombres de archivo con su extensión (el switch «Mostrar extensiones»; lo fija la `App`).
     pub show_extensions: bool,
+    /// Casillas de selección (el switch «Casillas de selección»; lo fija la `App`).
+    pub checkboxes: bool,
     hover: Option<usize>,
     typeahead: String,
     typeahead_at: Option<Instant>,
@@ -402,6 +420,7 @@ impl Default for FileList {
             descending: false,
             show_hidden: false,
             show_extensions: true,
+            checkboxes: false,
             hover: None,
             typeahead: String::new(),
             typeahead_at: None,
@@ -472,6 +491,7 @@ impl FileList {
             descending: self.descending,
             show_hidden: self.show_hidden,
             show_extensions: self.show_extensions,
+            checkboxes: self.checkboxes,
             columns,
             name_width: self.name_width,
             view: self.view,
@@ -1164,7 +1184,7 @@ impl FileList {
         texts.dedup();
         let widest = texts.iter().take(40).map(|t| measure(t, false)).fold(0.0, f32::max);
         let width = if col == Column::Name {
-            PAD * 2.0 + ICON + 8.0 + widest + 6.0
+            PAD * 2.0 + self.check_shift() + ICON + 8.0 + widest + 6.0
         } else {
             let title = measure(col.title(), true) + if col == self.sort { 22.0 } else { 0.0 };
             PAD * 2.0 + widest.max(title) + 4.0
@@ -1410,6 +1430,71 @@ impl FileList {
         changed
     }
 
+    // ---------- casillas de selección ----------
+
+    /// Cuánto corren el ícono y el nombre para dejarle lugar a la casilla (solo en las vistas por
+    /// filas; en las cuadrículas la casilla va sobre la esquina de la celda).
+    fn check_shift(&self) -> f32 {
+        if self.checkboxes && !self.view.is_grid() { CHECK_SHIFT } else { 0.0 }
+    }
+
+    /// Casilla de un elemento dado su rectángulo (`item_rect`) y el borde izquierdo de la columna
+    /// del nombre en Detalles: a la izquierda del ícono en las filas; arriba a la izquierda de la
+    /// celda en las cuadrículas, como en el Explorador.
+    fn checkbox_rect_in(&self, item: Rect, name_left: Option<f32>) -> Option<Rect> {
+        if !self.checkboxes {
+            return None;
+        }
+        let (x, y) = match self.view {
+            v if v.is_grid() => (item.left + 7.0, item.top + 7.0),
+            View::List => (item.left + 8.0, item.top + (ROW_H - CHECK) / 2.0),
+            View::Content => (item.left + 14.0, item.top + (CONTENT_H - CHECK) / 2.0),
+            _ => (name_left? + PAD, item.top + (ROW_H - CHECK) / 2.0),
+        };
+        Some(rect(x, y, x + CHECK, y + CHECK))
+    }
+
+    /// Elemento cuya casilla está bajo el punto (con un margen para el clic).
+    fn checkbox_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.checkboxes || !contains(&self.rows_area(), x, y) {
+            return None;
+        }
+        let pos = self.pos_at(x, y)?;
+        let name_left = self.columns().iter().find(|c| c.0 == Column::Name).map(|c| c.1);
+        let r = self.checkbox_rect_in(self.item_rect(pos), name_left)?;
+        contains(&grow(r, CHECK_SLOP), x, y).then_some(pos)
+    }
+
+    /// Casilla del encabezado (solo en Detalles), sobre las de las filas.
+    fn header_checkbox_rect(&self) -> Option<Rect> {
+        if !self.checkboxes || self.view != View::Details {
+            return None;
+        }
+        let (_, left, _) = self.columns().into_iter().find(|c| c.0 == Column::Name)?;
+        let (x, y) = (left + PAD, self.area.top + (HEADER_H - CHECK) / 2.0);
+        Some(rect(x, y, x + CHECK, y + CHECK))
+    }
+
+    /// Estado de la casilla del encabezado según lo que está a la vista.
+    pub fn check_state(&self) -> CheckState {
+        let marked = self.visible.iter().filter(|&&i| self.selected[i as usize]).count();
+        match marked {
+            0 => CheckState::Empty,
+            n if n == self.visible.len() => CheckState::Checked,
+            _ => CheckState::Partial,
+        }
+    }
+
+    /// Clic en la casilla del encabezado: si ya está todo lo visible, quita toda la selección; si
+    /// no, selecciona todo lo visible (los grupos plegados no cuentan, como Ctrl+A).
+    pub fn toggle_all_checked(&mut self) {
+        if self.check_state() == CheckState::Checked {
+            self.selected.iter_mut().for_each(|s| *s = false);
+        } else {
+            self.select_all();
+        }
+    }
+
     // ---------- entrada ----------
 
     /// Teclas de navegación. Devuelve None si la tecla no es de la lista.
@@ -1647,16 +1732,17 @@ impl FileList {
         let cell = self.item_rect(pos);
         match self.view {
             // Donde va el nombre en la celda (`draw_list_cell`) y en la fila (`draw_content_row`).
-            View::List => return Some(rect(cell.left + LIST_TEXT_X - 4.0, cell.top + 1.0, cell.right - 4.0, cell.bottom - 1.0)),
+            View::List => return Some(rect(cell.left + self.check_shift() + LIST_TEXT_X - 4.0, cell.top + 1.0, cell.right - 4.0, cell.bottom - 1.0)),
             View::Content => {
-                let right = (cell.right - CONTENT_EDGE - CONTENT_RIGHT_W - CONTENT_EDGE).max(cell.left + CONTENT_TEXT_X + 40.0);
-                return Some(rect(cell.left + CONTENT_TEXT_X - 4.0, cell.top + 7.0, right, cell.top + 29.0));
+                let left = cell.left + self.check_shift() + CONTENT_TEXT_X;
+                let right = (cell.right - CONTENT_EDGE - CONTENT_RIGHT_W - CONTENT_EDGE).max(left + 40.0);
+                return Some(rect(left - 4.0, cell.top + 7.0, right, cell.top + 29.0));
             }
             _ => {}
         }
         let (_, left, right) = self.columns().into_iter().find(|c| c.0 == Column::Name)?;
         let row = self.item_rect(pos);
-        Some(rect(left + PAD + ICON + 4.0, row.top + 1.0, right - PAD, row.bottom - 1.0))
+        Some(rect(left + PAD + self.check_shift() + ICON + 4.0, row.top + 1.0, right - PAD, row.bottom - 1.0))
     }
 
     /// Posición en pantalla (DIPs) del elemento con foco, para el menú contextual por teclado.
@@ -1693,6 +1779,11 @@ impl FileList {
 
     /// Botón izquierdo. Devuelve si hay que capturar el mouse (arrastre de la barra).
     pub fn on_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, shift: bool) -> (Action, bool) {
+        // Casilla del encabezado: selecciona todo lo que está a la vista, o quita todo.
+        if self.header_checkbox_rect().is_some_and(|r| contains(&grow(r, CHECK_SLOP), x, y)) {
+            self.toggle_all_checked();
+            return (Action::Redraw, false);
+        }
         if self.in_header(x, y) {
             // Borde: cambiar el ancho. Encabezado: ordenar al soltar, o reordenar si se arrastra.
             if let Some(index) = self.edge_at(x, y) {
@@ -1734,6 +1825,11 @@ impl FileList {
         if let Some(r) = self.header_at(x, y) {
             self.focus_header(r);
             self.toggle_group_row(r);
+            return (Action::Redraw, false);
+        }
+        // Casilla de un elemento: lo suma o lo quita de la selección sin tocar los demás (Ctrl+clic).
+        if let Some(pos) = self.checkbox_at(x, y) {
+            self.toggle(pos);
             return (Action::Redraw, false);
         }
         // En detalles, el hueco a la derecha del nombre cuenta como vacío: arma el rectángulo en
@@ -1799,6 +1895,15 @@ impl FileList {
     pub fn on_double_click(&mut self, x: f32, y: f32) -> Action {
         if self.scrollbar().is_some_and(|(track, _)| contains(&track, x, y)) {
             return Action::None;
+        }
+        // El segundo clic de un doble clic sobre una casilla la vuelve a alternar (no abre).
+        if self.header_checkbox_rect().is_some_and(|r| contains(&grow(r, CHECK_SLOP), x, y)) {
+            self.toggle_all_checked();
+            return Action::Redraw;
+        }
+        if let Some(pos) = self.checkbox_at(x, y) {
+            self.toggle(pos);
+            return Action::Redraw;
         }
         // El segundo clic de un doble clic en un encabezado también lo alterna.
         if let Some(r) = self.header_at(x, y) {
@@ -1934,7 +2039,9 @@ impl FileList {
             }
             let room = if button { filters::BUTTON_ROOM } else { PAD };
             let format = if col.right_aligned() { FontId::UiRight } else { FontId::UiBold };
-            let text_r = rect(left + PAD, header.top, (right - room).max(left + PAD), header.bottom);
+            // Con casillas, el título del nombre deja lugar a la del encabezado (diseño X36).
+            let text_left = left + PAD + if col == Column::Name && self.checkboxes { CHECK_SHIFT + 2.0 } else { 0.0 };
+            let text_r = rect(text_left, header.top, (right - room).max(text_left), header.bottom);
             p.text(format, col.title(), text_r, th.text_dim);
             if col == self.sort {
                 // Chevron arriba/abajo de Segoe Fluent Icons.
@@ -1947,6 +2054,9 @@ impl FileList {
                 p.fill(rect(left, header.top + 7.0, left + 1.0, header.bottom - 7.0), th.border);
             }
         }
+        if let Some(r) = self.header_checkbox_rect() {
+            draw_checkbox(p, r, self.check_state());
+        }
 
         let rows = self.rows_area();
         if self.visible.is_empty() && self.rows.is_empty() {
@@ -1958,6 +2068,8 @@ impl FileList {
         let item_focus = if header_focus.is_none() { self.focus } else { None };
 
         let mut ends = Vec::with_capacity(last - first);
+        let name_left = cols.iter().find(|c| c.0 == Column::Name).map(|c| c.1);
+        let shift = self.check_shift();
         p.clip(rows, &mut || {
             for pos in first..last {
                 let idx = self.visible[pos] as usize;
@@ -1986,6 +2098,20 @@ impl FileList {
                 if active && self.focus_visible && item_focus == Some(pos) {
                     p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
                 }
+                // Casilla: con el mouse encima o si está seleccionado. En la cuadrícula va después
+                // de la celda para que una miniatura ancha no la tape.
+                let checkbox = if (self.hover == Some(pos) || self.selected[idx])
+                    && let Some(r) = self.checkbox_rect_in(item, name_left)
+                {
+                    Some((r, if self.selected[idx] { CheckState::Checked } else { CheckState::Empty }))
+                } else {
+                    None
+                };
+                if !self.view.is_grid()
+                    && let Some((r, st)) = checkbox
+                {
+                    draw_checkbox(p, r, st);
+                }
 
                 // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
                 let color = crate::config::color_for(p.file_colors(), &e.sort_key, e.is_dir, e.attrs)
@@ -1993,6 +2119,9 @@ impl FileList {
                 match self.view {
                     v if v.is_grid() => {
                         self.draw_cell(p, e, row, color);
+                        if let Some((r, st)) = checkbox {
+                            draw_checkbox(p, r, st);
+                        }
                         continue;
                     }
                     View::List => {
@@ -2010,8 +2139,8 @@ impl FileList {
                     match col {
                         Column::Name => {
                             let iy = y + (ROW_H - ICON) / 2.0;
-                            p.shell_icon(e.icon, e.overlay, cell.left, iy, ICON);
-                            let text = rect(cell.left + ICON + 8.0, y, cell.right, y + ROW_H);
+                            p.shell_icon(e.icon, e.overlay, cell.left + shift, iy, ICON);
+                            let text = rect(cell.left + shift + ICON + 8.0, y, cell.right, y + ROW_H);
                             let name = shown_name(e, self.show_extensions);
                             p.text(FontId::Ui, name, text, color);
                             ends.push(text.left + p.measure(FontId::Ui, name) + 6.0);
@@ -2091,8 +2220,9 @@ impl FileList {
 
     /// Celda de la Lista (diseño `list::FileList::draw_list_cell`): ícono de 16 y el nombre.
     fn draw_list_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color) {
-        p.shell_icon(e.icon, e.overlay, cell.left + 8.0, cell.top + (ROW_H - ICON) / 2.0, ICON);
-        let text = rect(cell.left + LIST_TEXT_X, cell.top, cell.right - 8.0, cell.bottom);
+        let left = cell.left + self.check_shift();
+        p.shell_icon(e.icon, e.overlay, left + 8.0, cell.top + (ROW_H - ICON) / 2.0, ICON);
+        let text = rect(left + LIST_TEXT_X, cell.top, cell.right - 8.0, cell.bottom);
         p.text(FontId::Ui, shown_name(e, self.show_extensions), text, color);
     }
 
@@ -2103,7 +2233,8 @@ impl FileList {
         let th = p.theme();
         p.fill(rect(row.left + CONTENT_EDGE, row.bottom - 1.0, row.right - CONTENT_EDGE, row.bottom), th.border);
         const SIZE: f32 = 32.0;
-        let (ix, iy) = (row.left + 14.0, row.top + (CONTENT_H - SIZE) / 2.0);
+        let shift = self.check_shift();
+        let (ix, iy) = (row.left + shift + 14.0, row.top + (CONTENT_H - SIZE) / 2.0);
         let image = rect(ix, iy, ix + SIZE, iy + SIZE);
         let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(SIZE)), image));
         if !drawn {
@@ -2113,8 +2244,8 @@ impl FileList {
         let (top, bottom) = ((row.top + 9.0, row.top + 27.0), (row.top + 29.0, row.top + 47.0));
         let right = row.right - CONTENT_EDGE;
         let data_left = right - CONTENT_RIGHT_W;
-        let text_right = (data_left - CONTENT_EDGE).max(row.left + CONTENT_TEXT_X + 40.0);
-        let text_left = row.left + CONTENT_TEXT_X;
+        let text_left = row.left + shift + CONTENT_TEXT_X;
+        let text_right = (data_left - CONTENT_EDGE).max(text_left + 40.0);
         p.text(FontId::Ui, shown_name(e, self.show_extensions), rect(text_left, top.0, text_right, top.1), color);
         p.text(FontId::Ui, &e.type_name, rect(text_left, bottom.0, text_right, bottom.1), th.text_dim);
         let root = self.search_root.as_deref();
@@ -2122,6 +2253,34 @@ impl FileList {
         let size = Self::cell_text(Column::Size, e, root, true);
         p.text(FontId::UiRight, &date, rect(data_left, top.0, right, top.1), th.text_secondary);
         p.text(FontId::UiRight, &size, rect(data_left, bottom.0, right, bottom.1), th.text_dim);
+    }
+}
+
+/// Rectángulo agrandado `d` de cada lado.
+fn grow(r: Rect, d: f32) -> Rect {
+    rect(r.left - d, r.top - d, r.right + d, r.bottom + d)
+}
+
+/// Casilla de selección (diseño `list::FileList::draw_checkbox`): vacía con borde tenue, marcada
+/// con el acento y una tilde blanca, o parcial con un guion.
+fn draw_checkbox(p: &dyn Painter, r: Rect, state: CheckState) {
+    let th = p.theme();
+    match state {
+        CheckState::Empty => {
+            p.round_fill(r, 3.0, th.surface);
+            p.round_stroke_w(grow(r, -0.6), 2.5, th.text_dim, 1.2);
+        }
+        CheckState::Checked => {
+            p.round_fill(r, 3.0, th.accent);
+            let (x, y) = (r.left + 3.0, r.top + 3.5);
+            p.rounded_path(&[(x, y + 3.733, 0.0), (x + 2.8, y + 7.0, 0.0), (x + 8.0, y, 0.0)], false, None, Some((CHECK_MARK, 1.6)));
+        }
+        CheckState::Partial => {
+            p.round_fill(r, 3.0, th.accent);
+            let (l, t) = (r.left + 3.5, r.top + 6.25);
+            let dash = [(l, t, 0.75), (l + 7.0, t, 0.75), (l + 7.0, t + 1.5, 0.75), (l, t + 1.5, 0.75)];
+            p.rounded_path(&dash, true, Some(CHECK_MARK), None);
+        }
     }
 }
 
@@ -2628,5 +2787,167 @@ mod tests {
             assert!(!matches_pattern(name, ""), "{name:?} con patrón vacío");
             assert!(!matches_pattern(name, ";"), "{name:?} con «;»");
         }
+    }
+}
+
+#[cfg(test)]
+mod checkbox_tests {
+    use super::*;
+    use crate::sys::testing::{RecordingPainter, install_fakes};
+
+    fn entry(name: &str, size: u64) -> Entry {
+        Entry {
+            name: name.into(),
+            full: None,
+            group: 0,
+            pidl: None,
+            display: name.into(),
+            sort_key: name.to_lowercase(),
+            is_dir: false,
+            size,
+            modified: 0,
+            created: 0,
+            attrs: 0,
+            type_name: std::sync::Arc::from("Archivo"),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+        }
+    }
+
+    const AREA: Rect = Rect { left: 0.0, top: 0.0, right: 800.0, bottom: 600.0 };
+
+    fn painter() -> RecordingPainter {
+        RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)))
+    }
+
+    /// Cinco archivos «a»…«e» en Detalles, dibujados una vez (la lista conoce su área).
+    fn five(checkboxes: bool) -> FileList {
+        install_fakes();
+        let mut l = FileList { checkboxes, ..Default::default() };
+        l.append(["a", "b", "c", "d", "e"].iter().map(|n| entry(n, 0)).collect());
+        l.draw(&painter(), AREA, true);
+        l
+    }
+
+    fn selected(l: &FileList) -> Vec<String> {
+        l.selected_entries().map(|e| e.display.clone()).collect()
+    }
+
+    /// Centro de la casilla del elemento en la posición `pos`.
+    fn check_point(l: &FileList, pos: usize) -> (f32, f32) {
+        let name_left = l.columns().iter().find(|c| c.0 == Column::Name).map(|c| c.1);
+        let r = l.checkbox_rect_in(l.item_rect(pos), name_left).expect("hay casilla");
+        ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
+    }
+
+    fn click(l: &mut FileList, (x, y): (f32, f32)) {
+        l.on_mouse_move(x, y);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+    }
+
+    /// Clic en la casilla de un elemento: lo suma a la selección sin tocar los demás (como
+    /// Ctrl+clic), en Detalles, Lista, Contenido y las cuadrículas; otro clic lo quita.
+    #[test]
+    fn checkbox_click_toggles_only_that_item() {
+        for view in [View::Details, View::List, View::Content, View::Icons, View::Thumbnails] {
+            let mut l = five(true);
+            l.set_view(view);
+            l.draw(&painter(), AREA, true);
+            l.select_index(0);
+            l.on_mouse_down(check_point(&l, 1).0, check_point(&l, 1).1, true, false);
+            l.on_mouse_up();
+            assert_eq!(selected(&l), ["a", "b"], "{view:?}");
+            let at = check_point(&l, 2);
+            l.on_mouse_move(at.0, at.1);
+            l.on_mouse_down(at.0, at.1, false, false);
+            // Ni arrastre ni selección pendiente: moverse y soltar no deja solo a «c».
+            assert_ne!(l.on_mouse_move(at.0 + 20.0, at.1 + 20.0), Action::BeginDrag, "{view:?}");
+            l.on_mouse_up();
+            assert_eq!(selected(&l), ["a", "b", "c"], "{view:?}");
+            click(&mut l, at);
+            assert_eq!(selected(&l), ["a", "b"], "{view:?}");
+            // El doble clic sobre la casilla la alterna, no abre el archivo.
+            l.on_mouse_down(at.0, at.1, false, false);
+            l.on_mouse_up();
+            assert_ne!(l.on_double_click(at.0, at.1), Action::Open(2), "{view:?}");
+        }
+    }
+
+    /// La casilla del encabezado selecciona solo lo que está a la vista (no los grupos plegados);
+    /// el segundo clic quita toda la selección.
+    #[test]
+    fn header_checkbox_selects_all_visible_and_clears() {
+        install_fakes();
+        let mut l = FileList { checkboxes: true, ..Default::default() };
+        let sizes = [0, 0, 0, 1024, 1024];
+        l.append(sizes.iter().enumerate().map(|(i, &s)| entry(&((b'a' + i as u8) as char).to_string(), s)).collect());
+        l.set_group(Some(Column::Size));
+        l.toggle_group("Diminuto (0–16 KB)");
+        l.draw(&painter(), AREA, true);
+        let r = l.header_checkbox_rect().expect("casilla en el encabezado de Detalles");
+        let at = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        click(&mut l, at);
+        assert_eq!(selected(&l), ["a", "b", "c"]);
+        assert_eq!(l.check_state(), CheckState::Checked);
+        click(&mut l, at);
+        assert!(selected(&l).is_empty());
+        assert_eq!(l.check_state(), CheckState::Empty);
+        // Solo en Detalles.
+        l.set_view(View::List);
+        assert!(l.header_checkbox_rect().is_none());
+    }
+
+    /// Con 1 de 5 seleccionados la casilla del encabezado se dibuja parcial (el guion) y la del
+    /// elemento, marcada (la tilde).
+    #[test]
+    fn header_checkbox_partial_state() {
+        let mut l = five(true);
+        l.select_index(2);
+        assert_eq!(l.check_state(), CheckState::Partial);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        let paths = p.paths();
+        let header = l.header_checkbox_rect().unwrap();
+        let dash = paths.iter().find(|(pts, closed, fill)| *closed && *fill == Some(CHECK_MARK) && pts.iter().all(|&(x, y)| contains(&header, x, y)));
+        let dash = dash.expect("guion de la casilla parcial");
+        assert_eq!(dash.0.len(), 4);
+        assert_eq!(dash.0[1].0 - dash.0[0].0, 7.0, "guion de 7 DIPs como en el diseño");
+        let row = l.checkbox_rect_in(l.item_rect(2), Some(0.0)).unwrap();
+        assert!(paths.iter().any(|(pts, closed, _)| !*closed && pts.len() == 3 && pts.iter().all(|&(x, y)| contains(&row, x, y))), "tilde en la fila");
+        // Todos seleccionados: la del encabezado pasa a marcada (sin guion).
+        l.select_all();
+        let p = painter();
+        l.draw(&p, AREA, true);
+        assert!(!p.paths().iter().any(|(_, closed, _)| *closed));
+        assert_eq!(l.check_state(), CheckState::Checked);
+    }
+
+    /// Con el switch apagado no hay casillas: nada se dibuja, el nombre queda donde siempre y un
+    /// clic donde iría la casilla es un clic común (selecciona solo ese elemento).
+    #[test]
+    fn checkboxes_hidden_when_off() {
+        let mut l = five(false);
+        l.select_index(0);
+        l.on_mouse_move(PAD + 7.0, HEADER_H + ROW_H * 1.5);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        assert!(p.paths().is_empty(), "sin casillas");
+        assert!(l.header_checkbox_rect().is_none());
+        let name = p.texts().into_iter().find(|t| t.1 == "a").unwrap();
+        assert_eq!(name.2.left, PAD + ICON + 8.0);
+        assert_eq!(p.texts().into_iter().find(|t| t.1 == "Nombre").unwrap().2.left, PAD);
+        click(&mut l, (PAD + 7.0, HEADER_H + ROW_H * 1.5));
+        assert_eq!(selected(&l), ["b"]);
+        // Prendido: el ícono y el nombre se corren para dejarle lugar (diseño X36).
+        let mut l = five(true);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        let name = p.texts().into_iter().find(|t| t.1 == "a").unwrap();
+        assert_eq!(name.2.left, PAD + CHECK_SHIFT + ICON + 8.0);
+        assert_eq!(p.texts().into_iter().find(|t| t.1 == "Nombre").unwrap().2.left, PAD + CHECK_SHIFT + 2.0);
+        // Sin mouse ni selección, las filas no muestran casilla; la del encabezado sí (vacía).
+        assert!(p.paths().is_empty());
     }
 }

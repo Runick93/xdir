@@ -78,6 +78,11 @@ pub struct Session {
     pub file_colors: bool,
     /// Nombres de archivo con su extensión (switch «Mostrar extensiones»).
     pub show_extensions: bool,
+    /// Casillas de selección en las listas (switch «Casillas de selección»).
+    pub checkboxes: bool,
+    /// Switch «El árbol sigue al panel», si el usuario lo tocó alguna vez; `None` usa
+    /// `arbol_sigue_panel` de `config.toml`.
+    pub tree_follow: Option<bool>,
     /// Árbol de carpetas lateral visible (solo con la feature `arbol`).
     pub show_tree: bool,
     /// Árbol fijo al lado de los paneles (si no, queda la franja de íconos y se expande al asomar el mouse).
@@ -112,6 +117,8 @@ impl Default for Session {
             dark_mode: None,
             file_colors: false,
             show_extensions: true,
+            checkboxes: false,
+            tree_follow: None,
             show_tree: true,
             tree_pinned: true,
             quick_open: true,
@@ -163,6 +170,10 @@ fn write(s: &Session) -> String {
     out += &format!("colores_por_tipo = {}
 ", s.file_colors);
     out += &format!("extensiones = {}\n", s.show_extensions);
+    out += &format!("casillas = {}\n", s.checkboxes);
+    if let Some(on) = s.tree_follow {
+        out += &format!("arbol_sigue = {on}\n");
+    }
     out += &format!("arbol = {}
 ", s.show_tree);
     out += &format!("arbol_fijo = {}
@@ -254,6 +265,8 @@ fn parse(text: &str) -> Session {
             ("ocultos", None) => s.show_hidden = boolean().unwrap_or(false),
             ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(false),
             ("extensiones", None) => s.show_extensions = boolean().unwrap_or(true),
+            ("casillas", None) => s.checkboxes = boolean().unwrap_or(false),
+            ("arbol_sigue", None) => s.tree_follow = boolean(),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(true),
             ("arbol_fijo", None) => s.tree_pinned = boolean().unwrap_or(true),
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
@@ -401,6 +414,8 @@ mod tests {
             dark_mode: Some(false),
             file_colors: false,
             show_extensions: false,
+            checkboxes: true,
+            tree_follow: Some(false),
             show_tree: true,
             tree_pinned: false,
             quick_open: true,

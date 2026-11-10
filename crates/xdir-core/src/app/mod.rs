@@ -313,6 +313,11 @@ pub struct App {
     file_colors: bool,
     /// Nombres de archivo con su extensión (switch «Mostrar extensiones» de la rueda dentada).
     show_extensions: bool,
+    /// Casillas de selección en las listas (switch «Casillas de selección»).
+    checkboxes: bool,
+    /// Switch «El árbol sigue al panel», si el usuario lo tocó; `None` sigue a `arbol_sigue_panel`
+    /// de `config.toml` (ver `tree_follows`).
+    tree_follow: Option<bool>,
     /// Dónde caería lo que se arrastra sobre la barra de favoritos (panel, posición).
     fav_drop: Option<(usize, FavDrop)>,
     /// Arrastrando una pestaña sobre otro panel: (panel destino, posición en su tira).
@@ -503,6 +508,8 @@ impl App {
             show_group_bar: session.group_bar,
             file_colors: session.file_colors,
             show_extensions: session.show_extensions,
+            checkboxes: session.checkboxes,
+            tree_follow: session.tree_follow,
             fav_drop: None,
             tab_drop: None,
             ghost: None,

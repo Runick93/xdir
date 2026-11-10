@@ -38,6 +38,8 @@ thread_local! {
     /// El host de la ventana, para el código de AppKit que necesita el tipo concreto (`drawRect:`
     /// le pasa el tamaño de la vista al renderizador): la `App` lo tiene como `dyn WindowHost`.
     static HOST: RefCell<Option<Rc<MacHost>>> = const { RefCell::new(None) };
+    /// El tema del último cuadro (lo usa la ventana de copia al crearse).
+    static THEME: Cell<Option<Theme>> = const { Cell::new(None) };
 }
 
 /// La ventana principal de macOS. La ventana y la vista viven en los `thread_local!` de `mac.rs`.
@@ -103,6 +105,8 @@ impl WindowHost for MacHost {
 
     /// Dibuja en el contexto actual de AppKit (dentro de `drawRect:`).
     fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
+        THEME.with(|t| t.set(Some(*theme)));
+        crate::auxwin::set_theme(theme);
         self.renderer.borrow_mut().draw(self.window.get(), theme, file_colors, |p, w, h| paint(p, w, h))
     }
 
@@ -440,6 +444,24 @@ impl WindowHost for MacHost {
 
     fn quick_look_close(&self) {
         crate::quicklook::close();
+    }
+
+    /// La ventana de copia (`crate::auxwin`).
+    fn aux_show(&self, w: xdir_core::host::AuxWindow, title: &str, size: (f32, f32)) -> bool {
+        let theme = THEME.with(|t| t.get()).unwrap_or_else(|| Theme::from_system(xdir_core::theme::DEFAULT_ACCENT, None));
+        crate::auxwin::show(self.window.get(), w, title, size, &theme)
+    }
+
+    fn aux_resize(&self, w: xdir_core::host::AuxWindow, size: (f32, f32)) {
+        crate::auxwin::resize(w, size);
+    }
+
+    fn aux_invalidate(&self, w: xdir_core::host::AuxWindow) {
+        crate::auxwin::invalidate(w);
+    }
+
+    fn aux_hide(&self, w: xdir_core::host::AuxWindow) {
+        crate::auxwin::hide(w);
     }
 }
 

@@ -5,6 +5,8 @@
 #[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]
+mod auxwin;
+#[cfg(target_os = "macos")]
 mod drop;
 #[cfg(target_os = "macos")]
 mod fs;

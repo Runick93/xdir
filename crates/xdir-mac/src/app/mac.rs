@@ -64,7 +64,7 @@ thread_local! {
 }
 
 /// La aplicación, si ya existe (los eventos de AppKit pueden llegar antes o después).
-fn with_app(f: impl FnOnce(&mut App)) {
+pub(crate) fn with_app(f: impl FnOnce(&mut App)) {
     let ptr = APP.with(|a| a.get());
     if !ptr.is_null() {
         // SAFETY: la aplicación vive hasta que termina el proceso; los eventos llegan en el hilo
@@ -73,7 +73,7 @@ fn with_app(f: impl FnOnce(&mut App)) {
     }
 }
 
-pub(super) fn window() -> Option<Retained<NSWindow>> {
+pub(crate) fn window() -> Option<Retained<NSWindow>> {
     WINDOW.with(|w| w.borrow().clone())
 }
 
@@ -95,6 +95,8 @@ pub fn run() -> Result<(), String> {
     let host = MacHost::install()?;
     init.marks.push(("fabricas d2d/dwrite", ms_since(started)));
     let mut app = Box::new(App::new(init, host.clone()));
+    // Con la ventana de copia, los conflictos se preguntan (sin ella se omiten solos).
+    app.set_auto_skip(false);
 
     let nsapp = NSApplication::sharedApplication(mtm);
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -645,7 +647,7 @@ fn dragged_paths(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<Vec<Path
 }
 
 /// Tecla del evento con la numeración de `platform::Key` (la de Windows).
-fn translate_key(event: &NSEvent) -> Option<Key> {
+pub(crate) fn translate_key(event: &NSEvent) -> Option<Key> {
     let chars = event.charactersIgnoringModifiers().map(|s| s.to_string());
     key_from(event.keyCode(), chars.as_deref())
 }

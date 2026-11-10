@@ -98,7 +98,7 @@ pub fn create_lnk(target: &Path, lnk: &Path) -> Result<()> {
 /// A dónde apunta un `.lnk` (sin buscarlo si se movió) o un enlace simbólico. Inicializa COM en
 /// el hilo si hace falta (corre en hilos de trabajo).
 pub fn link_target(path: &Path) -> Option<PathBuf> {
-    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile, STGM_READ};
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, STGM_READ};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
         && let Ok(to) = std::fs::read_link(path)
@@ -108,8 +108,9 @@ pub fn link_target(path: &Path) -> Option<PathBuf> {
     if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
         return None;
     }
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+    // Los objetos COM se sueltan al salir de la clausura, antes de CoUninitialize.
+    let target = (|| unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         let file: IPersistFile = link.cast().ok()?;
         file.Load(PCWSTR(wide_path(path).as_ptr()), STGM_READ).ok()?;
@@ -117,7 +118,11 @@ pub fn link_target(path: &Path) -> Option<PathBuf> {
         link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
         let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         (len > 0).then(|| PathBuf::from(OsString::from_wide(&buf[..len])))
+    })();
+    if com {
+        unsafe { CoUninitialize() };
     }
+    target
 }
 
 pub fn data_object(items: &[Item]) -> Result<IDataObject> {

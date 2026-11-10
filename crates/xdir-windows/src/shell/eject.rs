@@ -238,14 +238,29 @@ fn devnode_parent(node: u32) -> Option<u32> {
 /// Saca el disco de una lectora: traba el volumen (si alguien lo usa, está ocupado), lo desmonta
 /// y lo expulsa.
 fn eject_media(root: &Path) -> Result<(), EjectError> {
-    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
-    use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA};
+    use windows::Win32::Foundation::GENERIC_READ;
+    use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_MEDIA_REMOVAL, PREVENT_MEDIA_REMOVAL};
     let device = volume_device(root).ok_or_else(|| fail("no es una unidad"))?;
-    let h = unsafe {
-        CreateFileW(&device, (GENERIC_READ | GENERIC_WRITE).0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
-    }
-    .map_err(|e| fail(&e.message()))?;
+    // Una lectora se abre solo para leer (pedir escritura falla en un CD).
+    let h = unsafe { CreateFileW(&device, GENERIC_READ.0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }
+        .map_err(|e| fail(&e.message()))?;
     let ioctl = |code: u32| unsafe { DeviceIoControl(h, code, None, 0, None, 0, None, None) };
+    // Permitir sacar el disco (un programa pudo haberlo trabado).
+    let allow = |h: HANDLE| {
+        let prevent = PREVENT_MEDIA_REMOVAL { PreventMediaRemoval: false };
+        unsafe {
+            DeviceIoControl(
+                h,
+                IOCTL_STORAGE_MEDIA_REMOVAL,
+                Some(&prevent as *const _ as *const c_void),
+                size_of::<PREVENT_MEDIA_REMOVAL>() as u32,
+                None,
+                0,
+                None,
+                None,
+            )
+        }
+    };
     let mut locked = false;
     for _ in 0..3 {
         if ioctl(FSCTL_LOCK_VOLUME).is_ok() {
@@ -258,6 +273,7 @@ fn eject_media(root: &Path) -> Result<(), EjectError> {
         Err(EjectError { busy_by: None, busy: true, message: "la unidad está en uso".into() })
     } else {
         let _ = ioctl(FSCTL_DISMOUNT_VOLUME);
+        let _ = allow(h);
         ioctl(IOCTL_STORAGE_EJECT_MEDIA).map_err(|e| fail(&e.message()))
     };
     unsafe {
@@ -269,12 +285,16 @@ fn eject_media(root: &Path) -> Result<(), EjectError> {
 /// «Expulsar» del Shell sobre la unidad (imágenes ISO/VHD montadas). Corre en un hilo de trabajo:
 /// inicializa COM.
 fn eject_with_shell(root: &Path) -> Result<(), EjectError> {
-    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-    }
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
     let item = xdir_core::shell::Item::from(root.to_path_buf());
-    crate::shell::win32::invoke_verb(xdir_core::sys::Handle(0), &xdir_core::fs::Location::Computer, &[item], "eject").map_err(|e| fail(&e.message()))
+    let result = crate::shell::win32::invoke_verb(xdir_core::sys::Handle(0), &xdir_core::fs::Location::Computer, &[item], "eject")
+        .map_err(|e| fail(&e.message()));
+    // Cada CoInitializeEx que anduvo lleva su CoUninitialize.
+    if com {
+        unsafe { CoUninitialize() };
+    }
+    result
 }
 
 /// ¿El veto es porque alguien lo usa? Archivos abiertos (`OutstandingOpen`), el dispositivo o

@@ -35,8 +35,9 @@ pub(super) struct NetState {
     pub dialog: Option<ConnectDialog>,
     /// Generación de los intentos de conectar (un resultado de otra se descarta).
     pub generation: u64,
-    /// Conexiones pedidas desde la barra de dirección: (pestaña, generación, servidor).
-    pub bar_pending: Vec<(usize, u64, String)>,
+    /// Conexiones pedidas desde la barra de dirección: (pestaña, generación, servidor, navegación
+    /// de la pestaña al pedirla; si navega, se descarta).
+    pub bar_pending: Vec<(usize, u64, String, u64)>,
     /// Conexiones en las que ya se reintentó desconectar (la próxima vez se ofrece forzar).
     pub retried: std::collections::HashSet<PathBuf>,
     /// Fila de «Red» del clic derecho en curso.
@@ -168,14 +169,20 @@ impl App {
     /// Volvió una conexión pedida por una pestaña: la carpeta UNC que falló por credenciales
     /// (recarga) o una dirección escrita en la barra (navega a la ruta o deja el error).
     fn connected_in_tab(&mut self, id: usize, generation: u64, addr: &Address, result: Result<PathBuf, NetError>) {
-        let from_bar = self.net.bar_pending.iter().any(|(t, g, _)| *t == id && *g == generation);
-        let stale = self.net.bar_pending.iter().any(|(t, g, _)| *t == id && *g != generation) && !from_bar;
-        self.net.bar_pending.retain(|(t, g, _)| !(*t == id && *g <= generation));
+        let from_bar = self.net.bar_pending.iter().any(|(t, g, ..)| *t == id && *g == generation);
+        let stale = self.net.bar_pending.iter().any(|(t, g, ..)| *t == id && *g != generation) && !from_bar;
+        let nav = self.net.bar_pending.iter().find(|(t, g, ..)| *t == id && *g == generation).map(|e| e.3);
+        self.net.bar_pending.retain(|(t, g, ..)| !(*t == id && *g <= generation));
         if stale {
             return;
         }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let Some(t) = self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == id) else { return };
+        // La pestaña navegó mientras tanto: el resultado de la barra ya no le toca.
+        if from_bar && nav.is_some_and(|n| n != t.nav_id()) {
+            self.redraw();
+            return;
+        }
         match result {
             Ok(path) if from_bar => {
                 t.navigate(hwnd, &tx, Location::Path(path));
@@ -940,9 +947,9 @@ impl App {
                 return;
             }
         };
-        let host = addr.host.clone();
+        let (host, nav) = (addr.host.clone(), self.panes[pane].tab().nav_id());
         let generation = self.spawn_connect(pane, Some(tab_id), addr, ConnectOptions::default());
-        self.net.bar_pending.push((tab_id, generation, host));
+        self.net.bar_pending.push((tab_id, generation, host, nav));
         let t = self.panes[pane].tab_mut();
         t.error = None;
         self.redraw();
@@ -1082,7 +1089,7 @@ impl App {
                 _ => String::new(),
             };
             // Conectando desde la barra: el aviso enseguida, en la misma pestaña.
-            let bar = self.net.bar_pending.iter().find(|(t, ..)| *t == tab.id).map(|(.., h)| h.clone());
+            let bar = self.net.bar_pending.iter().find(|(t, .., n)| *t == tab.id && *n == tab.nav_id()).map(|(_, _, h, _)| h.clone());
             let ph = match slow {
                 Slow::No if bar.is_some() => bar.map(Placeholder::Connecting),
                 Slow::No => None,

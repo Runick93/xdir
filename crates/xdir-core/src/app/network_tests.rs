@@ -1324,3 +1324,21 @@ fn remote_watcher_released_off_thread() {
     assert!(t0.elapsed() < Duration::from_millis(200), "navegar esperó al guardián: {:?}", t0.elapsed());
     wait_until(&mut a, |_| FakeFileSystem::watches(&root).1 == 1);
 }
+
+/// I7: si la pestaña navega mientras conecta desde la barra, el aviso se va y el resultado no la
+/// hace saltar.
+#[test]
+fn bar_connect_dropped_when_tab_navigates() {
+    let target = tmp_dir("r1-bar-target");
+    FakeNetwork::set_connect("nas-r1bar", Ok(target.clone()));
+    FakeNetwork::hang("nas-r1bar", Duration::from_millis(200));
+    let mut a = net_app();
+    a.go_to_text(0, "smb://nas-r1bar/x");
+    let local = tmp_dir("r1-bar-local");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local.clone()));
+    a.paint();
+    assert!(a.panes[0].tab().list.placeholder.is_none());
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
+    assert_eq!(a.panes[0].tab().location, Location::Path(local));
+}

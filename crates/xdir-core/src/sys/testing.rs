@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Overlays, Services, Shell, SystemEnv, Watch, Waker};
-use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, OverlayRequest, QuickItem, WM_APP_LOAD};
+use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
 use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
 use crate::geom::{Color, Rect};
@@ -37,6 +37,7 @@ pub fn install_fakes() {
         shell: Box::new(FakeShell),
         file_system: Box::new(FakeFileSystem),
         overlays: Box::new(FakeOverlays),
+        metadata: Box::new(FakeMetadata),
     });
 }
 
@@ -709,6 +710,59 @@ impl Watch for FakeWatch {}
 impl Drop for FakeWatch {
     fn drop(&mut self) {
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(self.0.clone()).or_insert((0, 0)).1 += 1;
+    }
+}
+
+/// Un pedido de metadatos visto por el falso: (índice, ruta) de cada elemento y campos pedidos.
+pub type MetaRequestRecord = (Vec<(usize, PathBuf)>, Vec<MetaField>);
+
+thread_local! {
+    /// Metadatos que devuelve el falso, por ruta (por hilo de prueba).
+    static META_DATA: RefCell<HashMap<PathBuf, Meta>> = RefCell::new(HashMap::new());
+    /// Pedidos recibidos: (índice, ruta) de cada elemento y campos pedidos.
+    static META_REQUESTS: RefCell<Vec<MetaRequestRecord>> = const { RefCell::new(Vec::new()) };
+    /// Demora de la respuesta: `None` responde en el mismo hilo, al pedir.
+    static META_DELAY: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+}
+
+/// `Metadata` falso: anota cada pedido y responde con lo cargado con `serve` para cada ruta (o
+/// vacío), en un solo lote, en el mismo hilo o, con `set_delay`, desde otro hilo después de la
+/// demora. Todo es por hilo de prueba.
+pub struct FakeMetadata;
+
+impl FakeMetadata {
+    /// Desde ahora (en este hilo) la ruta tiene estos metadatos.
+    pub fn serve(path: &Path, meta: Meta) {
+        META_DATA.with(|d| d.borrow_mut().insert(path.to_path_buf(), meta));
+    }
+
+    /// Pedidos recibidos hasta ahora (y los olvida): elementos y campos de cada uno.
+    pub fn take_requests() -> Vec<MetaRequestRecord> {
+        META_REQUESTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// Demora de las respuestas (`None`: en el mismo hilo, al pedir).
+    pub fn set_delay(delay: Option<std::time::Duration>) {
+        META_DELAY.with(|d| d.set(delay));
+    }
+}
+
+impl Metadata for FakeMetadata {
+    fn request(&self, req: MetadataRequest) {
+        META_REQUESTS.with(|r| r.borrow_mut().push((req.items.clone(), req.fields.clone())));
+        let batch: Vec<(usize, Meta)> =
+            META_DATA.with(|d| req.items.iter().map(|(i, p)| (*i, d.borrow().get(p).cloned().unwrap_or_default())).collect());
+        match META_DELAY.with(Cell::get) {
+            None => {
+                req.send(batch);
+            }
+            Some(delay) => {
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    req.send(batch);
+                });
+            }
+        }
     }
 }
 

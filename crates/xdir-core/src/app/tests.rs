@@ -1888,7 +1888,7 @@ fn group_menu_in_background_menu() {
         })
         .collect();
     let names: Vec<&str> = labels.iter().map(|(l, _)| l.as_str()).collect();
-    assert_eq!(names, ["Nombre", "Fecha de modificación", "Fecha de creación", "Tipo", "Tamaño", "(Ninguno)"]);
+    assert_eq!(names, ["Nombre", "Fecha de modificación", "Fecha de creación", "Tipo", "Tamaño", "Dimensiones", "Duración", "(Ninguno)"]);
     let tipo = labels.iter().find(|(l, _)| l == "Tipo").unwrap().1;
     FakeShell::choose(Some(&format!("own:{tipo}")));
     a.on_context_menu(Some((10.0, 20.0)));

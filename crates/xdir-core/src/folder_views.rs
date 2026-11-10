@@ -445,6 +445,28 @@ mod tests {
         assert!(!back.is_fresh());
     }
 
+    /// Las columnas de metadatos (con sus ids `dimensiones`, `duracion`, `autor`, `etiquetas`,
+    /// `artista`, `album`) se guardan y se leen como las demás, también al agrupar y filtrar.
+    #[test]
+    fn folder_views_roundtrip_metadata_columns() {
+        let meta = [Column::Dimensions, Column::Duration, Column::Authors, Column::Tags, Column::Artist, Column::Album];
+        assert_eq!(meta.map(Column::id), ["dimensiones", "duracion", "autor", "etiquetas", "artista", "album"]);
+        let mut fv = FolderViews::default();
+        let mut columns = vec![ColumnSpec { col: Column::Name, width: 0.0 }];
+        columns.extend(meta.iter().map(|&col| ColumnSpec { col, width: 120.0 }));
+        let v = ViewSettings {
+            columns,
+            sort: Column::Duration,
+            group_by: Some(Column::Dimensions),
+            filters: vec![(Column::Tags, vec!["viaje".into()])],
+            ..ViewSettings::default()
+        };
+        fv.set("/fotos", v.clone());
+        let (back, errors) = parse(&write(&fv));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(back.get("/fotos"), v);
+    }
+
     #[test]
     fn folder_views_ignores_bad_lines() {
         let text = write(&sample());

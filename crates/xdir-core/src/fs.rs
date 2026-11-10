@@ -168,6 +168,9 @@ pub enum LoadMsg {
     Icons(Vec<(u32, i32)>),
     /// Superposiciones: (posición, índice de superposición).
     Overlays(Vec<(u32, u8)>),
+    /// Metadatos leídos (dimensiones, duración, autor…): (índice en la lista, datos). Llegan en
+    /// lotes después de un `sys::Metadata::request`.
+    Metadata(Vec<(usize, Meta)>),
     /// Avance de una búsqueda: elementos revisados y fracción estimada del recorrido (0 a 1).
     Progress { scanned: u64, done: f32 },
 }
@@ -197,6 +200,75 @@ pub struct OverlayRequest {
     pub generation: u64,
     /// (posición del elemento, ruta).
     pub items: Vec<(u32, PathBuf)>,
+}
+
+/// Metadatos de un elemento que no salen de leer la carpeta: los de las columnas Dimensiones,
+/// Duración, Autor, Etiquetas, Artista y Álbum. Vacío (`Default`) si el sistema no tiene datos.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Meta {
+    /// Ancho y alto en píxeles (imágenes y videos).
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Duración en milisegundos (audio y video).
+    pub duration_ms: Option<u64>,
+    pub authors: Vec<String>,
+    /// Etiquetas (palabras clave en Windows, etiquetas del Finder en macOS).
+    pub tags: Vec<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+/// Qué metadatos se piden (uno por columna nueva).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum MetaField {
+    Dimensions,
+    Duration,
+    Authors,
+    Tags,
+    Artist,
+    Album,
+}
+
+impl MetaField {
+    pub const ALL: [MetaField; 6] = [MetaField::Dimensions, MetaField::Duration, MetaField::Authors, MetaField::Tags, MetaField::Artist, MetaField::Album];
+}
+
+/// Cuántos elementos va como mucho en un pedido de metadatos (y en cada lote de respuesta).
+pub const META_BATCH: usize = 200;
+
+/// Pedido de metadatos para elementos de una pestaña (ver `sys::Metadata`). La respuesta vuelve
+/// como `LoadMsg::Metadata` por el canal de carga, en lotes, con la misma `generation`: si la
+/// pestaña ya cargó otra cosa, la descarta.
+pub struct MetadataRequest {
+    pub hwnd: Handle,
+    pub tx: Sender<LoadEvent>,
+    pub panel: usize,
+    pub generation: u64,
+    /// (índice del elemento en la lista, ruta).
+    pub items: Vec<(usize, PathBuf)>,
+    pub fields: Vec<MetaField>,
+}
+
+impl MetadataRequest {
+    /// Manda un lote de respuestas y despierta al hilo de interfaz. `false` si la pestaña ya no
+    /// escucha (se puede dejar de leer).
+    pub fn send(&self, batch: Vec<(usize, Meta)>) -> bool {
+        let ok = self.tx.send(LoadEvent { panel: self.panel, generation: self.generation, msg: LoadMsg::Metadata(batch) }).is_ok();
+        if ok {
+            self.hwnd.post(WM_APP_LOAD, self.panel, 0);
+        }
+        ok
+    }
+
+    /// Responde sin datos para todos los elementos (sistemas sin de dónde leerlos): las columnas
+    /// quedan vacías y los grupos en «Sin valor» en vez de «Leyendo…».
+    pub fn answer_empty(self) {
+        for chunk in self.items.chunks(META_BATCH) {
+            if !self.send(chunk.iter().map(|(i, _)| (*i, Meta::default())).collect()) {
+                return;
+            }
+        }
+    }
 }
 
 /// Quita los `.` y resuelve los `..` de una ruta escrita a mano, sin tocar el disco

@@ -17,6 +17,7 @@ use crate::thumbs;
 
 pub mod filters;
 pub mod groups;
+pub mod meta;
 
 pub use filters::ListHit;
 pub use groups::{GROUPINGS, GroupKey, LocalNow, Meta, Row, group_key};
@@ -40,10 +41,17 @@ pub enum Column {
     /// Dónde está cada resultado de una búsqueda (relativo a la carpeta buscada). Solo se ve
     /// mientras hay una búsqueda.
     Folder,
+    /// Columnas de metadatos (ver `meta`): se leen en segundo plano con `sys::Metadata`.
+    Dimensions,
+    Duration,
+    Authors,
+    Tags,
+    Artist,
+    Album,
 }
 
 /// Todas las columnas: (columna, título, identificador para la sesión, ancho inicial).
-pub const COLUMNS: [(Column, &str, &str, f32); 8] = [
+pub const COLUMNS: [(Column, &str, &str, f32); 14] = [
     (Column::Name, "Nombre", "nombre", 0.0),
     (Column::Modified, "Fecha de modificación", "modificado", 160.0),
     (Column::Created, "Fecha de creación", "creado", 160.0),
@@ -52,6 +60,14 @@ pub const COLUMNS: [(Column, &str, &str, f32); 8] = [
     (Column::Size, "Tamaño", "tamano", 96.0),
     (Column::Attributes, "Atributos", "atributos", 80.0),
     (Column::Folder, "Carpeta", "carpeta", 220.0),
+    // Anchos de la pantalla X37 (Etiquetas es la última y llega al borde: 200; Artista y Álbum
+    // como Autor).
+    (Column::Dimensions, "Dimensiones", "dimensiones", 120.0),
+    (Column::Duration, "Duración", "duracion", 80.0),
+    (Column::Authors, "Autor", "autor", 160.0),
+    (Column::Tags, "Etiquetas", "etiquetas", 200.0),
+    (Column::Artist, "Artista", "artista", 160.0),
+    (Column::Album, "Álbum", "album", 160.0),
 ];
 
 impl Column {
@@ -362,6 +378,14 @@ pub struct FileList {
     /// desde la posición `name_ends_first`. Lo de más a la derecha, en la misma columna, es hueco.
     name_ends: Vec<f32>,
     name_ends_first: usize,
+    /// Metadatos de cada elemento (índice en `entries`), si ya llegaron; si se pidieron; y los
+    /// leídos en esta carpeta por ruta y fecha (sobreviven a las recargas). Ver `meta`.
+    meta: Vec<Option<std::sync::Arc<crate::fs::Meta>>>,
+    meta_asked: Vec<bool>,
+    meta_cache: std::collections::HashMap<(OsString, u64), std::sync::Arc<crate::fs::Meta>>,
+    /// Los elementos tienen ruta de disco de donde leer metadatos (carpetas y búsquedas; no «Este
+    /// equipo» ni las carpetas virtuales). Lo fija la pestaña.
+    pub meta_enabled: bool,
 }
 
 /// Carpeta de un elemento con ruta completa (resultado de búsqueda).
@@ -454,11 +478,15 @@ impl Default for FileList {
             press_band: None,
             name_ends: Vec::new(),
             name_ends_first: 0,
+            meta: Vec::new(),
+            meta_asked: Vec::new(),
+            meta_cache: std::collections::HashMap::new(),
+            meta_enabled: true,
         }
     }
 }
 
-fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
+fn compare(a: &Entry, b: &Entry, ma: Option<&crate::fs::Meta>, mb: Option<&crate::fs::Meta>, sort: Column, desc: bool) -> Ordering {
     // Primero el grupo (secciones de "Este equipo"), después carpetas arriba, en cualquier orden.
     a.group.cmp(&b.group).then_with(|| b.is_dir.cmp(&a.is_dir)).then_with(|| {
         let ord = match sort {
@@ -470,6 +498,7 @@ fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
             Column::Size => a.size.cmp(&b.size),
             Column::Attributes => attr_letters(a.attrs).cmp(&attr_letters(b.attrs)),
             Column::Folder => format::caseless_cmp(&parent_of(a), &parent_of(b)),
+            col => meta::meta_cmp(col, ma, mb),
         }
         .then_with(|| format::natural_cmp(&a.sort_key, &b.sort_key));
         if desc { ord.reverse() } else { ord }
@@ -561,6 +590,10 @@ impl FileList {
         let focus_entry = self.focused_index();
         let start = self.entries.len() as u32;
         self.selected.extend(std::iter::repeat_n(false, batch.len()));
+        self.meta.resize(start as usize, None);
+        self.meta_asked.resize(start as usize, false);
+        self.meta.extend(std::iter::repeat_n(None, batch.len()));
+        self.meta_asked.extend(std::iter::repeat_n(false, batch.len()));
         self.entries.extend(batch);
 
         // Primero los filtros por columna (ver `filters`); después se ordena y se agrupa.
@@ -568,12 +601,15 @@ impl FileList {
         let mut new: Vec<u32> = (start..self.entries.len() as u32)
             .filter(|&i| {
                 let e = &self.entries[i as usize];
-                self.shows(e) && self.passes_filters(e, now)
+                self.shows(e) && self.passes_filters(i as usize, now)
             })
             .collect();
-        let entries = &self.entries;
+        let (entries, metas, enabled) = (&self.entries, &self.meta, self.meta_enabled);
         let (sort, desc) = (self.sort, self.descending);
-        let cmp = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], sort, desc);
+        let cmp = |a: &u32, b: &u32| {
+            let (a, b) = (*a as usize, *b as usize);
+            compare(&entries[a], &entries[b], meta::meta_at(metas, enabled, a), meta::meta_at(metas, enabled, b), sort, desc)
+        };
         new.sort_unstable_by(cmp);
 
         let old = std::mem::take(&mut self.order);
@@ -604,6 +640,7 @@ impl FileList {
         let focus_name = self.focused_index().map(|i| self.entries[i].name.clone());
         self.selected = entries.iter().map(|e| selected.contains(&e.name)).collect();
         self.entries = entries;
+        self.meta_from_cache();
         // Los grupos se vuelven a calcular para los elementos nuevos.
         self.entry_keys.clear();
         let focus = focus_name.and_then(|n| self.entries.iter().position(|e| e.name == n));
@@ -758,7 +795,7 @@ impl FileList {
     /// Filtra ocultos y filtros por columna, ordena, agrupa y reubica el foco en `focus_entry`.
     fn rebuild(&mut self, focus_entry: Option<usize>) {
         let now = self.filter_now();
-        let shown: Vec<bool> = self.entries.iter().map(|e| self.shows(e) && self.passes_filters(e, now)).collect();
+        let shown: Vec<bool> = self.entries.iter().enumerate().map(|(i, e)| self.shows(e) && self.passes_filters(i, now)).collect();
         self.order = (0..self.entries.len() as u32).filter(|&i| shown[i as usize]).collect();
         // Lo que queda fuera se deselecciona para no operar sobre lo que no se ve.
         for (s, &v) in self.selected.iter_mut().zip(&shown) {
@@ -766,7 +803,11 @@ impl FileList {
         }
 
         let (entries, sort, desc) = (&self.entries, self.sort, self.descending);
-        self.order.sort_unstable_by(|&a, &b| compare(&entries[a as usize], &entries[b as usize], sort, desc));
+        let (metas, enabled) = (&self.meta, self.meta_enabled);
+        self.order.sort_unstable_by(|&a, &b| {
+            let (a, b) = (a as usize, b as usize);
+            compare(&entries[a], &entries[b], meta::meta_at(metas, enabled, a), meta::meta_at(metas, enabled, b), sort, desc)
+        });
         self.regroup();
         self.refresh_filter_menu();
 
@@ -1161,6 +1202,8 @@ impl FileList {
             Column::Extension => extension_of(e).to_string(),
             Column::Attributes => attr_letters(e.attrs),
             Column::Folder => relative_folder(root, e),
+            // Los metadatos no son del elemento (ver `meta::meta_text`).
+            Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => String::new(),
             Column::Size => match (e.is_dir, e.modified) {
                 (true, 0) if e.size > 0 => format::size_short(e.size),
                 (true, _) => String::new(),
@@ -1179,7 +1222,14 @@ impl FileList {
         let col = self.columns[index].col;
         // Solo se miden los textos más largos: medir cada fila de una carpeta enorme sería lento.
         let root = self.search_root.as_deref();
-        let mut texts: Vec<String> = self.visible.iter().map(|&v| Self::cell_text(col, &self.entries[v as usize], root, self.show_extensions)).collect();
+        let mut texts: Vec<String> = self
+            .visible
+            .iter()
+            .map(|&v| {
+                let i = v as usize;
+                if col.is_meta() { meta::meta_text(col, self.meta_of(i)) } else { Self::cell_text(col, &self.entries[i], root, self.show_extensions) }
+            })
+            .collect();
         texts.sort_unstable_by_key(|t| std::cmp::Reverse(t.chars().count()));
         texts.dedup();
         let widest = texts.iter().take(40).map(|t| measure(t, false)).fold(0.0, f32::max);
@@ -2151,6 +2201,12 @@ impl FileList {
                         Column::Extension => p.text(FontId::Ui, extension_of(e), cell, th.text_secondary),
                         Column::Attributes => p.text(FontId::Ui, &attr_letters(e.attrs), cell, th.text_secondary),
                         Column::Folder => p.text(FontId::Ui, &relative_folder(self.search_root.as_deref(), e), cell, th.text_secondary),
+                        Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => {
+                            let text = meta::meta_text(col, self.meta_of(idx));
+                            if !text.is_empty() {
+                                p.text(FontId::Ui, &text, cell, th.text_secondary);
+                            }
+                        }
                         Column::Size => {
                             let s = match (e.is_dir, e.modified) {
                                 // Unidades (sin fecha): capacidad total.

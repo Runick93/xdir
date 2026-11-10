@@ -19,10 +19,10 @@ use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
-use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
+use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
 use xdir_core::shell::{Entry, Item};
 use xdir_core::typed::MAX as TYPED_MAX;
 
@@ -565,6 +565,15 @@ impl Overlays for Win32Overlays {
     }
 }
 
+/// Metadatos de archivos: provisorio, responde vacío hasta que se lean de `IPropertyStore`.
+struct Win32Metadata;
+
+impl Metadata for Win32Metadata {
+    fn request(&self, req: MetadataRequest) {
+        req.answer_empty();
+    }
+}
+
 /// Instala los servicios de Windows en el registro del núcleo. El ayudante elevado de xtree
 /// (`--xtree-mft`) sale antes de llegar acá: no usa servicios.
 pub fn install() {
@@ -576,6 +585,7 @@ pub fn install() {
         shell: Box::new(Win32Shell),
         file_system: Box::new(Win32FileSystem),
         overlays: Box::new(Win32Overlays),
+        metadata: Box::new(Win32Metadata),
     });
 }
 

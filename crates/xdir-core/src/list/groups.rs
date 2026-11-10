@@ -8,10 +8,7 @@ use crate::geom::{Rect, rect};
 use crate::paint::{FontId, Painter};
 pub use crate::sys::LocalNow;
 
-/// Metadatos leídos de un elemento (dimensiones, duración, autor…). Provisorio: lo completa la
-/// tarea de las columnas nuevas; por ahora ninguna columna de metadatos agrupa.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Meta;
+pub use crate::fs::Meta;
 
 /// Grupo de un elemento: `order` ordena los grupos (después, el nombre); `label` es lo que se
 /// muestra y lo que se guarda como grupo plegado.
@@ -29,17 +26,24 @@ pub const PINNED_LAST: i64 = 1000;
 
 /// Criterios de «Agrupar por», en el orden del menú y de `Command::GroupBy`; el último es
 /// «(Ninguno)».
-pub const GROUPINGS: [Option<Column>; 6] =
-    [Some(Column::Name), Some(Column::Modified), Some(Column::Created), Some(Column::Type), Some(Column::Size), None];
+pub const GROUPINGS: [Option<Column>; 8] = [
+    Some(Column::Name),
+    Some(Column::Modified),
+    Some(Column::Created),
+    Some(Column::Type),
+    Some(Column::Size),
+    Some(Column::Dimensions),
+    Some(Column::Duration),
+    None,
+];
 
 fn key(order: i64, label: &str) -> GroupKey {
     GroupKey { order, label: label.to_string() }
 }
 
-/// Grupo de `e` según la columna `col`. `meta` son los metadatos leídos del elemento (si los
-/// hay) y `now` la fecha de hoy en hora local. Pura.
+/// Grupo de `e` según la columna `col`. `meta` son los metadatos leídos del elemento (`None`:
+/// todavía no llegaron, «Leyendo…») y `now` la fecha de hoy en hora local. Pura.
 pub fn group_key(col: Column, e: &Entry, meta: Option<&Meta>, now: LocalNow) -> GroupKey {
-    let _ = meta;
     match col {
         Column::Name => name_group(&e.sort_key),
         Column::Modified => date_group(e.modified, now),
@@ -49,6 +53,7 @@ pub fn group_key(col: Column, e: &Entry, meta: Option<&Meta>, now: LocalNow) -> 
         Column::Extension => value_group(&extension_of(e).to_uppercase()),
         Column::Attributes => value_group(&attr_letters(e.attrs)),
         Column::Folder => value_group(&parent_of(e)),
+        Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => super::meta::meta_group(col, meta),
     }
 }
 
@@ -307,15 +312,21 @@ impl FileList {
         }
         // La fecha de hoy solo hace falta para las fechas.
         let now = if natural_descending(col) { crate::sys::env().local_now() } else { LocalNow::from_unix(0, 0) };
-        for e in &self.entries[self.entry_keys.len()..] {
-            let k = group_key(col, e, None, now);
-            let n = self.key_table.len() as u32;
-            let i = *self.key_index.entry(k.clone()).or_insert(n);
-            if i == n {
-                self.key_table.push(k);
-            }
-            self.entry_keys.push(i);
+        for i in self.entry_keys.len()..self.entries.len() {
+            let k = group_key(col, &self.entries[i], self.meta_of(i), now);
+            let id = self.intern_key(k);
+            self.entry_keys.push(id);
         }
+    }
+
+    /// Índice del grupo en `key_table` (lo agrega si es nuevo).
+    pub(super) fn intern_key(&mut self, k: GroupKey) -> u32 {
+        let n = self.key_table.len() as u32;
+        let i = *self.key_index.entry(k.clone()).or_insert(n);
+        if i == n {
+            self.key_table.push(k);
+        }
+        i
     }
 
     /// Arma lo que se ve a partir de `order` (elementos que pasan los filtros, ya ordenados):

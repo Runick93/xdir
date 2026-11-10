@@ -222,9 +222,11 @@ impl App {
         views.push(Entry::Sep);
         views.push(item("Usar esta vista en todas las carpetas", Command::ApplyViewToAll, true, false));
         views.push(item("Restablecer la vista de esta carpeta", Command::ResetFolderView, true, false));
+        // Las columnas de metadatos, solo si están a la vista (son muchas y casi siempre vacías).
         let sorts = list::COLUMNS
             .iter()
             .enumerate()
+            .filter(|(_, c)| !c.0.is_meta() || list.columns.iter().any(|s| s.col == c.0))
             .map(|(i, &(col, title, ..))| item(title, Command::SortBy(i as u8), true, col == list.sort))
             .collect();
         // «Agrupar por»: los criterios con el título de su columna y «(Ninguno)».

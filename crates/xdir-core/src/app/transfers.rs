@@ -810,9 +810,19 @@ impl App {
         let pairs: Vec<_> = v.errors.iter().filter(|e| e.retry).map(|e| (e.src.clone(), e.dst.clone())).collect();
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
         let restore = self.transfers.meta.get(&id).is_some_and(|m| m.restore);
+        let roots = v.route.sources.clone();
         self.forget_job(id);
         let spec = if restore {
-            JobSpec::Restore { items: pairs.into_iter().map(|(src, _)| src).collect() }
+            // Lo de adentro de una carpeta devuelta no tiene lugar original propio: se devuelve
+            // otra vez esa carpeta (lo elegido en la Papelera que la contiene).
+            let mut items: Vec<PathBuf> = Vec::new();
+            for (src, _) in pairs {
+                let top = roots.iter().find(|r| src.starts_with(r)).cloned().unwrap_or(src);
+                if !items.contains(&top) {
+                    items.push(top);
+                }
+            }
+            JobSpec::Restore { items }
         } else {
             JobSpec::Retry { moving, pairs }
         };

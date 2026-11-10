@@ -717,3 +717,35 @@ fn eject_finds_jobs_on_the_volume_by_identity() {
     assert!(!f.exists(&p("/app-ejid-enlace/d/otro.txt")));
     assert!(!f.exists(&p("/app-ejid-enlace/d/grande.bin")));
 }
+
+#[test]
+fn retry_of_a_restored_folder_child_restores_its_folder() {
+    // Ronda 2: algo de adentro de una carpeta devuelta que falló: «Reintentar» devuelve esa
+    // carpeta de la Papelera (lo de adentro no tiene lugar original propio).
+    let f = fake();
+    f.add_file(&p("/app-rc/.Trash/X/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-rc/.Trash/X/b.txt"), b"b".to_vec());
+    f.set_trash_origin(&p("/app-rc/.Trash/X"), &p("/app-rc/Docs/X"));
+    f.add_dir(&p("/app-rc/Docs/X"));
+    f.fail(&p("/app-rc/Docs/X/b.txt"), ErrKind::InUse, 1);
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(JobSpec::Restore { items: vec![p("/app-rc/.Trash/X")] });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.state == JobState::Conflict) || idle(a));
+    if a.jobs().iter().any(|j| j.state == JobState::Conflict) {
+        std::thread::sleep(Duration::from_millis(450));
+        a.answer_job(id, Answer { choice: Choice::Merge, all: false });
+    }
+    wait(&mut a, idle);
+    let errs = a.jobs().iter().find(|j| j.id == id).map(|j| j.errors.clone()).unwrap_or_default();
+    assert!(errs.iter().any(|e| e.src == p("/app-rc/.Trash/X/b.txt")), "{errs:?}");
+    a.take_started();
+    a.retry_job(id);
+    assert_eq!(a.take_started(), vec![JobSpec::Restore { items: vec![p("/app-rc/.Trash/X")] }]);
+    // La carpeta ya está (con a.txt): se combina y llega b.txt.
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.state == JobState::Conflict));
+    std::thread::sleep(Duration::from_millis(450));
+    let again = a.jobs()[0].id;
+    a.answer_job(again, Answer { choice: Choice::Merge, all: false });
+    wait(&mut a, idle);
+    assert_eq!(f.contents(&p("/app-rc/Docs/X/b.txt")).unwrap(), b"b");
+}

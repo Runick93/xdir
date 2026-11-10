@@ -4,6 +4,8 @@
 
 pub use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 
+mod prims;
 mod win32;
+pub(crate) use self::prims::WinCopyPrims;
 pub use self::win32::item;
 pub(crate) use self::win32::spawn as spawn_native;

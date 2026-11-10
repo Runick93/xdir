@@ -15,7 +15,7 @@ use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::Win32::UI::Shell::{
-    BHID_SFUIObject, CMINVOKECOMMANDINFO, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
+    BHID_SFUIObject, CMINVOKECOMMANDINFO, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_SILENT,
     FOF_RENAMEONCOLLISION, FOFX_RECYCLEONDELETE, FileOperation, IContextMenu, IFileOperation,
     IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem, SHCreateItemFromParsingName,
     SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
@@ -199,7 +199,7 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
     Ok(OpResult { undo: None, focus, rename_after: false, error: None, ..Default::default() })
 }
 
-fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
+pub(super) fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
     unsafe {
         let it: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(parsing_name), None)?;
         let menu: IContextMenu = it.BindToHandler(None, &BHID_SFUIObject)?;
@@ -216,6 +216,27 @@ fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
         let _ = DestroyMenu(hmenu);
         result
     }
+}
+
+/// Manda un elemento a la Papelera sin diálogos (para el motor de copia: lo reemplazado). Devuelve
+/// su nombre de análisis dentro de la Papelera (lo que usa `restore_from_recycle_bin`). COM tiene
+/// que estar iniciado en el hilo.
+pub(super) fn recycle_one(path: &Path) -> Result<String> {
+    let fo: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
+    let recorder: IFileOperationProgressSink = Recorder::default().into();
+    unsafe {
+        fo.Advise(&recorder)?;
+        fo.SetOperationFlags(FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI)?;
+        fo.DeleteItem(&item(path)?, None)?;
+        fo.PerformOperations()?;
+        if fo.GetAnyOperationsAborted().map(|b| b.as_bool()).unwrap_or(false) {
+            return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+        }
+    }
+    recorder_log(&recorder)
+        .into_iter()
+        .find_map(|r| r.created)
+        .ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))
 }
 
 pub fn item(path: &Path) -> Result<IShellItem> {

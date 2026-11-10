@@ -484,6 +484,11 @@ impl Pane {
         self.chevrons.get(i).cloned()
     }
 
+    /// Dónde se dibujó la miga `i`.
+    pub fn crumb_rect(&self, i: usize) -> Option<Rect> {
+        self.crumbs.get(i).map(|(r, _)| *r)
+    }
+
     pub fn crumb(&self, i: usize) -> Option<Location> {
         self.crumbs.get(i).map(|(_, l)| l.clone())
     }

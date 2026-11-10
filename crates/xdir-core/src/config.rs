@@ -101,8 +101,9 @@ pub struct Config {
     /// Los problemas de `[atajos]`, como se muestran arriba de la página Atajos
     /// («config.toml, línea 12: tecla desconocida «Hiper»»); también están en `errors`.
     pub key_errors: Vec<String>,
-    /// Cuántas líneas activas tiene `[atajos]` (los atajos propios; «Restablecer todos» las quita).
-    pub own_shortcuts: usize,
+    /// Las acciones con línea propia en `[atajos]` (los atajos propios; «Restablecer todos» las
+    /// quita). Se cuentan acciones, no escrituras.
+    pub own_shortcut_ids: std::collections::BTreeSet<String>,
     /// Cuántas de `colors` son del usuario (van primero; el resto son las de fábrica).
     pub own_colors: usize,
     /// Fecha del archivo leído, para saber si cambió.
@@ -111,7 +112,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, errors: Vec::new(), key_errors: Vec::new(), own_shortcuts: 0, own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
     }
 }
 
@@ -209,6 +210,11 @@ impl Config {
         modified_time() != self.modified
     }
 
+    /// Cuántos atajos propios hay (acciones con línea en `[atajos]`).
+    pub fn own_shortcuts(&self) -> usize {
+        self.own_shortcut_ids.len()
+    }
+
     /// Toma la fecha de `other` (lo que se acaba de escribir), así la escritura propia no cuenta
     /// como un cambio de afuera.
     pub fn take_modified(&mut self, other: &Config) {
@@ -235,7 +241,7 @@ impl Config {
                     }
                 }
                 "atajos" => {
-                    c.own_shortcuts += section.entries.len();
+                    c.own_shortcut_ids.extend(section.entries.iter().map(|e| e.key.clone()));
                     let before = c.errors.len();
                     let error_lines: Vec<usize> = doc.errors.iter().map(|(l, _)| *l).filter(|l| *l > section.line && section_end(&doc, section) > *l).collect();
                     for e in &section.entries {

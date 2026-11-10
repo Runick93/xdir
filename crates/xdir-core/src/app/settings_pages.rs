@@ -27,7 +27,15 @@ pub(super) struct ExtraPage {
     pub click: fn(&mut App, f32, f32) -> bool,
     /// Terminó la edición de un campo propio de la página (`true`: con Enter); `true` si era suyo.
     pub field_done: fn(&mut App, TextBox, bool) -> bool,
+    /// Tab en un campo propio (`true`: con Shift, hacia atrás); `true` si era suyo.
+    pub field_tab: fn(&mut App, TextBox, bool) -> bool,
 }
+
+// Contrato de los campos de una página extra: la página crea la caja con
+// `host.text_create(TextKind::Field, …)` y la anota en `App::settings_field`; `field_done` y
+// `field_tab` reciben esa caja. Si la configuración deja de verse, la `App` la destruye y deja
+// `settings_field` en `None` (la página no tiene que hacerlo). `draw` solo dibuja: no abre cajas
+// ni lanza trabajos.
 
 /// Las páginas extra, en el orden en que aparecen después de su sección.
 pub(super) const PAGES: &[ExtraPage] = &[];

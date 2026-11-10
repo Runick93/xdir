@@ -318,8 +318,13 @@ impl App {
                         self.host.capture_mouse();
                         self.drag = Drag::Button(i, b);
                     }
-                    // Las migas de la configuración no llevan a otro lado.
-                    PaneHit::Crumb(_) if self.panes[i].tab().is_settings() => {}
+                    // Las migas de la configuración llevan a la sección (con una búsqueda, la
+                    // terminan).
+                    PaneHit::Crumb(_) if self.panes[i].tab().is_settings() => {
+                        if !self.panes[i].tab().search_query().is_empty() {
+                            self.clear_filter(i);
+                        }
+                    }
                     PaneHit::Crumb(k) => {
                         if let Some(loc) = self.panes[i].crumb(k) {
                             self.panes[i].tab_mut().navigate(hwnd, &tx, loc);
@@ -536,6 +541,8 @@ impl App {
 
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
+        // Una página extra de la configuración dibuja su hover con la posición del mouse.
+        redraw |= matches!(hover, Hit::Settings(_, crate::settings::SettingsHit::Extra));
         redraw |= self.update_tooltip(hover, x, y);
         // Con xtree abierto el mouse es de la vista: los paneles y el árbol de abajo no se resaltan.
         if self.xtree_open {

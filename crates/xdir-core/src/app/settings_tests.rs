@@ -843,7 +843,7 @@ fn extra_page_items_searchable() {
     fn field(_: &mut App, _: TextBox, _: bool) -> bool {
         false
     }
-    let pages = [ExtraPage { id: "red", title: "Red", after: Section::Keys, search: items, draw, click, field_done: field }];
+    let pages = [ExtraPage { id: "red", title: "Red", after: Section::Keys, search: items, draw, click, field_done: field, field_tab: field }];
     let a = app();
     let (counts, results) = a.settings_results("smb", &pages);
     let order: Vec<PageId> = counts.iter().map(|(p, _)| *p).collect();
@@ -920,4 +920,74 @@ fn typing_in_search_cancels_recording() {
     a.settings_part(0, "duplicar", PART_EDIT, 0.0);
     a.begin_filter(0);
     assert!(!a.capturing_keys());
+}
+
+/// M-4: el mouse que se mueve dentro de una página extra pide otro cuadro (la página dibuja su
+/// hover con la posición).
+#[test]
+fn hover_inside_extra_page_redraws() {
+    let (mut a, host) = settings_app(Section::Appearance);
+    let content = a.settings_view(0).unwrap().content;
+    if let Some(v) = a.settings_view_mut(0) {
+        v.hits.insert(0, (content, SettingsHit::Extra));
+    }
+    let (x, y) = (content.left + 20.0, content.top + 20.0);
+    a.on_mouse_move(x, y);
+    let before = host.invalidations();
+    a.on_mouse_move(x + 5.0, y + 5.0);
+    assert!(host.invalidations() > before);
+}
+
+/// M-5: el campo de una página extra se suelta (y se destruye) cuando la configuración deja de
+/// verse; sin él, `WM_APP_FIELD_DONE` sigue a lo de siempre.
+#[test]
+fn settings_field_released_when_hidden() {
+    let (mut a, host) = settings_app(Section::Appearance);
+    let b = host.text_create(TextKind::Field, geom::rect(0.0, 0.0, 10.0, 10.0), "x", &a.theme).unwrap();
+    a.settings_field = Some(b);
+    a.run_command(Command::NewTab);
+    assert_eq!(a.settings_field, None);
+    assert!(host.text_boxes_of(TextKind::Field).is_empty());
+    assert!(!a.settings_field_done(true));
+    assert!(!a.settings_field_tab(false));
+}
+
+/// M-6: las migas llevan a la sección (con una búsqueda, la terminan).
+#[test]
+fn crumb_click_goes_to_section() {
+    let (mut a, _) = settings_app(Section::Tree);
+    search(&mut a, "oscuro");
+    a.paint();
+    let r = a.panes[0].crumb_rect(1).expect("miga de la sección");
+    a.on_left_down(r.left + 2.0, r.top + 2.0, false);
+    assert_eq!(a.panes[0].tab().search_query(), "");
+    assert_eq!(page(&a), PageId::Builtin(Section::Tree));
+}
+
+/// M-7: F10 (que en Windows llega como tecla de sistema, sin Alt) se graba como F10.
+#[test]
+fn f10_alone_is_not_alt() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+    FakeEnv::hold_keys(&[]);
+    a.on_alt_key(Key(0x79));
+    assert_eq!(a.config.keymap.combos(Command::Duplicate), [combo("F10")]);
+}
+
+/// M-8: la cantidad de atajos propios cuenta comandos, no escrituras.
+#[test]
+fn own_shortcuts_counted_once() {
+    let (mut a, host) = keys_app();
+    for k in [0x72u16, 0x73, 0x74] {
+        a.settings_part(0, "duplicar", PART_EDIT, 0.0);
+        press(&mut a, &[], Key(k));
+    }
+    assert_eq!(a.config.own_shortcuts(), 1);
+    a.settings_part(0, "duplicar", PART_RESET, 0.0);
+    assert_eq!(a.config.own_shortcuts(), 0);
+    a.settings_part(0, "duplicar", PART_CHIP_REMOVE, 0.0);
+    wait_config(&mut a);
+    host.set_answer(Some(false));
+    a.settings_part(0, "restablecer_atajos", 0, 0.0);
+    assert!(host.questions().last().unwrap().1.ends_with("Se borran 1 atajos propios."));
 }

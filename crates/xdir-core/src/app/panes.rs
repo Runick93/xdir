@@ -430,6 +430,7 @@ impl App {
         // Cambió la pestaña a la vista (o el layout): Renombrar varios se recalcula o se cierra,
         // y una grabación de atajo que ya no se ve termina.
         self.end_hidden_recording();
+        self.release_hidden_settings_field();
         self.refresh_rename_many();
         self.sync_rename_boxes();
     }

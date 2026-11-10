@@ -617,6 +617,21 @@ impl App {
         PAGES.iter().any(|p| (p.field_done)(self, b, commit))
     }
 
+    /// Tab en un campo (`WM_APP_FIELD_TAB`): si es de una página extra, lo atiende ella.
+    pub(super) fn settings_field_tab(&mut self, back: bool) -> bool {
+        let Some(b) = self.settings_field else { return false };
+        PAGES.iter().any(|p| (p.field_tab)(self, b, back))
+    }
+
+    /// Si la configuración ya no se ve, el campo abierto de su página extra se destruye (así un
+    /// `WM_APP_FIELD_DONE` de otra caja no le llega con una caja vieja).
+    pub(super) fn release_hidden_settings_field(&mut self) {
+        let visible = self.shown_panes().iter().any(|&p| self.panes[p].tab().is_settings());
+        if !visible && let Some(b) = self.settings_field.take() {
+            self.host.text_destroy(b);
+        }
+    }
+
     /// La página de la pestaña Configuración para la sesión.
     pub(super) fn settings_session_page(&self) -> Option<String> {
         let (pane, index) = self.settings_tab()?;
@@ -898,7 +913,11 @@ impl App {
                 edits.push(self.shortcut_line(d));
             }
         }
-        self.config.own_shortcuts += edits.len();
+        for e in &edits {
+            if let ConfigEdit::Set { key, .. } = e {
+                self.config.own_shortcut_ids.insert(key.clone());
+            }
+        }
         self.edit_config(edits);
     }
 
@@ -913,19 +932,20 @@ impl App {
         let factory = Keymap::default().combos(c);
         let free: Vec<Combo> = factory.into_iter().filter(|k| self.config.keymap.owner(*k).is_none_or(|o| o == c)).collect();
         self.config.keymap.set(c, &free);
+        self.config.own_shortcut_ids.remove(spec_id(c));
         self.edit_config(vec![ConfigEdit::Remove { section: "atajos", key: spec_id(c).to_string() }]);
     }
 
     /// «Restablecer todos»: pregunta y quita todas las líneas activas de `[atajos]`.
     fn reset_all_shortcuts(&mut self) {
-        let n = self.config.own_shortcuts;
+        let n = self.config.own_shortcuts();
         let text = format!("¿Volver todos los atajos a los de fábrica? Se borran {n} atajos propios.");
         if !self.host.ask_yes_no("Atajos", &text) {
             return;
         }
         self.set_recording(None);
         self.config.keymap = Keymap::default();
-        self.config.own_shortcuts = 0;
+        self.config.own_shortcut_ids.clear();
         self.edit_config(vec![ConfigEdit::RemoveAll { section: "atajos" }]);
     }
 }

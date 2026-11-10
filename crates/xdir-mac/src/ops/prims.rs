@@ -8,7 +8,7 @@ use std::io;
 use std::os::macos::fs::MetadataExt as MacMetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use xdir_core::sys::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, VolumeInfo};
 
@@ -260,18 +260,10 @@ impl CopyPrims for MacCopyPrims {
         Ok(in_trash.to_string_lossy().into_owned())
     }
 
-    /// Adentro de la Papelera se le pone el nombre de `shown` si está libre (así se reconoce lo
-    /// que reemplazó); «Deshacer» lo devuelve igual, por la ruta que se devuelve acá.
-    fn trash_as(&self, p: &Path, shown: &Path) -> Result<String, CopyError> {
-        let in_trash = PathBuf::from(self.trash(p)?);
-        if let (Some(dir), Some(name)) = (in_trash.parent(), shown.file_name()) {
-            let named = dir.join(name);
-            if named != in_trash && self.rename_noreplace(&in_trash, &named).is_ok() {
-                return Ok(named.to_string_lossy().into_owned());
-            }
-        }
-        Ok(in_trash.to_string_lossy().into_owned())
-    }
+    // `trash_as` es el de siempre (`trash`): lo apartado queda en la Papelera con su nombre visible
+    // («informe (reemplazado).pdf»). No se renombra adentro: «Devolver» del Finder busca el lugar
+    // original por el nombre en el `.DS_Store` de la Papelera. «Deshacer» lo devuelve al nombre
+    // reemplazado (`untrash` renombra desde la Papelera al destino).
 
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {
         self.rename_noreplace(Path::new(in_trash), original)
@@ -283,6 +275,7 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use xdir_core::ops::Undo;
     use xdir_core::transfer::{Answer, Choice, Control, JobOutcome, JobSpec, Update, run};

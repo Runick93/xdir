@@ -43,6 +43,8 @@ pub(super) struct NetState {
     /// Fila de «Red» del clic derecho en curso.
     #[cfg(feature = "arbol")]
     pub tree_ctx: Option<crate::tree::NetRow>,
+    /// Credenciales pedidas por una pestaña (carpeta UNC): (pestaña, generación, navegación).
+    pub auth_pending: Vec<(usize, u64, u64)>,
     /// Conexión pedida desde el árbol (sin panel): su generación.
     pub tree_pending: Option<u64>,
     /// Las máquinas que llegan de `browse` (mientras corre).
@@ -132,7 +134,9 @@ impl App {
     pub(super) fn connect_for_tab(&mut self, tab_id: usize, path: &Path) {
         let Ok(addr) = Address::parse(&path.to_string_lossy()) else { return };
         let pane = self.panes.iter().position(|p| p.tabs.iter().any(|t| t.id == tab_id)).unwrap_or(self.active);
-        self.spawn_connect(pane, Some(tab_id), addr, ConnectOptions::default());
+        let nav = self.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == tab_id).map_or(0, |t| t.nav_id());
+        let generation = self.spawn_connect(pane, Some(tab_id), addr, ConnectOptions::default());
+        self.net.auth_pending.push((tab_id, generation, nav));
     }
 
     pub(super) fn on_net_places(&mut self, read: Option<(NetPlaces, Option<std::time::SystemTime>)>) {
@@ -177,9 +181,12 @@ impl App {
             return;
         }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        let auth_nav = self.net.auth_pending.iter().find(|(t, g, _)| *t == id && *g == generation).map(|e| e.2);
+        self.net.auth_pending.retain(|(t, g, _)| !(*t == id && *g == generation));
         let Some(t) = self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == id) else { return };
-        // La pestaña navegó mientras tanto: el resultado de la barra ya no le toca.
-        if from_bar && nav.is_some_and(|n| n != t.nav_id()) {
+        // La pestaña navegó mientras tanto: el resultado ya no le toca (ni recarga la carpeta nueva
+        // ni le apaga el pedido de credenciales).
+        if nav.or(auth_nav).is_some_and(|n| n != t.nav_id()) {
             self.redraw();
             return;
         }

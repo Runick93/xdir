@@ -1342,3 +1342,24 @@ fn bar_connect_dropped_when_tab_navigates() {
     wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
     assert_eq!(a.panes[0].tab().location, Location::Path(local));
 }
+
+/// M6: si la pestaña navegó mientras se pedían credenciales, el resultado no la recarga.
+#[test]
+fn auth_retry_ignored_after_navigation() {
+    let mut a = net_app();
+    let path = PathBuf::from(r"\\nas-r1auth\fotos");
+    FakeFileSystem::set_load_error(&path, Some("Acceso denegado (os error 1326)"));
+    FakeNetwork::set_connect("nas-r1auth", Ok(path.clone()));
+    FakeNetwork::hang("nas-r1auth", Duration::from_millis(150));
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(path.clone()));
+    wait_until(&mut a, |_| FakeNetwork::connects_to("nas-r1auth").len() == 1);
+    let local = tmp_dir("r1-auth-local");
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local.clone()));
+    wait_until(&mut a, |a| !a.panes[0].tab().loading);
+    let loads = FakeFileSystem::loads(&local);
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(FakeFileSystem::loads(&local), loads, "no recarga la carpeta nueva");
+    FakeFileSystem::set_load_error(&path, None);
+}

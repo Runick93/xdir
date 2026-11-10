@@ -76,9 +76,10 @@ pub enum Action {
 }
 
 /// Estado del escaneo para el indicador junto al botón «xtree» de la barra de estado.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum XtreeBadge {
     /// Sin escaneo, cancelado, o el resultado ya se vio en la vista: el botón de siempre.
+    #[default]
     Idle,
     /// Escaneando un volumen entero: porcentaje de avance.
     Progress(u8),
@@ -211,8 +212,8 @@ pub struct Xtree {
     /// El escaneo se cortó antes de terminar (`cancel`).
     scan_stopped: bool,
     /// Reescaneo con permisos (tecla A) después de un análisis terminado: cronómetro del análisis
-    /// anterior (inicio, duración), para volver a él si el escaneo elevado no trae árbol.
-    before_elevate: Option<(Option<Instant>, Option<Duration>)>,
+    /// anterior (inicio, duración, ya visto), para volver a él si el escaneo elevado no trae árbol.
+    before_elevate: Option<(Option<Instant>, Option<Duration>, bool)>,
     /// Mayor porcentaje mostrado en este escaneo: no retrocede.
     pct_max: std::cell::Cell<u8>,
     /// Disco o carpeta elegida en el desplegable; se analiza al pulsar «Analizar».
@@ -402,8 +403,9 @@ impl Xtree {
         let t = fmt_elapsed(self.elapsed());
         if self.scan_stopped {
             format!("Detenido a los {t}")
-        } else if self.elevated_pending() {
-            // El ayudante elevado no informa bytes leídos: solo el cronómetro.
+        } else if self.elevated_pending() || (self.scanning && self.elevating.load(Ordering::Relaxed)) {
+            // El ayudante elevado no informa bytes leídos: solo el cronómetro (como el indicador,
+            // que gira).
             format!("Escaneando\u{2026} {t}")
         } else if self.scanning {
             match self.percent() {
@@ -546,10 +548,12 @@ impl Xtree {
         if !self.elevating.load(Ordering::Relaxed)
             && self.elevated_pending()
             && self.scan.result.lock().unwrap().is_none()
-            && let Some((started, elapsed)) = self.before_elevate.take()
+            && let Some((started, elapsed, seen)) = self.before_elevate.take()
         {
             self.scan_started = started;
             self.scan_elapsed = elapsed;
+            // Un resultado que ya se había visto no vuelve a aparecer como «terminado».
+            self.seen = seen;
         }
         // Avance: el mapa en vivo se recalcula con lo que lleva descubierto el escáner. También
         // llega cuando termina el escaneo elevado sin árbol: hay que repintar su aviso.
@@ -579,7 +583,7 @@ impl Xtree {
         // pedido de permisos) y, como el escáner ya no avisa, un hilo pide repintar cada 250 ms
         // mientras dure. Si el recorrido normal sigue, su tiempo ya incluye al ayudante.
         if !self.scanning && !self.scan_stopped && self.scan_elapsed.is_some() {
-            self.before_elevate = Some((self.scan_started, self.scan_elapsed));
+            self.before_elevate = Some((self.scan_started, self.scan_elapsed, self.seen));
             self.start_clock();
             let (elevating, cancel) = (self.elevating.clone(), self.scan.cancel.clone());
             let _ = std::thread::Builder::new().spawn(move || {
@@ -1647,5 +1651,43 @@ mod tests {
         assert_eq!(x.badge_tip().as_deref(), Some("Análisis completado en 1:23"));
         x.scan.progress.denied.store(458, Ordering::Relaxed);
         assert_eq!(x.badge_tip().as_deref(), Some("Análisis completado en 1:23 \u{B7} 458 carpetas sin permiso"));
+    }
+
+    /// Si el reescaneo con permisos falla, un resultado que ya se había visto no vuelve a
+    /// aparecer como «terminado»; mientras dura, el indicador gira.
+    #[test]
+    fn badge_stays_seen_after_refused_elevation() {
+        let mut x = scanning_since("raiz-elev-visto", 83);
+        finish(&mut x);
+        x.mark_seen();
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); None }), Action::Redraw);
+        assert!(matches!(x.badge(), XtreeBadge::Spinning(_)), "{:?}", x.badge());
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        assert!(x.on_message(x.scan.id, 0));
+        assert_eq!(x.state_text(), "Análisis completado en 1:23");
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+    }
+
+    /// Reescaneo con permisos durante el escaneo de un volumen entero: el estado de la vista,
+    /// como el indicador, sin porcentaje.
+    #[test]
+    fn elevating_during_volume_scan_hides_percent() {
+        crate::sys::testing::install_fakes();
+        crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
+        let mut x = scanning_since("disco-elevando", 42);
+        x.scan.progress.bytes.store(370, Ordering::Relaxed);
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 37 % \u{B7} 0:42");
+        lacking_permissions(&x);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert_eq!(x.elevate_with(move |_, _, _| { let _ = rx.recv(); None }), Action::Redraw);
+        assert_eq!(x.state_text(), "Escaneando\u{2026} 0:42");
+        assert!(matches!(x.badge(), XtreeBadge::Spinning(_)), "{:?}", x.badge());
+        tx.send(()).unwrap();
+        wait_elevated(&x);
+        x.cancel();
+        crate::sys::testing::FakeDiskScan::set_volume(None, false);
     }
 }

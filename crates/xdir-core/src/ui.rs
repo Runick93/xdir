@@ -16,7 +16,7 @@ const GEAR_W: f32 = 30.0;
 const GROUPS_W: f32 = 84.0;
 const XTREE_W: f32 = 74.0;
 /// Ancho del botón «xtree» con el porcentaje del escaneo («◔ 37 %  xtree»).
-const XTREE_WIDE_W: f32 = 99.0;
+const XTREE_WIDE_W: f32 = 105.0;
 /// Lado del indicador del escaneo de xtree.
 pub const BADGE: f32 = 14.0;
 const MIN_SPLIT: f32 = 0.15;
@@ -321,7 +321,7 @@ pub fn layout_at(w: f32, h: f32, x: f32, y: f32) -> Option<Layout> {
 }
 
 /// Estado de los botones de la barra de estado.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct StatusButtons {
     /// La rueda dentada está bajo el mouse o su panel abierto.
     pub gear_hot: bool,
@@ -331,12 +331,6 @@ pub struct StatusButtons {
     pub xtree_on: bool,
     /// Indicador del escaneo de xtree junto al botón.
     pub xtree: XtreeBadge,
-}
-
-impl Default for StatusButtons {
-    fn default() -> Self {
-        Self { gear_hot: false, groups_hot: false, xtree_hot: false, xtree_on: false, xtree: XtreeBadge::Idle }
-    }
 }
 
 pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) {
@@ -370,8 +364,8 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
         XtreeBadge::Progress(pct) => {
             // El anillo reemplaza al ícono del mapa; el porcentaje va entre el anillo y «xtree».
             draw_xtree_badge(p, rect(xtree.left + 6.0, badge_top, xtree.left + 6.0 + BADGE, badge_top + BADGE), badge);
-            p.text(FontId::Ui, &format!("{pct} %"), rect(xtree.left + 25.0, xtree.top, xtree.left + 57.0, xtree.bottom), color);
-            p.text(FontId::Ui, "xtree", rect(xtree.left + 60.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
+            p.text(FontId::Ui, &format!("{pct} %"), rect(xtree.left + 26.0, xtree.top, xtree.left + 63.0, xtree.bottom), color);
+            p.text(FontId::Ui, "xtree", rect(xtree.left + 67.0, xtree.top, xtree.right - 6.0, xtree.bottom), color);
         }
         _ => {
             draw_xtree_badge(p, rect(xtree.left + 7.0, badge_top, xtree.left + 7.0 + BADGE, badge_top + BADGE), badge);
@@ -667,7 +661,7 @@ mod tests {
     #[test]
     fn status_bar_draws_ring_and_widens_button() {
         let (p, r) = status_with(XtreeBadge::Progress(37));
-        assert_eq!(r.right - r.left, 99.0);
+        assert_eq!(r.right - r.left, 105.0);
         let texts = p.texts();
         assert!(texts.iter().any(|(_, s, t)| s == "37 %" && t.left >= r.left && t.right <= r.right), "{texts:?}");
         assert!(texts.iter().any(|(_, s, t)| s == "xtree" && t.left >= r.left && t.right <= r.right));

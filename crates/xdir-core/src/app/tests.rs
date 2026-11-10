@@ -2257,3 +2257,28 @@ fn scan_notices_repaint_status_with_view_closed() {
     assert_eq!(a.xtree.as_ref().unwrap().badge(), XtreeBadge::Idle);
     a.on_closing();
 }
+
+/// Con la vista cerrada, un aviso que no cambia el indicador (mismo porcentaje) no repinta.
+#[test]
+fn scan_notice_without_badge_change_does_not_repaint() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
+    let dir = xtree_dir("sin-cambio");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
+    click_xtree_button(&mut a);
+    click_xtree_button(&mut a);
+    assert_eq!(a.xtree_badge(), XtreeBadge::Progress(0));
+    let id = a.xtree.as_ref().unwrap().scan_id();
+    let before = host.invalidations();
+    assert!(a.on_app_message(crate::xtree::scan::WM_APP_XTREE, id, 0));
+    assert_eq!(host.invalidations(), before, "repintó sin cambios en el indicador");
+    // Con la vista abierta, cada aviso repinta (el mapa en vivo).
+    click_xtree_button(&mut a);
+    let before = host.invalidations();
+    assert!(a.on_app_message(crate::xtree::scan::WM_APP_XTREE, id, 0));
+    assert!(host.invalidations() > before);
+    crate::sys::testing::FakeDiskScan::set_volume(None, false);
+    a.on_closing();
+}

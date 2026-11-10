@@ -68,9 +68,12 @@ impl App {
                 self.redraw();
             }
             crate::xtree::scan::WM_APP_XTREE => {
-                // Con la vista cerrada también se repinta: el indicador de la barra de estado sigue
-                // el escaneo con estos avisos (cada 250 ms), sin un temporizador propio.
+                // Con la vista cerrada también se repinta si cambió el indicador de la barra de
+                // estado (o su cartel está a la vista): sigue el escaneo con estos avisos (cada
+                // 250 ms), sin un temporizador propio.
                 let open = self.xtree_open;
+                let before = self.xtree_badge();
+                let tip_shown = self.tip.is_some_and(|t| t.hit == Hit::Xtree && t.state == tooltip::TipState::Visible);
                 if let Some(v) = &mut self.xtree
                     && v.on_message(wparam, lparam)
                 {
@@ -78,7 +81,9 @@ impl App {
                     if open {
                         v.mark_seen();
                     }
-                    self.redraw();
+                    if open || tip_shown || self.xtree_badge() != before {
+                        self.redraw();
+                    }
                 }
             }
             WM_APP_OP_DONE => {

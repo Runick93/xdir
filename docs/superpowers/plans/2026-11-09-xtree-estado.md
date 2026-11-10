@@ -15,7 +15,7 @@
 - `xdir-core` sin dependencias ni `cfg` de sistema en producción; tests con `install_fakes()`, `FakeHost`, `FakeDiskScan`, `RecordingPainter`.
 - `cargo test -p xdir-core` (con y sin `--features arbol`), `cargo clippy -p xdir-core --all-targets` sin warnings nuevos, `cargo check -p xdir-mac`; Linux por Docker.
 - Textos exactos del cartel: «Escaneando / · 37 % · 0:42», «Escaneando ~/Proyectos · 0:12», «Análisis completado en 1:23», «Análisis completado en 1:23 · 458 carpetas sin permiso» (ruta como la muestra hoy la vista de xtree; tiempo con `fmt_elapsed`; porcentaje con `scan_percent`).
-- Medidas y colores del diseño: indicador 14×14; progreso = anillo en acento lleno según el %; giro = arco que avanza con cada aviso del escaneo (250 ms), sin repintado continuo extra; terminado = tilde en `ok`; aviso = ícono en `advertencia`. El botón de la barra se ensancha de 74 a 99 mientras muestra el indicador y el anillo reemplaza al ícono del mapa.
+- Medidas y colores del diseño: indicador 14×14; progreso = anillo en acento lleno según el %; giro = arco que avanza con cada aviso del escaneo (250 ms), sin repintado continuo extra; terminado = tilde en `ok`; aviso = ícono en `advertencia`. El botón de la barra se ensancha de 74 a 105 mientras muestra el indicador y el anillo reemplaza al ícono del mapa.
 - Terminado/aviso se ven hasta que se abre la vista de xtree; al abrirla, vuelve a `Idle`.
 - Castellano; Conventional Commits sin atribución a Claude.
 
@@ -41,7 +41,7 @@
   - `pub fn draw_xtree_badge(p: &dyn Painter, r: Rect, badge: XtreeBadge, theme…)` en `ui.rs` (seguir la firma de los otros dibujos de `ui.rs`).
   - `draw_status` recibe el `XtreeBadge` (reemplazar o complementar `xtree_on`; si la lista de parámetros crece, agrupar en un struct como se hizo con `PickerSwitches`).
 
-- [ ] **Step 1: Tests que fallan**: `badge_progress_while_scanning_volume` (FakeDiskScan con volumen de 1000 usados y 370 leídos → `Progress(37)`), `badge_spins_for_folder_scan` (carpeta sin volumen → `Spinning(_)` y la fase cambia entre avisos), `badge_done_until_view_opened` (terminado → `Done`; tras `mark_seen` → `Idle`), `badge_done_with_issues_when_denied` (carpetas sin permiso > 0 → `DoneWithIssues` y cartel «Análisis completado en 1:23 · 458 carpetas sin permiso» con el tiempo de FakeEnv), `badge_idle_after_cancel`, `badge_tip_texts` (los cuatro textos de Global Constraints), `status_bar_draws_ring_and_widens_button` (RecordingPainter: con `Progress(37)` el botón mide 99 y se dibuja «37 %»; con `Idle`, 74 y el ícono del mapa), `status_tooltip_uses_badge_tip`.
+- [ ] **Step 1: Tests que fallan**: `badge_progress_while_scanning_volume` (FakeDiskScan con volumen de 1000 usados y 370 leídos → `Progress(37)`), `badge_spins_for_folder_scan` (carpeta sin volumen → `Spinning(_)` y la fase cambia entre avisos), `badge_done_until_view_opened` (terminado → `Done`; tras `mark_seen` → `Idle`), `badge_done_with_issues_when_denied` (carpetas sin permiso > 0 → `DoneWithIssues` y cartel «Análisis completado en 1:23 · 458 carpetas sin permiso» con el tiempo de FakeEnv), `badge_idle_after_cancel`, `badge_tip_texts` (los cuatro textos de Global Constraints), `status_bar_draws_ring_and_widens_button` (RecordingPainter: con `Progress(37)` el botón mide 105 y se dibuja «37 %»; con `Idle`, 74 y el ícono del mapa), `status_tooltip_uses_badge_tip`.
 - [ ] **Step 2:** FAIL.
 - [ ] **Step 3:** Implementar.
 - [ ] **Step 4:** PASS + Global Constraints.

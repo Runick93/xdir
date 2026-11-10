@@ -82,6 +82,8 @@ pub enum Command {
     ResetFolderView,
     /// Quita los filtros por columna de la lista activa.
     ClearFilters,
+    /// Mostrar u ocultar la columna de vista previa (a la derecha de los paneles).
+    TogglePreview,
 }
 
 /// ¿La acción existe en esta compilación y en este sistema? (las experimentales dependen de una
@@ -183,6 +185,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),
     spec(Command::ToggleGroupBar, "barra_grupos", "Mostrar u ocultar la barra de grupos", &[]),
     spec(Command::OpenConfig, "abrir_configuracion", "Abrir la configuración (config.toml)", &[]),
+    spec(Command::TogglePreview, "vista_previa", "Mostrar u ocultar la vista previa", &["Alt+P"]),
     spec(Command::Xtree, "xtree", "Mapa de uso de disco (xtree)", &[]),
     spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),
@@ -477,6 +480,22 @@ mod tests {
         let spec = |c| ALL.iter().find(|s| s.command == c).unwrap();
         assert_eq!((spec(Command::SelectPattern).id, spec(Command::SelectPattern).name), ("seleccionar_patron", "Seleccionar por patrón…"));
         assert_eq!((spec(Command::DeselectPattern).id, spec(Command::DeselectPattern).name), ("deseleccionar_patron", "Deseleccionar por patrón…"));
+    }
+
+    /// La columna de vista previa: `vista_previa`, Alt+P (en macOS ⌥⌘P, porque ⇧⌘P es la paleta;
+    /// lo prueba la tabla de macOS), sin chocar con otro atajo.
+    #[test]
+    fn toggle_preview_command_and_shortcuts() {
+        install_fakes();
+        let s = ALL.iter().find(|s| s.id == "vista_previa").unwrap();
+        assert_eq!((s.command, s.name, s.default_keys), (Command::TogglePreview, "Mostrar u ocultar la vista previa", &["Alt+P"][..]));
+        let km = Keymap::default();
+        let c = parse_combo("Alt+P").unwrap();
+        assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(Command::TogglePreview));
+        assert_eq!(km.label(Command::TogglePreview), "Alt+P");
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Alt+P").unwrap()), "⌥⌘P");
+        let p = parse_combo("Ctrl+Shift+P").unwrap();
+        assert_eq!(km.lookup(Key(p.vk), p.ctrl, p.shift, p.alt), Some(Command::Palette));
     }
 
     /// Vistas Lista y Contenido: `Command::View(4)` y `(5)` (índices de `list::VIEWS`), con sus

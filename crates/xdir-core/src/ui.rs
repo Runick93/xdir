@@ -20,6 +20,15 @@ const XTREE_WIDE_W: f32 = 105.0;
 /// Lado del indicador del escaneo de xtree.
 pub const BADGE: f32 = 14.0;
 const MIN_SPLIT: f32 = 0.15;
+/// Ancho mínimo de un panel: prender o ensanchar la columna de vista previa nunca lo deja más
+/// angosto.
+pub const MIN_PANE_W: f32 = 280.0;
+/// Columna de vista previa: ancho al empezar, mínimo y máximo.
+pub const PREVIEW_W: f32 = 320.0;
+pub const PREVIEW_MIN_W: f32 = 240.0;
+pub const PREVIEW_MAX_W: f32 = 640.0;
+/// Botón de la columna de vista previa en la barra de estado.
+const PREVIEW_BTN_W: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layout {
@@ -86,9 +95,27 @@ impl Splits {
 }
 
 /// Área de los paneles (sin márgenes ni barra de estado). `left`: ancho que ocupa algo a la
-/// izquierda (el árbol de carpetas, si está).
-pub fn panes_area(w: f32, h: f32, left: f32, top: f32) -> Rect {
-    rect(GAP + left, top + GAP / 2.0, w - GAP, h - STATUSBAR_H)
+/// izquierda (el árbol de carpetas, si está); `right`, a la derecha (la columna de vista previa
+/// con su separación, si está).
+pub fn panes_area(w: f32, h: f32, left: f32, top: f32, right: f32) -> Rect {
+    rect(GAP + left, top + GAP / 2.0, w - GAP - right, h - STATUSBAR_H)
+}
+
+/// Columna de vista previa de `width` a la derecha de la ventana, desde `top` (el mismo alto que
+/// el árbol) hasta la barra de estado.
+pub fn preview_column_rect(w: f32, h: f32, top: f32, width: f32) -> Rect {
+    rect(w - GAP - width, top, w - GAP, h - STATUSBAR_H)
+}
+
+/// Ancho de la columna de vista previa para una ventana de `w` con `left` ocupado a la izquierda y
+/// `panes_across` paneles lado a lado: lo pedido entre `PREVIEW_MIN_W` y `PREVIEW_MAX_W`, sin dejar
+/// un panel por debajo de `MIN_PANE_W` (salvo que ni el mínimo entre: nunca menos de
+/// `PREVIEW_MIN_W`).
+pub fn clamp_preview_width(want: f32, w: f32, left: f32, panes_across: usize) -> f32 {
+    let n = panes_across.max(1) as f32;
+    // Márgenes: el de la izquierda, la separación con la columna y el de la derecha.
+    let room = w - GAP * 3.0 - left - n * MIN_PANE_W - (n - 1.0) * GAP;
+    want.clamp(PREVIEW_MIN_W, PREVIEW_MAX_W).min(room).max(PREVIEW_MIN_W)
 }
 
 /// Alto de la barra de pestañas de grupos (arriba de todo, solo si hay grupos guardados).
@@ -246,10 +273,35 @@ pub fn layout_buttons(w: f32, h: f32) -> Vec<(Layout, Rect)> {
         .collect()
 }
 
-/// Botón de grupos guardados, a la izquierda de los de layout.
-pub fn groups_rect(w: f32, h: f32) -> Rect {
+/// Botón de la columna de vista previa, 10 a la izquierda del primer botón de layout.
+pub fn preview_rect(w: f32, h: f32) -> Rect {
     let first = layout_buttons(w, h)[0].1;
-    rect(first.left - 10.0 - GROUPS_W, first.top, first.left - 10.0, first.bottom)
+    rect(first.left - 10.0 - PREVIEW_BTN_W, first.top, first.left - 10.0, first.bottom)
+}
+
+/// Botón de grupos guardados, a la izquierda del de la vista previa.
+pub fn groups_rect(w: f32, h: f32) -> Rect {
+    let preview = preview_rect(w, h);
+    rect(preview.left - 10.0 - GROUPS_W, preview.top, preview.left - 10.0, preview.bottom)
+}
+
+/// Botón de la columna de vista previa (diseño `ui::draw_preview_toggle`): apagado, bajo el mouse
+/// o encendido. El ícono son los paneles con la columna a la derecha, rellena si está encendida.
+pub fn draw_preview_toggle(p: &dyn Painter, r: Rect, on: bool, hot: bool) {
+    let th = p.theme();
+    if on {
+        p.round_fill(r, 4.0, th.selection);
+    } else if hot {
+        p.round_fill(r, 4.0, th.hover);
+    }
+    let color = if on { th.accent } else if hot { th.text } else { th.text_dim };
+    let (x, y) = (r.left + 7.0, r.top + 5.0);
+    p.round_stroke(rect(x + 0.5, y + 0.5, x + 10.5, y + 11.5), 1.0, color);
+    let column = rect(x + 12.5, y + 0.5, x + 15.5, y + 11.5);
+    if on {
+        p.round_fill(column, 1.0, color);
+    }
+    p.round_stroke(column, 1.0, color);
 }
 
 /// Botón que abre xtree (mapa de uso de disco), a la izquierda del de grupos. Con el porcentaje
@@ -331,10 +383,13 @@ pub struct StatusButtons {
     pub xtree_on: bool,
     /// Indicador del escaneo de xtree junto al botón.
     pub xtree: XtreeBadge,
+    /// Botón de la vista previa bajo el mouse, y si la columna está prendida.
+    pub preview_hot: bool,
+    pub preview_on: bool,
 }
 
 pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) {
-    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge } = b;
+    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
@@ -372,6 +427,8 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
             p.text(FontId::Ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
         }
     }
+
+    draw_preview_toggle(p, preview_rect(w, h), preview_on, preview_hot);
 
     let gear = gear_rect(w, h);
     if gear_hot {
@@ -739,6 +796,48 @@ mod tests {
         let track = p.strokes().into_iter().map(|s| s.0).find(|r| r.top < cy && r.bottom > cy && r.left > t.left).expect("pista");
         assert!(track.left >= t.right + 4.0, "{track:?} {t:?}");
         assert!(track.right <= panel.right - 4.0, "{track:?} {panel:?}");
+    }
+
+    /// El botón de la vista previa mide 30×22 y va 10 a la izquierda del primer layout; «Grupos»
+    /// y «xtree» se corren 40 a la izquierda.
+    #[test]
+    fn preview_toggle_rect_and_shift() {
+        let (w, h) = (1400.0, 800.0);
+        let first = layout_buttons(w, h)[0].1;
+        let r = preview_rect(w, h);
+        assert_eq!((r.right - r.left, r.bottom - r.top), (30.0, 22.0));
+        assert_eq!(r.right, first.left - 10.0);
+        assert_eq!((r.left, r.right), (1160.0, 1190.0));
+        let g = groups_rect(w, h);
+        // Antes: 10 a la izquierda del primer layout (1190); ahora 40 más a la izquierda.
+        assert_eq!(g.right, 1190.0 - 40.0);
+        assert_eq!(xtree_rect(w, h, XtreeBadge::Idle).right, g.left - 10.0);
+        // Encendido: fondo y columna en acento; el texto de estado no lo pisa.
+        let p = RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(true)));
+        let buttons = StatusButtons { preview_on: true, ..StatusButtons::default() };
+        draw_status(&p, w, h, "x", Layout::TwoSide, None, buttons);
+        assert!(p.texts().iter().all(|(_, _, t)| t.right <= r.left || t.left >= r.right));
+    }
+
+    /// Ventana de 1000 con dos paneles lado a lado: la columna se recorta para que cada panel quede
+    /// de 280 o más; nunca baja de 240.
+    #[test]
+    fn column_width_respects_pane_min() {
+        let (w, h) = (1000.0, 700.0);
+        let width = clamp_preview_width(640.0, w, 0.0, 2);
+        assert!((PREVIEW_MIN_W..640.0).contains(&width), "{width}");
+        let area = panes_area(w, h, 0.0, 0.0, width + GAP);
+        for r in pane_rects(Layout::TwoSide, area, Splits::default()) {
+            assert!(r.right - r.left >= MIN_PANE_W - 0.5, "{r:?}");
+        }
+        assert_eq!(preview_column_rect(w, h, 3.0, width).left, area.right + GAP);
+        assert_eq!(preview_column_rect(w, h, 3.0, width).right, w - GAP);
+        // Lo pedido dentro de los límites, si entra.
+        assert_eq!(clamp_preview_width(410.0, 1600.0, 0.0, 2), 410.0);
+        assert_eq!(clamp_preview_width(100.0, 1600.0, 0.0, 2), PREVIEW_MIN_W);
+        assert_eq!(clamp_preview_width(9999.0, 3000.0, 0.0, 1), PREVIEW_MAX_W);
+        // Muy angosta: el mínimo de la columna gana.
+        assert_eq!(clamp_preview_width(320.0, 600.0, 0.0, 2), PREVIEW_MIN_W);
     }
 
     fn status_with(badge: XtreeBadge) -> (RecordingPainter, Rect) {

@@ -96,6 +96,8 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::View(3), &["Ctrl+Alt+4"]),
     (Command::View(4), &["Ctrl+Alt+5"]),
     (Command::View(5), &["Ctrl+Alt+6"]),
+    // ⌥⌘P: la columna de vista previa (⇧⌘P es la paleta de comandos).
+    (Command::TogglePreview, &["Ctrl+Alt+P"]),
 ];
 
 /// macOS: nombres distintos a los de Windows.

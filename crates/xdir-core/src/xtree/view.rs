@@ -295,6 +295,24 @@ impl Xtree {
         self.go(0);
     }
 
+    /// Tamaño de una carpeta (o archivo) del último escaneo terminado: se busca en el árbol tramo
+    /// por tramo desde la raíz. `None` si no hay escaneo terminado o la ruta no está en él.
+    pub fn size_of(&self, path: &Path) -> Option<u64> {
+        let root = self.arena.first()?;
+        let rel = path.strip_prefix(&self.root).ok()?;
+        let mut node = root;
+        for part in rel.components() {
+            let name = part.as_os_str().to_string_lossy();
+            let kids = node.children.iter().filter_map(|&c| self.arena.get(c as usize)).filter(|n| !n.small);
+            let mut kids: Vec<&Node> = kids.collect();
+            node = match kids.iter().position(|n| *n.name == *name) {
+                Some(i) => kids.swap_remove(i),
+                None => kids.into_iter().find(|n| n.name.eq_ignore_ascii_case(&name))?,
+            };
+        }
+        Some(node.size)
+    }
+
     /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).
     pub fn close_menu(&mut self) {
         self.menu_open = false;

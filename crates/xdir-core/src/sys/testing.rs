@@ -895,6 +895,7 @@ pub struct RecordingPainter {
     strokes: RefCell<Vec<(Rect, Color)>>,
     big: RefCell<Vec<(thumbs::Key, Rect)>>,
     big_ready: Cell<bool>,
+    forgotten: RefCell<Vec<thumbs::Source>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -909,6 +910,7 @@ impl RecordingPainter {
             strokes: RefCell::new(Vec::new()),
             big: RefCell::new(Vec::new()),
             big_ready: Cell::new(false),
+            forgotten: RefCell::new(Vec::new()),
         }
     }
 
@@ -920,6 +922,11 @@ impl RecordingPainter {
     /// Claves y rectángulos pedidos a `big_image`, en orden.
     pub fn big_draws(&self) -> Vec<(thumbs::Key, Rect)> {
         self.big.borrow().clone()
+    }
+
+    /// Fuentes cuyas imágenes grandes se olvidaron (`forget_big`), en orden.
+    pub fn forgotten(&self) -> Vec<thumbs::Source> {
+        self.forgotten.borrow().clone()
     }
 
     /// Lo que devuelve `big_image` desde ahora (si la imagen "está").
@@ -973,6 +980,10 @@ impl Painter for RecordingPainter {
     fn big_image(&self, key: &thumbs::Key, r: Rect) -> bool {
         self.big.borrow_mut().push((key.clone(), r));
         self.big_ready.get()
+    }
+
+    fn forget_big(&self, src: &thumbs::Source) {
+        self.forgotten.borrow_mut().push(src.clone());
     }
 
     fn logo(&self, _r: Rect) {}

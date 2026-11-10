@@ -75,6 +75,9 @@ pub trait Painter {
     /// el escalón más grande que haya de la misma fuente (`BigCache::best_for`). Devuelve false si
     /// no hay ninguno (se dibuja el ícono).
     fn big_image(&self, key: &thumbs::Key, r: Rect) -> bool;
+    /// Olvida las imágenes grandes de `src` (el archivo cambió): la próxima `big_image` la vuelve
+    /// a pedir. Donde no hay caché, no hace nada.
+    fn forget_big(&self, _src: &thumbs::Source) {}
     /// Logo de Runick centrado en `r` sin deformarlo.
     fn logo(&self, r: Rect);
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.

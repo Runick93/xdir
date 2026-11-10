@@ -207,6 +207,7 @@ impl App {
                 }
             }
             Command::Xtree => self.toggle_xtree(),
+            Command::TogglePreview => self.toggle_preview(),
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {
                     if !path.exists() {

@@ -120,7 +120,7 @@ fn preview_cloud_only_not_read() {
         true
     };
     let info = answer_of(PreviewTarget::File(missing.clone()), &cloud);
-    assert_eq!(info, PreviewInfo { body: PreviewBody::CloudOnly, accessed: 0 });
+    assert_eq!(info, PreviewInfo::new(PreviewBody::CloudOnly));
     assert!(asked.get() > 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -129,7 +129,7 @@ fn preview_cloud_only_not_read() {
 fn preview_unreadable() {
     let dir = temp_dir("ilegible");
     let info = answer_of(PreviewTarget::File(dir.join("no-existe.txt")), &local);
-    assert_eq!(info, PreviewInfo { body: PreviewBody::Unreadable, accessed: 0 });
+    assert_eq!(info, PreviewInfo::new(PreviewBody::Unreadable));
     let info = answer_of(PreviewTarget::Folder(dir.join("no-existe")), &local);
     assert_eq!(info.body, PreviewBody::Unreadable);
     let _ = std::fs::remove_dir_all(&dir);
@@ -166,7 +166,7 @@ fn fake_preview_serves_reads_and_delays() {
     let dir = temp_dir("falso");
     let file = dir.join("a.txt");
     std::fs::write(&file, "hola").unwrap();
-    let served = PreviewInfo { body: PreviewBody::Folder { items: 9 }, accessed: 1 };
+    let served = PreviewInfo { body: PreviewBody::Folder { items: 9 }, accessed: 1, created: 0, modified: 0 };
     FakePreview::serve(&dir.join("servido"), served.clone());
 
     let (req, rx) = request(PreviewTarget::File(dir.join("servido")));

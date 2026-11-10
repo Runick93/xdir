@@ -13,7 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::sys::{self, Handle};
 
+pub mod draw;
 pub mod text;
+
+pub use draw::{Shown, detail_rows};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -69,6 +72,17 @@ pub struct PreviewInfo {
     pub body: PreviewBody,
     /// Último acceso como FILETIME (0 si no hay).
     pub accessed: u64,
+    /// Creación y modificación como FILETIME (0 si no hay): los detalles de la carpeta abierta,
+    /// que no es un elemento de la lista.
+    pub created: u64,
+    pub modified: u64,
+}
+
+impl PreviewInfo {
+    /// Sin fechas.
+    pub fn new(body: PreviewBody) -> PreviewInfo {
+        PreviewInfo { body, accessed: 0, created: 0, modified: 0 }
+    }
 }
 
 /// Respuesta de un pedido, con su generación (la `App` descarta las de una selección vieja).
@@ -114,7 +128,7 @@ pub fn answer(req: PreviewRequest, cloud_only: &dyn Fn(&Path) -> bool) {
         return;
     }
     let info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&req.target, cloud_only)))
-        .unwrap_or(PreviewInfo { body: PreviewBody::Unreadable, accessed: 0 });
+        .unwrap_or(PreviewInfo::new(PreviewBody::Unreadable));
     req.send(info);
 }
 
@@ -126,6 +140,8 @@ pub fn read(target: &PreviewTarget, cloud_only: &dyn Fn(&Path) -> bool) -> Previ
     // abrir el marcador de posición, que lo haría bajar).
     let meta = if cloud { std::fs::symlink_metadata(path) } else { std::fs::metadata(path).or_else(|_| std::fs::symlink_metadata(path)) };
     let accessed = meta.as_ref().map_or(0, |m| filetime(m.accessed()));
+    let created = meta.as_ref().map_or(0, |m| filetime(m.created()));
+    let modified = meta.as_ref().map_or(0, |m| filetime(m.modified()));
     let body = match target {
         _ if cloud => PreviewBody::CloudOnly,
         _ if meta.is_err() => PreviewBody::Unreadable,
@@ -139,7 +155,7 @@ pub fn read(target: &PreviewTarget, cloud_only: &dyn Fn(&Path) -> bool) -> Previ
             None => PreviewBody::Nothing,
         },
     };
-    PreviewInfo { body, accessed }
+    PreviewInfo { body, accessed, created, modified }
 }
 
 /// Texto (por extensión o porque los primeros 4 KB lo son), `Image` (lo demás: lo dibuja el

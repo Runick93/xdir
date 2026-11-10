@@ -449,6 +449,12 @@ impl paint::Painter for Painter<'_> {
         true
     }
 
+    fn forget_big(&self, src: &thumbs::Source) {
+        let mut icons = self.icons.borrow_mut();
+        icons.absorb_big(self.ctx);
+        icons.big.forget(src);
+    }
+
     /// Logo de Runick centrado en `r` sin deformarlo (ni agrandarlo más que su tamaño de origen).
     fn logo(&self, r: Rect) {
         let mut icons = self.icons.borrow_mut();

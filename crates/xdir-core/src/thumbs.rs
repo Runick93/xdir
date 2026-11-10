@@ -89,6 +89,18 @@ impl<V> BigCache<V> {
         Some(&item.0)
     }
 
+    /// Olvida todos los escalones de `src` (el archivo cambió: la próxima vez se vuelve a pedir).
+    pub fn forget(&mut self, src: &Source) {
+        let used = &mut self.used;
+        self.items.retain(|(s, _), (_, b, _)| {
+            let keep = s != src;
+            if !keep {
+                *used -= *b;
+            }
+            keep
+        });
+    }
+
     /// Vacía la caché (se perdió el dispositivo de dibujo).
     pub fn clear(&mut self) {
         self.items.clear();
@@ -189,6 +201,18 @@ mod tests {
     }
 
     /// `best_for` da el escalón más grande que haya de esa fuente.
+    #[test]
+    fn big_cache_forget_source() {
+        let mut c = BigCache::new(1000);
+        c.insert(key("a", 256), 1, 10);
+        c.insert(key("a", 1024), 2, 40);
+        c.insert(key("b", 256), 3, 10);
+        c.forget(&Source::Path(PathBuf::from("a")));
+        assert_eq!(c.best_for(&Source::Path(PathBuf::from("a"))), None);
+        assert_eq!(c.get(&key("b", 256)), Some(&3));
+        assert_eq!(c.used, 10);
+    }
+
     #[test]
     fn big_cache_best_for_largest_step() {
         let mut c = BigCache::new(BIG_CACHE_BYTES);

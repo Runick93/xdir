@@ -13,10 +13,13 @@ mod input;
 mod paint;
 mod quick_jump;
 mod panes;
+mod preview;
 mod tooltip;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod preview_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -131,6 +134,10 @@ enum Hit {
     Groups,
     /// Botón que abre y cierra xtree, el mapa de uso de disco.
     Xtree,
+    /// Botón de la columna de vista previa.
+    PreviewToggle,
+    /// Borde izquierdo de la columna de vista previa (cambiar su ancho).
+    PreviewEdge,
     /// La vista de xtree abierta, sobre el área de los paneles.
     XtreeView,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
@@ -167,6 +174,9 @@ enum Drag {
     /// Borde derecho del árbol de carpetas: cambiar su ancho.
     #[cfg(feature = "arbol")]
     TreeEdge,
+    /// Borde izquierdo de la columna de vista previa: cambiar su ancho (y cuánto a la derecha del
+    /// borde se lo agarró).
+    PreviewEdge(f32),
     /// Pulgar de una barra del árbol (y dónde se lo agarró).
     #[cfg(feature = "arbol")]
     TreeBar(tree::Bar, f32),
@@ -362,6 +372,8 @@ pub struct App {
     xtree: Option<Xtree>,
     /// La vista de xtree tapa los paneles.
     xtree_open: bool,
+    /// Columna de vista previa (a la derecha de los paneles).
+    preview: preview::PreviewState,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -535,6 +547,7 @@ impl App {
             history_ctx: None,
             xtree: None,
             xtree_open: false,
+            preview: preview::PreviewState::new(session.preview_on, session.preview_width),
         };
         app.restore_panes(&session, start_path);
         app.sync_folder_views();

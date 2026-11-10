@@ -56,6 +56,10 @@ pub(super) fn tooltip_for(hit: Hit, keymap: &Keymap, tab_path: &dyn Fn(usize, us
     let text = match hit {
         Hit::Layout(l) => command(Command::Layout(l.index() as u8)),
         Hit::Gear => "Apariencia y opciones".to_string(),
+        Hit::PreviewToggle => match keymap.label(Command::TogglePreview) {
+            keys if keys.is_empty() => "Vista previa".to_string(),
+            keys => format!("Vista previa ({keys})"),
+        },
         Hit::GroupBar(ui::GroupHit::Add) => "Guardar los paneles como grupo".to_string(),
         Hit::TreePin if tree_pinned => "Soltar el árbol".to_string(),
         Hit::TreePin => "Fijar el árbol".to_string(),

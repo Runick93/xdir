@@ -26,7 +26,8 @@ pub struct NameRules {
     pub chars: &'static [char],
     /// Windows quita el punto o el espacio del final: «a.» sería «a».
     pub no_trailing_dot_space: bool,
-    /// Los nombres de dispositivo de DOS (CON, PRN, AUX, NUL, COM1–9, LPT1–9), con o sin extensión.
+    /// Los nombres de dispositivo de DOS (CON, PRN, AUX, NUL, CONIN$, CONOUT$, COM1–9, LPT1–9), con o
+    /// sin extensión (`names::is_dos_reserved`).
     pub reserved_dos: bool,
     /// Largo máximo de un nombre: en unidades UTF-16 si `utf16` (Windows), si no en bytes UTF-8.
     pub max_len: usize,
@@ -40,19 +41,6 @@ impl NameRules {
     fn too_long(&self, name: &str) -> bool {
         let len = if self.utf16 { name.encode_utf16().count() } else { name.len() };
         len > self.max_len
-    }
-}
-
-/// ¿Es un nombre de dispositivo de DOS? Cuenta lo que va antes del primer punto, sin los espacios
-/// del final y sin distinguir mayúsculas («con.txt», «Nul .tar.gz»).
-fn reserved_dos(name: &str) -> bool {
-    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
-    match base.as_str() {
-        "CON" | "PRN" | "AUX" | "NUL" => true,
-        _ => {
-            let b = base.as_bytes();
-            b.len() == 4 && (base.starts_with("COM") || base.starts_with("LPT")) && (b'1'..=b'9').contains(&b[3])
-        }
     }
 }
 
@@ -246,7 +234,7 @@ pub fn clashes(old: &[String], new: &[String], others: &[String], case_insensiti
             if rules.no_trailing_dot_space && (n.ends_with('.') || n.ends_with(' ')) {
                 return Some(Clash::TrailingDotSpace);
             }
-            if rules.reserved_dos && reserved_dos(n) {
+            if rules.reserved_dos && crate::names::is_dos_reserved(n) {
                 return Some(Clash::Reserved);
             }
             if rules.too_long(n) {
@@ -631,6 +619,9 @@ mod tests {
         let new = vec!["a.".to_string(), "b ".into(), "CON.txt".into(), "lpt1.tar.gz".into(), long.clone(), "COM10.txt".into()];
         let c = clashes(&old, &new, &[], true, &NameRules::WINDOWS);
         assert_eq!(c, [Some(Clash::TrailingDotSpace), Some(Clash::TrailingDotSpace), Some(Clash::Reserved), Some(Clash::Reserved), Some(Clash::TooLong), None]);
+        // Las consolas también (la misma lista que al extraer: `names::is_dos_reserved`).
+        let c = clashes(&strings(&["a", "b"]), &strings(&["CONIN$", "conout$.txt"]), &[], true, &NameRules::WINDOWS);
+        assert_eq!(c, [Some(Clash::Reserved), Some(Clash::Reserved)]);
         // En macOS y Linux esos nombres valen; el largo se cuenta en bytes.
         let c = clashes(&old[..4], &new[..4], &[], false, &NameRules::UNIX);
         assert_eq!(c, [None, None, None, None]);

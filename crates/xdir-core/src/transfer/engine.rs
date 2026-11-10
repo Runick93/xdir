@@ -1403,7 +1403,11 @@ impl<'a> Job<'a> {
             Undo::Created(paths) => {
                 for p in paths {
                     self.current = name_of(&p);
-                    if self.exists(&p).is_some()
+                    // Por ruta: si una carpeta del camino pasó a ser un enlace, no se toca lo que
+                    // está del otro lado.
+                    if let Err(e) = self.prims.check_parent(p.parent().unwrap_or(Path::new(""))) {
+                        self.fail_msg(&p, &p, &e.message(), false);
+                    } else if self.exists(&p).is_some()
                         && let Err(e) = self.prims.trash(&p)
                     {
                         self.fail(&p, &p, e);

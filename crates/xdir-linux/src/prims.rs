@@ -336,6 +336,11 @@ impl CopyPrims for LinuxCopyPrims {
         crate::ops::prepare_restore_parent(trash, dir, create).map_err(refuse)
     }
 
+    /// Las reglas de «Devolver» sin crear nada (`ops::check_parent`).
+    fn check_parent(&self, dir: &Path) -> Result<(), CopyError> {
+        crate::ops::check_parent(dir).map_err(|e| CopyError::new(ErrKind::Other(e), dir))
+    }
+
     /// Ya devuelto: se borra su `.trashinfo`.
     fn restored(&self, in_trash: &Path) {
         if let Some((trash, name)) = crate::ops::trash_of(in_trash) {

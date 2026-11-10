@@ -201,6 +201,12 @@ pub(crate) fn trash_of(item: &Path) -> Option<(&Path, String)> {
 /// carpeta del camino debajo de `root` tiene que ser una carpeta de verdad y las que faltan se
 /// crean una por una (`create`); al final la ruta real tiene que seguir dentro de la de `root`.
 /// Con `root` = `/` valen los enlaces del sistema (de root); en otro disco, ninguno.
+/// Ninguna carpeta del camino de `dir` es un enlace (salvo los de root del primer nivel, como
+/// `/tmp`): antes de tocar algo por su ruta.
+pub(crate) fn check_parent(dir: &Path) -> Result<()> {
+    prepare_parent(Path::new("/"), dir, false)
+}
+
 fn prepare_parent(root: &Path, parent: &Path, create: bool) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     use std::path::Component;
@@ -276,7 +282,11 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
         }
         Undo::Created(paths) => {
             for p in paths {
-                if let Err(e) = to_trash(&p, trash) {
+                // Por ruta: una carpeta del camino que pasó a ser un enlace no se atraviesa.
+                let parent = p.parent().unwrap_or(Path::new("/"));
+                if let Err(e) = check_parent(parent) {
+                    errors.push(e);
+                } else if let Err(e) = to_trash(&p, trash) {
                     errors.push(e);
                 }
             }
@@ -499,6 +509,22 @@ mod tests {
     }
 
     /// Si después de crearla se agregó algo a la carpeta, deshacer devuelve lo movido y la deja.
+    /// Ronda 2: deshacer «lo creado» no manda a la papelera algo a través de una carpeta del
+    /// camino que pasó a ser un enlace.
+    #[test]
+    fn undo_created_refuses_symlinked_parent() {
+        let dir = tmp("deshacer-creado-enlace");
+        let trash = dir.join("Trash");
+        let outside = dir.join("afuera");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("importante.txt"), "no").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("docs")).unwrap();
+        let r = run(Op::Undo(Undo::Created(vec![dir.join("docs/importante.txt")])), Some(&trash)).unwrap();
+        assert!(r.error.is_some());
+        assert!(outside.join("importante.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn undo_created_folder_keeps_non_empty() {
         let dir = tmp("carpeta-con-llena");

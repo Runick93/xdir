@@ -1337,3 +1337,19 @@ fn retry_of_a_copy_from_the_trash_stays_a_copy() {
     assert!(!fake.exists(&p("/rc/docs/f.txt")));
     assert!(fake.restored().is_empty());
 }
+
+#[test]
+fn undo_created_refuses_a_symlinked_parent() {
+    // Ronda 2: deshacer «lo creado» manda a la Papelera por ruta; si una carpeta del camino pasó a
+    // ser un enlace a otro lado, no se manda a la Papelera lo que está del otro lado.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/uc/afuera/importante.txt"), b"no".to_vec());
+    fake.add_symlink(&p("/uc/docs"), &p("/uc/afuera"));
+    fake.add_file(&p("/uc/otra/copia.txt"), b"c".to_vec());
+    let undo = Undo::Created(vec![p("/uc/docs/importante.txt"), p("/uc/otra/copia.txt")]);
+    let r = go(&fake, JobSpec::Undo(undo), &[]);
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.messages());
+    assert!(!r.out.errors[0].retry);
+    assert!(fake.exists(&p("/uc/afuera/importante.txt")));
+    assert!(!fake.exists(&p("/uc/otra/copia.txt")), "lo demás sí");
+}

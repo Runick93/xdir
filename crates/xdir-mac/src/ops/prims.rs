@@ -306,6 +306,12 @@ impl CopyPrims for MacCopyPrims {
         crate::trash::prepare_parent(&root, dir, false).map_err(refuse)
     }
 
+    /// Las reglas de «Devolver» sin crear nada (`trash::prepare_parent`).
+    fn check_parent(&self, dir: &Path) -> Result<(), CopyError> {
+        let root = crate::trash::volume_root(dir);
+        crate::trash::prepare_parent(&root, dir, false).map_err(|e| CopyError::new(ErrKind::Other(e), dir))
+    }
+
     fn restored(&self, in_trash: &Path) {
         crate::trash::forget(in_trash);
     }

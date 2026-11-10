@@ -187,6 +187,12 @@ pub trait CopyPrims: Send + Sync {
         }
         Ok(())
     }
+    /// Antes de mandar a la Papelera algo por su ruta (deshacer «lo creado»): ninguna carpeta del
+    /// camino de `dir` puede ser un enlace a otro lado (salvo los del sistema, como `/tmp`).
+    /// Por defecto, no se mira.
+    fn check_parent(&self, _dir: &Path) -> Result<(), CopyError> {
+        Ok(())
+    }
     /// «Devolver» terminó con `in_trash`: el sistema olvida su registro (el `.trashinfo` en Linux,
     /// la línea de `papelera.tsv` en macOS).
     fn restored(&self, _in_trash: &Path) {}

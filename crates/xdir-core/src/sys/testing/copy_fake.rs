@@ -583,6 +583,16 @@ impl CopyPrims for FakeCopyPrims {
         self.fs().origins.get(in_trash).cloned()
     }
 
+    /// Ninguna carpeta del camino puede ser un enlace.
+    fn check_parent(&self, dir: &Path) -> Result<(), CopyError> {
+        for d in dir.ancestors().filter(|d| !d.as_os_str().is_empty()) {
+            if self.stat(d).is_ok_and(|s| s.kind == ItemKind::Symlink) {
+                return Err(CopyError::new(ErrKind::Other(format!("«{}» es un enlace: no se toca lo que está del otro lado", d.display())), d));
+            }
+        }
+        Ok(())
+    }
+
     fn restored(&self, in_trash: &Path) {
         self.fs().restored.push(in_trash.to_path_buf());
     }

@@ -55,7 +55,7 @@ espera que Descargas quede agrupada por fecha y Fotos en miniaturas sin tener qu
      encabezado ocupa una fila completa).
    - Menú «Agrupar por» en el clic derecho del fondo (junto a «Ordenar por» y «Vista») y comandos en la
      paleta («Agrupar por nombre», …, «No agrupar»). El clic derecho en el encabezado de columnas trae
-     también «Ordenar por ▸» y «Agrupar por ▸» (los mismos submenús, sobre el panel del encabezado),
+     también «Ver ▸», «Ordenar por ▸» y «Agrupar por ▸» (los mismos submenús, sobre el panel del encabezado),
      entre las columnas y «Columnas de fábrica».
 3. **Más columnas**: Dimensiones (ancho × alto en píxeles, imágenes y videos), Duración (h:mm:ss, audio y
    video), Autor, Etiquetas, Artista y Álbum. Se agregan desde el menú de columnas del encabezado (como las

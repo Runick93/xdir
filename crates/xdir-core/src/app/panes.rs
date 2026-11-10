@@ -231,12 +231,12 @@ impl App {
 
     /// «Usar esta vista en todas las carpetas»: con confirmación, la vista de la carpeta del panel
     /// activo pasa a ser la por defecto y se borran las de las demás; las listas abiertas la toman.
-    pub(super) fn apply_view_to_all(&mut self) {
+    pub(super) fn apply_view_to_all(&mut self, pane: usize) {
         let question = "¿Usar esta vista en todas las carpetas? Se pierden las vistas guardadas de cada carpeta.";
         if self.host.ask_yes_no_cancel("Usar esta vista en todas las carpetas", question) != Some(true) {
             return;
         }
-        let mut v = self.panes[self.active].tab().list.view_settings();
+        let mut v = self.panes[pane].tab().list.view_settings();
         // La columna de carpeta es solo de las búsquedas.
         v.columns.retain(|c| c.col != list::Column::Folder);
         self.folder_views.apply_to_all(v);
@@ -249,8 +249,8 @@ impl App {
 
     /// «Restablecer la vista de esta carpeta»: vuelve a la por defecto (también en las otras
     /// pestañas que la muestran).
-    pub(super) fn reset_folder_view(&mut self) {
-        let key = self.panes[self.active].tab().view_key();
+    pub(super) fn reset_folder_view(&mut self, pane: usize) {
+        let key = self.panes[pane].tab().view_key();
         self.folder_views.reset(&key);
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).filter(|t| t.view_key() == key) {
             tab.reload_view();
@@ -263,7 +263,7 @@ impl App {
     /// `at`: punto del clic derecho, en DIPs del área de la ventana.
     pub(super) fn show_columns_menu(&mut self, pane: usize, at: (f32, f32)) {
         const RESET: usize = 100;
-        // Ids de «Ordenar por» y «Agrupar por»: después de las columnas y de RESET.
+        // Ids de «Ver», «Ordenar por» y «Agrupar por»: después de las columnas y de RESET.
         const SUB_BASE: u32 = 200;
         let current = self.panes[pane].tab().list.columns.clone();
         let mut entries: Vec<shell::Entry> = list::COLUMNS
@@ -284,17 +284,37 @@ impl App {
             cmds.push(command);
             shell::Entry::Item { id: SUB_BASE + cmds.len() as u32 - 1, label: label.to_string(), enabled, checked }
         };
+        let views = self.views_submenu(pane, &mut item);
         let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
+        entries.push(views);
         entries.push(sorts);
         entries.push(groupings);
         entries.push(shell::Entry::Sep);
         entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
         let cmd = self.host.popup_menu(&entries, MenuPos::At(at.0, at.1), None, None).map_or(0, |c| c as usize);
-        let list = &mut self.panes[pane].tab_mut().list;
         match cmd {
             c if c >= SUB_BASE as usize => {
                 // Lo mismo que en el menú del fondo, pero sobre el panel del encabezado.
+                let list = &mut self.panes[pane].tab_mut().list;
                 match cmds.get(c - SUB_BASE as usize) {
+                    Some(&Command::View(i)) => match list::VIEWS.get(i as usize) {
+                        Some(&(view, ..)) => {
+                            self.set_view(pane, view);
+                            self.redraw();
+                            return;
+                        }
+                        None => return,
+                    },
+                    Some(&Command::ApplyViewToAll) => {
+                        self.apply_view_to_all(pane);
+                        self.redraw();
+                        return;
+                    }
+                    Some(&Command::ResetFolderView) => {
+                        self.reset_folder_view(pane);
+                        self.redraw();
+                        return;
+                    }
                     Some(&Command::SortBy(i)) => match list::COLUMNS.get(i as usize) {
                         Some(&(col, ..)) => list.set_sort(col),
                         None => return,
@@ -307,6 +327,7 @@ impl App {
                 }
             }
             RESET => {
+                let list = &mut self.panes[pane].tab_mut().list;
                 // La columna de carpeta de una búsqueda se queda donde está.
                 let folder = list.columns.iter().position(|c| c.col == list::Column::Folder).map(|i| (i, list.columns[i]));
                 list.reset_name_width();
@@ -315,7 +336,7 @@ impl App {
                     list.columns.insert(at.min(list.columns.len()), spec);
                 }
             }
-            i if (1..=list::COLUMNS.len()).contains(&i) => list.toggle_column(list::COLUMNS[i - 1].0),
+            i if (1..=list::COLUMNS.len()).contains(&i) => self.panes[pane].tab_mut().list.toggle_column(list::COLUMNS[i - 1].0),
             _ => return,
         }
         self.sync_folder_views();

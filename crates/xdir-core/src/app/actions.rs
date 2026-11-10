@@ -190,8 +190,8 @@ impl App {
                     self.sync_folder_views();
                 }
             }
-            Command::ApplyViewToAll => self.apply_view_to_all(),
-            Command::ResetFolderView => self.reset_folder_view(),
+            Command::ApplyViewToAll => self.apply_view_to_all(self.active),
+            Command::ResetFolderView => self.reset_folder_view(self.active),
             Command::ClearFilters => {
                 self.tab_mut().list.clear_filters();
                 self.sync_folder_views();

@@ -18,6 +18,8 @@ objc2-app-kit = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-core-text = "0.3.2"
+# Spotlight (MDItem) para las columnas de metadatos.
+objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "Metadata", "MDItem"] }
 objc2-quick-look-thumbnailing = "0.3.2"
 objc2-uniform-type-identifiers = "0.3.2"
 block2 = "0.6.2"

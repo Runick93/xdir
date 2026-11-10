@@ -4,7 +4,8 @@
 //! por columna → filtro rápido (la búsqueda, que ya trae sus resultados) → orden → grupos.
 
 use super::groups::{PINNED_LAST, natural_descending};
-use super::{Column, FileList, GroupKey, HEADER_H, LocalNow, group_key};
+use super::meta::{READING_NOTE, meta_option_keys, meta_passes};
+use super::{Column, FileList, GroupKey, HEADER_H, LocalNow, Meta, group_key};
 use crate::fs::Entry;
 use crate::geom::{Color, Rect, contains, rect};
 use crate::paint::{FontId, Painter};
@@ -42,15 +43,21 @@ pub(super) struct FilterMenu {
     pub options: Vec<(GroupKey, usize, bool)>,
     pub hover: Option<ListHit>,
     pub first: usize,
+    /// Faltan metadatos de la columna: las cuentas son parciales y se ve «Leyendo datos…».
+    pub reading: bool,
 }
 
-/// ¿Pasa `e` los filtros (salvo el de la columna `except`)? Un filtro sin grupos no filtra.
-fn passes(filters: &[(Column, Vec<String>)], e: &Entry, now: LocalNow, except: Option<Column>) -> bool {
+/// ¿Pasa `e` (con sus metadatos `meta`) los filtros (salvo el de la columna `except`)? Un filtro
+/// sin grupos no filtra.
+fn passes(filters: &[(Column, Vec<String>)], e: &Entry, meta: Option<&Meta>, now: LocalNow, except: Option<Column>) -> bool {
     filters.iter().filter(|(c, _)| Some(*c) != except).all(|(col, labels)| {
-        labels.is_empty() || {
-            let key = group_key(*col, e, None, now);
-            labels.iter().any(|l| *l == key.label)
-        }
+        labels.is_empty()
+            || if col.is_meta() {
+                meta_passes(*col, meta, labels)
+            } else {
+                let key = group_key(*col, e, meta, now);
+                labels.contains(&key.label)
+            }
     })
 }
 
@@ -74,20 +81,34 @@ impl FileList {
         self.filter_now_for(None)
     }
 
-    /// ¿El elemento pasa los filtros por columna? (`now`: ver `filter_now`).
-    pub(super) fn passes_filters(&self, e: &Entry, now: LocalNow) -> bool {
-        passes(&self.filters, e, now, None)
+    /// ¿El elemento (índice en `entries`) pasa los filtros por columna? (`now`: ver `filter_now`).
+    pub(super) fn passes_filters(&self, i: usize, now: LocalNow) -> bool {
+        passes(&self.filters, &self.entries[i], self.meta_of(i), now, None)
     }
 
     /// Opciones del filtro de la columna: cada grupo con elementos (de los que dejan pasar los
     /// ocultos y los filtros de las demás columnas), con su cantidad y si está tildado, en el orden
     /// de los grupos. Un grupo tildado sin elementos sigue apareciendo (con 0) para poder destildarlo.
+    /// En las columnas de metadatos, lo que todavía no llegó no cuenta (ver `filter_menu_reading`),
+    /// y en Etiquetas un elemento cuenta en cada una de sus etiquetas.
     pub fn filter_options(&self, col: Column) -> Vec<(GroupKey, usize, bool)> {
         let checked: &[String] = self.filters.iter().find(|(c, _)| *c == col).map_or(&[], |(_, l)| l.as_slice());
         let now = self.filter_now_for(Some(col));
         let mut counts: std::collections::HashMap<GroupKey, usize> = std::collections::HashMap::new();
-        for e in self.entries.iter().filter(|e| self.shows(e) && passes(&self.filters, e, now, Some(col))) {
-            *counts.entry(group_key(col, e, None, now)).or_default() += 1;
+        for (i, e) in self.entries.iter().enumerate() {
+            let meta = self.meta_of(i);
+            if !self.shows(e) || !passes(&self.filters, e, meta, now, Some(col)) {
+                continue;
+            }
+            if col.is_meta() {
+                if meta.is_some() {
+                    for k in meta_option_keys(col, meta) {
+                        *counts.entry(k).or_default() += 1;
+                    }
+                }
+            } else {
+                *counts.entry(group_key(col, e, meta, now)).or_default() += 1;
+            }
         }
         let mut out: Vec<(GroupKey, usize, bool)> = counts
             .into_iter()
@@ -158,6 +179,16 @@ impl FileList {
         self.filters.iter().any(|(c, _)| *c == col)
     }
 
+    /// ¿El desplegable abierto muestra «Leyendo datos…»? (faltan metadatos de su columna).
+    pub fn filter_menu_reading(&self) -> bool {
+        self.menu.as_ref().is_some_and(|m| m.reading)
+    }
+
+    /// Alto de la nota «Leyendo datos…» del desplegable (0 si no se ve).
+    fn note_h(&self) -> f32 {
+        if self.filter_menu_reading() { OPTION_H } else { 0.0 }
+    }
+
     /// Columna del desplegable abierto.
     pub fn filter_menu(&self) -> Option<Column> {
         self.menu.as_ref().map(|m| m.col)
@@ -173,7 +204,7 @@ impl FileList {
             return;
         }
         self.header_drag = None;
-        self.menu = Some(FilterMenu { col, options: self.filter_options(col), hover: None, first: 0 });
+        self.menu = Some(FilterMenu { col, options: self.filter_options(col), hover: None, first: 0, reading: self.filter_reading(col) });
     }
 
     /// Cierra el desplegable. Devuelve si estaba abierto.
@@ -185,9 +216,11 @@ impl FileList {
     pub(super) fn refresh_filter_menu(&mut self) {
         if let Some(col) = self.filter_menu() {
             let options = self.filter_options(col);
+            let reading = self.filter_reading(col);
             if let Some(m) = &mut self.menu {
                 m.first = m.first.min(options.len().saturating_sub(1));
                 m.options = options;
+                m.reading = reading;
             }
         }
     }
@@ -221,7 +254,7 @@ impl FileList {
     fn menu_rows(&self) -> usize {
         let Some(m) = &self.menu else { return 0 };
         let top = self.area.top + HEADER_H;
-        let fit = ((self.area.bottom - top - MENU_PAD * 2.0 - SEP_H - OPTION_H) / OPTION_H).floor().max(0.0) as usize;
+        let fit = ((self.area.bottom - top - MENU_PAD * 2.0 - SEP_H - OPTION_H - self.note_h()) / OPTION_H).floor().max(0.0) as usize;
         m.options.len().min(fit.max(1))
     }
 
@@ -231,7 +264,7 @@ impl FileList {
         let (_, _, _, right) = self.layout_columns().into_iter().find(|c| c.1 == m.col)?;
         let left = (right - MENU_W).max(self.area.left);
         let top = self.area.top + HEADER_H;
-        let h = MENU_PAD * 2.0 + self.menu_rows() as f32 * OPTION_H + SEP_H + OPTION_H;
+        let h = MENU_PAD * 2.0 + self.menu_rows() as f32 * OPTION_H + self.note_h() + SEP_H + OPTION_H;
         Some(rect(left, top, left + MENU_W, top + h))
     }
 
@@ -380,6 +413,10 @@ impl FileList {
             p.text(FontId::Ui, &format!("{} ({count})", key.label), rect(row.left + 36.0, row.top, row.right - 12.0, row.bottom), th.text);
         }
         let Some(clear) = self.filter_clear_rect() else { return };
+        if m.reading {
+            let y = r.top + MENU_PAD + self.menu_rows() as f32 * OPTION_H;
+            p.text(FontId::Ui, READING_NOTE, rect(r.left + 36.0, y, r.right - 12.0, y + OPTION_H), th.text_dim);
+        }
         let sep = clear.top - 5.0;
         p.fill(rect(r.left + 8.0, sep, r.right - 8.0, sep + 1.0), th.border);
         let filtered = self.is_column_filtered(m.col);

@@ -14,10 +14,10 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Metadata, Overlays, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
-use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, OverlayRequest, QuickItem};
+use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
 use xdir_core::shell::{Entry, Item};
 
 use crate::fs::macos as fsp;
@@ -514,6 +514,16 @@ impl Overlays for MacOverlays {
     fn request(&self, _req: OverlayRequest) {}
 }
 
+/// Metadatos de archivos: los lee el hilo propio de `crate::metadata` (Spotlight, la cabecera
+/// de las imágenes y las etiquetas del Finder).
+struct MacMetadata;
+
+impl Metadata for MacMetadata {
+    fn request(&self, req: MetadataRequest) {
+        crate::metadata::queue(req)
+    }
+}
+
 /// Instala los servicios de macOS en el registro del núcleo.
 pub fn install() {
     xdir_core::sys::install(Services {
@@ -524,5 +534,6 @@ pub fn install() {
         shell: Box::new(MacShell),
         file_system: Box::new(MacFileSystem),
         overlays: Box::new(MacOverlays),
+        metadata: Box::new(MacMetadata),
     });
 }

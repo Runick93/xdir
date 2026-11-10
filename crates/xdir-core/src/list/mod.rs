@@ -17,6 +17,7 @@ use crate::thumbs;
 
 pub mod filters;
 pub mod groups;
+pub mod meta;
 
 pub use filters::ListHit;
 pub use groups::{GROUPINGS, GroupKey, LocalNow, Meta, Row, group_key};
@@ -40,10 +41,17 @@ pub enum Column {
     /// Dónde está cada resultado de una búsqueda (relativo a la carpeta buscada). Solo se ve
     /// mientras hay una búsqueda.
     Folder,
+    /// Columnas de metadatos (ver `meta`): se leen en segundo plano con `sys::Metadata`.
+    Dimensions,
+    Duration,
+    Authors,
+    Tags,
+    Artist,
+    Album,
 }
 
 /// Todas las columnas: (columna, título, identificador para la sesión, ancho inicial).
-pub const COLUMNS: [(Column, &str, &str, f32); 8] = [
+pub const COLUMNS: [(Column, &str, &str, f32); 14] = [
     (Column::Name, "Nombre", "nombre", 0.0),
     (Column::Modified, "Fecha de modificación", "modificado", 160.0),
     (Column::Created, "Fecha de creación", "creado", 160.0),
@@ -52,6 +60,14 @@ pub const COLUMNS: [(Column, &str, &str, f32); 8] = [
     (Column::Size, "Tamaño", "tamano", 96.0),
     (Column::Attributes, "Atributos", "atributos", 80.0),
     (Column::Folder, "Carpeta", "carpeta", 220.0),
+    // Anchos de la pantalla X37 (Etiquetas es la última y llega al borde: 200; Artista y Álbum
+    // como Autor).
+    (Column::Dimensions, "Dimensiones", "dimensiones", 120.0),
+    (Column::Duration, "Duración", "duracion", 80.0),
+    (Column::Authors, "Autor", "autor", 160.0),
+    (Column::Tags, "Etiquetas", "etiquetas", 200.0),
+    (Column::Artist, "Artista", "artista", 160.0),
+    (Column::Album, "Álbum", "album", 160.0),
 ];
 
 impl Column {
@@ -336,6 +352,9 @@ pub struct FileList {
     key_table: Vec<GroupKey>,
     key_index: std::collections::HashMap<GroupKey, u32>,
     keys_for: Option<Column>,
+    /// Día local (`LocalNow::day`) con el que se calcularon las claves de fecha: si cambia (pasó
+    /// la medianoche), se recalculan («Hoy» pasa a «Ayer»).
+    keys_day: i64,
     /// Geometría de la lista agrupada (líneas de encabezado y de elementos).
     layout: Option<groups::Layout>,
     /// El foco está en el encabezado de este grupo (en vez de en un elemento).
@@ -365,6 +384,16 @@ pub struct FileList {
     /// desde la posición `name_ends_first`. Lo de más a la derecha, en la misma columna, es hueco.
     name_ends: Vec<f32>,
     name_ends_first: usize,
+    /// Metadatos de cada elemento (índice en `entries`), si ya llegaron; si se pidieron; y los
+    /// leídos en esta carpeta por ruta y fecha (sobreviven a las recargas). Ver `meta`.
+    meta: Vec<Option<std::sync::Arc<crate::fs::Meta>>>,
+    meta_asked: Vec<bool>,
+    meta_cache: std::collections::HashMap<(OsString, u64), std::sync::Arc<crate::fs::Meta>>,
+    /// Los elementos tienen ruta de disco de donde leer metadatos (carpetas y búsquedas; no «Este
+    /// equipo» ni las carpetas virtuales). Lo fija la pestaña.
+    pub meta_enabled: bool,
+    /// Llegaron metadatos y falta rearmar lo que se ve (`flush_meta`).
+    meta_dirty: bool,
 }
 
 /// Carpeta de un elemento con ruta completa (resultado de búsqueda).
@@ -447,6 +476,7 @@ impl Default for FileList {
             key_table: Vec::new(),
             key_index: std::collections::HashMap::new(),
             keys_for: None,
+            keys_day: 0,
             layout: None,
             header_focus: None,
             rows_built: 0,
@@ -461,11 +491,16 @@ impl Default for FileList {
             press_band: None,
             name_ends: Vec::new(),
             name_ends_first: 0,
+            meta: Vec::new(),
+            meta_asked: Vec::new(),
+            meta_cache: std::collections::HashMap::new(),
+            meta_enabled: true,
+            meta_dirty: false,
         }
     }
 }
 
-fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
+fn compare(a: &Entry, b: &Entry, ma: Option<&crate::fs::Meta>, mb: Option<&crate::fs::Meta>, sort: Column, desc: bool) -> Ordering {
     // Primero el grupo (secciones de "Este equipo"), después carpetas arriba, en cualquier orden.
     a.group.cmp(&b.group).then_with(|| b.is_dir.cmp(&a.is_dir)).then_with(|| {
         let ord = match sort {
@@ -477,6 +512,7 @@ fn compare(a: &Entry, b: &Entry, sort: Column, desc: bool) -> Ordering {
             Column::Size => a.size.cmp(&b.size),
             Column::Attributes => attr_letters(a.attrs).cmp(&attr_letters(b.attrs)),
             Column::Folder => format::caseless_cmp(&parent_of(a), &parent_of(b)),
+            col => meta::meta_cmp(col, ma, mb),
         }
         .then_with(|| format::natural_cmp(&a.sort_key, &b.sort_key));
         if desc { ord.reverse() } else { ord }
@@ -568,6 +604,9 @@ impl FileList {
         let focus_entry = self.focused_index();
         let start = self.entries.len() as u32;
         self.selected.extend(std::iter::repeat_n(false, batch.len()));
+        self.meta.resize(start as usize, None);
+        self.meta_asked.resize(start as usize, false);
+        self.meta_for_new(&batch);
         self.entries.extend(batch);
 
         // Primero los filtros por columna (ver `filters`); después se ordena y se agrupa.
@@ -575,12 +614,15 @@ impl FileList {
         let mut new: Vec<u32> = (start..self.entries.len() as u32)
             .filter(|&i| {
                 let e = &self.entries[i as usize];
-                self.shows(e) && self.passes_filters(e, now)
+                self.shows(e) && self.passes_filters(i as usize, now)
             })
             .collect();
-        let entries = &self.entries;
+        let (entries, metas, enabled) = (&self.entries, &self.meta, self.meta_enabled);
         let (sort, desc) = (self.sort, self.descending);
-        let cmp = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], sort, desc);
+        let cmp = |a: &u32, b: &u32| {
+            let (a, b) = (*a as usize, *b as usize);
+            compare(&entries[a], &entries[b], meta::meta_at(metas, enabled, a), meta::meta_at(metas, enabled, b), sort, desc)
+        };
         new.sort_unstable_by(cmp);
 
         let old = std::mem::take(&mut self.order);
@@ -611,12 +653,14 @@ impl FileList {
         let focus_name = self.focused_index().map(|i| self.entries[i].name.clone());
         self.selected = entries.iter().map(|e| selected.contains(&e.name)).collect();
         self.entries = entries;
+        self.meta_from_cache();
         // Los grupos se vuelven a calcular para los elementos nuevos.
         self.entry_keys.clear();
         let focus = focus_name.and_then(|n| self.entries.iter().position(|e| e.name == n));
         self.rebuild(focus);
         self.hover = None;
         self.clamp_scroll();
+        self.reask_visible_meta();
     }
 
     pub fn set_overlays(&mut self, overlays: &[(u32, u8)]) {
@@ -657,6 +701,7 @@ impl FileList {
     /// Pone el foco en un elemento por nombre (p. ej. la carpeta de la que se subió).
     pub fn focus_name(&mut self, name: &OsString) -> bool {
         let Some(idx) = self.entries.iter().position(|e| &e.name == name) else { return false };
+        self.reveal(idx);
         let Some(pos) = self.visible.iter().position(|&v| v as usize == idx) else { return false };
         self.select_only(pos);
         // Al terminar de cargar una carpeta no se anima: ya está donde tiene que estar.
@@ -758,14 +803,16 @@ impl FileList {
         self.entries.iter().zip(&self.selected).filter(|(_, s)| **s).map(|(e, _)| e)
     }
 
+    /// Elemento con foco (índice en `entries`); ninguno mientras el foco está en un encabezado de
+    /// grupo.
     pub fn focused_index(&self) -> Option<usize> {
-        self.focus.and_then(|p| self.visible.get(p)).map(|&i| i as usize)
+        self.focus_pos().and_then(|p| self.visible.get(p)).map(|&i| i as usize)
     }
 
     /// Filtra ocultos y filtros por columna, ordena, agrupa y reubica el foco en `focus_entry`.
     fn rebuild(&mut self, focus_entry: Option<usize>) {
         let now = self.filter_now();
-        let shown: Vec<bool> = self.entries.iter().map(|e| self.shows(e) && self.passes_filters(e, now)).collect();
+        let shown: Vec<bool> = self.entries.iter().enumerate().map(|(i, e)| self.shows(e) && self.passes_filters(i, now)).collect();
         self.order = (0..self.entries.len() as u32).filter(|&i| shown[i as usize]).collect();
         // Lo que queda fuera se deselecciona para no operar sobre lo que no se ve.
         for (s, &v) in self.selected.iter_mut().zip(&shown) {
@@ -773,7 +820,11 @@ impl FileList {
         }
 
         let (entries, sort, desc) = (&self.entries, self.sort, self.descending);
-        self.order.sort_unstable_by(|&a, &b| compare(&entries[a as usize], &entries[b as usize], sort, desc));
+        let (metas, enabled) = (&self.meta, self.meta_enabled);
+        self.order.sort_unstable_by(|&a, &b| {
+            let (a, b) = (a as usize, b as usize);
+            compare(&entries[a], &entries[b], meta::meta_at(metas, enabled, a), meta::meta_at(metas, enabled, b), sort, desc)
+        });
         self.regroup();
         self.refresh_filter_menu();
 
@@ -1023,8 +1074,15 @@ impl FileList {
         }
         let mut lh = self.line_h();
         let mut top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
-        if let Some(l) = self.layout.as_ref().and_then(|l| Some(l.lines[*l.pos_line.get(pos)? as usize])) {
+        if let Some(layout) = &self.layout
+            && let Some(&li) = layout.pos_line.get(pos)
+        {
+            let l = layout.lines[li as usize];
             (top, lh) = (l.top, l.h);
+            // La primera línea de un grupo lleva también su encabezado a la vista.
+            if let Some(h) = (li as usize).checked_sub(1).map(|i| layout.lines[i]).filter(|h| h.header.is_some()) {
+                (top, lh) = (h.top, l.top + l.h - h.top);
+            }
         }
         self.ensure_span(top, lh);
     }
@@ -1168,6 +1226,8 @@ impl FileList {
             Column::Extension => extension_of(e).to_string(),
             Column::Attributes => attr_letters(e.attrs),
             Column::Folder => relative_folder(root, e),
+            // Los metadatos no son del elemento (ver `meta::meta_text`).
+            Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => String::new(),
             Column::Size => match (e.is_dir, e.modified) {
                 (true, 0) if e.size > 0 => format::size_short(e.size),
                 (true, _) => String::new(),
@@ -1186,7 +1246,14 @@ impl FileList {
         let col = self.columns[index].col;
         // Solo se miden los textos más largos: medir cada fila de una carpeta enorme sería lento.
         let root = self.search_root.as_deref();
-        let mut texts: Vec<String> = self.visible.iter().map(|&v| Self::cell_text(col, &self.entries[v as usize], root, self.show_extensions)).collect();
+        let mut texts: Vec<String> = self
+            .visible
+            .iter()
+            .map(|&v| {
+                let i = v as usize;
+                if col.is_meta() { meta::meta_text(col, self.meta_of(i)) } else { Self::cell_text(col, &self.entries[i], root, self.show_extensions) }
+            })
+            .collect();
         texts.sort_unstable_by_key(|t| std::cmp::Reverse(t.chars().count()));
         texts.dedup();
         let widest = texts.iter().take(40).map(|t| measure(t, false)).fold(0.0, f32::max);
@@ -1594,6 +1661,12 @@ impl FileList {
             }
         };
         let step = usize::from(self.selected.iter().any(|&s| s));
+        // Re Pág / Av Pág cuentan desde el encabezado con foco (el primer elemento que le sigue)
+        // o desde el elemento con foco.
+        let page_from = match header_line {
+            Some(li) => layout.lines[li + 1..].iter().find(|l| l.header.is_none()).map_or(n.saturating_sub(1), |l| l.first as usize),
+            None => cur.unwrap_or(0),
+        };
         let target = match (key, header, cur) {
             (VK_LEFT, Some(r), _) => {
                 if !self.collapsed_row(r) {
@@ -1636,8 +1709,8 @@ impl FileList {
             }
             (VK_LEFT, None, Some(pos)) if grid => To::Pos(pos.saturating_sub(step)),
             (VK_RIGHT, None, Some(pos)) if grid => To::Pos((pos + step).min(n - 1)),
-            (VK_PRIOR, _, _) if n > 0 => To::Pos(cur.unwrap_or(0).saturating_sub(self.page_rows())),
-            (VK_NEXT, _, _) if n > 0 => To::Pos((cur.unwrap_or(0) + self.page_rows()).min(n - 1)),
+            (VK_PRIOR, _, _) if n > 0 => To::Pos(page_from.saturating_sub(self.page_rows())),
+            (VK_NEXT, _, _) if n > 0 => To::Pos((page_from + self.page_rows()).min(n - 1)),
             (VK_HOME, _, _) if n > 0 => To::Pos(0),
             (VK_END, _, _) if n > 0 => To::Pos(n - 1),
             // Sin elementos a la vista (todo plegado): el primer o el último encabezado.
@@ -1720,6 +1793,7 @@ impl FileList {
 
     /// Selecciona solo un elemento por índice y lo deja a la vista.
     pub fn select_index(&mut self, idx: usize) {
+        self.reveal(idx);
         if let Some(pos) = self.visible.iter().position(|&v| v as usize == idx) {
             self.select_only(pos);
             self.ensure_visible(pos);
@@ -2012,6 +2086,9 @@ impl FileList {
     // ---------- dibujo ----------
 
     pub fn draw(&mut self, p: &dyn Painter, area: Rect, active: bool) {
+        // Metadatos entregados sin rearmar todavía (la app ya lo hace al vaciar el canal).
+        self.flush_meta();
+        self.regroup_if_day_changed();
         self.area = area;
         // Con otro ancho entran otros elementos por línea: solo la geometría se recalcula.
         if !self.layout_current() {
@@ -2105,11 +2182,9 @@ impl FileList {
                 if active && self.focus_visible && item_focus == Some(pos) {
                     p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
                 }
-                // Casilla: con el mouse encima o si está seleccionado. En la cuadrícula va después
-                // de la celda para que una miniatura ancha no la tape.
-                let checkbox = if (self.hover == Some(pos) || self.selected[idx])
-                    && let Some(r) = self.checkbox_rect_in(item, name_left)
-                {
+                // Casilla: con el switch prendido, en todos los elementos (vacía o marcada). En la
+                // cuadrícula va después de la celda para que una miniatura ancha no la tape.
+                let checkbox = if let Some(r) = self.checkbox_rect_in(item, name_left) {
                     Some((r, if self.selected[idx] { CheckState::Checked } else { CheckState::Empty }))
                 } else {
                     None
@@ -2158,6 +2233,12 @@ impl FileList {
                         Column::Extension => p.text(FontId::Ui, extension_of(e), cell, th.text_secondary),
                         Column::Attributes => p.text(FontId::Ui, &attr_letters(e.attrs), cell, th.text_secondary),
                         Column::Folder => p.text(FontId::Ui, &relative_folder(self.search_root.as_deref(), e), cell, th.text_secondary),
+                        Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => {
+                            let text = meta::meta_text(col, self.meta_of(idx));
+                            if !text.is_empty() {
+                                p.text(FontId::Ui, &text, cell, th.text_secondary);
+                            }
+                        }
                         Column::Size => {
                             let s = match (e.is_dir, e.modified) {
                                 // Unidades (sin fecha): capacidad total.
@@ -2275,7 +2356,9 @@ fn draw_checkbox(p: &dyn Painter, r: Rect, state: CheckState) {
     match state {
         CheckState::Empty => {
             p.round_fill(r, 3.0, th.surface);
-            p.round_stroke_w(grow(r, -0.6), 2.5, th.text_dim, 1.2);
+            // En oscuro `text_dim` casi no se distingue de la superficie ni del fondo de la fila.
+            let edge = if th.dark { th.text_secondary } else { th.text_dim };
+            p.round_stroke_w(grow(r, -0.6), 2.5, edge, 1.2);
         }
         CheckState::Checked => {
             p.round_fill(r, 3.0, th.accent);
@@ -2929,6 +3012,35 @@ mod checkbox_tests {
         l.draw(&p, AREA, true);
         assert!(!p.paths().iter().any(|(_, closed, _)| *closed));
         assert_eq!(l.check_state(), CheckState::Checked);
+    }
+
+    /// Con el switch prendido cada fila visible tiene su casilla, sin selección ni mouse encima.
+    #[test]
+    fn checkboxes_visible_on_all_rows_when_on() {
+        let mut l = five(true);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        // Una casilla vacía es un borde cuadrado de lado CHECK_BOX (menos el recorte del trazo).
+        let boxes = p.strokes().iter().filter(|(r, _)| (r.right - r.left - (CHECK - 1.2)).abs() < 0.01).count();
+        // Las 5 filas y la casilla del encabezado.
+        assert_eq!(boxes, 6, "una casilla por fila");
+    }
+
+    /// En oscuro el borde de la casilla vacía usa `text_secondary` (con `text_dim` casi no se ve);
+    /// en claro sigue con `text_dim`.
+    #[test]
+    fn empty_checkbox_edge_by_theme() {
+        let mut l = five(true);
+        for dark in [true, false] {
+            let th = crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(dark));
+            let p = RecordingPainter::new(th);
+            l.draw(&p, AREA, true);
+            let edges: Vec<Color> =
+                p.strokes().iter().filter(|(r, _)| (r.right - r.left - (CHECK - 1.2)).abs() < 0.01).map(|s| s.1).collect();
+            assert_eq!(edges.len(), 6);
+            let want = if dark { th.text_secondary } else { th.text_dim };
+            assert!(edges.iter().all(|c| *c == want), "oscuro={dark}: {edges:?}");
+        }
     }
 
     /// Con el switch apagado no hay casillas: nada se dibuja, el nombre queda donde siempre y un

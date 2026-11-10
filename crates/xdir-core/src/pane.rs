@@ -320,7 +320,9 @@ impl Pane {
     /// Saca una pestaña para llevarla a otro panel (no va al historial de cerradas). El panel
     /// puede quedar vacío: quien llama tiene que agregarle una.
     pub fn take_tab(&mut self, i: usize) -> Tab {
-        let tab = self.tabs.remove(i);
+        let mut tab = self.tabs.remove(i);
+        // El desplegable de filtros quedaría abierto en el otro panel.
+        tab.list.close_filter_menu();
         if self.active > i || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }

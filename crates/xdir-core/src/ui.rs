@@ -618,11 +618,13 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                     p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 }
                 p.text(FontId::Glyphs, glyph, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
-                p.text(FontId::Ui, label, rect(r.left + 34.0, r.top, r.right - 56.0, r.bottom), th.text);
+                // El texto llega hasta 6 DIPs antes del switch y el switch, a 6 del borde de la
+                // fila: «Mostrar archivos ocultos» entra con lugar en Segoe UI.
+                p.text(FontId::Ui, label, rect(r.left + 34.0, r.top, r.right - 52.0, r.bottom), th.text);
                 // Switch: pastilla de acento con la perilla a la derecha cuando está encendido.
                 let cy = (r.top + r.bottom) / 2.0;
                 let half = 10.0_f32.min(lay.btn / 2.0 - 2.0);
-                let track = rect(r.right - 50.0, cy - half, r.right - 10.0, cy + half);
+                let track = rect(r.right - 46.0, cy - half, r.right - 6.0, cy + half);
                 if on {
                     p.round_fill(track, half, th.accent);
                 } else {
@@ -720,6 +722,24 @@ mod tests {
     use super::*;
     use crate::sys::testing::RecordingPainter;
     use crate::theme::{DEFAULT_ACCENT, Theme};
+
+    /// «Mostrar archivos ocultos» tiene lugar de sobra (en Windows, con Segoe UI, quedaba justo):
+    /// el texto llega a 154 DIPs y el switch queda dentro del panel, separado del texto.
+    #[test]
+    fn picker_switch_labels_have_room() {
+        let p = RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(false)));
+        let (w, h) = (1400.0, 900.0);
+        draw_picker(&p, w, h, DEFAULT_ACCENT, None, PickerSwitches::default());
+        let panel = picker_rect(w, h);
+        let texts = p.texts();
+        let (_, _, t) = texts.iter().find(|(_, s, _)| s == "Mostrar archivos ocultos").expect("el switch");
+        assert!(t.right - t.left >= 154.0, "{t:?}");
+        // La pista apagada del switch de esa fila (borde con `round_stroke_w`).
+        let cy = (t.top + t.bottom) / 2.0;
+        let track = p.strokes().into_iter().map(|s| s.0).find(|r| r.top < cy && r.bottom > cy && r.left > t.left).expect("pista");
+        assert!(track.left >= t.right + 4.0, "{track:?} {t:?}");
+        assert!(track.right <= panel.right - 4.0, "{track:?} {panel:?}");
+    }
 
     fn status_with(badge: XtreeBadge) -> (RecordingPainter, Rect) {
         let p = RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(true)));

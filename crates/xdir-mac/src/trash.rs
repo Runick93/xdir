@@ -492,13 +492,13 @@ mod tests {
         b.push(4);
         b.extend(b"DSDB");
         b.extend(0u32.to_be_bytes());
-        while (b.len() - 4) % 32 != 0 {
+        while !(b.len() - 4).is_multiple_of(32) {
             b.push(0);
         }
         let db = b.len();
         b.extend(1u32.to_be_bytes());
         b.resize(db + 32, 0);
-        while (b.len() - 4) % 32 != 0 {
+        while !(b.len() - 4).is_multiple_of(32) {
             b.push(0);
         }
         let node = b.len();
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn ds_store_block_aliasing_finishes() {
         fn align(b: &mut Vec<u8>) {
-            while (b.len() - 4) % 32 != 0 {
+            while !(b.len() - 4).is_multiple_of(32) {
                 b.push(0);
             }
         }

@@ -43,8 +43,9 @@ pub(super) struct Transfers {
     sched: Arc<Scheduler>,
     /// Sin ventana para preguntar: los conflictos se responden «Omitir» en el hilo del trabajo.
     auto_skip: bool,
-    /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco.
-    pending_eject: Option<(Vec<JobId>, AfterJobs)>,
+    /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco; varios
+    /// pedidos esperan cada uno los suyos.
+    pending_eject: Vec<(Vec<JobId>, AfterJobs)>,
 }
 
 /// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
@@ -62,7 +63,7 @@ impl Transfers {
             sched: Arc::new(Scheduler::new()),
             // TODO(task 12): la ventana de copia lo apaga y pregunta.
             auto_skip: true,
-            pending_eject: None,
+            pending_eject: Vec::new(),
         }
     }
 }
@@ -286,13 +287,14 @@ impl App {
         self.run_pending_eject();
     }
 
-    /// Si «Expulsar» esperaba a estos trabajos y ya terminaron todos, sigue.
+    /// Los «Expulsar» cuyos trabajos ya terminaron todos, siguen (en el orden en que se pidieron).
     fn run_pending_eject(&mut self) {
-        let waiting = match &self.transfers.pending_eject {
-            Some((ids, _)) => ids.iter().any(|id| self.transfers.jobs.iter().any(|j| j.id == *id && j.state != JobState::Done)),
-            None => return,
-        };
-        if !waiting && let Some((_, then)) = self.transfers.pending_eject.take() {
+        let pending = std::mem::take(&mut self.transfers.pending_eject);
+        let (ready, waiting): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|(ids, _)| !ids.iter().any(|id| self.transfers.jobs.iter().any(|j| j.id == *id && j.state != JobState::Done)));
+        self.transfers.pending_eject = waiting;
+        for (_, then) in ready {
             then(self);
         }
     }
@@ -412,7 +414,7 @@ impl App {
                 c.cancel();
             }
         }
-        self.transfers.pending_eject = Some((ids, then));
+        self.transfers.pending_eject.push((ids, then));
         true
     }
 }

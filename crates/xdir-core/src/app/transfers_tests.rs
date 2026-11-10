@@ -227,3 +227,29 @@ fn eject_waits_for_cancelled_jobs() {
     assert_eq!(ejected.get(), 2);
     assert!(!f.exists(&p("/app-usb/d/grande.bin")));
 }
+
+#[test]
+fn second_eject_does_not_drop_the_first() {
+    let f = fake();
+    for usb in ["/app-ej1", "/app-ej2"] {
+        f.set_volume(&p(usb), volume(&usb[1..]));
+        f.add_file(&p(&format!("{usb}/s/grande.bin")), vec![1; 64 * 1024 * 20]);
+        f.add_dir(&p(&format!("{usb}/d")));
+        f.set_slow(&p(&format!("{usb}/s/grande.bin")), Some(Duration::from_millis(20)));
+    }
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    host.set_answer(Some(true));
+    let ejected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    for usb in ["/app-ej1", "/app-ej2"] {
+        a.start_transfer(JobSpec::Copy { sources: vec![p(&format!("{usb}/s/grande.bin"))], dest: p(&format!("{usb}/d")) });
+    }
+    for usb in ["/app-ej1", "/app-ej2"] {
+        let e = ejected.clone();
+        assert!(a.eject_after_jobs(Path::new(usb), usb, Box::new(move |_: &mut App| e.borrow_mut().push(usb))));
+    }
+    wait(&mut a, idle);
+    let mut got = ejected.borrow().clone();
+    got.sort();
+    assert_eq!(got, vec!["/app-ej1", "/app-ej2"]);
+}

@@ -344,7 +344,8 @@ pub fn handle_menu_message(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<L
 }
 
 /// Verbos que resuelve la propia aplicación en vez del Shell.
-pub const OWN_VERBS: [&str; 5] = ["rename", "delete", "cut", "copy", "paste"];
+/// «Propiedades» abre el panel de información de xdir («Más en el sistema…» abre el diálogo del Shell).
+pub const OWN_VERBS: [&str; 6] = ["rename", "delete", "cut", "copy", "paste", "properties"];
 
 
 /// Identificadores propios: por encima de los que el Shell recibe (1..=0x7FFF).

@@ -537,6 +537,27 @@ impl FileSystem for MacFileSystem {
     fn cloud_only(&self, path: &Path) -> bool {
         crate::metadata::cloud_only(path)
     }
+
+    /// `pathconf(_PC_CASE_SENSITIVE)`: APFS y HFS+ por defecto no distinguen (0). Si no se sabe,
+    /// que no distingue (se marcan más choques, nunca menos).
+    fn case_insensitive(&self, dir: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return true };
+        unsafe { libc::pathconf(c.as_ptr(), libc::_PC_CASE_SENSITIVE) != 1 }
+    }
+
+    /// `renamex_np` con `RENAME_EXCL`: falla si el destino existe, sin carrera.
+    fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
+        use std::os::unix::ffi::OsStrExt;
+        let cstr = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| format!("Nombre inválido: «{}»", p.display()));
+        let (f, t) = (cstr(from)?, cstr(to)?);
+        if unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) } == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        let at = if e.kind() == std::io::ErrorKind::AlreadyExists { to } else { from };
+        Err(xdir_core::rename_many::io_message(&e, at))
+    }
 }
 
 /// El sistema de archivos real de macOS (lo que instala `install`).
@@ -594,5 +615,6 @@ pub fn install() {
         overlays: Box::new(MacOverlays),
         metadata: Box::new(MacMetadata),
         preview: Box::new(MacPreview),
+        info: Box::new(crate::info::MacInfo),
     });
 }

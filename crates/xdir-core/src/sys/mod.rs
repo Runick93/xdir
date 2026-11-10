@@ -1,7 +1,7 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
 //! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
-//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()` y `preview()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()`, `preview()` e `info()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirEntry, Metadata as FsMetadata};
@@ -14,6 +14,7 @@ use crate::commands::Command;
 use crate::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult};
+use crate::info::{InfoChange, InfoReply, InfoRequest};
 use crate::preview::PreviewRequest;
 use crate::shell::{Entry, Item};
 use crate::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
@@ -329,6 +330,19 @@ pub trait FileSystem: Send + Sync {
     fn cloud_only(&self, _path: &Path) -> bool {
         false
     }
+    /// Las reglas de nombres del sistema (`rename_many::NameRules::WINDOWS` o `UNIX`: en macOS
+    /// «:» vale, el Finder lo muestra como «/»).
+    fn name_rules(&self) -> crate::rename_many::NameRules {
+        crate::rename_many::NameRules::UNIX
+    }
+    /// ¿El disco de `dir` no distingue mayúsculas? Bloqueante (corre en un hilo de trabajo). Por
+    /// defecto sí: así se marcan más choques, nunca menos.
+    fn case_insensitive(&self, _dir: &Path) -> bool {
+        true
+    }
+    /// Renombra `from` a `to` sin pisar nunca lo que ya está (falla si `to` existe). Bloqueante:
+    /// corre en un hilo de trabajo. El error es el texto para el usuario.
+    fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String>;
 }
 
 /// Un guardián de carpeta (ver `FileSystem::watch`): vigila mientras viva y al soltarlo
@@ -355,6 +369,23 @@ pub trait Preview: Send + Sync {
     fn request(&self, req: PreviewRequest);
 }
 
+/// Panel de información: leer lo que se sabe de unos elementos y aplicar los cambios del panel.
+/// `request` y `apply` vuelven enseguida: leen y escriben en otro hilo, sin abrir el contenido de
+/// lo que está solo en la nube, y responden por el canal con `WM_APP_INFO`
+/// (`InfoRequest::send`, `info::send_applied`).
+pub trait Info: Send + Sync {
+    fn request(&self, req: InfoRequest);
+    /// Aplica `change` en otro hilo y responde `InfoReply::Applied` con el error en texto.
+    fn apply(&self, owner: Handle, tx: Sender<InfoReply>, generation: u64, change: InfoChange);
+    /// Abre el diálogo de información del sistema (lo que antes hacía `Shell::properties`).
+    /// Devuelve false si el sistema no tiene uno.
+    fn more_in_system(&self, owner: Handle, items: &[Item]) -> bool;
+    /// ¿Hay diálogo del sistema? (si no, el botón «Más en el sistema…» no se muestra).
+    fn has_more_in_system(&self) -> bool {
+        true
+    }
+}
+
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {
     pub waker: Box<dyn Waker>,
@@ -366,6 +397,7 @@ pub struct Services {
     pub overlays: Box<dyn Overlays>,
     pub metadata: Box<dyn Metadata>,
     pub preview: Box<dyn Preview>,
+    pub info: Box<dyn Info>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -424,4 +456,8 @@ pub fn metadata() -> &'static dyn Metadata {
 
 pub fn preview() -> &'static dyn Preview {
     &*services().preview
+}
+
+pub fn info() -> &'static dyn Info {
+    &*services().info
 }

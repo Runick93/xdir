@@ -255,6 +255,8 @@ fn undo_op(undo: Undo, hooks: &Hooks) -> Result<OpResult> {
     let trash = hooks.trash;
     let mut errors = Vec::new();
     match undo {
+        // Renombrar varios se deshace en el núcleo (`rename_many::rename_all`): nunca llega acá.
+        Undo::Renames(_) => return Err("Renombrar varios se deshace en el núcleo".into()),
         Undo::Rename { path, old_name } => {
             let target = path.with_file_name(&old_name);
             // Lo que apareció después con el nombre de antes no se pisa.

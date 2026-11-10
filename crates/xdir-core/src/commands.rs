@@ -62,6 +62,8 @@ pub enum Command {
     /// Expulsar el disco enfocado en «Este equipo» o el de la carpeta del panel.
     Eject,
     Rename,
+    /// Renombrar varios: el panel de la derecha con la vista previa en la lista.
+    RenameMany,
     Properties,
     /// Copia de cada seleccionado a su lado («nombre copia»).
     Duplicate,
@@ -195,6 +197,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::ShowOriginal, "mostrar_original", "Mostrar el original", &[]),
     spec(Command::Eject, "expulsar", "Expulsar", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
+    spec(Command::RenameMany, "renombrar_varios", "Renombrar varios…", &[]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
     spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),
     spec(Command::ToggleFavorite, "favorito", "Agregar o quitar de favoritos", &["Ctrl+Shift+D"]),

@@ -82,7 +82,7 @@ pub(crate) fn cloud_only(path: &HSTRING) -> bool {
 }
 
 /// Un PROPVARIANT que se libera al salir.
-struct Value(PROPVARIANT);
+pub(crate) struct Value(pub(crate) PROPVARIANT);
 
 impl Drop for Value {
     fn drop(&mut self) {
@@ -94,7 +94,7 @@ impl Drop for Value {
 
 impl Value {
     /// Lista de textos (un texto solo también vale), sin los vacíos.
-    fn strings(&self) -> Vec<String> {
+    pub(crate) fn strings(&self) -> Vec<String> {
         let mut out = Vec::new();
         unsafe {
             let mut array: *mut PWSTR = std::ptr::null_mut();
@@ -119,7 +119,7 @@ impl Value {
         out
     }
 
-    fn string(&self) -> Option<String> {
+    pub(crate) fn string(&self) -> Option<String> {
         unsafe {
             let p = PropVariantToStringAlloc(&self.0).ok()?;
             let s = p.to_string().ok();

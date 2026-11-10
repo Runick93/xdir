@@ -379,6 +379,11 @@ impl App {
             entries.push(item("Carpeta nueva con la selección", Command::NewFolderWithSelection));
         }
         entries.push(item("Copiar como ruta de acceso", Command::CopyPaths));
+        // Con varios seleccionados en una carpeta del disco: Renombrar varios.
+        let n = self.panes[self.active].tab().list.selected_positions().len();
+        if n > 1 && self.can_rename_many(self.active) {
+            entries.push(item(&format!("Renombrar {n} elementos…"), Command::RenameMany));
+        }
         entries
     }
 
@@ -449,6 +454,8 @@ impl App {
             Some("cut") => self.copy_selection(true),
             Some("copy") => self.copy_selection(false),
             Some("paste") => self.paste(),
+            // «Propiedades» / «Obtener información» del menú: el panel de información.
+            Some("properties") => self.open_info(),
             _ => {}
         }
         self.redraw();

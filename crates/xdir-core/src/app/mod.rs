@@ -8,24 +8,30 @@ mod edit;
 mod events;
 mod favs;
 mod fileops;
+mod info;
 mod saved_groups;
-mod tasks;
 mod input;
 mod paint;
 mod quick_jump;
 mod quick_look;
 mod panes;
 mod preview;
+mod rename_many;
+mod tasks;
 mod tooltip;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod info_tests;
 #[cfg(test)]
 mod preview_tests;
 #[cfg(test)]
 mod quick_look_tests;
 #[cfg(test)]
 mod ops_tests;
+#[cfg(test)]
+mod rename_many_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -67,7 +73,7 @@ use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
 use crate::a11y::{self, A11yAction, A11yView, ItemInfo};
 use crate::host::{
-    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
+    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FIELD_DONE, WM_APP_FIELD_TAB, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
     WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED, WindowHost,
 };
 
@@ -144,11 +150,15 @@ enum Hit {
     PreviewToggle,
     /// Borde izquierdo de la columna de vista previa (cambiar su ancho).
     PreviewEdge,
+    /// El panel de información (en el lugar de la columna).
+    Info(crate::info::draw::InfoHit),
     /// La vista de xtree abierta, sobre el área de los paneles.
     XtreeView,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
+    /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
+    RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
@@ -389,8 +399,14 @@ pub struct App {
     xtree_open: bool,
     /// Columna de vista previa (a la derecha de los paneles).
     preview: preview::PreviewState,
+    /// Panel de información (en el lugar de la columna, cuando se pide).
+    info: info::InfoState,
     /// Vista rápida abierta (Espacio).
     quick_look: Option<quick_look::QlState>,
+    /// Renombrar varios abierto (el panel de la derecha y la vista previa en la lista).
+    rename_many: Option<rename_many::RenameMany>,
+    /// Hay un Renombrar varios (o su deshacer) corriendo: no se larga otro hasta que termine.
+    renaming: bool,
     /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
     swallow_space: bool,
 }
@@ -571,7 +587,10 @@ impl App {
             xtree: None,
             xtree_open: false,
             preview: preview::PreviewState::new(session.preview_on, session.preview_width),
+            info: info::InfoState::new(session.info_sections),
             quick_look: None,
+            rename_many: None,
+            renaming: false,
             swallow_space: false,
         };
         app.restore_panes(&session, start_path);

@@ -724,7 +724,7 @@ mod key_tests {
 /// Solo con `--features pruebas`: la app se maneja con comandos de texto escritos (uno por línea)
 /// en el archivo de `XDIR_PRUEBAS`, igual que el gancho `WM_COPYDATA` de Windows. Además de los de
 /// `test_hook`: `captura <archivo.png>` guarda la vista, `clic <x> <y>`, `doble <x> <y>`,
-/// `derecho <x> <y>`, `tecla <vk>`, `escribir <texto>`, `enter`, `escape` y `salir`.
+/// `derecho <x> <y>`, `tecla <vk>`, `escribir <texto>`, `enter`, `escape`, `tab`, `backtab` y `salir`.
 #[cfg(feature = "pruebas")]
 mod pruebas {
     use super::*;
@@ -805,11 +805,16 @@ mod pruebas {
                 }
             }
             // Enter o Escape en la caja de texto con foco (pasan por su delegado, como al teclear).
-            ("enter" | "escape", _) => {
+            ("enter" | "escape" | "tab" | "backtab", _) => {
                 let host = MacHost::current();
                 if let Some(field) = host.as_ref().and_then(|h| h.focused_text_box().and_then(|b| h.text_field(b))) {
                     if let Some(editor) = field.currentEditor() {
-                        let command = if verb == "enter" { sel!(insertNewline:) } else { sel!(cancelOperation:) };
+                        let command = match verb {
+                            "enter" => sel!(insertNewline:),
+                            "escape" => sel!(cancelOperation:),
+                            "tab" => sel!(insertTab:),
+                            _ => sel!(insertBacktab:),
+                        };
                         unsafe { editor.doCommandBySelector(command) };
                     }
                 }

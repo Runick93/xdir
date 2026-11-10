@@ -64,6 +64,10 @@ impl WindowHost for HeadlessHost {
         None
     }
 
+    fn ask_yes_no(&self, _title: &str, _text: &str) -> bool {
+        false
+    }
+
     fn open_url(&self, _url: &str) {}
     fn open_in_editor(&self, _path: &Path) {}
 

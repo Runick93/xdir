@@ -348,10 +348,8 @@ pub fn context_menu(
             let _ = copy_text(owner, &text.join("\n"));
             "shell"
         }
-        c if c == Act::Info as u32 => {
-            properties(owner, &target);
-            "shell"
-        }
+        // «Obtener información» abre el panel de información de xdir.
+        c if c == Act::Info as u32 => "properties",
         c if c == Act::Terminal as u32 => {
             if let Some(dir) = folder.target() {
                 let _ = std::process::Command::new("open").args(["-a", "Terminal"]).arg(dir).spawn();

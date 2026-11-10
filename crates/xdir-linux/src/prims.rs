@@ -334,7 +334,7 @@ impl CopyPrims for LinuxCopyPrims {
         trash::origin(&name, trash).ok()
     }
 
-    /// Las reglas de «Devolver» de `Op::Restore` (`ops::prepare_restore_parent`): la papelera de
+    /// Las reglas de «Devolver» (`ops::prepare_restore_parent`): la papelera de
     /// un disco solo devuelve dentro de ese disco y nunca se siguen enlaces (salvo los de root del
     /// primer nivel del disco de arranque).
     fn prepare_restore(&self, in_trash: &Path, dir: &Path, create: bool) -> Result<(), CopyError> {

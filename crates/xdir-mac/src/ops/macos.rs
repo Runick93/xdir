@@ -1,6 +1,7 @@
 //! macOS: operaciones de archivos con `copyfile` (clona en APFS y conserva metadatos), `rename`
 //! y la Papelera de `NSFileManager`. Los nombres repetidos se resuelven como el Finder
-//! ("informe copia.txt", "informe copia 2.txt"). Cada operación anota cómo deshacerla.
+//! ("informe copia.txt", "informe copia 2.txt"). Cada operación anota cómo deshacerla. Copiar,
+//! mover y devolver de la Papelera son del motor de copia (`prims`).
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -80,13 +81,11 @@ fn same_item(p: &Path, id: (u64, u64)) -> std::result::Result<Option<bool>, Stri
 struct Hooks<'a> {
     /// Manda a la Papelera y devuelve dónde quedó.
     trash: &'a dyn Fn(&Path) -> Result<PathBuf>,
-    /// De dónde vino algo que está en la Papelera.
-    origin: &'a dyn Fn(&Path) -> Option<PathBuf>,
     /// Olvida un elemento que salió de la Papelera (registro propio).
     forget: &'a dyn Fn(&Path),
 }
 
-const REAL: Hooks<'static> = Hooks { trash: &trash, origin: &crate::trash::origin, forget: &crate::trash::forget };
+const REAL: Hooks<'static> = Hooks { trash: &trash, forget: &crate::trash::forget };
 
 fn run(op: Op) -> Result<OpResult> {
     run_with(op, &REAL)
@@ -95,33 +94,6 @@ fn run(op: Op) -> Result<OpResult> {
 fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
     let trash = hooks.trash;
     match op {
-        Op::Copy { sources, dest } => {
-            let (mut created, mut errors) = (Vec::new(), Vec::new());
-            for src in &sources {
-                let target = copy_target(&dest, src, src.parent() == Some(dest.as_path()));
-                match copy(src, &target) {
-                    Ok(()) => created.push(target),
-                    Err(e) => errors.push(e),
-                }
-            }
-            let focus = created.last().cloned();
-            ok((!created.is_empty()).then(|| Undo::Created(created)), focus, false, errors)
-        }
-        Op::Move { sources, dest } => {
-            let (mut moved, mut errors) = (Vec::new(), Vec::new());
-            for src in &sources {
-                if src.parent() == Some(dest.as_path()) || dest.starts_with(src) {
-                    continue;
-                }
-                let target = copy_target(&dest, src, false);
-                match move_item(src, &target) {
-                    Ok(()) => moved.push((target, src.clone())),
-                    Err(e) => errors.push(e),
-                }
-            }
-            let focus = moved.last().map(|(t, _)| t.clone());
-            ok((!moved.is_empty()).then(|| Undo::Moved(moved)), focus, false, errors)
-        }
         Op::Delete { paths, recycle } => {
             let (mut recycled, mut errors) = (Vec::new(), Vec::new());
             for p in &paths {
@@ -166,19 +138,6 @@ fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
             let target = create_new_file(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
-        Op::Restore { items } => {
-            let (mut restored, mut errors) = (Vec::new(), Vec::new());
-            for item in &items {
-                match restore_one(item, hooks) {
-                    Ok(to) => restored.push(to),
-                    Err(e) => errors.push(e),
-                }
-            }
-            let focus = restored.last().cloned();
-            let mut r = ok((!restored.is_empty()).then(|| Undo::Created(restored.clone())), focus, false, errors)?;
-            r.select = restored;
-            Ok(r)
-        }
         Op::Shortcuts { targets } => {
             let (mut created, mut errors) = (Vec::new(), Vec::new());
             for target in &targets {
@@ -199,26 +158,6 @@ fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
         }
         Op::Undo(undo) => undo_op(undo, hooks),
     }
-}
-
-/// Devuelve un elemento de la Papelera a su lugar (creando la carpeta si ya no está); nunca pisa.
-fn restore_one(item: &Path, hooks: &Hooks) -> Result<PathBuf> {
-    let name = item.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let to = (hooks.origin)(item).ok_or_else(|| format!("No se sabe de dónde vino «{name}»"))?;
-    let parent = to.parent().ok_or_else(|| format!("No se sabe de dónde vino «{name}»"))?;
-    if taken(&to) {
-        let folder = parent.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| parent.display().to_string());
-        let shown = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        return Err(format!("Ya existe «{shown}» en «{folder}»"));
-    }
-    // Sin seguir enlaces: un disco armado podría tener «docs» apuntando a otro lado (también una
-    // carpeta del registro propio que después se cambió por un enlace).
-    let root = crate::trash::volume_root(&to);
-    crate::trash::prepare_parent(&root, parent, true)?;
-    crate::trash::prepare_parent(&root, parent, false)?;
-    move_item(item, &to)?;
-    (hooks.forget)(item);
-    Ok(to)
 }
 
 fn undo_op(undo: Undo, hooks: &Hooks) -> Result<OpResult> {
@@ -293,18 +232,6 @@ fn undo_op(undo: Undo, hooks: &Hooks) -> Result<OpResult> {
         }
     }
     ok(None, None, false, errors)
-}
-
-/// Dónde copiar o mover `src` dentro de `dest`: el mismo nombre, o "nombre copia", "nombre copia
-/// 2"... (`always_copy`: copiar en la misma carpeta siempre lleva "copia"; ver `names`).
-fn copy_target(dest: &Path, src: &Path, always_copy: bool) -> PathBuf {
-    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let first = dest.join(&name);
-    if !always_copy && !taken(&first) {
-        return first;
-    }
-    let is_dir = src.is_dir();
-    names::free_name(dest, &|n| names::copy_name(&name, is_dir, n), &taken)
 }
 
 /// ¿Carpeta vacía? (un `.DS_Store` que dejó el Finder no cuenta).
@@ -473,7 +400,7 @@ mod tests {
 
     /// Papelera de prueba: mueve a `dir/.papelera` (nunca a la Papelera real del usuario).
     fn hooks<'a>(trash: &'a dyn Fn(&Path) -> Result<PathBuf>) -> Hooks<'a> {
-        Hooks { trash, origin: &|_| None, forget: &|_| {} }
+        Hooks { trash, forget: &|_| {} }
     }
 
     fn fake_trash(dir: &Path) -> impl Fn(&Path) -> Result<PathBuf> + '_ {
@@ -550,46 +477,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Devolver: crea la carpeta de origen si ya no está, no pisa lo que haya con ese nombre y
-    /// sin origen conocido avisa; deshacer los vuelve a mandar a la Papelera.
-    #[test]
-    fn restore_creates_missing_parent_and_refuses_overwrite() {
-        let dir = tmp("devolver");
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        for n in ["a.txt", "b.txt", "c.txt"] {
-            std::fs::write(bin.join(n), n).unwrap();
-        }
-        // a vuelve a una carpeta que ya no existe; b choca con uno nuevo; c no tiene origen.
-        let a_to = dir.join("borrada/sub/a.txt");
-        let b_to = dir.join("b.txt");
-        std::fs::write(&b_to, "nuevo").unwrap();
-        let origin = |p: &Path| match p.file_name()?.to_str()? {
-            "a.txt" => Some(a_to.clone()),
-            "b.txt" => Some(b_to.clone()),
-            _ => None,
-        };
-        let forgotten = std::cell::RefCell::new(Vec::new());
-        let forget = |p: &Path| forgotten.borrow_mut().push(p.to_path_buf());
-        let trash = fake_trash(&dir);
-        let h = Hooks { trash: &trash, origin: &origin, forget: &forget };
-        let items: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"].iter().map(|n| bin.join(n)).collect();
-        let r = run_with(Op::Restore { items }, &h).unwrap();
-        assert_eq!(std::fs::read_to_string(&a_to).unwrap(), "a.txt");
-        assert_eq!(std::fs::read_to_string(&b_to).unwrap(), "nuevo");
-        assert!(bin.join("b.txt").exists() && bin.join("c.txt").exists());
-        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![a_to.clone()])));
-        assert_eq!(r.select, std::slice::from_ref(&a_to));
-        let e = r.error.unwrap();
-        assert!(e.contains("Ya existe «b.txt» en «"), "{e}");
-        assert!(e.contains("No se sabe de dónde vino «c.txt»"), "{e}");
-        assert_eq!(*forgotten.borrow(), [bin.join("a.txt")]);
-        // Deshacer: a vuelve a la Papelera.
-        run_with(Op::Undo(r.undo.unwrap()), &h).unwrap();
-        assert!(!a_to.exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// «Crear acceso directo» hace un alias del Finder «a.txt alias» que `link_target` resuelve
     /// y que la carga marca como enlace.
     #[test]
@@ -624,10 +511,10 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
         std::fs::write(a.join("a.txt"), "viejo").unwrap();
-        let r = run_with(Op::Move { sources: vec![a.join("a.txt")], dest: b.clone() }, &hooks(&trash)).unwrap();
-        assert_eq!(r.error, None);
+        std::fs::rename(a.join("a.txt"), b.join("a.txt")).unwrap();
         std::fs::write(a.join("a.txt"), "nuevo").unwrap();
-        let r = run_with(Op::Undo(r.undo.unwrap()), &hooks(&trash)).unwrap();
+        let undo = Undo::Moved(vec![(b.join("a.txt"), a.join("a.txt"))]);
+        let r = run_with(Op::Undo(undo), &hooks(&trash)).unwrap();
         assert!(r.error.is_some());
         assert_eq!(std::fs::read_to_string(a.join("a.txt")).unwrap(), "nuevo");
         assert_eq!(std::fs::read_to_string(b.join("a.txt")).unwrap(), "viejo");
@@ -671,28 +558,6 @@ mod tests {
         std::fs::write(&b, "viejo").unwrap();
         assert!(copy(&a, &b).is_err());
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "viejo");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Devolver a una carpeta que es un enlace (un disco armado: «docs» → otra carpeta) no deja
-    /// el archivo del otro lado.
-    #[test]
-    fn restore_refuses_symlinked_folder() {
-        let dir = tmp("devolver-enlace");
-        let (vol, outside) = (dir.join("vol"), dir.join("LaunchAgents"));
-        std::fs::create_dir_all(vol.join(".Trashes/501")).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, vol.join("docs")).unwrap();
-        let item = vol.join(".Trashes/501/evil.plist");
-        std::fs::write(&item, "x").unwrap();
-        let to = vol.join("docs/evil.plist");
-        let origin = |_: &Path| Some(to.clone());
-        let trash = fake_trash(&dir);
-        let h = Hooks { trash: &trash, origin: &origin, forget: &|_| {} };
-        let r = run_with(Op::Restore { items: vec![item.clone()] }, &h).unwrap();
-        assert!(r.error.is_some());
-        assert!(item.exists(), "sigue en la Papelera");
-        assert!(!outside.join("evil.plist").exists(), "no llegó a la carpeta del enlace");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

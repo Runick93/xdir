@@ -496,15 +496,26 @@ impl App {
 
     // ---------- unidades de red (Windows) ----------
 
-    /// «Conectar unidad de red…»: letras libres (de Z hacia abajo; lo recordado lo lee Windows
-    /// del registro, sin ir a la red), la carpeta con el foco.
+    /// «Conectar unidad de red…»: la carpeta con el foco; las letras libres (de Z hacia abajo) se
+    /// piden en otro hilo (lo recordado pasa por los proveedores de red de Windows).
     pub(super) fn open_map_dialog(&mut self) {
         if self.net.map.is_none() {
-            self.net.map = Some(crate::net::drives_dialog::MapDialog::new(sys::network().free_drive_letters()));
+            self.net.map = Some(crate::net::drives_dialog::MapDialog::new(Vec::new()));
+            self.spawn_task(|| TaskDone::FreeLetters(sys::network().free_drive_letters()));
         }
         self.sync_map_boxes();
         if let Some(b) = self.net.map.as_ref().and_then(|m| m.folder) {
             self.host.text_focus(b);
+        }
+        self.redraw();
+    }
+
+    pub(super) fn on_free_letters(&mut self, letters: Vec<char>) {
+        if let Some(m) = &mut self.net.map {
+            if !letters.contains(&m.letter) {
+                m.letter = letters.first().copied().unwrap_or(m.letter);
+            }
+            m.letters = letters;
         }
         self.redraw();
     }

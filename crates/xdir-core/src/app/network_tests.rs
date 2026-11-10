@@ -1128,6 +1128,9 @@ mod drives {
     fn map_dialog_defaults() {
         let host = FakeHost::new();
         let mut a = map_app(host.clone());
+        // M12: las letras libres se piden en otro hilo.
+        assert_eq!(FakeNetwork::free_letters_here(), 0);
+        wait_until(&mut a, |a| a.net.map.as_ref().is_some_and(|m| !m.letters.is_empty()));
         let m = a.net.map.as_ref().unwrap();
         assert_eq!((m.letter, m.reconnect, m.other_credentials), ('Z', true, false));
         assert!(crate::host::WindowHost::text_has_focus(&*host, m.folder.unwrap()));

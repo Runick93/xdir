@@ -28,12 +28,13 @@ static HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static REMOTE: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 static HANGS: Mutex<Vec<(String, Duration)>> = Mutex::new(Vec::new());
 static BROWSING: Mutex<usize> = Mutex::new(0);
+static FREE_LETTERS: Mutex<Vec<char>> = Mutex::new(Vec::new());
 
 thread_local! {
     static SUPPORTS: RefCell<Vec<String>> = RefCell::new(vec!["smb".into(), "afp".into(), "sftp".into()]);
     static CAN_FORCE: Cell<bool> = const { Cell::new(false) };
     static DENIED: Cell<bool> = const { Cell::new(false) };
-    static FREE_LETTERS: RefCell<Vec<char>> = const { RefCell::new(Vec::new()) };
+    static FREE_LETTERS_HERE: Cell<usize> = const { Cell::new(0) };
     static UI_THREAD: Cell<bool> = const { Cell::new(false) };
     static UI_IO: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static CONNECT_ON_UI: Cell<usize> = const { Cell::new(0) };
@@ -106,7 +107,12 @@ impl FakeNetwork {
     }
 
     pub fn set_free_letters(letters: Vec<char>) {
-        FREE_LETTERS.with(|c| *c.borrow_mut() = letters);
+        *lock(&FREE_LETTERS) = letters;
+    }
+
+    /// Cuántas veces se pidieron las letras libres en este hilo.
+    pub fn free_letters_here() -> usize {
+        FREE_LETTERS_HERE.with(Cell::get)
     }
 
     /// Todo lo que está bajo `prefix` es remoto.
@@ -212,7 +218,8 @@ impl Network for FakeNetwork {
     fn refresh_remote(&self) {}
 
     fn free_drive_letters(&self) -> Vec<char> {
-        FREE_LETTERS.with(|c| c.borrow().clone())
+        FREE_LETTERS_HERE.with(|c| c.set(c.get() + 1));
+        lock(&FREE_LETTERS).clone()
     }
 
     fn can_force(&self) -> bool {

@@ -110,6 +110,19 @@ fn clean_address(raw: &str) -> String {
     })
 }
 
+/// Lanza `cmd` sin esperarlo; un hilo lo recoge al terminar (sin procesos zombis).
+fn open_detached(cmd: &mut std::process::Command) -> bool {
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 pub struct MacNetwork {
     /// Puntos de montaje de red (para `is_remote`, sin E/S).
     remote: RwLock<Vec<PathBuf>>,
@@ -224,7 +237,8 @@ impl Network for MacNetwork {
     }
 
     fn open_credentials_place(&self, _owner: Handle) -> bool {
-        std::process::Command::new("/usr/bin/open").args(["-b", "com.apple.keychainaccess"]).status().is_ok_and(|s| s.success())
+        // Sin esperar a `open` (corre en el hilo de la ventana); un hilo lo recoge al terminar.
+        open_detached(std::process::Command::new("/usr/bin/open").args(["-b", "com.apple.keychainaccess"]))
     }
 
     fn has_credentials_place(&self) -> bool {
@@ -232,7 +246,7 @@ impl Network for MacNetwork {
     }
 
     fn open_local_network_settings(&self, _owner: Handle) {
-        let _ = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork").status();
+        open_detached(std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"));
     }
 }
 

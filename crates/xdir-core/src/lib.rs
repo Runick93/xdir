@@ -42,6 +42,8 @@ pub mod tab;
 pub mod theme;
 pub mod thumbs;
 pub mod toml;
+/// Cambiar `config.toml` por líneas sin perder lo escrito a mano.
+pub mod toml_edit;
 /// Árbol de carpetas lateral (solo con la feature `arbol`).
 #[cfg(feature = "arbol")]
 pub mod tree;

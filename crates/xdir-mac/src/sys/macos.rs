@@ -14,8 +14,7 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::info::{InfoChange, InfoReply, InfoRequest};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Info, KeyStyle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
 use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
@@ -551,28 +550,6 @@ impl Preview for MacPreview {
     }
 }
 
-/// Panel de información: por ahora lo mínimo (`std::fs`, sin abrir lo que está en la nube) y
-/// «Más en el sistema…» abre la ventana del Finder.
-struct MacInfo;
-
-impl Info for MacInfo {
-    fn request(&self, req: InfoRequest) {
-        let spawned = std::thread::Builder::new()
-            .name("xdir-informacion".into())
-            .spawn(move || xdir_core::info::answer(req, &|p| xdir_core::info::read_minimal(p, &crate::metadata::cloud_only)));
-        debug_assert!(spawned.is_ok(), "hilo de información");
-    }
-
-    fn apply(&self, owner: Handle, tx: Sender<InfoReply>, generation: u64, change: InfoChange) {
-        xdir_core::info::send_applied(owner, &tx, generation, change.section(), Some("Todavía no se puede cambiar desde xdir".into()));
-    }
-
-    fn more_in_system(&self, owner: Handle, items: &[Item]) -> bool {
-        sh::properties(owner, items);
-        true
-    }
-}
-
 /// La vista previa real de macOS (lo que instala `install`).
 #[cfg(test)]
 pub fn platform_preview() -> Box<dyn Preview> {
@@ -591,6 +568,6 @@ pub fn install() {
         overlays: Box::new(MacOverlays),
         metadata: Box::new(MacMetadata),
         preview: Box::new(MacPreview),
-        info: Box::new(MacInfo),
+        info: Box::new(crate::info::MacInfo),
     });
 }

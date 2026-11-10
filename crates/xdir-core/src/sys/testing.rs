@@ -931,6 +931,10 @@ impl Watch for FakeWatch {}
 
 impl Drop for FakeWatch {
     fn drop(&mut self) {
+        // Soltar el guardián de una carpeta de red colgada espera al servidor (como Windows).
+        if let Some(d) = FakeNetwork::hang_for(&self.0.to_string_lossy()) {
+            std::thread::sleep(d);
+        }
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(self.0.clone()).or_insert((0, 0)).1 += 1;
     }
 }

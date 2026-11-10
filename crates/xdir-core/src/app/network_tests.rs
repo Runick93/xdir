@@ -1293,3 +1293,19 @@ fn xtree_remote_volume_off_thread() {
     std::thread::sleep(Duration::from_millis(50));
     assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("volume_space")), "{:?}", FakeNetwork::ui_io_calls());
 }
+
+/// I5: soltar el guardián de una carpeta de red colgada no espera en el hilo de la ventana.
+#[test]
+fn remote_watcher_released_off_thread() {
+    let root = remote_dir("r1-watchdrop");
+    let mut a = net_app();
+    a.sync_visibility();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(root.clone()));
+    wait_until(&mut a, |_| FakeFileSystem::watches(&root).0 == 1);
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_millis(400));
+    let t0 = Instant::now();
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(tmp_dir("r1-watchdrop-local")));
+    assert!(t0.elapsed() < Duration::from_millis(200), "navegar esperó al guardián: {:?}", t0.elapsed());
+    wait_until(&mut a, |_| FakeFileSystem::watches(&root).1 == 1);
+}

@@ -85,10 +85,20 @@ pub const SLOW_NOT_RESPONDING: std::time::Duration = std::time::Duration::from_s
 
 /// Un guardián de carpeta de red creado en otro hilo (el sistema puede tardar en vigilarla): el
 /// hilo lo deja en la ranura si la pestaña sigue esperándolo; al soltarlo se suelta el de adentro.
-/// (El campo no se lee: vale por lo que suelta al soltarse.)
-struct RemoteWatch(#[allow(dead_code)] Arc<std::sync::Mutex<Option<Box<dyn Watch>>>>);
+struct RemoteWatch(Arc<std::sync::Mutex<Option<Box<dyn Watch>>>>);
 
 impl Watch for RemoteWatch {}
+
+impl Drop for RemoteWatch {
+    /// El guardián de adentro se suelta en otro hilo: en Windows soltarlo cierra el handle de la
+    /// carpeta remota y espera a su hilo, y con el servidor colgado eso puede tardar mucho.
+    fn drop(&mut self) {
+        let inner = self.0.lock().ok().and_then(|mut s| s.take());
+        if let Some(w) = inner {
+            std::thread::spawn(move || drop(w));
+        }
+    }
+}
 
 /// El guardián de `path`: directo si es local; en otro hilo si es de red.
 fn make_watcher(hwnd: Handle, id: usize, nav_id: u64, path: &std::path::Path) -> Option<Box<dyn Watch>> {

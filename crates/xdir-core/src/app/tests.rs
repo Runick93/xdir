@@ -2274,6 +2274,14 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     let before = host.invalidations();
     assert!(a.on_app_message(crate::xtree::scan::WM_APP_XTREE, id, 0));
     assert_eq!(host.invalidations(), before, "repintó sin cambios en el indicador");
+    // Con el cartel del botón o de la entrada del árbol a la vista, repinta: su cronómetro avanza.
+    for hit in [Hit::Xtree, Hit::TreeXtree] {
+        a.tip = Some(tooltip::Tip { hit, x: 10.0, y: 10.0, state: tooltip::TipState::Visible, token: 1 });
+        let before = host.invalidations();
+        assert!(a.on_app_message(crate::xtree::scan::WM_APP_XTREE, id, 0));
+        assert!(host.invalidations() > before, "{hit:?}");
+    }
+    a.tip = None;
     // Con la vista abierta, cada aviso repinta (el mapa en vivo).
     click_xtree_button(&mut a);
     let before = host.invalidations();

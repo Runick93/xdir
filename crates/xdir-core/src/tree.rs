@@ -954,8 +954,14 @@ impl Tree {
                         let top = y + (ROW_H - ui::BADGE) / 2.0;
                         let badge = rect(row.right - 22.0, top, row.right - 22.0 + ui::BADGE, top + ui::BADGE);
                         ui::draw_xtree_badge(p, badge, xtree);
+                        // En un árbol angosto el porcentaje no pisa el nombre: si no entra, queda
+                        // solo el anillo.
                         if let XtreeBadge::Progress(pct) = xtree {
-                            p.text(FontId::UiRight, &format!("{pct} %"), rect(row.right - 90.0, y, row.right - 34.0, y + ROW_H), alpha(th.text_dim, e * e));
+                            let text = format!("{pct} %");
+                            let left = (row.right - 90.0).max(icon_x + 28.0 + n.text_w + 6.0);
+                            if row.right - 34.0 - left >= p.measure(FontId::Ui, &text) {
+                                p.text(FontId::UiRight, &text, rect(left, y, row.right - 34.0, y + ROW_H), alpha(th.text_dim, e * e));
+                            }
                         }
                     }
                 }
@@ -1282,5 +1288,30 @@ mod tests {
         t.reveal(Handle::default(), Path::new(""), false);
         finish_reveal(&mut t);
         assert_ne!(t.scroll_to, Some(id));
+    }
+
+    /// En un árbol angosto (ancho mínimo) el porcentaje no pisa el nombre: o entra a su derecha o
+    /// no se dibuja (queda el anillo).
+    #[test]
+    fn tree_xtree_percent_does_not_overlap_name() {
+        for w in [MIN_W, 165.0, 170.0, WIDTH] {
+            install_fakes();
+            let mut t = Tree::new();
+            t.visible = true;
+            t.width = w;
+            let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+            let area = rect(0.0, 0.0, w, 700.0);
+            t.draw(&p, area, None, XtreeBadge::Progress(37));
+            let y = row_y(area, xtree_row(&t));
+            let in_row = |r: &Rect| r.top <= y && r.bottom >= y;
+            let texts = p.texts();
+            let name = texts.iter().find(|(_, s, r)| s == "xtree" && in_row(r)).expect("nombre");
+            let name_end = name.2.left + p.measure(FontId::Ui, "xtree");
+            if let Some((_, s, r)) = texts.iter().find(|(_, s, r)| s == "37 %" && in_row(r)) {
+                // Alineado a la derecha: el texto ocupa el final de su cuadro.
+                assert!(r.right - p.measure(FontId::Ui, s) >= name_end, "ancho {w}: {r:?} pisa el nombre (termina en {name_end})");
+            }
+            assert!(p.paths().iter().any(|(pts, closed, _)| *closed && pts.iter().all(|&(_, py)| (py - y).abs() <= 8.0)), "ancho {w}: sin anillo");
+        }
     }
 }

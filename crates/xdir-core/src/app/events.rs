@@ -73,7 +73,7 @@ impl App {
                 // 250 ms), sin un temporizador propio.
                 let open = self.xtree_open;
                 let before = self.xtree_badge();
-                let tip_shown = self.tip.is_some_and(|t| t.hit == Hit::Xtree && t.state == tooltip::TipState::Visible);
+                let tip_shown = self.tip.is_some_and(|t| matches!(t.hit, Hit::Xtree | Hit::TreeXtree) && t.state == tooltip::TipState::Visible);
                 if let Some(v) = &mut self.xtree
                     && v.on_message(wparam, lparam)
                 {

@@ -355,6 +355,8 @@ impl App {
         for i in 0..PANES {
             let state = s.panes.get(i).or(fallback.panes.get(i)).cloned().unwrap_or_default();
             let locations = if state.tabs.is_empty() { vec![Location::Computer] } else { state.tabs };
+            // Sin mirar el disco: si un archivo comprimido ya no está, lo resuelve su carga
+            // (`after_archive_load`).
             let mut tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
             // Hay una sola configuración: si la sesión trae más de una, quedan carpetas.
             for tab in &mut tabs {

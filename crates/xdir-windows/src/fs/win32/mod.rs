@@ -81,6 +81,8 @@ pub fn spawn_load(
             Location::Shell { parsing, .. } => list_shell(&mut out, parsing),
             // La configuración no se carga (la dibuja el núcleo).
             Location::Settings => out.send(LoadMsg::Listed(Ok(()))),
+            // Dentro de un archivo comprimido lista el núcleo (`archive_nav`).
+            Location::Archive { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
         }
     });
 }
@@ -178,6 +180,7 @@ fn list_dir(out: &mut Batcher, path: &Path) {
             overlay: 0,
             // Se consulta recién cuando la fila se ve.
             overlay_checked: false,
+            packed: 0,
         });
         count += 1;
     }
@@ -261,6 +264,7 @@ pub fn disk_entry(path: &Path, name: OsString, meta: &std::fs::Metadata) -> Entr
         icon,
         overlay: 0,
         overlay_checked: false,
+        packed: 0,
     }
 }
 
@@ -314,6 +318,7 @@ fn list_computer(out: &mut Batcher) {
             icon: info.iIcon,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         });
     }
     out.flush();
@@ -485,6 +490,7 @@ fn shell_entry(item: &IShellItem, group: u8) -> Option<Entry> {
         icon,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     })
 }
 
@@ -545,6 +551,7 @@ fn list_drives(out: &mut Batcher) {
             overlay: 0,
             // Las unidades no tienen superposición.
             overlay_checked: true,
+            packed: 0,
         });
         // Cada unidad sale apenas se conoce: una unidad de red lenta no frena a las demás.
         out.flush();
@@ -570,6 +577,19 @@ static TYPE_CACHE: OnceLock<Mutex<HashMap<String, (Arc<str>, i32)>>> = OnceLock:
 /// interfaz no llama al Shell para esto).
 pub fn folder_icon() -> Option<i32> {
     TYPE_CACHE.get()?.lock().ok()?.get("\\dir").map(|v| v.1)
+}
+
+/// Ícono y tipo de un elemento de adentro de un archivo comprimido, por su nombre (el Shell los
+/// da por extensión, sin tocar el disco). Corre en el hilo que lista: COM queda iniciado en él
+/// mientras viva.
+pub fn archive_look(name: &str, is_dir: bool) -> (i32, Arc<str>) {
+    thread_local! {
+        static COM: ComGuard = ComGuard::new();
+    }
+    COM.with(|_| ());
+    let ext = if is_dir { None } else { extension(name) };
+    let (type_name, icon) = type_info(ext.as_deref(), is_dir);
+    (icon, type_name)
 }
 
 /// Tipo de una carpeta, el mismo que lleva en la lista.
@@ -656,7 +676,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } | Location::Settings => Vec::new(),
+        Location::Shell { .. } | Location::Settings | Location::Archive { .. } => Vec::new(),
     }
 }
 

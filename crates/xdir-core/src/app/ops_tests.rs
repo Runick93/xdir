@@ -502,6 +502,7 @@ fn drive_entry(root: &Path, label: &str) -> crate::fs::Entry {
         icon: 0,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     }
 }
 

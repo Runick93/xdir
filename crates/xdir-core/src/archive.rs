@@ -32,6 +32,11 @@ pub struct ArchiveEntry {
     pub link: Option<String>,
     /// Segundos desde 1970 (0 si no figura).
     pub modified: u64,
+    /// Bytes que ocupa comprimida dentro del archivo (0 si el formato no lo dice: un tar.gz se
+    /// comprime entero).
+    pub packed: u64,
+    /// Cifrada (un zip con contraseña): se lista pero no se puede leer.
+    pub encrypted: bool,
 }
 
 /// Bytes que declara el archivo para sus archivos (lo que ocupará extraído). No se confía (quien

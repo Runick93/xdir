@@ -68,6 +68,10 @@ impl SystemEnv for LinuxEnv {
         false
     }
 
+    fn archive_temp_dir(&self) -> Option<PathBuf> {
+        crate::origin::archive_temp_dir()
+    }
+
     fn config_dir(&self) -> Option<PathBuf> {
         config_dir_from(std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"))
     }

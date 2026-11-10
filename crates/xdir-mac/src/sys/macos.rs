@@ -157,6 +157,10 @@ impl SystemEnv for MacEnv {
         }
     }
 
+    fn archive_temp_dir(&self) -> Option<PathBuf> {
+        crate::origin::archive_temp_dir()
+    }
+
     /// ~/Library/Application Support/xdir
     fn config_dir(&self) -> Option<PathBuf> {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/xdir"))
@@ -485,6 +489,10 @@ impl FileSystem for MacFileSystem {
         fsp::folder_type()
     }
 
+    fn archive_look(&self, name: &str, is_dir: bool) -> (i32, Arc<str>) {
+        fsp::archive_look(name, is_dir)
+    }
+
     fn shell_location(&self, text: &str) -> Option<Location> {
         fsp::shell_location(text)
     }
@@ -620,7 +628,7 @@ pub fn install() {
         metadata: Box::new(MacMetadata),
         preview: Box::new(MacPreview),
         copy_prims: Box::new(crate::ops::MacCopyPrims),
-        archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset }),
+        archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset, copy_origin: crate::origin::copy_origin }),
         info: Box::new(crate::info::MacInfo),
     });
 }

@@ -28,7 +28,7 @@ impl Drop for Tmp {
 }
 
 fn svc() -> Service {
-    Service { tar_gz: true, utc_offset: |_| 0 }
+    Service { tar_gz: true, utc_offset: |_| 0, copy_origin: |_, _| {} }
 }
 
 /// UTC-3 fijo (Buenos Aires), para las horas de los zip.
@@ -382,7 +382,7 @@ fn zip_corrupt_is_clear_error() {
     fs::write(&z, b"esto no es un zip").unwrap();
     assert_eq!(svc().list(&z).unwrap_err().kind, ErrKind::Other("El zip está dañado".into()));
     assert_eq!(svc().list(&t.p("no.rar")).unwrap_err().kind, ErrKind::Other("Formato no soportado".into()));
-    let win = Service { tar_gz: false, utc_offset: |_| 0 };
+    let win = Service { tar_gz: false, utc_offset: |_| 0, copy_origin: |_, _| {} };
     assert_eq!(win.list(&t.p("a.tar.gz")).unwrap_err().kind, ErrKind::Other("Formato no soportado".into()));
     assert_eq!(win.formats().len(), 1);
 }
@@ -599,7 +599,7 @@ fn missing_entry_is_not_found_and_declared_total() {
     let z = t.p("out.zip");
     svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
     assert_eq!(svc().declared_total(&z).unwrap(), 200_004);
-    let ghost = ArchiveEntry { index: 99, name: "x".into(), size: 0, kind: ItemKind::File, link: None, modified: 0 };
+    let ghost = ArchiveEntry { index: 99, name: "x".into(), size: 0, kind: ItemKind::File, link: None, modified: 0, packed: 0, encrypted: false };
     let err = svc().extract(&z, &ghost, &t.0, None, &mut |_| Flow::Continue).unwrap_err();
     assert_eq!(err.kind, ErrKind::NotFound);
 }
@@ -923,7 +923,7 @@ fn zip_times_are_local() {
     let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
     fs::File::options().write(true).open(&f).unwrap().set_modified(when).unwrap();
     let z = t.p("hora.zip");
-    let ba = Service { tar_gz: true, utc_offset: utc_minus_3 };
+    let ba = Service { tar_gz: true, utc_offset: utc_minus_3, copy_origin: |_, _| {} };
     ba.create(&z, &[(f.clone(), "a.txt".into())], &mut |_| Flow::Continue).unwrap();
     let mut a = ::zip::ZipArchive::new(fs::File::open(&z).unwrap()).unwrap();
     let dt = a.by_index_raw(0).unwrap().last_modified().unwrap();
@@ -931,4 +931,136 @@ fn zip_times_are_local() {
     assert_eq!(ba.list(&z).unwrap()[0].modified, 1_700_000_000);
     // Leído en otra zona (UTC), la misma hora de pared: tres horas antes.
     assert_eq!(svc().list(&z).unwrap()[0].modified, 1_700_000_000 - 10_800);
+}
+
+// ---------- navegar dentro de un archivo comprimido ----------
+
+/// El listado trae el tamaño comprimido (zip) y si la entrada está cifrada, sin descomprimir.
+#[test]
+fn list_reports_packed_and_encrypted() {
+    let t = Tmp::new();
+    let (_, items) = sample(&t);
+    let z = t.p("out.zip");
+    svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
+    let list = svc().list(&z).unwrap();
+    let b = list.iter().find(|e| e.name == "src/b.bin").unwrap();
+    // 200.000 bytes iguales se comprimen muchísimo.
+    assert!(b.packed > 0 && b.packed < 10_000, "{}", b.packed);
+    assert!(list.iter().all(|e| !e.encrypted));
+    let c = t.p("clave.zip");
+    fs::write(&c, raw_zip(&[Raw { flags: 1, ..raw(b"secreto.txt", b"datos cifrados") }])).unwrap();
+    assert!(svc().list(&c).unwrap()[0].encrypted);
+}
+
+/// `extract_some` extrae solo lo que acepta `want` (por el nombre guardado), con las mismas
+/// reglas que `extract_all`.
+#[test]
+fn extract_some_only_wanted_zip() {
+    let t = Tmp::new();
+    let (_, items) = sample(&t);
+    let z = t.p("out.zip");
+    svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
+    let dst = t.p("dst");
+    fs::create_dir(&dst).unwrap();
+    let want = |_: usize, n: &str| if safe_entry_path(n).is_some_and(|p| p.starts_with(Path::new("src").join("sub"))) { Pick::Take } else { Pick::Skip };
+    let mut failed = Vec::new();
+    xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &want, &mut |_| Flow::Continue, &mut |n, e| failed.push((n.to_string(), e))).unwrap();
+    assert!(failed.is_empty());
+    assert_eq!(tree(&dst), [("src/".to_string(), None), ("src/sub/".to_string(), None), ("src/sub/c.txt".to_string(), Some(vec![])), ("src/sub/vacia/".to_string(), None)]);
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_some_only_wanted_targz() {
+    let t = Tmp::new();
+    let z = t.p("a.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"d/", tar::EntryType::Directory, None, b"");
+        tar_entry(b, b"d/a.txt", tar::EntryType::Regular, None, b"hola");
+        tar_entry(b, b"d/b.txt", tar::EntryType::Regular, None, b"chau");
+    });
+    let dst = t.p("dst");
+    fs::create_dir(&dst).unwrap();
+    let want = |_: usize, n: &str| if n == "d/b.txt" { Pick::Take } else { Pick::Skip };
+    xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &want, &mut |_| Flow::Continue, &mut |_, _| {}).unwrap();
+    assert_eq!(tree(&dst), [("d/".to_string(), None), ("d/b.txt".to_string(), Some(b"chau".to_vec()))]);
+}
+
+/// Listar para navegar corta en `max` (trae uno más para saber que se cortó), consulta `cancel`
+/// también en un zip y no lee el destino de los enlaces.
+#[test]
+fn list_stops_at_max_and_honours_cancel() {
+    let t = Tmp::new();
+    let z = t.p("muchos.zip");
+    let names: Vec<String> = (0..10).map(|i| format!("f{i}.txt")).collect();
+    let raws: Vec<Raw> = names.iter().map(|n| raw(n.as_bytes(), b"x")).collect();
+    fs::write(&z, raw_zip(&raws)).unwrap();
+    let got = xdir_core::sys::Archives::list(&svc(), &z, 3, &mut || Flow::Continue).unwrap();
+    assert_eq!(got.len(), 4);
+    let err = xdir_core::sys::Archives::list(&svc(), &z, usize::MAX, &mut || Flow::Stop).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
+}
+
+/// Listar no lee el destino de un enlace guardado en el zip.
+#[cfg(unix)]
+#[test]
+fn list_does_not_read_link_targets() {
+    let t = Tmp::new();
+    let l = t.p("enlace.zip");
+    fs::write(&l, raw_zip(&[link_entry(b"l", b"destino")])).unwrap();
+    let got = xdir_core::sys::Archives::list(&svc(), &l, usize::MAX, &mut || Flow::Continue).unwrap();
+    assert_eq!((got[0].kind, got[0].link.clone()), (ItemKind::Symlink, None));
+}
+
+#[cfg(unix)]
+#[test]
+fn targz_list_stops_at_max() {
+    let t = Tmp::new();
+    let z = t.p("m.tar.gz");
+    tar_gz(&z, |b| {
+        for i in 0..10 {
+            tar_entry(b, format!("f{i}").as_bytes(), tar::EntryType::Regular, None, b"x");
+        }
+    });
+    assert_eq!(xdir_core::sys::Archives::list(&svc(), &z, 3, &mut || Flow::Continue).unwrap().len(), 4);
+}
+
+/// `propagate_origin` le pasa a la plataforma cada cosa extraída con su archivo.
+#[test]
+fn propagate_origin_calls_the_platform_for_each() {
+    static SEEN: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let s = Service { tar_gz: true, utc_offset: |_| 0, copy_origin: |a, d| SEEN.lock().unwrap().push((a.to_path_buf(), d.to_path_buf())) };
+    let (z, a, b) = (Path::new("z.zip"), PathBuf::from("a"), PathBuf::from("b"));
+    xdir_core::sys::Archives::propagate_origin(&s, z, &[a.clone(), b.clone()]);
+    assert_eq!(*SEEN.lock().unwrap(), [(z.to_path_buf(), a), (z.to_path_buf(), b)]);
+}
+
+/// Con `Pick::Last` un tar.gz deja de descomprimirse después de esa entrada (no se lee lo que
+/// sigue); la posición es la de `list`.
+#[cfg(unix)]
+#[test]
+fn targz_extract_some_stops_after_last() {
+    let t = Tmp::new();
+    let z = t.p("largo.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"a.txt", tar::EntryType::Regular, None, b"a");
+        tar_entry(b, b"b.txt", tar::EntryType::Regular, None, b"b");
+        let big: Vec<u8> = (0..4_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        tar_entry(b, b"grande.bin", tar::EntryType::Regular, None, &big);
+    });
+    assert_eq!(svc().list(&z).unwrap()[1].name, "b.txt");
+    let run = |pick: Pick| {
+        let dst = t.p(&format!("dst-{pick:?}"));
+        fs::create_dir(&dst).unwrap();
+        let mut checks = 0;
+        xdir_core::sys::Archives::extract_some(&svc(), &z, &dst, &|i, _| if i == 1 { pick } else { Pick::Skip }, &mut |_| {
+            checks += 1;
+            Flow::Continue
+        }, &mut |_, _| {})
+        .unwrap();
+        assert_eq!(fs::read(dst.join("b.txt")).unwrap(), b"b");
+        checks
+    };
+    let (last, take) = (run(Pick::Last), run(Pick::Take));
+    assert!(last * 10 < take, "Last {last} / Take {take}");
 }

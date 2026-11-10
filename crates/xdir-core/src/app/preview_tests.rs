@@ -262,6 +262,7 @@ fn preview_computer_shows_drive() {
         icon: 0,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     };
     a.panes[0].tab_mut().list.append(vec![disk]);
     a.panes[0].tab_mut().list.select_pos(0);
@@ -497,6 +498,7 @@ fn computer_focused_file_is_requested() {
         icon: 0,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     };
     a.panes[0].tab_mut().list.append(vec![file]);
     a.panes[0].tab_mut().list.select_pos(0);

@@ -288,7 +288,11 @@ impl App {
             return;
         }
         // Pestañas deslizándose hacia su lugar, o una búsqueda en curso (su indicador gira): otro cuadro.
-        let searching = self.shown_panes().into_iter().any(|i| self.panes[i].tab().search.as_ref().is_some_and(|s| !s.done));
+        let searching = self.shown_panes().into_iter().any(|i| {
+            let tab = self.panes[i].tab();
+            // También mientras se lee un archivo comprimido (su «Cargando…» gira).
+            tab.search.as_ref().is_some_and(|s| !s.done) || (tab.loading && tab.location.is_archive())
+        });
         if self.panes.iter().any(|p| p.tab_busy) || searching {
             animating = true;
             self.last_frame = Some(now);

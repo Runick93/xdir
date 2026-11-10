@@ -85,6 +85,10 @@ impl SystemEnv for Win32Env {
         unsafe { GetKeyState(k.0 as i32) < 0 }
     }
 
+    fn archive_temp_dir(&self) -> Option<PathBuf> {
+        crate::origin::archive_temp_dir()
+    }
+
     /// %APPDATA%\xdir
     fn config_dir(&self) -> Option<PathBuf> {
         std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("xdir"))
@@ -528,6 +532,10 @@ impl FileSystem for Win32FileSystem {
         fsp::folder_type()
     }
 
+    fn archive_look(&self, name: &str, is_dir: bool) -> (i32, Arc<str>) {
+        fsp::archive_look(name, is_dir)
+    }
+
     fn shell_location(&self, text: &str) -> Option<Location> {
         fsp::shell_location(text)
     }
@@ -670,7 +678,7 @@ pub fn install() {
         preview: Box::new(Win32Preview),
         copy_prims: Box::new(crate::ops::WinCopyPrims),
         // Windows: solo zip (tar.gz, en macOS y Linux).
-        archives: Box::new(xdir_archive::Service { tar_gz: false, utc_offset }),
+        archives: Box::new(xdir_archive::Service { tar_gz: false, utc_offset, copy_origin: crate::origin::copy_origin }),
         info: Box::new(crate::info::Win32Info),
     });
 }

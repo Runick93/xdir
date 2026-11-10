@@ -20,6 +20,8 @@ mod metadata;
 #[cfg(windows)]
 mod ops;
 #[cfg(windows)]
+mod origin;
+#[cfg(windows)]
 mod platform;
 #[cfg(windows)]
 mod render;

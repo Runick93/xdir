@@ -154,6 +154,15 @@ pub trait SystemEnv: Send + Sync {
     fn local_now(&self) -> LocalNow {
         LocalNow::now_with_offset(0)
     }
+    /// ¿Se puede activar el modo portable desde la configuración? (en macOS el ejecutable está
+    /// dentro del `.app` firmado: solo se informa).
+    fn portable_supported(&self) -> bool {
+        true
+    }
+    /// Cómo se llama el explorador de archivos del sistema («Mostrar en el Explorador»).
+    fn file_manager_name(&self) -> &'static str {
+        "el Explorador"
+    }
 }
 
 /// Operaciones de archivos del sistema.

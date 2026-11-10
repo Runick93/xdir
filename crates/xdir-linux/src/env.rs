@@ -45,6 +45,11 @@ pub(crate) fn utc_offset(unix: i64) -> i64 {
 pub struct LinuxEnv;
 
 impl SystemEnv for LinuxEnv {
+    /// Cada escritorio tiene su gestor de archivos: «Mostrar en la carpeta».
+    fn file_manager_name(&self) -> &'static str {
+        "la carpeta"
+    }
+
     /// Sin interfaz no hay tema del sistema: claro.
     fn system_dark(&self) -> bool {
         false

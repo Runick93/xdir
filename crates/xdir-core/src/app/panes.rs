@@ -351,10 +351,22 @@ impl App {
 
     pub(super) fn restore_panes(&mut self, s: &Session, start_path: Option<PathBuf>) {
         let fallback = default_session();
+        let mut seen_settings = false;
         for i in 0..PANES {
             let state = s.panes.get(i).or(fallback.panes.get(i)).cloned().unwrap_or_default();
             let locations = if state.tabs.is_empty() { vec![Location::Computer] } else { state.tabs };
-            let tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
+            let mut tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
+            // Hay una sola configuración: si la sesión trae más de una, quedan carpetas.
+            for tab in &mut tabs {
+                if let Some(v) = &mut tab.settings {
+                    if seen_settings {
+                        *tab = Tab::new(tab.id, Location::Computer, self.show_hidden);
+                    } else {
+                        v.set_page(s.settings_page.as_deref().map_or(crate::settings::PageId::default(), Self::page_from_id));
+                    }
+                    seen_settings = true;
+                }
+            }
             self.panes.push(Pane::new(tabs, state.active));
         }
         self.active = s.active_pane.min(self.layout.panes() - 1);
@@ -387,6 +399,8 @@ impl App {
             preview_on: self.preview.on,
             preview_width: self.preview.width,
             info_sections: self.info.sections,
+            settings_page: self.settings_session_page(),
+            xtree_last: self.xtree.as_ref().map(|x| x.root().to_path_buf()).or_else(|| self.xtree_last.clone()),
             // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
             columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),
@@ -413,7 +427,10 @@ impl App {
                 tab.set_visible(hwnd, &tx, i < visible_panes && j == active);
             }
         }
-        // Cambió la pestaña a la vista (o el layout): Renombrar varios se recalcula o se cierra.
+        // Cambió la pestaña a la vista (o el layout): Renombrar varios se recalcula o se cierra,
+        // y una grabación de atajo que ya no se ve termina.
+        self.end_hidden_recording();
+        self.release_hidden_settings_field();
         self.refresh_rename_many();
         self.sync_rename_boxes();
     }
@@ -424,6 +441,8 @@ impl App {
             // Ir a otro panel restaura el layout si había uno maximizado.
             self.maximized = None;
             self.active = pane;
+            // Una grabación de atajo en el panel que se deja termina.
+            self.end_hidden_recording();
             self.redraw();
         }
     }
@@ -492,6 +511,34 @@ impl App {
             "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
             "close" => self.close_palette(),
             "info" => self.info_test(a, nb),
+            // Configuración: `config_pagina <id>` va a esa página; `config_parte <id> <parte>` es
+            // un clic en esa parte de una fila (como la vio el último cuadro).
+            "config_pagina" => {
+                let page = Self::page_from_id(a);
+                if let Some(v) = self.settings_view_mut(self.active) {
+                    v.set_page(page);
+                }
+            }
+            // `buscar <texto>`: lo escrito en la caja de búsqueda del panel activo.
+            "buscar" => self.search_typed(self.active, text.strip_prefix("buscar").unwrap_or("").trim()),
+            // `grabar <tecla> <ctrl,shift,alt,meta>`: una tecla mientras se graba un atajo.
+            "grabar" => {
+                let has = |m: &str| b.split(',').any(|x| x == m);
+                self.settings_capture(crate::keys::Key(na as u16), has("ctrl"), has("shift"), has("alt"), has("meta"));
+            }
+            "config_parte" => {
+                let id = crate::settings::options::OPTIONS
+                    .iter()
+                    .map(|o| o.id)
+                    .chain(["reglas_color", "error_config", "restablecer_atajos"])
+                    .chain(crate::commands::ALL.iter().map(|s| s.id))
+                    .find(|id| *id == a);
+                if let Some(r) = id.and_then(|id| self.part_rect(self.active, id, nb)) {
+                    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+                    self.on_left_down(x, y, false);
+                    self.on_left_up(x, y);
+                }
+            }
             "copiar" | "mover" | "ventana" | "comprimir" | "extraer_aqui" | "extraer_en" => self.transfer_test(verb, &format!("{a} {b}")),
             _ => {}
         }

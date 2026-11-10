@@ -138,6 +138,8 @@ pub struct SearchView<'a> {
     pub running: Option<f32>,
     /// Se puede buscar en este lugar (no en carpetas virtuales).
     pub enabled: bool,
+    /// Lo que dice la caja vacía («Buscar»; «Buscar en la configuración»).
+    pub placeholder: &'a str,
 }
 
 /// Dónde caería algo que se suelta sobre la barra de favoritos.
@@ -482,6 +484,11 @@ impl Pane {
         self.chevrons.get(i).cloned()
     }
 
+    /// Dónde se dibujó la miga `i`.
+    pub fn crumb_rect(&self, i: usize) -> Option<Rect> {
+        self.crumbs.get(i).map(|(r, _)| *r)
+    }
+
     pub fn crumb(&self, i: usize) -> Option<Location> {
         self.crumbs.get(i).map(|(_, l)| l.clone())
     }
@@ -557,7 +564,7 @@ impl Pane {
                 Button::Back => tab.can_back(),
                 Button::Forward => tab.can_forward(),
                 Button::Up => tab.can_up(),
-                Button::Refresh => true,
+                Button::Refresh => !tab.is_settings(),
             };
             if enabled && hover == PaneHit::Button(b) {
                 let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
@@ -615,7 +622,11 @@ impl Pane {
             p.round_stroke(addr, 6.0, border);
             let star_w = if favs.is_some() { STAR_W } else { 0.0 };
             let crumbs_area = rect(addr.left, addr.top, addr.right - star_w - TERM_W - 4.0, addr.bottom);
-            self.draw_crumbs(p, crumbs_area, hover);
+            if self.tabs[self.active].is_settings() {
+                self.draw_settings_crumbs(p, crumbs_area, hover);
+            } else {
+                self.draw_crumbs(p, crumbs_area, hover);
+            }
 
             // Botón de consola: abre PowerShell o CMD en la carpeta (solo carpetas de disco).
             let term = rect(addr.right - star_w - TERM_W - 2.0, addr.top + 3.0, addr.right - star_w - 2.0, addr.bottom - 3.0);
@@ -635,7 +646,7 @@ impl Pane {
             };
             p.text(FontId::UiCenter, ">_", term, color);
             self.terminal = if enabled { term } else { rect(0.0, 0.0, 0.0, 0.0) };
-            if let Some((f, _)) = favs {
+            if let Some((f, _)) = favs.filter(|_| !self.tabs[self.active].is_settings()) {
                 // Estrella llena si la carpeta ya es favorita.
                 let star = rect(addr.right - STAR_W, addr.top + 3.0, addr.right - 3.0, addr.bottom - 3.0);
                 if hover == PaneHit::Star {
@@ -662,6 +673,15 @@ impl Pane {
 
         // Lista, un poco adentro del borde para no tapar las esquinas redondeadas.
         self.list = rect(area.left + 1.0, top, area.right - 1.0, area.bottom - FOOTER_H);
+        // La configuración ocupa el lugar de la lista: la dibuja la `App` (`settings::draw`).
+        if self.tabs[self.active].is_settings() {
+            self.view_button = rect(0.0, 0.0, 0.0, 0.0);
+            self.new_folder_button = rect(0.0, 0.0, 0.0, 0.0);
+            p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
+            let stroke = if active_pane { (th.accent, 1.5) } else { (th.border, 1.0) };
+            p.rounded_path(&outline, true, None, Some(stroke));
+            return;
+        }
         // Línea gris que separa el final de la lista del pie con los botones.
         p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
         // Botón del pie: cambia el tamaño de los íconos de este panel, vuelve a la primera vista al final.
@@ -801,7 +821,12 @@ impl Pane {
             let show_close = self.tabs.len() > 1 && (active || hovered);
             let text_right = if show_close { close.left - 2.0 } else { r.right - TAB_SLANT - 6.0 };
             let color = if active { th.text } else { th.text_dim };
-            let text = rect(r.left + left_slant + 12.0, r.top, text_right, r.bottom);
+            let mut text = rect(r.left + left_slant + 12.0, r.top, text_right, r.bottom);
+            if tab.is_settings() {
+                // La pestaña Configuración lleva el engranaje adelante.
+                p.text(FontId::GlyphsSmall, "\u{E713}", rect(text.left - 4.0, r.top, text.left + 16.0, r.bottom), color);
+                text.left += 18.0;
+            }
             p.text(FontId::Ui, &tab.location.title(), text, color);
             if show_close {
                 if hover == PaneHit::TabClose(i) {
@@ -848,7 +873,7 @@ impl Pane {
         let text = rect(field.left + 28.0, field.top, field.right - SEARCH_PROGRESS_W - 24.0, field.bottom);
         if !s.editing {
             if s.text.is_empty() {
-                p.text(FontId::Ui, "Buscar", text, dim);
+                p.text(FontId::Ui, s.placeholder, text, dim);
             } else {
                 p.text(FontId::Ui, s.text, text, th.text);
             }
@@ -1005,6 +1030,34 @@ impl Pane {
                 self.draw_chevron(p, rect(x, addr.top + 4.0, x + CHEVRON_W, addr.bottom - 4.0), last.clone(), hover);
             }
         }
+    }
+
+    /// Barra de dirección de la pestaña Configuración: «⚙ Configuración › <página>», sin flechas
+    /// de subcarpetas ni escritura (las migas no llevan a otro lado).
+    fn draw_settings_crumbs(&mut self, p: &dyn Painter, addr: Rect, hover: PaneHit) {
+        let th = p.theme();
+        self.crumbs.clear();
+        self.chevrons.clear();
+        let page = self.tabs[self.active].settings.as_ref().map(|v| v.page_title.clone()).unwrap_or_default();
+        let mut x = addr.left + 6.0;
+        let first_w = p.measure(FontId::Ui, crate::fs::SETTINGS_TITLE) + 16.0 + THIS_PC_ICON_W;
+        let r = rect(x, addr.top + 4.0, (x + first_w).min(addr.right - 4.0), addr.bottom - 4.0);
+        if hover == PaneHit::Crumb(0) {
+            p.round_fill(r, 4.0, alpha(th.text, 0.16));
+        }
+        p.text(FontId::GlyphsSmall, "\u{E713}", rect(r.left + 4.0, r.top, r.left + 4.0 + THIS_PC_ICON_W, r.bottom), th.text_dim);
+        p.text(FontId::UiCenter, crate::fs::SETTINGS_TITLE, rect(r.left + THIS_PC_ICON_W, r.top, r.right, r.bottom), th.text_dim);
+        self.crumbs.push((r, Location::Settings));
+        x = r.right;
+        if page.is_empty() {
+            return;
+        }
+        p.text(FontId::GlyphsSmall, "\u{E76C}", rect(x, addr.top + 4.0, x + CHEVRON_W, addr.bottom - 4.0), th.text_dim);
+        x += CHEVRON_W;
+        let w = p.measure(FontId::Ui, &page) + 16.0;
+        let r = rect(x, addr.top + 4.0, (x + w).min(addr.right - 4.0), addr.bottom - 4.0);
+        p.text(FontId::UiCenter, &page, r, th.text);
+        self.crumbs.push((r, Location::Settings));
     }
 
     /// Flecha entre tramos: abre el menú de subcarpetas de `of`. Abierta, apunta hacia abajo.

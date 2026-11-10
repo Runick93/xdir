@@ -48,7 +48,9 @@ impl App {
             WM_APP_FAVEDIT_DONE => self.end_fav_edit(wparam == 1),
             WM_APP_FILTER_DONE => self.end_filter(wparam == 1),
             WM_APP_RENAME_DONE => self.end_rename(wparam == 1),
+            WM_APP_FIELD_DONE if self.settings_field_done(wparam == 1) => {}
             WM_APP_FIELD_DONE => self.on_field_done(wparam == 1),
+            WM_APP_FIELD_TAB if self.settings_field_tab(wparam == 1) => {}
             WM_APP_FIELD_TAB => self.on_field_tab(wparam == 1),
             tasks::WM_APP_TASK => self.on_tasks(),
             WM_APP_SUGGEST_KEY => self.on_suggest_key(Key(wparam as u16)),
@@ -305,6 +307,10 @@ impl App {
     /// largo (Alt+F4, Alt+Espacio). Devuelve si se usó.
     pub fn on_alt_key(&mut self, vk: Key) -> bool {
         self.dismiss_tooltip();
+        // F10 llega acá sin Alt (es tecla de sistema en Windows): se mira si Alt está apretada.
+        if let Some(used) = self.settings_capture_key(vk, key_down(VK_MENU)) {
+            return used;
+        }
         match self.config.keymap.lookup(vk, key_down(VK_CONTROL), key_down(VK_SHIFT), true, key_down(VK_LWIN)) {
             Some(c) => {
                 self.run_command(c);
@@ -317,6 +323,10 @@ impl App {
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
         self.dismiss_tooltip();
+        // Grabando un atajo, lo escrito no va a la lista.
+        if self.capturing_keys() {
+            return;
+        }
         // El espacio de la tecla que abrió, cerró o plegó (Windows manda la tecla y después el
         // carácter) no entra en la búsqueda por tipeo.
         if std::mem::take(&mut self.swallow_space) && c == ' ' {
@@ -383,6 +393,10 @@ impl App {
             }
             Hit::Info(_) => {
                 self.info_wheel(delta * lines);
+                return;
+            }
+            Hit::Settings(i, _) => {
+                self.settings_wheel(i, delta * lines);
                 return;
             }
             Hit::Pane(i, _) => i,

@@ -10,6 +10,10 @@ pub const WM_APP_TASK: u32 = crate::WM_APP + 26;
 
 /// Lo que devuelve un trabajo suelto.
 pub(super) enum TaskDone {
+    /// Terminó de escribir `config.toml` (la pestaña Configuración): lo que quedó, o el error.
+    ConfigSaved { result: Result<Config, String> },
+    /// Terminó de activar (`on`) o desactivar el modo portable.
+    Portable { on: bool, result: Result<(), String> },
     /// El original de un acceso directo (`None`: no se resolvió o ya no existe).
     Original { pane: usize, link: PathBuf, target: Option<PathBuf> },
     /// Los discos que se pueden expulsar.
@@ -44,6 +48,8 @@ impl App {
 
     pub(super) fn on_task_done(&mut self, t: TaskDone) {
         match t {
+            TaskDone::ConfigSaved { result } => self.on_config_saved(result),
+            TaskDone::Portable { on, result } => self.on_portable_done(on, result),
             TaskDone::Renamed { dir, result, undoing } => self.on_renamed(dir, result, undoing),
             TaskDone::CaseInfo { dir, case_insensitive } => self.on_case_info(&dir, case_insensitive),
             TaskDone::Original { pane, link, target } => {

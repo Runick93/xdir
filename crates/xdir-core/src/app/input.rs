@@ -104,6 +104,10 @@ impl App {
         for i in self.shown_panes() {
             match self.panes[i].hit(x, y) {
                 PaneHit::None => {}
+                // La configuración ocupa el lugar de la lista.
+                PaneHit::List if self.panes[i].tab().is_settings() => {
+                    return Hit::Settings(i, self.settings_hit(i, x, y).unwrap_or(crate::settings::SettingsHit::Body));
+                }
                 h => return Hit::Pane(i, h),
             }
         }
@@ -114,6 +118,8 @@ impl App {
         self.dismiss_tooltip();
         let hit = self.hit(x, y);
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
+        // Grabando un atajo, un clic fuera de su fila deja de grabar (y sigue su curso).
+        self.cancel_recording_unless(hit);
         self.info.focused = matches!(hit, Hit::Info(_));
         if self.about_open {
             match hit {
@@ -263,6 +269,11 @@ impl App {
             Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
+            Hit::Picker(ui::PickerHit::MoreOptions) => self.run_command(Command::Settings),
+            Hit::Settings(i, h) => {
+                self.set_active(i);
+                self.settings_click(i, h, x, y);
+            }
             Hit::Picker(ui::PickerHit::Panel) => {}
             Hit::Splitter(s) if double => {
                 self.begin_layout_anim();
@@ -289,7 +300,7 @@ impl App {
                     }
                     PaneHit::TabClose(j) => self.close_tab(i, j),
                     PaneHit::NewTab => {
-                        let loc = self.panes[i].tab().location.clone();
+                        let loc = new_tab_location(&self.panes[i].tab().location);
                         self.new_tab(i, loc, true);
                     }
                     PaneHit::Maximize => self.toggle_maximize(i),
@@ -306,6 +317,13 @@ impl App {
                     PaneHit::Button(b) => {
                         self.host.capture_mouse();
                         self.drag = Drag::Button(i, b);
+                    }
+                    // Las migas de la configuración llevan a la sección (con una búsqueda, la
+                    // terminan).
+                    PaneHit::Crumb(_) if self.panes[i].tab().is_settings() => {
+                        if !self.panes[i].tab().search_query().is_empty() {
+                            self.clear_filter(i);
+                        }
                     }
                     PaneHit::Crumb(k) => {
                         if let Some(loc) = self.panes[i].crumb(k) {
@@ -491,6 +509,10 @@ impl App {
                 self.tree.drag_bar(bar, grab, x, y);
                 redraw = true;
             }
+            Drag::SettingsSlider(pane, id) => {
+                self.settings_slider(pane, id, x);
+                redraw = true;
+            }
             Drag::PreviewEdge(grab) => {
                 self.drag_preview_edge(x + grab);
                 self.sync_rename_boxes();
@@ -519,6 +541,8 @@ impl App {
 
         let hover = self.hit(x, y);
         redraw |= hover != self.hover;
+        // Una página extra de la configuración dibuja su hover con la posición del mouse.
+        redraw |= matches!(hover, Hit::Settings(_, crate::settings::SettingsHit::Extra));
         redraw |= self.update_tooltip(hover, x, y);
         // Con xtree abierto el mouse es de la vista: los paneles y el árbol de abajo no se resaltan.
         if self.xtree_open {
@@ -579,5 +603,14 @@ impl App {
         if redraw {
             self.redraw();
         }
+    }
+}
+
+/// Dónde abre una pestaña nueva desde la pestaña `from`: la misma ubicación, salvo la
+/// configuración (hay una sola): «Este equipo».
+pub(super) fn new_tab_location(from: &Location) -> Location {
+    match from {
+        Location::Settings => Location::Computer,
+        other => other.clone(),
     }
 }

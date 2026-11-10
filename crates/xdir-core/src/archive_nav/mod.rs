@@ -187,7 +187,8 @@ pub fn entry_of(c: &Child) -> Entry {
 
 /// Los últimos listados, por archivo (con su tamaño y fecha: si cambió, se vuelve a leer). Entrar
 /// y salir de carpetas de un zip grande no lo vuelve a leer cada vez.
-static LISTINGS: Mutex<Vec<(PathBuf, (u64, u64), Arc<Vec<ArchiveEntry>>)>> = Mutex::new(Vec::new());
+type Listing = (PathBuf, (u64, u64), Arc<Vec<ArchiveEntry>>);
+static LISTINGS: Mutex<Vec<Listing>> = Mutex::new(Vec::new());
 const LISTINGS_KEPT: usize = 4;
 
 /// Las entradas del archivo `real` (del disco o una extracción temporal), con la caché.

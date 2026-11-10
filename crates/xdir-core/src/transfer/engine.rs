@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::archive::{EntryKind, archive_name, declared_total, extract_folder_name};
+use crate::archive::{EntryKind, archive_name, declared_total, extract_folder_name, safe_entry_path};
 use crate::names::{copy_name, folder_with_name, free_name, numbered_name, replaced_name};
 use super::walk::{Planned, totals, walk};
 use super::{Answer, Choice, ConflictInfo, Control, Flow, JobError, JobOutcome, JobSpec, Update};
@@ -98,13 +98,17 @@ pub fn title(spec: &JobSpec, items: u64) -> String {
         JobSpec::Undo(_) => "Deshaciendo".into(),
         JobSpec::Compress { .. } => count("Comprimiendo"),
         JobSpec::Extract { archive, .. } => format!("Extrayendo «{}»", name(archive)),
+        JobSpec::ExtractEntries { archive, entries, dest } => match entries.as_slice() {
+            [one] if items == 1 => format!("Copiando «{}» a «{}»", one.rsplit('/').next().unwrap_or(one), name(dest)),
+            _ => format!("{} de «{}» a «{}»", count("Copiando"), name(archive), name(dest)),
+        },
     }
 }
 
 /// Corre el trabajo hasta el final (o hasta que se cancele) y manda `Update::Finished`. Comprimir
 /// y extraer usan `sys::archives()`.
 pub fn run(spec: JobSpec, prims: &dyn CopyPrims, ctl: &Control, out: &mut dyn FnMut(Update)) {
-    if matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }) {
+    if matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. } | JobSpec::ExtractEntries { .. }) {
         run_with(spec, prims, sys::archives(), ctl, out);
     } else {
         run_with(spec, prims, &NoArchives, ctl, out);
@@ -142,6 +146,7 @@ pub fn run_with(spec: JobSpec, prims: &dyn CopyPrims, archives: &dyn Archives, c
         JobSpec::NewFolderWith { parent, items } => job.new_folder_with(&parent, &items),
         JobSpec::Compress { sources } => job.compress(&sources),
         JobSpec::Extract { archive, into_folder } => job.extract(&archive, into_folder),
+        JobSpec::ExtractEntries { archive, entries, dest } => job.extract_entries(&archive, &entries, &dest),
         JobSpec::Restore { items } => job.restore(&items),
         JobSpec::Undo(undo) => {
             job.start("Deshaciendo".into(), count_steps(&undo), 0);
@@ -1719,6 +1724,96 @@ impl<'a> Job<'a> {
         self.items_done = count;
     }
 
+    /// Copia `entries` (rutas interiores, archivos o carpetas) de `archive` a `dest`: como «Extraer
+    /// aquí», pero solo eso y a otra carpeta. Se extrae en la carpeta oculta del motor junto al
+    /// destino (`Archives::extract_some`) y se lleva renombrando, con los conflictos de siempre.
+    fn extract_entries(&mut self, archive: &Path, entries: &[String], dest: &Path) {
+        let t = title(&JobSpec::ExtractEntries { archive: archive.to_path_buf(), entries: entries.to_vec(), dest: dest.to_path_buf() }, entries.len() as u64);
+        let archives = self.archives;
+        let ctl = self.ctl;
+        let list = match archives.list(archive, &mut || ctl.checkpoint()) {
+            Ok(v) => v,
+            Err(e) if e.kind == ErrKind::Cancelled => {
+                self.cancelled = true;
+                return;
+            }
+            Err(e) => {
+                self.fail_archive(archive, dest, e);
+                return;
+            }
+        };
+        let wanted: Vec<PathBuf> = entries.iter().filter_map(|e| safe_entry_path(e)).collect();
+        let want = |name: &str| !is_mac_metadata(name) && safe_entry_path(name).is_some_and(|p| wanted.iter().any(|w| p.starts_with(w)));
+        let chosen: Vec<_> = list.into_iter().filter(|e| want(&e.name)).collect();
+        let declared = declared_total(&chosen);
+        let count = chosen.iter().filter(|e| e.kind != EntryKind::Omitted).count() as u64;
+        if let Some(v) = self.prims.volume(dest)
+            && declared > v.free
+        {
+            let missing = sys::env().format_size_short(declared - v.free);
+            self.stopped = Some(format!("Faltan {missing} en \"{}\"", v.label));
+            return;
+        }
+        if declared > BIG_EXPANSION || chosen.len() > BIG_ENTRIES {
+            let q = format!("Esto se expande a {}. ¿Seguir?", sys::env().format_size_short(declared));
+            (self.out)(Update::Confirm(q));
+            if !self.ctl.wait_confirm() {
+                self.cancelled = true;
+                return;
+            }
+        }
+        self.start(t, count, declared);
+        self.current = name_of(archive);
+        let staging = tmp_in(dest);
+        if let Err(e) = self.prims.create_private_dir(&staging) {
+            self.fail_archive(archive, dest, e);
+            return;
+        }
+        let root = staging.join(STAGING_ROOT);
+        if let Err(e) = self.prims.create_dir(&root) {
+            self.remove_tree(&staging);
+            self.fail_archive(archive, dest, e);
+            return;
+        }
+        let mut failed: Vec<(String, CopyError)> = Vec::new();
+        let mut written = 0u64;
+        let res = {
+            let mut on_bytes = |b: u64| {
+                written = b;
+                self.progress(b, false);
+                self.ctl.checkpoint()
+            };
+            archives.extract_some(archive, &root, &want, &mut on_bytes, &mut |name, e| failed.push((name.to_string(), e)))
+        };
+        for (name, e) in failed {
+            self.entry_error(archive, dest, &name, &e.message());
+        }
+        match res {
+            Ok(n) => self.omitted = n,
+            Err(e) => {
+                self.remove_tree(&staging);
+                if e.kind == ErrKind::Cancelled {
+                    self.cancelled = true;
+                } else {
+                    self.fail_archive(archive, dest, e);
+                }
+                return;
+            }
+        }
+        if self.ctl.is_cancelled() {
+            self.remove_tree(&staging);
+            self.cancelled = true;
+            return;
+        }
+        self.items_done = count;
+        self.bytes_done = written;
+        self.progress(0, true);
+        let srcs: Vec<PathBuf> = wanted.iter().map(|w| root.join(w)).filter(|p| self.exists(p).is_some()).collect();
+        self.bring_in(archive, dest, &srcs);
+        self.remove_tree(&staging);
+        self.items_done = count;
+    }
+
     /// Una entrada del archivo que no llegó.
     fn entry_error(&mut self, archive: &Path, dir: &Path, name: &str, message: &str) {
         self.errors.push(super::JobError { src: archive.to_path_buf(), dst: dir.to_path_buf(), message: message.into(), retry: false, entry: Some(name.into()) });
@@ -1760,9 +1855,17 @@ impl<'a> Job<'a> {
     fn extract_here(&mut self, archive: &Path, dir: &Path, root: &Path) {
         let mut names = self.prims.read_dir(root).unwrap_or_default();
         names.sort();
+        let srcs: Vec<PathBuf> = names.iter().map(|n| root.join(n)).collect();
+        self.bring_in(archive, dir, &srcs);
+    }
+
+    /// Lleva lo extraído `srcs` a `dir` renombrando (cada uno con su nombre), con los conflictos
+    /// de siempre y revisando los enlaces que llegan; si se cancela, lo que llegó se saca.
+    fn bring_in(&mut self, archive: &Path, dir: &Path, srcs: &[PathBuf]) {
         self.moves_as_created = true;
         self.retry_renames = true;
-        let items: Vec<Item> = names.iter().map(|n| Item::new(&root.join(n), Target::Fixed(dir.join(n)), How::Rename)).collect();
+        let items: Vec<Item> =
+            srcs.iter().filter_map(|s| Some(Item::new(s, Target::Fixed(dir.join(s.file_name()?)), How::Rename))).collect();
         self.ahead = items.iter().map(|i| self.ahead_of(&i.src, &self.target_hint(i))).collect();
         for (i, item) in items.into_iter().enumerate() {
             self.index = i;

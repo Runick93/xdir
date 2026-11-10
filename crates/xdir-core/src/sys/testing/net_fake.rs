@@ -27,7 +27,6 @@ static DISCONNECTS: Mutex<Vec<(PathBuf, bool)>> = Mutex::new(Vec::new());
 static HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static REMOTE: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 static HANGS: Mutex<Vec<(String, Duration)>> = Mutex::new(Vec::new());
-static SHARES: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
 static BROWSING: Mutex<usize> = Mutex::new(0);
 
 thread_local! {
@@ -91,10 +90,6 @@ impl FakeNetwork {
     /// Cuántos `browse` están corriendo.
     pub fn browsing() -> usize {
         *lock(&BROWSING)
-    }
-
-    pub fn set_shares(host: &str, shares: Vec<String>) {
-        lock(&SHARES).insert(host.to_ascii_lowercase(), shares);
     }
 
     pub fn set_can_force(v: bool) {
@@ -185,11 +180,6 @@ impl Network for FakeNetwork {
             Some(v) => v.first().cloned().unwrap_or(Ok(())),
             None => Ok(()),
         }
-    }
-
-    fn shares(&self, host: &str) -> Result<Vec<String>, NetError> {
-        Self::sleep_if_hung(host);
-        Ok(lock(&SHARES).get(&host.to_ascii_lowercase()).cloned().unwrap_or_default())
     }
 
     fn browse(&self, hwnd: Handle, tx: Sender<HostEvent>, cancel: Arc<AtomicBool>) {

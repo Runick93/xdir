@@ -328,14 +328,6 @@ impl Network for LinuxNetwork {
         Err(gio_error(&err, &host, ""))
     }
 
-    fn shares(&self, host: &str) -> Result<Vec<String>, NetError> {
-        let (ok, out, err) = self.run(&["list", &format!("smb://{host}/")])?;
-        if !ok {
-            return Err(gio_error(&err, host, ""));
-        }
-        Ok(out.lines().map(str::trim).filter(|l| !l.is_empty() && !l.ends_with('$')).map(String::from).collect())
-    }
-
     fn browse(&self, hwnd: Handle, tx: Sender<HostEvent>, cancel: Arc<AtomicBool>) {
         if self.gio.is_none() {
             return;

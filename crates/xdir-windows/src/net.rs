@@ -10,12 +10,11 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::NetworkManagement::NetManagement::{MAX_PREFERRED_LENGTH, NetApiBufferFree};
 use windows::Win32::NetworkManagement::WNet::{
     CONNECT_INTERACTIVE, CONNECT_PROMPT, CONNECT_UPDATE_PROFILE, NET_CONNECT_FLAGS, NETRESOURCEW, RESOURCE_CONNECTED, RESOURCE_REMEMBERED,
     RESOURCETYPE_DISK, WNET_OPEN_ENUM_USAGE, WNetAddConnection3W, WNetCancelConnection2W, WNetCloseEnum, WNetEnumResourceW, WNetOpenEnumW,
 };
-use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, NetShareEnum, SHARE_INFO_1, STYPE_DISKTREE};
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use xdir_core::net::{Address, ConnectOptions, NetConnection, NetError};
 use xdir_core::sys::{Handle, HostEvent, Network};
@@ -200,31 +199,6 @@ impl Network for WinNetwork {
         let code = unsafe { WNetCancelConnection2W(&HSTRING::from(name.as_str()), CONNECT_UPDATE_PROFILE, force) }.0;
         self.refresh_remote();
         if code == 0 { Ok(()) } else { Err(win_error(code, "", "")) }
-    }
-
-    fn shares(&self, host: &str) -> Result<Vec<String>, NetError> {
-        let mut buf: *mut u8 = std::ptr::null_mut();
-        let (mut read, mut total) = (0u32, 0u32);
-        let server = HSTRING::from(format!(r"\\{host}"));
-        let code = unsafe { NetShareEnum(&server, 1, &mut buf, MAX_PREFERRED_LENGTH, &mut read, &mut total, None) };
-        if code != 0 {
-            return Err(win_error(code, host, ""));
-        }
-        let mut out = Vec::new();
-        if !buf.is_null() {
-            let items = unsafe { std::slice::from_raw_parts(buf as *const SHARE_INFO_1, read as usize) };
-            for i in items {
-                // Solo carpetas (sin impresoras ni los ocultos especiales como IPC$).
-                if i.shi1_type.0 & 0xFF == STYPE_DISKTREE.0 {
-                    out.push(pwstr(i.shi1_netname));
-                }
-            }
-            unsafe {
-                NetApiBufferFree(Some(buf as *const _));
-            }
-        }
-        out.sort_by_key(|s| s.to_lowercase());
-        Ok(out)
     }
 
     fn browse(&self, _hwnd: Handle, _tx: Sender<HostEvent>, _cancel: Arc<AtomicBool>) {

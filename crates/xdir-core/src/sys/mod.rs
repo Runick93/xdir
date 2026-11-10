@@ -412,8 +412,6 @@ pub trait Network: Send + Sync {
     fn connections(&self) -> Result<Vec<NetConnection>, NetError>;
     /// Desconecta lo montado en `local` (`force`: aunque haya archivos abiertos). Bloqueante.
     fn disconnect(&self, local: &Path, force: bool) -> Result<(), NetError>;
-    /// Recursos compartidos de una máquina. Bloqueante.
-    fn shares(&self, host: &str) -> Result<Vec<String>, NetError>;
     /// Manda `HostEvent`s a medida que aparecen y desaparecen máquinas, avisando a `hwnd` con
     /// `net::WM_APP_NET`; corre (bloqueante, en su hilo) hasta `cancel`.
     fn browse(&self, hwnd: Handle, tx: Sender<HostEvent>, cancel: Arc<AtomicBool>);
@@ -461,9 +459,6 @@ impl Network for NoNetwork {
     }
     fn disconnect(&self, _local: &Path, _force: bool) -> Result<(), NetError> {
         Err(NetError::Other("sin implementar".into()))
-    }
-    fn shares(&self, _host: &str) -> Result<Vec<String>, NetError> {
-        Ok(Vec::new())
     }
     fn browse(&self, _hwnd: Handle, _tx: Sender<HostEvent>, _cancel: Arc<AtomicBool>) {}
     fn is_remote(&self, path: &Path) -> bool {

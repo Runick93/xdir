@@ -200,11 +200,6 @@ impl Network for MacNetwork {
         result
     }
 
-    fn shares(&self, _host: &str) -> Result<Vec<String>, NetError> {
-        // macOS elige el recurso en su ventana al conectar a `smb://máquina`.
-        Ok(Vec::new())
-    }
-
     fn browse(&self, hwnd: Handle, tx: Sender<HostEvent>, cancel: Arc<AtomicBool>) {
         bonjour::browse(hwnd, tx, cancel, self.denied.clone());
     }

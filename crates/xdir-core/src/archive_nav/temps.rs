@@ -21,8 +21,12 @@ use crate::sys::{self, CopyError, ErrKind, Flow, ItemKind};
 /// Nombre del candado dentro de la carpeta de cada ejecución.
 const LOCK: &str = ".candado";
 
+/// Texto del error cuando no hay una carpeta temporal segura.
+pub const NO_SAFE_TEMP: &str = "No hay una carpeta temporal segura para extraer";
+
 pub struct Temps {
-    base: PathBuf,
+    /// La carpeta del usuario que da la plataforma (`None`: no hay una segura).
+    base: Option<PathBuf>,
     run: PathBuf,
     /// El candado de esta ejecución (abierto y tomado mientras viva).
     lock: Mutex<Option<File>>,
@@ -30,10 +34,11 @@ pub struct Temps {
     stamps: Mutex<HashMap<PathBuf, (u64, u64)>>,
 }
 
-/// Las temporales del proceso, en `<temp del sistema>/xdir-comprimidos`.
+/// Las temporales del proceso, en la carpeta que da la plataforma
+/// (`SystemEnv::archive_temp_dir`: propia del usuario, privada y verificada).
 pub fn global() -> &'static Temps {
     static GLOBAL: OnceLock<Temps> = OnceLock::new();
-    GLOBAL.get_or_init(|| Temps::new(&std::env::temp_dir().join("xdir-comprimidos")))
+    GLOBAL.get_or_init(|| Temps::new(sys::env().archive_temp_dir().as_deref()))
 }
 
 /// Al arrancar: borra lo que quedó de ejecuciones anteriores (en un hilo: no frena el arranque).
@@ -47,31 +52,38 @@ pub fn clean_at_exit() {
 }
 
 impl Temps {
-    /// Las temporales bajo `base` (se crean al primer uso).
-    pub fn new(base: &Path) -> Temps {
+    /// Las temporales bajo `base`, que ya tiene que estar verificada (se crean al primer uso).
+    /// Sin `base` no hay temporales: todo pedido falla con `NO_SAFE_TEMP`.
+    pub fn new(base: Option<&Path>) -> Temps {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
-        let run = base.join(format!("{}-{nanos}", std::process::id()));
-        Temps { base: base.to_path_buf(), run, lock: Mutex::new(None), stamps: Mutex::new(HashMap::new()) }
+        let run = base.map(|b| b.join(format!("{}-{nanos}", std::process::id()))).unwrap_or_default();
+        Temps { base: base.map(Path::to_path_buf), run, lock: Mutex::new(None), stamps: Mutex::new(HashMap::new()) }
     }
 
-    /// La carpeta de esta ejecución, creada y con su candado tomado.
-    pub fn run_dir(&self) -> &Path {
+    fn unsafe_base() -> CopyError {
+        CopyError::new(ErrKind::Other(NO_SAFE_TEMP.into()), Path::new(""))
+    }
+
+    /// La carpeta de esta ejecución, creada (nueva: `create_dir` no sigue un enlace que ya esté
+    /// ahí) y con su candado tomado. `None` sin carpeta segura o si no se pudo crear.
+    pub fn run_dir(&self) -> Option<&Path> {
+        self.base.as_ref()?;
         let mut lock = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         if lock.is_none() {
-            let _ = std::fs::create_dir_all(&self.run);
-            if let Ok(f) = File::create(self.run.join(LOCK)) {
-                let _ = f.try_lock();
-                *lock = Some(f);
-            }
+            std::fs::create_dir(&self.run).ok()?;
+            let f = File::create_new(self.run.join(LOCK)).ok()?;
+            let _ = f.try_lock();
+            *lock = Some(f);
         }
-        &self.run
+        Some(&self.run)
     }
 
     /// Borra las carpetas de ejecuciones que ya no están: las que tienen un candado que se puede
     /// tomar (las de un xdir abierto, no). Una sin candado se borra si tiene más de un minuto (la
     /// de una ejecución que justo está arrancando, no).
     pub fn clean_stale(&self) {
-        let Ok(dirs) = std::fs::read_dir(&self.base) else { return };
+        let Some(base) = &self.base else { return };
+        let Ok(dirs) = std::fs::read_dir(base) else { return };
         for d in dirs.flatten() {
             let path = d.path();
             if path == self.run || !path.is_dir() {
@@ -95,7 +107,9 @@ impl Temps {
     /// archivo abierto).
     pub fn clean_own(&self) {
         let mut lock = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        *lock = None;
+        if lock.take().is_none() {
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.run);
         self.stamps.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
@@ -111,6 +125,7 @@ impl Temps {
     /// Dónde queda (o quedaría) extraído el elemento `rel` (ruta interior con `/`), sin tocar el
     /// disco. `None` si el nombre no es seguro.
     pub fn entry_path(&self, file: &Path, nested: &[String], rel: &str) -> Option<PathBuf> {
+        self.base.as_ref()?;
         Some(self.dir_for(file, nested).join(safe_entry_path(rel)?))
     }
 
@@ -139,7 +154,7 @@ impl Temps {
         };
         let not_allowed = || CopyError::new(ErrKind::Other(sys::NOT_ALLOWED.into()), Path::new(rel));
         let target = safe_entry_path(rel).ok_or_else(not_allowed)?;
-        self.run_dir();
+        self.run_dir().ok_or_else(Temps::unsafe_base)?;
         let prims = sys::copy_prims();
         let dir = self.dir_for(file, nested);
         let stat = prims.stat(&real)?;

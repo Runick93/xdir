@@ -121,6 +121,13 @@ impl SystemEnv for FakeEnv {
         false
     }
 
+    /// Una por proceso de pruebas, bajo la temporal del sistema.
+    fn archive_temp_dir(&self) -> Option<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("xdir-comprimidos-pruebas-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
+
     fn key_down(&self, k: Key) -> bool {
         KEYS_DOWN.with(|d| d.borrow().contains(&k))
     }

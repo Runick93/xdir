@@ -78,6 +78,8 @@ fn rows_have_filetime_and_dir_attr() {
 fn base(name: &str) -> PathBuf {
     let b = std::env::temp_dir().join(format!("xdir-temps-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&b);
+    // La plataforma la da ya creada.
+    std::fs::create_dir_all(&b).unwrap();
     b
 }
 
@@ -86,13 +88,13 @@ fn base(name: &str) -> PathBuf {
 #[test]
 fn stale_run_dirs_removed_live_kept() {
     let b = base("viejas");
-    let live = Temps::new(&b);
-    let live_dir = live.run_dir().to_path_buf();
+    let live = Temps::new(Some(&b));
+    let live_dir = live.run_dir().unwrap().to_path_buf();
     let dead = b.join("1-1");
     std::fs::create_dir_all(&dead).unwrap();
     std::fs::write(dead.join(".candado"), "").unwrap();
     std::fs::write(dead.join("foto.jpg"), "x").unwrap();
-    let me = Temps::new(&b);
+    let me = Temps::new(Some(&b));
     me.clean_stale();
     assert!(!dead.exists());
     assert!(live_dir.exists(), "la de la otra ejecución, con su candado, queda");
@@ -109,7 +111,7 @@ fn ensure_extracts_once_and_again_if_changed() {
     let b = base("una");
     let zip = b.join("datos").join("fotos.zip");
     FakeArchives::shared().add_archive(&zip, &[("a/", b""), ("a/nota.txt", b"hola")], 30);
-    let t = Temps::new(&b);
+    let t = Temps::new(Some(&b));
     let got = t.ensure(&zip, &[], "a/nota.txt").unwrap();
     assert_eq!(Some(got.clone()), t.entry_path(&zip, &[], "a/nota.txt"));
     assert_eq!(FakeCopyPrims::shared().read_content(&got).unwrap(), b"hola");
@@ -133,7 +135,7 @@ fn nested_chain_resolves() {
     let b = base("anidado");
     let outer = b.join("afuera.zip");
     FakeArchives::shared().add_archive(&outer, &[("dir/adentro.zip", b"zz")], 10);
-    let t = Temps::new(&b);
+    let t = Temps::new(Some(&b));
     let inner_path = t.entry_path(&outer, &[], "dir/adentro.zip").unwrap();
     // El de adentro también es un «zip» del falso (con sus entradas).
     let real = t.resolve(&outer, &["dir/adentro.zip".to_string()]).unwrap();
@@ -153,4 +155,25 @@ fn offers_system_only_known_errors() {
     }
     assert!(!offers_system("Error de E/S: el sector está dañado"));
     assert!(!offers_system("Ya no existe"));
+}
+
+/// Sin una carpeta temporal segura (la plataforma no la dio o no pasó sus controles), no se
+/// extrae nada ni hay rutas temporales.
+#[test]
+fn no_safe_base_refuses_extraction() {
+    install_fakes();
+    let zip = base("sin-base").join("a.zip");
+    FakeArchives::shared().add_archive(&zip, &[("x.txt", b"x")], 3);
+    let t = Temps::new(None);
+    assert_eq!(t.entry_path(&zip, &[], "x.txt"), None);
+    let err = t.ensure(&zip, &[], "x.txt").unwrap_err();
+    assert_eq!(err.message(), super::temps::NO_SAFE_TEMP);
+}
+
+/// La carpeta de las temporales la da el sistema (la del falso, una por proceso de pruebas).
+#[test]
+fn global_base_comes_from_the_platform() {
+    install_fakes();
+    let base = crate::sys::env().archive_temp_dir().expect("el falso la da");
+    assert!(super::temps::global().run_dir().unwrap().starts_with(&base));
 }

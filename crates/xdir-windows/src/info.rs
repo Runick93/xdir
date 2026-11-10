@@ -245,7 +245,7 @@ fn account_name(sid: PSID) -> String {
 
 /// SID del usuario del proceso (en un búfer que hay que conservar mientras se usa).
 /// El búfer es de `u64`: `TOKEN_USER` lleva un puntero y tiene que quedar alineado.
-fn token_user() -> Option<Vec<u64>> {
+pub(crate) fn token_user() -> Option<Vec<u64>> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;

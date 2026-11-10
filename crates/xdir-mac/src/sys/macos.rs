@@ -148,6 +148,10 @@ impl SystemEnv for MacEnv {
         }
     }
 
+    fn archive_temp_dir(&self) -> Option<PathBuf> {
+        crate::origin::archive_temp_dir()
+    }
+
     /// ~/Library/Application Support/xdir
     fn config_dir(&self) -> Option<PathBuf> {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/xdir"))

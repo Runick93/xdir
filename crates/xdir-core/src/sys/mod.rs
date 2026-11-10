@@ -150,6 +150,13 @@ pub trait SystemEnv: Send + Sync {
     fn command_available(&self, _c: Command) -> bool {
         true
     }
+    /// Carpeta propia del usuario para lo que se extrae de un archivo comprimido sin que lo pida
+    /// (abrir, vista previa, zips anidados): ya creada, solo para él (0700 donde aplica), de su
+    /// propiedad y que no sea un enlace. `None` si no hay una así: no se extrae nada. Por defecto,
+    /// ninguna.
+    fn archive_temp_dir(&self) -> Option<PathBuf> {
+        None
+    }
     /// Fecha de hoy en hora local. Por defecto, en UTC; cada sistema la da con su zona horaria.
     fn local_now(&self) -> LocalNow {
         LocalNow::now_with_offset(0)

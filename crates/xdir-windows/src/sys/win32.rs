@@ -85,6 +85,10 @@ impl SystemEnv for Win32Env {
         unsafe { GetKeyState(k.0 as i32) < 0 }
     }
 
+    fn archive_temp_dir(&self) -> Option<PathBuf> {
+        crate::origin::archive_temp_dir()
+    }
+
     /// %APPDATA%\xdir
     fn config_dir(&self) -> Option<PathBuf> {
         std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("xdir"))

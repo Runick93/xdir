@@ -71,6 +71,13 @@ impl App {
             let tab = self.panes[i].tab();
             let restore = sys::file_system().is_trash(&tab.location).then(|| tab.list.selected_indices().next().is_some());
             self.panes[i].restore = restore;
+            // ⏏ en los discos expulsables de «Este equipo».
+            let tab = self.panes[i].tab();
+            let ejects: Vec<usize> = match tab.location {
+                Location::Computer => (0..tab.list.entries.len()).filter(|&k| self.ejectable.contains(&tab.entry_path(k))).collect(),
+                _ => Vec::new(),
+            };
+            self.panes[i].tab_mut().list.eject_rows = ejects;
         }
         self.last_frame = animating.then_some(now);
         for p in &mut self.panes {

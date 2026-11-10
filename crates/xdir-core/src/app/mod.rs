@@ -292,6 +292,8 @@ pub struct App {
     /// Trabajos sueltos (`tasks.rs`).
     task_tx: Sender<tasks::TaskDone>,
     task_rx: Receiver<tasks::TaskDone>,
+    /// Discos que se pueden expulsar (los averigua `request_ejectable` en otro hilo).
+    ejectable: std::collections::HashSet<PathBuf>,
     undo: Vec<Undo>,
     rename: Option<Rename>,
     /// Carpeta recién creada sobre la que abrir el renombrado cuando aparezca en la lista.
@@ -519,6 +521,7 @@ impl App {
             ops_rx,
             task_tx,
             task_rx,
+            ejectable: std::collections::HashSet::new(),
             undo: Vec::new(),
             rename: None,
             pending_rename: None,
@@ -591,6 +594,8 @@ impl App {
         self.hwnd = window;
         self.dpi = dpi;
         self.host.attach(window);
+        // Qué discos se pueden expulsar (en otro hilo; vuelve con `WM_APP_TASK`).
+        self.request_ejectable();
     }
 
     /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).

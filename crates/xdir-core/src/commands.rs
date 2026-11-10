@@ -59,6 +59,8 @@ pub enum Command {
     CreateShortcut,
     /// Abrir la carpeta del original de un acceso directo, con él seleccionado.
     ShowOriginal,
+    /// Expulsar el disco enfocado en «Este equipo» o el de la carpeta del panel.
+    Eject,
     Rename,
     Properties,
     /// Copia de cada seleccionado a su lado («nombre copia»).
@@ -191,6 +193,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::Restore, "devolver", "Devolver", &[]),
     spec(Command::CreateShortcut, "crear_acceso_directo", "Crear acceso directo", &[]),
     spec(Command::ShowOriginal, "mostrar_original", "Mostrar el original", &[]),
+    spec(Command::Eject, "expulsar", "Expulsar", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
     spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),

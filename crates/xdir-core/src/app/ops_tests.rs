@@ -429,3 +429,190 @@ fn show_original_missing_notice() {
     wait_task(&mut a);
     assert_eq!(a.notice.as_deref(), Some("No se encuentra el original de \"enlace\""));
 }
+
+// ---------- Expulsar ----------
+
+/// Una fila de unidad de «Este equipo» (como las de `list_computer`).
+fn drive_entry(root: &Path, label: &str) -> crate::fs::Entry {
+    crate::fs::Entry {
+        name: root.as_os_str().to_os_string(),
+        full: None,
+        group: 1,
+        pidl: None,
+        display: label.to_string(),
+        sort_key: label.to_lowercase(),
+        is_dir: true,
+        size: 0,
+        modified: 0,
+        created: 0,
+        attrs: 0x10,
+        type_name: std::sync::Arc::from("Unidad"),
+        icon: 0,
+        overlay: 0,
+        overlay_checked: true,
+    }
+}
+
+/// Dos «unidades» (carpetas temporales): E: expulsable y C: no. La `App` queda en «Este equipo»
+/// con las dos y ya sabe cuáles se expulsan.
+fn computer_with_drives(host: Rc<FakeHost>, tag: &str) -> (App, PathBuf, PathBuf) {
+    use crate::sys::testing::FakeFileSystem;
+    let mut a = app_with_host(host);
+    let e = fixture(&format!("{tag}-e"), &[]);
+    let c = fixture(&format!("{tag}-c"), &[]);
+    std::fs::create_dir_all(e.join("fotos")).unwrap();
+    FakeFileSystem::set_drives(&[(&c, "Disco local (C:)"), (&e, "USB (E:)")]);
+    FakeShell::set_ejectable(std::slice::from_ref(&e));
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.set_active(0);
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Computer);
+    pump(&mut a, 0);
+    // Al terminar de cargar «Este equipo» ya se preguntó qué discos se expulsan.
+    wait_task(&mut a);
+    a.panes[0].tab_mut().list.replace(vec![drive_entry(&c, "Disco local (C:)"), drive_entry(&e, "USB (E:)")]);
+    (a, e, c)
+}
+
+fn ejects_of(root: &Path) -> usize {
+    FakeShell::ejects().iter().filter(|p| p.as_path() == root).count()
+}
+
+/// ⏏ solo en la fila del disco expulsable, en Detalles y en Íconos.
+#[test]
+fn eject_button_only_on_ejectable() {
+    let host = FakeHost::new();
+    let (mut a, _e, _c) = computer_with_drives(host.clone(), "boton");
+    let count = |h: &FakeHost| h.drawn_texts().iter().filter(|(_, s, _)| s == crate::list::EJECT_GLYPH).count();
+    a.paint();
+    assert_eq!(count(&host), 1, "Detalles");
+    assert!(a.panes[0].tab().list.eject_button(1).is_some());
+    assert!(a.panes[0].tab().list.eject_button(0).is_none());
+    a.set_view(0, crate::list::View::Icons);
+    a.paint();
+    assert_eq!(count(&host), 1, "Íconos");
+}
+
+/// Expulsar suelta antes lo de xdir: las pestañas en ese disco pasan a «Este equipo»; la de otro
+/// disco queda. Y al terminar bien, el aviso.
+#[test]
+fn eject_click_releases_tabs_first() {
+    let host = FakeHost::new();
+    let (mut a, e, c) = computer_with_drives(host.clone(), "suelta");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[1].tab_mut().navigate(hwnd, &tx, Location::Path(e.join("fotos")));
+    a.panes[2].tab_mut().navigate(hwnd, &tx, Location::Path(e.join("fotos")));
+    a.panes[3].tab_mut().navigate(hwnd, &tx, Location::Path(c.clone()));
+    FakeShell::set_eject_result(&e, Ok(()));
+    a.paint();
+    let r = a.panes[0].tab().list.eject_button(1).expect("⏏ de E:");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let before = ejects_of(&e);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    // Ya se soltó (antes de que el hilo termine de expulsar).
+    assert_eq!(a.panes[1].tab().location, Location::Computer);
+    assert_eq!(a.panes[2].tab().location, Location::Computer);
+    assert_eq!(a.panes[3].tab().location, Location::Path(c.clone()));
+    wait_task(&mut a);
+    assert_eq!(ejects_of(&e) - before, 1);
+    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"USB (E:)\" con seguridad"));
+}
+
+#[test]
+fn eject_success_notice() {
+    let (mut a, e, _c) = computer_with_drives(FakeHost::new(), "aviso");
+    FakeShell::set_eject_result(&e, Ok(()));
+    a.panes[0].tab_mut().list.select_pos(1);
+    a.run_command(Command::Eject);
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"USB (E:)\" con seguridad"));
+}
+
+/// Ocupado: se pregunta si reintentar, nombrando el programa; Sí vuelve a intentar.
+#[test]
+fn eject_busy_offers_retry() {
+    use crate::shell::EjectError;
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "ocupado");
+    FakeShell::set_eject_result(&e, Err(EjectError { busy_by: Some("Word".into()), busy: true, message: "ocupado".into() }));
+    a.panes[0].tab_mut().list.select_pos(1);
+    host.set_answer(Some(true));
+    let before = ejects_of(&e);
+    a.run_command(Command::Eject);
+    wait_task(&mut a);
+    assert_eq!(
+        host.questions().last().cloned(),
+        Some(("Expulsar".to_string(), "No se pudo expulsar \"USB (E:)\": lo está usando Word. ¿Reintentar?".to_string()))
+    );
+    // Reintentó; la segunda vez se cancela.
+    host.set_answer(None);
+    wait_task(&mut a);
+    assert_eq!(ejects_of(&e) - before, 2);
+    // Sin nombre: «otro programa».
+    FakeShell::set_eject_result(&e, Err(EjectError { busy_by: None, busy: true, message: String::new() }));
+    a.run_command(Command::Eject);
+    wait_task(&mut a);
+    assert_eq!(
+        host.questions().last().map(|q| q.1.clone()).as_deref(),
+        Some("No se pudo expulsar \"USB (E:)\": lo está usando otro programa. ¿Reintentar?")
+    );
+}
+
+/// El comando expulsa el disco enfocado en «Este equipo» o, en una carpeta, el disco de esa
+/// carpeta; sin disco expulsable, nada. El menú del disco trae «Expulsar».
+#[test]
+fn eject_command_uses_focused_drive() {
+    let (mut a, e, c) = computer_with_drives(FakeHost::new(), "comando");
+    FakeShell::set_eject_result(&e, Ok(()));
+    let before = ejects_of(&e);
+    a.panes[0].tab_mut().list.select_pos(0);
+    a.run_command(Command::Eject);
+    assert_eq!(ejects_of(&c), 0, "C: no es expulsable");
+    a.panes[0].tab_mut().list.select_pos(1);
+    assert!(own_menu(&mut a).iter().any(|l| l == "Expulsar"));
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(e.join("fotos")));
+    pump(&mut a, 0);
+    a.run_command(Command::Eject);
+    wait_task(&mut a);
+    assert_eq!(ejects_of(&e) - before, 1);
+    assert_eq!(a.panes[0].tab().location, Location::Computer);
+    let s = crate::commands::ALL.iter().find(|s| s.id == "expulsar").unwrap();
+    assert_eq!((s.command, s.name, s.default_keys), (Command::Eject, "Expulsar", &[][..]));
+}
+
+/// ⏏ en el nodo del disco en el árbol: lo expulsa.
+#[cfg(feature = "arbol")]
+#[test]
+fn eject_from_tree_node() {
+    let (mut a, e, _c) = computer_with_drives(FakeHost::new(), "arbol");
+    FakeShell::set_eject_result(&e, Ok(()));
+    a.tree.visible = true;
+    a.tree.pinned = true;
+    a.tree.refresh_drives();
+    a.tree.ejectable = a.ejectable.clone();
+    a.paint();
+    a.paint();
+    let r = a.tree.eject_button(&e).expect("⏏ en el árbol");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let before = ejects_of(&e);
+    assert!(a.tree.eject_hit(x, y).is_some());
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    wait_task(&mut a);
+    assert_eq!(ejects_of(&e) - before, 1);
+}
+
+/// Al tomar la ventana ya se pregunta qué discos se expulsan (para «Expulsar» desde una carpeta
+/// sin haber pasado por «Este equipo»).
+#[test]
+fn attach_requests_ejectable() {
+    use crate::sys::testing::FakeFileSystem;
+    let mut a = app();
+    let e = fixture("al-abrir-e", &[]);
+    FakeFileSystem::set_drives(&[(&e, "USB (E:)")]);
+    FakeShell::set_ejectable(std::slice::from_ref(&e));
+    a.attach(crate::sys::Handle(7), 96);
+    wait_task(&mut a);
+    assert!(a.ejectable.contains(&e));
+}

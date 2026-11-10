@@ -119,6 +119,8 @@ impl App {
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let views = &mut self.folder_views;
         let Some(tab) = self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == event.panel) else { return false };
+        // Terminó de cargar «Este equipo»: se averigua qué discos se pueden expulsar.
+        let computer_listed = matches!(tab.location, Location::Computer) && matches!(event.msg, fs::LoadMsg::Listed(_));
         let views_changed = tab.sync_view(views);
         let changed = tab.on_load(event);
         tab.retry_with_credentials(hwnd, &tx);
@@ -131,6 +133,9 @@ impl App {
         // La vista rápida sigue a su carpeta (se borró el elemento, se vació, cambió de carpeta).
         if changed {
             self.sync_quick_look();
+        }
+        if computer_listed {
+            self.request_ejectable();
         }
         changed
     }

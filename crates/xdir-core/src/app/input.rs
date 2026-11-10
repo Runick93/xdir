@@ -182,6 +182,16 @@ impl App {
             self.term_menu = None;
             self.redraw();
         }
+        // ⏏ de un disco en «Este equipo».
+        if let Hit::Pane(i, PaneHit::List) = hit
+            && let Some(idx) = self.panes[i].tab().list.eject_hit(x, y)
+        {
+            self.set_active(i);
+            let root = self.panes[i].tab().entry_path(idx);
+            self.eject(root);
+            self.redraw();
+            return;
+        }
         match hit {
             Hit::TermMenu(Some(c)) => {
                 if let Some(pane) = self.term_menu.take() {

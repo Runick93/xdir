@@ -189,6 +189,10 @@ pub trait DiskScan: Send + Sync {
 /// abiertos (el menú del Shell de Windows) es estado de ese hilo dentro de la plataforma, no del
 /// servicio.
 pub trait Shell: Send + Sync {
+    /// De estas raíces de disco, las que se pueden expulsar (bloqueante: en hilos de trabajo).
+    fn ejectable(&self, roots: &[PathBuf]) -> Vec<PathBuf>;
+    /// Expulsa el disco de `root` (bloqueante: en hilos de trabajo).
+    fn eject(&self, root: &Path) -> Result<(), crate::shell::EjectError>;
     /// Cómo son los accesos directos de este sistema.
     fn link_style(&self) -> crate::names::LinkStyle;
     /// A dónde apunta un acceso directo, alias o enlace (`None` si no es uno o no se resuelve).

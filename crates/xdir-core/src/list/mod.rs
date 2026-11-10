@@ -393,6 +393,13 @@ pub struct FileList {
     /// desde la posición `name_ends_first`. Lo de más a la derecha, en la misma columna, es hueco.
     name_ends: Vec<f32>,
     name_ends_first: usize,
+    /// Filas (índices de `entries`) con botón ⏏: discos expulsables de «Este equipo» (lo pone la
+    /// `App`).
+    pub eject_rows: Vec<usize>,
+    /// Fila cuyo ⏏ tiene el mouse encima.
+    pub eject_hover: Option<usize>,
+    /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, índice).
+    eject_rects: Vec<(Rect, usize)>,
     /// Metadatos de cada elemento (índice en `entries`), si ya llegaron; si se pidieron; y los
     /// leídos en esta carpeta por ruta y fecha (sobreviven a las recargas). Ver `meta`.
     meta: Vec<Option<std::sync::Arc<crate::fs::Meta>>>,
@@ -518,6 +525,9 @@ impl Default for FileList {
             press_band: None,
             name_ends: Vec::new(),
             name_ends_first: 0,
+            eject_rows: Vec::new(),
+            eject_hover: None,
+            eject_rects: Vec::new(),
             meta: Vec::new(),
             meta_asked: Vec::new(),
             meta_cache: std::collections::HashMap::new(),
@@ -734,6 +744,16 @@ impl FileList {
     }
 
     /// Pone el foco en un elemento por nombre (p. ej. la carpeta de la que se subió).
+    /// ⏏ bajo el punto: el índice del disco.
+    pub fn eject_hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.eject_rects.iter().find(|(r, _)| contains(r, x, y)).map(|&(_, i)| i)
+    }
+
+    /// Dónde se dibujó el ⏏ de la fila `idx` (índice de `entries`) en el último cuadro.
+    pub fn eject_button(&self, idx: usize) -> Option<Rect> {
+        self.eject_rects.iter().find(|&&(_, i)| i == idx).map(|&(r, _)| r)
+    }
+
     pub fn focus_name(&mut self, name: &OsString) -> bool {
         let Some(idx) = self.entries.iter().position(|e| &e.name == name) else { return false };
         self.reveal(idx);
@@ -2305,6 +2325,7 @@ impl FileList {
         let item_focus = if header_focus.is_none() { self.focus } else { None };
 
         let mut ends = Vec::with_capacity(last - first);
+        let mut ejects = Vec::new();
         let name_left = cols.iter().find(|c| c.0 == Column::Name).map(|c| c.1);
         let shift = self.check_shift();
         p.clip(rows, &mut || {
@@ -2357,6 +2378,11 @@ impl FileList {
                         if let Some((r, st)) = checkbox {
                             draw_checkbox(p, r, st);
                         }
+                        if self.eject_rows.contains(&idx) {
+                            let b = rect(row.right - 26.0, row.top + 2.0, row.right - 2.0, row.top + 26.0);
+                            draw_eject(p, b, self.eject_hover == Some(idx));
+                            ejects.push((b, idx));
+                        }
                         continue;
                     }
                     View::List => {
@@ -2379,6 +2405,12 @@ impl FileList {
                             let name = shown_name(e, self.show_extensions);
                             p.text(FontId::Ui, name, text, color);
                             ends.push(text.left + p.measure(FontId::Ui, name) + 6.0);
+                            // ⏏ al final de la columna Nombre (discos expulsables).
+                            if self.eject_rows.contains(&idx) {
+                                let b = rect(cell.right - 24.0, y + 3.0, cell.right, y + ROW_H - 3.0);
+                                draw_eject(p, b, self.eject_hover == Some(idx));
+                                ejects.push((b, idx));
+                            }
                         }
                         Column::Modified => p.text(FontId::Ui, &format::date(e.modified), cell, th.text_secondary),
                         Column::Created => p.text(FontId::Ui, &format::date(e.created), cell, th.text_secondary),
@@ -2426,6 +2458,7 @@ impl FileList {
 
         self.name_ends = ends;
         self.name_ends_first = first;
+        self.eject_rects = ejects;
 
         if let Some((_, thumb)) = self.scrollbar() {
             let c = if self.thumb_drag.is_some() { alpha(th.scrollbar, th.scrollbar.a * 1.6) } else { th.scrollbar };
@@ -2504,6 +2537,18 @@ fn grow(r: Rect, d: f32) -> Rect {
 
 /// Casilla de selección (diseño `list::FileList::draw_checkbox`): vacía con borde tenue, marcada
 /// con el acento y una tilde blanca, o parcial con un guion.
+/// Símbolo del botón de expulsar.
+pub const EJECT_GLYPH: &str = "⏏";
+
+/// Botón ⏏ (con fondo si el mouse está encima).
+pub fn draw_eject(p: &dyn Painter, r: Rect, hover: bool) {
+    let th = p.theme();
+    if hover {
+        p.round_fill(r, 4.0, alpha(th.text, 0.12));
+    }
+    p.text(FontId::UiCenter, EJECT_GLYPH, r, if hover { th.text } else { th.text_dim });
+}
+
 fn draw_checkbox(p: &dyn Painter, r: Rect, state: CheckState) {
     let th = p.theme();
     match state {

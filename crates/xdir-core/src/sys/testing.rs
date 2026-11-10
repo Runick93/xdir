@@ -365,8 +365,29 @@ pub struct FakeShell;
 /// Originales de los accesos directos del falso (de todo el proceso: `link_target` corre en un
 /// hilo de trabajo); cada test usa rutas propias.
 static LINK_TARGETS: Mutex<BTreeMap<PathBuf, Option<PathBuf>>> = Mutex::new(BTreeMap::new());
+/// Discos expulsables del falso, resultado de expulsar cada uno y los que se expulsaron (de todo
+/// el proceso: se consultan desde hilos de trabajo).
+static EJECTABLE: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+type EjectResult = Result<(), crate::shell::EjectError>;
+static EJECT_RESULTS: Mutex<BTreeMap<PathBuf, EjectResult>> = Mutex::new(BTreeMap::new());
+static EJECTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 impl FakeShell {
+    /// Estos discos se pueden expulsar (se suman a los de otros tests).
+    pub fn set_ejectable(roots: &[PathBuf]) {
+        EJECTABLE.lock().unwrap_or_else(|e| e.into_inner()).extend(roots.iter().cloned());
+    }
+
+    /// Lo que devuelve `eject(root)` (por defecto, éxito).
+    pub fn set_eject_result(root: &Path, result: Result<(), crate::shell::EjectError>) {
+        EJECT_RESULTS.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), result);
+    }
+
+    /// Todos los discos que se pidió expulsar (de todo el proceso).
+    pub fn ejects() -> Vec<PathBuf> {
+        EJECTS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Desde ahora `link_target(link)` devuelve `target`.
     pub fn set_link_target(link: &Path, target: Option<PathBuf>) {
         LINK_TARGETS.lock().unwrap_or_else(|e| e.into_inner()).insert(link.to_path_buf(), target);
@@ -410,6 +431,16 @@ impl Shell for FakeShell {
 
     fn link_target(&self, path: &Path) -> Option<PathBuf> {
         LINK_TARGETS.lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned().flatten()
+    }
+
+    fn ejectable(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let set = EJECTABLE.lock().unwrap_or_else(|e| e.into_inner());
+        roots.iter().filter(|r| set.contains(*r)).cloned().collect()
+    }
+
+    fn eject(&self, root: &Path) -> Result<(), crate::shell::EjectError> {
+        EJECTS.lock().unwrap_or_else(|e| e.into_inner()).push(root.to_path_buf());
+        EJECT_RESULTS.lock().unwrap_or_else(|e| e.into_inner()).get(root).cloned().unwrap_or(Ok(()))
     }
 
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
@@ -1077,6 +1108,8 @@ pub struct FakeHost {
     beeps: Cell<usize>,
     color_choice: Cell<Option<u32>>,
     answer: Cell<Option<bool>>,
+    /// Preguntas de `ask_yes_no_cancel` (título y texto), en orden.
+    questions: RefCell<Vec<(String, String)>>,
     drag_result: RefCell<Result<(), String>>,
     drawn: RefCell<Vec<(FontId, String, Rect)>>,
     /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
@@ -1104,6 +1137,7 @@ impl FakeHost {
             beeps: Cell::new(0),
             color_choice: Cell::new(None),
             answer: Cell::new(None),
+            questions: RefCell::new(Vec::new()),
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
             text_boxes: RefCell::new(HashMap::new()),
@@ -1180,6 +1214,11 @@ impl FakeHost {
         self.color_choice.set(c);
     }
 
+    /// Las preguntas que se hicieron con `ask_yes_no_cancel` (título, texto).
+    pub fn questions(&self) -> Vec<(String, String)> {
+        self.questions.borrow().clone()
+    }
+
     /// La respuesta a `ask_yes_no_cancel` (`None`: cancelar).
     pub fn set_answer(&self, a: Option<bool>) {
         self.answer.set(a);
@@ -1233,7 +1272,8 @@ impl WindowHost for FakeHost {
         self.beeps.set(self.beeps.get() + 1);
     }
 
-    fn ask_yes_no_cancel(&self, _title: &str, _text: &str) -> Option<bool> {
+    fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool> {
+        self.questions.borrow_mut().push((title.to_string(), text.to_string()));
         self.answer.get()
     }
 

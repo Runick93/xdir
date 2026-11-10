@@ -366,6 +366,14 @@ impl Shell for Win32Shell {
         sh::link_target(path)
     }
 
+    fn ejectable(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        crate::shell::eject::ejectable(roots)
+    }
+
+    fn eject(&self, root: &Path) -> Result<(), xdir_core::shell::EjectError> {
+        crate::shell::eject::eject(root)
+    }
+
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
         sh::copy_files(items, cut).map_err(|e| e.message())
     }

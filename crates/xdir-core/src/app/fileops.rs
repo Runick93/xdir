@@ -388,6 +388,11 @@ impl App {
             cmds.push(Command::Restore);
             own.push(shell::Entry::Item { id: 0, label: "Devolver".into(), enabled: true, checked: false });
         }
+        // Un disco expulsable de «Este equipo»: «Expulsar».
+        if matches!(location, Location::Computer) && items.len() == 1 && self.eject_target().is_some() {
+            cmds.push(Command::Eject);
+            own.push(shell::Entry::Item { id: cmds.len() as u32 - 1, label: "Expulsar".into(), enabled: true, checked: false });
+        }
         own.extend(match (items.is_empty(), intercept) {
             (true, true) => self.background_entries(pane, &mut cmds),
             (false, true) => self.item_entries(&mut cmds),

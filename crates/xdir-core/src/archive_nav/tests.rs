@@ -230,3 +230,26 @@ fn ensure_extracts_the_listed_duplicate() {
     assert_eq!(FakeCopyPrims::shared().read_content(&got).unwrap(), b"dos");
     t.clean_own();
 }
+
+/// En un disco sin mayúsculas, «A.txt» y «a.txt» del mismo archivo se abren cada uno con lo suyo
+/// (el segundo va a una carpeta aparte), nunca uno en lugar del otro.
+#[test]
+fn case_twins_open_their_own_content() {
+    install_fakes();
+    let b = base("gemelos");
+    let caseless = crate::sys::VolumeInfo { id: "apfs".into(), label: "apfs".into(), case_insensitive: true, has_trash: false, max_file: None, free: u64::MAX };
+    FakeCopyPrims::shared().set_volume(&b, caseless);
+    let zip = b.join("gemelos.zip");
+    FakeArchives::shared().add_archive(&zip, &[("A.txt", b"MAYUS"), ("a.txt", b"minus")], 3);
+    let t = Temps::new(Some(&b));
+    let lim = super::temps::Limits::up_to(u64::MAX);
+    let upper = t.ensure(&zip, &[], "A.txt", &lim).unwrap();
+    let lower = t.ensure(&zip, &[], "a.txt", &lim).unwrap();
+    assert_eq!(FakeCopyPrims::shared().read_content(&upper).unwrap(), b"MAYUS");
+    assert_eq!(FakeCopyPrims::shared().read_content(&lower).unwrap(), b"minus");
+    assert_ne!(Some(lower.clone()), t.entry_path(&zip, &[], "a.txt"), "el gemelo no está donde lo buscaría la vista previa");
+    // Otra vez: cada uno lo suyo.
+    assert_eq!(t.ensure(&zip, &[], "a.txt", &lim).unwrap(), lower);
+    assert_eq!(t.ensure(&zip, &[], "A.txt", &lim).unwrap(), upper);
+    t.clean_own();
+}

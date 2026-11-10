@@ -148,6 +148,8 @@ impl Temps {
         if lock.take().is_none() {
             return;
         }
+        // Lo extraído pasó por las primitivas del sistema (en las pruebas, el disco falso).
+        remove_tree(&self.run);
         let _ = std::fs::remove_dir_all(&self.run);
         self.stamps.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.done.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -201,7 +203,14 @@ impl Temps {
             let mut stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
             if stamps.get(&dir) != Some(&stamp) {
                 remove_tree(&dir);
-                self.done.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| !p.starts_with(&dir));
+                // Y las carpetas de los gemelos (`<hash>~<n>`).
+                let prefix = format!("{}~", dir.file_name().unwrap_or_default().to_string_lossy());
+                for name in prims.read_dir(&self.run).unwrap_or_default() {
+                    if name.to_string_lossy().starts_with(&prefix) {
+                        remove_tree(&self.run.join(name));
+                    }
+                }
+                self.done.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| !p.starts_with(&dir) && !p.to_string_lossy().contains(&prefix));
                 stamps.insert(dir.clone(), stamp);
             }
         }
@@ -222,6 +231,21 @@ impl Temps {
         {
             return Err(CopyError::new(ErrKind::Other(NO_ROOM.into()), &dst));
         }
+        // En la carpeta del archivo ya hay otra cosa con este nombre (un gemelo que solo cambia en
+        // mayúsculas o en la forma de los acentos, en un disco que no los distingue): este va a una
+        // carpeta propia de la entrada, así cada uno se abre con lo suyo.
+        let index = entry.index;
+        let (root, dst) = if prims.stat(&dst).is_ok() {
+            let alt = self.twin_dir(&dir, index);
+            let at = alt.join(&target);
+            if self.done.lock().unwrap_or_else(|e| e.into_inner()).contains(&at) && prims.stat(&at).is_ok() {
+                return Ok(at);
+            }
+            (alt, at)
+        } else {
+            (dir.clone(), dst)
+        };
+        let dir = root;
         if prims.stat(&dir).is_err() {
             // La de la ejecución ya está en el disco real; en el falso de las pruebas se crea acá.
             for up in dir.ancestors().skip(1).collect::<Vec<_>>().into_iter().rev() {
@@ -233,7 +257,6 @@ impl Temps {
         }
         let mut failed = None;
         let mut too_big = false;
-        let index = entry.index;
         let res = sys::archives().extract_some(
             &real,
             &dir,
@@ -249,6 +272,11 @@ impl Temps {
             return Err(CopyError::new(ErrKind::Other(TOO_BIG.into()), &dst));
         }
         res?;
+        // Una entrada que no se pudo escribir (ya había algo, ruta no permitida…) es un error, nunca
+        // lo que haya en ese lugar.
+        if let Some(e) = failed {
+            return Err(e);
+        }
         match prims.stat(&dst) {
             Ok(_) => {
                 self.done.lock().unwrap_or_else(|e| e.into_inner()).insert(dst.clone());
@@ -258,8 +286,16 @@ impl Temps {
                 sys::archives().propagate_origin(&real, &written);
                 Ok(dst)
             }
-            Err(e) => Err(failed.unwrap_or(e)),
+            Err(e) => Err(e),
         }
+    }
+
+    /// La carpeta propia de la entrada `index` cuando su nombre choca con otro (al lado de la del
+    /// archivo, `<hash>~<index>`).
+    fn twin_dir(&self, dir: &Path, index: usize) -> PathBuf {
+        let mut name = dir.file_name().unwrap_or_default().to_os_string();
+        name.push(format!("~{index}"));
+        dir.with_file_name(name)
     }
 
     /// El candado de las extracciones de la carpeta `dir` (una por archivo comprimido).

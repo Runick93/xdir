@@ -192,3 +192,36 @@ fn real_escaping_link_is_gone_before_the_next_question_and_user_links_stay() {
     assert_eq!(fs::read(inn.join("z 2.txt")).unwrap(), b"theirs");
     let _ = fs::remove_dir_all(&t);
 }
+
+/// En APFS (sin mayúsculas, sin forma de acentos) los gemelos «A.txt»/«a.txt» y «café» NFC/NFD
+/// de un mismo zip se abren cada uno con lo suyo desde la temporal, con los servicios reales.
+#[test]
+fn case_and_accent_twins_open_their_own_file() {
+    use xdir_core::archive_nav::temps::{Limits, Temps};
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(crate::sys::install);
+    let d = tmp();
+    let zip = d.join("gemelos.zip");
+    let (nfc, nfd) = ("caf\u{e9}.txt", "cafe\u{301}.txt");
+    // Con la crate de verdad (nombres UTF-8 marcados); cada contenido sale de su propio archivo.
+    let mut items = Vec::new();
+    for (i, (name, data)) in [("A.txt", "MAYUS"), ("a.txt", "minus"), (nfc, "NFC"), (nfd, "NFD")].into_iter().enumerate() {
+        let src = d.join(format!("src{i}"));
+        fs::write(&src, data).unwrap();
+        items.push((src, name.to_string()));
+    }
+    let svc = xdir_archive::Service { tar_gz: true, utc_offset: |_| 0, copy_origin: |_, _| {} };
+    svc.create(&zip, &items, &mut |_| xdir_core::sys::Flow::Continue).unwrap();
+    let names: Vec<String> = svc.list(&zip).unwrap().into_iter().map(|e| e.name).collect();
+    assert_eq!(names, ["A.txt", "a.txt", nfc, nfd]);
+    let base = d.join("temporal");
+    fs::create_dir(&base).unwrap();
+    let t = Temps::new(Some(&base));
+    let lim = Limits::up_to(u64::MAX);
+    for (name, want) in [("A.txt", "MAYUS"), ("a.txt", "minus"), (nfc, "NFC"), (nfd, "NFD"), ("a.txt", "minus"), ("A.txt", "MAYUS")] {
+        let p = t.ensure(&zip, &[], name, &lim).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), want, "{name}");
+    }
+    t.clean_own();
+    let _ = fs::remove_dir_all(&d);
+}

@@ -427,7 +427,9 @@ impl App {
         let mine = turn.load(Ordering::Relaxed);
         self.spawn_task(move || {
             let cancel = || turn.load(Ordering::Relaxed) != mine;
-            let ok = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: limit, cancel: &cancel }).is_ok();
+            // Un gemelo (mismo nombre en otro uso de mayúsculas) queda en otra carpeta: la vista
+            // previa no lo muestra en lugar del de la fila.
+            let ok = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: limit, cancel: &cancel }).is_ok_and(|p| p == path);
             TaskDone::ArchivePrepared { path, ok }
         });
     }

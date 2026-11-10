@@ -461,11 +461,6 @@ pub fn true_case(path: &Path) -> PathBuf {
     out
 }
 
-/// Conectar un recurso de red con credenciales: en macOS se hace desde el Finder.
-pub fn connect_share(_owner: Handle, _path: &Path) -> bool {
-    false
-}
-
 /// Misma ruta: sin distinguir mayúsculas (APFS por defecto) ni barra final.
 pub fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {

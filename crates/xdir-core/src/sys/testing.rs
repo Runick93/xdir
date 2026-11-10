@@ -30,6 +30,8 @@ use crate::xtree::tree::Node;
 
 mod copy_fake;
 pub use copy_fake::FakeCopyPrims;
+mod net_fake;
+pub use net_fake::FakeNetwork;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
 /// instala, y si ya había servicios instalados no hace nada.
@@ -46,6 +48,7 @@ pub fn install_fakes() {
         preview: Box::new(FakePreview),
         copy_prims: Box::new(FakeCopyPrims::shared()),
         info: Box::new(FakeInfo),
+        network: Box::new(FakeNetwork),
     });
 }
 
@@ -535,6 +538,8 @@ impl Shell for FakeShell {
 /// el proceso (las lecturas corren en sus propios hilos): cada test usa rutas propias.
 static LOADS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
 static WATCHES: Mutex<BTreeMap<PathBuf, (usize, usize)>> = Mutex::new(BTreeMap::new());
+/// Cargas que fallan con ese texto (ver `FakeFileSystem::set_load_error`).
+static LOAD_ERRORS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
 thread_local! {
     /// Unidades del falso en este hilo (ruta y nombre); vacío salvo `FakeFileSystem::set_drives`.
@@ -582,6 +587,16 @@ impl FakeFileSystem {
                 c.remove(path);
             }
         });
+    }
+
+    /// Desde ahora (en todo el proceso) la carga de `path` falla con `error` (o vuelve a leer el
+    /// disco con `None`).
+    pub fn set_load_error(path: &Path, error: Option<&str>) {
+        let mut m = LOAD_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+        match error {
+            Some(e) => m.insert(path.to_path_buf(), e.to_string()),
+            None => m.remove(path),
+        };
     }
 
     /// Cuántas lecturas de `path` se pidieron (en todo el proceso).
@@ -663,7 +678,17 @@ impl FileSystem for FakeFileSystem {
                 }
             };
             match &location {
-                Location::Path(p) => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
+                Location::Path(p) => {
+                    // Una carpeta de red colgada (`FakeNetwork::hang`) no responde por un rato.
+                    if let Some(d) = FakeNetwork::hang_for(&p.to_string_lossy()) {
+                        std::thread::sleep(d);
+                    }
+                    let error = LOAD_ERRORS.lock().unwrap_or_else(|e| e.into_inner()).get(p).cloned();
+                    match error {
+                        Some(e) => send(LoadMsg::Listed(Err(e))),
+                        None => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
+                    }
+                }
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
                 Location::Computer => send(LoadMsg::Listed(Ok(()))),
                 Location::Shell { parsing, .. } => {
@@ -814,10 +839,6 @@ impl FileSystem for FakeFileSystem {
 
     fn true_case(&self, path: &Path) -> PathBuf {
         path.to_path_buf()
-    }
-
-    fn connect_share(&self, _owner: Handle, _path: &Path) -> bool {
-        false
     }
 
     fn same_path(&self, a: &Path, b: &Path) -> bool {

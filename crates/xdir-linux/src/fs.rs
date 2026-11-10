@@ -154,10 +154,6 @@ impl FileSystem for LinuxFileSystem {
         path.to_path_buf()
     }
 
-    fn connect_share(&self, _owner: Handle, _path: &Path) -> bool {
-        false
-    }
-
     /// Misma ruta escrita, tramo por tramo y distinguiendo mayúsculas (como en macOS, sin tocar
     /// el disco: el núcleo la llama en bucles del hilo de interfaz y un `stat` sobre un montaje
     /// de red colgado congelaría la ventana). `Path::components` ignora la barra final y los `.`.

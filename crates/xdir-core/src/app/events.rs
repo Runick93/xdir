@@ -121,14 +121,13 @@ impl App {
     /// carpeta si acaba de cambiar de ubicación (así los elementos llegan ya con su orden).
     /// Devuelve si hay que redibujar.
     pub(super) fn on_load_event(&mut self, event: fs::LoadEvent) -> bool {
-        let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let views = &mut self.folder_views;
         let Some(tab) = self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == event.panel) else { return false };
         // Terminó de cargar «Este equipo»: se averigua qué discos se pueden expulsar.
         let computer_listed = matches!(tab.location, Location::Computer) && matches!(event.msg, fs::LoadMsg::Listed(_));
         let views_changed = tab.sync_view(views);
         let changed = tab.on_load(event);
-        tab.retry_with_credentials(hwnd, &tx);
+        let retry = tab.retry_with_credentials().map(|p| (tab.id, p));
         if let Some(path) = tab.visited.take() {
             self.history.record(&path, jump::now());
         }
@@ -141,6 +140,9 @@ impl App {
         }
         if computer_listed {
             self.request_ejectable();
+        }
+        if let Some((id, path)) = retry {
+            self.connect_for_tab(id, &path);
         }
         changed
     }

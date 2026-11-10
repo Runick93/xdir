@@ -521,10 +521,6 @@ impl FileSystem for MacFileSystem {
         fsp::true_case(path)
     }
 
-    fn connect_share(&self, owner: Handle, path: &Path) -> bool {
-        fsp::connect_share(owner, path)
-    }
-
     fn same_path(&self, a: &Path, b: &Path) -> bool {
         fsp::same_path(a, b)
     }
@@ -617,5 +613,6 @@ pub fn install() {
         preview: Box::new(MacPreview),
         copy_prims: Box::new(crate::ops::MacCopyPrims),
         info: Box::new(crate::info::MacInfo),
+        network: Box::new(xdir_core::sys::NoNetwork),
     });
 }

@@ -267,14 +267,11 @@ impl App {
         }
         // "..", "." y "a\..\b": se resuelven acá (Windows los acepta, pero la pestaña mostraría la ruta sucia).
         path = fs::normalize_lexical(&path);
-        // Un recurso de red que pide usuario y contraseña (o que no se verifica): se muestra el
-        // diálogo de Windows. Si igual no se puede ver, se navega y la barra de estado dice por qué.
-        if fs::is_unc(&path) && !path.exists() {
-            sys::file_system().connect_share(hwnd, &path);
-            if !path.exists() {
-                tab.navigate(hwnd, &tx, Location::Path(path));
-                return;
-            }
+        // Un recurso de red: se navega sin tocarlo en este hilo. Si pide usuario y contraseña, la
+        // carga falla por credenciales y la `App` conecta en otro hilo (diálogo del sistema).
+        if fs::is_unc(&path) {
+            tab.navigate(hwnd, &tx, Location::Path(path));
+            return;
         }
         if path.is_dir() {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).

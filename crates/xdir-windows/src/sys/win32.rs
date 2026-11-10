@@ -574,10 +574,6 @@ impl FileSystem for Win32FileSystem {
         fsp::true_case(path)
     }
 
-    fn connect_share(&self, owner: Handle, path: &Path) -> bool {
-        fsp::connect_share(owner, path)
-    }
-
     fn same_path(&self, a: &Path, b: &Path) -> bool {
         fsp::same_path(a, b)
     }
@@ -676,6 +672,7 @@ pub fn install() {
         preview: Box::new(Win32Preview),
         copy_prims: Box::new(crate::ops::WinCopyPrims),
         info: Box::new(crate::info::Win32Info),
+        network: Box::new(xdir_core::sys::NoNetwork),
     });
 }
 

@@ -654,19 +654,28 @@ impl Tab {
     }
 
     /// Si la carpeta de red falló por credenciales (usuario o contraseña incorrectos, acceso
-    /// denegado), muestra el diálogo de Windows y vuelve a cargar. Una vez por navegación.
-    pub fn retry_with_credentials(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
-        let Location::Path(path) = &self.location else { return };
-        let Some(e) = &self.error else { return };
+    /// denegado), devuelve su ruta para que la `App` conecte en un hilo (con el diálogo de
+    /// credenciales del sistema) y recargue al volver. Una vez por navegación.
+    pub fn retry_with_credentials(&mut self) -> Option<PathBuf> {
+        let Location::Path(path) = &self.location else { return None };
+        let e = self.error.as_ref()?;
         let auth = ["os error 1326", "os error 5)", "os error 86", "os error 1219"].iter().any(|c| e.contains(c));
         if !auth || !fs::is_unc(path) || self.auth_nav == self.nav_id {
-            return;
+            return None;
         }
         self.auth_nav = self.nav_id;
-        if sys::file_system().connect_share(hwnd, &path.clone()) {
-            self.reload(hwnd, tx, false);
-            self.auth_nav = self.nav_id;
-        }
+        Some(path.clone())
+    }
+
+    /// Navegación en curso (para saber si un resultado que vuelve de un hilo sigue valiendo).
+    pub fn nav_id(&self) -> u64 {
+        self.nav_id
+    }
+
+    /// Recarga después de conectar: no vuelve a pedir credenciales en esta navegación.
+    pub fn reload_after_connect(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        self.reload(hwnd, tx, false);
+        self.auth_nav = self.nav_id;
     }
 
     pub fn status(&self) -> String {

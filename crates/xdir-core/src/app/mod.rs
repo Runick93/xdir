@@ -9,6 +9,7 @@ mod events;
 mod favs;
 mod fileops;
 mod info;
+mod network;
 mod saved_groups;
 mod input;
 mod paint;
@@ -35,6 +36,8 @@ mod transfers_tests;
 mod ops_tests;
 #[cfg(test)]
 mod rename_many_tests;
+#[cfg(test)]
+mod network_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -417,6 +420,8 @@ pub struct App {
     swallow_space: bool,
     /// Trabajos del motor de copia (cola, estado de cada uno).
     transfers: transfers::Transfers,
+    /// Red: favoritos y recientes, lo conectado y la red local.
+    net: network::NetState,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -601,6 +606,7 @@ impl App {
             renaming: false,
             swallow_space: false,
             transfers: transfers::Transfers::new(),
+            net: network::NetState::default(),
         };
         app.restore_panes(&session, start_path);
         app.sync_folder_views();
@@ -624,6 +630,9 @@ impl App {
         self.host.attach(window);
         // Qué discos se pueden expulsar (en otro hilo; vuelve con `WM_APP_TASK`).
         self.request_ejectable();
+        // Favoritos y recientes de red, y lo conectado (en otros hilos).
+        self.load_net_places();
+        self.request_connections();
     }
 
     /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).

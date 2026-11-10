@@ -108,6 +108,7 @@ impl App {
         #[cfg(feature = "arbol")]
         self.tree.refresh_drives();
         self.request_ejectable();
+        self.request_connections();
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
             match &tab.location {

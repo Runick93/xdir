@@ -21,6 +21,13 @@ pub(super) enum TaskDone {
     Renamed { dir: PathBuf, result: Result<Undo, String>, undoing: Option<Vec<(PathBuf, String)>> },
     /// Si el disco de `dir` distingue mayúsculas (para los choques de Renombrar varios).
     CaseInfo { dir: PathBuf, case_insensitive: bool },
+    /// Se leyó `red.toml`.
+    NetPlaces(crate::net::NetPlaces),
+    /// Lo conectado (`Network::connections`).
+    NetConnections(Result<Vec<crate::net::NetConnection>, crate::net::NetError>),
+    /// Terminó de conectar `addr` (`tab`: la pestaña que lo pidió al fallar por credenciales;
+    /// `None`: abrir el resultado en una pestaña nueva del panel `pane`).
+    Connected { pane: usize, tab: Option<usize>, addr: crate::net::Address, result: Result<PathBuf, crate::net::NetError> },
 }
 
 impl App {
@@ -72,6 +79,9 @@ impl App {
                 self.eject_done(&root);
                 self.on_ejected(root, label, result);
             }
+            TaskDone::NetPlaces(places) => self.on_net_places(places),
+            TaskDone::NetConnections(result) => self.on_net_connections(result),
+            TaskDone::Connected { pane, tab, addr, result } => self.on_connected(pane, tab, addr, result),
         }
     }
 

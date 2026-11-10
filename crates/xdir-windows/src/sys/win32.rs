@@ -672,7 +672,7 @@ pub fn install() {
         preview: Box::new(Win32Preview),
         copy_prims: Box::new(crate::ops::WinCopyPrims),
         info: Box::new(crate::info::Win32Info),
-        network: Box::new(xdir_core::sys::NoNetwork),
+        network: Box::new(crate::net::WinNetwork::new()),
     });
 }
 

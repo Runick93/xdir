@@ -35,8 +35,8 @@ pub(super) struct NetState {
     pub dialog: Option<ConnectDialog>,
     /// Generación de los intentos de conectar (un resultado de otra se descarta).
     pub generation: u64,
-    /// Conexiones pedidas desde la barra de dirección: (pestaña, generación).
-    pub bar_pending: Vec<(usize, u64)>,
+    /// Conexiones pedidas desde la barra de dirección: (pestaña, generación, servidor).
+    pub bar_pending: Vec<(usize, u64, String)>,
     /// Conexiones en las que ya se reintentó desconectar (la próxima vez se ofrece forzar).
     pub retried: std::collections::HashSet<PathBuf>,
     /// Fila de «Red» del clic derecho en curso.
@@ -168,9 +168,9 @@ impl App {
     /// Volvió una conexión pedida por una pestaña: la carpeta UNC que falló por credenciales
     /// (recarga) o una dirección escrita en la barra (navega a la ruta o deja el error).
     fn connected_in_tab(&mut self, id: usize, generation: u64, addr: &Address, result: Result<PathBuf, NetError>) {
-        let from_bar = self.net.bar_pending.iter().any(|&(t, g)| t == id && g == generation);
-        let stale = self.net.bar_pending.iter().any(|&(t, g)| t == id && g != generation) && !from_bar;
-        self.net.bar_pending.retain(|&(t, g)| !(t == id && g <= generation));
+        let from_bar = self.net.bar_pending.iter().any(|(t, g, _)| *t == id && *g == generation);
+        let stale = self.net.bar_pending.iter().any(|(t, g, _)| *t == id && *g != generation) && !from_bar;
+        self.net.bar_pending.retain(|(t, g, _)| !(*t == id && *g <= generation));
         if stale {
             return;
         }
@@ -606,6 +606,37 @@ impl App {
         self.redraw();
     }
 
+    /// Gancho de pruebas (`test_hook`): ver `red` en `panes.rs`.
+    #[cfg(feature = "pruebas")]
+    pub(super) fn net_test(&mut self, what: &str, arg: &str) {
+        match what {
+            "campo" => self.set_connect_field(arg),
+            "conectar" => self.connect_from_dialog(),
+            "fav" => {
+                if let Ok(a) = Address::parse(arg) {
+                    let name = a.label().to_string();
+                    self.net.places.toggle_favorite(&a, Some(name));
+                    self.save_net_places();
+                    self.net_changed();
+                }
+            }
+            "reciente" => {
+                if let Ok(a) = Address::parse(arg) {
+                    self.net.places.add_recent(&a, unix_now() - 2 * 86_400);
+                    self.save_net_places();
+                    self.net_changed();
+                }
+            }
+            #[cfg(feature = "arbol")]
+            "expandir" => {
+                let (hwnd, show) = (self.hwnd, self.show_hidden);
+                self.tree.expand_network_now(hwnd, show);
+            }
+            _ => {}
+        }
+        self.redraw();
+    }
+
     /// Cómo se muestran las direcciones: UNC solo donde el único esquema es `smb` (Windows).
     pub(super) fn net_style(&self) -> KeyStyle {
         let n = sys::network();
@@ -902,8 +933,9 @@ impl App {
                 return;
             }
         };
+        let host = addr.host.clone();
         let generation = self.spawn_connect(pane, Some(tab_id), addr, ConnectOptions::default());
-        self.net.bar_pending.push((tab_id, generation));
+        self.net.bar_pending.push((tab_id, generation, host));
         let t = self.panes[pane].tab_mut();
         t.error = None;
         self.redraw();
@@ -1042,7 +1074,10 @@ impl App {
                 Location::Path(p) if slow != Slow::No => self.remote_host_of(p),
                 _ => String::new(),
             };
+            // Conectando desde la barra: el aviso enseguida, en la misma pestaña.
+            let bar = self.net.bar_pending.iter().find(|(t, ..)| *t == tab.id).map(|(.., h)| h.clone());
             let ph = match slow {
+                Slow::No if bar.is_some() => bar.map(Placeholder::Connecting),
                 Slow::No => None,
                 Slow::Connecting { .. } => Some(Placeholder::Connecting(host)),
                 Slow::NotResponding { .. } => Some(Placeholder::NotResponding(host)),

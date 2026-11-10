@@ -318,7 +318,10 @@ fn address_bar_url_connects_in_place() {
     FakeNetwork::set_connect("nas-n4bar", Ok(target.clone()));
     let mut a = net_app();
     let tabs = a.panes[0].tabs.len();
+    FakeNetwork::hang("nas-n4bar", Duration::from_millis(100));
     a.go_to_text(0, "smb://nas-n4bar/x");
+    a.paint();
+    assert_eq!(a.panes[0].tab().list.placeholder, Some(crate::list::placeholder::Placeholder::Connecting("nas-n4bar".into())));
     wait_until(&mut a, |a| a.panes[0].tab().location == Location::Path(target.clone()));
     assert_eq!(a.panes[0].tabs.len(), tabs);
     assert_eq!(a.net.places.recents[0].address, "smb://nas-n4bar/x");
@@ -968,40 +971,39 @@ mod red_page {
         for t in ["Red", "Favoritos", "NAS — fotos", "smb://nas-n8/fotos", "Oficina", "Recientes", "smb://srv-n8/respaldo", "hace 2 días", "Conectados ahora"] {
             assert!(texts.iter().any(|x| x == t), "{t}: {texts:?}");
         }
-        // Renombrar en línea.
+        // Renombrar en línea: una caja, la del nombre.
         click(&mut a, PageHit::EditFavorite(1));
-        draw(&mut a);
-        let (_, n, ad, _) = a.net.page.editing.unwrap();
-        crate::host::WindowHost::text_set(&*host, n, "Oficina centro");
-        crate::host::WindowHost::text_focus(&*host, n);
+        let field = |a: &App| a.net.page.editing.as_ref().unwrap().field;
+        assert_eq!(host.text_boxes_of(crate::host::TextKind::Field).len(), 1);
+        crate::host::WindowHost::text_set(&*host, field(&a), "Oficina centro");
         a.on_field_done(true);
         assert_eq!(a.net.places.favorites[1].name, "Oficina centro");
         assert!(a.net.page.editing.is_none());
-        // Dirección inválida: el error queda en la fila y sigue editando.
-        click(&mut a, PageHit::EditFavorite(0));
+        assert!(host.text_boxes_of(crate::host::TextKind::Field).is_empty());
+        // Tab pasa a la dirección; una inválida deja el error en la fila y sigue editando.
         draw(&mut a);
-        let (_, _, ad2, _) = a.net.page.editing.unwrap();
-        crate::host::WindowHost::text_set(&*host, ad2, "smb://na s");
-        crate::host::WindowHost::text_focus(&*host, ad2);
+        click(&mut a, PageHit::EditFavorite(0));
+        a.on_field_tab(false);
+        assert!(a.net.page.editing.as_ref().unwrap().on_address);
+        assert_eq!(host.text_boxes_of(crate::host::TextKind::Field).len(), 1);
+        crate::host::WindowHost::text_set(&*host, field(&a), "smb://na s");
         a.on_field_done(true);
         assert_eq!(a.net.page.error, Some((0, "Escribí una dirección como smb://servidor/recurso".to_string())));
         assert!(draw(&mut a).iter().any(|t| t == "Escribí una dirección como smb://servidor/recurso"));
         a.on_field_done(false);
         assert!(a.net.page.editing.is_none());
-        let _ = ad;
         // ↑ cambia el orden de `places` y del árbol.
         draw(&mut a);
         click(&mut a, PageHit::FavoriteUp(1));
         assert_eq!(a.net.places.favorites[0].name, "Oficina centro");
         #[cfg(feature = "arbol")]
         assert_eq!(a.tree.network_rows()[1].1, "Oficina centro");
-        // Agregar…: una fila vacía; Enter con la dirección la suma.
+        // Agregar…: una fila nueva con la caja de la dirección; Enter la suma.
         draw(&mut a);
         click(&mut a, PageHit::AddFavorite);
-        draw(&mut a);
-        let (i, _, ad3, _) = a.net.page.editing.unwrap();
-        assert_eq!(i, 2);
-        crate::host::WindowHost::text_set(&*host, ad3, r"\\nuevo-n8\x");
+        let e = a.net.page.editing.as_ref().unwrap();
+        assert_eq!((e.index, e.on_address), (2, true));
+        crate::host::WindowHost::text_set(&*host, field(&a), r"\\nuevo-n8\x");
         a.on_field_done(true);
         assert_eq!(a.net.places.favorites[2].address, "smb://nuevo-n8/x");
         assert_eq!(a.net.places.favorites[2].name, "smb://nuevo-n8/x");

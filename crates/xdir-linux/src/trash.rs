@@ -160,6 +160,8 @@ fn decode_path(text: &str) -> Vec<u8> {
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
             && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())
         {
             out.push(v);
@@ -216,6 +218,9 @@ mod tests {
         std::fs::write(trash.join("info/sube.trashinfo"), "[Trash Info]\nPath=../../etc/x\n").unwrap();
         assert!(origin("sube", &trash).is_err());
         assert_eq!(decode_path("a%2"), b"a%2");
+        // Solo dos dígitos hexadecimales: «%+5» o «%g1» quedan como están.
+        assert_eq!(decode_path("a%+5b"), b"a%+5b");
+        assert_eq!(decode_path("%g1%41"), b"%g1A");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

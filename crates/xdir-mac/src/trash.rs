@@ -34,7 +34,7 @@ pub fn origin(in_trash: &Path) -> Option<PathBuf> {
 
 /// `origin` con el registro en `log` (los tests usan uno propio).
 pub fn origin_in(log: Option<&Path>, in_trash: &Path) -> Option<PathBuf> {
-    if let Some(found) = log.and_then(|l| read_log(l).into_iter().find(|(t, _)| t == in_trash).map(|(_, o)| o)) {
+    if let Some(found) = log.and_then(|l| logged_origin(l, in_trash)) {
         return Some(found);
     }
     let dir = in_trash.parent()?;
@@ -78,33 +78,100 @@ pub fn forget(in_trash: &Path) {
     }
 }
 
+/// Una línea del registro: dónde quedó en la Papelera, de dónde vino y qué archivo es (disco e
+/// inodo, para no confundirlo con otro que después tomó el mismo nombre).
+struct LogLine {
+    in_trash: PathBuf,
+    original: PathBuf,
+    id: (u64, u64),
+}
+
+/// Disco e inodo de un elemento (sin seguir enlaces).
+fn file_id(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(p).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// El registro se lee y reescribe entero: un candado para que dos operaciones no se pisen.
+static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn log_trashed_in(log: &Path, in_trash: &Path, original: &Path) {
+    let Some(id) = file_id(in_trash) else { return };
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut lines = read_log(log);
-    lines.retain(|(t, _)| t != in_trash);
-    lines.push((in_trash.to_path_buf(), original.to_path_buf()));
+    lines.retain(|l| l.in_trash != in_trash);
+    lines.push(LogLine { in_trash: in_trash.to_path_buf(), original: original.to_path_buf(), id });
     write_log(log, &lines);
 }
 
 pub fn forget_in(log: &Path, in_trash: &Path) {
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut lines = read_log(log);
     let before = lines.len();
-    lines.retain(|(t, _)| t != in_trash);
+    lines.retain(|l| l.in_trash != in_trash);
     if lines.len() != before {
         write_log(log, &lines);
     }
 }
 
-fn read_log(log: &Path) -> Vec<(PathBuf, PathBuf)> {
-    let Ok(text) = std::fs::read_to_string(log) else { return Vec::new() };
-    text.lines().filter_map(|l| l.split_once('\t')).map(|(t, o)| (PathBuf::from(t), PathBuf::from(o))).collect()
+/// Origen anotado para `in_trash`, si la línea es de ese mismo archivo.
+fn logged_origin(log: &Path, in_trash: &Path) -> Option<PathBuf> {
+    let id = file_id(in_trash)?;
+    read_log(log).into_iter().find(|l| l.in_trash == in_trash && l.id == id).map(|l| l.original)
 }
 
-/// Reescribe el registro sin lo que ya no está en la Papelera.
-fn write_log(log: &Path, lines: &[(PathBuf, PathBuf)]) {
+/// `\` → `\\`, tabulador → `\t`, salto de línea → `\n` (una línea por entrada, campos por
+/// tabulador).
+fn escape(p: &Path) -> String {
+    let mut out = String::new();
+    for c in p.to_string_lossy().chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape(s: &str) -> PathBuf {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some(o) => out.push(o),
+            None => out.push('\\'),
+        }
+    }
+    PathBuf::from(out)
+}
+
+/// Líneas `papelera<TAB>original<TAB>disco:inodo`; las que no tienen las tres partes se ignoran.
+fn read_log(log: &Path) -> Vec<LogLine> {
+    let Ok(text) = std::fs::read_to_string(log) else { return Vec::new() };
+    text.lines()
+        .filter_map(|l| {
+            let mut parts = l.split('\t');
+            let (t, o, id) = (parts.next()?, parts.next()?, parts.next()?);
+            let (dev, ino) = id.split_once(':')?;
+            Some(LogLine { in_trash: unescape(t), original: unescape(o), id: (dev.parse().ok()?, ino.parse().ok()?) })
+        })
+        .collect()
+}
+
+/// Reescribe el registro sin lo que ya no está en la Papelera (o ya es otro archivo).
+fn write_log(log: &Path, lines: &[LogLine]) {
     let text: String = lines
         .iter()
-        .filter(|(t, _)| std::fs::symlink_metadata(t).is_ok())
-        .map(|(t, o)| format!("{}\t{}\n", t.display(), o.display()))
+        .filter(|l| file_id(&l.in_trash) == Some(l.id))
+        .map(|l| format!("{}\t{}\t{}:{}\n", escape(&l.in_trash), escape(&l.original), l.id.0, l.id.1))
         .collect();
     if let Some(dir) = log.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -454,6 +521,34 @@ mod tests {
         }
         assert_eq!(safe_origin(Path::new("/Volumes/USB"), "/docs/", "bien.txt"), Some(PathBuf::from("/Volumes/USB/docs/bien.txt")));
         assert_eq!(safe_origin(Path::new("/"), "Users/x/", "a.txt"), Some(PathBuf::from("/Users/x/a.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// El registro anota qué archivo es (disco e inodo): si en la Papelera hay otro con el mismo
+    /// nombre (se vació y se borró otro), la línea no vale. Rutas con tabulador o salto de línea
+    /// se guardan escapadas.
+    #[test]
+    fn log_checks_file_identity_and_escapes() {
+        let dir = tmp("registro");
+        let bin = dir.join("Trash");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.join("papelera.tsv");
+        let item = bin.join("a.txt");
+        std::fs::write(&item, "a").unwrap();
+        log_trashed_in(&log, &item, Path::new("/tmp/vino/a.txt"));
+        assert_eq!(origin_in(Some(&log), &item), Some(PathBuf::from("/tmp/vino/a.txt")));
+        // Otro archivo con el mismo nombre (otro inodo): la línea se ignora.
+        let keep = dir.join("guardado");
+        std::fs::rename(&item, &keep).unwrap();
+        std::fs::write(&item, "otro").unwrap();
+        assert_eq!(origin_in(Some(&log), &item), None);
+        // Tabuladores, saltos de línea y barras invertidas en las rutas.
+        let raro = bin.join("con\ttab\ny salto \\ barra");
+        std::fs::write(&raro, "r").unwrap();
+        let original = Path::new("/tmp/x\ty\nz \\ w/raro");
+        log_trashed_in(&log, &raro, original);
+        assert_eq!(origin_in(Some(&log), &raro), Some(original.to_path_buf()));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1, "una línea por entrada");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

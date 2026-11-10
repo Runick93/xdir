@@ -266,6 +266,13 @@ fn set_content_size(window: &NSWindow, size: (f32, f32)) {
     window.setFrame_display(resized_frame(old, wanted, visible), true);
 }
 
+pub fn set_title(w: AuxWindow, title: &str) {
+    let AuxWindow::Transfers = w;
+    if let Some(window) = with(|a| a.window.clone()) {
+        window.setTitle(&NSString::from_str(title));
+    }
+}
+
 pub fn resize(w: AuxWindow, size: (f32, f32)) {
     let AuxWindow::Transfers = w;
     if let Some(window) = with(|a| a.window.clone()) {

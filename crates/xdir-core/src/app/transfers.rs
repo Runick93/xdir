@@ -67,8 +67,9 @@ struct CopyWindow {
     collapsed: bool,
     hover: Option<ViewHit>,
     pressed: Option<ViewHit>,
-    /// El último tamaño pedido (para no repetir `aux_resize`).
+    /// El último tamaño pedido (para no repetir `aux_resize`) y el último título.
     size: (f32, f32),
+    title: String,
 }
 
 /// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
@@ -353,10 +354,12 @@ impl App {
         }
         let size = self.transfers_size();
         let host = self.host.clone();
-        if host.aux_show(AuxWindow::Transfers, &view::window_title(&self.transfers.jobs), size) {
+        let title = view::window_title(&self.transfers.jobs);
+        if host.aux_show(AuxWindow::Transfers, &title, size) {
             let w = &mut self.transfers.window;
             w.shown = true;
             w.size = size;
+            w.title = title;
             host.aux_invalidate(AuxWindow::Transfers);
         } else {
             self.transfers.window.shown = false;
@@ -387,6 +390,11 @@ impl App {
         if size != self.transfers.window.size {
             self.transfers.window.size = size;
             host.aux_resize(AuxWindow::Transfers, size);
+        }
+        let title = view::window_title(&self.transfers.jobs);
+        if title != self.transfers.window.title {
+            host.aux_set_title(AuxWindow::Transfers, &title);
+            self.transfers.window.title = title;
         }
         host.aux_invalidate(AuxWindow::Transfers);
     }

@@ -1474,6 +1474,12 @@ impl WindowHost for FakeHost {
         true
     }
 
+    fn aux_set_title(&self, w: AuxWindow, title: &str) {
+        if let Some(last) = self.aux_shows.borrow_mut().iter_mut().rev().find(|s| s.0 == w) {
+            last.1 = title.to_string();
+        }
+    }
+
     fn aux_resize(&self, w: AuxWindow, size: (f32, f32)) {
         self.aux_sizes.borrow_mut().push((w, size));
     }

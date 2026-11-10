@@ -240,6 +240,8 @@ pub trait WindowHost {
     fn aux_show(&self, _w: AuxWindow, _title: &str, _size: (f32, f32)) -> bool {
         false
     }
+    /// Cambia el título (el trabajo pasó a esperar un conflicto, terminó con errores…).
+    fn aux_set_title(&self, _w: AuxWindow, _title: &str) {}
     /// Cambia el tamaño del área (el contenido creció o se achicó).
     fn aux_resize(&self, _w: AuxWindow, _size: (f32, f32)) {}
     /// Pide repintarla (sin ventana, no hace nada).

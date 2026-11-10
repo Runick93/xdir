@@ -245,6 +245,15 @@ pub fn resize(w: AuxWindow, size: (f32, f32)) {
     invalidate(hwnd);
 }
 
+pub fn set_title(w: AuxWindow, title: &str) {
+    let AuxWindow::Transfers = w;
+    if let Some(hwnd) = with(|a| a.hwnd) {
+        unsafe {
+            let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
+        }
+    }
+}
+
 pub fn invalidate_aux(w: AuxWindow) {
     let AuxWindow::Transfers = w;
     if let Some(hwnd) = with(|a| a.hwnd) {

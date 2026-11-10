@@ -346,7 +346,26 @@ fn conflict_shows_window_now() {
     assert_eq!(host.aux_shows().len(), 1);
     let t = aux_texts(&mut a);
     assert!(t.iter().any(|s| s == "Ya existe «x.txt» en «d»"), "{t:?}");
+    assert_eq!(host.aux_shows()[0].1, "Copiando: un conflicto");
     a.cancel_job(id);
+    wait(&mut a, idle);
+}
+
+#[test]
+fn title_follows_the_queue() {
+    let f = fake();
+    f.add_file(&p("/app-wt2/s/x.txt"), b"nuevo".to_vec());
+    f.add_file(&p("/app-wt2/d/x.txt"), b"viejo".to_vec());
+    let (mut a, host) = app_window();
+    let slow = a.start_transfer(slow_copy(&f, "/app-wt3", 20));
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wt2/s/x.txt")], dest: p("/app-wt2/d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.state == JobState::Conflict));
+    assert_eq!(host.aux_shows().last().unwrap().1, "Copiando: un conflicto");
+    // Respondido, vuelve a «Copiando…» (el otro sigue).
+    a.answer_job(id, Answer { choice: Choice::Skip, all: false });
+    wait(&mut a, |a| !a.jobs().iter().any(|j| j.id == id));
+    assert_eq!(host.aux_shows().last().unwrap().1, "Copiando…");
+    a.cancel_job(slow);
     wait(&mut a, idle);
 }
 

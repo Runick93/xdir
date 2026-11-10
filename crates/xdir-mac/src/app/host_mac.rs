@@ -452,6 +452,10 @@ impl WindowHost for MacHost {
         crate::auxwin::show(self.window.get(), w, title, size, &theme)
     }
 
+    fn aux_set_title(&self, w: xdir_core::host::AuxWindow, title: &str) {
+        crate::auxwin::set_title(w, title);
+    }
+
     fn aux_resize(&self, w: xdir_core::host::AuxWindow, size: (f32, f32)) {
         crate::auxwin::resize(w, size);
     }

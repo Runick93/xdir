@@ -329,6 +329,12 @@ fn volume_size(root: &Path) -> u64 {
     st.f_blocks * st.f_bsize as u64
 }
 
+/// ¿Va el volumen en la lista? Uno de red siempre (sin mirarlo); uno local, si `probe` (no es el
+/// enlace al de arranque y es carpeta).
+pub fn keep_volume(remote: bool, probe: impl FnOnce() -> bool) -> bool {
+    remote || probe()
+}
+
 /// Discos montados: el de arranque ("/") y los de `/Volumes` (sin el enlace al de arranque).
 pub fn drives() -> Vec<PathBuf> {
     let mut out = vec![PathBuf::from("/")];
@@ -336,8 +342,8 @@ pub fn drives() -> Vec<PathBuf> {
         let mut vols: Vec<PathBuf> = rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| !std::fs::read_link(p).is_ok_and(|t| t == Path::new("/")))
-            .filter(|p| p.is_dir())
+            // Un volumen de red no se toca (un `stat` del punto de montaje va al servidor).
+            .filter(|p| keep_volume(xdir_core::sys::network().is_remote(p), || !std::fs::read_link(p).is_ok_and(|t| t == Path::new("/")) && p.is_dir()))
             .collect();
         vols.sort();
         out.extend(vols);

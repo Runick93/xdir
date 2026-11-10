@@ -92,3 +92,12 @@ fn mac_connect_nas_manual() {
     assert!(n.connections().unwrap().iter().any(|c| local.starts_with(&c.local)));
     n.disconnect(&local, false).unwrap();
 }
+
+/// I2: la lista de discos no hace `stat` de un volumen de red.
+#[test]
+fn drives_skip_stat_of_network_volumes() {
+    use crate::fs::macos::keep_volume;
+    assert!(keep_volume(true, || panic!("no se mira un volumen de red")));
+    assert!(keep_volume(false, || true));
+    assert!(!keep_volume(false, || false));
+}

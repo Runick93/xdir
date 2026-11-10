@@ -57,6 +57,9 @@ pub(super) struct Transfers {
     /// pedidos esperan cada uno los suyos.
     pending_eject: Vec<(Vec<JobId>, AfterJobs)>,
     window: CopyWindow,
+    /// Lo que se lanzó (pruebas).
+    #[cfg(test)]
+    started: Vec<JobSpec>,
 }
 
 /// Estado de la ventana de copia.
@@ -92,6 +95,8 @@ impl Transfers {
             auto_skip: Arc::new(AtomicBool::new(true)),
             pending_eject: Vec::new(),
             window: CopyWindow::default(),
+            #[cfg(test)]
+            started: Vec::new(),
         }
     }
 }
@@ -236,6 +241,8 @@ fn plural_errors(n: usize) -> String {
 impl App {
     /// Lanza un trabajo del motor en su hilo y vuelve enseguida.
     pub fn start_transfer(&mut self, spec: JobSpec) -> JobId {
+        #[cfg(test)]
+        self.transfers.started.push(spec.clone());
         let t = &mut self.transfers;
         let id = t.next;
         t.next += 1;
@@ -755,6 +762,12 @@ impl App {
         again
     }
 
+    /// Los trabajos lanzados desde la última vez (pruebas).
+    #[cfg(test)]
+    pub(super) fn take_started(&mut self) -> Vec<JobSpec> {
+        std::mem::take(&mut self.transfers.started)
+    }
+
     /// Los trabajos (para la ventana de copia).
     pub fn jobs(&self) -> &[JobView] {
         &self.transfers.jobs
@@ -781,7 +794,6 @@ impl App {
     /// seguir con `then` (soltar el disco). Sin trabajos, sigue enseguida. Nunca bloquea: `then`
     /// corre desde `on_transfer_updates` cuando llega el último `Finished`. `false` si no se
     /// expulsa (dijo que no).
-    // TODO(merge tanda D): lo llama «Expulsar» (Task 5, otra rama) con lo que suelta el disco.
     pub fn eject_after_jobs(&mut self, root: &Path, label: &str, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
         if ids.is_empty() {

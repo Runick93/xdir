@@ -8,7 +8,7 @@ use std::io;
 use std::os::macos::fs::MetadataExt as MacMetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use xdir_core::sys::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, VolumeInfo};
 
@@ -248,9 +248,7 @@ impl CopyPrims for MacCopyPrims {
         if m.is_dir() { std::fs::remove_dir(p) } else { std::fs::remove_file(p) }.map_err(|e| err(e, p))
     }
 
-    // TODO(merge tanda D): anotar lo mandado a la Papelera (`log_trashed`, Task 3) y
-    // `trash_origin` = `trash::origin` (Task 3, otra rama). Sin él, «Devolver» dice «No se sabe
-    // de dónde vino».
+    /// Lo anota en el registro de xdir (`papelera.tsv`) para «Devolver».
     fn trash(&self, p: &Path) -> Result<String, CopyError> {
         let in_trash = super::macos::trash(p).map_err(|e| CopyError::new(ErrKind::Other(e), p))?;
         if in_trash.as_os_str().is_empty() {
@@ -266,7 +264,28 @@ impl CopyPrims for MacCopyPrims {
     // reemplazado (`untrash` renombra desde la Papelera al destino).
 
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {
-        self.rename_noreplace(Path::new(in_trash), original)
+        self.rename_noreplace(Path::new(in_trash), original)?;
+        crate::trash::forget(Path::new(in_trash));
+        Ok(())
+    }
+
+    /// El `.DS_Store` de la Papelera o el registro de xdir.
+    fn trash_origin(&self, in_trash: &Path) -> Option<PathBuf> {
+        crate::trash::origin(in_trash)
+    }
+
+    /// Las mismas reglas que «Devolver» del Finder en xdir (`trash::prepare_parent`): nada de
+    /// enlaces en el camino (salvo los de root del primer nivel del disco de arranque, como
+    /// `/tmp`), las carpetas que faltan se crean una por una y la ruta real queda en ese disco.
+    fn prepare_restore(&self, _in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+        let root = crate::trash::volume_root(dir);
+        let refuse = |e: String| CopyError::new(ErrKind::Other(e), dir);
+        crate::trash::prepare_parent(&root, dir, true).map_err(refuse)?;
+        crate::trash::prepare_parent(&root, dir, false).map_err(refuse)
+    }
+
+    fn restored(&self, in_trash: &Path) {
+        crate::trash::forget(in_trash);
     }
 }
 
@@ -455,6 +474,8 @@ mod tests {
     /// carpeta `other` como si fuera otro disco (mover entre discos de verdad).
     struct Real {
         other: Option<PathBuf>,
+        /// El lugar original de lo que está en la «Papelera» de la prueba (para «Devolver»).
+        origin: Option<PathBuf>,
     }
 
     impl CopyPrims for Real {
@@ -499,6 +520,12 @@ mod tests {
         fn untrash(&self, _in_trash: &str, original: &Path) -> Result<(), CopyError> {
             Err(CopyError::new(ErrKind::Other("sin Papelera en la prueba".into()), original))
         }
+        fn trash_origin(&self, _in_trash: &Path) -> Option<PathBuf> {
+            self.origin.clone()
+        }
+        fn prepare_restore(&self, in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+            MacCopyPrims.prepare_restore(in_trash, dir)
+        }
     }
 
     fn go(prims: &dyn CopyPrims, spec: JobSpec, answers: &[Answer], ctl: &Arc<Control>, hook: &mut dyn FnMut(&Update)) -> JobOutcome {
@@ -521,6 +548,37 @@ mod tests {
         assert!(left.is_empty(), "quedaron temporales: {left:?}");
     }
 
+    /// «Devolver» por el motor (lo de #45, ahora en el motor): a una carpeta que es un enlace (un
+    /// disco armado: «docs» → otra carpeta) no deja el archivo del otro lado; a una carpeta que ya
+    /// no está, la crea; nunca pisa (pregunta).
+    #[test]
+    fn engine_restore_refuses_symlinked_folder_and_creates_missing() {
+        let dir = tmp("motor-devolver");
+        let (vol, outside) = (dir.join("vol"), dir.join("LaunchAgents"));
+        std::fs::create_dir_all(vol.join(".Trashes/501")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, vol.join("docs")).unwrap();
+        let item = vol.join(".Trashes/501/evil.plist");
+        std::fs::write(&item, "x").unwrap();
+        let prims = Real { other: None, origin: Some(vol.join("docs/evil.plist")) };
+        let out = go(&prims, JobSpec::Restore { items: vec![item.clone()] }, &[], &Control::new(), &mut |_| {});
+        assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
+        assert!(item.exists(), "sigue en la Papelera");
+        assert!(!outside.join("evil.plist").exists(), "no llegó a la carpeta del enlace");
+        // A una carpeta que ya no está: se crea y vuelve; con algo en su lugar, pregunta.
+        let back = vol.join("Proyectos/2026/evil.plist");
+        let prims = Real { other: None, origin: Some(back.clone()) };
+        let out = go(&prims, JobSpec::Restore { items: vec![item.clone()] }, &[], &Control::new(), &mut |_| {});
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(std::fs::read_to_string(&back).unwrap(), "x");
+        std::fs::write(&item, "otra vez").unwrap();
+        let skip = Answer { choice: Choice::Skip, all: false };
+        let out = go(&prims, JobSpec::Restore { items: vec![item.clone()] }, &[skip], &Control::new(), &mut |_| {});
+        assert_eq!(out.skipped, vec![item.clone()]);
+        assert_eq!(std::fs::read_to_string(&back).unwrap(), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn engine_real_copy_tree() {
         let dir = tmp("motor");
@@ -530,7 +588,7 @@ mod tests {
         std::fs::write(src.join("Fotos/sub/b.jpg"), b"bbb").unwrap();
         std::os::unix::fs::symlink("a.jpg", src.join("Fotos/enlace")).unwrap();
         std::fs::create_dir(&dst).unwrap();
-        let prims = Real { other: None };
+        let prims = Real { other: None, origin: None };
         let out = go(&prims, JobSpec::Copy { sources: vec![src.join("Fotos")], dest: dst.clone() }, &[], &Control::new(), &mut |_| {});
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         assert_eq!(std::fs::read(dst.join("Fotos/a.jpg")).unwrap(), big(3 << 20));
@@ -555,7 +613,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("d")).unwrap();
         std::fs::write(dir.join("s/informe.pdf"), big(20 << 20)).unwrap();
         std::fs::write(dir.join("d/informe.pdf"), b"viejo").unwrap();
-        let prims = Real { other: None };
+        let prims = Real { other: None, origin: None };
         let spec = || JobSpec::Copy { sources: vec![dir.join("s/informe.pdf")], dest: dir.join("d") };
         let replace = [Answer { choice: Choice::Replace, all: false }];
         // Cancelar en el primer aviso (si APFS clona, no hay avisos: termina bien).
@@ -586,7 +644,7 @@ mod tests {
         std::fs::write(src.join("Dir/sub/b.txt"), b"b").unwrap();
         std::fs::write(src.join("Dir/sub/cerrado.txt"), b"c").unwrap();
         std::fs::set_permissions(src.join("Dir/sub/cerrado.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
-        let prims = Real { other: Some(other.clone()) };
+        let prims = Real { other: Some(other.clone()), origin: None };
         let out = go(&prims, JobSpec::Move { sources: vec![src.join("Dir")], dest: other.clone() }, &[], &Control::new(), &mut |_| {});
         assert_eq!(std::fs::read(other.join("Dir/a.txt")).unwrap(), b"a");
         assert_eq!(std::fs::read(other.join("Dir/sub/b.txt")).unwrap(), b"b");

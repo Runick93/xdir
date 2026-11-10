@@ -132,8 +132,18 @@ impl App {
         self.clear_preview_subject();
     }
 
-    /// Expulsa el disco de `root`: primero suelta lo de xdir, después expulsa en otro hilo.
+    /// Expulsa el disco de `root`. Con operaciones de copia sobre ese disco pregunta si se
+    /// cancelan y espera a que limpien lo a medio copiar (`eject_after_jobs`); después suelta lo
+    /// de xdir y expulsa en otro hilo.
     pub(super) fn eject(&mut self, root: PathBuf) {
+        let fs = sys::file_system();
+        let label = fs.drive_label(&fs.drive_name(&root));
+        let at = root.clone();
+        self.eject_after_jobs(&at, &label, Box::new(move |app: &mut App| app.eject_now(root)));
+    }
+
+    /// Suelta lo de xdir en el disco y lo expulsa en otro hilo (sin trabajos de copia encima).
+    fn eject_now(&mut self, root: PathBuf) {
         self.release_volume(&root);
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));

@@ -18,11 +18,9 @@ pub enum Op {
     NewFolder { parent: PathBuf },
     /// Archivo de texto vacío «Nuevo documento de texto.txt» (« (2)», « (3)»… si ya existe).
     NewFile { parent: PathBuf },
-    /// «nombre copia», «nombre copia 2»… al lado de cada uno (`names::copy_name`).
-    Duplicate { sources: Vec<PathBuf> },
-    /// Crea «Carpeta nueva con N elementos» en `parent` y mueve `items` adentro.
-    NewFolderWith { parent: PathBuf, items: Vec<PathBuf> },
-    /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux).
+    /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux). La `App` lo hace con
+    /// el motor de copia (`JobSpec::Restore`); queda como respaldo, como `Copy` y `Move`. Duplicar
+    /// y «Carpeta nueva con la selección» son solo del motor.
     Restore { items: Vec<PathBuf> },
     /// Un acceso directo (alias, enlace) junto a cada uno (`names::shortcut_name`).
     Shortcuts { targets: Vec<PathBuf> },

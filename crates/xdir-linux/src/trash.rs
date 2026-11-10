@@ -190,6 +190,11 @@ fn decode_path(text: &str) -> Vec<u8> {
     out
 }
 
+/// Olvida `files/<name>` de la papelera (ya se devolvió por otro camino): borra su `.trashinfo`.
+pub fn forget(name: &str, trash: &Path) {
+    let _ = std::fs::remove_file(info_path(trash, OsStr::new(name)));
+}
+
 /// Devuelve `files/<name>` de la papelera a `original` y borra su `.trashinfo`. Si en `original`
 /// ya hay algo, no se pisa: error y todo queda como estaba.
 pub fn restore(name: &str, original: &Path, trash: &Path) -> io::Result<()> {

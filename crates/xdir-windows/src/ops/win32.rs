@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVE_FILE_FLAGS, MoveFileExW};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
@@ -69,9 +69,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     let mut rename_after = false;
     let mut focus = None;
     // Carpeta que creó «Carpeta nueva con la selección» (se quita si no se movió nada).
-    let mut created_folder: Option<PathBuf> = None;
     // Error de `PerformOperations` cuando igual hay algo hecho que deshacer.
-    let mut perform_error: Option<String> = None;
 
     match &op {
         Op::Copy { sources, dest } | Op::Move { sources, dest } => {
@@ -86,38 +84,6 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                     }
                 }
             }
-        }
-        Op::Duplicate { sources } => {
-            // «nombre copia», «nombre copia 2»… como en macOS y Linux (no « - copia» del Explorador):
-            // el nombre se calcula acá y se pasa a `CopyItem`, sin `FOF_RENAMEONCOLLISION`.
-            for src in sources {
-                let (Some(parent), Some(name)) = (src.parent(), src.file_name()) else { continue };
-                let name = name.to_string_lossy();
-                let is_dir = src.is_dir();
-                let target = names::free_name(parent, &|n| names::copy_name(&name, is_dir, n), &|p| std::fs::symlink_metadata(p).is_ok());
-                let Some(copy_name) = target.file_name() else { continue };
-                unsafe { fo.CopyItem(&item(src)?, &item(parent)?, &HSTRING::from(copy_name), None)? };
-            }
-        }
-        Op::NewFolderWith { parent, items } => {
-            let base = names::folder_with_name(items.len());
-            let folder = names::free_name(parent, &|n| names::numbered_name(&base, true, n), &|p| std::fs::symlink_metadata(p).is_ok());
-            std::fs::create_dir(&folder).map_err(|e| Error::new(E_FAIL, format!("{}: {e}", folder.display())))?;
-            created_folder = Some(folder.clone());
-            // Si no se pudo armar la operación, la carpeta (vacía) no queda.
-            let queued = (|| -> Result<()> {
-                let dest = item(&folder)?;
-                for src in items {
-                    unsafe { fo.MoveItem(&item(src)?, &dest, PCWSTR::null(), None)? };
-                }
-                Ok(())
-            })();
-            if let Err(e) = queued {
-                let _ = std::fs::remove_dir(&folder);
-                return Err(e);
-            }
-            rename_after = true;
-            focus = Some(folder);
         }
         Op::Delete { paths, recycle } => {
             flags = if *recycle { FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE } else { FILEOPERATION_FLAGS(0) };
@@ -156,62 +122,13 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         if let Err(e) = performed
             && !aborted
         {
-            // «Carpeta nueva con la selección» sigue: lo que ya se movió necesita su deshacer.
-            if created_folder.is_none() {
-                return Err(e);
-            }
-            perform_error = Some(e.message().to_string());
+            return Err(e);
         }
     }
 
     let log = recorder_log(&recorder);
-    let mut select = Vec::new();
+    let select = Vec::new();
     let undo = match op {
-        Op::Duplicate { sources } => {
-            // Solo las copias de primer nivel (las de una carpeta copiada también avisan).
-            let parents: Vec<String> = sources.iter().filter_map(|s| s.parent()).map(path_key).collect();
-            select = log
-                .iter()
-                .filter_map(|r| r.created.clone())
-                .map(PathBuf::from)
-                .filter(|c| c.parent().is_some_and(|p| parents.contains(&path_key(p))))
-                .collect::<Vec<_>>();
-            focus = select.last().cloned();
-            Some(Undo::Created(select.clone()))
-        }
-        Op::NewFolderWith { parent, items } => {
-            let mut folder = created_folder.clone().unwrap_or_default();
-            let mut moved: Vec<(PathBuf, PathBuf)> = log
-                .iter()
-                .filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?)))
-                .filter(|(now, _)| now.parent().map(path_key) == Some(path_key(&folder)))
-                .collect();
-            if moved.is_empty() {
-                let _ = std::fs::remove_dir(&folder);
-                return Err(Error::new(E_FAIL, perform_error.as_deref().unwrap_or("No se movió ningún elemento")));
-            }
-            // El nombre cuenta lo que de verdad quedó adentro.
-            if moved.len() != items.len() {
-                let base = names::folder_with_name(moved.len());
-                let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
-                let renamed = names::free_name(&parent, &|n| names::numbered_name(&base, true, n), &taken);
-                // Sin MOVEFILE_REPLACE_EXISTING: nunca pisa algo que haya aparecido en el medio.
-                let moved_ok = unsafe {
-                    MoveFileExW(&HSTRING::from(folder.as_os_str()), &HSTRING::from(renamed.as_os_str()), MOVE_FILE_FLAGS(0))
-                }
-                .is_ok();
-                if moved_ok {
-                    for (now, _) in &mut moved {
-                        if let Some(name) = now.file_name() {
-                            *now = renamed.join(name);
-                        }
-                    }
-                    folder = renamed;
-                    focus = Some(folder.clone());
-                }
-            }
-            Some(Undo::Batch(vec![Undo::CreatedFolder(folder), Undo::Moved(moved)]))
-        }
         Op::Copy { .. } => Some(Undo::Created(log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect())),
         Op::Move { .. } => Some(Undo::Moved(
             log.iter().filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?))).collect(),
@@ -244,15 +161,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Rename { .. } | Undo::Batch(_) | Undo::CreatedFolder(_) => true,
         Undo::Renames(v) => !v.is_empty(),
     });
-    Ok(OpResult { undo, focus, rename_after, error: perform_error, select })
-}
-
-/// Ruta para comparar como lo hace Windows: sin el prefijo `\\?\`, sin separador final y sin
-/// distinguir mayúsculas (el registro del Shell puede devolverla distinta a como se pidió).
-pub fn path_key(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    let s = s.strip_prefix(r"\\?\UNC\").map(|r| format!(r"\\{r}")).unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
-    s.trim_end_matches(['\\', '/']).replace('/', "\\").to_lowercase()
+    Ok(OpResult { undo, focus, rename_after, error: None, select })
 }
 
 /// «Crear acceso directo»: un `.lnk` junto a cada uno («nombre - Acceso directo.lnk», « (2)»…).
@@ -514,13 +423,6 @@ impl IFileOperationProgressSink_Impl for Recorder_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn path_keys_compare_like_windows() {
-        assert_eq!(path_key(Path::new(r"\\?\C:\Users\Ana\Docs\")), path_key(Path::new(r"c:\users\ana\docs")));
-        assert_eq!(path_key(Path::new(r"\\?\UNC\srv\share\x")), path_key(Path::new(r"\\SRV\share\X")));
-        assert_ne!(path_key(Path::new(r"C:\a")), path_key(Path::new(r"C:\b")));
-    }
 
     /// «Crear acceso directo»: «a.txt - Acceso directo.lnk» (y « (2)»), que `link_target` resuelve.
     #[test]

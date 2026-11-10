@@ -305,8 +305,27 @@ impl CopyPrims for LinuxCopyPrims {
         trash::recycle_as(p, shown, &trash_dir(p)?).map_err(|e| err(e, p))
     }
 
-    // TODO(merge tanda D): `trash_origin` = `trash::origin` (Task 3, otra rama). Sin él, «Devolver»
-    // dice «No se sabe de dónde vino».
+    /// El `Path=` del `.trashinfo` de `<papelera>/files/<nombre>`.
+    fn trash_origin(&self, in_trash: &Path) -> Option<PathBuf> {
+        let (trash, name) = crate::ops::trash_of(in_trash)?;
+        trash::origin(&name, trash).ok()
+    }
+
+    /// Las reglas de «Devolver» de `Op::Restore` (`ops::prepare_restore_parent`): la papelera de
+    /// un disco solo devuelve dentro de ese disco y nunca se siguen enlaces (salvo los de root del
+    /// primer nivel del disco de arranque).
+    fn prepare_restore(&self, in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+        let refuse = |e: String| CopyError::new(ErrKind::Other(e), dir);
+        let (trash, _) = crate::ops::trash_of(in_trash).ok_or_else(|| refuse("No se sabe de dónde vino".into()))?;
+        crate::ops::prepare_restore_parent(trash, dir).map_err(refuse)
+    }
+
+    /// Ya devuelto: se borra su `.trashinfo`.
+    fn restored(&self, in_trash: &Path) {
+        if let Some((trash, name)) = crate::ops::trash_of(in_trash) {
+            trash::forget(&name, trash);
+        }
+    }
 
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {
         trash::restore(in_trash, original, &trash_dir(original)?).map_err(|e| err(e, original))
@@ -519,6 +538,44 @@ mod tests {
         fn untrash(&self, _in_trash: &str, original: &Path) -> Result<(), CopyError> {
             Err(CopyError::new(ErrKind::Other("sin Papelera en la prueba".into()), original))
         }
+        fn trash_origin(&self, in_trash: &Path) -> Option<PathBuf> {
+            LinuxCopyPrims.trash_origin(in_trash)
+        }
+        fn prepare_restore(&self, in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+            LinuxCopyPrims.prepare_restore(in_trash, dir)
+        }
+        fn restored(&self, in_trash: &Path) {
+            LinuxCopyPrims.restored(in_trash)
+        }
+    }
+
+    /// «Devolver» por el motor (lo de #45, ahora en el motor): desde la papelera de un disco, una
+    /// carpeta del camino que es un enlace o un `Path=` fuera del disco no se usan; lo demás vuelve
+    /// y se borra su `.trashinfo`.
+    #[test]
+    fn engine_restore_refuses_symlinked_folder_and_outside_paths() {
+        let dir = tmp("motor-devolver");
+        let (top, outside) = (dir.join("usb"), dir.join("autostart"));
+        let trash = top.join(".Trash-1000");
+        std::fs::create_dir_all(trash.join("files")).unwrap();
+        std::fs::create_dir_all(trash.join("info")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, top.join("docs")).unwrap();
+        for (name, path) in [("a", "docs/a".to_string()), ("b", outside.join("b").display().to_string()), ("c", "fotos/c".to_string())] {
+            std::fs::write(trash.join("files").join(name), name).unwrap();
+            std::fs::write(trash.join("info").join(format!("{name}.trashinfo")), format!("[Trash Info]\nPath={path}\n")).unwrap();
+        }
+        let items = vec![trash.join("files/a"), trash.join("files/b"), trash.join("files/c")];
+        let prims = Real { other: None };
+        let out = go(&prims, JobSpec::Restore { items }, &[], &Control::new(), &mut |_| {});
+        assert_eq!(out.errors.len(), 2, "{:?}", out.errors);
+        assert!(!outside.join("a").exists() && !outside.join("b").exists());
+        assert!(trash.join("files/a").exists() && trash.join("files/b").exists());
+        // La que sí: vuelve (creando «fotos») y su .trashinfo se va.
+        assert_eq!(std::fs::read_to_string(top.join("fotos/c")).unwrap(), "c");
+        assert!(!trash.join("info/c.trashinfo").exists());
+        assert!(trash.join("info/a.trashinfo").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn go(prims: &dyn CopyPrims, spec: JobSpec, answers: &[Answer], ctl: &Arc<Control>, hook: &mut dyn FnMut(&Update)) -> xdir_core::transfer::JobOutcome {

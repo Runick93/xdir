@@ -83,11 +83,34 @@ fn focused_name(a: &App) -> String {
     list.focused_index().map(|i| list.entries[i].name.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// Entrega lo que respondió el `FileOps` falso (lo que haría `WM_APP_OP_DONE`).
-fn drain_ops(a: &mut App) {
-    while let Ok(r) = a.ops_rx.try_recv() {
-        a.on_op_done(r);
+/// Los trabajos del motor que se lanzaron, ordenando las rutas de cada uno.
+fn started(a: &mut App) -> Vec<crate::transfer::JobSpec> {
+    use crate::transfer::JobSpec;
+    let sorted = |mut v: Vec<PathBuf>| {
+        v.sort();
+        v
+    };
+    a.take_started()
+        .into_iter()
+        .map(|s| match s {
+            JobSpec::Duplicate { sources } => JobSpec::Duplicate { sources: sorted(sources) },
+            JobSpec::NewFolderWith { parent, items } => JobSpec::NewFolderWith { parent, items: sorted(items) },
+            JobSpec::Restore { items } => JobSpec::Restore { items: sorted(items) },
+            other => other,
+        })
+        .collect()
+}
+
+/// Entrega los avisos de los trabajos del motor hasta que terminen todos.
+fn wait_jobs(a: &mut App) {
+    for _ in 0..500 {
+        a.on_transfer_updates();
+        if a.running_jobs() == 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
+    panic!("los trabajos no terminaron");
 }
 
 /// Las entradas propias del menú del clic derecho sobre la selección (sin elegir nada).
@@ -130,28 +153,26 @@ fn choose_menu(a: &mut App, label: &str) {
 
 // ---------- Duplicar ----------
 
-/// Ctrl+D con dos seleccionados manda `Op::Duplicate`; sin selección o en una carpeta virtual,
-/// nada.
+/// Ctrl+D con dos seleccionados lanza un trabajo `Duplicate` del motor; sin selección o en una
+/// carpeta virtual, nada.
 #[test]
-fn duplicate_spawns_op_with_selection() {
+fn duplicate_starts_engine_job_with_selection() {
     use crate::keys::keys::VK_CONTROL;
     let mut a = app();
     let d = fixture("dup-op", &["a.txt", "b.txt", "c.txt"]);
     go(&mut a, &d);
     select(&mut a, &["a.txt", "b.txt"]);
     FakeFileOps::take_ops();
+    a.take_started();
     FakeEnv::hold_keys(&[VK_CONTROL]);
     assert!(a.on_key(Key(b'D' as u16)));
     FakeEnv::hold_keys(&[]);
-    let ops = FakeFileOps::take_ops();
-    let [Op::Duplicate { sources }] = ops.as_slice() else { panic!("{ops:?}") };
-    let mut sources = sources.clone();
-    sources.sort();
-    assert_eq!(sources, [d.join("a.txt"), d.join("b.txt")]);
+    assert_eq!(FakeFileOps::take_ops(), [], "Duplicar va por el motor de copia");
+    assert_eq!(started(&mut a), [crate::transfer::JobSpec::Duplicate { sources: vec![d.join("a.txt"), d.join("b.txt")] }]);
     // Sin selección: nada.
     deselect_all(&mut a);
     a.run_command(Command::Duplicate);
-    assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut a), []);
     // En una carpeta virtual (la Papelera de Windows): nada.
     let parsing = format!("::{{bin}}-dup-{}", std::process::id());
     crate::sys::testing::FakeFileSystem::set_shell_items(&parsing, &["x.txt"]);
@@ -160,7 +181,8 @@ fn duplicate_spawns_op_with_selection() {
     pump(&mut a, 0);
     a.panes[0].tab_mut().list.select_pos(0);
     a.run_command(Command::Duplicate);
-    assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut a), []);
+    wait_jobs(&mut a);
 }
 
 /// Al terminar, las copias (`OpResult::select`) quedan seleccionadas tras la recarga, con el foco
@@ -171,19 +193,16 @@ fn duplicate_selects_copies_after_reload() {
     let d = fixture("dup-sel", &["a.txt", "b.txt", "a copia.txt", "b copia.txt"]);
     go(&mut a, &d);
     select(&mut a, &["a.txt", "b.txt"]);
-    let copies = vec![d.join("a copia.txt"), d.join("b copia.txt")];
-    FakeFileOps::respond_with(OpResult {
-        undo: Some(Undo::Created(copies.clone())),
-        focus: copies.last().cloned(),
-        select: copies.clone(),
-        ..Default::default()
-    });
+    // El motor copia en su disco falso (las copias de verdad ya están en la carpeta de la prueba).
+    let f = crate::sys::testing::FakeCopyPrims::shared();
+    f.add_file(&d.join("a.txt"), b"a".to_vec());
+    f.add_file(&d.join("b.txt"), b"b".to_vec());
     a.run_command(Command::Duplicate);
-    drain_ops(&mut a);
+    wait_jobs(&mut a);
+    assert!(f.exists(&d.join("a copia.txt")) && f.exists(&d.join("b copia.txt")));
     pump(&mut a, 0);
     assert_eq!(selected_names(&a), ["a copia.txt", "b copia.txt"]);
-    assert_eq!(focused_name(&a), "b copia.txt");
-    assert_eq!(a.undo.last(), Some(&Undo::Created(copies)));
+    assert!(matches!(a.undo.last(), Some(Undo::Batch(_))), "un paso de deshacer");
 }
 
 #[test]
@@ -194,16 +213,18 @@ fn item_menu_has_duplicate() {
     select(&mut a, &["a.txt"]);
     assert!(own_menu(&mut a).iter().any(|l| l == "Duplicar"));
     FakeFileOps::take_ops();
+    a.take_started();
     choose_menu(&mut a, "Duplicar");
-    assert_eq!(FakeFileOps::take_ops(), [Op::Duplicate { sources: vec![d.join("a.txt")] }]);
+    assert_eq!(started(&mut a), [crate::transfer::JobSpec::Duplicate { sources: vec![d.join("a.txt")] }]);
+    wait_jobs(&mut a);
 }
 
 // ---------- Carpeta nueva con la selección ----------
 
-/// Con dos seleccionados, Ctrl+Alt+Shift+N manda `Op::NewFolderWith` con la carpeta del panel; el
-/// resultado con `rename_after` abre el renombrado sobre la carpeta nueva.
+/// Con dos seleccionados, Ctrl+Alt+Shift+N lanza un trabajo `NewFolderWith` del motor con la
+/// carpeta del panel; al terminar se abre el renombrado sobre la carpeta nueva.
 #[test]
-fn new_folder_with_spawns_op() {
+fn new_folder_with_starts_engine_job() {
     use crate::host::TextKind;
     use crate::keys::keys::{VK_CONTROL, VK_MENU, VK_SHIFT};
     let host = FakeHost::new();
@@ -211,28 +232,28 @@ fn new_folder_with_spawns_op() {
     let d = fixture("nfw-op", &["a.txt", "b.txt", "c.txt"]);
     go(&mut a, &d);
     select(&mut a, &["a.txt", "b.txt"]);
+    // La carpeta de verdad (la que se va a ver); el motor trabaja en su disco falso.
     let folder = d.join("Carpeta nueva con 2 elementos");
     std::fs::create_dir(&folder).unwrap();
-    FakeFileOps::respond_with(OpResult { focus: Some(folder.clone()), rename_after: true, ..Default::default() });
+    let f = crate::sys::testing::FakeCopyPrims::shared();
+    f.add_file(&d.join("a.txt"), b"a".to_vec());
+    f.add_file(&d.join("b.txt"), b"b".to_vec());
+    a.take_started();
     FakeEnv::hold_keys(&[VK_CONTROL, VK_MENU, VK_SHIFT]);
     assert!(a.on_key(Key(b'N' as u16)));
     FakeEnv::hold_keys(&[]);
-    let ops = FakeFileOps::take_ops();
-    let [Op::NewFolderWith { parent, items }] = ops.as_slice() else { panic!("{ops:?}") };
-    assert_eq!(parent, &d);
-    let mut items = items.clone();
-    items.sort();
-    assert_eq!(items, [d.join("a.txt"), d.join("b.txt")]);
-    drain_ops(&mut a);
+    assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut a), [crate::transfer::JobSpec::NewFolderWith { parent: d.clone(), items: vec![d.join("a.txt"), d.join("b.txt")] }]);
+    wait_jobs(&mut a);
+    assert!(f.exists(&folder.join("a.txt")));
     pump(&mut a, 0);
     a.try_pending_rename();
     assert_eq!(host.text_of(TextKind::Rename).as_deref(), Some("Carpeta nueva con 2 elementos"));
     // Sin selección: nada.
     let mut b = app();
     go(&mut b, &d);
-    FakeFileOps::take_ops();
     b.run_command(Command::NewFolderWithSelection);
-    assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut b), []);
 }
 
 /// Meta (⌃ en la Mac) llega a los atajos: un atajo propio con Meta se resuelve con la tecla
@@ -245,14 +266,15 @@ fn meta_key_reaches_shortcuts() {
     go(&mut a, &d);
     select(&mut a, &["a.txt"]);
     a.config.keymap.set(Command::NewFolderWithSelection, &[crate::commands::parse_combo("Meta+Ctrl+K").unwrap()]);
-    FakeFileOps::take_ops();
+    a.take_started();
     FakeEnv::hold_keys(&[VK_CONTROL]);
     a.on_key(Key(b'K' as u16));
-    assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut a), []);
     FakeEnv::hold_keys(&[VK_CONTROL, VK_LWIN]);
     a.on_key(Key(b'K' as u16));
     FakeEnv::hold_keys(&[]);
-    assert_eq!(FakeFileOps::take_ops(), [Op::NewFolderWith { parent: d.clone(), items: vec![d.join("a.txt")] }]);
+    assert_eq!(started(&mut a), [crate::transfer::JobSpec::NewFolderWith { parent: d.clone(), items: vec![d.join("a.txt")] }]);
+    wait_jobs(&mut a);
 }
 
 /// El menú del clic derecho ofrece «Carpeta nueva con la selección» solo con dos o más.
@@ -265,16 +287,17 @@ fn menu_new_folder_with_needs_two() {
     assert!(!own_menu(&mut a).iter().any(|l| l == "Carpeta nueva con la selección"));
     select(&mut a, &["a.txt", "b.txt"]);
     assert!(own_menu(&mut a).iter().any(|l| l == "Carpeta nueva con la selección"));
-    FakeFileOps::take_ops();
+    a.take_started();
     choose_menu(&mut a, "Carpeta nueva con la selección");
-    let ops = FakeFileOps::take_ops();
-    assert!(matches!(ops.as_slice(), [Op::NewFolderWith { items, .. }] if items.len() == 2), "{ops:?}");
+    let jobs = started(&mut a);
+    assert!(matches!(jobs.as_slice(), [crate::transfer::JobSpec::NewFolderWith { items, .. }] if items.len() == 2), "{jobs:?}");
+    wait_jobs(&mut a);
 }
 
 // ---------- Devolver desde la Papelera ----------
 
 /// Con la Papelera a la vista: «Devolver» primero en el menú; el botón de la barra está apagado
-/// sin selección y con dos seleccionados manda `Op::Restore`.
+/// sin selección y con dos seleccionados lanza un trabajo `Restore` del motor.
 #[test]
 fn restore_menu_and_button_in_trash() {
     use crate::sys::testing::FakeFileSystem;
@@ -287,22 +310,19 @@ fn restore_menu_and_button_in_trash() {
     let r = a.panes[0].restore_button().expect("botón Devolver en la Papelera");
     assert!(host.drawn_texts().iter().any(|(_, s, _)| s == "Devolver"));
     let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
-    FakeFileOps::take_ops();
+    a.take_started();
     a.on_left_down(x, y, false);
     a.on_left_up(x, y);
-    assert_eq!(FakeFileOps::take_ops(), [], "apagado sin selección");
+    assert_eq!(started(&mut a), [], "apagado sin selección");
     select(&mut a, &["a.txt", "b.txt"]);
     assert_eq!(own_menu(&mut a).first().map(String::as_str), Some("Devolver"));
     a.paint();
     a.on_left_down(x, y, false);
     a.on_left_up(x, y);
-    let ops = FakeFileOps::take_ops();
-    let [Op::Restore { items }] = ops.as_slice() else { panic!("{ops:?}") };
-    let mut items = items.clone();
-    items.sort();
-    assert_eq!(items, [d.join("a.txt"), d.join("b.txt")]);
+    assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut a), [crate::transfer::JobSpec::Restore { items: vec![d.join("a.txt"), d.join("b.txt")] }]);
     choose_menu(&mut a, "Devolver");
-    assert!(matches!(FakeFileOps::take_ops().as_slice(), [Op::Restore { .. }]));
+    assert!(matches!(started(&mut a).as_slice(), [crate::transfer::JobSpec::Restore { .. }]));
     // Dentro de la Papelera no se duplica, ni se crean accesos ni carpetas con la selección.
     let menu = own_menu(&mut a);
     for label in ["Duplicar", "Crear acceso directo", "Carpeta nueva con la selección"] {
@@ -312,6 +332,8 @@ fn restore_menu_and_button_in_trash() {
         a.run_command(c);
     }
     assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut a), []);
+    wait_jobs(&mut a);
     FakeFileSystem::set_trash(None);
 }
 
@@ -327,10 +349,12 @@ fn recycle_in_trash_restores_on_mac() {
     go(&mut a, &d);
     select(&mut a, &["a.txt"]);
     FakeFileOps::take_ops();
+    a.take_started();
     FakeEnv::set_key_style(KeyStyle::Mac);
     a.run_command(Command::Recycle);
     FakeEnv::set_key_style(KeyStyle::Windows);
-    assert_eq!(FakeFileOps::take_ops(), [Op::Restore { items: vec![d.join("a.txt")] }]);
+    assert_eq!(started(&mut a), [crate::transfer::JobSpec::Restore { items: vec![d.join("a.txt")] }]);
+    wait_jobs(&mut a);
     a.run_command(Command::Recycle);
     assert_eq!(FakeFileOps::take_ops(), [Op::Delete { paths: vec![d.join("a.txt")], recycle: true }]);
     FakeFileSystem::set_trash(None);
@@ -658,4 +682,30 @@ fn attach_requests_ejectable() {
     a.attach(crate::sys::Handle(7), 96);
     wait_task(&mut a);
     assert!(a.ejectable.contains(&e));
+}
+
+/// Expulsar con una copia corriendo sobre el disco: pregunta, cancela y expulsa recién cuando el
+/// trabajo terminó de limpiar lo a medio copiar.
+#[test]
+fn eject_waits_for_copy_on_the_volume() {
+    use crate::sys::{VolumeInfo, testing::FakeCopyPrims};
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "con-copia");
+    FakeShell::set_eject_result(&e, Ok(()));
+    let f = FakeCopyPrims::shared();
+    f.set_volume(&e, VolumeInfo { id: "usb-e".into(), label: "USB (E:)".into(), case_insensitive: false, has_trash: true, max_file: None, free: u64::MAX });
+    let src = e.join("grande.bin");
+    f.add_file(&src, vec![1; 64 * 1024 * 20]);
+    f.add_dir(&e.join("destino"));
+    f.set_slow(&src, Some(Duration::from_millis(20)));
+    a.start_transfer(crate::transfer::JobSpec::Copy { sources: vec![src.clone()], dest: e.join("destino") });
+    host.set_answer(Some(true));
+    a.panes[0].tab_mut().list.select_pos(1);
+    a.run_command(Command::Eject);
+    assert_eq!(ejects_of(&e), 0, "no se expulsa con la copia corriendo");
+    wait_jobs(&mut a);
+    wait_task(&mut a);
+    assert_eq!(ejects_of(&e), 1);
+    assert!(!f.exists(&e.join("destino/grande.bin")));
+    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"USB (E:)\" con seguridad"));
 }

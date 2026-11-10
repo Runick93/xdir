@@ -38,6 +38,7 @@ pub const NO_COMMENT_TEXT: &str = "Este tipo de archivo no admite comentarios";
 pub const ADD_TAG_TEXT: &str = "Agregar etiqueta";
 pub const MORE_TEXT: &str = "Más en el sistema…";
 pub const CHANGE_ALL_TEXT: &str = "Cambiar todos…";
+pub const EJECT_TEXT: &str = "⏏ Expulsar";
 
 /// Lo que muestra el panel.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +48,8 @@ pub struct Panel {
     pub sections: Vec<SectionView>,
     /// Botón «Más en el sistema…» (no en Linux).
     pub more_button: bool,
+    /// Botón «⏏ Expulsar» (un disco expulsable).
+    pub eject_button: bool,
 }
 
 /// Encabezado: la imagen de la vista previa (si `image`, la grande de `key`; si no, el ícono), el
@@ -124,6 +127,8 @@ pub enum InfoHit {
     /// El acceso de una fila de permisos (0 dueño, 1 grupo, 2 todos).
     Perm(usize),
     MoreInSystem,
+    /// «⏏ Expulsar» del disco.
+    Eject,
     /// El panel, sin nada que tocar.
     Body,
 }
@@ -203,11 +208,20 @@ pub fn layout(r: Rect, panel: &Panel, scroll: f32, measure: &dyn Fn(&str) -> f32
     for s in &panel.sections {
         y = c.section(s, y);
     }
-    if panel.more_button {
+    // Abajo, en una fila: «⏏ Expulsar» a la izquierda y «Más en el sistema…» a la derecha.
+    if panel.more_button || panel.eject_button {
         y += 16.0;
-        let b = rect(x1 - MORE_W, y, x1, y + MORE_H);
-        c.button(b, MORE_TEXT);
-        c.hits.push((InfoHit::MoreInSystem, b));
+        if panel.eject_button {
+            let w = (c.measure)(EJECT_TEXT) + 28.0;
+            let b = rect(x0, y, x0 + w, y + MORE_H);
+            c.button(b, EJECT_TEXT);
+            c.hits.push((InfoHit::Eject, b));
+        }
+        if panel.more_button {
+            let b = rect(x1 - MORE_W, y, x1, y + MORE_H);
+            c.button(b, MORE_TEXT);
+            c.hits.push((InfoHit::MoreInSystem, b));
+        }
         y += MORE_H;
     }
     y += 16.0;

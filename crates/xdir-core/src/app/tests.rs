@@ -2182,7 +2182,7 @@ fn tooltip_text_for_buttons() {
         (pane(PaneHit::Button(Button::Forward)), "Adelante (Alt+→)"),
         (pane(PaneHit::Button(Button::Up)), "Subir a la carpeta superior (Alt+↑)"),
         (pane(PaneHit::Button(Button::Refresh)), "Recargar (F5)"),
-        (pane(PaneHit::Star), "Agregar o quitar de favoritos (Ctrl+D)"),
+        (pane(PaneHit::Star), "Agregar o quitar de favoritos (Ctrl+Shift+D)"),
         (pane(PaneHit::Terminal), "Abrir una consola en la carpeta"),
         (pane(PaneHit::AddressClear), "Borrar"),
         (pane(PaneHit::SearchClear), "Terminar la búsqueda"),

@@ -274,13 +274,16 @@ fn info_folder_size_calculating() {
     assert!(t.iter().any(|s| s.starts_with(&crate::format::size_short(1_330_000_000))), "{t:?}");
 }
 
-#[test]
-fn info_drive_shows_capacity() {
+/// «Este equipo» con un disco «PENDRIVE» (carpeta temporal `tag`) seleccionado y el panel abierto.
+fn drive_info(tag: &str, ejectable: bool) -> (App, Rc<FakeHost>, PathBuf) {
     let (mut a, host) = app();
     a.set_active(0);
     pump(&mut a, 0);
-    let root = fixture("disco", &[]);
+    let root = fixture(tag, &[]);
     FakeFileSystem::set_drives(&[(&root, "PENDRIVE")]);
+    if ejectable {
+        a.ejectable.insert(root.clone());
+    }
     FakeInfo::serve(&root, ItemInfo {
         path: root.clone(),
         kind_name: "Disco extraíble (USB)".into(),
@@ -308,7 +311,15 @@ fn info_drive_shows_capacity() {
     a.panes[0].tab_mut().list.append(vec![disk]);
     a.panes[0].tab_mut().list.select_pos(0);
     open_on(&mut a);
+    (a, host, root)
+}
+
+#[test]
+fn info_drive_shows_capacity() {
+    let (a, host, _root) = drive_info("disco", false);
     let t = texts(&host);
+    assert!(!a.info.layout.hits.iter().any(|(h, _)| *h == InfoHit::Eject), "C: no se expulsa");
+    assert!(!t.iter().any(|x| x == crate::info::draw::EJECT_TEXT), "{t:?}");
     let free = crate::format::size_short(21_400_000_000);
     let total = crate::format::size_short(58_000_000_000);
     assert!(t.contains(&format!("{free} disponibles de {total}")), "{t:?}");
@@ -316,6 +327,24 @@ fn info_drive_shows_capacity() {
         assert!(t.iter().any(|x| x == s), "falta {s}: {t:?}");
     }
     assert!(!t.iter().any(|x| x == "Etiquetas" || x == "Abrir con"), "{t:?}");
+    FakeFileSystem::set_drives(&[]);
+    FakeDiskScan::set_volume(None, false);
+}
+
+/// Un disco expulsable muestra «⏏ Expulsar» en el panel; el clic lo expulsa como el ⏏ de la fila.
+#[test]
+fn info_drive_eject_button() {
+    let (mut a, host, root) = drive_info("disco-usb", true);
+    assert!(texts(&host).iter().any(|x| x == crate::info::draw::EJECT_TEXT), "{:?}", texts(&host));
+    let before = crate::sys::testing::FakeShell::ejects().iter().filter(|p| **p == root).count();
+    click(&mut a, InfoHit::Eject);
+    // Puede llegar antes otro trabajo (qué discos se expulsan): hasta el aviso de expulsar.
+    while a.notice.is_none() {
+        let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("expulsar termina");
+        a.on_task_done(t);
+    }
+    assert_eq!(crate::sys::testing::FakeShell::ejects().iter().filter(|p| **p == root).count() - before, 1);
+    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"PENDRIVE\" con seguridad"));
     FakeFileSystem::set_drives(&[]);
     FakeDiskScan::set_volume(None, false);
 }

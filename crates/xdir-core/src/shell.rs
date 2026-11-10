@@ -33,3 +33,14 @@ pub enum Entry {
 /// Lo que devuelve `context_menu` si se eligió "Desanclar de Acceso rápido" (el Shell solo ofrece
 /// ese verbo en el propio Acceso rápido: ahí la aplicación lo resuelve con `unpin_quick_access`).
 pub const UNPIN_QUICK: &str = "unpin-quick";
+
+/// Por qué no se pudo expulsar un disco.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EjectError {
+    /// El programa que lo está usando, si se sabe.
+    pub busy_by: Option<String>,
+    /// Lo está usando alguien (se puede reintentar).
+    pub busy: bool,
+    /// Texto del sistema.
+    pub message: String,
+}

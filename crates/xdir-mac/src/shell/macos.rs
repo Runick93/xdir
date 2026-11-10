@@ -38,6 +38,99 @@ fn file_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
 }
 
+/// Un valor booleano de recurso de un volumen (`None` si no se sabe).
+fn volume_flag(url: &NSURL, key: &objc2_foundation::NSURLResourceKey) -> Option<bool> {
+    let mut value: Option<Retained<AnyObject>> = None;
+    // SAFETY: `value` recibe un objeto (o nada) del tipo que corresponde a la clave.
+    unsafe { url.getResourceValue_forKey_error(&mut value, key) }.ok()?;
+    value?.downcast::<NSNumber>().ok().map(|n| n.boolValue())
+}
+
+/// De estas raíces, las que se expulsan como en el Finder: expulsables, extraíbles, no internas
+/// (imágenes de disco, discos externos) o de red. El disco de arranque nunca.
+pub fn ejectable(roots: &[PathBuf]) -> Vec<PathBuf> {
+    use objc2_foundation::{NSURLVolumeIsEjectableKey, NSURLVolumeIsInternalKey, NSURLVolumeIsLocalKey, NSURLVolumeIsRemovableKey};
+    roots
+        .iter()
+        .filter(|r| r.as_path() != Path::new("/"))
+        .filter(|r| {
+            let url = file_url(r);
+            // SAFETY: claves estáticas de Foundation.
+            let (ej, rem, int, local) = unsafe {
+                (
+                    volume_flag(&url, NSURLVolumeIsEjectableKey),
+                    volume_flag(&url, NSURLVolumeIsRemovableKey),
+                    volume_flag(&url, NSURLVolumeIsInternalKey),
+                    volume_flag(&url, NSURLVolumeIsLocalKey),
+                )
+            };
+            ej == Some(true) || rem == Some(true) || int == Some(false) || local == Some(false)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Expulsa el volumen de `root` (`NSWorkspace`). Si falla, `lsof` dice qué programas lo usan.
+pub fn eject(root: &Path) -> std::result::Result<(), xdir_core::shell::EjectError> {
+    let ws = NSWorkspace::sharedWorkspace();
+    let Err(e) = ws.unmountAndEjectDeviceAtURL_error(&file_url(root)) else { return Ok(()) };
+    let message = e.localizedDescription().to_string();
+    let holders = std::process::Command::new("/usr/sbin/lsof")
+        // Con el punto de montaje, `lsof` lista lo abierto en todo ese sistema de archivos.
+        .args(["-F", "pc"])
+        .arg(root)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| parse_lsof(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    // Lo que tenga abierto xdir ya se soltó: si aparece, no es «otro programa».
+    let own = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let others: Vec<String> = holders.into_iter().filter(|h| Some(h) != own.as_ref()).collect();
+    Err(xdir_core::shell::EjectError { busy_by: others.first().cloned(), busy: !others.is_empty(), message })
+}
+
+/// Nombres de programa (líneas `c…`) de la salida de `lsof -F pc`, sin repetir y en orden.
+pub fn parse_lsof(out: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in out.lines().filter_map(|l| l.strip_prefix('c')) {
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// Crea en `alias` un alias del Finder que apunta a `target` (bookmark de NSURL).
+pub fn create_alias(target: &Path, alias: &Path) -> std::result::Result<(), String> {
+    use objc2_foundation::{NSURLBookmarkCreationOptions, NSURLBookmarkFileCreationOptions};
+    let data = file_url(target)
+        .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+            NSURLBookmarkCreationOptions::SuitableForBookmarkFile,
+            None,
+            None,
+        )
+        .map_err(|e| format!("{}: {}", target.display(), e.localizedDescription()))?;
+    NSURL::writeBookmarkData_toURL_options_error(&data, &file_url(alias), 0 as NSURLBookmarkFileCreationOptions)
+        .map_err(|e| format!("{}: {}", alias.display(), e.localizedDescription()))
+}
+
+/// A dónde apunta un enlace simbólico o un alias del Finder (sin interfaz ni montar discos).
+pub fn link_target(path: &Path) -> Option<PathBuf> {
+    use objc2_foundation::NSURLBookmarkResolutionOptions;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() {
+        let to = std::fs::read_link(path).ok()?;
+        return Some(if to.is_absolute() { to } else { path.parent()?.join(to) });
+    }
+    if !crate::fs::is_alias(path) {
+        return None;
+    }
+    let options = NSURLBookmarkResolutionOptions::WithoutUI | NSURLBookmarkResolutionOptions::WithoutMounting;
+    let url = NSURL::URLByResolvingAliasFileAtURL_options_error(&file_url(path), options).ok()?;
+    let resolved = PathBuf::from(url.path()?.to_string());
+    (resolved != path).then_some(resolved)
+}
+
 // ---------- portapapeles ----------
 
 /// macOS no tiene "cortar" archivos: se copia y se recuerda que fue un corte (para mover al pegar,
@@ -368,6 +461,20 @@ fn compress(items: &[Item]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_lsof_names() {
+        let out = "p123\ncPreview\np456\ncWord\np789\ncPreview\n";
+        assert_eq!(super::parse_lsof(out), ["Preview", "Word"]);
+        assert!(super::parse_lsof("").is_empty());
+        assert!(super::parse_lsof("p1\nc\n").is_empty());
+    }
+
+    /// El disco de arranque no se expulsa.
+    #[test]
+    fn startup_disk_not_ejectable() {
+        assert!(super::ejectable(&[std::path::PathBuf::from("/")]).is_empty());
+    }
+
     use super::*;
 
     fn labels(entries: &[Entry]) -> Vec<String> {

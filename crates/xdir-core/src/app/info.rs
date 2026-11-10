@@ -454,7 +454,7 @@ impl App {
             let title = TITLE.to_string();
             let line = if n == 0 { "Sin información para este lugar" } else { "Cargando…" };
             let icon = sys::file_system().folder_icon().unwrap_or(0);
-            return Panel { title, header: Header { key: None, icon, image: false, name, lines: vec![(line.to_string(), false)] }, sections: Vec::new(), more_button };
+            return Panel { title, header: Header { key: None, icon, image: false, name, lines: vec![(line.to_string(), false)] }, sections: Vec::new(), more_button, eject_button: false };
         };
         let section = |s: Section, body: Body| SectionView { section: s, open: st.is_open(s), error: st.error(s), body };
         if items.len() > 1 {
@@ -478,6 +478,7 @@ impl App {
                     section(Section::General, Body::General { capacity: None, rows, flags: sum.flags.clone() }),
                 ],
                 more_button,
+                eject_button: false,
             };
         }
         let item = &items[0];
@@ -514,7 +515,9 @@ impl App {
             if let Some(body) = self.perms_body(item) {
                 sections.push(section(Section::Perms, body));
             }
-            return Panel { title, header: Header { key: None, icon, image: false, name, lines }, sections, more_button };
+            // ⏏ si el disco se puede expulsar (como en la fila de «Este equipo»).
+            let eject_button = self.ejectable.contains(&item.path);
+            return Panel { title, header: Header { key: None, icon, image: false, name, lines }, sections, more_button, eject_button };
         }
         // Encabezado.
         let mut lines = vec![(kind.clone(), false)];
@@ -615,7 +618,7 @@ impl App {
         if let Some(body) = self.perms_body(item) {
             sections.push(section(Section::Perms, body));
         }
-        Panel { title, header: Header { key, icon, image, name, lines }, sections, more_button }
+        Panel { title, header: Header { key, icon, image, name, lines }, sections, more_button, eject_button: false }
     }
 
     fn perms_body(&self, item: &ItemInfo) -> Option<Body> {
@@ -810,6 +813,13 @@ impl App {
                 let items: Vec<shell::Item> = paths.into_iter().map(shell::Item::from).collect();
                 sys::info().more_in_system(self.hwnd, &items);
             }
+            InfoHit::Eject => {
+                if let [root] = &paths[..]
+                    && self.ejectable.contains(root)
+                {
+                    self.eject(root.clone());
+                }
+            }
             InfoHit::Body => {}
         }
         self.redraw();
@@ -871,7 +881,7 @@ impl App {
 
 impl App {
     /// Pruebas (`info <qué> [n]`): un clic en el panel de información sin buscar coordenadas:
-    /// `oculto`, `bloqueado`, `comentario`, `nombre`, `etiqueta`, `cerrar`, `mas`,
+    /// `oculto`, `bloqueado`, `comentario`, `nombre`, `etiqueta`, `cerrar`, `mas`, `expulsar`,
     /// `seccion <n>` (plegar o abrir la sección n) o `bajar <px>` (desplazar).
     #[cfg(feature = "pruebas")]
     pub(super) fn info_test(&mut self, what: &str, n: usize) {
@@ -883,6 +893,7 @@ impl App {
             "etiqueta" => InfoHit::TagAdd,
             "cerrar" => InfoHit::Close,
             "mas" => InfoHit::MoreInSystem,
+            "expulsar" => InfoHit::Eject,
             "seccion" => match Section::ALL.get(n) {
                 Some(&s) => InfoHit::Toggle(s),
                 None => return,

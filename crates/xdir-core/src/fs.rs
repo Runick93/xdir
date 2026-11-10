@@ -152,6 +152,10 @@ pub struct Entry {
     pub overlay_checked: bool,
 }
 
+/// Atributo de enlace (`FILE_ATTRIBUTE_REPARSE_POINT` en Windows): las cargas lo ponen en los
+/// enlaces simbólicos y, en macOS, en los alias del Finder.
+pub const ATTR_LINK: u32 = 0x400;
+
 impl Entry {
     pub fn is_hidden(&self) -> bool {
         const HIDDEN: u32 = 0x2;

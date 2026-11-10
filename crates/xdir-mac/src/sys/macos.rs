@@ -99,6 +99,10 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::View(6), &["Ctrl+Alt+7"]),
     // ⌥⌘P: la columna de vista previa (⇧⌘P es la paleta de comandos).
     (Command::TogglePreview, &["Ctrl+Alt+P"]),
+    // ⌘D es Duplicar (como el Finder); favoritos pasa a ⇧⌘D.
+    (Command::ToggleFavorite, &["Ctrl+Shift+D"]),
+    // ⌃⌘N, como el Finder (Meta es la tecla Control).
+    (Command::NewFolderWithSelection, &["Meta+Ctrl+N"]),
 ];
 
 /// macOS: nombres distintos a los de Windows.
@@ -131,13 +135,15 @@ impl SystemEnv for MacEnv {
         !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     }
 
-    /// En macOS, Ctrl de los atajos es ⌘ (como Ctrl+C → ⌘C) y Alt es ⌥.
+    /// En macOS, Ctrl de los atajos es ⌘ (como Ctrl+C → ⌘C), Alt es ⌥ y Meta (`VK_LWIN`) es ⌃.
     fn key_down(&self, k: Key) -> bool {
         let flags = NSEvent::modifierFlags_class();
         match k.0 {
             0x10 => flags.contains(NSEventModifierFlags::Shift),
             0x11 => flags.contains(NSEventModifierFlags::Command),
             0x12 => flags.contains(NSEventModifierFlags::Option),
+            // Meta de los atajos (⌃).
+            0x5B => flags.contains(NSEventModifierFlags::Control),
             _ => false,
         }
     }
@@ -310,6 +316,22 @@ impl DiskScan for MacDiskScan {
 struct MacShell;
 
 impl Shell for MacShell {
+    fn link_style(&self) -> xdir_core::names::LinkStyle {
+        xdir_core::names::LinkStyle::Alias
+    }
+
+    fn link_target(&self, path: &Path) -> Option<PathBuf> {
+        sh::link_target(path)
+    }
+
+    fn ejectable(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        sh::ejectable(roots)
+    }
+
+    fn eject(&self, root: &Path) -> Result<(), xdir_core::shell::EjectError> {
+        sh::eject(root)
+    }
+
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
         sh::copy_files(items, cut).map_err(|e| e.message())
     }
@@ -386,6 +408,10 @@ impl Shell for MacShell {
 struct MacFileSystem;
 
 impl FileSystem for MacFileSystem {
+    fn is_trash(&self, loc: &Location) -> bool {
+        matches!(loc, Location::Path(p) if crate::trash::is_trash_dir(p))
+    }
+
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
         fsp::spawn_load(hwnd, tx, panel, generation, current, location)
     }

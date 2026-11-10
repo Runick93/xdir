@@ -10,6 +10,8 @@ impl App {
         // Ctrl+Alt (y AltGr) en Windows y ⌥⌘ en macOS llegan acá, no a `on_alt_key`: sin mirar
         // Alt, Ctrl+Alt+N se buscaba como Ctrl+N.
         let alt = key_down(VK_MENU);
+        // Meta: la tecla Windows / Super (⌃ en macOS), para atajos como ⌃⌘N.
+        let meta = key_down(VK_LWIN);
         // El Espacio solo se traga si es el carácter que sigue a esta tecla.
         self.swallow_space = false;
         // La vista rápida va antes que los atajos: Espacio la abre o la cierra, Esc la cierra y
@@ -17,14 +19,14 @@ impl App {
         if let Some(used) = self.quick_look_key(vk, ctrl, shift, alt) {
             return used;
         }
-        let used = self.on_window_key(vk, ctrl, shift, alt);
+        let used = self.on_window_key(vk, ctrl, shift, alt, meta);
         // Con la vista rápida recorriendo la carpeta, sigue al foco de la lista.
         self.quick_look_follow_list();
         used
     }
 
     /// `on_key` después de la vista rápida: Escape de lo que flota, xtree, los atajos y la lista.
-    fn on_window_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+    fn on_window_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
         let active = self.active;
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
@@ -38,7 +40,7 @@ impl App {
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
-            _ => match self.config.keymap.lookup(vk, ctrl, shift, alt) {
+            _ => match self.config.keymap.lookup(vk, ctrl, shift, alt, meta) {
                 Some(c) => self.run_command(c),
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
                     Some(action) => {
@@ -160,12 +162,26 @@ impl App {
                     sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::NewFile { parent });
                 }
             }
+            Command::NewFolderWithSelection => self.new_folder_with_selection(),
+            // En la Papelera de la Mac, ⌘⌫ devuelve (como el Finder).
+            Command::Recycle if sys::env().key_style() == sys::KeyStyle::Mac && sys::file_system().is_trash(&self.panes[active].tab().location) => {
+                self.restore_selection()
+            }
             Command::Recycle => self.delete_selection(true),
+            Command::Restore => self.restore_selection(),
+            Command::CreateShortcut => self.create_shortcuts(),
+            Command::ShowOriginal => self.show_original(),
+            Command::Eject => {
+                if let Some(root) = self.eject_target() {
+                    self.eject(root);
+                }
+            }
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.rename_command(active),
             Command::RenameMany => self.open_rename_many(active),
             // El panel de información (lo de la selección, la carpeta o el disco enfocado).
             Command::Properties => self.toggle_info(),
+            Command::Duplicate => self.duplicate_selection(),
             Command::ToggleFavorite => self.toggle_favorite(active),
             Command::ToggleFavBar => self.show_favorites = !self.show_favorites,
             Command::ToggleGroupBar => {
@@ -260,7 +276,7 @@ impl App {
                 return true;
             }
         }
-        match self.config.keymap.lookup(vk, ctrl, shift, false) {
+        match self.config.keymap.lookup(vk, ctrl, shift, false, key_down(VK_LWIN)) {
             Some(c @ (Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)) => {
                 self.run_command(c);
                 true

@@ -78,6 +78,10 @@ impl SystemEnv for Win32Env {
     }
 
     fn key_down(&self, k: Key) -> bool {
+        // Meta de los atajos (`VK_LWIN`): cualquiera de las dos teclas Windows.
+        if k.0 == 0x5B {
+            return unsafe { GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0 };
+        }
         unsafe { GetKeyState(k.0 as i32) < 0 }
     }
 
@@ -354,6 +358,22 @@ impl DiskScan for Win32DiskScan {
 struct Win32Shell;
 
 impl Shell for Win32Shell {
+    fn link_style(&self) -> xdir_core::names::LinkStyle {
+        xdir_core::names::LinkStyle::Lnk
+    }
+
+    fn link_target(&self, path: &Path) -> Option<PathBuf> {
+        sh::link_target(path)
+    }
+
+    fn ejectable(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        crate::shell::eject::ejectable(roots)
+    }
+
+    fn eject(&self, root: &Path) -> Result<(), xdir_core::shell::EjectError> {
+        crate::shell::eject::eject(root)
+    }
+
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
         sh::copy_files(items, cut).map_err(|e| e.message())
     }
@@ -429,7 +449,19 @@ impl Shell for Win32Shell {
 /// hilo de cada lectura o búsqueda, y las cachés (nombres de unidad, tipos) son estáticas.
 struct Win32FileSystem;
 
+/// ¿Es el nombre de análisis de la Papelera? Exactamente su GUID (sin distinguir mayúsculas),
+/// no algo que solo lo contenga.
+pub fn is_recycle_bin(parsing: &str) -> bool {
+    const BIN: &str = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+    parsing.trim_end_matches('\\').eq_ignore_ascii_case(BIN)
+}
+
 impl FileSystem for Win32FileSystem {
+    /// La Papelera es la carpeta virtual `::{645FF040-…}` del Shell.
+    fn is_trash(&self, loc: &Location) -> bool {
+        matches!(loc, Location::Shell { parsing, .. } if is_recycle_bin(parsing))
+    }
+
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
         fsp::spawn_load(hwnd, tx, panel, generation, current, location)
     }
@@ -657,4 +689,15 @@ fn system_time_secs(t: &SYSTEMTIME) -> i64 {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + (153 * m + 2) / 5 + d - 1;
     let days = era * 146_097 + doe - 719_468;
     days * 86_400 + i64::from(t.wHour) * 3600 + i64::from(t.wMinute) * 60 + i64::from(t.wSecond)
+}
+
+#[cfg(test)]
+mod recycle_bin_tests {
+    #[test]
+    fn recycle_bin_parsing_is_exact() {
+        assert!(super::is_recycle_bin("::{645FF040-5081-101B-9F08-00AA002F954E}"));
+        assert!(super::is_recycle_bin("::{645ff040-5081-101b-9f08-00aa002f954e}\\"));
+        assert!(!super::is_recycle_bin("C:\\carpeta\\::{645FF040-5081-101B-9F08-00AA002F954E}"));
+        assert!(!super::is_recycle_bin("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"));
+    }
 }

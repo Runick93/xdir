@@ -39,10 +39,137 @@ pub fn volume_in(path: &Path, drives: &[PathBuf]) -> Option<OsString> {
         .map(|d| d.as_os_str().to_os_string())
 }
 
+/// (dispositivo, punto de montaje) de cada línea de `/proc/self/mounts` (`\040` → espacio).
+fn mounts(text: &str) -> Vec<(String, PathBuf)> {
+    text.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some((it.next()?.to_string(), PathBuf::from(it.next()?.replace("\\040", " "))))
+        })
+        .collect()
+}
+
+/// Disco de bloque de un dispositivo de partición: `/dev/sdb1` → `sdb`, `/dev/mmcblk0p1` →
+/// `mmcblk0`, `/dev/nvme0n1p2` → `nvme0n1`.
+fn block_of(dev: &str) -> Option<String> {
+    let name = dev.strip_prefix("/dev/")?;
+    if name.starts_with("mmcblk") || name.starts_with("nvme") {
+        return Some(name.rsplit_once('p').map_or(name, |(b, _)| b).to_string());
+    }
+    Some(name.trim_end_matches(|c: char| c.is_ascii_digit()).to_string())
+}
+
+/// De `roots`, las expulsables: montadas bajo `/media` o `/run/media`, o de un disco con
+/// `removable` = 1 (`removable` lo responde quien llama: `/sys/block/<disco>/removable`).
+pub fn ejectable_in(mounts_text: &str, roots: &[PathBuf], removable: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+    let table = mounts(mounts_text);
+    roots
+        .iter()
+        .filter(|r| r.as_path() != Path::new("/"))
+        .filter(|r| {
+            r.starts_with("/media")
+                || r.starts_with("/run/media")
+                || table.iter().any(|(dev, m)| m == *r && block_of(dev).is_some_and(|b| removable(&b)))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Programas (`/proc/<pid>/comm`) con su carpeta de trabajo o algún archivo abierto dentro de
+/// `mount`, sin repetir. `proc_root` es `/proc` (los tests usan uno falso).
+pub fn holders(proc_root: &Path, mount: &Path) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let Ok(dir) = std::fs::read_dir(proc_root) else { return names };
+    let mut pids: Vec<PathBuf> = dir
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()))
+        .map(|e| e.path())
+        .collect();
+    pids.sort();
+    for pid in pids {
+        let inside = |link: &Path| std::fs::read_link(link).is_ok_and(|t| t.starts_with(mount));
+        let mut uses = inside(&pid.join("cwd"));
+        if !uses && let Ok(fds) = std::fs::read_dir(pid.join("fd")) {
+            uses = fds.filter_map(|f| f.ok()).any(|f| inside(&f.path()));
+        }
+        if uses
+            && let Ok(comm) = std::fs::read_to_string(pid.join("comm"))
+        {
+            let comm = comm.trim().to_string();
+            if !comm.is_empty() && !names.contains(&comm) {
+                names.push(comm);
+            }
+        }
+    }
+    names
+}
+
+/// Corre un programa y dice si terminó bien.
+fn run_ok(program: &str, args: &[&std::ffi::OsStr]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Expulsa: `udisksctl unmount` + `power-off` del dispositivo; si no, `gio mount -e`; si no,
+/// `umount`. Si sigue montado, busca en `/proc` quién lo usa.
+pub fn eject(root: &Path) -> Result<(), xdir_core::shell::EjectError> {
+    let text = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    let dev = mounts(&text).into_iter().find(|(_, m)| m == root).map(|(d, _)| d);
+    let ok = match &dev {
+        Some(d) if d.starts_with("/dev/") => {
+            let d = std::ffi::OsStr::new(d);
+            run_ok("udisksctl", &["unmount".as_ref(), "-b".as_ref(), d]) && {
+                // Apagar el disco es lo de menos: ya se desmontó.
+                let _ = run_ok("udisksctl", &["power-off".as_ref(), "-b".as_ref(), d]);
+                true
+            }
+        }
+        _ => false,
+    } || run_ok("gio", &["mount".as_ref(), "-e".as_ref(), root.as_os_str()])
+        || run_ok("umount", &[root.as_os_str()]);
+    if ok {
+        return Ok(());
+    }
+    let users = holders(Path::new("/proc"), root);
+    Err(xdir_core::shell::EjectError {
+        busy_by: users.first().cloned(),
+        busy: !users.is_empty(),
+        message: "no se pudo desmontar".into(),
+    })
+}
+
 /// Integración con el escritorio de Linux (lo que instala `sys::install`).
 pub struct LinuxShell;
 
+/// A dónde apunta un enlace simbólico (relativo a su carpeta si no es absoluto).
+pub fn link_target(path: &Path) -> Option<PathBuf> {
+    let to = std::fs::read_link(path).ok()?;
+    Some(if to.is_absolute() { to } else { path.parent()?.join(to) })
+}
+
 impl Shell for LinuxShell {
+    fn link_style(&self) -> xdir_core::names::LinkStyle {
+        xdir_core::names::LinkStyle::Symlink
+    }
+
+    fn link_target(&self, path: &Path) -> Option<PathBuf> {
+        link_target(path)
+    }
+
+    fn ejectable(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let text = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        let removable = |block: &str| std::fs::read_to_string(format!("/sys/block/{block}/removable")).is_ok_and(|s| s.trim() == "1");
+        ejectable_in(&text, roots, &removable)
+    }
+
+    fn eject(&self, root: &Path) -> Result<(), xdir_core::shell::EjectError> {
+        eject(root)
+    }
+
     fn copy_files(&self, _items: &[Item], _cut: bool) -> Result<(), String> {
         Err(UNAVAILABLE.into())
     }
@@ -111,6 +238,41 @@ impl Shell for LinuxShell {
 
 #[cfg(test)]
 mod tests {
+    /// Un `/proc` falso: el que tiene su carpeta de trabajo en el disco y el que tiene un archivo
+    /// abierto ahí aparecen (una vez cada uno); el que no lo usa, no.
+    #[test]
+    fn holders_finds_cwd_and_fd() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("xdir-linux-proc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (proc_root, mount) = (dir.join("proc"), dir.join("media/USB"));
+        std::fs::create_dir_all(mount.join("sub")).unwrap();
+        for (pid, comm) in [("100", "bash"), ("200", "vlc"), ("300", "otro"), ("400", "vlc")] {
+            std::fs::create_dir_all(proc_root.join(pid).join("fd")).unwrap();
+            std::fs::write(proc_root.join(pid).join("comm"), format!("{comm}\n")).unwrap();
+        }
+        std::fs::create_dir_all(proc_root.join("self")).unwrap();
+        symlink(mount.join("sub"), proc_root.join("100/cwd")).unwrap();
+        symlink(mount.join("video.mp4"), proc_root.join("200/fd/3")).unwrap();
+        symlink("/tmp", proc_root.join("300/cwd")).unwrap();
+        symlink(mount.join("otro.mp4"), proc_root.join("400/fd/7")).unwrap();
+        assert_eq!(super::holders(&proc_root, &mount), ["bash", "vlc"]);
+        assert!(super::holders(&proc_root, &dir.join("nada")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ejectable_mounts() {
+        let mounts = "/dev/sda2 / ext4 rw 0 0\n/dev/sdb1 /mnt/datos ext4 rw 0 0\n/dev/mmcblk0p1 /mnt/sd vfat rw 0 0\n/dev/sdc1 /mnt/fijo ext4 rw 0 0\n";
+        let removable = |b: &str| b == "sdb" || b == "mmcblk0";
+        let roots: Vec<PathBuf> = ["/", "/mnt/datos", "/mnt/sd", "/mnt/fijo", "/media/ana/USB"].iter().map(PathBuf::from).collect();
+        assert_eq!(
+            super::ejectable_in(mounts, &roots, &removable),
+            ["/mnt/datos", "/mnt/sd", "/media/ana/USB"].iter().map(PathBuf::from).collect::<Vec<_>>()
+        );
+        assert_eq!(super::block_of("/dev/nvme0n1p2").as_deref(), Some("nvme0n1"));
+    }
+
     use super::*;
 
     #[test]

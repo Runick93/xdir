@@ -132,6 +132,7 @@ fn panel(sections: Vec<SectionView>) -> Panel {
         header: Header { key: None, icon: 1, image: false, name: "IMG_3101.jpg".into(), lines: vec![("Imagen JPEG".into(), false), ("3,8 MB".into(), false)] },
         sections,
         more_button: true,
+        eject_button: false,
     }
 }
 
@@ -191,4 +192,26 @@ fn layout_scrolls_under_top_bar() {
     assert!(!l.hits.iter().any(|(h, _)| *h == InfoHit::Toggle(Section::More)));
     assert!(toggle.top - 160.0 < 40.0);
     assert!(texts(&l).contains(&"R10".to_string()));
+}
+
+/// «⏏ Expulsar» a la izquierda, en la misma fila que «Más en el sistema…»; solo si se pide.
+#[test]
+fn layout_eject_button() {
+    let r = rect(0.0, 0.0, 320.0, 790.0);
+    let mut p = panel(Vec::new());
+    let l = draw::layout(r, &p, 0.0, &measure);
+    assert!(!l.hits.iter().any(|(h, _)| *h == InfoHit::Eject));
+    assert!(!texts(&l).contains(&draw::EJECT_TEXT.to_string()));
+    p.eject_button = true;
+    let l = draw::layout(r, &p, 0.0, &measure);
+    let (_, eject) = *l.hits.iter().find(|(h, _)| *h == InfoHit::Eject).expect("⏏");
+    let (_, more) = *l.hits.iter().find(|(h, _)| *h == InfoHit::MoreInSystem).unwrap();
+    assert_eq!((eject.left, eject.top, eject.bottom), (16.0, more.top, more.bottom));
+    assert!(eject.right < more.left);
+    assert!(texts(&l).contains(&draw::EJECT_TEXT.to_string()));
+    assert_eq!(draw::hit(&l, eject.left + 4.0, eject.top + 4.0), Some(InfoHit::Eject));
+    // Sin «Más en el sistema…» (Linux) igual aparece.
+    p.more_button = false;
+    let l = draw::layout(r, &p, 0.0, &measure);
+    assert!(l.hits.iter().any(|(h, _)| *h == InfoHit::Eject));
 }

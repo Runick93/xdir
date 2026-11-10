@@ -18,6 +18,14 @@ pub enum Op {
     NewFolder { parent: PathBuf },
     /// Archivo de texto vacío «Nuevo documento de texto.txt» (« (2)», « (3)»… si ya existe).
     NewFile { parent: PathBuf },
+    /// «nombre copia», «nombre copia 2»… al lado de cada uno (`names::copy_name`).
+    Duplicate { sources: Vec<PathBuf> },
+    /// Crea «Carpeta nueva con N elementos» en `parent` y mueve `items` adentro.
+    NewFolderWith { parent: PathBuf, items: Vec<PathBuf> },
+    /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux).
+    Restore { items: Vec<PathBuf> },
+    /// Un acceso directo (alias, enlace) junto a cada uno (`names::shortcut_name`).
+    Shortcuts { targets: Vec<PathBuf> },
     Undo(Undo),
 }
 
@@ -32,9 +40,9 @@ pub enum Undo {
     Moved(Vec<(PathBuf, PathBuf)>),
     /// (nombre del elemento dentro de la papelera, dónde estaba).
     Recycled(Vec<(String, PathBuf)>),
-    /// Varios pasos de una misma operación: se deshacen en orden inverso.
+    /// Varios pasos de una sola operación; se deshacen en orden inverso.
     Batch(Vec<Undo>),
-    /// Carpeta creada para la operación: a la papelera solo si quedó vacía (si no, se deja).
+    /// Carpeta creada por la operación: va a la Papelera solo si quedó vacía (si no, se deja).
     CreatedFolder(PathBuf),
     /// Renombrar varios: (cómo se llama ahora, nombre anterior). Se deshace en el núcleo, con
     /// `rename_many::rename_all` (el mismo cruce seguro), nunca por `FileOps`.
@@ -49,6 +57,6 @@ pub struct OpResult {
     /// Carpeta o archivo nuevo: se abre el renombrado en línea sobre él.
     pub rename_after: bool,
     pub error: Option<String>,
-    /// Elementos que quedan seleccionados al recargar (las copias de Duplicar, lo copiado).
+    /// Elementos que quedan seleccionados al recargar (las copias de Duplicar…).
     pub select: Vec<PathBuf>,
 }

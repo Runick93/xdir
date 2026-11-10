@@ -31,6 +31,8 @@ mod sys;
 #[cfg(target_os = "macos")]
 mod thumbs;
 #[cfg(target_os = "macos")]
+mod trash;
+#[cfg(target_os = "macos")]
 pub(crate) use xdir_core::{config, theme, xtree};
 
 #[cfg(target_os = "macos")]

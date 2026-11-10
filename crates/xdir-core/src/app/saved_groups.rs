@@ -107,6 +107,7 @@ impl App {
         sys::file_system().forget_drive_labels();
         #[cfg(feature = "arbol")]
         self.tree.refresh_drives();
+        self.request_ejectable();
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
             match &tab.location {

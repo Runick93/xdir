@@ -139,6 +139,57 @@ fn recycle_with(path: &Path, shown: &Path, trash: &Path, mover: impl Fn(&Path, &
     unreachable!("siempre hay un nombre libre")
 }
 
+/// Lugar original de `files/<name>`: el `Path=` de su `.trashinfo`, decodificado (`%20` → espacio).
+pub fn origin(name: &str, trash: &Path) -> io::Result<PathBuf> {
+    let text = std::fs::read_to_string(info_path(trash, OsStr::new(name)))?;
+    let raw = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Path="))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "el .trashinfo no tiene Path="))?;
+    let path = PathBuf::from(OsString::from_vec(decode_path(raw.trim())));
+    // Una ruta relativa es relativa a la carpeta que tiene a la papelera (papeleras de discos):
+    // solo nombres de carpeta, sin «..» que la saquen del disco.
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    if !path.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Path= se sale del disco"));
+    }
+    Ok(topdir(trash).join(path))
+}
+
+/// La carpeta de arriba de una papelera de disco: `$topdir/.Trash-$uid` → `$topdir`;
+/// `$topdir/.Trash/$uid` → `$topdir` (dos niveles).
+pub fn topdir(trash: &Path) -> PathBuf {
+    let parent = trash.parent().unwrap_or(Path::new("/"));
+    match parent.file_name() {
+        Some(n) if n == ".Trash" => parent.parent().unwrap_or(Path::new("/")).to_path_buf(),
+        _ => parent.to_path_buf(),
+    }
+}
+
+/// `%XX` → byte.
+fn decode_path(text: &str) -> Vec<u8> {
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
+            && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Devuelve `files/<name>` de la papelera a `original` y borra su `.trashinfo`. Si en `original`
 /// ya hay algo, no se pisa: error y todo queda como estaba.
 pub fn restore(name: &str, original: &Path, trash: &Path) -> io::Result<()> {
@@ -195,6 +246,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `origin` lee el `Path=` del `.trashinfo` y lo decodifica.
+    #[test]
+    fn trashinfo_origin_decodes_path() {
+        let dir = tmp("origen");
+        let trash = dir.join("Trash");
+        let f = dir.join("mi informe ñ.txt");
+        std::fs::write(&f, "x").unwrap();
+        let name = recycle(&f, &trash).unwrap();
+        assert_eq!(origin(&name, &trash).unwrap(), std::path::absolute(&f).unwrap());
+        std::fs::write(trash.join("info/raro.trashinfo"), "[Trash Info]\nPath=/home/a/con%20espacio/b%25.txt\n").unwrap();
+        assert_eq!(origin("raro", &trash).unwrap(), PathBuf::from("/home/a/con espacio/b%.txt"));
+        assert!(origin("no-esta", &trash).is_err());
+        // Relativa (papelera de un disco): dentro del disco; con «..», no.
+        std::fs::write(trash.join("info/rel.trashinfo"), "[Trash Info]\nPath=fotos/a.jpg\n").unwrap();
+        assert_eq!(origin("rel", &trash).unwrap(), dir.join("fotos/a.jpg"));
+        std::fs::write(trash.join("info/sube.trashinfo"), "[Trash Info]\nPath=../../etc/x\n").unwrap();
+        assert!(origin("sube", &trash).is_err());
+        // Papelera de disco con la forma «$topdir/.Trash/$uid»: lo relativo es al disco, dos
+        // niveles arriba.
+        let top = dir.join("usb");
+        let shared = top.join(".Trash/1000");
+        std::fs::create_dir_all(shared.join("info")).unwrap();
+        std::fs::write(shared.join("info/x.trashinfo"), "[Trash Info]\nPath=docs/x\n").unwrap();
+        assert_eq!(origin("x", &shared).unwrap(), top.join("docs/x"));
+        assert_eq!(topdir(&shared), top);
+        assert_eq!(topdir(&top.join(".Trash-1000")), top);
+        assert_eq!(decode_path("a%2"), b"a%2");
+        // Solo dos dígitos hexadecimales: «%+5» o «%g1» quedan como están.
+        assert_eq!(decode_path("a%+5b"), b"a%+5b");
+        assert_eq!(decode_path("%g1%41"), b"%g1A");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -21,6 +21,19 @@ use crate::platform::Handle;
 /// Atributos como los de Windows (los usa la lista para ocultos y carpetas).
 const ATTR_HIDDEN: u32 = 0x2;
 const ATTR_DIRECTORY: u32 = 0x10;
+
+/// ¿Es un alias del Finder? Marca `kIsAlias` de la información del Finder (atributo extendido,
+/// sin leer el contenido).
+pub fn is_alias(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let mut info = [0u8; 32];
+    // SAFETY: `c` es una cadena C válida y `info` tiene 32 bytes.
+    let n = unsafe {
+        libc::getxattr(c.as_ptr(), c"com.apple.FinderInfo".as_ptr(), info.as_mut_ptr().cast(), info.len(), 0, libc::XATTR_NOFOLLOW)
+    };
+    n >= 10 && u16::from_be_bytes([info[8], info[9]]) & 0x8000 != 0
+}
 /// `UF_HIDDEN` de `chflags`: oculto en el Finder aunque el nombre no empiece con punto.
 const UF_HIDDEN: u32 = 0x8000;
 
@@ -241,7 +254,12 @@ fn list_dir(out: &mut Batcher, path: &Path) {
         let full = item.path();
         // Los enlaces simbólicos se muestran como lo que apuntan (si existe).
         let Ok(meta) = std::fs::metadata(&full).or_else(|_| item.metadata()) else { continue };
-        out.push(entry_for(&full, item.file_name(), &meta, 0, None));
+        let mut e = entry_for(&full, item.file_name(), &meta, 0, None);
+        // Enlaces y alias, para «Mostrar el original».
+        if item.file_type().is_ok_and(|t| t.is_symlink()) || (meta.is_file() && is_alias(&full)) {
+            e.attrs |= xdir_core::fs::ATTR_LINK;
+        }
+        out.push(e);
     }
     out.flush();
     out.send(LoadMsg::Listed(Ok(())));

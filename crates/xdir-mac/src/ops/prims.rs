@@ -37,6 +37,11 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
     }
 }
 
+/// El sistema de archivos no sabe asegurar una carpeta (no es un error de la copia).
+pub(crate) fn dir_sync_unsupported(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP | libc::EBADF))
+}
+
 fn err(e: io::Error, p: &Path) -> CopyError {
     let kind = match e.raw_os_error() {
         Some(n) => err_kind(n),
@@ -244,9 +249,18 @@ impl CopyPrims for MacCopyPrims {
         Ok(())
     }
 
-    /// La carpeta (con lo recién renombrado adentro), igual que `sync`.
+    /// La carpeta (con lo recién renombrado adentro), como `sync`. Donde el sistema de archivos no
+    /// sabe asegurar una carpeta (EINVAL, ENOTSUP, EBADF: red, FAT…) se sigue: es lo que hay.
     fn sync_dir(&self, dir: &Path) -> Result<(), CopyError> {
-        self.sync(dir)
+        let f = std::fs::File::open(dir).map_err(|e| err(e, dir))?;
+        if unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&f), libc::F_FULLFSYNC) } != -1 {
+            return Ok(());
+        }
+        match f.sync_all() {
+            Ok(()) => Ok(()),
+            Err(e) if dir_sync_unsupported(&e) => Ok(()),
+            Err(e) => Err(err(e, dir)),
+        }
     }
 
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
@@ -447,6 +461,21 @@ mod tests {
         MacCopyPrims.finish_dir(&dst, &src).unwrap();
         assert_eq!(std::fs::metadata(&dst).unwrap().modified().unwrap(), old);
         assert!(MacCopyPrims.remove(&dst).is_err());
+    }
+
+    /// Revisión del cableado (M4): asegurar una carpeta donde el sistema de archivos no sabe
+    /// (EINVAL, ENOTSUP, EBADF) no corta el mover; los demás errores sí.
+    #[test]
+    fn dir_sync_unsupported_is_best_effort() {
+        for n in [libc::EINVAL, libc::ENOTSUP, libc::EBADF] {
+            assert!(dir_sync_unsupported(&io::Error::from_raw_os_error(n)), "{n}");
+        }
+        for n in [libc::EIO, libc::ENOSPC, libc::EACCES] {
+            assert!(!dir_sync_unsupported(&io::Error::from_raw_os_error(n)), "{n}");
+        }
+        let dir = tmp("sync-carpeta");
+        MacCopyPrims.sync_dir(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

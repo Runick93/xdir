@@ -40,6 +40,11 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
     }
 }
 
+/// El sistema de archivos no sabe asegurar una carpeta (no es un error de la copia).
+pub(crate) fn dir_sync_unsupported(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP | libc::EBADF))
+}
+
 fn err(e: io::Error, p: &Path) -> CopyError {
     let kind = match e.raw_os_error() {
         Some(n) => err_kind(n),
@@ -292,9 +297,14 @@ impl CopyPrims for LinuxCopyPrims {
         File::open(p).and_then(|f| f.sync_all()).map_err(|e| err(e, p))
     }
 
-    /// `fsync` de la carpeta: el nombre recién renombrado queda en el disco.
+    /// `fsync` de la carpeta: el nombre recién renombrado queda en el disco. Donde el sistema de
+    /// archivos no sabe (EINVAL, ENOTSUP, EBADF: algunos de red o FUSE) se sigue: es lo que hay.
     fn sync_dir(&self, dir: &Path) -> Result<(), CopyError> {
-        self.sync(dir)
+        match File::open(dir).and_then(|f| f.sync_all()) {
+            Ok(()) => Ok(()),
+            Err(e) if dir_sync_unsupported(&e) => Ok(()),
+            Err(e) => Err(err(e, dir)),
+        }
     }
 
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
@@ -465,6 +475,21 @@ mod tests {
         assert_eq!(std::fs::metadata(&dst).unwrap().modified().unwrap(), old);
         // `remove` no borra carpetas con algo adentro.
         assert!(LinuxCopyPrims.remove(&dst).is_err());
+    }
+
+    /// Revisión del cableado (M4): asegurar una carpeta donde el sistema de archivos no sabe
+    /// (EINVAL, ENOTSUP, EBADF) no corta el mover; los demás errores sí.
+    #[test]
+    fn dir_sync_unsupported_is_best_effort() {
+        for n in [libc::EINVAL, libc::ENOTSUP, libc::EBADF] {
+            assert!(dir_sync_unsupported(&io::Error::from_raw_os_error(n)), "{n}");
+        }
+        for n in [libc::EIO, libc::ENOSPC, libc::EACCES] {
+            assert!(!dir_sync_unsupported(&io::Error::from_raw_os_error(n)), "{n}");
+        }
+        let dir = tmp("sync-carpeta");
+        LinuxCopyPrims.sync_dir(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

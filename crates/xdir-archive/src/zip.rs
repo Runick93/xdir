@@ -65,17 +65,25 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// La hora de un zip no lleva zona: se toma como UTC.
-fn epoch_of(dt: Option<DateTime>) -> u64 {
+/// La hora de un zip (DOS) es la hora local de quien lo armó, sin zona: se toma como local y se
+/// pasa a UTC con `utc_offset` (la diferencia en ese momento: primero se estima con la hora de
+/// pared y después se corrige con el instante UTC, por los cambios de horario).
+fn epoch_of(dt: Option<DateTime>, utc_offset: fn(i64) -> i64) -> u64 {
     let Some(t) = dt else { return 0 };
     let days = days_from_civil(t.year() as i64, t.month() as i64, t.day() as i64);
-    let secs = days * 86400 + t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64;
-    secs.max(0) as u64
+    let wall = days * 86400 + t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64;
+    let guess = wall - utc_offset(wall);
+    (wall - utc_offset(guess)).max(0) as u64
 }
 
-fn dos_time(secs: u64) -> Option<DateTime> {
-    let (y, m, d) = civil_from_days((secs / 86400) as i64);
-    let r = secs % 86400;
+/// Hora DOS (local) de un instante `secs` (UTC); `None` fuera de 1980–2107.
+fn dos_time(secs: u64, utc_offset: fn(i64) -> i64) -> Option<DateTime> {
+    let local = secs as i64 + utc_offset(secs as i64);
+    if local < 0 {
+        return None;
+    }
+    let (y, m, d) = civil_from_days(local / 86400);
+    let r = local % 86400;
     DateTime::from_date_and_time(y as u16, m as u8, d as u8, (r / 3600) as u8, (r % 3600 / 60) as u8, (r % 60) as u8).ok()
 }
 
@@ -99,7 +107,7 @@ fn kind_of_file(f: &::zip::read::ZipFile<'_, BufReader<File>>) -> ItemKind {
     }
 }
 
-fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path) -> Result<Vec<ArchiveEntry>, Error> {
+fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path, utc_offset: fn(i64) -> i64) -> Result<Vec<ArchiveEntry>, Error> {
     let mut out = Vec::with_capacity(a.len());
     for i in 0..a.len() {
         // `by_index_raw` no descifra: así las entradas con contraseña también se listan.
@@ -108,7 +116,7 @@ fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path) -> Result<Vec<Arc
             let kind = kind_of_file(&f);
             let name = f.name().map_err(|e| map_zip(e, path))?.into_owned();
             let ok = kind == ItemKind::Symlink && !f.encrypted() && f.size() <= MAX_LINK;
-            (name, kind, f.size(), epoch_of(f.last_modified()), ok)
+            (name, kind, f.size(), epoch_of(f.last_modified(), utc_offset), ok)
         };
         let link = if readable_link {
             let mut z = a.by_index(i).map_err(|e| map_zip(e, path))?;
@@ -121,9 +129,9 @@ fn list_open(a: &mut ZipArchive<BufReader<File>>, path: &Path) -> Result<Vec<Arc
     Ok(out)
 }
 
-pub fn list(path: &Path) -> Result<Vec<ArchiveEntry>, Error> {
+pub fn list(path: &Path, utc_offset: fn(i64) -> i64) -> Result<Vec<ArchiveEntry>, Error> {
     let mut a = open(path)?;
-    list_open(&mut a, path)
+    list_open(&mut a, path, utc_offset)
 }
 
 /// Extrae la entrada `index` de un zip ya abierto; devuelve los bytes escritos.
@@ -169,7 +177,8 @@ pub fn extract(
 
 pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
     let mut a = open(archive)?;
-    let entries = list_open(&mut a, archive)?;
+    // La hora no se usa al extraer.
+    let entries = list_open(&mut a, archive, |_| 0)?;
     let sh = Shared::new(progress);
     let mut base = 0u64;
     let mut omitted = 0usize;
@@ -191,9 +200,9 @@ pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) ->
     Ok(omitted)
 }
 
-pub fn create(out: &Path, items: &[(PathBuf, String)], progress: &mut dyn FnMut(u64) -> Flow) -> Result<(), Error> {
+pub fn create(out: &Path, items: &[(PathBuf, String)], progress: &mut dyn FnMut(u64) -> Flow, utc_offset: fn(i64) -> i64) -> Result<(), Error> {
     let f = OpenOptions::new().write(true).create_new(true).open(out).map_err(|e| io_err(e, out))?;
-    let res = write_all(f, out, items, progress);
+    let res = write_all(f, out, items, progress, utc_offset);
     if res.is_err() {
         let _ = std::fs::remove_file(out);
     }
@@ -205,6 +214,7 @@ fn write_all(
     out: &Path,
     items: &[(PathBuf, String)],
     progress: &mut dyn FnMut(u64) -> Flow,
+    utc_offset: fn(i64) -> i64,
 ) -> Result<(), Error> {
     let mut zw = ZipWriter::new(BufWriter::new(f));
     let zerr = |e: ZipError| map_zip(e, out);
@@ -229,7 +239,7 @@ fn write_all(
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|d| dos_time(d.as_secs()))
+            .and_then(|d| dos_time(d.as_secs(), utc_offset))
         {
             opts = opts.last_modified_time(t);
         }

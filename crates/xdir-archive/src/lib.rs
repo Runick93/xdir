@@ -96,6 +96,10 @@ fn fatal(e: &Error) -> bool {
 pub struct Service {
     /// Windows: `false` (solo zip).
     pub tar_gz: bool,
+    /// Diferencia de la hora local con UTC (segundos, -10800 es UTC-3) en el instante `unix`
+    /// (segundos desde 1970, UTC), según la zona del sistema. Las horas de un zip (DOS) son
+    /// locales: con esto se escriben y se leen. La da cada plataforma.
+    pub utc_offset: fn(i64) -> i64,
 }
 
 use xdir_core::sys::NOT_ALLOWED;
@@ -123,7 +127,7 @@ impl Service {
     /// para listarlo); `Stop` da `ErrKind::Cancelled`.
     pub fn list_cancellable(&self, archive: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
         match self.format(archive)? {
-            ArchiveFormat::Zip => zip::list(archive),
+            ArchiveFormat::Zip => zip::list(archive, self.utc_offset),
             ArchiveFormat::TarGz => targz::list(archive, cancel),
         }
     }
@@ -185,7 +189,7 @@ impl Service {
         if self.format(out)? != ArchiveFormat::Zip {
             return Err(other(xdir_core::sys::UNSUPPORTED, out));
         }
-        zip::create(out, items, progress)
+        zip::create(out, items, progress, self.utc_offset)
     }
 }
 
@@ -467,6 +471,6 @@ impl Archives for Service {
 
     /// Siempre zip (el nombre puede ser un parcial del motor, sin `.zip`).
     fn create(&self, out: &Path, items: &[(PathBuf, String)], progress: &mut dyn FnMut(u64) -> Flow) -> Result<(), Error> {
-        zip::create(out, items, progress)
+        zip::create(out, items, progress, self.utc_offset)
     }
 }

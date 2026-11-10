@@ -28,7 +28,12 @@ impl Drop for Tmp {
 }
 
 fn svc() -> Service {
-    Service { tar_gz: true }
+    Service { tar_gz: true, utc_offset: |_| 0 }
+}
+
+/// UTC-3 fijo (Buenos Aires), para las horas de los zip.
+fn utc_minus_3(_: i64) -> i64 {
+    -10_800
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -377,7 +382,7 @@ fn zip_corrupt_is_clear_error() {
     fs::write(&z, b"esto no es un zip").unwrap();
     assert_eq!(svc().list(&z).unwrap_err().kind, ErrKind::Other("El zip está dañado".into()));
     assert_eq!(svc().list(&t.p("no.rar")).unwrap_err().kind, ErrKind::Other("Formato no soportado".into()));
-    let win = Service { tar_gz: false };
+    let win = Service { tar_gz: false, utc_offset: |_| 0 };
     assert_eq!(win.list(&t.p("a.tar.gz")).unwrap_err().kind, ErrKind::Other("Formato no soportado".into()));
     assert_eq!(win.formats().len(), 1);
 }
@@ -905,4 +910,25 @@ fn links_through_a_dangling_link_count_as_outside() {
     std::os::unix::fs::symlink("todavia/no", root.join("z")).unwrap();
     let out = Archives::links_outside(&svc(), &root, &[root.join("y"), root.join("z")]);
     assert_eq!(out, vec![root.join("y")]);
+}
+
+/// Las horas de un zip (DOS) son locales: al comprimir se pasa la de cada archivo a la hora local
+/// y al listar se vuelve a UTC con la diferencia de la zona.
+#[test]
+fn zip_times_are_local() {
+    let t = Tmp::new();
+    let f = t.p("a.txt");
+    fs::write(&f, "a").unwrap();
+    // 2023-11-14 22:13:20 UTC = 19:13:20 en UTC-3.
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    fs::File::options().write(true).open(&f).unwrap().set_modified(when).unwrap();
+    let z = t.p("hora.zip");
+    let ba = Service { tar_gz: true, utc_offset: utc_minus_3 };
+    ba.create(&z, &[(f.clone(), "a.txt".into())], &mut |_| Flow::Continue).unwrap();
+    let mut a = ::zip::ZipArchive::new(fs::File::open(&z).unwrap()).unwrap();
+    let dt = a.by_index_raw(0).unwrap().last_modified().unwrap();
+    assert_eq!((dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()), (2023, 11, 14, 19, 13, 20));
+    assert_eq!(ba.list(&z).unwrap()[0].modified, 1_700_000_000);
+    // Leído en otra zona (UTC), la misma hora de pared: tres horas antes.
+    assert_eq!(svc().list(&z).unwrap()[0].modified, 1_700_000_000 - 10_800);
 }

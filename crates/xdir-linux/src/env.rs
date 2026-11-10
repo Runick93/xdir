@@ -30,7 +30,7 @@ const SECS_1601_TO_1970: i64 = 11_644_473_600;
 
 /// Diferencia con UTC (en segundos) de la hora local en el instante `unix` (segundos desde 1970),
 /// según la zona horaria del sistema; 0 si no se puede saber.
-fn utc_offset(unix: i64) -> i64 {
+pub(crate) fn utc_offset(unix: i64) -> i64 {
     let t = unix as libc::time_t;
     // SAFETY: `localtime_r` escribe en `tm`, que es nuestro (la versión `_r` no usa memoria
     // compartida entre hilos).

@@ -927,15 +927,15 @@ impl<'a> Job<'a> {
             self.fail(&item.src, dst, e);
             return false;
         }
-        if moving {
-            if let Err(e) = self.prims.remove(&item.src) {
-                // Quedó copiado y el original sigue: se anota como copia (deshacer la borra).
-                self.fail(&item.src, dst, e);
-                if record {
-                    self.record(Undo::Created(vec![dst.to_path_buf()]));
-                }
-                return false;
+        if moving
+            && let Err(e) = self.prims.remove(&item.src)
+        {
+            // Quedó copiado y el original sigue: se anota como copia (deshacer la borra).
+            self.fail(&item.src, dst, e);
+            if record {
+                self.record(Undo::Created(vec![dst.to_path_buf()]));
             }
+            return false;
         }
         if record {
             self.record_done(&item.src, dst, moving);

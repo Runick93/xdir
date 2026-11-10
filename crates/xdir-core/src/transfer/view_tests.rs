@@ -279,11 +279,11 @@ fn finished_header_counts_and_relative_folders() {
     assert!(t.iter().any(|s| s == "Se copiaron 1.281 de 1.284 elementos de «Descargas» a «Respaldo»"), "{t:?}");
     // La carpeta de cada error, desde la carpeta de lo que se copió.
     let facturas = std::path::Path::new("Descargas").join("Facturas").display().to_string();
-    assert!(t.iter().any(|s| *s == facturas), "{t:?}");
+    assert!(t.contains(&facturas), "{t:?}");
     assert!(t.iter().any(|s| s == "Descargas"), "{t:?}");
     // Fuera de lo elegido (no debería pasar): la ruta entera.
     let full = std::path::Path::new("/otro/lado").display().to_string();
-    assert!(t.iter().any(|s| *s == full), "{t:?}");
+    assert!(t.contains(&full), "{t:?}");
     // En singular.
     let mut one = job(2, JobState::Done);
     one.items = (1, 1);

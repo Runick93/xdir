@@ -521,7 +521,10 @@ mod tests {
 
     impl RenamePrims for FakeRenames {
         fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
-            let (f, t) = (from.to_string_lossy().into_owned(), to.to_string_lossy().into_owned());
+            // `rename_all` arma las rutas con `with_file_name`, que en Windows junta con «\»
+            // («/d/1» → «/d\x»): el falso guarda las rutas siempre con «/».
+            let norm = |p: &Path| p.to_string_lossy().replace('\\', "/");
+            let (f, t) = (norm(from), norm(to));
             let short = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if self.fail_to.borrow().contains(&t) || self.fail_names.borrow().iter().any(|p| short.starts_with(p.as_str())) {
                 return Err(format!("falla {t}"));

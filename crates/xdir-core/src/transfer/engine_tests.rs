@@ -935,6 +935,8 @@ fn replace_same_file_from_another_folder_never_deletes() {
     let r = go(&fake, JobSpec::Move { sources: vec![p("/hl/a/x.txt")], dest: p("/hl/b") }, &replace);
     assert!(r.conflicts().is_empty());
     assert_eq!(fake.contents(&p("/hl/a/x.txt")).unwrap(), b"unico");
+    // No se movió: se avisa como omitido.
+    assert_eq!(r.out.skipped, vec![p("/hl/a/x.txt")]);
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/hl/a/x.txt")], dest: p("/hl/b") }, &replace);
     assert!(r.conflicts().is_empty());
     assert_eq!(fake.contents(&p("/hl/a/x.txt")).unwrap(), b"unico");

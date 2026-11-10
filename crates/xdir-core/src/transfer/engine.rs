@@ -613,6 +613,10 @@ impl<'a> Job<'a> {
         if self.same_path(src, dst) || incoming.same_item(&existing) {
             // El mismo elemento (quizás por otro camino): mover no hace nada; copiar duplica.
             if moving {
+                // Otro nombre del mismo archivo (un enlace duro): se avisa como omitido.
+                if !self.same_path(src, dst) {
+                    self.skipped.push(src.to_path_buf());
+                }
                 return Decision::Skip;
             }
             let dir = dst.parent().unwrap_or(Path::new(""));

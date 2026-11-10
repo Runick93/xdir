@@ -187,7 +187,10 @@ impl App {
         if self.info_open() {
             return;
         }
-        if !self.preview_visible() {
+        // Hay un solo panel a la vez: Renombrar varios se cierra (sin dejar ver la vista previa).
+        let shown = self.preview_visible();
+        self.close_rename_many();
+        if !shown {
             self.begin_layout_anim();
         }
         self.preview.owner = RightPanel::Info;

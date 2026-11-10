@@ -39,9 +39,6 @@ pub const ADD_TAG_TEXT: &str = "Agregar etiqueta";
 pub const MORE_TEXT: &str = "Más en el sistema…";
 pub const CHANGE_ALL_TEXT: &str = "Cambiar todos…";
 
-/// Rojo de los errores de una sección (el `danger` del diseño; el tema no lo tiene todavía).
-const DANGER: u32 = 0xE5484D;
-
 /// Lo que muestra el panel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Panel {
@@ -561,7 +558,7 @@ fn paint(p: &dyn Painter, prim: &Prim) {
         Tone::Dim => th.text_dim,
         Tone::Secondary => th.text_secondary,
         Tone::Accent => th.accent,
-        Tone::Danger => rgb(DANGER),
+        Tone::Danger => th.danger,
         Tone::Border => th.border,
         Tone::Background => th.background,
         Tone::SurfaceAlt => th.surface_alt,

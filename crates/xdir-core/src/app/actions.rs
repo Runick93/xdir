@@ -33,6 +33,7 @@ impl App {
             VK_ESCAPE if self.filter_menu_pane().is_some() => {
                 self.close_filter_menus();
             }
+            VK_ESCAPE if self.rename_many.is_some() => self.close_rename_many(),
             VK_ESCAPE if self.info_open() && self.info.focused => self.close_info(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
@@ -138,11 +139,12 @@ impl App {
                     let _ = sys::shell().copy_text(hwnd, &fileops::quoted_paths(&paths));
                 }
             }
-            Command::Undo => {
-                if let Some(undo) = self.undo.pop() {
-                    sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::Undo(undo));
-                }
-            }
+            Command::Undo => match self.undo.pop() {
+                // Renombrar varios se deshace en el núcleo, con el mismo cruce seguro.
+                Some(Undo::Renames(renames)) => self.undo_renames(renames),
+                Some(undo) => sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::Undo(undo)),
+                None => {}
+            },
             Command::NewFolder => {
                 if let Some(parent) = self.panes[active].tab().location.target() {
                     sys::file_ops().spawn(hwnd, self.ops_tx.clone(), Op::NewFolder { parent });
@@ -155,7 +157,8 @@ impl App {
             }
             Command::Recycle => self.delete_selection(true),
             Command::Delete => self.delete_selection(false),
-            Command::Rename => self.begin_rename(active),
+            Command::Rename => self.rename_command(active),
+            Command::RenameMany => self.open_rename_many(active),
             // El panel de información (lo de la selección, la carpeta o el disco enfocado).
             Command::Properties => self.toggle_info(),
             Command::ToggleFavorite => self.toggle_favorite(active),
@@ -235,6 +238,9 @@ impl App {
         if c != Command::QuickLook {
             self.sync_quick_look();
         }
+        // El orden de la lista (y el lugar del panel de la derecha) pudo cambiar.
+        self.refresh_rename_many();
+        self.sync_rename_boxes();
         self.redraw();
     }
 
@@ -273,6 +279,7 @@ impl App {
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.close_quick_look();
+            self.close_rename_many();
             self.picker_open = false;
             self.term_menu = None;
             self.close_filter_menus();

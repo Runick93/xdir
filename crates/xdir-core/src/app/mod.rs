@@ -16,6 +16,8 @@ mod quick_jump;
 mod quick_look;
 mod panes;
 mod preview;
+mod rename_many;
+mod tasks;
 mod tooltip;
 
 #[cfg(test)]
@@ -26,6 +28,8 @@ mod info_tests;
 mod preview_tests;
 #[cfg(test)]
 mod quick_look_tests;
+#[cfg(test)]
+mod rename_many_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -67,7 +71,7 @@ use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
 use crate::a11y::{self, A11yAction, A11yView, ItemInfo};
 use crate::host::{
-    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
+    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FIELD_DONE, WM_APP_FIELD_TAB, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
     WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED, WindowHost,
 };
 
@@ -151,6 +155,8 @@ enum Hit {
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
+    /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
+    RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
@@ -390,6 +396,13 @@ pub struct App {
     info: info::InfoState,
     /// Vista rápida abierta (Espacio).
     quick_look: Option<quick_look::QlState>,
+    /// Renombrar varios abierto (el panel de la derecha y la vista previa en la lista).
+    rename_many: Option<rename_many::RenameMany>,
+    /// Hay un Renombrar varios (o su deshacer) corriendo: no se larga otro hasta que termine.
+    renaming: bool,
+    /// Trabajos sueltos en otro hilo (`spawn_task`) y su canal.
+    task_tx: Sender<tasks::TaskDone>,
+    task_rx: Receiver<tasks::TaskDone>,
     /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
     swallow_space: bool,
 }
@@ -481,6 +494,7 @@ impl App {
         let theme = Theme::from_system(session.accent, session.dark_mode);
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
+        let (task_tx, task_rx) = channel();
         let config_errors = config.errors.first().map(|e| format!("config.toml, {e}"));
         let config_errors = config_errors.or_else(|| folder_views.errors.first().map(|e| format!("carpetas.toml, {e}")));
         let mut app = App {
@@ -568,6 +582,10 @@ impl App {
             preview: preview::PreviewState::new(session.preview_on, session.preview_width),
             info: info::InfoState::new(session.info_sections),
             quick_look: None,
+            rename_many: None,
+            renaming: false,
+            task_tx,
+            task_rx,
             swallow_space: false,
         };
         app.restore_panes(&session, start_path);

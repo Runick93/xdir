@@ -407,6 +407,9 @@ impl App {
                 tab.set_visible(hwnd, &tx, i < visible_panes && j == active);
             }
         }
+        // Cambió la pestaña a la vista (o el layout): Renombrar varios se recalcula o se cierra.
+        self.refresh_rename_many();
+        self.sync_rename_boxes();
     }
 
     pub(super) fn set_active(&mut self, pane: usize) {

@@ -32,6 +32,9 @@ pub enum Undo {
     Moved(Vec<(PathBuf, PathBuf)>),
     /// (nombre del elemento dentro de la papelera, dónde estaba).
     Recycled(Vec<(String, PathBuf)>),
+    /// Renombrar varios: (cómo se llama ahora, nombre anterior). Se deshace en el núcleo, con
+    /// `rename_many::rename_all` (el mismo cruce seguro), nunca por `FileOps`.
+    Renames(Vec<(PathBuf, String)>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

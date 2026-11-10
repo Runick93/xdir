@@ -67,6 +67,9 @@ impl App {
         if self.preview_edge_at(x, y) {
             return Hit::PreviewEdge;
         }
+        if let Some(h) = self.rename_panel_hit(x, y) {
+            return Hit::RenamePanel(h);
+        }
         if let Some(h) = self.info_hit(x, y) {
             return Hit::Info(h);
         }
@@ -199,6 +202,10 @@ impl App {
             Hit::Groups => self.show_groups_menu(),
             Hit::Xtree => self.toggle_xtree(),
             Hit::PreviewToggle => self.run_command(Command::TogglePreview),
+            Hit::RenamePanel(h) => {
+                self.rename_panel_click(h);
+                return;
+            }
             Hit::Info(h) => self.info_click(h),
             Hit::PreviewEdge => {
                 self.host.capture_mouse();
@@ -471,6 +478,7 @@ impl App {
             }
             Drag::PreviewEdge(grab) => {
                 self.drag_preview_edge(x + grab);
+                self.sync_rename_boxes();
                 redraw = true;
             }
             Drag::List(i) => {

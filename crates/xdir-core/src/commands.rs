@@ -52,6 +52,8 @@ pub enum Command {
     Recycle,
     Delete,
     Rename,
+    /// Renombrar varios: el panel de la derecha con la vista previa en la lista.
+    RenameMany,
     Properties,
     ToggleFavorite,
     ToggleFavBar,
@@ -178,6 +180,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::Recycle, "papelera", "Enviar a la papelera", &["Supr"]),
     spec(Command::Delete, "eliminar", "Eliminar definitivamente", &["Shift+Supr"]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
+    spec(Command::RenameMany, "renombrar_varios", "Renombrar varios…", &[]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
     spec(Command::ToggleFavorite, "favorito", "Agregar o quitar de favoritos", &["Ctrl+D"]),
     spec(Command::ToggleFavBar, "barra_favoritos", "Mostrar u ocultar la barra de favoritos", &["Ctrl+Shift+B"]),

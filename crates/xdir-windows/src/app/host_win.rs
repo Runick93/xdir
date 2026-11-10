@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use super::INITIAL_SIZE;
 use super::win::*;
 use crate::drop;
-use crate::platform::keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_UP};
+use crate::platform::keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_TAB, VK_UP};
 use crate::platform::{Color, Handle, HandleExt, Key};
 use crate::theme::Theme;
 use crate::{render, shell};
@@ -757,6 +757,14 @@ unsafe extern "system" fn edit_proc(
                 let _ = PostMessageW(Some(parent), WM_APP_SUGGEST_KEY, wparam, LPARAM(0));
                 return LRESULT(0);
             }
+            // Tab en un campo de panel: el núcleo pasa el foco a la caja siguiente (o a la anterior
+            // con Shift).
+            WM_KEYDOWN if done_msg as u32 == xdir_core::host::WM_APP_FIELD_DONE && wparam.0 == VK_TAB.0 as usize => {
+                let back = xdir_core::sys::env().key_down(VK_SHIFT);
+                let _ = PostMessageW(Some(parent), xdir_core::host::WM_APP_FIELD_TAB, WPARAM(back as usize), LPARAM(0));
+                return LRESULT(0);
+            }
+            WM_CHAR if done_msg as u32 == xdir_core::host::WM_APP_FIELD_DONE && wparam.0 == '\t' as usize => return LRESULT(0),
             WM_KEYDOWN if wparam.0 == VK_RETURN.0 as usize || wparam.0 == VK_ESCAPE.0 as usize => {
                 let commit = wparam.0 == VK_RETURN.0 as usize;
                 let _ = PostMessageW(Some(parent), done_msg as u32, WPARAM(commit as usize), LPARAM(0));
@@ -765,6 +773,8 @@ unsafe extern "system" fn edit_proc(
             // Evita el "ding" de Enter/Escape en un edit de una línea.
             WM_CHAR if wparam.0 == '\r' as usize || wparam.0 == 0x1B => return LRESULT(0),
             // Al perder el foco: el renombrado se aplica (como en el Explorador), la dirección no.
+            // Un campo de panel sigue abierto: perder el foco no avisa.
+            WM_KILLFOCUS if done_msg as u32 == xdir_core::host::WM_APP_FIELD_DONE => {}
             WM_KILLFOCUS => {
                 let commit = done_msg as u32 != WM_APP_EDIT_DONE;
                 let _ = PostMessageW(Some(parent), done_msg as u32, WPARAM(commit as usize), LPARAM(0));

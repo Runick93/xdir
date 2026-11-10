@@ -316,6 +316,19 @@ pub trait FileSystem: Send + Sync {
     fn cloud_only(&self, _path: &Path) -> bool {
         false
     }
+    /// Las reglas de nombres del sistema (`rename_many::NameRules::WINDOWS` o `UNIX`: en macOS
+    /// «:» vale, el Finder lo muestra como «/»).
+    fn name_rules(&self) -> crate::rename_many::NameRules {
+        crate::rename_many::NameRules::UNIX
+    }
+    /// ¿El disco de `dir` no distingue mayúsculas? Bloqueante (corre en un hilo de trabajo). Por
+    /// defecto sí: así se marcan más choques, nunca menos.
+    fn case_insensitive(&self, _dir: &Path) -> bool {
+        true
+    }
+    /// Renombra `from` a `to` sin pisar nunca lo que ya está (falla si `to` existe). Bloqueante:
+    /// corre en un hilo de trabajo. El error es el texto para el usuario.
+    fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String>;
 }
 
 /// Un guardián de carpeta (ver `FileSystem::watch`): vigila mientras viva y al soltarlo

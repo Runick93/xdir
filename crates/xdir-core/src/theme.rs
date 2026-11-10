@@ -25,6 +25,8 @@ pub struct Theme {
     pub ok: Color,
     /// Advertencia (ámbar): terminado con problemas.
     pub warning: Color,
+    /// Error o choque (rojo del diseño de la tanda D: renombrar varios, errores de la copia).
+    pub danger: Color,
 }
 
 /// Colores de acento predefinidos (rueda dentada de la barra de estado): (nombre, 0xRRGGBB).
@@ -87,6 +89,7 @@ impl Theme {
                 scrollbar: rgba(0xFF, 0xFF, 0xFF, 0.22),
                 ok: rgb(0x33, 0xB8, 0x61),
                 warning: rgb(0xFA, 0xC7, 0x4D),
+                danger: rgb(0xEB, 0x52, 0x57),
             }
         } else {
             Self {
@@ -105,6 +108,7 @@ impl Theme {
                 scrollbar: rgba(0x00, 0x00, 0x00, 0.28),
                 ok: rgb(0x33, 0xB8, 0x61),
                 warning: rgb(0xB7, 0x79, 0x1F),
+                danger: rgb(0xEB, 0x52, 0x57),
             }
         }
     }

@@ -747,3 +747,107 @@ fn keys_page_mac_labels() {
     assert_eq!(headings[0], "Navegación");
     assert_eq!(headings.last().copied(), Some("Otros"));
 }
+
+// ---------- Buscador ----------
+
+fn search(a: &mut App, text: &str) {
+    a.search_typed(0, text);
+}
+
+fn count_of(counts: &[(PageId, usize)], s: Section) -> usize {
+    counts.iter().find(|(p, _)| *p == PageId::Builtin(s)).unwrap().1
+}
+
+#[test]
+fn search_across_sections_counts() {
+    let a = app();
+    let (counts, items) = a.settings_results("mostrar", &[]);
+    assert_eq!(count_of(&counts, Section::ListViews), 2);
+    assert_eq!(count_of(&counts, Section::Tree), usize::from(cfg!(feature = "arbol")));
+    assert_eq!(count_of(&counts, Section::Preview), 1);
+    assert_eq!(count_of(&counts, Section::Advanced), 0);
+    assert!(matches!(&items[0], Item::Heading(h) if h == "Lista y vistas"));
+    // Sin tildes ni mayúsculas.
+    let (counts, _) = a.settings_results("ÁRBOL fijo", &[]);
+    assert_eq!(count_of(&counts, Section::Tree), 1);
+}
+
+#[test]
+fn search_keys_by_label() {
+    let mut a = app();
+    a.config.keymap.set(Command::Duplicate, &[combo("Ctrl+K")]);
+    let found = |a: &App, q: &str| {
+        a.settings_results(q, &[]).1.iter().any(|i| matches!(i, Item::Shortcut(s) if s.id == "duplicar"))
+    };
+    assert!(found(&a, "ctrl+k"));
+    FakeEnv::set_key_style(sys::KeyStyle::Mac);
+    let mac = found(&a, "⌘k");
+    FakeEnv::set_key_style(sys::KeyStyle::Windows);
+    assert!(mac);
+    assert!(found(&a, "duplicar"));
+    let (counts, items) = a.settings_results("atajo", &[]);
+    // La sección y el comando «Configuración: Atajos de teclado».
+    assert_eq!(count_of(&counts, Section::Keys), 2);
+    assert!(matches!(&items[1], Item::Link(PageId::Builtin(Section::Keys), ..)));
+    assert!(matches!(&items[2], Item::Shortcut(s) if s.id == "configuracion_atajos"));
+}
+
+#[test]
+fn search_empty_returns_to_page() {
+    let (mut a, host) = settings_app(Section::Tree);
+    search(&mut a, "oscuro");
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|(_, t, _)| t).collect();
+    assert!(texts.iter().any(|t| t == "Resultados para \"oscuro\""), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Tema"));
+    search(&mut a, "");
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|(_, t, _)| t).collect();
+    assert!(!texts.iter().any(|t| t.starts_with("Resultados")));
+    assert_eq!(page(&a), PageId::Builtin(Section::Tree));
+    // Elegir una sección con una búsqueda la termina y va ahí.
+    search(&mut a, "oscuro");
+    a.paint();
+    let nav = a.settings_view(0).unwrap().hits.iter().find(|(_, h)| *h == SettingsHit::Nav(PageId::Builtin(Section::Preview))).map(|(r, _)| *r).unwrap();
+    a.on_left_down(nav.left + 4.0, nav.top + 4.0, false);
+    assert_eq!(page(&a), PageId::Builtin(Section::Preview));
+    assert_eq!(a.panes[0].tab().search_query(), "");
+}
+
+#[test]
+fn search_draws_groups() {
+    let (mut a, host) = settings_app(Section::Appearance);
+    search(&mut a, "mostrar");
+    a.paint();
+    let texts = host.drawn_texts();
+    let heading = |t: &str| texts.iter().position(|(f, s, _)| *f == crate::paint::FontId::SmallBold && s == t);
+    let (lists, preview) = (heading("Lista y vistas").unwrap(), heading("Vista previa").unwrap());
+    let row = texts.iter().position(|(_, s, _)| s == "Mostrar extensiones").unwrap();
+    assert!(lists < row && row < preview);
+    // La cantidad al lado de cada sección.
+    assert!(texts.iter().any(|(_, s, _)| s == "2"));
+}
+
+#[test]
+fn extra_page_items_searchable() {
+    use super::settings_pages::ExtraPage;
+    fn items(_: &App) -> Vec<crate::settings::SearchItem> {
+        vec![crate::settings::SearchItem { title: "Servidores favoritos".into(), desc: "NAS y oficina".into(), keywords: vec!["smb".into()] }]
+    }
+    fn draw(_: &mut App, _: &dyn crate::paint::Painter, _: geom::Rect, _: Option<(f32, f32)>) -> f32 {
+        0.0
+    }
+    fn click(_: &mut App, _: f32, _: f32) -> bool {
+        false
+    }
+    fn field(_: &mut App, _: TextBox, _: bool) -> bool {
+        false
+    }
+    let pages = [ExtraPage { id: "red", title: "Red", after: Section::Keys, search: items, draw, click, field_done: field }];
+    let a = app();
+    let (counts, results) = a.settings_results("smb", &pages);
+    let order: Vec<PageId> = counts.iter().map(|(p, _)| *p).collect();
+    assert_eq!(order[5], PageId::Extra("red"), "Red va después de Atajos");
+    assert_eq!(counts[5].1, 1);
+    assert!(matches!(&results[..], [Item::Heading(h), Item::Link(PageId::Extra("red"), t, _)] if h == "Red" && t == "Servidores favoritos"));
+}

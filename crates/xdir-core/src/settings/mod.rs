@@ -204,4 +204,6 @@ pub enum Item {
     Action(&'static str, String),
     /// Fila de un comando en Atajos de teclado.
     Shortcut(keys::ShortcutRow),
+    /// Un resultado de la búsqueda que lleva a su página («Ver»).
+    Link(PageId, String, String),
 }

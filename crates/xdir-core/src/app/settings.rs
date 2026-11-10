@@ -1,7 +1,7 @@
 //! La pestaña Configuración desde la `App`: abrirla (una sola), su página, el dibujo de cada
 //! cuadro, los clics y la rueda.
 
-use super::settings_pages::PAGES;
+use super::settings_pages::{ExtraPage, PAGES};
 use super::*;
 use crate::config::ConfigEdit;
 use crate::paint::Painter;
@@ -518,6 +518,18 @@ impl App {
             Hit::Settings(j, h) if j == pane => Some(h),
             _ => None,
         };
+        let query = self.settings_view(pane).map(|v| v.query.clone()).unwrap_or_default();
+        // Con texto en el buscador: los resultados de todas las páginas.
+        if !query.trim().is_empty() {
+            let (counts, items) = self.settings_results(&query, PAGES);
+            let nav: Vec<NavItem> = counts.into_iter().map(|(page, n)| NavItem { page, title: Self::page_title(page).to_string(), count: Some(n) }).collect();
+            let title = format!("Resultados para \"{}\"", query.trim());
+            let Some(view) = self.settings_view_mut(pane) else { return };
+            let content = crate::settings::draw::frame(p, r, &nav, None, &title, hover, view);
+            let items = if items.is_empty() { vec![Item::Note("Nada coincide con lo buscado.".into())] } else { items };
+            crate::settings::draw::items(p, content, &items, hover, view);
+            return;
+        }
         let nav: Vec<NavItem> = self.settings_nav().into_iter().map(|page| NavItem { page, title: Self::page_title(page).to_string(), count: None }).collect();
         let Some(view) = self.settings_view_mut(pane) else { return };
         let page = view.page;
@@ -639,15 +651,33 @@ impl App {
         for e in &self.config.key_errors {
             items.push(Item::Error(e.clone(), Some(("error_config", "Abrir config.toml".to_string()))));
         }
-        let factory = Keymap::default();
-        let rec = self.recording();
         for g in commands::Group::ALL {
-            let specs: Vec<&commands::Spec> = commands::ALL.iter().filter(|s| commands::group(s.command) == g && commands::available(s.command)).collect();
+            let specs: Vec<&'static commands::Spec> = commands::ALL.iter().filter(|s| commands::group(s.command) == g && commands::available(s.command)).collect();
             if specs.is_empty() {
                 continue;
             }
             items.push(Item::Heading(g.title().to_string()));
-            for spec in specs {
+            items.extend(self.shortcut_rows(&specs));
+        }
+        items
+    }
+
+    /// Lo que se busca de un comando: su nombre, su grupo y sus atajos («⌘K», «ctrl+k»).
+    fn command_search_item(&self, spec: &commands::Spec) -> crate::settings::SearchItem {
+        let combos = self.config.keymap.combos(spec.command);
+        let mut keywords: Vec<String> = combos.iter().map(|c| commands::combo_label(*c)).collect();
+        keywords.extend(combos.iter().map(|c| commands::combo_text(*c).to_lowercase()));
+        keywords.push(commands::group(spec.command).title().to_string());
+        crate::settings::SearchItem { title: spec.title().to_string(), desc: String::new(), keywords }
+    }
+
+    /// Las filas de Atajos de estos comandos.
+    fn shortcut_rows(&self, specs: &[&'static commands::Spec]) -> Vec<Item> {
+        let mut items = Vec::new();
+        let factory = Keymap::default();
+        let rec = self.recording();
+        {
+            for spec in specs.iter().copied() {
                 let combos = self.config.keymap.combos(spec.command);
                 let state = match rec.filter(|r| r.command == spec.command) {
                     None => RowState::Normal,
@@ -670,6 +700,76 @@ impl App {
             }
         }
         items
+    }
+
+    /// Las páginas de la lista con estas páginas extra (como `settings_nav`).
+    fn nav_with(pages: &[ExtraPage]) -> Vec<PageId> {
+        let mut out = Vec::new();
+        for s in Section::ALL {
+            out.push(PageId::Builtin(s));
+            out.extend(pages.iter().filter(|p| p.after == s).map(|p| PageId::Extra(p.id)));
+        }
+        out
+    }
+
+    /// La búsqueda en toda la configuración: cuántos resultados hay en cada página (en el orden
+    /// de la lista) y lo que se muestra a la derecha, agrupado bajo el nombre de cada página.
+    pub(super) fn settings_results(&self, query: &str, pages: &[ExtraPage]) -> (Vec<(PageId, usize)>, Vec<Item>) {
+        let mut counts = Vec::new();
+        let mut items = Vec::new();
+        for page in Self::nav_with(pages) {
+            let mut found = Vec::new();
+            let mut n = 0;
+            match page {
+                PageId::Builtin(Section::Keys) => {
+                    let section = crate::settings::SearchItem {
+                        title: Section::Keys.title().to_string(),
+                        desc: "Cambiar, agregar o quitar atajos".into(),
+                        keywords: vec!["teclas".into(), "teclado".into(), "atajos".into()],
+                    };
+                    if options::matches(query, &section) {
+                        n += 1;
+                        found.push(Item::Link(page, section.title, section.desc));
+                    }
+                    let specs: Vec<&'static commands::Spec> = commands::ALL
+                        .iter()
+                        .filter(|s| commands::available(s.command) && options::matches(query, &self.command_search_item(s)))
+                        .collect();
+                    n += specs.len();
+                    found.extend(self.shortcut_rows(&specs));
+                }
+                PageId::Builtin(section) => {
+                    for spec in options::of(section).filter(|o| options::matches(query, &o.search_item())) {
+                        let rows = self.option_items(spec);
+                        if !rows.is_empty() {
+                            n += 1;
+                            found.extend(rows);
+                        }
+                    }
+                }
+                PageId::Extra(id) => {
+                    let Some(extra) = pages.iter().find(|p| p.id == id) else { continue };
+                    for it in (extra.search)(self).into_iter().filter(|it| options::matches(query, it)) {
+                        n += 1;
+                        found.push(Item::Link(page, it.title, it.desc));
+                    }
+                }
+            }
+            counts.push((page, n));
+            if n > 0 {
+                items.push(Item::Heading(Self::page_title_in(page, pages).to_string()));
+                items.extend(found);
+            }
+        }
+        (counts, items)
+    }
+
+    /// Nombre de una página con estas páginas extra.
+    fn page_title_in(page: PageId, pages: &[ExtraPage]) -> &'static str {
+        match page {
+            PageId::Builtin(s) => s.title(),
+            PageId::Extra(id) => pages.iter().find(|p| p.id == id).map_or("", |p| p.title),
+        }
     }
 
     /// Un clic que no es en la fila que se está grabando cancela la grabación.

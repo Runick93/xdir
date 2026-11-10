@@ -19,7 +19,6 @@ pub(super) struct ExtraPage {
     /// Va después de esta sección en la lista.
     pub after: Section,
     /// Lo que se puede buscar en la página.
-    #[allow(dead_code)] // lo usa el buscador
     pub search: fn(&App) -> Vec<SearchItem>,
     /// Dibuja el contenido en el área dada (ya desplazada) con el mouse en esa posición, si está
     /// encima. Devuelve el alto del contenido.

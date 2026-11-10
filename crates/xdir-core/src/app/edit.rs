@@ -213,6 +213,13 @@ impl App {
     /// (para no recorrer el disco con cada letra). Vacía, vuelve a la carpeta enseguida.
     pub(super) fn search_typed(&mut self, pane: usize, text: &str) {
         let text = text.trim().to_string();
+        // En la configuración se busca en memoria: al instante.
+        if self.panes[pane].tab().is_settings() {
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            self.panes[pane].tab_mut().search(hwnd, &tx, &text);
+            self.redraw();
+            return;
+        }
         if text.is_empty() {
             self.pending_search = None;
             let (hwnd, tx) = (self.hwnd, self.tx.clone());

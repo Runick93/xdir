@@ -39,7 +39,7 @@ pub const OPTIONS: &[OptionSpec] = &[
     opt("xtree_abrir", Section::Xtree, "Disco que se analiza al abrir", "El del sistema, el de la carpeta del panel o el último", &["xtree", "disco", "analizar", "carpeta"]),
     opt("xtree_teclas", Section::Xtree, "Teclas de xtree", "Solo para ver: se cambian en Atajos de teclado", &["xtree", "teclas", "atajos"]),
     opt("abrir_config", Section::Advanced, "config.toml", "Atajos, colores y opciones escritos a mano", &["config", "toml", "abrir", "editor", "archivo"]),
-    opt("carpeta_config", Section::Advanced, "Carpeta de configuración", "Donde xdir guarda sus archivos", &["carpeta", "configuracion", "archivos", "mostrar"]),
+    opt("carpeta_config", Section::Advanced, "Carpeta de configuración", "Donde xdir guarda sus archivos", &["carpeta", "configuracion", "archivos", "finder", "explorador"]),
     opt("archivos", Section::Advanced, "Dónde están los archivos", "Qué guarda cada archivo de la carpeta", &["archivos", "sesion", "favoritos", "grupos", "historial"]),
     opt("portable", Section::Advanced, "Modo portable", "Los archivos junto a xdir en vez de en la carpeta del usuario", &["portable", "usb", "carpeta"]),
 ];
@@ -52,4 +52,55 @@ pub fn of(section: Section) -> impl Iterator<Item = &'static OptionSpec> {
 /// La opción con ese id.
 pub fn get(id: &str) -> Option<&'static OptionSpec> {
     OPTIONS.iter().find(|o| o.id == id)
+}
+
+/// Para comparar sin mayúsculas ni tildes: minúsculas y sin acentos ni diéresis (la ñ queda).
+pub fn fold(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            c => c,
+        })
+        .collect()
+}
+
+/// ¿Todas las palabras de la búsqueda están en el título, la descripción o las palabras clave?
+pub fn matches(query: &str, item: &super::SearchItem) -> bool {
+    let hay = fold(&format!("{} {} {}", item.title, item.desc, item.keywords.join(" ")));
+    let words: Vec<String> = fold(query).split_whitespace().map(str::to_string).collect();
+    !words.is_empty() && words.iter().all(|w| hay.contains(w.as_str()))
+}
+
+impl OptionSpec {
+    pub fn search_item(&self) -> super::SearchItem {
+        super::SearchItem { title: self.title.to_string(), desc: self.desc.to_string(), keywords: self.keywords.iter().map(|k| k.to_string()).collect() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::SearchItem;
+
+    #[test]
+    fn fold_strips_accents() {
+        assert_eq!(fold("Árbol"), "arbol");
+        assert_eq!(fold("Pingüino Ñandú ÉÍÓ"), "pinguino ñandu eio");
+    }
+
+    #[test]
+    fn search_tema_by_keyword() {
+        let tema = get("tema").unwrap().search_item();
+        assert!(matches("noche", &tema));
+        assert!(matches("MODO oscuro", &tema));
+        assert!(!matches("noche azul", &tema));
+        assert!(!matches("  ", &tema));
+        let item = SearchItem { title: "Atajos de teclado".into(), desc: String::new(), keywords: vec![] };
+        assert!(matches("atajo", &item));
+    }
 }

@@ -85,6 +85,7 @@ fn item_height(item: &Item) -> f32 {
         Item::Note(_) => 26.0,
         Item::Error(..) => 36.0,
         Item::Action(..) => 36.0,
+        Item::Link(..) => ROW_H,
         Item::Row(row) => match &row.control {
             Control::Accent(_) => ACCENT_H,
             Control::ColorRules(rules) => 58.0 + RULE_H * rules.len() as f32,
@@ -171,6 +172,15 @@ fn draw_item(p: &dyn Painter, r: Rect, item: &Item, hover: Option<SettingsHit>, 
             hits.push((b, SettingsHit::Part(id, 0)));
         }
         Item::Row(row) => draw_row(p, r, row, hover, hits),
+        Item::Link(page, title, desc) => {
+            p.round_fill(r, 6.0, th.surface_alt);
+            p.round_stroke(r, 6.0, th.border);
+            p.text(FontId::Ui, title, rect(r.left + 16.0, r.top + 10.0, r.right - 140.0, r.top + 28.0), th.text);
+            p.text(FontId::Small, desc, rect(r.left + 16.0, r.top + 31.0, r.right - 140.0, r.top + 47.0), th.text_dim);
+            let b = rect(r.right - 16.0 - 100.0, r.top + 14.0, r.right - 16.0, r.top + 14.0 + CONTROL_H);
+            controls::button(p, b, "Ver", hover == Some(SettingsHit::Nav(*page)), true);
+            hits.push((b, SettingsHit::Nav(*page)));
+        }
         Item::Shortcut(s) => draw_shortcut(p, r, s, hover, hits),
     }
 }

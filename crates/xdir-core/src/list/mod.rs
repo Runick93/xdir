@@ -51,10 +51,12 @@ pub enum Column {
     Tags,
     Artist,
     Album,
+    /// Lo que ocupa comprimido un elemento de adentro de un archivo comprimido.
+    Packed,
 }
 
 /// Todas las columnas: (columna, título, identificador para la sesión, ancho inicial).
-pub const COLUMNS: [(Column, &str, &str, f32); 14] = [
+pub const COLUMNS: [(Column, &str, &str, f32); 15] = [
     (Column::Name, "Nombre", "nombre", 0.0),
     (Column::Modified, "Fecha de modificación", "modificado", 160.0),
     (Column::Created, "Fecha de creación", "creado", 160.0),
@@ -71,6 +73,8 @@ pub const COLUMNS: [(Column, &str, &str, f32); 14] = [
     (Column::Tags, "Etiquetas", "etiquetas", 200.0),
     (Column::Artist, "Artista", "artista", 160.0),
     (Column::Album, "Álbum", "album", 160.0),
+    // Solo tiene datos dentro de un archivo comprimido.
+    (Column::Packed, "Tamaño comprimido", "comprimido", 120.0),
 ];
 
 impl Column {
@@ -86,13 +90,13 @@ impl Column {
         COLUMNS.iter().find(|c| c.2 == id).map(|c| c.0)
     }
 
-    fn default_width(self) -> f32 {
+    pub(crate) fn default_width(self) -> f32 {
         COLUMNS.iter().find(|c| c.0 == self).unwrap().3
     }
 
     /// Texto alineado a la derecha (números).
     fn right_aligned(self) -> bool {
-        self == Column::Size
+        matches!(self, Column::Size | Column::Packed)
     }
 }
 
@@ -551,6 +555,12 @@ impl Default for FileList {
     }
 }
 
+/// Texto de «Tamaño comprimido»: vacío en carpetas y cuando el formato no lo dice (un tar.gz se
+/// comprime entero).
+fn packed_text(e: &Entry) -> String {
+    if e.is_dir || (e.packed == 0 && e.size > 0) { String::new() } else { format::size_kb(e.packed) }
+}
+
 fn compare(a: &Entry, b: &Entry, ma: Option<&crate::fs::Meta>, mb: Option<&crate::fs::Meta>, sort: Column, desc: bool) -> Ordering {
     // Primero el grupo (secciones de "Este equipo"), después carpetas arriba, en cualquier orden.
     a.group.cmp(&b.group).then_with(|| b.is_dir.cmp(&a.is_dir)).then_with(|| {
@@ -561,6 +571,7 @@ fn compare(a: &Entry, b: &Entry, ma: Option<&crate::fs::Meta>, mb: Option<&crate
             Column::Type => format::caseless_cmp(&a.type_name, &b.type_name),
             Column::Extension => extension_of(a).cmp(extension_of(b)),
             Column::Size => a.size.cmp(&b.size),
+            Column::Packed => a.packed.cmp(&b.packed),
             Column::Attributes => attr_letters(a.attrs).cmp(&attr_letters(b.attrs)),
             Column::Folder => format::caseless_cmp(&parent_of(a), &parent_of(b)),
             col => meta::meta_cmp(col, ma, mb),
@@ -1324,6 +1335,7 @@ impl FileList {
                 (true, _) => String::new(),
                 (false, _) => format::size_kb(e.size),
             },
+            Column::Packed => packed_text(e),
         }
     }
 
@@ -2457,6 +2469,7 @@ impl FileList {
                             };
                             p.text(FontId::UiRight, &s, cell, th.text_secondary);
                         }
+                        Column::Packed => p.text(FontId::UiRight, &packed_text(e), cell, th.text_secondary),
                     }
                 }
             }
@@ -2653,6 +2666,27 @@ mod column_tests {
         assert_eq!(l.sort, Column::Size);
     }
 
+    /// «Tamaño comprimido»: el valor de la entrada, vacío en carpetas y cuando no se sabe; ordena
+    /// por lo que ocupa comprimido.
+    #[test]
+    fn packed_column_text_and_sort() {
+        crate::sys::testing::install_fakes();
+        let mk = |name: &str, size: u64, packed: u64, is_dir: bool| Entry { size, packed, is_dir, ..entry(name) };
+        assert_eq!(FileList::cell_text(Column::Packed, &mk("a", 5000, 2048, false), None, true), format::size_kb(2048));
+        assert_eq!(FileList::cell_text(Column::Packed, &mk("d", 0, 0, true), None, true), "");
+        assert_eq!(FileList::cell_text(Column::Packed, &mk("t", 5000, 0, false), None, true), "");
+        assert!(Column::Packed.right_aligned());
+        assert_eq!(Column::from_id("comprimido"), Some(Column::Packed));
+        let mut l = FileList::default();
+        l.append(vec![mk("a", 10, 300, false), mk("b", 99, 100, false), mk("c", 1, 200, false)]);
+        l.set_sort(Column::Packed);
+        if l.descending {
+            l.set_sort(Column::Packed);
+        }
+        let order: Vec<String> = (0..l.count()).map(|p| l.entries[l.entry_of_pos(p).unwrap()].display.clone()).collect();
+        assert_eq!(order, ["b", "c", "a"]);
+    }
+
     fn entry(name: &str) -> Entry {
         Entry {
             name: name.into(),
@@ -2670,6 +2704,7 @@ mod column_tests {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         }
     }
 
@@ -3124,6 +3159,7 @@ mod checkbox_tests {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         }
     }
 

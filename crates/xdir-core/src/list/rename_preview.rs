@@ -60,6 +60,7 @@ impl FileList {
             icon: e.icon,
             overlay: e.overlay,
             overlay_checked: e.overlay_checked,
+            packed: e.packed,
         }
     }
 

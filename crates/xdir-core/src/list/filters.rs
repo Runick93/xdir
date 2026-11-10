@@ -457,6 +457,7 @@ mod tests {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         }
     }
 

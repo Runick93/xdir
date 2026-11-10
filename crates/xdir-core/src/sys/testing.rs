@@ -630,6 +630,7 @@ impl FakeFileSystem {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         }
     }
 }
@@ -669,6 +670,8 @@ impl FileSystem for FakeFileSystem {
                 Location::Path(p) => fake_list(p, || current.load(Ordering::Relaxed) != generation, send),
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
                 Location::Computer => send(LoadMsg::Listed(Ok(()))),
+                // Lo lista el núcleo (`archive_nav`), nunca el sistema.
+                Location::Archive { .. } => send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
                 Location::Shell { parsing, .. } => {
                     let items = SHELL_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).get(parsing).cloned();
                     let Some(names) = items else { return send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))) };
@@ -691,6 +694,7 @@ impl FileSystem for FakeFileSystem {
                             icon: 0,
                             overlay: 0,
                             overlay_checked: true,
+                            packed: 0,
                         })
                         .collect();
                     if !batch.is_empty() {

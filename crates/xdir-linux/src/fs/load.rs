@@ -27,7 +27,7 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
         match &location {
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
-            Location::Shell { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en Linux".into()))),
+            Location::Shell { .. } | Location::Archive { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en Linux".into()))),
         }
     });
 }
@@ -126,6 +126,7 @@ pub fn entry_for(name: OsString, meta: &Metadata, group: u8, display: Option<Str
         icon: 0,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     }
 }
 

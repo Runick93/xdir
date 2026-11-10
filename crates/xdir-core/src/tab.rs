@@ -395,8 +395,9 @@ impl Tab {
         let (roots, root) = match &self.location {
             Location::Path(p) => (vec![p.clone()], Some(p.clone())),
             Location::Computer => (sys::file_system().drives(), None),
-            // Las carpetas virtuales no se recorren: se filtra lo que muestran.
-            Location::Shell { .. } => {
+            // Las carpetas virtuales y las de un archivo comprimido no se recorren: se filtra lo
+            // que muestran.
+            Location::Shell { .. } | Location::Archive { .. } => {
                 let now = Instant::now();
                 self.search = Some(Search { query: query.to_string(), scanned: 0, progress: 1.0, done: true, started: now, finished: Some(now), in_place: true });
                 self.list.set_name_filter(Some(query));
@@ -734,9 +735,21 @@ fn child_name(parent: &Location, descendant: &Location) -> Option<OsString> {
     if let Location::Shell { name, .. } = descendant {
         return Some(OsString::from(name));
     }
+    if let Location::Archive { file, nested, inner } = descendant {
+        // Lo que sigue a la ruta interior del padre, hasta la próxima barra.
+        let rest = match parent {
+            Location::Path(p) => return (file.parent() == Some(p.as_path())).then(|| file.file_name().map(|n| n.to_os_string())).flatten(),
+            Location::Archive { file: f, nested: n, inner: i } if f == file && nested.starts_with(n) => {
+                let tail = if nested.len() > n.len() { &nested[n.len()] } else if n.len() == nested.len() { inner } else { return None };
+                if i.is_empty() { tail.as_str() } else { tail.strip_prefix(i.as_str())?.strip_prefix('/')? }
+            }
+            _ => return None,
+        };
+        return rest.split('/').next().filter(|s| !s.is_empty()).map(OsString::from);
+    }
     let Location::Path(d) = descendant else { return None };
     match parent {
-        Location::Shell { .. } => None,
+        Location::Shell { .. } | Location::Archive { .. } => None,
         Location::Computer => d.components().next().map(|c| {
             // La unidad se lista como "C:\".
             let mut s = c.as_os_str().to_os_string();
@@ -893,6 +906,7 @@ mod tests {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         };
         tab.list.append(vec![entry("a.jpg"), entry("b.png"), entry("c.png")]);
         assert_eq!(tab.status(), "3 elementos");

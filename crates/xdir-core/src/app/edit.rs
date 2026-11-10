@@ -57,11 +57,7 @@ impl App {
             return;
         }
         self.set_active(pane);
-        let text = match &self.panes[pane].tab().location {
-            Location::Computer => "Este equipo".to_string(),
-            Location::Path(p) => p.to_string_lossy().into_owned(),
-            Location::Shell { parsing, .. } => parsing.clone(),
-        };
+        let text = self.panes[pane].tab().location.address_text();
         let r = self.panes[pane].address;
         let (x, w) = (r.left + 10.0, r.right - r.left - 20.0 - pane::ADDRESS_CLEAR_W);
         let y = (r.top + r.bottom) / 2.0 - 10.0;

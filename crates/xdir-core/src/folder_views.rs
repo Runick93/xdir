@@ -22,6 +22,18 @@ const FILE_NAME: &str = "carpetas.toml";
 const COMPUTER_KEY: &str = "equipo";
 const SHELL_PREFIX: &str = "shell:";
 const SEARCH_PREFIX: &str = "busqueda:";
+/// Clave de la vista de las carpetas de adentro de un archivo comprimido (una para todas).
+pub const ARCHIVE_KEY: &str = "comprimido";
+
+/// Vista de fábrica dentro de un archivo comprimido: Nombre, Tamaño, Tamaño comprimido y Fecha
+/// de modificación.
+pub fn archive_default_view() -> ViewSettings {
+    let columns = [Column::Name, Column::Size, Column::Packed, Column::Modified]
+        .into_iter()
+        .map(|col| ColumnSpec { col, width: if col == Column::Name { 0.0 } else { col.default_width() } })
+        .collect();
+    ViewSettings { columns, ..ViewSettings::default() }
+}
 
 /// Cómo se ve una carpeta.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +78,8 @@ pub fn folder_key(loc: &Location, search_root: Option<&Path>) -> String {
         Location::Computer => COMPUTER_KEY.to_string(),
         Location::Shell { parsing, .. } => format!("{SHELL_PREFIX}{parsing}"),
         Location::Path(p) => path_key(p),
+        // Todas las carpetas de adentro de los archivos comprimidos comparten una vista.
+        Location::Archive { .. } => ARCHIVE_KEY.to_string(),
     }
 }
 
@@ -158,7 +172,11 @@ impl FolderViews {
 
     /// La vista de la carpeta, o la por defecto si nunca se la tocó.
     pub fn get(&self, key: &str) -> ViewSettings {
-        self.entries.get(key).map_or_else(|| self.default.clone(), |e| e.0.clone())
+        match self.entries.get(key) {
+            Some(e) => e.0.clone(),
+            None if key == ARCHIVE_KEY => archive_default_view(),
+            None => self.default.clone(),
+        }
     }
 
     /// ¿La carpeta tiene vista propia?
@@ -437,6 +455,18 @@ mod tests {
     fn same(a: &FolderViews, b: &FolderViews) {
         assert_eq!(a.default_view(), b.default_view());
         assert_eq!(a.entries(), b.entries());
+    }
+
+    /// Dentro de un archivo comprimido la vista de fábrica es Nombre, Tamaño, Tamaño comprimido y
+    /// Fecha; todas sus carpetas comparten la clave.
+    #[test]
+    fn archive_default_view_shared() {
+        crate::sys::testing::install_fakes();
+        let a = Location::Archive { file: PathBuf::from("/x.zip"), nested: vec![], inner: "a".into() };
+        let b = Location::Archive { file: PathBuf::from("/y.zip"), nested: vec![], inner: String::new() };
+        assert_eq!(folder_key(&a, None), folder_key(&b, None));
+        let v = FolderViews::default().get(&folder_key(&a, None));
+        assert_eq!(v.columns.iter().map(|c| c.col).collect::<Vec<_>>(), [Column::Name, Column::Size, Column::Packed, Column::Modified]);
     }
 
     #[test]

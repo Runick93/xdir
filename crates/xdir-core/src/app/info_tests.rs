@@ -307,6 +307,7 @@ fn drive_info(tag: &str, ejectable: bool) -> (App, Rc<FakeHost>, PathBuf) {
         icon: 0,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     };
     a.panes[0].tab_mut().list.append(vec![disk]);
     a.panes[0].tab_mut().list.select_pos(0);

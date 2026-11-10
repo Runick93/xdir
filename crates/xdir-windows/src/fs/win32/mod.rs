@@ -79,6 +79,8 @@ pub fn spawn_load(
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
             Location::Shell { parsing, .. } => list_shell(&mut out, parsing),
+            // Dentro de un archivo comprimido lista el núcleo (`archive_nav`).
+            Location::Archive { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
         }
     });
 }
@@ -176,6 +178,7 @@ fn list_dir(out: &mut Batcher, path: &Path) {
             overlay: 0,
             // Se consulta recién cuando la fila se ve.
             overlay_checked: false,
+            packed: 0,
         });
         count += 1;
     }
@@ -259,6 +262,7 @@ pub fn disk_entry(path: &Path, name: OsString, meta: &std::fs::Metadata) -> Entr
         icon,
         overlay: 0,
         overlay_checked: false,
+        packed: 0,
     }
 }
 
@@ -312,6 +316,7 @@ fn list_computer(out: &mut Batcher) {
             icon: info.iIcon,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         });
     }
     out.flush();
@@ -483,6 +488,7 @@ fn shell_entry(item: &IShellItem, group: u8) -> Option<Entry> {
         icon,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     })
 }
 
@@ -543,6 +549,7 @@ fn list_drives(out: &mut Batcher) {
             overlay: 0,
             // Las unidades no tienen superposición.
             overlay_checked: true,
+            packed: 0,
         });
         // Cada unidad sale apenas se conoce: una unidad de red lenta no frena a las demás.
         out.flush();
@@ -654,7 +661,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } => Vec::new(),
+        Location::Shell { .. } | Location::Archive { .. } => Vec::new(),
     }
 }
 

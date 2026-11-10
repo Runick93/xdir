@@ -44,7 +44,8 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
         match &location {
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
-            Location::Shell { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en macOS".into()))),
+            // Dentro de un archivo comprimido lista el núcleo (`archive_nav`).
+            Location::Shell { .. } | Location::Archive { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en macOS".into()))),
         }
     });
 }
@@ -198,6 +199,7 @@ fn entry_for(path: &Path, name: OsString, meta: &std::fs::Metadata, group: u8, d
         icon,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     }
 }
 
@@ -396,7 +398,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } => Vec::new(),
+        Location::Shell { .. } | Location::Archive { .. } => Vec::new(),
     }
 }
 

@@ -67,7 +67,7 @@ pub enum CellState {
 
 impl FileList {
     /// La tira, abajo de todo el área.
-    fn strip_rect(&self) -> Rect {
+    pub(super) fn strip_rect(&self) -> Rect {
         let a = self.area;
         rect(a.left, (a.bottom - STRIP_H).max(a.top), a.right, a.bottom)
     }
@@ -582,6 +582,41 @@ mod tests {
         l.on_key(VK_RIGHT.0, false, false);
         let r = l.item_rect(edge + 1);
         assert_eq!((r.left + r.right) / 2.0, 480.0);
+    }
+
+    /// Una celda que no se ve entera en el borde: el primer clic corre la tira y el punto queda
+    /// sobre la vecina; el doble clic abre igual la celda presionada.
+    #[test]
+    fn gallery_double_click_opens_pressed_cell() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[0] as usize);
+        let cell = l.item_rect(9);
+        assert!(cell.right > 960.0 - GALLERY_PAD && cell.left < 960.0, "la 9 se ve a medias");
+        let (x, y) = (958.0, (cell.top + cell.bottom) / 2.0);
+        assert_eq!(l.pos_at_point(x, y), Some(9));
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.pos_at_point(x, y), Some(10), "la tira se corrió y el punto cae en la vecina");
+        assert_eq!(l.on_double_click(x, y), Action::Open(l.visible[9] as usize));
+        assert_eq!(l.selected_positions(), [9]);
+    }
+
+    /// Lo mismo con la casilla: el segundo clic vuelve a alternar la celda presionada.
+    #[test]
+    fn gallery_double_click_checkbox_pressed_cell() {
+        let mut l = gallery(30);
+        l.checkboxes = true;
+        l.select_index(l.visible[0] as usize);
+        let cell = l.item_rect(9);
+        // La casilla de la 9 está a 12 de su borde; después de correr la tira, ese punto es otra
+        // cosa (no la misma casilla).
+        let (x, y) = (cell.left + 12.0 + 7.0, cell.top + 12.0 + 7.0);
+        l.on_mouse_move(x, y);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.selected_positions(), [0, 9]);
+        assert_eq!(l.on_double_click(x, y), Action::Redraw);
+        assert_eq!(l.selected_positions(), [0], "se alternó la 9 y no otra");
     }
 
     /// Con casillas, un clic en la casilla de una celda alejada alterna esa celda y no otra, y un

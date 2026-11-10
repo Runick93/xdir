@@ -410,6 +410,9 @@ pub struct FileList {
     strip_scroll: f32,
     strip_w: f32,
     strip_active: bool,
+    /// Galería: elemento (índice en `entries`) presionado en la tira con el último clic y si fue
+    /// en su casilla. El doble clic actúa sobre él aunque la tira se haya corrido entre medio.
+    gallery_press: Option<(usize, bool)>,
     /// Galería: rueda acumulada que todavía no llegó a un paso (touchpad).
     wheel_acc: f32,
 }
@@ -519,6 +522,7 @@ impl Default for FileList {
             strip_scroll: 0.0,
             strip_w: 0.0,
             strip_active: true,
+            gallery_press: None,
             wheel_acc: 0.0,
         }
     }
@@ -1926,6 +1930,7 @@ impl FileList {
 
     /// Botón izquierdo. Devuelve si hay que capturar el mouse (arrastre de la barra).
     pub fn on_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, shift: bool) -> (Action, bool) {
+        self.gallery_press = None;
         // Casilla del encabezado: selecciona todo lo que está a la vista, o quita todo.
         if self.header_checkbox_rect().is_some_and(|r| contains(&grow(r, CHECK_SLOP), x, y)) {
             self.toggle_all_checked();
@@ -1978,6 +1983,7 @@ impl FileList {
         if let Some(pos) = self.checkbox_at(x, y) {
             self.toggle(pos);
             if self.view == View::Gallery {
+                self.gallery_press = Some((self.visible[pos] as usize, true));
                 self.reveal_strip(pos);
             }
             return (Action::Redraw, false);
@@ -1989,6 +1995,7 @@ impl FileList {
             // Galería: un clic no centra la tira (el doble clic tiene que caer en la misma celda);
             // solo la corre si la celda no se ve entera.
             Some(pos) if self.view == View::Gallery && (ctrl || shift) => {
+                self.gallery_press = Some((self.visible[pos] as usize, false));
                 if ctrl {
                     self.toggle(pos);
                 } else {
@@ -2013,6 +2020,7 @@ impl FileList {
                     self.press = Some((x, y));
                 }
                 if self.view == View::Gallery {
+                    self.gallery_press = Some((idx, false));
                     self.reveal_strip(pos);
                 }
             }
@@ -2059,6 +2067,20 @@ impl FileList {
     }
 
     pub fn on_double_click(&mut self, x: f32, y: f32) -> Action {
+        // Galería: el segundo clic va a la celda del primero (si la tira se corrió para mostrarla
+        // entera, el punto puede caer ahora sobre la vecina).
+        if let Some((idx, checkbox)) = self.gallery_press.take()
+            && self.view == View::Gallery
+            && contains(&self.strip_rect(), x, y)
+            && let Some(pos) = self.visible.iter().position(|&v| v as usize == idx)
+        {
+            if checkbox {
+                self.toggle(pos);
+                return Action::Redraw;
+            }
+            self.select_only(pos);
+            return Action::Open(idx);
+        }
         if self.scrollbar().is_some_and(|(track, _)| contains(&track, x, y)) {
             return Action::None;
         }

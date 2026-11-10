@@ -28,6 +28,8 @@ pub mod palette;
 pub mod pane;
 pub mod preview;
 pub mod quicklook;
+/// Renombrar varios: nombres nuevos, choques y renombrado seguro.
+pub mod rename_many;
 pub mod session;
 pub mod shell;
 pub mod sys;

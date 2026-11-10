@@ -207,3 +207,42 @@ fn mac_preview_answers_from_thread() {
     assert!(reply.info.accessed > 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Renombrar varios en una carpeta temporal real (APFS, que no distingue mayúsculas): nombres que
+/// se cruzan, un cambio solo de mayúsculas y el deshacer en un paso; nunca pisa lo que ya está.
+#[test]
+fn rename_many_real_disk() {
+    use std::path::{Path, PathBuf};
+    use xdir_core::ops::Undo;
+    use xdir_core::rename_many::{RenamePrims, rename_all};
+    struct Real(Box<dyn xdir_core::sys::FileSystem>);
+    impl RenamePrims for Real {
+        fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
+            self.0.rename_noreplace(from, to)
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("xdir-renvarios-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (n, body) in [("a.txt", "A"), ("b.txt", "B"), ("foto.jpg", "F")] {
+        std::fs::write(dir.join(n), body).unwrap();
+    }
+    let fs = Real(platform_file_system());
+    // No pisa: «a.txt» sobre «b.txt» falla y los dos quedan.
+    assert!(fs.rename_noreplace(&dir.join("a.txt"), &dir.join("b.txt")).unwrap_err().contains("Ya existe"));
+    let pairs: Vec<(PathBuf, String)> =
+        vec![(dir.join("a.txt"), "b.txt".into()), (dir.join("b.txt"), "a.txt".into()), (dir.join("foto.jpg"), "FOTO.jpg".into())];
+    let Undo::Renames(back) = rename_all(&fs, &pairs).unwrap() else { panic!("se esperaba Renames") };
+    let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["FOTO.jpg", "a.txt", "b.txt"]);
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "B");
+    assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "A");
+    // Deshacer: todos vuelven en un paso.
+    rename_all(&fs, &back).unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["a.txt", "b.txt", "foto.jpg"]);
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "A");
+    let _ = std::fs::remove_dir_all(&dir);
+}

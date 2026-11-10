@@ -767,6 +767,29 @@ impl FileSystem for FakeFileSystem {
         CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
         CLOUD.with(|c| c.borrow().contains(path))
     }
+
+    /// Sobre el disco real (las carpetas temporales de cada test), sin pisar: falla si `to` existe
+    /// o si está en `fail_rename_to`.
+    fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
+        if RENAME_FAILS.lock().unwrap_or_else(|e| e.into_inner()).contains(to) {
+            return Err(format!("No se pudo renombrar «{}»", from.display()));
+        }
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(format!("Ya existe «{}»", to.display()));
+        }
+        std::fs::rename(from, to).map_err(|e| crate::rename_many::io_message(&e, from))
+    }
+}
+
+/// Destinos con los que `FakeFileSystem::rename_noreplace` falla (de todo el proceso: renombra
+/// desde hilos de trabajo; cada test usa rutas propias).
+static RENAME_FAILS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+impl FakeFileSystem {
+    /// Desde ahora, renombrar algo a `to` falla.
+    pub fn fail_rename_to(to: &Path) {
+        RENAME_FAILS.lock().unwrap_or_else(|e| e.into_inner()).insert(to.to_path_buf());
+    }
 }
 
 /// Guardián del `FileSystem` falso: al soltarlo, cuenta una baja para su carpeta.

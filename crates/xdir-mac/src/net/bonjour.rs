@@ -89,6 +89,19 @@ fn result_name(result: *mut c_void) -> Option<String> {
     }
 }
 
+/// `nw_browser_state_ready`.
+const STATE_READY: i32 = 1;
+
+/// ¿Sigue negado el permiso de «Red local» después de este estado del navegador? Esperando o
+/// fallido con `PolicyDenied`: sí; listo: ya no (el usuario lo dio después); otro: como estaba.
+pub fn denied_after(state: i32, code: Option<i32>, prev: bool) -> bool {
+    match (state, code) {
+        (STATE_WAITING | STATE_FAILED, Some(POLICY_DENIED)) => true,
+        (STATE_READY, _) => false,
+        _ => prev,
+    }
+}
+
 /// Corre hasta `cancel` (bloqueante: en su propio hilo).
 pub fn browse(hwnd: Handle, tx: Sender<HostEvent>, cancel: Arc<AtomicBool>, denied: Arc<AtomicBool>) {
     let hosts = Arc::new(Mutex::new(BonjourHosts::default()));
@@ -117,12 +130,9 @@ pub fn browse(hwnd: Handle, tx: Sender<HostEvent>, cancel: Arc<AtomicBool>, deni
         });
         let denied_s = denied.clone();
         let state: RcBlock<dyn Fn(i32, *mut c_void)> = RcBlock::new(move |state: i32, error: *mut c_void| {
-            if (state == STATE_WAITING || state == STATE_FAILED) && !error.is_null() {
-                // SAFETY: `error` es un `nw_error_t` vivo durante el bloque.
-                if unsafe { nw_error_get_error_code(error) } == POLICY_DENIED {
-                    denied_s.store(true, Ordering::Relaxed);
-                }
-            }
+            // SAFETY: `error` es un `nw_error_t` vivo durante el bloque (o nulo).
+            let code = (!error.is_null()).then(|| unsafe { nw_error_get_error_code(error) });
+            denied_s.store(denied_after(state, code, denied_s.load(Ordering::Relaxed)), Ordering::Relaxed);
         });
         // SAFETY: objetos creados acá; los bloques los copia Network.framework; la cola vive
         // hasta después de cancelar y soltar los navegadores.

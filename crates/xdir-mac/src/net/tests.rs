@@ -101,3 +101,14 @@ fn drives_skip_stat_of_network_volumes() {
     assert!(keep_volume(false, || true));
     assert!(!keep_volume(false, || false));
 }
+
+/// M7: el permiso de red local negado vuelve a darse si el navegador queda listo.
+#[test]
+fn local_network_denied_follows_state() {
+    use super::bonjour::denied_after;
+    assert!(denied_after(4, Some(-65570), false));
+    assert!(denied_after(2, Some(-65570), false));
+    assert!(!denied_after(1, None, true), "listo: ya hay permiso");
+    assert!(denied_after(4, Some(-1), true), "otro error no cambia");
+    assert!(!denied_after(4, Some(-1), false));
+}

@@ -154,6 +154,18 @@ fn moving_the_only_tab_leaves_this_pc_behind() {
     assert_eq!(a.panes[3].tabs.last().unwrap().id, id);
 }
 
+/// Llevar una pestaña a otro panel cierra su desplegable de filtros (quedaría abierto en un lugar
+/// que ya no corresponde).
+#[test]
+fn moving_a_tab_closes_its_filter_menu() {
+    let mut a = app();
+    a.new_tab(0, Location::Path(std::env::temp_dir()), true);
+    a.panes[0].tab_mut().list.open_filter_menu(list::Column::Type);
+    assert!(a.panes[0].tab().list.filter_menu().is_some());
+    a.move_tab_to_pane(0, 1, 2, 0);
+    assert_eq!(a.panes[2].tab().list.filter_menu(), None);
+}
+
 #[test]
 fn moving_within_the_same_pane_or_out_of_range_does_nothing() {
     let mut a = app();

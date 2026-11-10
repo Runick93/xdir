@@ -99,6 +99,8 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::View(6), &["Ctrl+Alt+7"]),
     // ⌥⌘P: la columna de vista previa (⇧⌘P es la paleta de comandos).
     (Command::TogglePreview, &["Ctrl+Alt+P"]),
+    // ⌘D es Duplicar (como el Finder); favoritos pasa a ⇧⌘D.
+    (Command::ToggleFavorite, &["Ctrl+Shift+D"]),
 ];
 
 /// macOS: nombres distintos a los de Windows.

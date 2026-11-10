@@ -46,6 +46,8 @@ pub struct Tab {
     reload_buf: Option<Vec<Entry>>,
     /// Elemento a enfocar cuando termine la carga (al subir, la carpeta de la que se vino).
     focus_after_load: Option<OsString>,
+    /// Elementos a seleccionar al terminar la carga en curso (el foco va al último).
+    select_after_load: Vec<OsString>,
     watcher: Option<Box<dyn Watch>>,
     /// Solo las pestañas a la vista vigilan su carpeta (un hilo por pestaña no escala).
     visible: bool,
@@ -143,6 +145,7 @@ impl Tab {
             nav_id: 0,
             reload_buf: None,
             focus_after_load: None,
+            select_after_load: Vec::new(),
             watcher: None,
             visible: false,
             counts_as_visit: false,
@@ -365,6 +368,16 @@ impl Tab {
         }
     }
 
+    /// Al terminar la carga en curso deja seleccionados `names` y el foco en el último.
+    pub fn select_after_load(&mut self, names: Vec<OsString>) {
+        self.select_after_load = names;
+    }
+
+    /// ¿Hay una recarga silenciosa en curso (la lista sigue mostrando lo de antes)?
+    pub fn reload_pending(&self) -> bool {
+        self.reload_buf.is_some()
+    }
+
     /// Enfoca `name` cuando termine la carga en curso.
     pub fn focus_after_load(&mut self, name: OsString) {
         self.focus_after_load = Some(name);
@@ -498,6 +511,17 @@ impl Tab {
                 }
                 if let Some(name) = self.focus_after_load.take() {
                     self.list.focus_name(&name);
+                }
+                let select = std::mem::take(&mut self.select_after_load);
+                if let Some(last) = select.last() {
+                    self.list.focus_name(last);
+                    for name in &select {
+                        if let Some(idx) = self.list.entries.iter().position(|e| &e.name == name)
+                            && let Some(pos) = (0..self.list.count()).find(|&p| self.list.entry_of_pos(p) == Some(idx))
+                        {
+                            self.list.set_selected_pos(pos, true);
+                        }
+                    }
                 }
             }
             // Las superposiciones se piden sobre la lista visible; en una recarga se vuelven a pedir.

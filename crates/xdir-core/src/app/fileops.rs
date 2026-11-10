@@ -61,6 +61,17 @@ impl App {
         }
     }
 
+    /// Duplicar: una copia de cada seleccionado a su lado (solo carpetas de disco).
+    pub(super) fn duplicate_selection(&mut self) {
+        if !matches!(self.panes[self.active].tab().location, Location::Path(_)) {
+            return;
+        }
+        let sources = self.selection(self.active);
+        if !sources.is_empty() {
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Duplicate { sources });
+        }
+    }
+
     pub(super) fn delete_selection(&mut self, recycle: bool) {
         // En carpetas virtuales borra el propio Shell (en la Papelera: eliminar definitivamente).
         let location = self.panes[self.active].tab().location.clone();
@@ -87,6 +98,25 @@ impl App {
             }
         }
         self.reload_shell_tabs();
+        // Lo que tiene que quedar seleccionado (las copias de Duplicar), por carpeta.
+        let mut by_folder: Vec<(PathBuf, Vec<std::ffi::OsString>)> = Vec::new();
+        for p in &result.select {
+            let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else { continue };
+            match by_folder.iter_mut().find(|(f, _)| f == parent) {
+                Some((_, names)) => names.push(name.to_os_string()),
+                None => by_folder.push((parent.to_path_buf(), vec![name.to_os_string()])),
+            }
+        }
+        if !by_folder.is_empty() {
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+                let Some((_, names)) = by_folder.iter().find(|(f, _)| tab.location.is_path(f)) else { continue };
+                if tab.is_loaded() {
+                    tab.select_after_load(names.clone());
+                    tab.reload(hwnd, &tx, true);
+                }
+            }
+        }
         let Some(path) = result.focus else { return };
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return };
         // Las pestañas que muestran esa carpeta enfocan el elemento al recargar.
@@ -290,7 +320,7 @@ impl App {
         };
         // «Vista rápida» primero. «Copiar como ruta de acceso» usa las mismas comillas y saltos de
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
-        vec![item("Vista rápida", Command::QuickLook), item("Copiar como ruta de acceso", Command::CopyPaths)]
+        vec![item("Vista rápida", Command::QuickLook), item("Duplicar", Command::Duplicate), item("Copiar como ruta de acceso", Command::CopyPaths)]
     }
 
     /// Menú contextual de la lista en `at` (DIPs del área de la ventana). Sin punto (tecla de

@@ -25,6 +25,7 @@ use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s,
 
 use crate::platform::{Handle, HandleExt};
 use crate::fs::wide_path;
+use xdir_core::names;
 
 
 
@@ -34,12 +35,7 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
     std::thread::spawn(move || {
         let hwnd = HWND(hwnd_raw as *mut _);
         let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-        let result = run(hwnd, op).unwrap_or_else(|e| OpResult {
-            undo: None,
-            focus: None,
-            rename_after: false,
-            error: Some(e.message().to_string()),
-        });
+        let result = run(hwnd, op).unwrap_or_else(|e| OpResult { error: Some(e.message().to_string()), ..Default::default() });
         if tx.send(result).is_ok() {
             unsafe {
                 let _ = PostMessageW(Some(hwnd), WM_APP_OP_DONE, WPARAM(0), LPARAM(0));
@@ -74,6 +70,18 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                         fo.MoveItem(&src_item, &dest_item, PCWSTR::null(), None)?;
                     }
                 }
+            }
+        }
+        Op::Duplicate { sources } => {
+            // «nombre copia», «nombre copia 2»… como en macOS y Linux (no « - copia» del Explorador):
+            // el nombre se calcula acá y se pasa a `CopyItem`, sin `FOF_RENAMEONCOLLISION`.
+            for src in sources {
+                let (Some(parent), Some(name)) = (src.parent(), src.file_name()) else { continue };
+                let name = name.to_string_lossy();
+                let is_dir = src.is_dir();
+                let target = names::free_name(parent, &|n| names::copy_name(&name, is_dir, n), &|p| std::fs::symlink_metadata(p).is_ok());
+                let Some(copy_name) = target.file_name() else { continue };
+                unsafe { fo.CopyItem(&item(src)?, &item(parent)?, &HSTRING::from(copy_name), None)? };
             }
         }
         Op::Delete { paths, recycle } => {
@@ -117,7 +125,13 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     }
 
     let log = recorder_log(&recorder);
+    let mut select = Vec::new();
     let undo = match op {
+        Op::Duplicate { .. } => {
+            select = log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect::<Vec<_>>();
+            focus = select.last().cloned();
+            Some(Undo::Created(select.clone()))
+        }
         Op::Copy { .. } => Some(Undo::Created(log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect())),
         Op::Move { .. } => Some(Undo::Moved(
             log.iter().filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?))).collect(),
@@ -149,7 +163,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Recycled(v) => !v.is_empty(),
         Undo::Rename { .. } => true,
     });
-    Ok(OpResult { undo, focus, rename_after, error: None })
+    Ok(OpResult { undo, focus, rename_after, error: None, select })
 }
 
 fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
@@ -184,12 +198,12 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                     focus = Some(original.clone());
                 }
                 fo.PerformOperations().ok();
-                return Ok(OpResult { undo: None, focus, rename_after: false, error: None });
+                return Ok(OpResult { focus, ..Default::default() });
             }
         }
         fo.PerformOperations()?;
     }
-    Ok(OpResult { undo: None, focus, rename_after: false, error: None })
+    Ok(OpResult { focus, ..Default::default() })
 }
 
 fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {

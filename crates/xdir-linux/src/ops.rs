@@ -7,6 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+use xdir_core::names;
 use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use xdir_core::sys::{FileOps, Handle};
 
@@ -31,7 +32,7 @@ impl FileOps for LinuxFileOps {
 }
 
 fn ok(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, errors: Vec<String>) -> Result<OpResult> {
-    Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")) })
+    Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")), ..Default::default() })
 }
 
 /// Error de una ruta como lo ve el usuario.
@@ -60,7 +61,7 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                     errors.push(err_at(src, "no se puede copiar una carpeta dentro de sí misma"));
                     continue;
                 }
-                let target = free_name(&dest, src, src.parent() == Some(dest.as_path()));
+                let target = copy_target(&dest, src, src.parent() == Some(dest.as_path()));
                 match copy_item(src, &target) {
                     Ok(()) => created.push(target),
                     Err(e) => {
@@ -78,7 +79,7 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                 if src.parent() == Some(dest.as_path()) || dest.starts_with(src) {
                     continue;
                 }
-                let target = free_name(&dest, src, false);
+                let target = copy_target(&dest, src, false);
                 match move_path(src, &target) {
                     Ok(()) => moved.push((target, src.clone())),
                     Err(e) => errors.push(err_at(src, e)),
@@ -126,6 +127,24 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
         Op::NewFile { parent } => {
             let target = create_new_file(&parent).map_err(|e| err_at(&parent, e))?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
+        }
+        Op::Duplicate { sources } => {
+            let (mut created, mut errors) = (Vec::new(), Vec::new());
+            for src in &sources {
+                let Some(parent) = src.parent() else { continue };
+                let target = copy_target(parent, src, true);
+                match copy_item(src, &target) {
+                    Ok(()) => created.push(target),
+                    Err(e) => {
+                        let _ = remove_item(&target);
+                        errors.push(err_at(src, e));
+                    }
+                }
+            }
+            let focus = created.last().cloned();
+            let mut r = ok((!created.is_empty()).then(|| Undo::Created(created.clone())), focus, false, errors)?;
+            r.select = created;
+            Ok(r)
         }
         Op::Undo(undo) => undo_op(undo, trash),
     }
@@ -195,28 +214,21 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
     ok(None, None, false, errors)
 }
 
-/// Nombre libre para `src` dentro de `dest`: el mismo, o "nombre copia", "nombre copia 2"...
-/// (`always_copy`: copiar en la misma carpeta siempre lleva "copia").
-fn free_name(dest: &Path, src: &Path, always_copy: bool) -> PathBuf {
+/// Dónde copiar o mover `src` dentro de `dest`: el mismo nombre, o "nombre copia", "nombre copia
+/// 2"... (`always_copy`: copiar en la misma carpeta siempre lleva "copia"; ver `names`).
+fn copy_target(dest: &Path, src: &Path, always_copy: bool) -> PathBuf {
     let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
     let first = dest.join(&name);
     if !always_copy && !taken(&first) {
         return first;
     }
     let is_dir = std::fs::symlink_metadata(src).is_ok_and(|m| m.is_dir());
-    let (stem, ext) = match name.rfind('.') {
-        Some(dot) if dot > 0 && !is_dir => (name[..dot].to_string(), name[dot..].to_string()),
-        _ => (name.clone(), String::new()),
-    };
-    let mut n = 1;
-    loop {
-        let candidate = if n == 1 { dest.join(format!("{stem} copia{ext}")) } else { dest.join(format!("{stem} copia {n}{ext}")) };
-        if !taken(&candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
+    names::free_name(dest, &|n| names::copy_name(&name, is_dir, n), &taken)
+}
+
+/// ¿Hay algo con ese nombre? (también un enlace roto).
+fn taken(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok()
 }
 
 /// Copia un archivo, un enlace simbólico (como enlace) o una carpeta entera. Los permisos de las
@@ -324,6 +336,31 @@ mod tests {
         // Una carpeta dentro de sí misma no se copia (no termina nunca).
         let r = run(Op::Copy { sources: vec![otra.clone()], dest: otra.join("sub") }, None).unwrap();
         assert!(r.error.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Duplicar dos veces el mismo archivo: «a copia.txt» y «a copia 2.txt», con el mismo
+    /// contenido; el deshacer y la selección son las copias.
+    #[test]
+    fn duplicate_creates_copy_names() {
+        let dir = tmp("duplicar");
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "datos").unwrap();
+        let r = run(Op::Duplicate { sources: vec![a.clone(), a.clone()] }, None).unwrap();
+        let copies = vec![dir.join("a copia.txt"), dir.join("a copia 2.txt")];
+        assert_eq!(r.error, None);
+        assert_eq!(r.undo, Some(Undo::Created(copies.clone())));
+        assert_eq!(r.select, copies);
+        assert_eq!(r.focus, Some(copies[1].clone()));
+        for c in &copies {
+            assert_eq!(std::fs::read_to_string(c).unwrap(), "datos");
+        }
+        let f = dir.join("Fotos.2024");
+        std::fs::create_dir(&f).unwrap();
+        std::fs::write(f.join("x"), "x").unwrap();
+        let r = run(Op::Duplicate { sources: vec![f.clone()] }, None).unwrap();
+        assert_eq!(r.select, [dir.join("Fotos.2024 copia")]);
+        assert_eq!(std::fs::read_to_string(dir.join("Fotos.2024 copia/x")).unwrap(), "x");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -438,9 +475,9 @@ mod tests {
         let first = dir.join("Nuevo documento de texto.txt");
         let second = dir.join("Nuevo documento de texto (2).txt");
         let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None });
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None, ..Default::default() });
         let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None });
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None, ..Default::default() });
         assert_eq!(std::fs::read(&first).unwrap(), b"");
         assert_eq!(std::fs::read(&second).unwrap(), b"");
         let _ = std::fs::remove_dir_all(&dir);

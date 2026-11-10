@@ -18,6 +18,8 @@ pub enum Op {
     NewFolder { parent: PathBuf },
     /// Archivo de texto vacío «Nuevo documento de texto.txt» (« (2)», « (3)»… si ya existe).
     NewFile { parent: PathBuf },
+    /// «nombre copia», «nombre copia 2»… al lado de cada uno (`names::copy_name`).
+    Duplicate { sources: Vec<PathBuf> },
     Undo(Undo),
 }
 
@@ -42,4 +44,6 @@ pub struct OpResult {
     /// Carpeta o archivo nuevo: se abre el renombrado en línea sobre él.
     pub rename_after: bool,
     pub error: Option<String>,
+    /// Elementos que quedan seleccionados al recargar (las copias de Duplicar…).
+    pub select: Vec<PathBuf>,
 }

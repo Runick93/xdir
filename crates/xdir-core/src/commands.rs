@@ -53,6 +53,8 @@ pub enum Command {
     Delete,
     Rename,
     Properties,
+    /// Copia de cada seleccionado a su lado («nombre copia»).
+    Duplicate,
     ToggleFavorite,
     ToggleFavBar,
     PowerShell,
@@ -179,7 +181,8 @@ pub const ALL: &[Spec] = &[
     spec(Command::Delete, "eliminar", "Eliminar definitivamente", &["Shift+Supr"]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
-    spec(Command::ToggleFavorite, "favorito", "Agregar o quitar de favoritos", &["Ctrl+D"]),
+    spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),
+    spec(Command::ToggleFavorite, "favorito", "Agregar o quitar de favoritos", &["Ctrl+Shift+D"]),
     spec(Command::ToggleFavBar, "barra_favoritos", "Mostrar u ocultar la barra de favoritos", &["Ctrl+Shift+B"]),
     spec(Command::PowerShell, "powershell", "Abrir PowerShell en la carpeta", &[]),
     spec(Command::Cmd, "cmd", "Abrir CMD en la carpeta", &[]),
@@ -405,6 +408,24 @@ mod tests {
         assert_eq!(parse_combo("Mayús+Supr").unwrap().vk, VK_DELETE.0);
         assert!(parse_combo("Ctrl+Hiper").is_err());
         assert!(parse_combo("Meta+X").is_err());
+    }
+
+    /// Duplicar toma Ctrl+D (⌘D) y favoritos pasa a Ctrl+Shift+D (⇧⌘D).
+    #[test]
+    fn duplicate_command_and_favorite_moved() {
+        install_fakes();
+        let spec = |id: &str| ALL.iter().find(|s| s.id == id).unwrap();
+        let d = spec("duplicar");
+        assert_eq!((d.command, d.name, d.default_keys), (Command::Duplicate, "Duplicar", &["Ctrl+D"][..]));
+        assert_eq!(spec("favorito").default_keys, &["Ctrl+Shift+D"][..]);
+        let pos = |id: &str| ALL.iter().position(|s| s.id == id).unwrap();
+        assert_eq!(pos("duplicar") + 1, pos("favorito"));
+        let km = Keymap::default();
+        let (cd, csd) = (parse_combo("Ctrl+D").unwrap(), parse_combo("Ctrl+Shift+D").unwrap());
+        assert_eq!(km.lookup(Key(cd.vk), cd.ctrl, cd.shift, cd.alt), Some(Command::Duplicate));
+        assert_eq!(km.lookup(Key(csd.vk), csd.ctrl, csd.shift, csd.alt), Some(Command::ToggleFavorite));
+        assert_eq!(combo_label_in(KeyStyle::Mac, cd), "⌘D");
+        assert_eq!(combo_label_in(KeyStyle::Mac, csd), "⇧⌘D");
     }
 
     /// El árbol de carpetas solo existe compilando con la feature `arbol`; las demás acciones no

@@ -23,6 +23,8 @@ mod tests;
 mod preview_tests;
 #[cfg(test)]
 mod quick_look_tests;
+#[cfg(test)]
+mod ops_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;

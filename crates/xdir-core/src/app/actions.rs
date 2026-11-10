@@ -163,6 +163,7 @@ impl App {
                     _ => sys::shell().properties(hwnd, &items),
                 }
             }
+            Command::Duplicate => self.duplicate_selection(),
             Command::ToggleFavorite => self.toggle_favorite(active),
             Command::ToggleFavBar => self.show_favorites = !self.show_favorites,
             Command::ToggleGroupBar => {

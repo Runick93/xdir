@@ -1224,3 +1224,54 @@ fn restore_rechecks_folder_after_the_question() {
         crate::sys::CopyPrims::rename_noreplace(&fake, &p("/rq/vol/docs-real"), &p("/rq/vol/docs")).unwrap();
     }
 }
+
+#[test]
+fn new_folder_with_name_counts_what_arrived() {
+    // Revisión del cableado (M2, el M11 de #45): de tres pedidos llegan dos → «… con 2 elementos»,
+    // y el deshacer apunta a la carpeta con su nombre final.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/nc/a.txt"), b"a".to_vec());
+    fake.add_file(&p("/nc/b.txt"), b"b".to_vec());
+    let items = vec![p("/nc/a.txt"), p("/nc/b.txt"), p("/nc/no-esta.txt")];
+    let r = go(&fake, JobSpec::NewFolderWith { parent: p("/nc"), items }, &[]);
+    let folder = p("/nc/Carpeta nueva con 2 elementos");
+    assert!(fake.exists(&folder.join("a.txt")) && fake.exists(&folder.join("b.txt")));
+    assert!(!fake.exists(&p("/nc/Carpeta nueva con 3 elementos")));
+    assert_eq!(r.out.result.focus, Some(folder.clone()));
+    assert_eq!(
+        r.out.result.undo,
+        Some(Undo::Batch(vec![
+            Undo::CreatedFolder(folder.clone()),
+            Undo::Moved(vec![(folder.join("a.txt"), p("/nc/a.txt")), (folder.join("b.txt"), p("/nc/b.txt"))]),
+        ]))
+    );
+    go(&fake, JobSpec::Undo(r.out.result.undo.unwrap()), &[]);
+    assert!(fake.exists(&p("/nc/a.txt")) && fake.exists(&p("/nc/b.txt")));
+    assert!(!fake.exists(&folder));
+}
+
+#[test]
+fn new_folder_with_keeps_undo_for_copies_whose_source_stayed() {
+    // Revisión del cableado (M2): entre discos, si no se pudo borrar el original, lo copiado queda
+    // en la carpeta con su deshacer (nunca copias sueltas sin deshacer).
+    let fake = FakeCopyPrims::new();
+    two_volumes(&fake);
+    fake.add_file(&p("/v1/a/x.txt"), b"x".to_vec());
+    fake.fail(&p("/v1/a/x.txt"), ErrKind::Denied, 0);
+    let r = go_with(&fake, JobSpec::NewFolderWith { parent: p("/v2/dst"), items: vec![p("/v1/a/x.txt")] }, &[], &Control::new(), &mut |u, _| {
+        // Recién cuando ya se copió: borrar el original falla.
+        if let Update::Progress { bytes, .. } = u
+            && *bytes > 0
+        {
+            fake.fail(&p("/v1/a/x.txt"), ErrKind::Denied, 5);
+        }
+    });
+    let folder = p("/v2/dst/Carpeta nueva con 1 elemento");
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.messages());
+    assert!(fake.exists(&folder.join("x.txt")), "la copia queda en la carpeta");
+    assert!(fake.exists(&p("/v1/a/x.txt")), "y el original");
+    let undo = r.out.result.undo.clone().expect("con deshacer");
+    go(&fake, JobSpec::Undo(undo), &[]);
+    assert!(!fake.exists(&folder.join("x.txt")), "deshacer saca la copia");
+    assert!(!fake.exists(&folder), "y la carpeta");
+}

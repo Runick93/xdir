@@ -202,6 +202,24 @@ fn part_name(dst: &Path, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
     short_part_name(dst)
 }
 
+/// Lo que estaba en `from` ahora está en `to` (la carpeta cambió de nombre): el deshacer apunta ahí.
+fn remap_undo(u: &mut Undo, from: &Path, to: &Path) {
+    let fix = |p: &mut PathBuf| {
+        if let Ok(rest) = p.strip_prefix(from) {
+            *p = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+        }
+    };
+    match u {
+        Undo::Batch(v) => v.iter_mut().for_each(|u| remap_undo(u, from, to)),
+        Undo::Created(v) => v.iter_mut().for_each(fix),
+        Undo::Moved(v) => v.iter_mut().for_each(|(now, _)| fix(now)),
+        Undo::Recycled(v) => v.iter_mut().for_each(|(_, p)| fix(p)),
+        Undo::CreatedFolder(p) => fix(p),
+        Undo::Rename { path, .. } => fix(path),
+        Undo::Renames(v) => v.iter_mut().for_each(|(p, _)| fix(p)),
+    }
+}
+
 /// Un parcial corto y único del motor (si el disco no acepta el nombre largo).
 fn short_part_name(dst: &Path) -> PathBuf {
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1303,16 +1321,30 @@ impl<'a> Job<'a> {
             }
             self.process(item, true);
         }
-        let moved = self.undo.iter().any(|u| matches!(u, Undo::Moved(_)));
         self.select.clear();
-        if moved {
-            self.focus = Some(folder);
-            self.rename_after = true;
-        } else {
-            // No se movió nada: la carpeta vacía no queda.
+        // Lo que de verdad quedó adentro (movido, o copiado entre discos aunque el original no se
+        // haya podido borrar: eso tiene su deshacer como copia).
+        let arrived = self.prims.read_dir(&folder).map_or(0, |v| v.len());
+        if arrived == 0 {
+            // No llegó nada: la carpeta vacía no queda.
             let _ = self.prims.remove(&folder);
             self.undo.clear();
+            return;
         }
+        // El nombre cuenta lo que de verdad quedó adentro (sin pisar nada).
+        let mut folder = folder;
+        if arrived != items.len() {
+            let name = folder_with_name(arrived);
+            let renamed = free_name(parent, &|n| numbered_name(&name, true, n), &|p| self.exists(p).is_some());
+            if self.prims.rename_noreplace(&folder, &renamed).is_ok() {
+                for u in &mut self.undo {
+                    remap_undo(u, &folder, &renamed);
+                }
+                folder = renamed;
+            }
+        }
+        self.focus = Some(folder);
+        self.rename_after = true;
     }
 
     // ---------- devolver de la Papelera ----------

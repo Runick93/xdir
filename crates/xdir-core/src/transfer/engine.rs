@@ -186,6 +186,20 @@ fn tmp_in(dir: &Path) -> PathBuf {
     dir.join(format!(".xdir-{}-{n}.tmp", std::process::id()))
 }
 
+/// Nombre con que se escribe un archivo nuevo hasta que está entero: «.informe.pdf.xdir-part» al
+/// lado del destino (oculto donde los puntos ocultan, y reconocible). Si el nombre es muy largo o
+/// ese parcial ya existe (quedó de otra vez), uno único del motor.
+fn part_name(dst: &Path, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
+    let dir = dst.parent().unwrap_or(Path::new(""));
+    let name = name_of(dst);
+    let part = dir.join(format!(".{name}.xdir-part"));
+    if name.len() <= 200 && !taken(&part) {
+        return part;
+    }
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(".xdir-{}-{n}.xdir-part", std::process::id()))
+}
+
 fn name_of(p: &Path) -> String {
     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
@@ -889,14 +903,31 @@ impl<'a> Job<'a> {
     /// Copia (o mueve) un archivo o un enlace a `dst`, que está libre. `record`: anota el
     /// deshacer (no hace falta dentro de una carpeta creada por este trabajo).
     fn copy_one(&mut self, item: &Planned, dst: &Path, moving: bool, record: bool) -> bool {
-        if let Err(e) = self.write(item, dst) {
+        // Se escribe con un nombre parcial y recién entero toma el suyo: si xdir se corta a mitad,
+        // nunca queda algo a medias con el nombre del archivo.
+        let part = part_name(dst, &|p| self.exists(p).is_some());
+        if let Err(e) = self.write(item, &part) {
+            if e.kind != ErrKind::Exists {
+                let _ = self.prims.remove(&part);
+            }
+            self.fail(&item.src, dst, e);
+            return false;
+        }
+        if moving && !self.verify_move(item, &part, dst) {
+            return false;
+        }
+        if self.halted() || self.ctl.is_cancelled() {
+            let _ = self.prims.remove(&part);
+            self.cancelled = true;
+            return false;
+        }
+        if let Err(e) = self.prims.rename_noreplace(&part, dst) {
+            // Algo ocupó el nombre mientras se copiaba: no se pisa.
+            let _ = self.prims.remove(&part);
             self.fail(&item.src, dst, e);
             return false;
         }
         if moving {
-            if !self.verify_move(item, dst, dst) {
-                return false;
-            }
             if let Err(e) = self.prims.remove(&item.src) {
                 // Quedó copiado y el original sigue: se anota como copia (deshacer la borra).
                 self.fail(&item.src, dst, e);

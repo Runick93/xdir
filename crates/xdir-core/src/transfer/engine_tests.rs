@@ -917,10 +917,11 @@ fn move_syncs_copy_before_deleting_source() {
     fake.add_file(&p("/v1/a/x.txt"), b"x".to_vec());
     fake.add_file(&p("/v1/a/y.txt"), b"y".to_vec());
     go(&fake, JobSpec::Move { sources: vec![p("/v1/a/x.txt")], dest: p("/v2/dst") }, &[]);
-    assert_eq!(fake.syncs(), vec![p("/v2/dst/x.txt")]);
+    // Se asegura la copia (todavía con su nombre parcial) antes de borrar el original.
+    assert_eq!(fake.syncs(), vec![p("/v2/dst/.x.txt.xdir-part")]);
     assert!(!fake.exists(&p("/v1/a/x.txt")));
     // Si no se puede asegurar la copia, el original queda.
-    fake.fail(&p("/v2/dst/y.txt"), ErrKind::Other("No se pudo guardar".into()), 1);
+    fake.fail(&p("/v2/dst/.y.txt.xdir-part"), ErrKind::Other("No se pudo guardar".into()), 1);
     let r = go(&fake, JobSpec::Move { sources: vec![p("/v1/a/y.txt")], dest: p("/v2/dst") }, &[]);
     assert_eq!(r.messages(), vec!["No se pudo guardar".to_string()]);
     assert!(fake.exists(&p("/v1/a/y.txt")) && !fake.exists(&p("/v2/dst/y.txt")));
@@ -1030,4 +1031,54 @@ fn unknown_volume_cross_device_keeps_the_first_answer() {
     assert_eq!(fake.contents(&p("/xd/usb/D/w.txt")).unwrap(), b"w viejo");
     assert_eq!(fake.contents(&p("/xd/a/D/w.txt")).unwrap(), b"w nuevo");
     assert!(!fake.exists(&p("/xd/a/D/z.txt")));
+}
+
+#[test]
+fn new_files_are_written_under_a_partial_name() {
+    // Mientras se copia, el nombre de verdad no existe: lo que se ve es «.a.bin.xdir-part». Si se
+    // corta (cancelar, o cerrar xdir antes de que limpie), nunca queda algo a medias con el nombre
+    // del archivo.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/pt/s/a.bin"), vec![7; 64 * 1024 * 4]);
+    fake.add_dir(&p("/pt/d"));
+    fake.set_block(64 * 1024);
+    let mut seen = Vec::new();
+    let r = go_with(&fake, JobSpec::Copy { sources: vec![p("/pt/s/a.bin")], dest: p("/pt/d") }, &[], &Control::new(), &mut |u, _| {
+        if let Update::Progress { bytes, .. } = u
+            && *bytes > 0
+            && *bytes < 64 * 1024 * 4
+        {
+            seen.push((fake.exists(&p("/pt/d/a.bin")), fake.exists(&p("/pt/d/.a.bin.xdir-part"))));
+        }
+    });
+    assert!(r.out.errors.is_empty());
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|s| *s == (false, true)), "{seen:?}");
+    assert_eq!(fake.contents(&p("/pt/d/a.bin")).unwrap().len(), 64 * 1024 * 4);
+    no_tmp_left(&fake, &p("/pt/d"));
+    // Cancelado a mitad: ni el archivo ni el parcial.
+    fake.add_file(&p("/pt/s/b.bin"), vec![7; 64 * 1024 * 4]);
+    let ctl = Control::new();
+    let r = go_with(&fake, JobSpec::Copy { sources: vec![p("/pt/s/b.bin")], dest: p("/pt/d") }, &[], &ctl, &mut |u, c| {
+        if let Update::Progress { bytes, .. } = u
+            && *bytes > 0
+        {
+            c.cancel();
+        }
+    });
+    assert!(r.out.cancelled);
+    assert!(!fake.exists(&p("/pt/d/b.bin")));
+    no_tmp_left(&fake, &p("/pt/d"));
+}
+
+#[test]
+fn leftover_partial_does_not_block_the_copy() {
+    // Un parcial que quedó de otra vez (xdir se cerró a la fuerza) no impide copiar ni se pisa.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/pl/s/a.bin"), b"nuevo".to_vec());
+    fake.add_file(&p("/pl/d/.a.bin.xdir-part"), b"viejo parcial".to_vec());
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/pl/s/a.bin")], dest: p("/pl/d") }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.contents(&p("/pl/d/a.bin")).unwrap(), b"nuevo");
+    assert_eq!(fake.contents(&p("/pl/d/.a.bin.xdir-part")).unwrap(), b"viejo parcial");
 }

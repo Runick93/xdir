@@ -142,15 +142,47 @@ fn recycle_with(path: &Path, shown: &Path, trash: &Path, mover: impl Fn(&Path, &
 /// Devuelve `files/<name>` de la papelera a `original` y borra su `.trashinfo`. Si en `original`
 /// ya hay algo, no se pisa: error y todo queda como estaba.
 pub fn restore(name: &str, original: &Path, trash: &Path) -> io::Result<()> {
+    let exists = || io::Error::new(io::ErrorKind::AlreadyExists, format!("ya existe {}", original.display()));
     if std::fs::symlink_metadata(original).is_ok() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("ya existe {}", original.display())));
+        return Err(exists());
     }
-    move_path(&trash.join("files").join(name), original).map_err(|e| match e {
-        MoveError::Copy(e) => e,
-        e @ MoveError::Remove(_) => io::Error::other(e.to_string()),
-    })?;
+    let from = trash.join("files").join(name);
+    // Renombrar sin pisar en un solo paso (lo que aparezca entre medio con ese nombre no se pisa);
+    // en otro disco, copiar y borrar (`copy_then_remove` crea el destino sin pisar).
+    match rename_noreplace(&from, original) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => return Err(exists()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            crate::ops::copy_then_remove(&from, original).map_err(|e| match e {
+                MoveError::Copy(e) => e,
+                e @ MoveError::Remove(_) => io::Error::other(e.to_string()),
+            })?;
+        }
+        Err(e) => return Err(e),
+    }
     let _ = std::fs::remove_file(info_path(trash, OsStr::new(name)));
     Ok(())
+}
+
+/// `renameat2(RENAME_NOREPLACE)`; donde el disco no lo tiene (`EINVAL`/`ENOSYS`), se comprueba y
+/// se renombra.
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "ruta inválida"));
+    let (f, t) = (c(from)?, c(to)?);
+    let r = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOSYS) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(io::Error::from_raw_os_error(libc::EEXIST));
+            }
+            std::fs::rename(from, to)
+        }
+        _ => Err(e),
+    }
 }
 
 #[cfg(test)]

@@ -177,8 +177,14 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                 }
             }
             Undo::Recycled(items) => {
-                // "Restaurar" de la papelera devuelve cada elemento a su lugar original.
+                // "Restaurar" de la papelera devuelve cada elemento a su lugar original, si está
+                // libre: lo que apareció después con ese nombre no se pisa.
+                let mut taken = Vec::new();
                 for (recycled, original) in items {
+                    if let Some(busy) = super::prims::first_taken(&[original.as_path()], &|p| p.exists()) {
+                        taken.push(format!("{}: ya existe, no se pisa", busy.display()));
+                        continue;
+                    }
                     if restore_from_recycle_bin(recycled).is_err() {
                         let (Some(parent), Some(name)) = (original.parent(), original.file_name()) else { continue };
                         let it: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(recycled.as_str()), None)?;
@@ -187,7 +193,8 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                     focus = Some(original.clone());
                 }
                 fo.PerformOperations().ok();
-                return Ok(OpResult { undo: None, focus, rename_after: false, error: None, ..Default::default() });
+                let error = (!taken.is_empty()).then(|| taken.join("; "));
+                return Ok(OpResult { undo: None, focus, rename_after: false, error, ..Default::default() });
             }
             // Solo los arman los trabajos del motor de copia, que los deshace él (`transfer`).
             Undo::Batch(_) | Undo::CreatedFolder(_) => {
@@ -200,9 +207,9 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
 }
 
 /// `CMIC_MASK_NOASYNC`: `InvokeCommand` no vuelve hasta que el verbo terminó (el motor de copia
-/// renombra lo restaurado enseguida). `CMIC_MASK_FLAG_NO_UI`: sin diálogos de error.
+/// renombra lo restaurado enseguida). Sin `CMIC_MASK_FLAG_NO_UI`: si el lugar está ocupado, el
+/// sistema pregunta (Reemplazar / Omitir) en vez de decidir solo.
 const CMIC_MASK_NOASYNC: u32 = 0x0000_0100;
-const CMIC_MASK_FLAG_NO_UI: u32 = 0x0000_0400;
 
 pub(super) fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
     unsafe {
@@ -213,7 +220,7 @@ pub(super) fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
         let _ = menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, 0);
         let info = CMINVOKECOMMANDINFO {
             cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
-            fMask: CMIC_MASK_NOASYNC | CMIC_MASK_FLAG_NO_UI,
+            fMask: CMIC_MASK_NOASYNC,
             lpVerb: s!("undelete"),
             nShow: 1,
             ..Default::default()

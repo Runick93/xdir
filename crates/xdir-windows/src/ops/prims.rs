@@ -194,6 +194,29 @@ unsafe extern "system" fn chunk_done(msg: *const COPYFILE2_MESSAGE, ctx: *const 
     COPYFILE2_PROGRESS_CONTINUE
 }
 
+/// Lo que devuelve `trash`: (nombre en la Papelera, de dónde salió si se guardó).
+pub(crate) fn split_trashed(in_trash: &str) -> (&str, Option<&Path>) {
+    in_trash.split_once('\n').map_or((in_trash, None), |(a, b)| (a, Some(Path::new(b))))
+}
+
+/// La primera de `paths` que ya está ocupada (para no pisar nada al devolver de la Papelera).
+pub(crate) fn first_taken<'a>(paths: &[&'a Path], exists: &dyn Fn(&Path) -> bool) -> Option<&'a Path> {
+    paths.iter().copied().find(|p| exists(p))
+}
+
+/// Espera hasta `tries` veces a que `ready` dé verdadero; `false` si nunca.
+pub(crate) fn wait_for(ready: &dyn Fn() -> bool, tries: u32, every: std::time::Duration) -> bool {
+    for i in 0..tries {
+        if ready() {
+            return true;
+        }
+        if i + 1 < tries {
+            std::thread::sleep(every);
+        }
+    }
+    false
+}
+
 fn delete_file(p: &Path) -> Result<(), CopyError> {
     let wide = long_path(p);
     unsafe { DeleteFileW(PCWSTR(wide.as_ptr())) }.map_err(|e| err(e, p))
@@ -391,23 +414,27 @@ impl CopyPrims for WinCopyPrims {
     }
 
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {
-        if attr_data(original).is_ok() {
-            return Err(CopyError::new(ErrKind::Exists, original));
+        let (in_bin, from) = split_trashed(in_trash);
+        // «Restaurar» del Shell vuelve a donde estaba al mandarlo (`from`, lo apartado) y de ahí
+        // al lugar pedido. Los dos tienen que estar libres antes: si algo ocupó el nombre
+        // apartado («x (reemplazado).ext» es previsible), restaurar lo pisaría o se renombraría
+        // el archivo equivocado.
+        let mut must_be_free = vec![original];
+        if let Some(from) = from.filter(|f| *f != original) {
+            must_be_free.push(from);
         }
-        let (in_bin, from) = in_trash.split_once('\n').map_or((in_trash, None), |(a, b)| (a, Some(Path::new(b))));
+        if let Some(busy) = first_taken(&must_be_free, &|p| attr_data(p).is_ok()) {
+            return Err(CopyError::new(ErrKind::Exists, busy));
+        }
         let _com = Com::new();
-        // «Restaurar» del Shell: vuelve a donde estaba al mandarlo; si era un nombre temporal, de
-        // ahí al lugar pedido (sin pisar).
         super::win32::restore_from_recycle_bin(in_bin).map_err(|e| err(e, original))?;
         match from {
             Some(from) if from != original => {
-                // El verbo corre sin asincronía (`CMIC_MASK_NOASYNC`), pero algunas extensiones
-                // de la Papelera terminan después: se espera un poco a que aparezca.
-                for _ in 0..50 {
-                    if attr_data(from).is_ok() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                // El verbo corre sin asincronía (`CMIC_MASK_NOASYNC`), pero algunas extensiones de la
+                // Papelera terminan después: se espera a que aparezca (estaba libre: lo que
+                // aparezca es lo restaurado).
+                if !wait_for(&|| attr_data(from).is_ok(), 50, std::time::Duration::from_millis(100)) {
+                    return Err(CopyError::new(ErrKind::NotFound, from));
                 }
                 self.rename_noreplace(from, original)
             }
@@ -566,6 +593,34 @@ mod tests {
         // Los HRESULT de Win32 se traducen por su código.
         let e = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(ERROR_SHARING_VIOLATION.0));
         assert_eq!(err(e, Path::new("x")).kind, ErrKind::InUse);
+    }
+
+    #[test]
+    fn untrash_helpers() {
+        let (name, from) = split_trashed("::{645FF040}\\$R1.pdf\nC:\\d\\informe (reemplazado).pdf");
+        assert_eq!(name, "::{645FF040}\\$R1.pdf");
+        assert_eq!(from, Some(Path::new(r"C:\d\informe (reemplazado).pdf")));
+        assert_eq!(split_trashed("solo"), ("solo", None));
+        let busy = Path::new(r"C:\d\informe (reemplazado).pdf");
+        let free = Path::new(r"C:\d\informe.pdf");
+        assert_eq!(first_taken(&[free, busy], &|p| p == busy), Some(busy));
+        assert_eq!(first_taken(&[free], &|p| p == busy), None);
+        let calls = std::cell::Cell::new(0);
+        assert!(wait_for(&|| { calls.set(calls.get() + 1); calls.get() >= 3 }, 5, std::time::Duration::ZERO));
+        assert_eq!(calls.get(), 3);
+        assert!(!wait_for(&|| false, 3, std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn untrash_refuses_when_aside_name_is_taken() {
+        // Alguien creó otro «informe (reemplazado).pdf»: deshacer no lo toca.
+        let dir = tmp("deshacer-ocupado");
+        let aside = dir.join("informe (reemplazado).pdf");
+        std::fs::write(&aside, b"otro").unwrap();
+        let in_trash = format!("::{{645FF040-5081-101B-9F08-00AA002F954E}}\\nada\n{}", aside.display());
+        let e = WinCopyPrims.untrash(&in_trash, &dir.join("informe.pdf")).unwrap_err();
+        assert_eq!((e.kind, e.path), (ErrKind::Exists, aside.clone()));
+        assert_eq!(std::fs::read(&aside).unwrap(), b"otro");
     }
 
     #[test]

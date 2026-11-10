@@ -12,6 +12,8 @@ mod fs;
 #[cfg(windows)]
 mod icons;
 #[cfg(windows)]
+mod info;
+#[cfg(windows)]
 mod metadata;
 #[cfg(windows)]
 mod ops;

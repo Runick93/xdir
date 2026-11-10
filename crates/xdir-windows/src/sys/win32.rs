@@ -19,8 +19,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::info::{InfoChange, InfoReply, InfoRequest};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
 use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
@@ -600,28 +599,6 @@ impl Preview for Win32Preview {
     }
 }
 
-/// Panel de información: por ahora lo mínimo (`std::fs`, sin abrir lo que está en la nube) y
-/// «Más en el sistema…» abre las propiedades del Shell.
-struct Win32Info;
-
-impl Info for Win32Info {
-    fn request(&self, req: InfoRequest) {
-        let spawned = std::thread::Builder::new()
-            .name("xdir-informacion".into())
-            .spawn(move || xdir_core::info::answer(req, &|p| xdir_core::info::read_minimal(p, &|x| crate::metadata::cloud_only(&HSTRING::from(x)))));
-        debug_assert!(spawned.is_ok(), "hilo de información");
-    }
-
-    fn apply(&self, owner: Handle, tx: Sender<InfoReply>, generation: u64, change: InfoChange) {
-        xdir_core::info::send_applied(owner, &tx, generation, change.section(), Some("Todavía no se puede cambiar desde xdir".into()));
-    }
-
-    fn more_in_system(&self, owner: Handle, items: &[Item]) -> bool {
-        sh::properties(owner, items);
-        true
-    }
-}
-
 /// La vista previa real de Windows (lo que instala `install`).
 #[cfg(test)]
 pub fn platform_preview() -> Box<dyn Preview> {
@@ -641,7 +618,7 @@ pub fn install() {
         overlays: Box::new(Win32Overlays),
         metadata: Box::new(Win32Metadata),
         preview: Box::new(Win32Preview),
-        info: Box::new(Win32Info),
+        info: Box::new(crate::info::Win32Info),
     });
 }
 

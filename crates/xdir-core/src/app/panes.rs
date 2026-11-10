@@ -134,6 +134,8 @@ impl App {
             // Como el botón «xtree» de la barra: abre la vista sobre la carpeta del panel activo
             // o la cierra si está abierta. No navega el panel.
             tree::TreeHit::Xtree => self.toggle_xtree(),
+            tree::TreeHit::ConnectFavorite(address) => self.open_net_address(&address),
+            tree::TreeHit::ConnectHost(host) => self.open_net_address(&format!("smb://{host}")),
             tree::TreeHit::Nothing => {}
         }
         self.redraw();

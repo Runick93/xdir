@@ -39,6 +39,13 @@ pub(super) struct NetState {
     pub bar_pending: Vec<(usize, u64)>,
     /// Conexiones en las que ya se reintentó desconectar (la próxima vez se ofrece forzar).
     pub retried: std::collections::HashSet<PathBuf>,
+    /// Fila de «Red» del clic derecho en curso.
+    #[cfg(feature = "arbol")]
+    pub tree_ctx: Option<crate::tree::NetRow>,
+    /// Conexión pedida desde el árbol (sin panel): su generación.
+    pub tree_pending: Option<u64>,
+    /// Las máquinas que llegan de `browse` (mientras corre).
+    pub host_rx: Option<std::sync::mpsc::Receiver<sys::HostEvent>>,
     /// Hay un redibujo pedido para este momento (`WM_APP_NET_TICK`).
     pub tick_due: Option<std::time::Instant>,
 }
@@ -162,6 +169,11 @@ impl App {
     /// Volvió la conexión del panel: abre la ruta en una pestaña nueva del panel y la suma a los
     /// recientes; si falló, el error queda en el panel. Un intento cancelado se descarta.
     fn connected_from_dialog(&mut self, pane: usize, generation: u64, addr: &Address, result: Result<PathBuf, NetError>) {
+        if self.net.tree_pending == Some(generation) {
+            self.net.tree_pending = None;
+            self.connected_from_tree(pane, addr, result);
+            return;
+        }
         let Some(d) = &mut self.net.dialog else { return };
         if d.busy != Some(generation) {
             return;
@@ -176,6 +188,176 @@ impl App {
                 self.save_net_places();
             }
             Err(e) => d.error = Some(e.message()),
+        }
+        self.redraw();
+    }
+
+    /// Volvió una conexión pedida desde el árbol: abre la carpeta en el panel; si falló, el
+    /// panel de conectar con la dirección y el error.
+    fn connected_from_tree(&mut self, pane: usize, addr: &Address, result: Result<PathBuf, NetError>) {
+        match result {
+            Ok(path) => {
+                let (hwnd, tx) = (self.hwnd, self.tx.clone());
+                let pane = pane.min(self.panes.len().saturating_sub(1));
+                self.panes[pane].tab_mut().navigate(hwnd, &tx, Location::Path(path));
+                self.net.places.add_recent(addr, unix_now());
+                self.save_net_places();
+            }
+            Err(e) => {
+                self.close_connect_dialog();
+                self.open_connect_dialog();
+                let text = addr.display(self.net_style());
+                self.set_connect_field(&text);
+                if let Some(d) = &mut self.net.dialog {
+                    d.error = Some(e.message());
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    /// Clic en un favorito o una máquina de «Red»: si ya hay una conexión con ese servidor y
+    /// recurso, abre su carpeta; si no, conecta (sin panel) y abre al volver.
+    pub(super) fn open_net_address(&mut self, address: &str) {
+        let Ok(addr) = Address::parse(address) else { return };
+        let existing = self.net.connections.iter().find(|c| c.connected && Address::parse(&c.address).is_ok_and(|a| a.same_share(&addr) && addr.share.is_some()));
+        if let Some(c) = existing {
+            let path = addr.rest.iter().fold(c.local.clone(), |p, r| p.join(r));
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            self.tab_mut().navigate(hwnd, &tx, Location::Path(path));
+            self.redraw();
+            return;
+        }
+        if !sys::network().supports(&addr.scheme) {
+            self.notice = Some(NetError::Unsupported { scheme: addr.scheme }.message());
+            self.redraw();
+            return;
+        }
+        let pane = self.active;
+        let generation = self.spawn_connect(pane, None, addr, ConnectOptions::default());
+        self.net.tree_pending = Some(generation);
+    }
+
+    /// Las máquinas de la red local se buscan mientras el árbol se ve (`browse` en su hilo).
+    pub(super) fn sync_browse(&mut self) {
+        #[cfg(feature = "arbol")]
+        let want = self.tree.visible;
+        #[cfg(not(feature = "arbol"))]
+        let want = false;
+        match (&self.net.browse_cancel, want) {
+            (None, true) => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (c, hwnd) = (cancel.clone(), self.hwnd);
+                std::thread::spawn(move || sys::network().browse(hwnd, tx, c));
+                self.net.browse_cancel = Some(cancel);
+                self.net.host_rx = Some(rx);
+            }
+            (Some(c), false) => {
+                c.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.net.browse_cancel = None;
+                self.net.host_rx = None;
+                if !self.net.hosts.is_empty() {
+                    self.net.hosts.clear();
+                    self.net_changed();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `WM_APP_NET`: llegaron máquinas que aparecen o se van.
+    pub(super) fn on_net_hosts(&mut self) {
+        let Some(rx) = &self.net.host_rx else { return };
+        let mut changed = false;
+        while let Ok(e) = rx.try_recv() {
+            match e {
+                sys::HostEvent::Up(h) if !self.net.hosts.iter().any(|x| x.eq_ignore_ascii_case(&h)) => {
+                    self.net.hosts.push(h);
+                    changed = true;
+                }
+                sys::HostEvent::Down(h) => {
+                    let n = self.net.hosts.len();
+                    self.net.hosts.retain(|x| !x.eq_ignore_ascii_case(&h));
+                    changed |= n != self.net.hosts.len();
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            self.net.hosts.sort_by_key(|h| h.to_lowercase());
+            self.net_changed();
+        }
+    }
+
+    /// El título de una conexión en «Red»: «fotos (nas.local)» o «compartido (Z:)».
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    pub(super) fn connection_title(c: &NetConnection) -> String {
+        let addr = Address::parse(&c.address).ok();
+        let label = addr.as_ref().map_or_else(|| c.local.to_string_lossy().into_owned(), |a| a.label().to_string());
+        match (c.letter, addr) {
+            (Some(l), _) => format!("{label} ({l}:)"),
+            (None, Some(a)) if a.share.is_some() => format!("{label} ({})", a.host),
+            _ => label,
+        }
+    }
+
+    /// Menú del clic derecho de una fila de «Red».
+    #[cfg(feature = "arbol")]
+    pub(super) fn net_tree_menu(&mut self, row: crate::tree::NetRow) {
+        use crate::shell::Entry;
+        use crate::tree::NetRow;
+        let item = |id: u32, label: &str| Entry::Item { id, label: label.into(), enabled: true, checked: false };
+        let address = match &row {
+            NetRow::Favorite(a) | NetRow::Connected(_, a) => Some(a.clone()),
+            NetRow::Host(h) => Some(format!("smb://{h}")),
+            NetRow::Root => None,
+        };
+        let fav = address.as_deref().and_then(|a| Address::parse(a).ok()).map(|a| self.net.places.is_favorite(&a));
+        let mut entries = vec![item(0, "Conectar a un servidor…")];
+        if matches!(row, NetRow::Root) && crate::commands::available(crate::commands::Command::MapNetworkDrive) {
+            entries.push(item(5, "Conectar unidad de red…"));
+            entries.push(item(6, "Desconectar unidad de red…"));
+        }
+        if matches!(row, NetRow::Connected(..)) {
+            entries.push(item(1, "Desconectar"));
+        }
+        match fav {
+            Some(true) => entries.push(item(2, "Quitar de favoritos")),
+            Some(false) => entries.push(item(3, "Agregar a favoritos")),
+            None => {}
+        }
+        if address.is_some() {
+            entries.push(item(4, "Copiar la dirección"));
+        }
+        let Some(choice) = self.host.popup_menu(&entries, crate::host::MenuPos::Cursor, None, None) else { return };
+        match choice {
+            0 => self.open_connect_dialog(),
+            1 => {
+                if let NetRow::Connected(local, _) = &row {
+                    self.eject(local.clone());
+                }
+            }
+            2 | 3 => {
+                if let Some(a) = address.as_deref().and_then(|a| Address::parse(a).ok()) {
+                    let name = match &row {
+                        NetRow::Connected(local, _) => self.net.connections.iter().find(|c| &c.local == local).map(Self::connection_title),
+                        _ => None,
+                    };
+                    self.net.places.toggle_favorite(&a, name);
+                    self.save_net_places();
+                    self.net_changed();
+                }
+            }
+            4 => {
+                if let Some(a) = address.as_deref().and_then(|a| Address::parse(a).ok()) {
+                    let _ = sys::shell().copy_text(self.hwnd, &a.display(self.net_style()));
+                }
+            }
+            5 => self.run_command(crate::commands::Command::MapNetworkDrive),
+            6 => self.run_command(crate::commands::Command::DisconnectNetworkDrive),
+            _ => {}
         }
         self.redraw();
     }
@@ -656,6 +838,12 @@ impl App {
 
     /// Cambió algo de la red (favoritos, conexiones, máquinas): el árbol y lo que lo muestre.
     pub(super) fn net_changed(&mut self) {
+        #[cfg(feature = "arbol")]
+        {
+            let favorites = self.net.places.favorites.iter().map(|f| (f.name.clone(), f.address.clone())).collect();
+            let connected = self.net.connections.iter().filter(|c| c.connected).map(|c| (Self::connection_title(c), c.local.clone(), c.address.clone())).collect();
+            self.tree.set_network(favorites, connected, self.net.hosts.clone());
+        }
         self.redraw();
     }
 }

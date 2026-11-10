@@ -738,3 +738,190 @@ fn computer_list_shows_eject_for_connections() {
     a.panes[0].tab_mut().list.select_index(1);
     assert_eq!(a.eject_target(), Some(root));
 }
+
+// ---------- N7: «Red» en el árbol ----------
+
+#[cfg(feature = "arbol")]
+mod tree_net {
+    use super::*;
+    use crate::sys::testing::FAKE_NETWORK_PLACE;
+    use crate::tree::{NetRow, TreeHit};
+
+    fn tree_app(host: Rc<FakeHost>) -> App {
+        let mut a = net_app_with(host);
+        a.tree.visible = true;
+        a.paint();
+        a
+    }
+
+    fn with_network(a: &mut App, tag: &str, root: &Path) {
+        a.net.places.toggle_favorite(&Address::parse(&format!("smb://fav1-{tag}/x")).unwrap(), Some(format!("Fav uno {tag}")));
+        a.net.places.toggle_favorite(&Address::parse(&format!("smb://fav2-{tag}/y")).unwrap(), Some(format!("Fav dos {tag}")));
+        a.net.connections = vec![conn(&format!("smb://nas-{tag}/fotos"), &root.to_string_lossy())];
+        a.net.hosts = vec![format!("MAC-{tag}"), format!("PC-{tag}")];
+        a.net_changed();
+        a.tree.expand_network(a.hwnd, true);
+        a.paint();
+    }
+
+    #[test]
+    fn tree_network_root_on_all_systems() {
+        let mut a = tree_app(FakeHost::new());
+        let rows = a.tree.network_rows();
+        assert_eq!(rows[0], (NetRow::Root, "Red".to_string()));
+        // Sin Red del Shell: un clic solo la despliega (no abre nada en el panel).
+        let (x, y) = a.tree.row_point("Red").unwrap();
+        assert!(matches!(a.tree.hit(x, y), TreeHit::Toggle(_)));
+        let before = a.panes[a.active].tab().location.clone();
+        a.on_tree_click(x, y);
+        assert_eq!(a.panes[a.active].tab().location, before);
+        assert!(a.tree.network_expanded());
+    }
+
+    #[test]
+    fn tree_network_groups() {
+        let root = tmp_dir("n7-groups").join("fotos");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut a = tree_app(FakeHost::new());
+        with_network(&mut a, "n7g", &root);
+        let rows: Vec<String> = a.tree.network_rows().into_iter().map(|(_, n)| n).collect();
+        assert_eq!(rows, ["Red", "Fav uno n7g", "Fav dos n7g", "fotos (nas-n7g)", "—", "MAC-n7g", "PC-n7g"]);
+        // ⏏ solo al pasar el mouse por la conexión (o si es la carpeta del panel).
+        assert!(a.tree.eject_button(&root).is_none());
+        let (x, y) = a.tree.row_point("fotos (nas-n7g)").unwrap();
+        a.tree.on_mouse_move(x, y, false);
+        a.paint();
+        assert!(a.tree.eject_button(&root).is_some());
+    }
+
+    #[test]
+    fn host_up_down_updates_tree() {
+        let mut a = tree_app(FakeHost::new());
+        a.tree.expand_network(a.hwnd, true);
+        let (tx, rx) = std::sync::mpsc::channel();
+        a.net.host_rx = Some(rx);
+        tx.send(crate::sys::HostEvent::Up("IMPRESORA-N7".into())).unwrap();
+        tx.send(crate::sys::HostEvent::Up("IMPRESORA-N7".into())).unwrap();
+        a.on_net_hosts();
+        assert_eq!(a.tree.network_rows().iter().filter(|(_, n)| n == "IMPRESORA-N7").count(), 1);
+        tx.send(crate::sys::HostEvent::Down("IMPRESORA-N7".into())).unwrap();
+        a.on_net_hosts();
+        assert!(a.tree.network_rows().iter().all(|(_, n)| n != "IMPRESORA-N7" && n != "—"));
+    }
+
+    #[test]
+    fn favorite_click_connects_or_opens() {
+        let target = tmp_dir("n7-fav");
+        FakeNetwork::set_connect("fav1-n7f", Ok(target.clone()));
+        let mut a = tree_app(FakeHost::new());
+        with_network(&mut a, "n7f", &tmp_dir("n7-fav-conn"));
+        // Sin conexión: conecta (sin panel) y abre en el panel activo.
+        let (x, y) = a.tree.row_point("Fav uno n7f").unwrap();
+        assert_eq!(a.tree.hit(x, y), TreeHit::ConnectFavorite("smb://fav1-n7f/x".into()));
+        a.on_tree_click(x, y);
+        assert!(a.net.dialog.is_none());
+        wait_until(&mut a, |a| a.panes[a.active].tab().location == Location::Path(target.clone()));
+        assert_eq!(FakeNetwork::connects_to("fav1-n7f").len(), 1);
+        // Con conexión: navega sin conectar.
+        let conn_root = tmp_dir("n7-fav-yes");
+        std::fs::create_dir_all(conn_root.join("x")).unwrap();
+        a.net.connections = vec![conn("smb://fav2-n7f/y", &conn_root.to_string_lossy())];
+        a.net_changed();
+        a.open_net_address("smb://fav2-n7f/y");
+        assert_eq!(a.panes[a.active].tab().location, Location::Path(conn_root));
+        assert!(FakeNetwork::connects_to("fav2-n7f").is_empty());
+        // Si falla, el panel de conectar con el error.
+        FakeNetwork::set_connect("fav-bad-n7f", Err(NetError::NotFound { host: "fav-bad-n7f".into() }));
+        a.open_net_address("smb://fav-bad-n7f/z");
+        wait_until(&mut a, |a| a.net.dialog.as_ref().is_some_and(|d| d.error.is_some()));
+        assert_eq!(a.connect_field_text(), "smb://fav-bad-n7f/z");
+    }
+
+    #[test]
+    fn host_click_connects_smb() {
+        FakeNetwork::set_connect("MAC-n7h", Ok(tmp_dir("n7-host")));
+        let mut a = tree_app(FakeHost::new());
+        with_network(&mut a, "n7h", &tmp_dir("n7-host-conn"));
+        let (x, y) = a.tree.row_point("MAC-n7h").unwrap();
+        assert_eq!(a.tree.hit(x, y), TreeHit::ConnectHost("MAC-n7h".into()));
+        a.on_tree_click(x, y);
+        wait_until(&mut a, |_| FakeNetwork::connects_to("MAC-n7h").len() == 1);
+        assert_eq!(FakeNetwork::connects_to("MAC-n7h")[0].0, "smb://MAC-n7h");
+    }
+
+    #[test]
+    fn connected_eject_runs_disconnect_flow() {
+        let root = tmp_dir("n7-eject").join("fotos");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut a = tree_app(FakeHost::new());
+        with_network(&mut a, "n7e", &root);
+        FakeNetwork::set_remote(&root);
+        let (x, y) = a.tree.row_point("fotos (nas-n7e)").unwrap();
+        a.tree.on_mouse_move(x, y, false);
+        a.paint();
+        let r = a.tree.eject_button(&root).unwrap();
+        a.on_tree_click((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
+        assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+    }
+
+    #[test]
+    fn tree_network_menu_entries() {
+        let host = FakeHost::new();
+        let mut a = tree_app(host.clone());
+        host.set_menu_choice(None);
+        a.net_tree_menu(NetRow::Connected(PathBuf::from("/net-n7menu/fotos"), "smb://nas-n7menu/fotos".into()));
+        let labels: Vec<String> = host
+            .menus()
+            .last()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                crate::shell::Entry::Item { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, ["Conectar a un servidor…", "Desconectar", "Agregar a favoritos", "Copiar la dirección"]);
+        // «Copiar la dirección».
+        host.set_menu_choice(Some(4));
+        FakeShell::take_calls();
+        a.net_tree_menu(NetRow::Favorite("smb://nas-n7menu/fotos".into()));
+        assert!(FakeShell::take_calls().contains(&ShellCall::CopyText("smb://nas-n7menu/fotos".into())));
+        // «Agregar a favoritos» → después dice «Quitar de favoritos».
+        host.set_menu_choice(Some(3));
+        a.net_tree_menu(NetRow::Host("PC-N7MENU".into()));
+        assert!(a.net.places.is_favorite(&Address::parse("smb://PC-N7MENU").unwrap()));
+    }
+
+    #[test]
+    fn windows_shell_children_kept() {
+        FakeFileSystem::set_network_place(true);
+        FakeFileSystem::set_shell_subfolders(FAKE_NETWORK_PLACE, vec![("SRV01".into(), PathBuf::from(r"\\SRV01"))]);
+        let mut a = tree_app(FakeHost::new());
+        with_network(&mut a, "n7w", &tmp_dir("n7-win"));
+        for _ in 0..500 {
+            a.tree.on_loaded();
+            if a.tree.network_rows().iter().any(|(_, n)| n == "SRV01") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(a.tree.network_rows().iter().any(|(_, n)| n == "SRV01"), "{:?} {}", a.tree.network_rows(), FakeFileSystem::shell_subfolder_calls(FAKE_NETWORK_PLACE));
+        assert_eq!(FakeFileSystem::shell_subfolder_calls(FAKE_NETWORK_PLACE), 1);
+        // Un clic en «Red» abre la Red del Shell, como hoy.
+        a.paint();
+        let (x, y) = a.tree.row_point("Red").unwrap();
+        assert!(matches!(a.tree.hit(x + 60.0, y), TreeHit::Open(Location::Shell { .. })));
+        FakeFileSystem::set_network_place(false);
+    }
+
+    #[test]
+    fn browse_cancelled_when_tree_hidden() {
+        let mut a = tree_app(FakeHost::new());
+        let cancel = a.net.browse_cancel.clone().expect("con el árbol a la vista se buscan máquinas");
+        a.tree.visible = false;
+        a.paint();
+        assert!(a.net.browse_cancel.is_none());
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+}

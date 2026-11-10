@@ -539,6 +539,13 @@ impl Shell for FakeShell {
 /// el proceso (las lecturas corren en sus propios hilos): cada test usa rutas propias.
 static LOADS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
 static WATCHES: Mutex<BTreeMap<PathBuf, (usize, usize)>> = Mutex::new(BTreeMap::new());
+/// Subcarpetas de cada carpeta virtual (y cuántas veces se pidieron), de todo el proceso.
+static SHELL_SUBFOLDERS: Mutex<BTreeMap<String, (usize, Vec<(String, PathBuf)>)>> = Mutex::new(BTreeMap::new());
+/// El nombre de análisis de la Red del falso cuando está prendida (`set_network_place`).
+pub const FAKE_NETWORK_PLACE: &str = "::{RED-FALSA}";
+thread_local! {
+    static NET_PLACE: Cell<bool> = const { Cell::new(false) };
+}
 /// Cargas que fallan con ese texto (ver `FakeFileSystem::set_load_error`).
 static LOAD_ERRORS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
@@ -588,6 +595,20 @@ impl FakeFileSystem {
                 c.remove(path);
             }
         });
+    }
+
+    /// Desde ahora (en este hilo) hay Red del Shell (`network_place` no vacío), como en Windows.
+    pub fn set_network_place(on: bool) {
+        NET_PLACE.with(|c| c.set(on));
+    }
+
+    /// Las subcarpetas de la carpeta virtual `parsing` y cuántas veces se pidieron.
+    pub fn set_shell_subfolders(parsing: &str, items: Vec<(String, PathBuf)>) {
+        SHELL_SUBFOLDERS.lock().unwrap_or_else(|e| e.into_inner()).insert(parsing.to_string(), (0, items));
+    }
+
+    pub fn shell_subfolder_calls(parsing: &str) -> usize {
+        SHELL_SUBFOLDERS.lock().unwrap_or_else(|e| e.into_inner()).get(parsing).map_or(0, |e| e.0)
     }
 
     /// Desde ahora (en todo el proceso) la carga de `path` falla con `error` (o vuelve a leer el
@@ -809,7 +830,7 @@ impl FileSystem for FakeFileSystem {
     }
 
     fn network_place(&self) -> &'static str {
-        ""
+        if NET_PLACE.with(Cell::get) { FAKE_NETWORK_PLACE } else { "" }
     }
 
     fn linux_place(&self) -> &'static str {
@@ -820,8 +841,11 @@ impl FileSystem for FakeFileSystem {
         false
     }
 
-    fn shell_subfolders(&self, _parsing: &str) -> Vec<(String, PathBuf)> {
-        Vec::new()
+    fn shell_subfolders(&self, parsing: &str) -> Vec<(String, PathBuf)> {
+        let mut m = SHELL_SUBFOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+        let e = m.entry(parsing.to_string()).or_insert((0, Vec::new()));
+        e.0 += 1;
+        e.1.clone()
     }
 
     fn quick_access(&self) -> Vec<QuickItem> {

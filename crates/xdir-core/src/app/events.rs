@@ -52,6 +52,7 @@ impl App {
             WM_APP_FIELD_TAB => self.on_field_tab(wparam == 1),
             tasks::WM_APP_TASK => self.on_tasks(),
             crate::net::WM_APP_NET_TICK => self.on_net_tick(),
+            crate::net::WM_APP_NET => self.on_net_hosts(),
             WM_APP_SUGGEST_KEY => self.on_suggest_key(Key(wparam as u16)),
             WM_APP_PALETTE_KEY => self.on_palette_key(Key(wparam as u16), lparam == 1),
             WM_APP_TEXT_CHANGED => self.on_text_changed(lparam),
@@ -241,6 +242,7 @@ impl App {
         #[cfg(feature = "arbol")]
         {
             self.tree_ctx = self.tree.contains(x, y).then(|| self.tree.path_at(x, y));
+            self.net.tree_ctx = self.tree.net_at(x, y);
         }
         match self.hit(x, y) {
             Hit::Pane(i, PaneHit::List) if self.panes[i].tab().list.in_header(x, y) => {
@@ -285,6 +287,12 @@ impl App {
         }
         if let Some((pane, console)) = self.term_ctx.take().filter(|_| at.is_some()) {
             self.console_context_menu(pane, console);
+            return;
+        }
+        #[cfg(feature = "arbol")]
+        if let Some(row) = self.net.tree_ctx.take().filter(|_| at.is_some()) {
+            self.tree_ctx = None;
+            self.net_tree_menu(row);
             return;
         }
         #[cfg(feature = "arbol")]

@@ -604,6 +604,8 @@ fn symbol_name(ch: char) -> Option<&'static str> {
         0xE80F => "house",
         0xE838 => "sidebar.left",
         0xE839 => "network",
+        // Conexión de red del árbol («Red»).
+        0xE968 => "externaldrive.connected.to.line.below",
         0xE840 => "pin.fill",
         0xE896 => "arrow.down.circle",
         0xE8A5 => "doc",

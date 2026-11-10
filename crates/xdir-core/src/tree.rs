@@ -68,6 +68,11 @@ enum Kind {
     /// "Red" y "Linux": carpetas virtuales del Shell (el nombre de análisis va en `path`).
     Network,
     Linux,
+    /// Hijos de «Red»: un favorito de red (la dirección va en `path`), una conexión (con su ruta
+    /// local, se expande como carpeta) y una máquina de la red local (el nombre).
+    NetFavorite,
+    NetConnected,
+    NetHost,
     /// Línea que separa grupos.
     Separator,
 }
@@ -160,8 +165,10 @@ impl Node {
     /// Lo que abre en el panel activo (None si no es navegable).
     fn location(&self) -> Option<Location> {
         match self.kind {
-            Kind::Separator | Kind::QuickAccess | Kind::Xtree => None,
+            Kind::Separator | Kind::QuickAccess | Kind::Xtree | Kind::NetFavorite | Kind::NetHost => None,
             Kind::Computer | Kind::Home => Some(Location::Computer),
+            // «Red» abre la Red del Shell donde existe (Windows); si no, solo se despliega.
+            Kind::Network if self.path.as_os_str().is_empty() => None,
             Kind::Network | Kind::Linux => {
                 Some(Location::Shell { parsing: self.path.to_string_lossy().into_owned(), name: self.name.clone(), parent: None })
             }
@@ -171,6 +178,7 @@ impl Node {
 }
 
 /// Qué tocó un clic.
+#[derive(Debug, PartialEq)]
 pub enum TreeHit {
     /// Expandir o contraer el nodo.
     Toggle(usize),
@@ -182,7 +190,21 @@ pub enum TreeHit {
     Unpin(PathBuf),
     /// La entrada «xtree»: abrir o cerrar la vista de xtree (como el botón de la barra de estado).
     Xtree,
+    /// Un favorito de red (la dirección): conectar si hace falta y abrir.
+    ConnectFavorite(String),
+    /// Una máquina de la red local: conectar a `smb://máquina`.
+    ConnectHost(String),
     Nothing,
+}
+
+/// Una fila de «Red», para su menú del clic derecho.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetRow {
+    Root,
+    Favorite(String),
+    /// (ruta local, dirección).
+    Connected(PathBuf, String),
+    Host(String),
 }
 
 pub struct Tree {
@@ -236,6 +258,14 @@ pub struct Tree {
     eject_rects: Vec<(Rect, usize)>,
     /// Unidades de red cuyo nombre falta pedir en otro hilo (`drive_label` iría al servidor).
     pending_labels: Vec<PathBuf>,
+    /// Hijos de «Red» que pone la `App` (favoritos, conexiones, separador, máquinas).
+    net_items: Vec<usize>,
+    /// Hijos de la Red del Shell (Windows), leídos al expandir.
+    net_shell: Option<Vec<usize>>,
+    /// Dirección de cada conexión (por nodo), para el menú.
+    net_addresses: Vec<(usize, String)>,
+    /// Separador entre lo de xdir y la Red del Shell.
+    net_sep_shell: Option<usize>,
 }
 
 /// Revelación pendiente (`Tree::reveal`).
@@ -283,6 +313,10 @@ impl Tree {
             scroll_to: None,
             ejectable: std::collections::HashSet::new(),
             pending_labels: Vec::new(),
+            net_items: Vec::new(),
+            net_shell: None,
+            net_addresses: Vec::new(),
+            net_sep_shell: None,
             eject_rects: Vec::new(),
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
@@ -316,11 +350,11 @@ impl Tree {
         let computer = t.roots[t.roots.len() - 1];
         t.nodes[computer].expanded = true;
         t.refresh_drives();
-        // Como en el Explorador: Red y, si hay WSL, Linux. Sus hijos se leen al expandir.
-        // La Red del Explorador (en macOS no hay).
-        if !crate::sys::file_system().network_place().is_empty() {
-            t.add_root(Kind::Network, PathBuf::from(crate::sys::file_system().network_place()), "Red".to_string(), 0);
-        }
+        // «Red» en los tres sistemas (favoritos, conexiones y la red local); en Windows también
+        // la Red del Shell, leída al expandir. Y, si hay WSL, Linux.
+        t.add_root(Kind::Network, PathBuf::from(crate::sys::file_system().network_place()), "Red".to_string(), 0);
+        let red = t.roots[t.roots.len() - 1];
+        t.nodes[red].children = Some(Vec::new());
         if crate::sys::file_system().shell_place_exists(crate::sys::file_system().linux_place()) {
             t.add_root(Kind::Linux, PathBuf::from(crate::sys::file_system().linux_place()), "Linux".to_string(), 0);
         }
@@ -401,6 +435,128 @@ impl Tree {
     }
 
     // ---------- unidades ----------
+
+    // ---------- Red ----------
+
+    /// Para las pruebas: el centro de la fila con ese nombre, si está a la vista.
+    #[cfg(test)]
+    pub fn row_point(&self, name: &str) -> Option<(f32, f32)> {
+        let i = self.rows().iter().position(|&id| self.nodes[id].name == name)?;
+        let y = self.area.top + TOP_PAD + i as f32 * ROW_H - self.scroll + ROW_H / 2.0;
+        Some(((self.area.left + self.area.right) / 2.0, y))
+    }
+
+    /// Para las pruebas: despliega o pliega «Red».
+    #[cfg(test)]
+    pub fn expand_network(&mut self, hwnd: Handle, on: bool) {
+        if let Some(r) = self.network_node()
+            && self.nodes[r].expanded != on
+        {
+            self.toggle(hwnd, r, false);
+        }
+    }
+
+    fn network_node(&self) -> Option<usize> {
+        self.roots.iter().copied().find(|&r| self.nodes[r].kind == Kind::Network)
+    }
+
+    /// Los hijos de «Red»: favoritos (nombre, dirección), conectados (título, ruta local,
+    /// dirección) y las máquinas de la red local. Las conexiones que siguen conservan lo expandido.
+    pub fn set_network(&mut self, favorites: Vec<(String, String)>, connected: Vec<(String, PathBuf, String)>, hosts: Vec<String>) {
+        let Some(red) = self.network_node() else { return };
+        let old = std::mem::take(&mut self.net_items);
+        let reuse = |t: &mut Tree, kind: Kind, path: PathBuf, name: String| -> usize {
+            if let Some(&id) = old.iter().find(|&&id| t.nodes[id].kind == kind && t.nodes[id].path == path && (kind != Kind::NetHost || t.nodes[id].name == name)) {
+                if t.nodes[id].name != name {
+                    t.nodes[id].name = name;
+                    t.nodes[id].text_w = 0.0;
+                }
+                return id;
+            }
+            t.nodes.push(Node::new(kind, path, name, 1));
+            t.nodes.len() - 1
+        };
+        let mut items = Vec::new();
+        for (name, address) in favorites {
+            let id = reuse(self, Kind::NetFavorite, PathBuf::from(&address), name);
+            self.nodes[id].children = Some(Vec::new());
+            items.push(id);
+        }
+        self.net_addresses.clear();
+        for (title, local, address) in connected {
+            let id = reuse(self, Kind::NetConnected, local, title);
+            self.net_addresses.push((id, address));
+            items.push(id);
+        }
+        if !hosts.is_empty() {
+            let sep = old.iter().copied().find(|&id| self.nodes[id].kind == Kind::Separator).unwrap_or_else(|| {
+                self.nodes.push(Node::new(Kind::Separator, PathBuf::new(), String::new(), 1));
+                self.nodes.len() - 1
+            });
+            items.push(sep);
+            for h in hosts {
+                let id = reuse(self, Kind::NetHost, PathBuf::new(), h);
+                self.nodes[id].children = Some(Vec::new());
+                items.push(id);
+            }
+        }
+        self.net_items = items;
+        self.rebuild_network_children();
+        // Una conexión nueva queda cerrada; «Red» queda como estaba.
+        let _ = red;
+    }
+
+    fn rebuild_network_children(&mut self) {
+        let Some(red) = self.network_node() else { return };
+        let mut c = self.net_items.clone();
+        if let Some(shell) = self.net_shell.as_ref().filter(|s| !s.is_empty()) {
+            if !c.is_empty() && self.nodes[*c.last().unwrap_or(&0)].kind != Kind::Separator {
+                if self.net_sep_shell.is_none() {
+                    self.nodes.push(Node::new(Kind::Separator, PathBuf::new(), String::new(), 1));
+                    self.net_sep_shell = Some(self.nodes.len() - 1);
+                }
+                c.extend(self.net_sep_shell);
+            }
+            c.extend(shell.iter().copied());
+        }
+        self.nodes[red].children = Some(c);
+    }
+
+    /// Las filas de «Red» (para pruebas y para el menú): (tipo, nombre).
+    pub fn network_rows(&self) -> Vec<(NetRow, String)> {
+        let Some(red) = self.network_node() else { return Vec::new() };
+        let mut out = vec![(NetRow::Root, self.nodes[red].name.clone())];
+        for &id in self.nodes[red].children.as_deref().unwrap_or(&[]) {
+            let name = if self.nodes[id].kind == Kind::Separator { "—".to_string() } else { self.nodes[id].name.clone() };
+            // Lo de la Red del Shell (Windows) no tiene menú propio: va como la raíz.
+            out.push((self.net_row(id).unwrap_or(NetRow::Root), name));
+        }
+        out
+    }
+
+    fn net_row(&self, id: usize) -> Option<NetRow> {
+        let n = &self.nodes[id];
+        Some(match n.kind {
+            Kind::Network => NetRow::Root,
+            Kind::NetFavorite => NetRow::Favorite(n.path.to_string_lossy().into_owned()),
+            Kind::NetConnected => NetRow::Connected(n.path.clone(), self.net_addresses.iter().find(|(i, _)| *i == id).map(|(_, a)| a.clone()).unwrap_or_default()),
+            Kind::NetHost => NetRow::Host(n.name.clone()),
+            _ => return None,
+        })
+    }
+
+    /// La fila de «Red» bajo el punto (para el menú del clic derecho).
+    pub fn net_at(&self, x: f32, y: f32) -> Option<NetRow> {
+        if !(contains(&self.area, x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        self.net_row(self.node_at(y)?)
+    }
+
+    /// ¿«Red» está desplegada? (para buscar máquinas solo mientras se ve).
+    pub fn network_expanded(&self) -> bool {
+        self.network_node().is_some_and(|r| self.nodes[r].expanded)
+    }
 
     /// Las unidades de red cuyo nombre hay que pedir en otro hilo (las saca de la lista).
     pub fn take_pending_labels(&mut self) -> Vec<PathBuf> {
@@ -551,7 +707,12 @@ impl Tree {
     /// Lee las subcarpetas de un nodo en otro hilo, si todavía no se leyeron.
     fn load_children(&mut self, hwnd: Handle, id: usize, show_hidden: bool) {
         let n = &mut self.nodes[id];
-        if n.children.is_some() || n.loading {
+        if n.kind == Kind::Network {
+            // Solo la Red del Shell (Windows) se lee; lo demás lo pone `set_network`.
+            if n.path.as_os_str().is_empty() || self.net_shell.is_some() || n.loading {
+                return;
+            }
+        } else if n.children.is_some() || n.loading {
             return;
         }
         n.loading = true;
@@ -572,6 +733,12 @@ impl Tree {
             for (name, path) in dirs {
                 self.nodes.push(Node::new(Kind::Folder, path, name, depth));
                 ids.push(self.nodes.len() - 1);
+            }
+            if self.nodes[id].kind == Kind::Network {
+                self.nodes[id].loading = false;
+                self.net_shell = Some(ids);
+                self.rebuild_network_children();
+                continue;
             }
             let n = &mut self.nodes[id];
             n.children = Some(ids);
@@ -715,6 +882,10 @@ impl Tree {
             _ if self.settled() && x < chevron_right => TreeHit::Toggle(id),
             // El grupo no es una carpeta: al tocarlo se abre o cierra.
             Kind::QuickAccess => TreeHit::Toggle(id),
+            Kind::NetFavorite => TreeHit::ConnectFavorite(n.path.to_string_lossy().into_owned()),
+            Kind::NetHost => TreeHit::ConnectHost(n.name.clone()),
+            // «Red» sin la Red del Shell: solo se despliega.
+            Kind::Network if n.path.as_os_str().is_empty() => TreeHit::Toggle(id),
             _ => n.location().map_or(TreeHit::Nothing, TreeHit::Open),
         }
     }
@@ -856,6 +1027,9 @@ impl Tree {
             Kind::QuickAccess => ("\u{EC50}", rgb(0.93, 0.50, 0.55)),
             Kind::Drive => ("\u{EDA2}", th.text_dim),
             Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),
+            Kind::NetFavorite => ("\u{E735}", th.accent),
+            Kind::NetConnected => ("\u{E968}", th.text_dim),
+            Kind::NetHost => ("\u{E7F4}", th.text_dim),
             Kind::Linux => ("\u{E968}", th.text_dim),
             Kind::Pinned => {
                 let (_, glyph, (r, g, b)) = PINNED[n.pin];
@@ -986,6 +1160,13 @@ impl Tree {
                     p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
                     // ⏏ a la derecha de los discos expulsables.
                     if n.kind == Kind::Drive && self.ejectable.contains(&n.path) && self.settled() {
+                        let slot = rect(row.right - 26.0, y + 3.0, row.right - 4.0, y + ROW_H - 3.0);
+                        crate::list::draw_eject(p, slot, self.hover == Some(id));
+                        ejects.push((slot, id));
+                    }
+                    // Una conexión de red: ⏏ al pasar el mouse y en la carpeta del panel.
+                    let in_it = current.is_some_and(|c| c.starts_with(&n.path));
+                    if n.kind == Kind::NetConnected && (self.hover == Some(id) || in_it) && self.settled() {
                         let slot = rect(row.right - 26.0, y + 3.0, row.right - 4.0, y + ROW_H - 3.0);
                         crate::list::draw_eject(p, slot, self.hover == Some(id));
                         ejects.push((slot, id));

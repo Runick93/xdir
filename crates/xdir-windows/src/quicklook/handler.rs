@@ -16,9 +16,9 @@
 //!   Espacio, Esc y las flechas van a la ventana principal (`WM_APP_QL_KEY`). El marco le da al
 //!   visor una tabla de aceleradores con esas teclas (`GetWindowContext`): muchos visores solo
 //!   llaman al marco por las teclas de esa tabla.
-//! - Si el visor se cuelga ya a la vista (no contesta dos veces seguidas), también se pasa a la
-//!   imagen grande. Al cerrar xdir con un hilo abandonado todavía vivo, el proceso termina sin
-//!   destruir ventanas (`must_exit_hard`).
+//! - Si el visor se cuelga ya a la vista (no contesta unos 4 s seguidos), también se pasa a la
+//!   imagen grande. Al cerrar xdir, si un hilo de visor retirado sigue vivo después de una espera
+//!   corta, el proceso termina sin destruir ventanas (`must_exit_hard`).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -48,8 +48,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, GUID, HSTRING, Interface, PCWSTR, PWSTR, Result, implement, w};
 
 use super::pure::{
-    ACCEL_KEYS, HANDLER_TIMEOUT, Liveness, Outcome, PREVIEW_HANDLER_IID, Reply, Status, forward_key, hard_exit, isolation_disabled,
-    run_with,
+    ACCEL_KEYS, EXIT_WAIT_STEP, EXIT_WAIT_STEPS, HANDLER_TIMEOUT, Liveness, Outcome, PREVIEW_HANDLER_IID, Reply, Status, exit_wait,
+    forward_key, isolation_disabled, run_with,
 };
 use super::{WM_APP_QL_KEY, WM_QL_DIED, WM_QL_SETTLED, encode_outcome};
 
@@ -205,19 +205,29 @@ impl Default for Shared {
 }
 
 thread_local! {
-    /// Los visores abandonados (hilo de interfaz), hasta que su hilo termine.
-    static ABANDONED: RefCell<Vec<Arc<Shared>>> = const { RefCell::new(Vec::new()) };
+    /// Los visores retirados, parados o abandonados (hilo de interfaz), hasta que su hilo termine.
+    static RETIRED: RefCell<Vec<Arc<Shared>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Al cerrar xdir: algún hilo de visor abandonado sigue vivo (colgado en `prevhost.exe`), así que
-/// hay que terminar el proceso sin destruir ventanas (ver `pure::hard_exit`).
+/// Al cerrar xdir (con el estado ya guardado): a los hilos retirados que siguen vivos se les
+/// cancela la llamada en curso a `prevhost.exe` y se los espera hasta unos 300 ms. Si alguno
+/// sigue vivo, hay que terminar el proceso sin destruir ventanas (ver `pure::hard_exit`).
 pub fn must_exit_hard() -> bool {
-    ABANDONED.with(|a| {
-        let mut a = a.borrow_mut();
-        a.retain(|s| s.alive.load(Ordering::Acquire));
-        let alive: Vec<bool> = a.iter().map(|s| s.alive.load(Ordering::Acquire)).collect();
-        hard_exit(&alive)
-    })
+    let retired: Vec<Arc<Shared>> = RETIRED.with(|r| {
+        let mut r = r.borrow_mut();
+        r.retain(|s| s.alive.load(Ordering::Acquire));
+        r.clone()
+    });
+    for s in &retired {
+        let thread = s.thread.load(Ordering::Acquire);
+        if thread != 0 {
+            unsafe {
+                let _ = CoCancelCall(thread, 0);
+            }
+        }
+    }
+    let alive = || retired.iter().map(|s| s.alive.load(Ordering::Acquire)).collect();
+    exit_wait(alive, EXIT_WAIT_STEPS, EXIT_WAIT_STEP)
 }
 
 /// Un visor encargado, visto desde el hilo de interfaz. Ningún método espera al hilo del visor.
@@ -288,6 +298,14 @@ impl Viewer {
     /// Ya no se lo quiere (otro elemento, o se cerró la vista rápida): el hilo descarga el visor
     /// (`Unload`) y termina.
     pub fn stop(&self) {
+        // Se lo sigue hasta que su hilo termine: si queda trabado en `Unload`, al cerrar xdir hay
+        // que saberlo (`must_exit_hard`).
+        RETIRED.with(|r| {
+            let mut r = r.borrow_mut();
+            if !r.iter().any(|s| Arc::ptr_eq(s, &self.shared)) {
+                r.push(self.shared.clone());
+            }
+        });
         self.shared.cancelled.store(true, Ordering::Release);
         unsafe {
             match self.body() {
@@ -308,7 +326,6 @@ impl Viewer {
     /// El visor no contestó a tiempo o murió: además de `stop`, se cancela la llamada que el hilo
     /// tenga en curso a `prevhost.exe`. Si igual sigue colgado, el hilo queda solo (oculto).
     pub fn abandon(&self) {
-        ABANDONED.with(|a| a.borrow_mut().push(self.shared.clone()));
         self.stop();
         let thread = self.shared.thread.load(Ordering::Acquire);
         if thread != 0 {
@@ -531,12 +548,15 @@ unsafe extern "system" fn body_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 LRESULT(0)
             }
             // ¿Sigue vivo el visor? Su ventana desapareció (`prevhost.exe` cerrado) o no contesta
-            // dos veces seguidas (colgado): se avisa y la ventana pasa a la imagen grande.
+            // `HUNG_MISSES` veces seguidas (colgado): se avisa y la ventana pasa a la imagen grande.
+            // Sin `SMTO_BLOCK`: mientras se espera, este hilo sigue atendiendo lo que el visor le
+            // manda a su ventana padre (`WM_SETCURSOR`, la rueda); bloqueado, eso se trababa y el
+            // visor parecía colgado. Acá no queda nada prestado durante la espera.
             WM_TIMER if wparam.0 == ALIVE_TIMER => {
                 let child = GetWindow(hwnd, GW_CHILD).ok().filter(|c| !c.is_invalid());
                 let responsive = child.is_some_and(|c| {
                     !IsHungAppWindow(c).as_bool()
-                        && SendMessageTimeoutW(c, WM_NULL, WPARAM(0), LPARAM(0), SMTO_ABORTIFHUNG | SMTO_BLOCK, HUNG_MS, None).0 != 0
+                        && SendMessageTimeoutW(c, WM_NULL, WPARAM(0), LPARAM(0), SMTO_NORMAL | SMTO_ABORTIFHUNG, HUNG_MS, None).0 != 0
                 });
                 let mut live = LIVENESS.with(Cell::get);
                 let dead = live.tick(child.is_some(), responsive);

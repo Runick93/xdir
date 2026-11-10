@@ -188,6 +188,8 @@ pub fn close() {
     }) else {
         return;
     };
+    // La próxima vez se piden de nuevo: un archivo pudo cambiar en el disco mientras tanto.
+    with_renderer(|r| r.clear_big());
     unsafe {
         let _ = ShowWindow(popup, SW_HIDE);
     }
@@ -202,7 +204,7 @@ fn retire(q: &mut Ql) {
 }
 
 /// Al cerrar xdir (con el estado ya guardado): cierra la vista rápida y dice si hay que terminar
-/// el proceso sin destruir ventanas porque un visor abandonado sigue colgado.
+/// el proceso sin destruir ventanas porque un visor retirado sigue colgado.
 pub fn exit_now() -> bool {
     close();
     handler::must_exit_hard()

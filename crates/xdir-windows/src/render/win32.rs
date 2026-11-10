@@ -115,8 +115,6 @@ impl Renderer {
         }
     }
 
-    /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
-    /// necesitar un cuadro en curso.
     /// Pasa a la caché las imágenes grandes que terminaron (al llegar `WM_APP_ICONS`, aunque no se
     /// dibuje ninguna: así no se acumulan con la columna oculta). Sin dispositivo se descartan (se
     /// vuelven a pedir al dibujar).
@@ -128,6 +126,15 @@ impl Renderer {
         }
     }
 
+    /// Olvida las imágenes grandes (la vista rápida, al cerrarse: un archivo pudo cambiar).
+    pub fn clear_big(&self) {
+        if let Ok(mut icons) = self.icons.try_borrow_mut() {
+            icons.big.clear();
+        }
+    }
+
+    /// Ancho de un texto con la fuente de la interfaz (o su negrita, la de los encabezados), sin
+    /// necesitar un cuadro en curso.
     pub fn text_width(&self, s: &str, bold: bool) -> f32 {
         measure(&self.dwrite, if bold { self.fonts.get(FontId::UiBold) } else { self.fonts.get(FontId::Ui) }, s)
     }

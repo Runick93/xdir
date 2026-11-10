@@ -121,15 +121,33 @@ pub fn decode_outcome(v: isize) -> Outcome<Status> {
     }
 }
 
-/// Al cerrar xdir: si algún hilo de visor abandonado (colgado en `prevhost.exe`) sigue vivo, se
-/// termina el proceso sin destruir ventanas. Destruir la ventana de la vista rápida le manda
-/// `WM_DESTROY` de forma síncrona a la ventana colgada, que es hija suya, y xdir no terminaría nunca.
-pub fn hard_exit(abandoned_alive: &[bool]) -> bool {
-    abandoned_alive.iter().any(|a| *a)
+/// Al cerrar xdir: si algún hilo de visor retirado (parado o abandonado) sigue vivo, puede estar
+/// colgado en `prevhost.exe` (en `Unload`, o en un visor colgado que todavía no se detectó), así
+/// que se termina el proceso sin destruir ventanas. Destruir la ventana de la vista rápida le
+/// manda `WM_DESTROY` de forma síncrona a la ventana colgada, que es hija suya, y xdir no
+/// terminaría nunca.
+pub fn hard_exit(retired_alive: &[bool]) -> bool {
+    retired_alive.iter().any(|a| *a)
+}
+
+/// Cuánto se espera al cerrar a que terminen los hilos retirados: `EXIT_WAIT_STEPS` × `EXIT_WAIT_STEP`.
+pub const EXIT_WAIT_STEPS: u32 = 30;
+pub const EXIT_WAIT_STEP: Duration = Duration::from_millis(10);
+
+/// Espera hasta `steps` × `step` a que ningún hilo retirado siga vivo (`alive` los mira cada vez).
+/// `true` si alguno sigue vivo al final: hay que salir sin destruir ventanas.
+pub fn exit_wait(alive: impl Fn() -> Vec<bool>, steps: u32, step: Duration) -> bool {
+    for _ in 0..steps {
+        if !hard_exit(&alive()) {
+            return false;
+        }
+        std::thread::sleep(step);
+    }
+    hard_exit(&alive())
 }
 
 /// Si el visor que se ve sigue vivo, mirado cada `ALIVE_MS` desde su hilo: murió si su ventana
-/// desapareció (se cerró `prevhost.exe`) o si no contesta dos veces seguidas (colgado).
+/// desapareció (se cerró `prevhost.exe`) o si no contesta `HUNG_MISSES` veces seguidas (colgado).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Liveness {
     had_child: bool,
@@ -137,7 +155,9 @@ pub struct Liveness {
 }
 
 /// Veces seguidas que el visor no contesta antes de darlo por colgado.
-pub const HUNG_MISSES: u8 = 2;
+/// Ocho vistazos de 500 ms (unos 4 s), en línea con `HANDLER_TIMEOUT` y con los 5 s de
+/// `IsHungAppWindow`: un visor ocupado un rato (un PDF grande, una planilla) no se descarta.
+pub const HUNG_MISSES: u8 = 8;
 
 impl Liveness {
     pub const fn new() -> Liveness {
@@ -353,17 +373,45 @@ mod tests {
         assert!(hard_exit(&[false, true]));
     }
 
+    /// Un visor parado (no abandonado) cuyo hilo termina mientras se espera: salida normal. Uno
+    /// que sigue trabado (en `Unload` de un `prevhost.exe` colgado): salida sin destruir ventanas.
+    #[test]
+    fn exit_waits_for_stopped_viewer() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread = alive.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            thread.store(false, Ordering::Release);
+        });
+        let t0 = Instant::now();
+        assert!(!exit_wait(|| vec![alive.load(Ordering::Acquire)], EXIT_WAIT_STEPS, EXIT_WAIT_STEP));
+        assert!(t0.elapsed() < Duration::from_millis(300));
+        // Trabado: se espera lo justo y se sale igual.
+        let t0 = Instant::now();
+        assert!(exit_wait(|| vec![false, true], 5, Duration::from_millis(10)));
+        assert!(t0.elapsed() < Duration::from_millis(500));
+        assert!(!exit_wait(Vec::new, 5, Duration::from_millis(10)));
+    }
+
     #[test]
     fn viewer_liveness() {
         let mut l = Liveness::default();
         // Sin ventana todavía: no se juzga.
         assert!(!l.tick(false, false));
         assert!(!l.tick(true, true));
-        // Una vez lento no alcanza; dos seguidas, colgado.
-        assert!(!l.tick(true, false));
+        // Lento un rato no alcanza; contestar vuelve a empezar la cuenta.
+        for _ in 0..HUNG_MISSES - 1 {
+            assert!(!l.tick(true, false));
+        }
         assert!(!l.tick(true, true));
-        assert!(!l.tick(true, false));
+        for _ in 0..HUNG_MISSES - 1 {
+            assert!(!l.tick(true, false));
+        }
+        // `HUNG_MISSES` seguidas (unos 4 s): colgado.
         assert!(l.tick(true, false));
+        assert_eq!(HUNG_MISSES, 8);
         // La ventana desapareció (prevhost.exe cerrado).
         let mut l = Liveness::default();
         assert!(!l.tick(true, true));

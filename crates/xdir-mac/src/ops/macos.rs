@@ -348,21 +348,55 @@ fn c_path(p: &Path) -> Result<CString> {
 /// Nunca pisa: si `dst` ya existe, error sin tocarlo (`COPYFILE_EXCL`). Si falla a mitad, lo
 /// copiado (que es solo de esta copia) se quita.
 fn copy(src: &Path, dst: &Path) -> Result<()> {
-    let (from, to) = (c_path(src)?, c_path(dst)?);
     if taken(dst) {
         return Err(format!("{}: ya existe, no se pisa", dst.display()));
     }
-    let flags = libc::COPYFILE_METADATA
+    copy_unchecked(src, dst)
+}
+
+/// `copy` sin mirar antes: el destino lo crea esta copia de forma exclusiva (una carpeta con
+/// `create_dir`, un archivo o enlace con `COPYFILE_EXCL`), así lo que haya aparecido en el medio
+/// nunca se toca ni se llena. Si falla después, se quita lo que creó.
+fn copy_unchecked(src: &Path, dst: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    if !meta.is_dir() {
+        return copy_entry(src, dst, false);
+    }
+    // `copyfile` con una carpeta que ya existe copia adentro de ella: la carpeta la crea esta copia.
+    std::fs::create_dir(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    let result = (|| {
+        for child in std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))? {
+            let child = child.map_err(|e| format!("{}: {e}", src.display()))?;
+            copy_entry(&child.path(), &dst.join(child.file_name()), false)?;
+        }
+        // Los metadatos de la carpeta (permisos, atributos extendidos, fechas) al final.
+        copy_entry(src, dst, true)
+    })();
+    if result.is_err() {
+        let _ = remove_tree(dst);
+    }
+    result
+}
+
+/// `copyfile` de `src` en `dst` (que no existe; con `meta_only`, solo los metadatos sobre `dst`).
+fn copy_entry(src: &Path, dst: &Path, meta_only: bool) -> Result<()> {
+    let (from, to) = (c_path(src)?, c_path(dst)?);
+    let flags = if meta_only {
+        libc::COPYFILE_METADATA | libc::COPYFILE_NOFOLLOW_SRC
+    } else {
+        libc::COPYFILE_METADATA
         | libc::COPYFILE_DATA
         | libc::COPYFILE_RECURSIVE
         | libc::COPYFILE_CLONE
         | libc::COPYFILE_NOFOLLOW_SRC
-        | libc::COPYFILE_EXCL;
+        | libc::COPYFILE_EXCL
+    };
     // SAFETY: dos cadenas C válidas; sin estado de copyfile.
     let r = unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), flags) };
     if r != 0 {
         let e = std::io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::EEXIST) {
+        // EEXIST: no lo creó esta copia, no se toca.
+        if !meta_only && e.raw_os_error() != Some(libc::EEXIST) {
             let _ = remove_tree(dst);
         }
         return Err(format!("{}: {e}", src.display()));
@@ -722,6 +756,26 @@ mod tests {
         assert!(r.error.is_some());
         assert!(item.exists(), "sigue en la Papelera");
         assert!(!outside.join("evil.plist").exists(), "no llegó a la carpeta del enlace");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Una carpeta que aparece en el medio con el nombre del destino (la carrera después de mirar
+    /// si existe): la copia falla sin meterse adentro ni borrarla.
+    #[test]
+    fn copy_dir_never_goes_into_existing_dir() {
+        let dir = tmp("copia-carrera");
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/b"), "b").unwrap();
+        let dst = dir.join("dst");
+        std::fs::create_dir(&dst).unwrap();
+        std::fs::write(dst.join("mio.txt"), "mio").unwrap();
+        assert!(copy_unchecked(&src, &dst).is_err());
+        assert_eq!(std::fs::read_to_string(dst.join("mio.txt")).unwrap(), "mio");
+        assert!(!dst.join("src").exists() && !dst.join("sub").exists(), "no copió adentro");
+        // A una carpeta nueva: entera, con su contenido.
+        copy_unchecked(&src, &dir.join("nueva")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("nueva/sub/b")).unwrap(), "b");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

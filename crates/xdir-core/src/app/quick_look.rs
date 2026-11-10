@@ -150,6 +150,11 @@ impl App {
         self.redraw();
     }
 
+    /// ¿La vista rápida muestra algo de una carpeta dentro de `root`?
+    pub(super) fn quick_look_under(&self, root: &std::path::Path) -> bool {
+        self.quick_look.as_ref().is_some_and(|st| matches!(&st.location, Location::Path(p) if p.starts_with(root)))
+    }
+
     /// Cierra la vista rápida (y el visor del host, si lo estaba mostrando).
     pub(super) fn close_quick_look(&mut self) {
         let Some(st) = self.quick_look.take() else { return };

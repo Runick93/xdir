@@ -609,6 +609,21 @@ fn eject_command_uses_focused_drive() {
     assert_eq!((s.command, s.name, s.default_keys), (Command::Eject, "Expulsar", &[][..]));
 }
 
+/// Expulsar también cierra la vista rápida de un archivo de ese disco.
+#[test]
+fn eject_closes_quick_look_on_volume() {
+    let (mut a, e, _c) = computer_with_drives(FakeHost::new(), "vista-rapida");
+    std::fs::write(e.join("fotos/a.txt"), "a").unwrap();
+    FakeShell::set_eject_result(&e, Ok(()));
+    go(&mut a, &e.join("fotos"));
+    select(&mut a, &["a.txt"]);
+    a.run_command(Command::QuickLook);
+    assert!(a.quick_look.is_some(), "se abrió la vista rápida");
+    a.run_command(Command::Eject);
+    assert!(a.quick_look.is_none());
+    wait_task(&mut a);
+}
+
 /// ⏏ en el nodo del disco en el árbol: lo expulsa.
 #[cfg(feature = "arbol")]
 #[test]

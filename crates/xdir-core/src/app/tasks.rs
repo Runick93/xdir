@@ -98,6 +98,11 @@ impl App {
     /// «Este equipo» (y sueltan su guardián), se cierra xtree si su raíz está ahí y se vacía la
     /// vista previa.
     pub(super) fn release_volume(&mut self, root: &std::path::Path) {
+        // La vista rápida de un archivo de ese disco se cierra primero (suelta el archivo). Las
+        // miniaturas no guardan nada abierto: con las pestañas fuera del disco no se piden más.
+        if self.quick_look_under(root) {
+            self.close_quick_look();
+        }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
             if matches!(&tab.location, Location::Path(p) if p.starts_with(root)) {

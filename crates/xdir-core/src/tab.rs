@@ -65,6 +65,48 @@ pub struct Tab {
     /// Lo que el usuario había cambiado en la vista de la ubicación que se acaba de dejar,
     /// pendiente de guardar en `sync_view`.
     left_view: Option<LeftView>,
+    /// Cuándo empezó la carga en curso de una carpeta de red (para «Conectando…»).
+    load_started: Option<Instant>,
+    /// La carga en curso ya trajo algún lote.
+    first_batch: bool,
+}
+
+/// Cuánto tarda una carpeta de red en cargar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Slow {
+    No,
+    Connecting { host: String },
+    NotResponding { host: String },
+}
+
+/// A partir de cuánto una carga remota sin ningún lote muestra «Conectando…» y «no responde».
+pub const SLOW_CONNECTING: std::time::Duration = std::time::Duration::from_millis(500);
+pub const SLOW_NOT_RESPONDING: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Un guardián de carpeta de red creado en otro hilo (el sistema puede tardar en vigilarla): el
+/// hilo lo deja en la ranura si la pestaña sigue esperándolo; al soltarlo se suelta el de adentro.
+/// (El campo no se lee: vale por lo que suelta al soltarse.)
+struct RemoteWatch(#[allow(dead_code)] Arc<std::sync::Mutex<Option<Box<dyn Watch>>>>);
+
+impl Watch for RemoteWatch {}
+
+/// El guardián de `path`: directo si es local; en otro hilo si es de red.
+fn make_watcher(hwnd: Handle, id: usize, nav_id: u64, path: &std::path::Path) -> Option<Box<dyn Watch>> {
+    if !sys::network().is_remote(path) {
+        return sys::file_system().watch(hwnd, WM_APP_CHANGED, id, nav_id as isize, path);
+    }
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let (weak, path) = (Arc::downgrade(&slot), path.to_path_buf());
+    std::thread::spawn(move || {
+        let w = sys::file_system().watch(hwnd, WM_APP_CHANGED, id, nav_id as isize, &path);
+        // Si la pestaña ya no lo espera, `w` se suelta acá.
+        if let Some(slot) = weak.upgrade()
+            && let Ok(mut s) = slot.lock()
+        {
+            *s = w;
+        }
+    });
+    Some(Box::new(RemoteWatch(slot)))
 }
 
 /// Vista cambiada de una ubicación que se dejó: su clave, cómo quedó, los filtros con los que se
@@ -92,6 +134,15 @@ fn store_view(views: &mut FolderViews, key: &str, v: ViewSettings, applied_filte
     views.set(key, ViewSettings { filters: Vec::new(), ..v });
 }
 
+/// El servidor de una ruta de red: `\\srv\rec` → «srv»; si no, el último tramo de la ruta.
+pub fn remote_host(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy();
+    if fs::is_unc(p) {
+        return s.trim_start_matches('\\').split('\\').next().unwrap_or_default().to_string();
+    }
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| s.into_owned())
+}
+
 impl Tab {
     /// Si la pestaña está a la vista (carga y vigila su carpeta). Lo usan las pruebas de `App`
     /// (app/tests.rs).
@@ -115,7 +166,7 @@ impl Tab {
             return;
         }
         if let Location::Path(p) = &self.location {
-            self.watcher = sys::file_system().watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p);
+            self.watcher = make_watcher(hwnd, self.id, self.nav_id, p);
         }
         if !self.loading {
             self.reload(hwnd, tx, true);
@@ -128,7 +179,7 @@ impl Tab {
 
     pub fn new(id: usize, location: Location, show_hidden: bool) -> Self {
         let location = match location {
-            Location::Path(p) => Location::Path(sys::file_system().long_path(&p)),
+            Location::Path(p) => Location::Path(fs::long_path_local(&p)),
             other => other,
         };
         let mut list = FileList::default();
@@ -154,6 +205,8 @@ impl Tab {
             search: None,
             view_applied: None,
             left_view: None,
+            load_started: None,
+            first_batch: false,
         }
     }
 
@@ -265,7 +318,7 @@ impl Tab {
     pub fn navigate(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, to: Location) {
         // Rutas cortas 8.3 (LEANDR~1) a su forma larga, para mostrarlas y compararlas bien.
         let to = match to {
-            Location::Path(p) => Location::Path(sys::file_system().long_path(&p)),
+            Location::Path(p) => Location::Path(fs::long_path_local(&p)),
             other => other,
         };
         if to == self.location && self.nav_id != 0 {
@@ -459,7 +512,12 @@ impl Tab {
         self.error = None;
         self.reload_buf = None;
         self.watcher = match &self.location {
-            Location::Path(p) if self.visible => sys::file_system().watch(hwnd, WM_APP_CHANGED, self.id, self.nav_id as isize, p),
+            Location::Path(p) if self.visible => make_watcher(hwnd, self.id, self.nav_id, p),
+            _ => None,
+        };
+        self.first_batch = false;
+        self.load_started = match &self.location {
+            Location::Path(p) if sys::network().is_remote(p) => Some(Instant::now()),
             _ => None,
         };
         sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
@@ -477,6 +535,9 @@ impl Tab {
         if event.generation != self.generation.load(Ordering::Relaxed) {
             return false;
         }
+        if matches!(event.msg, LoadMsg::Entries(_)) {
+            self.first_batch = true;
+        }
         match event.msg {
             LoadMsg::Entries(batch) => match &mut self.reload_buf {
                 Some(buf) => {
@@ -493,6 +554,7 @@ impl Tab {
             }
             LoadMsg::Listed(result) => {
                 self.loading = false;
+                self.load_started = None;
                 if let Some(s) = &mut self.search {
                     s.done = true;
                     s.progress = 1.0;
@@ -619,7 +681,8 @@ impl Tab {
         let e = &self.list.entries[idx];
         if e.is_dir {
             // Una carpeta de disco se navega por ruta; una virtual, por el Shell.
-            let to = if path.is_dir() {
+            // Una ruta de red no se toca acá: se navega y la carga decide.
+            let to = if fs::probe_dir(&path) != Some(false) {
                 Location::Path(path)
             } else {
                 Location::Shell {
@@ -632,7 +695,7 @@ impl Tab {
             return;
         }
         // Un .zip de disco se abre como carpeta dentro del mismo panel (lo lista el Shell).
-        if fs::is_zip(&path) && path.is_file() {
+        if fs::is_zip(&path) && fs::probe_file(&path) != Some(false) {
             let to = Location::Shell {
                 parsing: path.to_string_lossy().into_owned(),
                 name: e.display.clone(),
@@ -641,7 +704,7 @@ impl Tab {
             self.navigate(hwnd, tx, to);
             return;
         }
-        if !path.exists() {
+        if fs::probe_exists(&path) == Some(false) {
             // Archivo virtual (en un teléfono, dentro de un ZIP): lo abre el Shell.
             sys::shell().open_item(hwnd, &self.entry_item(idx));
             return;
@@ -665,6 +728,36 @@ impl Tab {
         }
         self.auth_nav = self.nav_id;
         Some(path.clone())
+    }
+
+    /// ¿Una carga de red que tarda? (remota, cargando y sin ningún lote: desde 0,5 s
+    /// «Conectando…», desde 20 s «no responde»). `host` sale de la ruta (`\\srv\…` o el nombre
+    /// del punto de montaje); la `App` lo reemplaza por el de la conexión si lo sabe.
+    pub fn slow_state(&self, now: Instant) -> Slow {
+        let (Some(t0), Location::Path(p)) = (self.load_started, &self.location) else { return Slow::No };
+        if !self.loading || self.first_batch {
+            return Slow::No;
+        }
+        let host = remote_host(p);
+        match now.saturating_duration_since(t0) {
+            d if d >= SLOW_NOT_RESPONDING => Slow::NotResponding { host },
+            d if d >= SLOW_CONNECTING => Slow::Connecting { host },
+            _ => Slow::No,
+        }
+    }
+
+    /// Lo que falta para el próximo de esos umbrales de una carga remota sin lotes (`None`: no
+    /// hay o ya pasaron todos).
+    pub fn slow_pending(&self, now: Instant, thresholds: &[std::time::Duration]) -> Option<std::time::Duration> {
+        let t0 = self.load_started.filter(|_| self.loading && !self.first_batch)?;
+        let elapsed = now.saturating_duration_since(t0);
+        thresholds.iter().filter(|&&t| t > elapsed).map(|&t| t - elapsed).min()
+    }
+
+    /// Para las pruebas: la carga remota en curso empezó en `t0`.
+    #[cfg(test)]
+    pub fn set_load_started(&mut self, t0: Option<Instant>) {
+        self.load_started = t0;
     }
 
     /// Navegación en curso (para saber si un resultado que vuelve de un hilo sigue valiendo).

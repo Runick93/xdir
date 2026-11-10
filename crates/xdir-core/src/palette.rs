@@ -109,7 +109,7 @@ fn typed_path(query: &str, expand: impl Fn(&str) -> String) -> Option<PathBuf> {
     if p.as_os_str().len() == 2 && p.to_string_lossy().ends_with(':') {
         p.push("\\");
     }
-    p.is_dir().then(|| crate::sys::file_system().true_case(&p))
+    (crate::fs::probe_dir(&p) != Some(false)).then(|| crate::fs::true_case_local(&p))
 }
 
 /// Grupos guardados que coinciden con lo escrito, para abrir (o, al guardar, reemplazar).

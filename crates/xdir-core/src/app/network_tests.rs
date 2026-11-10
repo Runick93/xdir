@@ -367,3 +367,201 @@ fn draw_connect_dialog_in_app() {
     let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
     assert!(texts.iter().any(|t| t == "Conectar a un servidor"), "{texts:?}");
 }
+
+// ---------- N5: que la red nunca trabe la ventana ----------
+
+use crate::list::placeholder::{Placeholder, PlaceholderButton};
+use crate::pane::PaneHit;
+use crate::tab::Slow;
+
+/// Una carpeta real que el `FakeNetwork` trata como de red, con una subcarpeta y un archivo.
+fn remote_dir(name: &str) -> PathBuf {
+    let d = tmp_dir(name);
+    std::fs::create_dir_all(d.join("sub")).unwrap();
+    std::fs::write(d.join("a.txt"), "x").unwrap();
+    FakeNetwork::set_remote(&d);
+    d
+}
+
+fn pump_pane(a: &mut App, pane: usize) {
+    wait_until(a, |a| !a.panes[pane].tab().loading);
+}
+
+#[test]
+fn remote_navigation_no_ui_io() {
+    let root = remote_dir("n5-nav");
+    let mut init = Init::blank();
+    init.session.panes = vec![crate::session::PaneState { tabs: vec![Location::Path(root.join("sub"))], active: 0 }];
+    FakeNetwork::mark_ui_thread();
+    let host = FakeHost::new();
+    install_fakes();
+    let mut a = App::new(init, host);
+    a.sync_visibility();
+    pump_pane(&mut a, 0);
+    // Pestaña nueva, navegar, abrir una subcarpeta de la lista, Atrás.
+    a.new_tab(0, Location::Path(root.clone()), true);
+    pump_pane(&mut a, 0);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    let idx = a.panes[0].tab().list.entries.iter().position(|e| e.name == "sub").expect("la lista tiene «sub»");
+    a.panes[0].tab_mut().open(hwnd, &tx, idx);
+    pump_pane(&mut a, 0);
+    assert_eq!(a.panes[0].tab().location, Location::Path(root.join("sub")));
+    a.panes[0].tab_mut().go_back(hwnd, &tx);
+    pump_pane(&mut a, 0);
+    // Un archivo de la lista: se abre sin mirar el disco.
+    let f = a.panes[0].tab().list.entries.iter().position(|e| e.name == "a.txt").unwrap();
+    a.panes[0].tab_mut().open(hwnd, &tx, f);
+    // La barra: una carpeta y una que no existe (navega igual; la carga dice el error).
+    a.go_to_text(0, &root.join("sub").to_string_lossy());
+    pump_pane(&mut a, 0);
+    a.go_to_text(0, &root.join("no-existe").to_string_lossy());
+    assert_eq!(a.panes[0].tab().location, Location::Path(root.join("no-existe")));
+    pump_pane(&mut a, 0);
+    // Cambió el conjunto de unidades; un grupo con esa ruta.
+    a.drives_changed();
+    a.groups.put(crate::groups::Group {
+        name: "red-n5".into(),
+        layout: 0,
+        split_x: 0.5,
+        split_y: 0.5,
+        panes: vec![crate::session::PaneState { tabs: vec![Location::Path(root.clone())], active: 0 }],
+        temp: false,
+    });
+    let gi = a.groups.find("red-n5").unwrap();
+    a.apply_group(gi);
+    pump_pane(&mut a, 0);
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn remote_watcher_created_off_thread() {
+    let root = remote_dir("n5-watch");
+    FakeNetwork::mark_ui_thread();
+    let mut a = net_app();
+    a.sync_visibility();
+    assert!(a.panes[0].tab().is_visible());
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(root.clone()));
+    assert!(FakeNetwork::ui_io_calls().is_empty());
+    wait_until(&mut a, |_| FakeFileSystem::watches(&root).0 == 1);
+    // Al irse, el guardián se suelta.
+    let local = tmp_dir("n5-watch-local");
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local));
+    wait_until(&mut a, |_| FakeFileSystem::watches(&root).1 == 1);
+}
+
+#[test]
+fn slow_state_thresholds() {
+    let root = remote_dir("n5-slow");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(2));
+    let mut a = net_app();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(root.clone()));
+    let t0 = Instant::now();
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    let tab = a.panes[0].tab();
+    let host = crate::tab::remote_host(&root);
+    assert_eq!(tab.slow_state(t0 + Duration::from_millis(400)), Slow::No);
+    assert_eq!(tab.slow_state(t0 + Duration::from_millis(600)), Slow::Connecting { host: host.clone() });
+    assert_eq!(tab.slow_state(t0 + Duration::from_secs(21)), Slow::NotResponding { host });
+    // Una carpeta local nunca.
+    let mut b = net_app();
+    let local = tmp_dir("n5-slow-local");
+    b.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local));
+    assert_eq!(b.panes[0].tab().slow_state(Instant::now() + Duration::from_secs(30)), Slow::No);
+    // Con un lote ya no es lenta.
+    wait_until(&mut a, |a| !a.panes[0].tab().loading);
+    assert_eq!(a.panes[0].tab().slow_state(t0 + Duration::from_secs(21)), Slow::No);
+}
+
+#[test]
+fn hung_load_shows_not_responding_and_close_works() {
+    let root = remote_dir("n5-hung");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(3));
+    FakeNetwork::set_connections("nas-n5hung", vec![conn("smb://nas-n5hung/fotos", &root.to_string_lossy())]);
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    a.net.connections = vec![conn("smb://nas-n5hung/fotos", &root.to_string_lossy())];
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let t0 = Instant::now() - Duration::from_millis(700);
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    a.paint();
+    let texts = |h: &FakeHost| h.drawn_texts().into_iter().map(|t| t.1).collect::<Vec<_>>();
+    assert!(texts(&host).iter().any(|t| t == "Conectando con \"nas-n5hung\"…"), "{:?}", texts(&host));
+    a.panes[0].tab_mut().set_load_started(Some(Instant::now() - Duration::from_secs(21)));
+    a.paint();
+    assert!(texts(&host).iter().any(|t| t == "\"nas-n5hung\" no responde"));
+    assert_eq!(a.panes[0].tab().list.placeholder, Some(Placeholder::NotResponding("nas-n5hung".into())));
+    // Cambiar de panel funciona en el medio.
+    a.set_layout(crate::ui::Layout::TwoSide);
+    a.set_active(1);
+    a.set_active(0);
+    a.paint();
+    // «Cerrar la pestaña».
+    let tabs = a.panes[0].tabs.len();
+    let (r, _) = *a.panes[0].tab().list.placeholder_buttons.iter().find(|(_, b)| *b == PlaceholderButton::CloseTab).unwrap();
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    assert!(matches!(a.hit(x, y), super::Hit::Pane(0, PaneHit::Placeholder(PlaceholderButton::CloseTab))));
+    a.on_left_down(x, y, false);
+    assert_eq!(a.panes[0].tabs.len(), tabs - 1);
+}
+
+#[test]
+fn retry_reloads() {
+    let root = remote_dir("n5-retry");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_millis(200));
+    let mut a = net_app();
+    a.new_tab(0, Location::Path(root.clone()), true);
+    a.panes[0].tab_mut().set_load_started(Some(Instant::now() - Duration::from_secs(21)));
+    a.paint();
+    let loads = FakeFileSystem::loads(&root);
+    let (r, _) = *a.panes[0].tab().list.placeholder_buttons.iter().find(|(_, b)| *b == PlaceholderButton::Retry).unwrap();
+    a.on_left_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+    assert_eq!(FakeFileSystem::loads(&root), loads + 1);
+    a.paint();
+    assert!(a.panes[0].tab().list.placeholder.is_none(), "recién empezada la recarga no es lenta");
+}
+
+#[test]
+fn late_result_discarded_after_close() {
+    let root = remote_dir("n5-late");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_millis(150));
+    let mut a = net_app();
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let n = a.panes[0].tabs.len();
+    a.close_tab(0, a.panes[0].active);
+    assert_eq!(a.panes[0].tabs.len(), n - 1);
+    std::thread::sleep(Duration::from_millis(300));
+    while let Ok(ev) = a.rx.try_recv() {
+        a.on_load_event(ev);
+    }
+    assert_eq!(a.panes[0].tabs.len(), n - 1);
+}
+
+#[test]
+fn local_paths_still_probe() {
+    let local = tmp_dir("n5-local-file");
+    std::fs::write(local.join("nota.txt"), "x").unwrap();
+    let mut a = net_app();
+    a.go_to_text(0, &local.join("nota.txt").to_string_lossy());
+    assert_eq!(a.panes[0].tab().location, Location::Path(local.clone()));
+    pump_pane(&mut a, 0);
+    let list = &a.panes[0].tab().list;
+    let focused = list.focused_index().map(|i| list.entries[i].name.clone());
+    assert_eq!(focused.as_deref(), Some(std::ffi::OsStr::new("nota.txt")));
+}
+
+#[cfg(feature = "arbol")]
+#[test]
+fn drive_label_of_remote_off_thread() {
+    let z = tmp_dir("n5-drive-z");
+    FakeNetwork::set_remote(&z);
+    FakeFileSystem::set_drives(&[(&z, "compartido (Z:)")]);
+    FakeNetwork::mark_ui_thread();
+    let mut a = net_app();
+    a.drives_changed();
+    assert!(FakeNetwork::ui_io_calls().is_empty(), "{:?}", FakeNetwork::ui_io_calls());
+    // El nombre llega desde otro hilo (el falso lo da por hilo: ahí no lo conoce).
+    wait_task(&mut a, |t| matches!(t, TaskDone::DriveLabels(_)));
+}

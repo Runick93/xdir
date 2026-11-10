@@ -33,8 +33,9 @@ pub fn queue(req: MetadataRequest) {
                 unsafe {
                     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
                 }
+                // Un archivo de una carpeta de red que no responde no frena la cola.
                 while let Ok(req) = rx.recv() {
-                    req.answer_with(read);
+                    req.answer_with(|p| xdir_core::net::remote_bounded(p, read_in_thread));
                 }
             })
             .expect("hilo de metadatos");
@@ -47,6 +48,14 @@ pub fn queue(req: MetadataRequest) {
 /// datos. `GPS_BESTEFFORT` y no `GPS_FASTPROPERTIESONLY`: con este último el Shell no carga el
 /// manejador de propiedades del archivo y no hay dimensiones ni duración. Sin `GPS_OPENSLOWITEM`,
 /// los archivos que están solo en la nube (OneDrive) no se descargan para leerlos.
+/// `read` en un hilo propio (el de la red con tiempo límite): con COM iniciado en ese hilo.
+fn read_in_thread(path: &Path) -> Meta {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    read(path)
+}
+
 pub fn read(path: &Path) -> Meta {
     let path_w = HSTRING::from(path);
     // Un archivo que solo está en la nube (OneDrive y similares) no se abre: el manejador de

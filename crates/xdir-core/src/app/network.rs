@@ -36,6 +36,8 @@ pub(super) struct NetState {
     pub generation: u64,
     /// Conexiones pedidas desde la barra de dirección: (pestaña, generación).
     pub bar_pending: Vec<(usize, u64)>,
+    /// Hay un redibujo pedido para este momento (`WM_APP_NET_TICK`).
+    pub tick_due: Option<std::time::Instant>,
 }
 
 /// Segundos desde 1970 (UTC).
@@ -471,6 +473,109 @@ impl App {
         self.net.bar_pending.push((tab_id, generation));
         let t = self.panes[pane].tab_mut();
         t.error = None;
+        self.redraw();
+    }
+
+    /// Los nombres de las unidades de red del árbol, en otro hilo (con tiempo límite).
+    pub(super) fn request_remote_drive_labels(&mut self) {
+        #[cfg(feature = "arbol")]
+        {
+            let pending = self.tree.take_pending_labels();
+            if pending.is_empty() {
+                return;
+            }
+            self.spawn_task(move || {
+                let labels = pending
+                    .into_iter()
+                    .filter_map(|p| {
+                        let q = p.clone();
+                        let host = crate::tab::remote_host(&p);
+                        net::with_timeout(LIST_LIMIT, &host, move || {
+                            let fs = sys::file_system();
+                            Ok(fs.drive_label(&fs.drive_name(&q)))
+                        })
+                        .ok()
+                        .map(|l| (p, l))
+                    })
+                    .collect();
+                TaskDone::DriveLabels(labels)
+            });
+        }
+    }
+
+    pub(super) fn on_drive_labels(&mut self, labels: Vec<(PathBuf, String)>) {
+        #[cfg(feature = "arbol")]
+        for (p, l) in labels {
+            self.tree.set_drive_name(&p, l);
+        }
+        #[cfg(not(feature = "arbol"))]
+        let _ = labels;
+    }
+
+    /// La conexión que contiene `p` (la de ruta local más larga).
+    pub(super) fn network_root(&self, p: &Path) -> Option<&NetConnection> {
+        self.net.connections.iter().filter(|c| c.connected && !c.local.as_os_str().is_empty() && p.starts_with(&c.local)).max_by_key(|c| c.local.as_os_str().len())
+    }
+
+    /// El nombre del servidor de una ruta de red: el de su conexión si se sabe, si no el de la
+    /// ruta.
+    pub(super) fn remote_host_of(&self, p: &Path) -> String {
+        self.network_root(p).and_then(|c| Address::parse(&c.address).ok()).map(|a| a.host).unwrap_or_else(|| crate::tab::remote_host(p))
+    }
+
+    /// Antes de dibujar: el aviso de cada lista a la vista que carga una carpeta de red lenta, y
+    /// el próximo redibujo (`WM_APP_NET_TICK`) para cuando cambie.
+    pub(super) fn update_placeholders(&mut self) {
+        use crate::list::placeholder::Placeholder;
+        use crate::tab::{SLOW_CONNECTING, SLOW_NOT_RESPONDING, Slow};
+        let now = std::time::Instant::now();
+        let mut next: Option<std::time::Duration> = None;
+        for i in 0..self.panes.len() {
+            let tab = self.panes[i].tab();
+            let slow = tab.slow_state(now);
+            let host = match &tab.location {
+                Location::Path(p) if slow != Slow::No => self.remote_host_of(p),
+                _ => String::new(),
+            };
+            let ph = match slow {
+                Slow::No => None,
+                Slow::Connecting { .. } => Some(Placeholder::Connecting(host)),
+                Slow::NotResponding { .. } => Some(Placeholder::NotResponding(host)),
+            };
+            // Cuánto falta para el próximo umbral de una carga remota sin lotes.
+            if let Some(wait) = tab.slow_pending(now, &[SLOW_CONNECTING, SLOW_NOT_RESPONDING]) {
+                next = Some(next.map_or(wait, |n| n.min(wait)));
+            }
+            let hover = match self.hover {
+                super::Hit::Pane(j, crate::pane::PaneHit::Placeholder(b)) if j == i && ph.is_some() => Some(b),
+                _ => None,
+            };
+            let list = &mut self.panes[i].tab_mut().list;
+            list.placeholder_hover = hover;
+            list.placeholder = ph;
+        }
+        if let Some(wait) = next {
+            let at = now + wait;
+            if self.net.tick_due.is_none_or(|d| d > at || d < now) {
+                self.net.tick_due = Some(at);
+                let hwnd = self.hwnd;
+                std::thread::spawn(move || {
+                    std::thread::sleep(wait + std::time::Duration::from_millis(10));
+                    hwnd.post(net::WM_APP_NET_TICK, 0, 0);
+                });
+            }
+        }
+    }
+
+    /// `WM_APP_NET_TICK`: toca redibujar el aviso de una carpeta de red lenta.
+    pub(super) fn on_net_tick(&mut self) {
+        self.net.tick_due = None;
+        self.redraw();
+    }
+
+    /// Después de «Reintentar»: el aviso vuelve a «Conectando…» al rato.
+    pub(super) fn watch_slow_load(&mut self, _pane: usize) {
+        self.net.tick_due = None;
         self.redraw();
     }
 

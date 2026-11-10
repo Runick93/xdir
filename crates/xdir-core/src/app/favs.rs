@@ -291,7 +291,7 @@ impl App {
             }
             return false;
         };
-        let dirs: Vec<PathBuf> = ev.paths.map(|p| p.iter().filter(|p| p.is_dir()).cloned().collect()).unwrap_or_default();
+        let dirs: Vec<PathBuf> = ev.paths.map(|p| p.iter().filter(|p| crate::fs::probe_dir(p) != Some(false)).cloned().collect()).unwrap_or_default();
         // Un favorito es un vínculo: no se copia ni se mueve nada.
         ev.effect = if dirs.is_empty() {
             Effect::NONE

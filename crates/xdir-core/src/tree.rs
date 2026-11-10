@@ -234,6 +234,8 @@ pub struct Tree {
     pub ejectable: std::collections::HashSet<PathBuf>,
     /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, nodo).
     eject_rects: Vec<(Rect, usize)>,
+    /// Unidades de red cuyo nombre falta pedir en otro hilo (`drive_label` iría al servidor).
+    pending_labels: Vec<PathBuf>,
 }
 
 /// Revelación pendiente (`Tree::reveal`).
@@ -280,6 +282,7 @@ impl Tree {
             reveal: None,
             scroll_to: None,
             ejectable: std::collections::HashSet::new(),
+            pending_labels: Vec::new(),
             eject_rects: Vec::new(),
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
@@ -399,6 +402,19 @@ impl Tree {
 
     // ---------- unidades ----------
 
+    /// Las unidades de red cuyo nombre hay que pedir en otro hilo (las saca de la lista).
+    pub fn take_pending_labels(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.pending_labels)
+    }
+
+    /// El nombre de una unidad, pedido en otro hilo.
+    pub fn set_drive_name(&mut self, path: &Path, name: String) {
+        for n in self.nodes.iter_mut().filter(|n| n.kind == Kind::Drive && n.path == path) {
+            n.name = name.clone();
+            n.text_w = 0.0;
+        }
+    }
+
     /// Vuelve a leer las unidades de "Este equipo" (se enchufó o quitó una): las que siguen
     /// conservan su estado, las nuevas se agregan en su lugar.
     pub fn refresh_drives(&mut self) {
@@ -406,7 +422,14 @@ impl Tree {
         let old = self.nodes[computer].children.clone().unwrap_or_default();
         let mut ids = Vec::new();
         for path in crate::sys::file_system().drives() {
-            let name = crate::sys::file_system().drive_label(&crate::sys::file_system().drive_name(&path));
+            let fs = crate::sys::file_system();
+            // Una unidad de red se muestra con su identificador hasta que llega el nombre.
+            let name = if crate::sys::network().is_remote(&path) {
+                self.pending_labels.push(path.clone());
+                fs.drive_name(&path)
+            } else {
+                fs.drive_label(&fs.drive_name(&path))
+            };
             if let Some(&id) = old.iter().find(|&&id| self.nodes[id].path == path) {
                 self.nodes[id].name = name;
                 self.nodes[id].text_w = 0.0;

@@ -377,5 +377,20 @@ pub fn with_timeout<T: Send + 'static>(
     }
 }
 
+/// Tiempo límite de un elemento de una carpeta de red en las colas de miniaturas y metadatos.
+pub const ITEM_LIMIT: Duration = Duration::from_secs(5);
+
+/// `f(path)` con tiempo límite si la ruta es de red (`ITEM_LIMIT`): sin respuesta, `T::default()`
+/// y la cola sigue (el hilo se abandona). Una ruta local se lee directo. Corre en hilos de
+/// trabajo (`f` es una función, así corre en un hilo nuevo sin estado del que llama).
+pub fn remote_bounded<T: Default + Send + 'static>(path: &std::path::Path, f: fn(&std::path::Path) -> T) -> T {
+    if !crate::sys::network().is_remote(path) {
+        return f(path);
+    }
+    let p = path.to_path_buf();
+    let host = crate::tab::remote_host(path);
+    with_timeout(ITEM_LIMIT, &host, move || Ok(f(&p))).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests;

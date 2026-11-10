@@ -445,7 +445,7 @@ pub fn parse_args(args: &[String]) -> (bool, Option<String>, Option<PathBuf>) {
         .enumerate()
         .find(|(i, a)| !a.starts_with("--") && (*i == 0 || args[i - 1] != "--probe"))
         .map(|(_, a)| PathBuf::from(a))
-        .filter(|p| p.is_dir());
+        .filter(|p| crate::fs::probe_dir(p) != Some(false));
     (probe.is_some(), probe, start_path)
 }
 
@@ -635,6 +635,7 @@ impl App {
         // Favoritos y recientes de red, y lo conectado (en otros hilos).
         self.load_net_places();
         self.request_connections();
+        self.request_remote_drive_labels();
     }
 
     /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).

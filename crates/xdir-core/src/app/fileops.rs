@@ -436,7 +436,7 @@ impl App {
         // Una sola carpeta anclada: su menú dice "Desanclar de Acceso rápido".
         #[cfg(feature = "arbol")]
         let pinned_one = match items.as_slice() {
-            [one] if one.pidl.is_none() && one.path.is_dir() => self.tree.is_pinned(&one.path).then(|| one.path.clone()),
+            [one] if one.pidl.is_none() && crate::fs::probe_dir(&one.path) == Some(true) => self.tree.is_pinned(&one.path).then(|| one.path.clone()),
             _ => None,
         };
         #[cfg(not(feature = "arbol"))]

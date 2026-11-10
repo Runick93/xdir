@@ -112,6 +112,7 @@ impl App {
         // «Conectar a un servidor»: las cajas en su lugar y lo que se dibuja, antes de prestar
         // los campos por separado.
         self.sync_connect_boxes();
+        self.update_placeholders();
         let connect_extra = self.net.dialog.as_ref().map(|_| {
             let style = self.net_style();
             let (now, offset) = (super::network::unix_now(), sys::env().local_now().offset);

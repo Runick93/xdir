@@ -291,7 +291,8 @@ impl DiskScan for FakeDiskScan {
         Vec::new()
     }
 
-    fn volume_space(&self, _path: &Path) -> Option<(u64, u64)> {
+    fn volume_space(&self, path: &Path) -> Option<(u64, u64)> {
+        FakeNetwork::note_io("volume_space", path);
         VOLUME.with(|v| v.get().0)
     }
 
@@ -764,13 +765,15 @@ impl FileSystem for FakeFileSystem {
 
     /// El nombre de `set_drives` (si la unidad es de este hilo); si no, el mismo texto.
     fn drive_label(&self, drive: &str) -> String {
+        FakeNetwork::note_io("drive_label", Path::new(drive));
         DRIVES.with(|d| d.borrow().iter().find(|(p, _)| p.to_string_lossy() == drive).map(|(_, n)| n.clone()))
             .unwrap_or_else(|| drive.to_string())
     }
 
     fn forget_drive_labels(&self) {}
 
-    fn drive_missing(&self, _path: &Path) -> bool {
+    fn drive_missing(&self, path: &Path) -> bool {
+        FakeNetwork::note_io("drive_missing", path);
         false
     }
 
@@ -834,10 +837,12 @@ impl FileSystem for FakeFileSystem {
     }
 
     fn long_path(&self, path: &Path) -> PathBuf {
+        FakeNetwork::note_io("long_path", path);
         path.to_path_buf()
     }
 
     fn true_case(&self, path: &Path) -> PathBuf {
+        FakeNetwork::note_io("true_case", path);
         path.to_path_buf()
     }
 
@@ -853,7 +858,9 @@ impl FileSystem for FakeFileSystem {
     /// Un guardián que no vigila nada: solo cuenta altas y bajas por ruta. `None` si la carpeta
     /// no existe (como los reales).
     fn watch(&self, _hwnd: Handle, _msg: u32, _panel: usize, _lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
-        if !path.is_dir() {
+        FakeNetwork::note_io("watch", path);
+        // Una carpeta «de red» del falso (`FakeNetwork::set_remote`) se vigila aunque no exista.
+        if !path.is_dir() && !crate::sys::network().is_remote(path) {
             return None;
         }
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(path.to_path_buf()).or_insert((0, 0)).0 += 1;
@@ -862,6 +869,7 @@ impl FileSystem for FakeFileSystem {
 
     /// Solo lo marcado con `set_cloud_only` en este hilo.
     fn cloud_only(&self, path: &Path) -> bool {
+        FakeNetwork::note_io("cloud_only", path);
         CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
         CLOUD.with(|c| c.borrow().contains(path))
     }

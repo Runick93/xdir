@@ -125,6 +125,8 @@ pub enum PaneHit {
     NewFolderButton,
     /// Botón «Devolver» junto a la barra de dirección (solo en la Papelera).
     Restore,
+    /// Un botón del aviso de una carpeta de red que tarda («Reintentar», «Cerrar la pestaña»).
+    Placeholder(crate::list::placeholder::PlaceholderButton),
     List,
 }
 
@@ -467,6 +469,9 @@ impl Pane {
             return PaneHit::ViewButton;
         }
         if contains(&self.list, x, y) {
+            if let Some(b) = crate::list::placeholder::hit(&self.tabs[self.active].list.placeholder_buttons, x, y) {
+                return PaneHit::Placeholder(b);
+            }
             return PaneHit::List;
         }
         PaneHit::None
@@ -686,6 +691,15 @@ impl Pane {
             _ => None,
         };
         tab.list.draw(p, self.list, active_pane);
+        // Carpeta de red que tarda: el aviso en lugar de la lista vacía (debajo del encabezado).
+        tab.list.placeholder_buttons = match &tab.list.placeholder {
+            Some(ph) => {
+                let top = if tab.list.view.has_header() { self.list.top + crate::list::HEADER_H } else { self.list.top };
+                let body = rect(self.list.left + 1.0, top, self.list.right - 1.0, self.list.bottom - 1.0);
+                crate::list::placeholder::draw(p, body, ph, tab.list.placeholder_hover)
+            }
+            None => Vec::new(),
+        };
 
         // Contorno encima de todo; de acento si es el panel activo.
         let stroke = if active_pane { (th.accent, 1.5) } else { (th.border, 1.0) };

@@ -132,7 +132,7 @@ fn run() {
             (_, true) => big_flags(false),
             (_, false) => SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK,
         };
-        let pixels = image(&key, flags).map(Arc::new);
+        let pixels = bounded_image(&key, flags).map(Arc::new);
         {
             let (lock, _) = queue();
             lock.lock().unwrap().pending.remove(&((key.clone(), big), hwnd));
@@ -146,6 +146,24 @@ fn run() {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_ICONS, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+/// `image` con tiempo límite si el archivo está en una carpeta de red: sin respuesta, sin
+/// miniatura y la cola sigue (el hilo se abandona).
+fn bounded_image(key: &Key, flags: SIIGBF) -> Option<Pixels> {
+    let Source::Path(p) = &key.0 else { return image(key, flags) };
+    if !xdir_core::sys::network().is_remote(p) {
+        return image(key, flags);
+    }
+    let (k, host) = (key.clone(), xdir_core::tab::remote_host(p));
+    xdir_core::net::with_timeout(xdir_core::net::ITEM_LIMIT, &host, move || {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        Ok(image(&k, flags))
+    })
+    .ok()
+    .flatten()
 }
 
 fn image((source, px): &Key, flags: SIIGBF) -> Option<Pixels> {

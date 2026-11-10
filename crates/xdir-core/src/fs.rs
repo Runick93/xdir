@@ -340,6 +340,34 @@ pub fn is_zip(path: &Path) -> bool {
 }
 
 /// ¿Es una ruta de red (`\\servidor\recurso\...`)? Los prefijos `\\?\` y `\\.\` no cuentan.
+/// ¿Es una carpeta? `None` si la ruta es de red (`Network::is_remote`, sin E/S): en el hilo de
+/// interfaz no se toca; quien llama navega igual y deja que la carga (en su hilo) decida.
+pub fn probe_dir(p: &Path) -> Option<bool> {
+    (!crate::sys::network().is_remote(p)).then(|| p.is_dir())
+}
+
+/// Como `probe_dir`, para un archivo.
+pub fn probe_file(p: &Path) -> Option<bool> {
+    (!crate::sys::network().is_remote(p)).then(|| p.is_file())
+}
+
+/// Como `probe_dir`, para saber si existe.
+pub fn probe_exists(p: &Path) -> Option<bool> {
+    (!crate::sys::network().is_remote(p)).then(|| p.exists())
+}
+
+/// La forma larga de una ruta (`long_path`), salvo las de red: en Windows `GetLongPathNameW` va
+/// al servidor y las rutas de red no tienen nombres 8.3 que valga la pena expandir.
+pub fn long_path_local(p: &Path) -> PathBuf {
+    if crate::sys::network().is_remote(p) { p.to_path_buf() } else { crate::sys::file_system().long_path(p) }
+}
+
+/// Las mayúsculas reales del disco (`true_case`), salvo en rutas de red (quedan como se
+/// escribieron).
+pub fn true_case_local(p: &Path) -> PathBuf {
+    if crate::sys::network().is_remote(p) { p.to_path_buf() } else { crate::sys::file_system().true_case(p) }
+}
+
 pub fn is_unc(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.starts_with(r"\\") && !s.starts_with(r"\\?\") && !s.starts_with(r"\\.\")

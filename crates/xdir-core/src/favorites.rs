@@ -61,7 +61,7 @@ impl Favorites {
         fn normalize(items: &mut [Fav]) {
             for item in items {
                 match item {
-                    Fav::Link { location: Location::Path(p), .. } => *p = crate::sys::file_system().long_path(p),
+                    Fav::Link { location: Location::Path(p), .. } => *p = crate::fs::long_path_local(p),
                     Fav::Group { items, .. } => normalize(items),
                     _ => {}
                 }

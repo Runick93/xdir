@@ -29,6 +29,9 @@ pub(super) enum TaskDone {
     /// `None`: abrir el resultado en una pestaña nueva del panel `pane`).
     /// `generation`: la del intento (los cancelados se descartan).
     Connected { pane: usize, tab: Option<usize>, generation: u64, addr: crate::net::Address, result: Result<PathBuf, crate::net::NetError> },
+    /// Nombres de unidades de red, pedidos en otro hilo (para el árbol).
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    DriveLabels(Vec<(PathBuf, String)>),
 }
 
 impl App {
@@ -83,6 +86,7 @@ impl App {
             TaskDone::NetPlaces(places) => self.on_net_places(places),
             TaskDone::NetConnections(result) => self.on_net_connections(result),
             TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
+            TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
         }
     }
 

@@ -145,7 +145,8 @@ impl App {
         if commit {
             self.go_to_text(pane, &text);
             let typed = text.trim().trim_matches('"');
-            if std::path::Path::new(typed).exists() {
+            // Una ruta de red no se mira acá: se anota igual.
+            if fs::probe_exists(std::path::Path::new(typed)) != Some(false) {
                 typed::push(typed);
             }
         }
@@ -278,9 +279,11 @@ impl App {
             tab.navigate(hwnd, &tx, Location::Path(path));
             return;
         }
-        if path.is_dir() {
+        // Una ruta de red no se toca en este hilo: se navega y la carga (en su hilo) decide.
+        let is_dir = fs::probe_dir(&path);
+        if is_dir != Some(false) {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).
-            tab.navigate(hwnd, &tx, Location::Path(sys::file_system().true_case(&path)));
+            tab.navigate(hwnd, &tx, Location::Path(fs::true_case_local(&path)));
         } else if fs::is_zip(&path) && path.is_file() {
             // Un .zip escrito en la barra: se entra como carpeta.
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

@@ -125,6 +125,25 @@ fn timeout_abandons_hung_call() {
 }
 
 #[test]
+fn remote_item_has_time_limit() {
+    crate::sys::testing::install_fakes();
+    let remote = std::path::PathBuf::from("/net/n5-item");
+    crate::sys::testing::FakeNetwork::set_remote(&remote);
+    fn slow(_: &std::path::Path) -> u32 {
+        std::thread::sleep(Duration::from_secs(30));
+        7
+    }
+    fn fast(_: &std::path::Path) -> u32 {
+        7
+    }
+    assert_eq!(remote_bounded(&remote.join("a.jpg"), fast), 7);
+    assert_eq!(remote_bounded(std::path::Path::new("/local-n5/a.jpg"), fast), 7);
+    let t0 = Instant::now();
+    assert_eq!(remote_bounded(&remote.join("b.jpg"), slow), 0);
+    assert!(t0.elapsed() < Duration::from_secs(7));
+}
+
+#[test]
 fn secret_wipe_zeroes() {
     let mut s = Secret::new(b"clave".to_vec());
     assert_eq!(s.expose(), b"clave");

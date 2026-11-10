@@ -301,6 +301,14 @@ impl App {
                         self.drag = Drag::Tab { pane: i, index: j, start_x: x, start_y: y, moved: false, grab };
                     }
                     PaneHit::TabClose(j) => self.close_tab(i, j),
+                    PaneHit::Placeholder(crate::list::placeholder::PlaceholderButton::Retry) => {
+                        self.panes[i].tab_mut().reload(hwnd, &tx, false);
+                        self.watch_slow_load(i);
+                    }
+                    PaneHit::Placeholder(crate::list::placeholder::PlaceholderButton::CloseTab) => {
+                        let j = self.panes[i].active;
+                        self.close_tab(i, j);
+                    }
                     PaneHit::NewTab => {
                         let loc = self.panes[i].tab().location.clone();
                         self.new_tab(i, loc, true);

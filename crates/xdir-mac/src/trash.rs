@@ -172,20 +172,30 @@ fn read_records(b: &[u8], out: &mut HashMap<String, (Option<String>, Option<Stri
     };
     let db = block(dsdb?)?;
     let root_node = u32_at(b, db)? as usize;
+    // Topes: un nodo visitado dos veces (ciclo), más registros o nodos pendientes de los que
+    // puede tener una Papelera razonable → archivo armado o roto, sin resultado.
+    const MAX: usize = 1 << 16;
     let mut stack = vec![root_node];
-    let mut seen = 0usize;
+    let mut visited = std::collections::HashSet::new();
+    let mut records = 0usize;
     while let Some(node) = stack.pop() {
-        seen += 1;
-        if seen > count + 1 {
-            return None; // Ciclo o basura: no se sigue.
+        if !visited.insert(node) {
+            return None;
         }
         let mut at = block(node)?;
         let p = u32_at(b, at)?;
         let n = u32_at(b, at + 4)? as usize;
+        records += n;
+        if records > MAX {
+            return None;
+        }
         at += 8;
-        for _ in 0..n.min(1 << 16) {
+        for _ in 0..n {
             if p != 0 {
                 stack.push(u32_at(b, at)? as usize);
+                if stack.len() > MAX {
+                    return None;
+                }
                 at += 4;
             }
             at = read_record(b, at, out)?;
@@ -336,6 +346,55 @@ mod tests {
         for cut in [10, 100, 2100, 4100, 6200] {
             let _ = parse_ds_store(&one[..cut.min(one.len())]);
         }
+    }
+
+    /// Un nodo que se apunta a sí mismo con muchos registros (caso del revisor): termina enseguida
+    /// y sin resultado, sin colgarse ni comer memoria.
+    #[test]
+    fn ds_store_self_reference_finishes() {
+        let count: usize = 65536;
+        let mut b = Vec::new();
+        b.extend(1u32.to_be_bytes());
+        b.extend(b"Bud1");
+        let root = 32u32;
+        b.extend((root - 4).to_be_bytes());
+        b.resize(32, 0);
+        b.extend((count as u32).to_be_bytes());
+        b.extend(0u32.to_be_bytes());
+        let addr_pos = b.len();
+        b.resize(addr_pos + 4 * count, 0);
+        b.extend(1u32.to_be_bytes());
+        b.push(4);
+        b.extend(b"DSDB");
+        b.extend(0u32.to_be_bytes());
+        while (b.len() - 4) % 32 != 0 {
+            b.push(0);
+        }
+        let db = b.len();
+        b.extend(1u32.to_be_bytes());
+        b.resize(db + 32, 0);
+        while (b.len() - 4) % 32 != 0 {
+            b.push(0);
+        }
+        let node = b.len();
+        let n = 20000u32;
+        b.extend(1u32.to_be_bytes());
+        b.extend(n.to_be_bytes());
+        for _ in 0..n {
+            b.extend(1u32.to_be_bytes());
+            b.extend(1u32.to_be_bytes());
+            b.extend(0x61u16.to_be_bytes());
+            b.extend(b"ptbL");
+            b.extend(b"bool");
+            b.push(1);
+        }
+        for (i, off) in [(0, db), (1, node)] {
+            let a = (((off - 4) as u32) & !0x1f) | 5;
+            b[addr_pos + 4 * i..addr_pos + 4 * i + 4].copy_from_slice(&a.to_be_bytes());
+        }
+        let t = std::time::Instant::now();
+        assert!(parse_ds_store(&b).is_empty());
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
     }
 
     fn tmp(name: &str) -> PathBuf {

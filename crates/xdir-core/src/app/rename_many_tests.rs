@@ -450,3 +450,89 @@ fn only_visible_selection_counts() {
     a.run_command(Command::Rename);
     assert!(a.rename_many.is_none());
 }
+
+// Un solo panel a la derecha: Renombrar varios y el de información se reemplazan entre sí, y al
+// cerrar cualquiera de los dos vuelve la vista previa si estaba prendida.
+
+const VK_F2: Key = Key(crate::keys::keys::VK_F1.0 + 1);
+
+#[test]
+fn info_closes_rename_many_and_preview_comes_back() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    a.info.size_thread = false;
+    let dir = fixture("info-cierra", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    a.preview.on = true;
+    select(&mut a, &["a.txt", "b.txt"]);
+    // F2 con varios abre Renombrar varios; Alt+Enter (⌘I en la Mac) lo cambia por información.
+    assert!(a.on_key(VK_F2));
+    assert_eq!(a.preview.owner, RightPanel::RenameMany);
+    assert!(a.on_alt_key(crate::keys::keys::VK_RETURN));
+    assert!(a.rename_many.is_none(), "abrir información cierra Renombrar varios");
+    assert!(host.text_boxes_of(TextKind::Field).is_empty());
+    assert!(a.info_open());
+    assert_eq!(a.preview.owner, RightPanel::Info);
+    assert!(a.panes[0].tab().list.rename_preview.is_none(), "la lista vuelve a la normal");
+    a.paint();
+    assert!(!host.drawn_texts().iter().any(|(_, t, _)| t.starts_with("Renombrar ")));
+    // Cerrar información: vuelve la vista previa.
+    assert!(a.on_alt_key(crate::keys::keys::VK_RETURN));
+    assert!(!a.info_open());
+    assert_eq!(a.preview.owner, RightPanel::Preview);
+    assert!(a.preview_column().is_some() && a.preview.on);
+}
+
+#[test]
+fn rename_many_closes_info_and_preview_comes_back() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    a.info.size_thread = false;
+    let dir = fixture("renvarios-cierra", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    a.preview.on = true;
+    select(&mut a, &["a.txt", "b.txt"]);
+    a.run_command(Command::Properties);
+    assert!(a.info_open());
+    // F2 con varios desde información: Renombrar varios toma el lugar y la información se cierra.
+    assert!(a.on_key(VK_F2));
+    assert!(!a.info_open());
+    assert_eq!(a.preview.owner, RightPanel::RenameMany);
+    assert_eq!(a.rename_many.as_ref().expect("panel abierto").items, ["a.txt", "b.txt"]);
+    assert_eq!(host.text_boxes_of(TextKind::Field).len(), 2);
+    a.paint();
+    assert!(host.drawn_texts().iter().any(|(_, t, _)| t == "Renombrar 2 elementos"));
+    // Esc cierra Renombrar varios y vuelve la vista previa (no la información).
+    a.on_key(crate::keys::keys::VK_ESCAPE);
+    assert!(a.rename_many.is_none() && !a.info_open());
+    assert_eq!(a.preview.owner, RightPanel::Preview);
+    assert!(a.preview_column().is_some());
+    // Con la vista previa apagada, cerrar cualquiera de los dos deja la columna oculta.
+    a.preview.on = false;
+    a.run_command(Command::RenameMany);
+    a.run_command(Command::Properties);
+    assert!(a.info_open() && a.rename_many.is_none());
+    a.run_command(Command::RenameMany);
+    assert!(!a.info_open() && a.rename_many.is_some());
+    a.close_rename_many();
+    assert!(a.preview_column().is_none());
+}
+
+#[test]
+fn toggle_preview_closes_either_panel() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    a.info.size_thread = false;
+    let dir = fixture("prender", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    a.preview.on = false;
+    select(&mut a, &["a.txt", "b.txt"]);
+    a.run_command(Command::RenameMany);
+    a.run_command(Command::TogglePreview);
+    assert!(a.rename_many.is_none());
+    assert_eq!(a.preview.owner, RightPanel::Preview);
+    assert!(a.preview.on);
+    a.run_command(Command::Properties);
+    a.run_command(Command::TogglePreview);
+    assert!(!a.info_open() && a.preview.on);
+}

@@ -175,11 +175,18 @@ impl App {
         self.preview.width = clamped.clamp(ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W);
     }
 
+    /// Cierra el panel que esté en el lugar de la vista previa (información o Renombrar varios).
+    pub(super) fn close_right_panel(&mut self) {
+        match self.preview.owner {
+            RightPanel::Preview => {}
+            RightPanel::Info => self.close_info(),
+            RightPanel::RenameMany => self.close_rename_many(),
+        }
+    }
+
     /// Prende la columna (venía de xtree, donde no se veía).
     pub(super) fn show_preview(&mut self) {
-        if self.preview.owner != RightPanel::Preview {
-            self.close_info();
-        }
+        self.close_right_panel();
         self.preview.on = true;
         self.sync_preview();
         self.redraw();
@@ -188,7 +195,7 @@ impl App {
     /// Prende o apaga la columna. Con otro panel en su lugar, lo cierra y muestra la vista previa.
     pub(super) fn toggle_preview(&mut self) {
         if self.preview.owner != RightPanel::Preview {
-            self.close_info();
+            self.close_right_panel();
             self.preview.on = true;
             self.sync_preview();
             self.redraw();

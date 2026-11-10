@@ -1,8 +1,8 @@
 //! Ventanas secundarias del sistema cuyo contenido dibuja el núcleo (`WindowHost::aux_*`): por
 //! ahora la ventana de copia (`xdir.aux`), como la de Windows: barra de título del sistema con
 //! minimizar y cerrar, dueña la principal, sin redimensionar (el alto lo pone el contenido con
-//! `aux_resize`), abajo a la derecha del monitor de xdir la primera vez y después donde la dejó el
-//! usuario (mientras dure la sesión). Dibuja con un `Renderer` propio llamando a
+//! `aux_resize`), centrada sobre la ventana de xdir la primera vez (sin salirse del área de trabajo
+//! de su monitor) y después donde la dejó el usuario (mientras dure la sesión). Dibuja con un `Renderer` propio llamando a
 //! `App::paint_aux`; el mouse y las teclas van a `App::aux_mouse` / `App::aux_key`; cerrarla la
 //! oculta (`App::aux_closed`) y los trabajos siguen.
 //!
@@ -40,12 +40,14 @@ fn style() -> WINDOW_STYLE {
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
 }
 
-/// Rectángulo de la ventana (`size` en píxeles, con el borde) abajo a la derecha de `work`.
-pub fn initial_rect(work: RECT, size: SIZE) -> RECT {
-    let right = work.right - MARGIN;
-    let bottom = work.bottom - MARGIN;
-    let left = (right - size.cx).max(work.left);
-    let top = (bottom - size.cy).max(work.top);
+/// Rectángulo de la ventana (`size` en píxeles, con el borde) centrado sobre `owner` (la ventana
+/// principal), corrido para que entre en `work` (el área de trabajo de su monitor); si es más
+/// grande que el área, queda pegado arriba a la izquierda.
+pub fn initial_rect(owner: RECT, work: RECT, size: SIZE) -> RECT {
+    let cx = (owner.left + owner.right) / 2;
+    let cy = (owner.top + owner.bottom) / 2;
+    let left = (cx - size.cx / 2).min(work.right - size.cx).max(work.left);
+    let top = (cy - size.cy / 2).min(work.bottom - size.cy).max(work.top);
     RECT { left, top, right: left + size.cx, bottom: top + size.cy }
 }
 
@@ -207,7 +209,11 @@ pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &The
                 } else {
                     RECT { left: 0, top: 0, right: 1280, bottom: 800 }
                 };
-                let r = initial_rect(work, ws);
+                let mut owner = RECT::default();
+                if GetWindowRect(main, &mut owner).is_err() {
+                    owner = work;
+                }
+                let r = initial_rect(owner, work, ws);
                 (r.left, r.top)
             });
             let _ = SetWindowPos(hwnd, Some(HWND_TOP), x, y, ws.cx, ws.cy, SWP_NOACTIVATE);
@@ -399,16 +405,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_position_bottom_right() {
+    fn initial_position_centered_on_main() {
         let work = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
-        let r = initial_rect(work, SIZE { cx: 576, cy: 450 });
-        assert_eq!((r.left, r.top, r.right, r.bottom), (1920 - 16 - 576, 1040 - 16 - 450, 1920 - 16, 1040 - 16));
+        let size = SIZE { cx: 576, cy: 450 };
+        // Centrada sobre la principal.
+        let r = initial_rect(RECT { left: 200, top: 100, right: 1480, bottom: 900 }, work, size);
+        assert_eq!((r.left, r.top, r.right, r.bottom), (840 - 288, 500 - 225, 840 + 288, 500 + 225));
+        // La principal casi fuera del monitor: la de copia se corre para entrar entera.
+        let r = initial_rect(RECT { left: 1700, top: 900, right: 2500, bottom: 1500 }, work, size);
+        assert_eq!((r.right, r.bottom), (1920, 1040));
+        let r = initial_rect(RECT { left: -600, top: -400, right: 200, bottom: 100 }, work, size);
+        assert_eq!((r.left, r.top), (0, 0));
         // Un segundo monitor a la izquierda (coordenadas negativas).
-        let work = RECT { left: -1280, top: 0, right: 0, bottom: 760 };
-        let r = initial_rect(work, SIZE { cx: 576, cy: 450 });
-        assert_eq!((r.right, r.bottom), (-16, 744));
+        let left = RECT { left: -1280, top: 0, right: 0, bottom: 760 };
+        let r = initial_rect(RECT { left: -1280, top: 0, right: 0, bottom: 760 }, left, size);
+        assert_eq!((r.left, r.top), (-640 - 288, 380 - 225));
         // Más grande que el área: queda pegada arriba a la izquierda.
-        let r = initial_rect(RECT { left: 0, top: 0, right: 400, bottom: 300 }, SIZE { cx: 576, cy: 450 });
+        let r = initial_rect(RECT { left: 0, top: 0, right: 400, bottom: 300 }, RECT { left: 0, top: 0, right: 400, bottom: 300 }, size);
         assert_eq!((r.left, r.top), (0, 0));
     }
 

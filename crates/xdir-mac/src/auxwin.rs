@@ -4,7 +4,7 @@
 //! llamando a `App::paint_aux`, manda el mouse a `App::aux_mouse` y las teclas a `App::aux_key`.
 //! Cerrarla la oculta (`orderOut`) y avisa `App::aux_closed`: los trabajos siguen. La ventana se
 //! crea una vez y se reusa, así recuerda dónde la dejó el usuario mientras dure la sesión; la
-//! primera vez va abajo a la derecha de la pantalla de xdir.
+//! primera vez va centrada sobre la ventana de xdir, sin salirse de su pantalla.
 
 use std::cell::RefCell;
 
@@ -26,13 +26,15 @@ use crate::theme::Theme;
 /// Separación de los bordes de la pantalla.
 const MARGIN: f64 = 16.0;
 
-/// Marco inicial abajo a la derecha de `visible` (coordenadas de AppKit: el origen es la esquina
-/// de abajo a la izquierda), con margen 16. Si no entra, el borde de arriba queda a la vista.
-pub fn initial_frame(visible: NSRect, size: NSSize) -> NSRect {
-    let right = visible.origin.x + visible.size.width - MARGIN;
-    let x = (right - size.width).max(visible.origin.x);
-    let top = visible.origin.y + visible.size.height;
-    let y = (visible.origin.y + MARGIN).min(top - size.height);
+/// Marco inicial centrado sobre `main` (la ventana principal), corrido para que entre en
+/// `visible` (coordenadas de AppKit: el origen es la esquina de abajo a la izquierda). Si es más
+/// alto que la pantalla, el borde de arriba queda a la vista.
+pub fn initial_frame(main: NSRect, visible: NSRect, size: NSSize) -> NSRect {
+    let cx = main.origin.x + main.size.width / 2.0;
+    let cy = main.origin.y + main.size.height / 2.0;
+    let (vr, vt) = (visible.origin.x + visible.size.width, visible.origin.y + visible.size.height);
+    let x = (cx - size.width / 2.0).min(vr - size.width).max(visible.origin.x);
+    let y = (cy - size.height / 2.0).max(visible.origin.y).min(vt - size.height);
     NSRect::new(NSPoint::new(x, y), size)
 }
 
@@ -225,10 +227,12 @@ fn ensure(main: Handle, theme: &Theme, size: (f32, f32)) -> Option<Retained<NSWi
     let delegate = AuxDelegate::new(mtm);
     window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     apply_appearance(&window, theme.dark);
-    let screen = crate::app::main_window().and_then(|w| w.screen()).or_else(|| window.screen());
+    let main_window = crate::app::main_window();
+    let screen = main_window.as_ref().and_then(|w| w.screen()).or_else(|| window.screen());
     if let Some(screen) = screen {
-        let frame = window.frame();
-        window.setFrame_display(initial_frame(screen.visibleFrame(), frame.size), false);
+        let visible = screen.visibleFrame();
+        let over = main_window.map_or(visible, |w| w.frame());
+        window.setFrame_display(initial_frame(over, visible, window.frame().size), false);
     }
     let renderer = Renderer::new().ok()?;
     RENDERER.with(|r| *r.borrow_mut() = Some(renderer));
@@ -283,6 +287,12 @@ pub fn hide(w: AuxWindow) {
     }
 }
 
+/// Número de la ventana de copia para el sistema (pruebas: capturar solo esa ventana).
+#[cfg(feature = "pruebas")]
+pub fn window_number() -> Option<isize> {
+    with(|a| a.window.isVisible().then(|| a.window.windowNumber())).flatten()
+}
+
 /// El tema cambió (lo llama el host al dibujar la principal).
 pub fn set_theme(theme: &Theme) {
     let changed = with(|a| {
@@ -302,18 +312,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_frame_bottom_right() {
+    fn initial_frame_centered_on_main() {
+        let size = NSSize::new(560.0, 442.0);
         // AppKit: el origen es la esquina de abajo a la izquierda; el Dock deja 70 abajo.
         let visible = NSRect::new(NSPoint::new(0.0, 70.0), NSSize::new(1512.0, 845.0));
-        let f = initial_frame(visible, NSSize::new(560.0, 442.0));
-        assert_eq!((f.origin.x, f.origin.y, f.size.width, f.size.height), (1512.0 - 16.0 - 560.0, 70.0 + 16.0, 560.0, 442.0));
+        let main = NSRect::new(NSPoint::new(100.0, 100.0), NSSize::new(1280.0, 800.0));
+        let f = initial_frame(main, visible, size);
+        assert_eq!((f.origin.x, f.origin.y, f.size.width, f.size.height), (740.0 - 280.0, 500.0 - 221.0, 560.0, 442.0));
+        // La principal corrida hasta casi salirse: la de copia entra entera en la pantalla.
+        let off = NSRect::new(NSPoint::new(1300.0, -300.0), NSSize::new(800.0, 500.0));
+        let f = initial_frame(off, visible, size);
+        assert_eq!((f.origin.x + f.size.width, f.origin.y), (1512.0, 70.0));
         // Otra pantalla a la izquierda (x negativas).
         let left = NSRect::new(NSPoint::new(-1920.0, 0.0), NSSize::new(1920.0, 1055.0));
-        let f = initial_frame(left, NSSize::new(560.0, 442.0));
-        assert_eq!((f.origin.x, f.origin.y), (-16.0 - 560.0, 16.0));
+        let f = initial_frame(left, left, size);
+        assert_eq!((f.origin.x, f.origin.y), (-960.0 - 280.0, 527.5 - 221.0));
         // Más alta que la pantalla: el borde de arriba queda a la vista.
         let small = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 400.0));
-        let f = initial_frame(small, NSSize::new(560.0, 442.0));
+        let f = initial_frame(small, small, size);
         assert!(f.origin.y + f.size.height <= 400.0);
     }
 

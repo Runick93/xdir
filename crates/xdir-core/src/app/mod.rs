@@ -29,6 +29,8 @@ mod preview_tests;
 #[cfg(test)]
 mod quick_look_tests;
 #[cfg(test)]
+mod ops_tests;
+#[cfg(test)]
 mod rename_many_tests;
 
 pub use events::CursorKind;
@@ -48,7 +50,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use crate::geom::{self, contains};
-use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
+use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
 use crate::sys::{self, Handle};
 use crate::{WM_APP, fs, shell};
 
@@ -297,6 +299,11 @@ pub struct App {
     window_state: Option<([i32; 4], bool)>,
     ops_tx: Sender<OpResult>,
     ops_rx: Receiver<OpResult>,
+    /// Trabajos sueltos (`tasks.rs`).
+    task_tx: Sender<tasks::TaskDone>,
+    task_rx: Receiver<tasks::TaskDone>,
+    /// Discos que se pueden expulsar (los averigua `request_ejectable` en otro hilo).
+    ejectable: std::collections::HashSet<PathBuf>,
     undo: Vec<Undo>,
     rename: Option<Rename>,
     /// Carpeta recién creada sobre la que abrir el renombrado cuando aparezca en la lista.
@@ -400,9 +407,6 @@ pub struct App {
     rename_many: Option<rename_many::RenameMany>,
     /// Hay un Renombrar varios (o su deshacer) corriendo: no se larga otro hasta que termine.
     renaming: bool,
-    /// Trabajos sueltos en otro hilo (`spawn_task`) y su canal.
-    task_tx: Sender<tasks::TaskDone>,
-    task_rx: Receiver<tasks::TaskDone>,
     /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
     swallow_space: bool,
 }
@@ -531,6 +535,9 @@ impl App {
             window_state: session.window.map(|w| (w, session.maximized)),
             ops_tx,
             ops_rx,
+            task_tx,
+            task_rx,
+            ejectable: std::collections::HashSet::new(),
             undo: Vec::new(),
             rename: None,
             pending_rename: None,
@@ -584,8 +591,6 @@ impl App {
             quick_look: None,
             rename_many: None,
             renaming: false,
-            task_tx,
-            task_rx,
             swallow_space: false,
         };
         app.restore_panes(&session, start_path);
@@ -608,6 +613,8 @@ impl App {
         self.hwnd = window;
         self.dpi = dpi;
         self.host.attach(window);
+        // Qué discos se pueden expulsar (en otro hilo; vuelve con `WM_APP_TASK`).
+        self.request_ejectable();
     }
 
     /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).

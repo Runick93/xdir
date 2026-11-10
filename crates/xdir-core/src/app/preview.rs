@@ -275,16 +275,21 @@ impl App {
         self.preview.gallery_stamps = stamps;
     }
 
+    /// Suelta lo que mostraba la vista previa (lo que esté en camino se descarta).
+    pub(super) fn clear_preview_subject(&mut self) {
+        if self.preview.subject.is_some() || self.preview.fingerprint.is_some() {
+            self.preview.subject = None;
+            self.preview.info = None;
+            self.preview.fingerprint = None;
+            self.preview.pending = false;
+            self.preview.bump();
+        }
+    }
+
     pub(super) fn sync_preview(&mut self) {
         // Con otro panel en su lugar, la vista previa no muestra ni pide nada.
         if !self.preview_visible() || self.preview.owner != RightPanel::Preview {
-            if self.preview.subject.is_some() || self.preview.fingerprint.is_some() {
-                self.preview.subject = None;
-                self.preview.info = None;
-                self.preview.fingerprint = None;
-                self.preview.pending = false;
-                self.preview.bump();
-            }
+            self.clear_preview_subject();
             return;
         }
         let tab = self.panes[self.active].tab();

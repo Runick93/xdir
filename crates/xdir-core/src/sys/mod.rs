@@ -190,6 +190,15 @@ pub trait DiskScan: Send + Sync {
 /// abiertos (el menú del Shell de Windows) es estado de ese hilo dentro de la plataforma, no del
 /// servicio.
 pub trait Shell: Send + Sync {
+    /// De estas raíces de disco, las que se pueden expulsar (bloqueante: en hilos de trabajo).
+    fn ejectable(&self, roots: &[PathBuf]) -> Vec<PathBuf>;
+    /// Expulsa el disco de `root` (bloqueante: en hilos de trabajo).
+    fn eject(&self, root: &Path) -> Result<(), crate::shell::EjectError>;
+    /// Cómo son los accesos directos de este sistema.
+    fn link_style(&self) -> crate::names::LinkStyle;
+    /// A dónde apunta un acceso directo, alias o enlace (`None` si no es uno o no se resuelve).
+    /// Bloqueante: solo en hilos de trabajo. No lee el contenido del destino.
+    fn link_target(&self, path: &Path) -> Option<PathBuf>;
     /// Copia (o corta, con `cut`) los elementos al portapapeles de archivos.
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String>;
     /// Archivos del portapapeles y si se cortaron.
@@ -283,6 +292,11 @@ pub trait FileSystem: Send + Sync {
     /// Tipo que el sistema le da a una carpeta (el mismo que muestra la lista).
     fn folder_type(&self) -> Arc<str> {
         Arc::from("Carpeta")
+    }
+    /// ¿Es la Papelera? (sin E/S: solo mira la ruta). Windows: la carpeta virtual de la
+    /// Papelera; macOS: `~/.Trash` o `/Volumes/*/.Trashes/<uid>`; Linux: `<datos>/Trash/files`.
+    fn is_trash(&self, _loc: &Location) -> bool {
+        false
     }
     /// Lo escrito en la barra de dirección como lugar especial del Shell ("shell:RecycleBinFolder").
     fn shell_location(&self, text: &str) -> Option<Location>;

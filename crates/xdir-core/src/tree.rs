@@ -230,6 +230,10 @@ pub struct Tree {
     reveal: Option<Reveal>,
     /// Nodo que el próximo cuadro deja a la vista (desplazando lo justo).
     scroll_to: Option<usize>,
+    /// Discos que se pueden expulsar (llevan ⏏); lo pone la `App`.
+    pub ejectable: std::collections::HashSet<PathBuf>,
+    /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, nodo).
+    eject_rects: Vec<(Rect, usize)>,
 }
 
 /// Revelación pendiente (`Tree::reveal`).
@@ -275,6 +279,8 @@ impl Tree {
             qrx,
             reveal: None,
             scroll_to: None,
+            ejectable: std::collections::HashSet::new(),
+            eject_rects: Vec::new(),
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
         t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
@@ -652,6 +658,21 @@ impl Tree {
         self.rows().get(row as usize).copied()
     }
 
+    /// ⏏ de un disco bajo el punto: el nodo.
+    pub fn eject_hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.eject_rects.iter().find(|(r, _)| contains(r, x, y)).map(|&(_, id)| id)
+    }
+
+    /// Dónde se dibujó el ⏏ del disco `root` en el último cuadro.
+    pub fn eject_button(&self, root: &Path) -> Option<Rect> {
+        self.eject_rects.iter().find(|&&(_, id)| self.nodes[id].path == root).map(|&(r, _)| r)
+    }
+
+    /// Ruta de un nodo.
+    pub fn path_of(&self, id: usize) -> PathBuf {
+        self.nodes[id].path.clone()
+    }
+
     pub fn hit(&self, x: f32, y: f32) -> TreeHit {
         if !contains(&self.area, x, y) {
             return TreeHit::Nothing;
@@ -907,6 +928,7 @@ impl Tree {
         let hs = self.hscroll;
         let body = rect(area.left + 1.0, area.top + TOP_PAD - 2.0, area.left + view_w - 1.0, area.top + view_h);
         let centered_x = area.left + (COLLAPSED_W - 22.0) / 2.0;
+        let mut ejects = Vec::new();
         p.clip(body, &mut || {
             for (i, &id) in rows.iter().enumerate() {
                 let y = area.top + TOP_PAD + i as f32 * ROW_H - self.scroll;
@@ -939,6 +961,12 @@ impl Tree {
                 p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
                 if e > 0.05 {
                     p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
+                    // ⏏ a la derecha de los discos expulsables.
+                    if n.kind == Kind::Drive && self.ejectable.contains(&n.path) && self.settled() {
+                        let slot = rect(row.right - 26.0, y + 3.0, row.right - 4.0, y + ROW_H - 3.0);
+                        crate::list::draw_eject(p, slot, self.hover == Some(id));
+                        ejects.push((slot, id));
+                    }
                     if self.shows_pin(n) {
                         let slot = rect(row.right - 26.0, y + 5.0, row.right - 4.0, y + ROW_H - 5.0);
                         let hot = self.pin_hover == Some(id);
@@ -967,6 +995,7 @@ impl Tree {
                 }
             }
         });
+        self.eject_rects = ejects;
 
         // Título y chincheta (acento si está fija).
         if e > 0.05 {

@@ -9,3 +9,5 @@ pub use xdir_core::shell::{Entry, Item};
 pub use xdir_core::shell::UNPIN_QUICK;
 
 pub mod win32;
+/// Expulsar discos.
+pub mod eject;

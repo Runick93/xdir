@@ -360,6 +360,17 @@ mod tests {
         assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
     }
 
+    /// Un atajo con Meta en `[atajos]` se lee y no choca con el mismo sin Meta.
+    #[test]
+    fn meta_shortcut_in_config() {
+        crate::sys::testing::install_fakes();
+        let c = Config::parse("[atajos]\ncarpeta_con_seleccion = \"Meta+Ctrl+K\"\n");
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        let k = Key(b'K' as u16);
+        assert_eq!(c.keymap.lookup(k, true, false, false, true), Some(commands::Command::NewFolderWithSelection));
+        assert_eq!(c.keymap.lookup(k, true, false, false, false), None);
+    }
+
     #[test]
     fn user_changes_and_errors() {
         crate::sys::testing::install_fakes();
@@ -367,7 +378,7 @@ mod tests {
             "[atajos]\npestana_nueva = \"Ctrl+K\"\ninexistente = \"Ctrl+J\"\nrecargar = \"Ctrl+Hiper\"\n\
              [colores]\n\"*.PDF; *.ps\" = \"#FF0000\"\n'@oculto' = \"#00FF00\"\n'@raro' = \"#000000\"\n\"*.x\" = \"rojo\"\n[otra]\n",
         );
-        assert_eq!(c.keymap.lookup(Key(b'K' as u16), true, false, false), Some(commands::Command::NewTab));
+        assert_eq!(c.keymap.lookup(Key(b'K' as u16), true, false, false, false), Some(commands::Command::NewTab));
         let own = 2;
         assert_eq!(c.colors.len(), own + Config::parse_rules(DEFAULT_COLORS).colors.len());
         assert_eq!(c.colors[0].matches, ColorMatch::Names(vec!["*.pdf".into(), "*.ps".into()]));

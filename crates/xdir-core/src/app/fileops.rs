@@ -61,6 +61,59 @@ impl App {
         }
     }
 
+    /// ¿El panel activo muestra la Papelera?
+    pub(super) fn in_trash(&self) -> bool {
+        sys::file_system().is_trash(&self.panes[self.active].tab().location)
+    }
+
+    /// Duplicar: una copia de cada seleccionado a su lado (solo carpetas de disco, no la Papelera).
+    pub(super) fn duplicate_selection(&mut self) {
+        if !matches!(self.panes[self.active].tab().location, Location::Path(_)) || self.in_trash() {
+            return;
+        }
+        let sources = self.selection(self.active);
+        if !sources.is_empty() {
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Duplicate { sources });
+        }
+    }
+
+    /// Carpeta nueva con la selección: en la carpeta del panel (en una búsqueda, la carpeta
+    /// buscada), solo en carpetas de disco.
+    pub(super) fn new_folder_with_selection(&mut self) {
+        let location = &self.panes[self.active].tab().location;
+        let (Location::Path(_), Some(parent)) = (location, location.target()) else { return };
+        if self.in_trash() {
+            return;
+        }
+        let items = self.selection(self.active);
+        if !items.is_empty() {
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::NewFolderWith { parent, items });
+        }
+    }
+
+    /// Devolver: cada seleccionado de la Papelera vuelve a su lugar. En la Papelera virtual de
+    /// Windows lo hace el Shell (verbo `undelete`); en las demás, `Op::Restore`.
+    pub(super) fn restore_selection(&mut self) {
+        let location = self.panes[self.active].tab().location.clone();
+        if !sys::file_system().is_trash(&location) {
+            return;
+        }
+        if let Location::Shell { .. } = location {
+            let items = self.selection_items(self.active);
+            if !items.is_empty() {
+                if let Err(e) = sys::shell().invoke_verb(self.hwnd, &location, &items, "undelete") {
+                    self.notice = Some(format!("No se pudo devolver: {e}"));
+                }
+                self.reload_shell_tabs();
+            }
+            return;
+        }
+        let items = self.selection(self.active);
+        if !items.is_empty() {
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Restore { items });
+        }
+    }
+
     pub(super) fn delete_selection(&mut self, recycle: bool) {
         // En carpetas virtuales borra el propio Shell (en la Papelera: eliminar definitivamente).
         let location = self.panes[self.active].tab().location.clone();
@@ -87,6 +140,25 @@ impl App {
             }
         }
         self.reload_shell_tabs();
+        // Lo que tiene que quedar seleccionado (las copias de Duplicar), por carpeta.
+        let mut by_folder: Vec<(PathBuf, Vec<std::ffi::OsString>)> = Vec::new();
+        for p in &result.select {
+            let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else { continue };
+            match by_folder.iter_mut().find(|(f, _)| f == parent) {
+                Some((_, names)) => names.push(name.to_os_string()),
+                None => by_folder.push((parent.to_path_buf(), vec![name.to_os_string()])),
+            }
+        }
+        if !by_folder.is_empty() {
+            let (hwnd, tx) = (self.hwnd, self.tx.clone());
+            for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {
+                let Some((_, names)) = by_folder.iter().find(|(f, _)| tab.location.is_path(f)) else { continue };
+                if tab.is_loaded() {
+                    tab.select_after_load(names.clone());
+                    tab.reload(hwnd, &tx, true);
+                }
+            }
+        }
         let Some(path) = result.focus else { return };
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return };
         // Las pestañas que muestran esa carpeta enfocan el elemento al recargar.
@@ -290,7 +362,23 @@ impl App {
         };
         // «Vista rápida» primero. «Copiar como ruta de acceso» usa las mismas comillas y saltos de
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
-        let mut entries = vec![item("Vista rápida", Command::QuickLook), item("Copiar como ruta de acceso", Command::CopyPaths)];
+        let many = self.panes[self.active].tab().list.selected_indices().nth(1).is_some();
+        let link = self.selected_link().is_some();
+        // En la Papelera no se crean cosas nuevas (duplicados, accesos, carpetas).
+        let creates = !self.in_trash();
+        let mut entries = vec![item("Vista rápida", Command::QuickLook)];
+        if creates {
+            entries.push(item("Duplicar", Command::Duplicate));
+            entries.push(item("Crear acceso directo", Command::CreateShortcut));
+        }
+        if link {
+            entries.push(item("Mostrar el original", Command::ShowOriginal));
+        }
+        // Con dos o más: juntarlos en una carpeta nueva.
+        if many && creates {
+            entries.push(item("Carpeta nueva con la selección", Command::NewFolderWithSelection));
+        }
+        entries.push(item("Copiar como ruta de acceso", Command::CopyPaths));
         // Con varios seleccionados en una carpeta del disco: Renombrar varios.
         let n = self.panes[self.active].tab().list.selected_positions().len();
         if n > 1 && self.can_rename_many(self.active) {
@@ -312,11 +400,22 @@ impl App {
         // El menú del fondo del Shell solo trae las extensiones: Ver, Ordenar, Actualizar, Pegar y
         // Deshacer los pone la vista del Explorador, así que se agregan acá.
         let mut cmds = Vec::new();
-        let own = match (items.is_empty(), intercept) {
+        let mut own = Vec::new();
+        // En la Papelera, «Devolver» primero (también en la del Shell de Windows).
+        if !items.is_empty() && sys::file_system().is_trash(&location) {
+            cmds.push(Command::Restore);
+            own.push(shell::Entry::Item { id: 0, label: "Devolver".into(), enabled: true, checked: false });
+        }
+        // Un disco expulsable de «Este equipo»: «Expulsar».
+        if matches!(location, Location::Computer) && items.len() == 1 && self.eject_target().is_some() {
+            cmds.push(Command::Eject);
+            own.push(shell::Entry::Item { id: cmds.len() as u32 - 1, label: "Expulsar".into(), enabled: true, checked: false });
+        }
+        own.extend(match (items.is_empty(), intercept) {
             (true, true) => self.background_entries(pane, &mut cmds),
             (false, true) => self.item_entries(&mut cmds),
             _ => Vec::new(),
-        };
+        });
         let before: Option<std::collections::HashSet<String>> = (items.is_empty() && matches!(location, Location::Path(_)))
             .then(|| self.panes[pane].tab().list.entries.iter().map(|e| e.display.to_lowercase()).collect());
         // Una sola carpeta anclada: su menú dice "Desanclar de Acceso rápido".

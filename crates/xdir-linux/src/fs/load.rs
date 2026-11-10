@@ -150,7 +150,12 @@ fn list_dir(out: &mut Batcher, path: &Path) {
         let Ok(item) = item else { continue };
         let full = item.path();
         let Some(meta) = metadata(&item, &full) else { continue };
-        out.push(entry_for(item.file_name(), &meta, 0, None));
+        let mut e = entry_for(item.file_name(), &meta, 0, None);
+        // Enlaces simbólicos, para «Mostrar el original».
+        if item.file_type().is_ok_and(|t| t.is_symlink()) {
+            e.attrs |= xdir_core::fs::ATTR_LINK;
+        }
+        out.push(e);
     }
     out.flush();
     out.send(LoadMsg::Listed(Ok(())));

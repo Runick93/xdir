@@ -116,6 +116,12 @@ impl App {
         if !self.tree.contains(x, y) {
             return false;
         }
+        if let Some(id) = self.tree.eject_hit(x, y) {
+            let root = self.tree.path_of(id);
+            self.eject(root);
+            self.redraw();
+            return true;
+        }
         match self.tree.hit(x, y) {
             tree::TreeHit::Toggle(id) => self.tree.toggle(self.hwnd, id, self.show_hidden),
             tree::TreeHit::Open(loc) => {

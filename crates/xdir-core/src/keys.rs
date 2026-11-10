@@ -15,6 +15,8 @@ pub mod keys {
     pub const VK_CONTROL: Key = Key(0x11);
     /// Alt (⌥ Option en macOS).
     pub const VK_MENU: Key = Key(0x12);
+    /// Tecla Windows (Super en Linux); en macOS, la tecla Control (⌃). Es «Meta» en los atajos.
+    pub const VK_LWIN: Key = Key(0x5B);
     pub const VK_ESCAPE: Key = Key(0x1B);
     pub const VK_SPACE: Key = Key(0x20);
     pub const VK_PRIOR: Key = Key(0x21);

@@ -57,8 +57,10 @@ fn default_volume() -> VolumeInfo {
     VolumeInfo { id: "fake".into(), label: "Disco".into(), case_insensitive: false, has_trash: true, max_file: None, free: u64::MAX }
 }
 
-fn lower(p: &Path) -> String {
-    p.to_string_lossy().to_lowercase()
+/// Por tramos y en minúsculas (como un disco que no distingue): en Windows las rutas de las
+/// pruebas usan `/` y las que arma el motor con `join`, `\`.
+fn lower(p: &Path) -> Vec<String> {
+    crate::sys::folded(p)
 }
 
 impl FakeFs {

@@ -23,7 +23,10 @@ use crate::xtree::tree::Node;
 pub mod testing;
 mod copy;
 
-pub use copy::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo};
+pub use copy::{
+    CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
+    starts_with_folded,
+};
 
 #[cfg(test)]
 mod tests;

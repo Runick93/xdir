@@ -434,7 +434,7 @@ impl<'a> Job<'a> {
 
     /// ¿Es la misma ruta? (sin distinguir mayúsculas donde el disco no las distingue).
     fn same_path(&self, a: &Path, b: &Path) -> bool {
-        a == b || (self.case_insensitive(a) && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase())
+        a == b || (self.case_insensitive(a) && sys::same_path_folded(a, b))
     }
 
     /// ¿Es la misma carpeta? (por la ruta o por la identidad: otro camino a la misma).
@@ -447,11 +447,8 @@ impl<'a> Job<'a> {
         if inner.starts_with(outer) {
             return true;
         }
-        if self.case_insensitive(outer) {
-            let (i, o) = (inner.to_string_lossy().to_lowercase(), outer.to_string_lossy().to_lowercase());
-            if Path::new(&i).starts_with(Path::new(&o)) {
-                return true;
-            }
+        if self.case_insensitive(outer) && sys::starts_with_folded(inner, outer) {
+            return true;
         }
         // Otro camino a la misma carpeta: alguna de arriba de `inner` es `outer`.
         let Some(target) = self.exists(outer).filter(|s| s.kind == ItemKind::Dir && s.file_id.is_some()) else { return false };

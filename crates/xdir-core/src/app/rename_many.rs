@@ -292,6 +292,13 @@ impl App {
         if self.connect_field_done(commit) {
             return;
         }
+        // Una caja de la sección «Red» de la configuración (la que tiene el foco).
+        if let Some((_, n, a, _)) = self.net.page.editing.as_ref().map(|(i, n, a, r)| (*i, *n, *a, *r)) {
+            let b = if self.host.text_has_focus(n) { n } else { a };
+            if super::network_page::field_done(self, b, commit) {
+                return;
+            }
+        }
         if commit {
             self.apply_rename_many();
         } else {

@@ -234,5 +234,7 @@ impl App {
         if groups != self.groups {
             self.groups = groups;
         }
+        // `red.toml`: si cambió su fecha (mirada en un hilo).
+        self.reload_net_places(self.net.places_mtime.or(Some(std::time::UNIX_EPOCH)));
     }
 }

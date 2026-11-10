@@ -925,3 +925,165 @@ mod tree_net {
         assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
+
+// ---------- N8: sección «Red» de la configuración ----------
+
+mod red_page {
+    use super::*;
+    use crate::app::network::unix_now;
+    use crate::app::network_page::{self, LOCAL_NETWORK_HINT, PageHit, password_text};
+    use crate::geom::rect;
+    use crate::sys::testing::RecordingPainter;
+    use crate::theme::{DEFAULT_ACCENT, Theme};
+
+    fn painter() -> RecordingPainter {
+        RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(false)))
+    }
+
+    fn draw(a: &mut App) -> Vec<String> {
+        let p = painter();
+        let h = network_page::draw(a, &p, rect(0.0, 0.0, 900.0, 2000.0), None);
+        assert!(h > 100.0);
+        p.texts().into_iter().map(|t| t.1).collect()
+    }
+
+    fn click(a: &mut App, hit: PageHit) {
+        let (r, _) = *a.net.page.hits.iter().find(|(_, h)| *h == hit).unwrap_or_else(|| panic!("{hit:?}: {:?}", a.net.page.hits));
+        assert!(network_page::click(a, (r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0));
+    }
+
+    fn page_app(host: Rc<FakeHost>) -> App {
+        let mut a = net_app_with(host);
+        a.net.places.toggle_favorite(&Address::parse("smb://nas-n8/fotos").unwrap(), Some("NAS — fotos".into()));
+        a.net.places.toggle_favorite(&Address::parse("smb://srv-n8/comp").unwrap(), Some("Oficina".into()));
+        a.net.places.add_recent(&Address::parse("smb://srv-n8/respaldo").unwrap(), unix_now() - 2 * 86_400);
+        a
+    }
+
+    #[test]
+    fn red_page_lists_and_edits_favorites() {
+        let host = FakeHost::new();
+        let mut a = page_app(host.clone());
+        let texts = draw(&mut a);
+        for t in ["Red", "Favoritos", "NAS — fotos", "smb://nas-n8/fotos", "Oficina", "Recientes", "smb://srv-n8/respaldo", "hace 2 días", "Conectados ahora"] {
+            assert!(texts.iter().any(|x| x == t), "{t}: {texts:?}");
+        }
+        // Renombrar en línea.
+        click(&mut a, PageHit::EditFavorite(1));
+        draw(&mut a);
+        let (_, n, ad, _) = a.net.page.editing.unwrap();
+        crate::host::WindowHost::text_set(&*host, n, "Oficina centro");
+        crate::host::WindowHost::text_focus(&*host, n);
+        a.on_field_done(true);
+        assert_eq!(a.net.places.favorites[1].name, "Oficina centro");
+        assert!(a.net.page.editing.is_none());
+        // Dirección inválida: el error queda en la fila y sigue editando.
+        click(&mut a, PageHit::EditFavorite(0));
+        draw(&mut a);
+        let (_, _, ad2, _) = a.net.page.editing.unwrap();
+        crate::host::WindowHost::text_set(&*host, ad2, "smb://na s");
+        crate::host::WindowHost::text_focus(&*host, ad2);
+        a.on_field_done(true);
+        assert_eq!(a.net.page.error, Some((0, "Escribí una dirección como smb://servidor/recurso".to_string())));
+        assert!(draw(&mut a).iter().any(|t| t == "Escribí una dirección como smb://servidor/recurso"));
+        a.on_field_done(false);
+        assert!(a.net.page.editing.is_none());
+        let _ = ad;
+        // ↑ cambia el orden de `places` y del árbol.
+        draw(&mut a);
+        click(&mut a, PageHit::FavoriteUp(1));
+        assert_eq!(a.net.places.favorites[0].name, "Oficina centro");
+        #[cfg(feature = "arbol")]
+        assert_eq!(a.tree.network_rows()[1].1, "Oficina centro");
+        // Agregar…: una fila vacía; Enter con la dirección la suma.
+        draw(&mut a);
+        click(&mut a, PageHit::AddFavorite);
+        draw(&mut a);
+        let (i, _, ad3, _) = a.net.page.editing.unwrap();
+        assert_eq!(i, 2);
+        crate::host::WindowHost::text_set(&*host, ad3, r"\\nuevo-n8\x");
+        a.on_field_done(true);
+        assert_eq!(a.net.places.favorites[2].address, "smb://nuevo-n8/x");
+        assert_eq!(a.net.places.favorites[2].name, "smb://nuevo-n8/x");
+        // ✕ quita.
+        draw(&mut a);
+        click(&mut a, PageHit::RemoveFavorite(2));
+        assert_eq!(a.net.places.favorites.len(), 2);
+    }
+
+    #[test]
+    fn red_page_recents_star_and_clear() {
+        let mut a = page_app(FakeHost::new());
+        draw(&mut a);
+        click(&mut a, PageHit::StarRecent(0));
+        assert!(a.net.places.is_favorite(&Address::parse("smb://srv-n8/respaldo").unwrap()));
+        draw(&mut a);
+        click(&mut a, PageHit::RemoveRecent(0));
+        assert!(a.net.places.recents.is_empty());
+        a.net.places.add_recent(&Address::parse("smb://x-n8/y").unwrap(), 1);
+        draw(&mut a);
+        click(&mut a, PageHit::ClearRecents);
+        assert!(a.net.places.recents.is_empty());
+        let red = crate::session::config_dir().unwrap().join("red.toml");
+        wait_until(&mut a, |_| std::fs::read_to_string(&red).is_ok_and(|t| !t.contains("x-n8") && t.contains("srv-n8/respaldo")));
+    }
+
+    #[test]
+    fn red_page_connected_eject() {
+        let mut a = page_app(FakeHost::new());
+        let root = PathBuf::from("/net-n8ej/fotos");
+        a.net.connections = vec![conn("smb://nas-n8ej/fotos", "/net-n8ej/fotos")];
+        let texts = draw(&mut a);
+        assert!(texts.iter().any(|t| t == "smb://nas-n8ej/fotos"));
+        click(&mut a, PageHit::Eject(0));
+        wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
+        assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+    }
+
+    #[test]
+    fn red_page_password_text() {
+        assert_eq!(password_text(KeyStyle::Mac, true), "xdir no guarda contraseñas: las guarda el sistema (Llavero)");
+        assert_eq!(password_text(KeyStyle::Windows, true), "xdir no guarda contraseñas: las guarda el sistema (Administrador de credenciales)");
+        assert_eq!(password_text(KeyStyle::Windows, false), "xdir no guarda contraseñas: las guarda el sistema (llavero del escritorio)");
+        crate::sys::testing::FakeEnv::set_key_style(KeyStyle::Mac);
+        let mut a = page_app(FakeHost::new());
+        let texts = draw(&mut a);
+        crate::sys::testing::FakeEnv::set_key_style(KeyStyle::Windows);
+        assert!(texts.iter().any(|t| t == "xdir no guarda contraseñas: las guarda el sistema (Llavero)"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Abrir"));
+    }
+
+    #[test]
+    fn red_page_local_network_hint() {
+        let mut a = page_app(FakeHost::new());
+        assert!(!draw(&mut a).iter().any(|t| t == LOCAL_NETWORK_HINT));
+        FakeNetwork::set_local_network_denied(true);
+        let texts = draw(&mut a);
+        FakeNetwork::set_local_network_denied(false);
+        assert!(texts.iter().any(|t| t == LOCAL_NETWORK_HINT));
+        assert!(a.net.page.hits.iter().any(|(_, h)| *h == PageHit::OpenLocalNetwork));
+    }
+
+    #[test]
+    fn red_toml_reloaded_when_changed() {
+        let mut a = net_app();
+        a.attach(Handle(0), 96);
+        wait_until(&mut a, |a| a.net.places_mtime.is_some() || std::fs::metadata(crate::session::config_dir().unwrap().join("red.toml")).is_err());
+        let path = crate::session::config_dir().unwrap().join("red.toml");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[[favorito]]\nnombre = \"A mano\"\ndireccion = \"smb://mano-n8/x\"\n").unwrap();
+        a.reload_config();
+        wait_until(&mut a, |a| a.net.places.favorites.iter().any(|f| f.name == "A mano"));
+    }
+
+    #[test]
+    fn red_page_search_items() {
+        let a = net_app();
+        let items = network_page::search(&a);
+        let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Favoritos", "Recientes", "Conectados ahora", "Contraseñas"]);
+        assert!(items[3].keywords.iter().any(|k| k == "contraseña") && items[3].keywords.iter().any(|k| k == "llavero"));
+        assert!(items.iter().all(|i| i.keywords.iter().any(|k| k == "servidor")));
+    }
+}

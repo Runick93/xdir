@@ -21,8 +21,8 @@ pub(super) enum TaskDone {
     Renamed { dir: PathBuf, result: Result<Undo, String>, undoing: Option<Vec<(PathBuf, String)>> },
     /// Si el disco de `dir` distingue mayúsculas (para los choques de Renombrar varios).
     CaseInfo { dir: PathBuf, case_insensitive: bool },
-    /// Se leyó `red.toml`.
-    NetPlaces(crate::net::NetPlaces),
+    /// Se leyó `red.toml` (con su fecha); `None`: no cambió.
+    NetPlaces(Option<(crate::net::NetPlaces, Option<std::time::SystemTime>)>),
     /// Lo conectado (`Network::connections`).
     NetConnections(Result<Vec<crate::net::NetConnection>, crate::net::NetError>),
     /// Terminó de conectar `addr` (`tab`: la pestaña que lo pidió al fallar por credenciales;

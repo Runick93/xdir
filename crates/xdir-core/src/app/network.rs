@@ -46,6 +46,10 @@ pub(super) struct NetState {
     pub tree_pending: Option<u64>,
     /// Las máquinas que llegan de `browse` (mientras corre).
     pub host_rx: Option<std::sync::mpsc::Receiver<sys::HostEvent>>,
+    /// La sección «Red» de la configuración.
+    pub page: super::network_page::PageState,
+    /// Fecha de `red.toml` leída (para volver a leerlo si cambió).
+    pub places_mtime: Option<std::time::SystemTime>,
     /// Hay un redibujo pedido para este momento (`WM_APP_NET_TICK`).
     pub tick_due: Option<std::time::Instant>,
 }
@@ -69,8 +73,18 @@ fn inner(r: Rect) -> Rect {
 impl App {
     /// Lee `red.toml` en un hilo (al arrancar).
     pub(super) fn load_net_places(&self) {
-        let dir = crate::session::config_dir();
-        self.spawn_task(move || TaskDone::NetPlaces(dir.map(|d| NetPlaces::load_from(&d)).unwrap_or_default()));
+        self.reload_net_places(None);
+    }
+
+    /// Vuelve a leer `red.toml` si su fecha no es `known` (la fecha se mira en un hilo).
+    pub(super) fn reload_net_places(&self, known: Option<std::time::SystemTime>) {
+        let Some(dir) = crate::session::config_dir() else { return };
+        let first = known.is_none();
+        self.spawn_task(move || {
+            let mtime = std::fs::metadata(dir.join("red.toml")).and_then(|m| m.modified()).ok();
+            let changed = first || mtime != known;
+            TaskDone::NetPlaces(changed.then(|| (NetPlaces::load_from(&dir), mtime)))
+        });
     }
 
     /// Pide lo conectado en un hilo (al arrancar y al cambiar los discos) y refresca la lista de
@@ -117,9 +131,13 @@ impl App {
         self.spawn_connect(pane, Some(tab_id), addr, ConnectOptions::default());
     }
 
-    pub(super) fn on_net_places(&mut self, places: NetPlaces) {
-        self.net.places = places;
-        self.net_changed();
+    pub(super) fn on_net_places(&mut self, read: Option<(NetPlaces, Option<std::time::SystemTime>)>) {
+        let Some((places, mtime)) = read else { return };
+        self.net.places_mtime = mtime;
+        if places != self.net.places {
+            self.net.places = places;
+            self.net_changed();
+        }
     }
 
     pub(super) fn on_net_connections(&mut self, result: Result<Vec<NetConnection>, NetError>) {

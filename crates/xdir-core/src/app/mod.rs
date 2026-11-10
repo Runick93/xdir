@@ -10,6 +10,7 @@ mod favs;
 mod fileops;
 mod info;
 mod network;
+mod network_page;
 mod saved_groups;
 mod input;
 mod paint;

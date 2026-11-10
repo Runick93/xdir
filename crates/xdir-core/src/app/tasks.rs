@@ -132,8 +132,10 @@ impl App {
 
     /// Suelta lo que xdir tiene abierto en el disco de `root`: las pestañas en ese disco pasan a
     /// «Este equipo» (y sueltan su guardián), se cierra xtree si su raíz está ahí y se vacía la
-    /// vista previa.
-    pub(super) fn release_volume(&mut self, root: &std::path::Path) {
+    /// vista previa. El panel de información suelta lo de ese disco y corta la suma de carpeta:
+    /// devuelve su hilo para esperar a que cierre la carpeta que tenía abierta (sale enseguida:
+    /// mira el corte en cada elemento y antes de abrir cada carpeta).
+    pub(super) fn release_volume(&mut self, root: &std::path::Path) -> Option<std::thread::JoinHandle<()>> {
         // La vista rápida de un archivo de ese disco se cierra primero (suelta el archivo). Las
         // miniaturas no guardan nada abierto: con las pestañas fuera del disco no se piden más.
         if self.quick_look_under(root) {
@@ -150,6 +152,7 @@ impl App {
             self.xtree = None;
         }
         self.clear_preview_subject();
+        self.release_info_under(root)
     }
 
     /// Expulsa el disco de `root`. Con operaciones de copia sobre ese disco pregunta si se
@@ -164,10 +167,13 @@ impl App {
 
     /// Suelta lo de xdir en el disco y lo expulsa en otro hilo (sin trabajos de copia encima).
     fn eject_now(&mut self, root: PathBuf) {
-        self.release_volume(&root);
+        let summing = self.release_volume(&root);
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
         self.spawn_task(move || {
+            if let Some(h) = summing {
+                let _ = h.join();
+            }
             let result = sys::shell().eject(&root);
             TaskDone::Ejected { root, label, result }
         });

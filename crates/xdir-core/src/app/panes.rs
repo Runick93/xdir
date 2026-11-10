@@ -539,7 +539,7 @@ impl App {
                     self.on_left_up(x, y);
                 }
             }
-            "copiar" | "mover" | "ventana" => self.transfer_test(verb, &format!("{a} {b}")),
+            "copiar" | "mover" | "ventana" | "comprimir" | "extraer_aqui" | "extraer_en" => self.transfer_test(verb, &format!("{a} {b}")),
             _ => {}
         }
         self.redraw();

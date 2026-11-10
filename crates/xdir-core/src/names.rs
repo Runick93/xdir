@@ -75,10 +75,33 @@ pub fn free_name(dir: &Path, make: &dyn Fn(u32) -> String, taken: &dyn Fn(&Path)
     }
 }
 
+/// ¿Es un nombre de dispositivo de Windows (DOS)? No se puede usar como archivo, con o sin
+/// extensión: cuenta lo que va antes del primer punto, sin los espacios del final y sin distinguir
+/// mayúsculas («con.txt», «Nul .tar.gz», «COM¹»). Lo usan extraer (`archive`) y Renombrar varios.
+pub fn is_dos_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    stem.chars().count() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.chars().last().is_some_and(|d| matches!(d, '1'..='9' | '¹' | '²' | '³'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn dos_reserved_names() {
+        for n in ["CON", "con.txt", "Nul .tar.gz", "prn", "AUX.", "COM1", "lpt9.log", "COM¹", "LPT³", "CONIN$", "conout$.txt"] {
+            assert!(is_dos_reserved(n), "{n}");
+        }
+        for n in ["CONSOLA", "COM0", "COM10", "LPT", "a.con", "CONIN", "CONOUT", "nul2", " NUL"] {
+            assert!(!is_dos_reserved(n), "{n}");
+        }
+    }
 
     #[test]
     fn replaced_names() {

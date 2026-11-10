@@ -651,3 +651,38 @@ fn info_late_applied_still_counts() {
     a.paint();
     assert!(texts(&host).iter().any(|x| x == "Tarde"), "{:?}", texts(&host));
 }
+
+/// Expulsar el disco con el panel sumando una carpeta de ese disco: se corta la suma (la señal
+/// compartida queda en `true` sin esperar al hilo), el panel suelta la carpeta y una respuesta
+/// tardía de esa suma no vuelve a aparecer.
+#[test]
+fn eject_stops_folder_size_on_volume() {
+    let root = fixture("expulsa-suma", &[("Fotos/", ""), ("Fotos/a.jpg", "x")]);
+    let (mut a, _host) = app();
+    FakeFileSystem::set_drives(&[(&root, "PENDRIVE")]);
+    a.ejectable.insert(root.clone());
+    crate::sys::testing::FakeShell::set_eject_result(&root, Ok(()));
+    go(&mut a, 0, &root);
+    a.set_active(0);
+    select(&mut a, 0, "Fotos");
+    open_on(&mut a);
+    let folder = root.join("Fotos");
+    assert_eq!(a.info_folder(), Some((folder.clone(), false)), "sumándose");
+    // El «hilo» de la suma: lo que recibiría al arrancar.
+    let cancel = a.info.size_cancel.clone();
+    let generation = a.info.size_generation;
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+    a.run_command(Command::Eject);
+    assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "la suma se cortó al soltar el disco");
+    assert_eq!(a.info_folder(), None);
+    assert!(!a.info_subject().iter().any(|p| p.starts_with(&root)), "{:?}", a.info_subject());
+    a.info.tx.send(InfoReply::FolderSize { generation, path: folder.clone(), bytes: 9, files: 1, folders: 0, skipped: 0, done: true }).unwrap();
+    deliver(&mut a);
+    assert_eq!(a.info_folder(), None, "la respuesta tardía no cuenta");
+    while a.notice.is_none() {
+        let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("expulsar termina");
+        a.on_task_done(t);
+    }
+    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"PENDRIVE\" con seguridad"));
+    FakeFileSystem::set_drives(&[]);
+}

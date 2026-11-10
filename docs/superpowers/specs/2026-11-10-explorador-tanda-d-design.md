@@ -551,3 +551,34 @@ duplicación de más se deshace con Ctrl+Z).
 2. **Diálogo de copia = ventana aparte del sistema** (como la de Windows), no dibujada dentro de xdir: muestra la cola, el avance de cada operación y, como Windows, **un gráfico de velocidad** de la copia en curso (velocidad a lo largo del tiempo, con el promedio y lo que falta). Implica una ventana secundaria en el host de Windows y de macOS (Windows ya tiene la base de la ventana de la vista rápida). Reemplaza a la Decisión 1 para la copia.
 3. **Renombrar varios sin ventana:** un panel a la derecha (el mismo lugar que información) con el modo y los campos, y la vista previa en la lista misma: la columna Nombre muestra el nombre nuevo de cada seleccionado mientras se escribe (lo que cambia resaltado y el nombre viejo tachado al lado); los choques se marcan en rojo en la fila. «Renombrar» aplica; «Cancelar» o Esc vuelven a la lista normal. (Propuesta de Claude al usuario; confirmar en el diseño visual.)
 4. **Zip con una librería común para las tres plataformas** (crate compartida, como en la Decisión 7), con avance del proceso en el diálogo de copia. En macOS no se conservan etiquetas ni atributos extendidos dentro del zip (aceptado).
+
+## Desvíos en la implementación
+
+Lo que quedó distinto de lo escrito arriba al programar la tanda (manda esto):
+
+1. **Información y copia, según las Decisiones del usuario:** la información es un panel a la derecha (el lugar de la
+   vista previa, uno solo a la vez con vista previa y Renombrar varios) y la copia es una ventana propia del sistema con
+   la cola y el gráfico de velocidad. El título del panel es «Información» (no «Propiedades» ni «Obtener información»,
+   que quedan como nombres del comando en cada sistema).
+2. **`sys::Archives::extract_all` con `failed`:** extraer todo recibe `failed(nombre, error)` para cada entrada que no
+   se puede extraer y sigue con las demás; solo corta si se cancela, se llena el disco, el zip tiene contraseña o no se
+   puede leer. Las horas de un zip (DOS) se leen y se escriben en hora local (la diferencia con UTC la da cada
+   plataforma).
+3. **«Extraer en una carpeta»:** si el archivo trae una sola carpeta arriba de todo, se sube (no queda «Viaje/Viaje/»), y
+   `__MACOSX` (los metadatos del Finder) no se extrae, ni ahí ni en «Extraer aquí».
+4. **Expansión grande se pregunta antes de extraer:** más de 10 GiB, o más de 100 veces lo que ocupa el archivo cuando
+   eso pasa de 1 GiB, o más de 100 000 entradas.
+5. **Zip con contraseña:** no se pide la contraseña; al terminar se pregunta «¿Abrir con el sistema?» (Sí / No) y con Sí
+   lo abre la aplicación del sistema.
+6. **En la Mac no se renombra nada dentro de la Papelera:** lo que se reemplaza va a la Papelera ya apartado como
+   «… (reemplazado)» y queda con ese nombre (el «Devolver» del Finder usa el nombre guardado en el `.DS_Store`), igual
+   que en Windows; deshacer lo trae desde ahí al destino. En la Papelera de la Mac, ⌘⌫ y Supr devuelven.
+7. **Deshacer un Renombrar varios** (`Undo::Renames`) lo hace el núcleo con el mismo cruce seguro de `rename_all`, que
+   renombra siempre con `rename_noreplace` (nunca pisa), no `FileOps`.
+8. **«Devolver» en Windows** usa el verbo `undelete` del Shell sobre la Papelera virtual; en macOS y Linux, el motor de
+   copia (`JobSpec::Restore`, con conflictos en la ventana de copia).
+9. **`Op::Copy`, `Op::Move` y `Op::Restore` se quitaron:** copiar, mover, duplicar, «Carpeta nueva con la selección» y
+   devolver son todos del motor de copia; `FileOps` queda para borrar, renombrar, carpeta y archivo nuevos, accesos
+   directos y deshacer.
+10. **Windows, «Carpeta nueva con la selección» = Ctrl+Alt+Shift+N:** en los teclados español y latinoamericano Ctrl+Alt
+    es AltGr, así que es AltGr+Shift+N; se puede cambiar en la configuración de atajos.

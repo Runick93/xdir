@@ -43,6 +43,8 @@ struct JobMeta {
     paths: Vec<PathBuf>,
     /// Los discos que toca (identidad), cuando el hilo del trabajo los averiguó.
     volumes: Vec<OsString>,
+    /// Comprimir y extraer: «Reintentar» vuelve a correr el mismo trabajo entero.
+    rerun: Option<JobSpec>,
 }
 
 /// Estado de los trabajos de copia de la `App`.
@@ -157,6 +159,8 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
         JobSpec::Restore { items } => out.extend(items.iter().cloned()),
         JobSpec::Undo(u) => undo_paths(u, &mut out),
         JobSpec::Retry { pairs, .. } => pairs.iter().for_each(|(a, b)| out.extend([a.clone(), b.clone()])),
+        JobSpec::Compress { sources } => out.extend(sources.iter().cloned()),
+        JobSpec::Extract { archive, .. } => out.push(archive.clone()),
     }
     out
 }
@@ -178,6 +182,8 @@ fn spec_route(spec: &JobSpec) -> transfer::JobRoute {
             (one, many, folder(&srcs), to, srcs)
         }
         JobSpec::Undo(_) => ("Se deshizo", "Se deshicieron", None, None, Vec::new()),
+        JobSpec::Compress { sources } => ("Se comprimió", "Se comprimieron", folder(sources), None, sources.clone()),
+        JobSpec::Extract { archive, .. } => ("Se extrajo", "Se extrajeron", None, None, vec![archive.clone()]),
     };
     transfer::JobRoute { done_one, done_many, from, to, sources }
 }
@@ -188,6 +194,8 @@ fn spec_count(spec: &JobSpec) -> u64 {
         JobSpec::Copy { sources, .. } | JobSpec::Move { sources, .. } | JobSpec::Duplicate { sources } => sources.len(),
         JobSpec::NewFolderWith { items, .. } | JobSpec::Restore { items } => items.len(),
         JobSpec::Retry { pairs, .. } => pairs.len(),
+        JobSpec::Compress { sources } => sources.len(),
+        JobSpec::Extract { .. } => 1,
         JobSpec::Undo(_) => 0,
     }) as u64
 }
@@ -202,6 +210,8 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
         JobSpec::Undo(_) => ("Deshacer", true),
         JobSpec::Retry { moving: true, .. } => ("Mover", true),
         JobSpec::Retry { moving: false, .. } => ("Copiar", false),
+        JobSpec::Compress { .. } => ("Comprimir", false),
+        JobSpec::Extract { .. } => ("Extraer", false),
     }
 }
 
@@ -236,6 +246,12 @@ pub fn eject_question(jobs: usize, label: &str) -> String {
     } else {
         format!("Hay {jobs} operaciones sobre \"{label}\". ¿Cancelarlas y expulsar?")
     }
+}
+
+/// «Se omitieron 2 elementos que no se pueden crear» (al extraer: enlaces en Windows, enlaces
+/// duros y dispositivos de un tar).
+pub fn omitted_text(n: usize) -> String {
+    if n == 1 { "Se omitió 1 elemento que no se puede crear".into() } else { format!("Se omitieron {n} elementos que no se pueden crear") }
 }
 
 /// «Se omitieron 3 elementos que ya existían».
@@ -308,7 +324,8 @@ impl App {
             done_items: None,
         });
         let restore = matches!(spec, JobSpec::Restore { .. });
-        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new() });
+        let rerun = matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }).then(|| spec.clone());
+        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun });
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
@@ -354,6 +371,8 @@ impl App {
         let auto = self.auto_skip();
         // Conflictos que llegaron sin a quién preguntar (el hilo los mandó antes de saberlo).
         let mut skip_now = Vec::new();
+        // Preguntas de los trabajos (se hacen después de vaciar el canal).
+        let mut confirms = Vec::new();
         while let Ok((id, update)) = self.transfers.rx.try_recv() {
             if let Update::Volumes(vols) = &update {
             if let Some(m) = self.transfers.meta.get_mut(&id) {
@@ -402,6 +421,7 @@ impl App {
                     v.conflict_since = Some(now);
                     show = show || !auto;
                 }
+                Update::Confirm(q) => confirms.push((id, q)),
                 Update::Finished(outcome) => {
                     v.state = JobState::Done;
                     v.conflict = None;
@@ -414,6 +434,13 @@ impl App {
         }
         for id in skip_now {
             self.answer_job(id, Answer { choice: Choice::Skip, all: false });
+        }
+        for (id, q) in confirms {
+            let label = self.transfers.meta.get(&id).map_or("xdir", |m| m.label);
+            let yes = self.host.clone().ask_yes_no(label, &q);
+            if let Some(c) = self.job_ctl(id) {
+                c.confirm(yes);
+            }
         }
         for (id, outcome) in finished {
             // Terminó con errores o sin poder hacerlo: la ventana lo muestra enseguida.
@@ -622,7 +649,8 @@ impl App {
     /// Comandos de prueba (feature `pruebas`): `copiar <destino>|<origen>|…` y `mover …` lanzan un
     /// trabajo; `ventana <control>` hace clic en la ventana de copia sobre el control del primer
     /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `detalles`, `reemplazar`, `ambos`,
-    /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`).
+    /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`). `comprimir <a>|<b>…`, `extraer_aqui
+    /// <archivo>` y `extraer_en <archivo>` lanzan esos trabajos.
     #[cfg(feature = "pruebas")]
     pub(super) fn transfer_test(&mut self, verb: &str, rest: &str) {
         let parts: Vec<PathBuf> = rest.trim().split('|').map(PathBuf::from).collect();
@@ -630,6 +658,13 @@ impl App {
             "copiar" | "mover" if parts.len() >= 2 => {
                 let (dest, sources) = (parts[0].clone(), parts[1..].to_vec());
                 self.start_transfer(if verb == "mover" { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
+            }
+            "comprimir" if !rest.trim().is_empty() => {
+                self.start_transfer(JobSpec::Compress { sources: parts });
+            }
+            "extraer_aqui" | "extraer_en" if !rest.trim().is_empty() => {
+                let archive = parts[0].clone();
+                self.start_transfer(JobSpec::Extract { archive, into_folder: verb == "extraer_en" });
             }
             "ventana" => {
                 let what = rest.trim();
@@ -707,10 +742,12 @@ impl App {
             Some(format!("{label}: {why}"))
         } else if !outcome.errors.is_empty() {
             let first = &outcome.errors[0];
-            let name = first.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = first.shown_name();
             Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), first.message))
         } else if !outcome.skipped.is_empty() {
             Some(skipped_text(outcome.skipped.len()))
+        } else if outcome.omitted > 0 {
+            Some(omitted_text(outcome.omitted))
         } else if !self.auto_skip()
             && let Some(c) = self.transfers.jobs.iter().find_map(|j| j.conflict.as_ref())
         {
@@ -720,6 +757,16 @@ impl App {
             // No se borra un aviso de otro trabajo (los omitidos, por ejemplo).
             previous.filter(|_| self.running_jobs() > 0)
         };
+        // Un zip con contraseña o en un formato que no se sabe leer: se ofrece abrirlo con el sistema.
+        if let Some(e) = outcome.errors.iter().find(|e| e.message == sys::PASSWORD || e.message == sys::UNSUPPORTED)
+            && let Some(JobSpec::Extract { archive, .. }) = self.transfers.meta.get(&id).and_then(|m| m.rerun.clone())
+        {
+            let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let q = format!("«{name}»: {}. ¿Abrir con el sistema?", e.message);
+            if self.host.clone().ask_yes_no("Abrir con el sistema", &q) {
+                sys::shell().open_item(self.hwnd, &archive.into());
+            }
+        }
         // Los que terminaron bien se van; los que tienen errores quedan para «Reintentar».
         if outcome.errors.is_empty() && outcome.stopped.is_none() {
             self.forget_job(id);
@@ -817,9 +864,17 @@ impl App {
         let pairs: Vec<_> = v.errors.iter().filter(|e| e.retry).map(|e| (e.src.clone(), e.dst.clone())).collect();
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
         let restore = self.transfers.meta.get(&id).is_some_and(|m| m.restore);
+        let rerun = self.transfers.meta.get(&id).and_then(|m| m.rerun.clone());
         let roots = v.route.sources.clone();
         self.forget_job(id);
-        let spec = if restore {
+        let spec = if let Some(spec) = rerun {
+            // Comprimir y extraer se vuelven a hacer enteros (si hay algo que valga reintentar).
+            if pairs.is_empty() {
+                self.sync_transfers_window();
+                return None;
+            }
+            spec
+        } else if restore {
             // Lo de adentro de una carpeta devuelta no tiene lugar original propio: se devuelve
             // otra vez esa carpeta (lo elegido en la Papelera que la contiene).
             let mut items: Vec<PathBuf> = Vec::new();

@@ -59,6 +59,12 @@ pub enum Command {
     CreateShortcut,
     /// Abrir la carpeta del original de un acceso directo, con él seleccionado.
     ShowOriginal,
+    /// Un zip con la selección («nombre.zip» o «Archivo.zip»).
+    Compress,
+    /// Extraer el archivo seleccionado en su carpeta.
+    ExtractHere,
+    /// Extraer el archivo seleccionado en una carpeta nueva con su nombre.
+    ExtractInto,
     /// Expulsar el disco enfocado en «Este equipo» o el de la carpeta del panel.
     Eject,
     Rename,
@@ -201,6 +207,9 @@ pub const ALL: &[Spec] = &[
     spec(Command::Restore, "devolver", "Devolver", &[]),
     spec(Command::CreateShortcut, "crear_acceso_directo", "Crear acceso directo", &[]),
     spec(Command::ShowOriginal, "mostrar_original", "Mostrar el original", &[]),
+    spec(Command::Compress, "comprimir", "Comprimir", &[]),
+    spec(Command::ExtractHere, "extraer_aqui", "Extraer aquí", &[]),
+    spec(Command::ExtractInto, "extraer_en", "Extraer en una carpeta", &[]),
     spec(Command::Eject, "expulsar", "Expulsar", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::RenameMany, "renombrar_varios", "Renombrar varios…", &[]),
@@ -325,6 +334,9 @@ pub fn group(c: Command) -> Group {
         | Command::RenameMany
         | Command::Properties
         | Command::Duplicate
+        | Command::Compress
+        | Command::ExtractHere
+        | Command::ExtractInto
         | Command::ShowTransfers => Group::Files,
         Command::View(_)
         | Command::SortBy(_)

@@ -177,7 +177,10 @@ impl App {
                 }
             }
             Command::NewFolderWithSelection => self.new_folder_with_selection(),
-            // En la Papelera de la Mac, ⌘⌫ devuelve (como el Finder).
+            // En la Papelera de la Mac, `Recycle` devuelve (como ⌘⌫ en el Finder). Es el mismo
+            // comando con sus dos atajos, ⌘⌫ y Supr (fn+⌫): los dos devuelven, a propósito (borrar
+            // definitivamente desde la Papelera sigue siendo `Delete`: ⌥⌘⌫ o ⇧Supr). En Windows y
+            // Linux, Supr en la Papelera sigue siendo borrar.
             Command::Recycle if sys::env().key_style() == sys::KeyStyle::Mac && sys::file_system().is_trash(&self.panes[active].tab().location) => {
                 self.restore_selection()
             }
@@ -185,6 +188,9 @@ impl App {
             Command::Restore => self.restore_selection(),
             Command::CreateShortcut => self.create_shortcuts(),
             Command::ShowOriginal => self.show_original(),
+            Command::Compress => self.compress_selection(),
+            Command::ExtractHere => self.extract_selection(false),
+            Command::ExtractInto => self.extract_selection(true),
             Command::Eject => {
                 if let Some(root) = self.eject_target() {
                     self.eject(root);
@@ -514,6 +520,9 @@ fn needs_folder(c: Command) -> bool {
             | Command::RenameMany
             | Command::Properties
             | Command::Duplicate
+            | Command::Compress
+            | Command::ExtractHere
+            | Command::ExtractInto
             | Command::ToggleFavorite
             | Command::PowerShell
             | Command::Cmd

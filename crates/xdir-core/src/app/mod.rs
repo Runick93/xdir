@@ -34,6 +34,8 @@ mod quick_look_tests;
 #[cfg(test)]
 mod transfers_tests;
 #[cfg(test)]
+mod archive_tests;
+#[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
 mod rename_many_tests;

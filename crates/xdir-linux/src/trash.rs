@@ -205,7 +205,7 @@ pub fn restore(name: &str, original: &Path, trash: &Path) -> io::Result<()> {
     let from = trash.join("files").join(name);
     // Renombrar sin pisar en un solo paso (lo que aparezca entre medio con ese nombre no se pisa);
     // en otro disco, copiar y borrar (`copy_then_remove` crea el destino sin pisar).
-    match rename_noreplace(&from, original) {
+    match crate::fs::rename_noreplace(&from, original) {
         Ok(()) => {}
         Err(e) if e.raw_os_error() == Some(libc::EEXIST) => return Err(exists()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
@@ -218,27 +218,6 @@ pub fn restore(name: &str, original: &Path, trash: &Path) -> io::Result<()> {
     }
     let _ = std::fs::remove_file(info_path(trash, OsStr::new(name)));
     Ok(())
-}
-
-/// `renameat2(RENAME_NOREPLACE)`; donde el disco no lo tiene (`EINVAL`/`ENOSYS`), se comprueba y
-/// se renombra.
-fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
-    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "ruta inválida"));
-    let (f, t) = (c(from)?, c(to)?);
-    let r = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-    if r == 0 {
-        return Ok(());
-    }
-    let e = io::Error::last_os_error();
-    match e.raw_os_error() {
-        Some(libc::EINVAL | libc::ENOSYS) => {
-            if std::fs::symlink_metadata(to).is_ok() {
-                return Err(io::Error::from_raw_os_error(libc::EEXIST));
-            }
-            std::fs::rename(from, to)
-        }
-        _ => Err(e),
-    }
 }
 
 #[cfg(test)]

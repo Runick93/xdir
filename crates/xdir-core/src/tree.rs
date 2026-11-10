@@ -456,6 +456,16 @@ impl Tree {
         }
     }
 
+    /// Despliega «Red» (gancho de pruebas).
+    #[cfg(feature = "pruebas")]
+    pub fn expand_network_now(&mut self, hwnd: Handle, show_hidden: bool) {
+        if let Some(r) = self.network_node()
+            && !self.nodes[r].expanded
+        {
+            self.toggle(hwnd, r, show_hidden);
+        }
+    }
+
     fn network_node(&self) -> Option<usize> {
         self.roots.iter().copied().find(|&r| self.nodes[r].kind == Kind::Network)
     }

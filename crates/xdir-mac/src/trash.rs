@@ -21,7 +21,7 @@ pub fn is_trash_dir(path: &Path) -> bool {
 }
 
 /// Raíz del disco de una Papelera: `/Volumes/X` para `/Volumes/X/.Trashes/…`; si no, `/`.
-fn volume_root(trash_dir: &Path) -> PathBuf {
+pub(crate) fn volume_root(trash_dir: &Path) -> PathBuf {
     let parts: Vec<_> = trash_dir.components().take(3).collect();
     if trash_dir.starts_with("/Volumes") && parts.len() == 3 { parts.iter().collect() } else { PathBuf::from("/") }
 }
@@ -62,6 +62,44 @@ pub fn safe_origin(root: &Path, folder: &str, name: &str) -> Option<PathBuf> {
     }
     let out = root.join(folder).join(n);
     out.starts_with(root).then_some(out)
+}
+
+/// Deja lista la carpeta `parent` (dentro del disco `root`) para devolver ahí, sin seguir enlaces:
+/// cada carpeta del camino debajo de `root` tiene que ser una carpeta de verdad (no un enlace) y
+/// las que faltan se crean una por una (`create`); al final, la ruta real tiene que seguir dentro
+/// de la ruta real del disco. En el disco de arranque (`/`) valen los enlaces del sistema (de
+/// root, como `/var` o `/tmp`); en otro disco, ninguno. Sin `create` solo revisa (justo antes de
+/// mover).
+pub fn prepare_parent(root: &Path, parent: &Path, create: bool) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    let refuse = |p: &Path| format!("«{}» no es una carpeta de ese disco (es un enlace o está afuera): no se devuelve ahí", p.display());
+    let rest = parent.strip_prefix(root).map_err(|_| refuse(parent))?;
+    let system = root == Path::new("/");
+    let mut cur = root.to_path_buf();
+    for c in rest.components() {
+        let Component::Normal(name) = c else { return Err(refuse(parent)) };
+        cur.push(name);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                if !(system && m.uid() == 0) {
+                    return Err(refuse(&cur));
+                }
+            }
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err(refuse(&cur)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+                std::fs::create_dir(&cur).map_err(|e| format!("{}: {e}", cur.display()))?;
+                if !std::fs::symlink_metadata(&cur).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+                    return Err(refuse(&cur));
+                }
+            }
+            Err(e) => return Err(format!("{}: {e}", cur.display())),
+        }
+    }
+    let real_root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let real = std::fs::canonicalize(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    if real.starts_with(&real_root) { Ok(()) } else { Err(refuse(parent)) }
 }
 
 /// Tamaño máximo de un `.DS_Store` que se lee.
@@ -634,6 +672,30 @@ mod tests {
         log_trashed_in(&log, &raro, original);
         assert_eq!(origin_in(Some(&log), &raro), Some(original.to_path_buf()));
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1, "una línea por entrada");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Devolver no sigue enlaces en la carpeta de destino: si una carpeta del camino (dentro del
+    /// disco) es un enlace, no se crea nada ni se escribe afuera; las que faltan se crean una por
+    /// una.
+    #[test]
+    fn restore_parent_refuses_symlinks() {
+        let dir = tmp("destino-enlace");
+        let (vol, outside) = (dir.join("vol"), dir.join("afuera"));
+        std::fs::create_dir_all(&vol).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, vol.join("docs")).unwrap();
+        assert!(prepare_parent(&vol, &vol.join("docs"), true).is_err());
+        assert!(prepare_parent(&vol, &vol.join("docs/sub/otra"), true).is_err());
+        assert!(!outside.join("sub").exists(), "no se creó nada afuera");
+        // Sin enlaces: crea lo que falta.
+        prepare_parent(&vol, &vol.join("nueva/sub"), true).unwrap();
+        assert!(vol.join("nueva/sub").is_dir());
+        // Sin crear: solo revisa.
+        assert!(prepare_parent(&vol, &vol.join("nueva/sub"), false).is_ok());
+        assert!(prepare_parent(&vol, &vol.join("falta"), false).is_err());
+        // Fuera del disco, nunca.
+        assert!(prepare_parent(&vol, &outside, true).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -241,7 +241,11 @@ fn restore_one(item: &Path, hooks: &Hooks) -> Result<PathBuf> {
         let shown = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         return Err(format!("Ya existe «{shown}» en «{folder}»"));
     }
-    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    // Sin seguir enlaces: un disco armado podría tener «docs» apuntando a otro lado (también una
+    // carpeta del registro propio que después se cambió por un enlace).
+    let root = crate::trash::volume_root(&to);
+    crate::trash::prepare_parent(&root, parent, true)?;
+    crate::trash::prepare_parent(&root, parent, false)?;
     move_item(item, &to)?;
     (hooks.forget)(item);
     Ok(to)
@@ -696,6 +700,28 @@ mod tests {
             assert!(r.select.is_empty());
             assert!(!dir.join("carpeta copia").exists(), "no queda la copia a medias");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Devolver a una carpeta que es un enlace (un disco armado: «docs» → otra carpeta) no deja
+    /// el archivo del otro lado.
+    #[test]
+    fn restore_refuses_symlinked_folder() {
+        let dir = tmp("devolver-enlace");
+        let (vol, outside) = (dir.join("vol"), dir.join("LaunchAgents"));
+        std::fs::create_dir_all(vol.join(".Trashes/501")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, vol.join("docs")).unwrap();
+        let item = vol.join(".Trashes/501/evil.plist");
+        std::fs::write(&item, "x").unwrap();
+        let to = vol.join("docs/evil.plist");
+        let origin = |_: &Path| Some(to.clone());
+        let trash = fake_trash(&dir);
+        let h = Hooks { trash: &trash, origin: &origin, forget: &|_| {} };
+        let r = run_with(Op::Restore { items: vec![item.clone()] }, &h).unwrap();
+        assert!(r.error.is_some());
+        assert!(item.exists(), "sigue en la Papelera");
+        assert!(!outside.join("evil.plist").exists(), "no llegó a la carpeta del enlace");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

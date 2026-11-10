@@ -228,9 +228,50 @@ fn restore_item(item: &Path) -> Result<PathBuf> {
         let shown = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         return Err(format!("Ya existe «{shown}» en «{folder}»"));
     }
-    std::fs::create_dir_all(parent).map_err(|e| err_at(parent, e))?;
+    // La papelera de un disco (no la del usuario) solo devuelve dentro de ese disco; y en ningún
+    // caso se siguen enlaces en las carpetas del camino.
+    let home = trash::data_home().map(|d| trash::trash_dir(&d));
+    let root = if home.as_deref() == Some(trash) { PathBuf::from("/") } else { trash.parent().unwrap_or(Path::new("/")).to_path_buf() };
+    prepare_parent(&root, parent, true)?;
+    prepare_parent(&root, parent, false)?;
     trash::restore(&name, &to, trash).map_err(|e| err_at(item, e))?;
     Ok(to)
+}
+
+/// Deja lista la carpeta `parent` (dentro de `root`) para devolver ahí, sin seguir enlaces: cada
+/// carpeta del camino debajo de `root` tiene que ser una carpeta de verdad y las que faltan se
+/// crean una por una (`create`); al final la ruta real tiene que seguir dentro de la de `root`.
+/// Con `root` = `/` valen los enlaces del sistema (de root); en otro disco, ninguno.
+fn prepare_parent(root: &Path, parent: &Path, create: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    let refuse = |p: &Path| format!("«{}» no es una carpeta de ese disco (es un enlace o está afuera): no se devuelve ahí", p.display());
+    let rest = parent.strip_prefix(root).map_err(|_| refuse(parent))?;
+    let system = root == Path::new("/");
+    let mut cur = root.to_path_buf();
+    for c in rest.components() {
+        let Component::Normal(n) = c else { return Err(refuse(parent)) };
+        cur.push(n);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                if !(system && m.uid() == 0) {
+                    return Err(refuse(&cur));
+                }
+            }
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err(refuse(&cur)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
+                std::fs::create_dir(&cur).map_err(|e| err_at(&cur, e))?;
+                if !std::fs::symlink_metadata(&cur).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+                    return Err(refuse(&cur));
+                }
+            }
+            Err(e) => return Err(err_at(&cur, e)),
+        }
+    }
+    let real_root = std::fs::canonicalize(root).map_err(|e| err_at(root, e))?;
+    let real = std::fs::canonicalize(parent).map_err(|e| err_at(parent, e))?;
+    if real.starts_with(&real_root) { Ok(()) } else { Err(refuse(parent)) }
 }
 
 /// Nombre de una carpeta nueva (con " (2)", " (3)"... si ya existe, como en Windows).
@@ -606,6 +647,30 @@ mod tests {
         assert_eq!(r.focus, Some(dir.join("Enlace a a.txt 2")));
         std::os::unix::fs::symlink("a.txt", dir.join("rel")).unwrap();
         assert_eq!(crate::shell::link_target(&dir.join("rel")), Some(a.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// La papelera de un disco no devuelve a través de un enlace («docs» → otra carpeta) ni a una
+    /// ruta absoluta fuera del disco.
+    #[test]
+    fn restore_refuses_symlinked_folder_and_outside_paths() {
+        let dir = tmp("devolver-enlace");
+        let (top, outside) = (dir.join("usb"), dir.join("autostart"));
+        let trash = top.join(".Trash-1000");
+        std::fs::create_dir_all(trash.join("files")).unwrap();
+        std::fs::create_dir_all(trash.join("info")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, top.join("docs")).unwrap();
+        for (name, path) in [("a", "docs/a".to_string()), ("b", outside.join("b").display().to_string())] {
+            std::fs::write(trash.join("files").join(name), name).unwrap();
+            std::fs::write(trash.join("info").join(format!("{name}.trashinfo")), format!("[Trash Info]\nPath={path}\n")).unwrap();
+        }
+        let items = vec![trash.join("files/a"), trash.join("files/b")];
+        let r = run(Op::Restore { items }, None).unwrap();
+        assert!(r.select.is_empty(), "{:?}", r.select);
+        assert!(r.error.is_some());
+        assert!(!outside.join("a").exists() && !outside.join("b").exists());
+        assert!(trash.join("files/a").exists() && trash.join("files/b").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

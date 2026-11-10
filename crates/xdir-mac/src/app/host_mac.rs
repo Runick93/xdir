@@ -513,6 +513,13 @@ impl TextDelegate {
         } else {
             None
         };
+        // Tab y Shift+Tab en un campo de panel: el núcleo pasa el foco a la caja siguiente o a la
+        // anterior (las cajas se crean y destruyen al cambiar el modo: no hay cadena fija de
+        // `nextKeyView`).
+        if iv.kind == TextKind::Field && (command == sel!(insertTab:) || command == sel!(insertBacktab:)) {
+            h.post(xdir_core::host::WM_APP_FIELD_TAB, (command == sel!(insertBacktab:)) as usize, 0);
+            return true;
+        }
         if let Some(vk) = nav {
             match iv.kind {
                 TextKind::Address => h.post(WM_APP_SUGGEST_KEY, vk.0 as usize, 0),

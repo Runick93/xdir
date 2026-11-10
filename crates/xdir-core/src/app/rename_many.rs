@@ -69,12 +69,13 @@ impl App {
     /// ¿Se puede abrir Renombrar varios en ese panel? (una carpeta del disco, sin búsqueda.)
     pub(super) fn can_rename_many(&self, pane: usize) -> bool {
         let tab = self.panes[pane].tab();
-        matches!(tab.location, Location::Path(_)) && tab.search.is_none() && tab.list.selected_indices().next().is_some()
+        matches!(tab.location, Location::Path(_)) && tab.search.is_none() && !tab.list.selected_positions().is_empty()
     }
 
     /// F2: con más de un seleccionado, Renombrar varios; si no, el renombrado en línea.
     pub(super) fn rename_command(&mut self, pane: usize) {
-        if self.panes[pane].tab().list.selected_indices().nth(1).is_some() && self.can_rename_many(pane) {
+        // Cuentan los seleccionados a la vista (los que un filtro oculta no se renombran).
+        if self.panes[pane].tab().list.selected_positions().len() > 1 && self.can_rename_many(pane) {
             self.open_rename_many(pane);
         } else {
             self.begin_rename(pane);
@@ -152,7 +153,8 @@ impl App {
     pub(super) fn refresh_rename_many(&mut self) {
         let Some(st) = &self.rename_many else { return };
         let tab = self.panes[st.pane].tab();
-        if tab.id != st.tab_id || !tab.location.is_path(&st.dir) || tab.search.is_some() {
+        let shown = st.pane < self.layout.panes();
+        if !shown || tab.id != st.tab_id || !tab.location.is_path(&st.dir) || tab.search.is_some() {
             self.close_rename_many();
             return;
         }
@@ -201,10 +203,15 @@ impl App {
         let st = self.rename_many.as_ref()?;
         let changing = st.rows.iter().filter(|(_, o, n, _)| o != n).count();
         let bad: Vec<&Row> = st.rows.iter().filter(|r| r.3.is_some()).collect();
-        let clash = bad.first().map(|(_, _, n, c)| {
+        let mut clash = bad.first().map(|(_, _, n, c)| {
             let s = if bad.len() == 1 { "" } else { "s" };
             format!("{} choque{s}: {}", bad.len(), c.unwrap().short(n))
         });
+        // «Número inicial» que no es un número: se avisa y no se aplica.
+        let bad_start = st.mode == ModeKind::Format && st.style != FormatStyle::Date && st.text(Field::Start).trim().parse::<u32>().is_err();
+        if bad_start && clash.is_none() {
+            clash = Some("«Número inicial» tiene que ser un número".to_string());
+        }
         Some(PanelState {
             count: st.rows.len(),
             mode: st.mode,
@@ -213,7 +220,7 @@ impl App {
             style: st.style,
             format_before: st.format_before,
             changing,
-            can_apply: changing > 0 && bad.is_empty(),
+            can_apply: changing > 0 && bad.is_empty() && !bad_start,
             clash,
         })
     }
@@ -287,6 +294,24 @@ impl App {
         }
     }
 
+    /// Tab (o Shift+Tab con `back`) en una caja del panel: el foco pasa a la siguiente (o a la
+    /// anterior), dando la vuelta.
+    pub(super) fn on_field_tab(&mut self, back: bool) {
+        let Some(st) = &self.rename_many else { return };
+        let n = st.boxes.len();
+        if n == 0 {
+            return;
+        }
+        let at = st.boxes.iter().position(|(_, b)| self.host.text_has_focus(*b));
+        let next = match (at, back) {
+            (Some(i), false) => (i + 1) % n,
+            (Some(i), true) => (i + n - 1) % n,
+            (None, false) => 0,
+            (None, true) => n - 1,
+        };
+        self.host.text_focus(st.boxes[next].1);
+    }
+
     /// Clic en el panel.
     pub(super) fn rename_panel_click(&mut self, h: PanelHit) {
         let Some(st) = &mut self.rename_many else { return };
@@ -312,6 +337,9 @@ impl App {
 
     /// «Renombrar»: corre `rename_all` en un hilo (si no hay choques y algo cambia) y cierra.
     pub(super) fn apply_rename_many(&mut self) {
+        if self.refuse_while_renaming() {
+            return;
+        }
         // Lo último escrito, por si el aviso de la caja todavía no llegó.
         if let Some(st) = &mut self.rename_many {
             for &(f, b) in &st.boxes {
@@ -332,29 +360,55 @@ impl App {
             let tab = self.panes[pane].tab_mut();
             tab.focus_after_load(OsString::from(name));
         }
-        self.spawn_task(move || TaskDone::Renamed { result: rename_all(&SysRenames, &pairs), dir, undoing: false });
+        self.renaming = true;
+        self.spawn_task(move || TaskDone::Renamed { result: rename_all(&SysRenames, &pairs), dir, undoing: None });
+    }
+
+    /// Con un renombrado corriendo no se larga otro (dos a la vez en la misma carpeta podrían
+    /// cruzarse): pita y avisa. `true` si se rechazó.
+    fn refuse_while_renaming(&mut self) -> bool {
+        if self.renaming {
+            self.host.beep();
+            self.notice = Some("Todavía se está renombrando; esperá a que termine".to_string());
+            self.redraw();
+        }
+        self.renaming
     }
 
     /// Ctrl+Z de un Renombrar varios: el mismo cruce seguro, en un hilo (no por `FileOps`).
     pub(super) fn undo_renames(&mut self, renames: Vec<(PathBuf, String)>) {
+        if self.refuse_while_renaming() {
+            // Queda para después.
+            self.undo.push(Undo::Renames(renames));
+            return;
+        }
         let dir = renames.first().and_then(|(p, _)| p.parent()).map(Path::to_path_buf).unwrap_or_default();
-        self.spawn_task(move || TaskDone::Renamed { result: rename_all(&SysRenames, &renames), dir, undoing: true });
+        self.renaming = true;
+        self.spawn_task(move || {
+            let result = rename_all(&SysRenames, &renames);
+            TaskDone::Renamed { result, dir, undoing: Some(renames) }
+        });
     }
 
     /// Terminó un renombrado (o su deshacer): se apila el deshacer, se avisa el error y se recargan
     /// las pestañas de esa carpeta.
-    pub(super) fn on_renamed(&mut self, dir: PathBuf, result: Result<Undo, String>, undoing: bool) {
-        match result {
-            Ok(undo) => {
+    pub(super) fn on_renamed(&mut self, dir: PathBuf, result: Result<Undo, String>, undoing: Option<Vec<(PathBuf, String)>>) {
+        self.renaming = false;
+        match (result, undoing) {
+            (Ok(undo), None) => {
                 self.notice = None;
-                if !undoing {
-                    self.undo.push(undo);
-                    if self.undo.len() > UNDO_MAX {
-                        self.undo.remove(0);
-                    }
+                self.undo.push(undo);
+                if self.undo.len() > UNDO_MAX {
+                    self.undo.remove(0);
                 }
             }
-            Err(e) => self.notice = Some(format!("No se pudo renombrar: {e}")),
+            (Ok(_), Some(_)) => self.notice = None,
+            (Err(e), None) => self.notice = Some(format!("No se pudo renombrar: {e}")),
+            // El deshacer que falló vuelve a la pila (`rename_all` dejó todo como estaba o dice qué no).
+            (Err(e), Some(renames)) => {
+                self.undo.push(Undo::Renames(renames));
+                self.notice = Some(format!("No se pudo deshacer el renombrado: {e}"));
+            }
         }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         for tab in self.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()) {

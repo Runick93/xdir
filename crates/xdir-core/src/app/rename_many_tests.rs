@@ -335,3 +335,118 @@ fn rename_many_menu_label() {
     select(&mut a, &["b.txt", "c.txt"]);
     assert!(labels(&a).iter().any(|l| l == "Renombrar 3 elementos…"));
 }
+
+#[test]
+fn second_apply_or_undo_waits_for_the_running_one() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let dir = fixture("uno-a-la-vez", &["a.txt", "b.txt", "c.txt"]);
+    go(&mut a, &dir);
+    select(&mut a, &["a.txt", "b.txt"]);
+    a.run_command(Command::Rename);
+    a.rename_panel_click(PanelHit::Mode(ModeKind::Add));
+    type_in(&mut a, &host, Field::Text, "x-");
+    a.rename_panel_click(PanelHit::Apply);
+    // Sin procesar el final: otro Renombrar varios no arranca.
+    select(&mut a, &["c.txt"]);
+    a.run_command(Command::Rename);
+    a.rename_panel_click(PanelHit::Mode(ModeKind::Add));
+    type_in(&mut a, &host, Field::Text, "y-");
+    let beeps = host.beeps();
+    a.rename_panel_click(PanelHit::Apply);
+    assert_eq!(host.beeps(), beeps + 1);
+    assert!(a.rename_many.is_some(), "el panel sigue abierto");
+    assert!(a.notice.as_deref().is_some_and(|n| n.starts_with("Todavía se está renombrando")));
+    a.close_rename_many();
+    wait_renamed(&mut a);
+    assert_eq!(names_on_disk(&dir), ["c.txt", "x-a.txt", "x-b.txt"]);
+    // Un deshacer mientras corre otro deshacer queda en la pila.
+    a.run_command(Command::Undo);
+    a.undo.push(Undo::Renames(vec![(dir.join("c.txt"), "z.txt".into())]));
+    a.run_command(Command::Undo);
+    assert!(matches!(a.undo.last(), Some(Undo::Renames(v)) if v[0].1 == "z.txt"));
+    wait_renamed(&mut a);
+    assert_eq!(names_on_disk(&dir), ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[test]
+fn failed_undo_goes_back_to_the_stack() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let dir = fixture("deshacer-falla", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    select(&mut a, &["a.txt", "b.txt"]);
+    a.run_command(Command::Rename);
+    a.rename_panel_click(PanelHit::Mode(ModeKind::Add));
+    type_in(&mut a, &host, Field::Text, "x-");
+    a.rename_panel_click(PanelHit::Apply);
+    wait_renamed(&mut a);
+    crate::sys::testing::FakeFileSystem::fail_rename_to(&dir.join("b.txt"));
+    a.run_command(Command::Undo);
+    wait_renamed(&mut a);
+    assert_eq!(names_on_disk(&dir), ["x-a.txt", "x-b.txt"]);
+    assert!(matches!(a.undo.last(), Some(Undo::Renames(v)) if v.len() == 2));
+    assert!(a.notice.as_deref().is_some_and(|n| n.starts_with("No se pudo deshacer el renombrado: ")), "{:?}", a.notice);
+}
+
+#[test]
+fn invalid_start_number_disables_apply() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let dir = fixture("inicio", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    select(&mut a, &["a.txt", "b.txt"]);
+    a.run_command(Command::Rename);
+    a.rename_panel_click(PanelHit::Mode(ModeKind::Format));
+    type_in(&mut a, &host, Field::Base, "foto");
+    assert!(a.rename_panel_state().unwrap().can_apply);
+    type_in(&mut a, &host, Field::Start, "1a");
+    let s = a.rename_panel_state().unwrap();
+    assert!(!s.can_apply);
+    assert_eq!(s.clash.as_deref(), Some("«Número inicial» tiene que ser un número"));
+}
+
+#[test]
+fn tab_moves_between_fields() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let dir = fixture("tab", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    select(&mut a, &["a.txt", "b.txt"]);
+    a.run_command(Command::Rename);
+    assert!(host.text_has_focus(field(&a, Field::Find)));
+    a.on_app_message(WM_APP_FIELD_TAB, 0, 0);
+    assert!(host.text_has_focus(field(&a, Field::With)));
+    a.on_app_message(WM_APP_FIELD_TAB, 0, 0);
+    assert!(host.text_has_focus(field(&a, Field::Find)), "da la vuelta");
+    a.on_app_message(WM_APP_FIELD_TAB, 1, 0);
+    assert!(host.text_has_focus(field(&a, Field::With)), "Shift+Tab va para atrás");
+}
+
+#[test]
+fn switching_tab_closes_the_panel() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let dir = fixture("pestana", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    select(&mut a, &["a.txt", "b.txt"]);
+    a.run_command(Command::Rename);
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    assert!(a.rename_many.is_none());
+    assert!(host.text_boxes_of(TextKind::Field).is_empty());
+}
+
+#[test]
+fn only_visible_selection_counts() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let dir = fixture("visibles", &["a.txt", "b.jpg"]);
+    go(&mut a, &dir);
+    select(&mut a, &["a.txt", "b.jpg"]);
+    a.panes[0].tab_mut().list.set_filter(Column::Extension, vec!["TXT".to_string()]);
+    // Queda uno a la vista: F2 es el renombrado en línea y el menú no ofrece Renombrar varios.
+    let mut cmds = Vec::new();
+    assert!(!a.item_entries(&mut cmds).iter().any(|e| matches!(e, shell::Entry::Item { label, .. } if label.starts_with("Renombrar"))));
+    a.run_command(Command::Rename);
+    assert!(a.rename_many.is_none());
+}

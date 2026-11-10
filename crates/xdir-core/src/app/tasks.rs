@@ -12,8 +12,9 @@ pub const WM_APP_TASK: u32 = WM_APP + 26;
 
 /// Lo que devuelve un trabajo suelto.
 pub(super) enum TaskDone {
-    /// Terminó Renombrar varios (o su deshacer, con `undoing`) en la carpeta `dir`.
-    Renamed { dir: PathBuf, result: Result<Undo, String>, undoing: bool },
+    /// Terminó Renombrar varios en la carpeta `dir`; si era un deshacer, `undoing` trae los pares
+    /// para volver a apilarlos si falló.
+    Renamed { dir: PathBuf, result: Result<Undo, String>, undoing: Option<Vec<(PathBuf, String)>> },
     /// Si el disco de `dir` distingue mayúsculas (para los choques de Renombrar varios).
     CaseInfo { dir: PathBuf, case_insensitive: bool },
 }

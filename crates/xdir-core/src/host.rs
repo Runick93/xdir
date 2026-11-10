@@ -40,6 +40,10 @@ pub const WM_APP_TEXT_CHANGED: u32 = WM_APP + 16;
 /// Escape. Perder el foco no avisa (el panel sigue abierto).
 pub const WM_APP_FIELD_DONE: u32 = WM_APP + 31;
 
+/// Tab en un campo de un panel (`TextKind::Field`): el foco pasa a la caja siguiente (`wparam` = 1
+/// con Shift: a la anterior).
+pub const WM_APP_FIELD_TAB: u32 = WM_APP + 32;
+
 /// Para qué es una caja de edición: decide qué mensaje manda al terminar y qué teclas reenvía.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextKind {

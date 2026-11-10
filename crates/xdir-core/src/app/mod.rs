@@ -68,7 +68,7 @@ use crate::theme::{Accent, Theme};
 use crate::ui::{Layout, Splits, Splitter};
 use crate::a11y::{self, A11yAction, A11yView, ItemInfo};
 use crate::host::{
-    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FIELD_DONE, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
+    MenuPos, TextBox, TextKind, WM_APP_EDIT_DONE, WM_APP_FAVEDIT_DONE, WM_APP_FIELD_DONE, WM_APP_FIELD_TAB, WM_APP_FILTER_DONE, WM_APP_PALETTE_KEY, WM_APP_RENAME_DONE,
     WM_APP_SUGGEST_KEY, WM_APP_TEXT_CHANGED, WindowHost,
 };
 
@@ -391,6 +391,8 @@ pub struct App {
     quick_look: Option<quick_look::QlState>,
     /// Renombrar varios abierto (el panel de la derecha y la vista previa en la lista).
     rename_many: Option<rename_many::RenameMany>,
+    /// Hay un Renombrar varios (o su deshacer) corriendo: no se larga otro hasta que termine.
+    renaming: bool,
     /// Trabajos sueltos en otro hilo (`spawn_task`) y su canal.
     task_tx: Sender<tasks::TaskDone>,
     task_rx: Receiver<tasks::TaskDone>,
@@ -573,6 +575,7 @@ impl App {
             preview: preview::PreviewState::new(session.preview_on, session.preview_width),
             quick_look: None,
             rename_many: None,
+            renaming: false,
             task_tx,
             task_rx,
             swallow_space: false,

@@ -292,7 +292,7 @@ impl App {
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
         let mut entries = vec![item("Vista rápida", Command::QuickLook), item("Copiar como ruta de acceso", Command::CopyPaths)];
         // Con varios seleccionados en una carpeta del disco: Renombrar varios.
-        let n = self.panes[self.active].tab().list.selected_indices().count();
+        let n = self.panes[self.active].tab().list.selected_positions().len();
         if n > 1 && self.can_rename_many(self.active) {
             entries.push(item(&format!("Renombrar {n} elementos…"), Command::RenameMany));
         }

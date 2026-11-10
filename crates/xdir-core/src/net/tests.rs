@@ -170,3 +170,17 @@ fn secret_wipe_zeroes() {
     let o = ConnectOptions { credentials: Some(c), ..Default::default() };
     assert!(o.without_secret().credentials.is_none());
 }
+
+#[test]
+fn bonjour_service_hosts() {
+    let a = p("smb://MacBook%20Pro%20de%20Javier%20(2)._smb._tcp.local/fotos");
+    assert_eq!(a.host, "MacBook Pro de Javier (2)._smb._tcp.local");
+    assert_eq!(a.to_url(), "smb://MacBook%20Pro%20de%20Javier%20(2)._smb._tcp.local/fotos");
+    assert_eq!(Address::parse(&a.to_url()), Ok(a));
+    assert_eq!(host_address("MacBook Pro de Javier (2)"), "smb://MacBook%20Pro%20de%20Javier%20(2)._smb._tcp.local");
+    assert_eq!(host_address("NAS-CASA"), "smb://NAS-CASA");
+    // Sin el sufijo de Bonjour, un host con espacios sigue sin valer; ni con `/` o `@` adentro.
+    for bad in ["smb://Mac%20Book/x", "smb://a%2Fb._smb._tcp.local/x", "smb://a%40b._smb._tcp.local", "smb://._smb._tcp.local"] {
+        assert!(Address::parse(bad).is_err(), "{bad}");
+    }
+}

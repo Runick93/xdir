@@ -135,7 +135,7 @@ impl App {
             // o la cierra si está abierta. No navega el panel.
             tree::TreeHit::Xtree => self.toggle_xtree(),
             tree::TreeHit::ConnectFavorite(address) => self.open_net_address(&address),
-            tree::TreeHit::ConnectHost(host) => self.open_net_address(&format!("smb://{host}")),
+            tree::TreeHit::ConnectHost(host) => self.open_net_address(&crate::net::host_address(&host)),
             tree::TreeHit::Nothing => {}
         }
         self.redraw();

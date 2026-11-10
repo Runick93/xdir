@@ -852,6 +852,21 @@ mod tree_net {
         assert_eq!(FakeNetwork::connects_to("MAC-n7h")[0].0, "smb://MAC-n7h");
     }
 
+    /// Las máquinas de Bonjour llegan con su nombre para mostrar: se conecta a su servicio SMB.
+    #[test]
+    fn bonjour_host_click_connects_service() {
+        let mut a = tree_app(FakeHost::new());
+        a.net.hosts = vec!["MacBook de N7 (2)".into()];
+        a.net_changed();
+        a.tree.expand_network(a.hwnd, true);
+        a.paint();
+        let (x, y) = a.tree.row_point("MacBook de N7 (2)").unwrap();
+        a.on_tree_click(x, y);
+        let host = "MacBook de N7 (2)._smb._tcp.local";
+        wait_until(&mut a, |_| FakeNetwork::connects_to(host).len() == 1);
+        assert_eq!(FakeNetwork::connects_to(host)[0].0, "smb://MacBook%20de%20N7%20(2)._smb._tcp.local");
+    }
+
     #[test]
     fn connected_eject_runs_disconnect_flow() {
         let root = tmp_dir("n7-eject").join("fotos");

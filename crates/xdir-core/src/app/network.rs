@@ -250,7 +250,14 @@ impl App {
     /// Clic en un favorito o una máquina de «Red»: si ya hay una conexión con ese servidor y
     /// recurso, abre su carpeta; si no, conecta (sin panel) y abre al volver.
     pub(super) fn open_net_address(&mut self, address: &str) {
-        let Ok(addr) = Address::parse(address) else { return };
+        let addr = match Address::parse(address) {
+            Ok(a) => a,
+            Err(e) => {
+                self.notice = Some(e);
+                self.redraw();
+                return;
+            }
+        };
         let existing = self.net.connections.iter().find(|c| c.connected && Address::parse(&c.address).is_ok_and(|a| a.same_share(&addr) && addr.share.is_some()));
         if let Some(c) = existing {
             let path = addr.rest.iter().fold(c.local.clone(), |p, r| p.join(r));
@@ -341,7 +348,7 @@ impl App {
         let item = |id: u32, label: &str| Entry::Item { id, label: label.into(), enabled: true, checked: false };
         let address = match &row {
             NetRow::Favorite(a) | NetRow::Connected(_, a) => Some(a.clone()),
-            NetRow::Host(h) => Some(format!("smb://{h}")),
+            NetRow::Host(h) => Some(net::host_address(h)),
             NetRow::Root => None,
         };
         let fav = address.as_deref().and_then(|a| Address::parse(a).ok()).map(|a| self.net.places.is_favorite(&a));

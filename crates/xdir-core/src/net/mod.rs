@@ -87,6 +87,26 @@ fn valid_host(h: &str) -> bool {
     !h.is_empty() && h.len() <= 253 && h.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')) && !h.starts_with(['.', '-'])
 }
 
+const BONJOUR_SUFFIXES: [&str; 2] = ["._smb._tcp.local", "._afpovertcp._tcp.local"];
+
+/// ¿Es el nombre de un servicio de Bonjour? Con nombre antes del sufijo y sin separadores,
+/// `@`, `:`, `%` ni caracteres de control.
+fn is_bonjour_host(h: &str) -> bool {
+    let lower = h.to_lowercase();
+    BONJOUR_SUFFIXES.iter().any(|s| lower.ends_with(s) && lower.len() > s.len())
+        && !h.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | '@' | ':' | '%'))
+}
+
+/// La dirección para conectarse a una máquina que anuncia la red local: `smb://nombre` si el
+/// nombre es un nombre de host; si no (los nombres de Bonjour llevan espacios), su servicio SMB
+/// (`smb://Nombre%20con%20espacios._smb._tcp.local`), que el sistema resuelve.
+pub fn host_address(name: &str) -> String {
+    match Address::parse(&format!("smb://{name}")) {
+        Ok(a) if a.share.is_none() => a.to_url(),
+        _ => format!("smb://{}._smb._tcp.local", encode(name)),
+    }
+}
+
 fn valid_ipv6(h: &str) -> bool {
     h.contains(':') && h.bytes().all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'.'))
 }
@@ -159,10 +179,18 @@ impl Address {
                 Some(_) => return Err(bad()),
                 None => (hostport, None),
             };
-            if !valid_host(h) {
-                return Err(bad());
-            }
-            (h.to_string(), port)
+            let host = if valid_host(h) {
+                h.to_string()
+            } else {
+                // Un servicio de Bonjour («MacBook de Ana._smb._tcp.local»): el nombre puede llevar
+                // espacios y signos, codificados en la URL.
+                let d = decode(h)?;
+                if !is_bonjour_host(&d) {
+                    return Err(bad());
+                }
+                d
+            };
+            (host, port)
         };
         let port = match port {
             Some(p) => match p.parse::<u16>() {
@@ -185,7 +213,13 @@ impl Address {
     }
 
     fn host_for_url(&self) -> String {
-        if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() }
+        if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else if valid_host(&self.host) {
+            self.host.clone()
+        } else {
+            encode(&self.host)
+        }
     }
 
     /// `esquema://[usuario@]servidor[:puerto]/recurso/resto`, con lo que haga falta codificado.

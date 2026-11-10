@@ -1209,36 +1209,19 @@ impl<'a> Job<'a> {
             if self.should_stop() {
                 break;
             }
+            // La carpeta del lugar original, sin seguir enlaces (reglas de cada sistema).
             if let Some(dir) = origin.parent()
-                && let Err(e) = self.make_dirs(dir)
+                && let Err(e) = self.prims.prepare_restore(&src, dir)
             {
                 self.fail(&src, &origin, e);
                 continue;
             }
-            let item = self.item_to(&src, origin, true);
+            let item = self.item_to(&src, origin.clone(), true);
             self.process(item, true);
-        }
-    }
-
-    /// Crea `dir` y las carpetas de arriba que falten.
-    fn make_dirs(&self, dir: &Path) -> Result<(), CopyError> {
-        let mut missing = Vec::new();
-        let mut cur = Some(dir);
-        while let Some(d) = cur {
-            if d.as_os_str().is_empty() || self.exists(d).is_some() {
-                break;
-            }
-            missing.push(d.to_path_buf());
-            cur = d.parent();
-        }
-        for d in missing.iter().rev() {
-            match self.prims.create_dir(d) {
-                Ok(()) => {}
-                Err(e) if e.kind == ErrKind::Exists => {}
-                Err(e) => return Err(e),
+            if self.exists(&src).is_none() && self.exists(&origin).is_some() {
+                self.prims.restored(&src);
             }
         }
-        Ok(())
     }
 
     // ---------- deshacer ----------

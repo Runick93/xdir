@@ -50,6 +50,7 @@ struct FakeFs {
     /// `FOFX_RECYCLEONDELETE`).
     trash_deletes: bool,
     syncs: Vec<PathBuf>,
+    restored: Vec<PathBuf>,
 }
 
 fn default_volume() -> VolumeInfo {
@@ -340,6 +341,11 @@ impl FakeCopyPrims {
     pub fn syncs(&self) -> Vec<PathBuf> {
         self.fs().syncs.clone()
     }
+
+    /// Lo que se le avisó como devuelto de la Papelera (`CopyPrims::restored`), en orden.
+    pub fn restored(&self) -> Vec<PathBuf> {
+        self.fs().restored.clone()
+    }
 }
 
 impl CopyPrims for FakeCopyPrims {
@@ -570,6 +576,10 @@ impl CopyPrims for FakeCopyPrims {
 
     fn trash_origin(&self, in_trash: &Path) -> Option<PathBuf> {
         self.fs().origins.get(in_trash).cloned()
+    }
+
+    fn restored(&self, in_trash: &Path) {
+        self.fs().restored.push(in_trash.to_path_buf());
     }
 
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {

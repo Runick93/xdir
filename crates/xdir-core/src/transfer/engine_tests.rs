@@ -1082,3 +1082,34 @@ fn leftover_partial_does_not_block_the_copy() {
     assert_eq!(fake.contents(&p("/pl/d/a.bin")).unwrap(), b"nuevo");
     assert_eq!(fake.contents(&p("/pl/d/.a.bin.xdir-part")).unwrap(), b"viejo parcial");
 }
+
+#[test]
+fn restore_refuses_a_symlinked_parent() {
+    // Un disco armado: «docs» es un enlace a otra carpeta. Devolver ahí no deja el archivo del
+    // otro lado: queda en la Papelera, con el error.
+    let fake = FakeCopyPrims::new();
+    fake.add_dir(&p("/rl/afuera"));
+    fake.add_symlink(&p("/rl/vol/docs"), &p("/rl/afuera"));
+    fake.add_file(&p("/rl/vol/.Trashes/evil.plist"), b"x".to_vec());
+    fake.set_trash_origin(&p("/rl/vol/.Trashes/evil.plist"), &p("/rl/vol/docs/evil.plist"));
+    let r = go(&fake, JobSpec::Restore { items: vec![p("/rl/vol/.Trashes/evil.plist")] }, &[]);
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.messages());
+    assert!(fake.exists(&p("/rl/vol/.Trashes/evil.plist")));
+    assert!(!fake.exists(&p("/rl/afuera/evil.plist")));
+    assert!(fake.restored().is_empty());
+}
+
+#[test]
+fn restore_tells_the_platform_what_came_back() {
+    // Lo devuelto sale del registro de la Papelera (papelera.tsv en la Mac, el .trashinfo en
+    // Linux); lo que no se pudo devolver, no.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/rf/.Trash/a.txt"), b"a".to_vec());
+    fake.set_trash_origin(&p("/rf/.Trash/a.txt"), &p("/rf/Docs/a.txt"));
+    fake.add_file(&p("/rf/.Trash/b.txt"), b"b".to_vec());
+    fake.set_trash_origin(&p("/rf/.Trash/b.txt"), &p("/rf/Docs/b.txt"));
+    fake.add_file(&p("/rf/Docs/b.txt"), b"otro".to_vec());
+    let r = go(&fake, JobSpec::Restore { items: vec![p("/rf/.Trash/a.txt"), p("/rf/.Trash/b.txt")] }, &[answer(Choice::Skip)]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.restored(), vec![p("/rf/.Trash/a.txt")]);
+}

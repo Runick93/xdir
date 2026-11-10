@@ -149,6 +149,32 @@ pub trait CopyPrims: Send + Sync {
     fn trash_origin(&self, _in_trash: &Path) -> Option<PathBuf> {
         None
     }
+    /// «Devolver»: deja lista la carpeta `dir` del lugar original de `in_trash` antes de moverlo
+    /// ahí, sin seguir enlaces (un disco armado podría tener «docs» apuntando a otro lado): las
+    /// que faltan se crean una por una y ninguna del camino puede ser un enlace. Cada sistema
+    /// pone sus reglas (en macOS y Linux, solo los enlaces de root del primer nivel del disco de
+    /// arranque, como `/tmp`). Por defecto: ningún enlace en el camino.
+    fn prepare_restore(&self, _in_trash: &Path, dir: &Path) -> Result<(), CopyError> {
+        let refuse = |p: &Path| CopyError::new(ErrKind::Other(format!("«{}» no es una carpeta de ese disco (es un enlace o está afuera): no se devuelve ahí", p.display())), p);
+        // Las que faltan (desde abajo) hasta la primera que está; desde ahí, todas carpetas.
+        let mut missing = Vec::new();
+        let mut found = false;
+        for d in dir.ancestors().filter(|d| !d.as_os_str().is_empty()) {
+            match self.stat(d) {
+                Ok(s) if s.kind == ItemKind::Dir => found = true,
+                Ok(_) => return Err(refuse(d)),
+                Err(e) if e.kind == ErrKind::NotFound && !found => missing.push(d.to_path_buf()),
+                Err(e) => return Err(e),
+            }
+        }
+        for d in missing.iter().rev() {
+            self.create_dir(d)?;
+        }
+        Ok(())
+    }
+    /// «Devolver» terminó con `in_trash`: el sistema olvida su registro (el `.trashinfo` en Linux,
+    /// la línea de `papelera.tsv` en macOS).
+    fn restored(&self, _in_trash: &Path) {}
     /// Deshace `trash`: devuelve `in_trash` a `original` (que puede no ser donde estaba al
     /// mandarlo: el motor manda a la Papelera lo apartado con un nombre temporal).
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError>;

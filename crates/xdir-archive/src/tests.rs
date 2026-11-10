@@ -107,11 +107,16 @@ fn raw_zip(entries: &[Raw]) -> Vec<u8> {
     out
 }
 
-/// Extrae todas las entradas como lo hará el motor: ruta segura bajo `root`; devuelve el primer error.
+/// Extrae todo con `extract_all` (enlaces al final, una pasada).
 fn extract_all(zip: &Path, root: &Path) -> Result<(), Error> {
+    svc().extract_all(zip, root, &mut |_| Flow::Continue).map(|_| ())
+}
+
+/// Extrae entrada por entrada, en el orden del archivo (como un llamador torpe).
+#[cfg(unix)]
+fn extract_each(zip: &Path, root: &Path) -> Result<(), Error> {
     for e in svc().list(zip)? {
-        let rel = safe_entry_path(&e.name).ok_or_else(|| Error::other("Ruta no permitida", zip))?;
-        svc().extract(zip, &e, &root.join(rel), &mut |_| Flow::Continue)?;
+        svc().extract(zip, &e, root, None, &mut |_| Flow::Continue)?;
     }
     Ok(())
 }
@@ -169,8 +174,16 @@ fn zip_roundtrip() {
     extract_all(&z, &dst).unwrap();
     assert_eq!(tree(&src), tree(&dst.join("src")));
     // No pisa.
-    let again = svc().extract(&z, list.iter().find(|e| e.name == "src/a.txt").unwrap(), &dst.join("src/a.txt"), &mut |_| Flow::Continue);
+    let a_txt = list.iter().find(|e| e.name == "src/a.txt").unwrap();
+    let again = svc().extract(&z, a_txt, &dst, None, &mut |_| Flow::Continue);
     assert_eq!(again.unwrap_err().kind, ErrKind::Exists);
+    // Conservar ambos: otro nombre final, siempre adentro.
+    svc().extract(&z, a_txt, &dst, Some("a 2.txt".as_ref()), &mut |_| Flow::Continue).unwrap();
+    assert_eq!(fs::read(dst.join("src/a 2.txt")).unwrap(), b"hola");
+    for bad in ["../x.txt", "a/b.txt", "..", "C:x", "a\\b"] {
+        let r = svc().extract(&z, a_txt, &dst, Some(std::ffi::OsStr::new(bad)), &mut |_| Flow::Continue);
+        assert!(matches!(r.unwrap_err().kind, ErrKind::Other(_)), "{bad}");
+    }
 }
 
 #[test]
@@ -198,7 +211,7 @@ fn zip_progress_and_stop() {
         Flow::Continue
     })
     .unwrap();
-    assert!(seen.windows(2).all(|w| w[0] < w[1]));
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]));
     assert_eq!(*seen.last().unwrap(), 200_004);
 
     let z2 = t.p("stop.zip");
@@ -209,18 +222,35 @@ fn zip_progress_and_stop() {
     // Extraer: avance acumulado y Stop borra lo escrito.
     let list = svc().list(&z).unwrap();
     let big = list.iter().find(|e| e.name == "src/b.bin").unwrap();
-    let dst = t.p("big.bin");
+    let root = t.p("o1");
+    fs::create_dir(&root).unwrap();
     let mut last = 0;
-    svc().extract(&z, big, &dst, &mut |b| {
+    svc().extract(&z, big, &root, None, &mut |b| {
         last = b;
         Flow::Continue
     })
     .unwrap();
     assert_eq!(last, 200_000);
-    let dst2 = t.p("big2.bin");
-    let err = svc().extract(&z, big, &dst2, &mut |_| Flow::Stop).unwrap_err();
+    assert_eq!(fs::metadata(root.join("src/b.bin")).unwrap().len(), 200_000);
+    let err = svc().extract(&z, big, &root, Some("big2.bin".as_ref()), &mut |_| Flow::Stop).unwrap_err();
     assert_eq!(err.kind, ErrKind::Cancelled);
-    assert!(!dst2.exists());
+    assert!(!root.join("src/big2.bin").exists());
+
+    // extract_all: avance total y cancelar.
+    let all = t.p("o2");
+    fs::create_dir(&all).unwrap();
+    let mut seen = vec![];
+    svc().extract_all(&z, &all, &mut |b| {
+        seen.push(b);
+        Flow::Continue
+    })
+    .unwrap();
+    assert_eq!(*seen.last().unwrap(), 200_004);
+    assert_eq!(tree(&t.p("src")), tree(&all.join("src")));
+    let all2 = t.p("o3");
+    fs::create_dir(&all2).unwrap();
+    let err = svc().extract_all(&z, &all2, &mut |_| Flow::Stop).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
 }
 
 #[test]
@@ -244,7 +274,7 @@ fn zip_password_error() {
     fs::write(&z, raw_zip(&[Raw { flags: 1, ..raw(b"secreto.txt", b"datos cifrados") }])).unwrap();
     let list = svc().list(&z).unwrap();
     assert_eq!(list[0].name, "secreto.txt");
-    let err = svc().extract(&z, &list[0], &t.p("secreto.txt"), &mut |_| Flow::Continue).unwrap_err();
+    let err = svc().extract(&z, &list[0], &t.0, None, &mut |_| Flow::Continue).unwrap_err();
     assert_eq!(err.kind, ErrKind::Other("Este zip tiene contraseña".into()));
     assert!(!t.p("secreto.txt").exists());
 }
@@ -260,7 +290,7 @@ fn zip_unsupported_method() {
     b[c + 10] = 14;
     fs::write(&z, b).unwrap();
     let list = svc().list(&z).unwrap();
-    let err = svc().extract(&z, &list[0], &t.p("a.txt"), &mut |_| Flow::Continue).unwrap_err();
+    let err = svc().extract(&z, &list[0], &t.0, None, &mut |_| Flow::Continue).unwrap_err();
     assert_eq!(err.kind, ErrKind::Other("Formato no soportado".into()));
     assert!(!t.p("a.txt").exists());
 }
@@ -289,10 +319,10 @@ fn zip_malicious_names_write_nothing_outside() {
         fs::create_dir_all(&root).unwrap();
         let list = svc().list(&z).unwrap();
         assert_eq!(safe_entry_path(&list[0].name), None, "{name}");
-        // Aunque un llamador torpe pase una ruta propia, la entrada se rechaza por su nombre.
-        let err = svc().extract(&z, &list[0], &root.join("x"), &mut |_| Flow::Continue).unwrap_err();
+        let err = svc().extract(&z, &list[0], &root, None, &mut |_| Flow::Continue).unwrap_err();
         assert!(matches!(err.kind, ErrKind::Other(_)), "{name}");
-        assert!(!root.join("x").exists());
+        assert!(extract_all(&z, &root).is_err());
+        assert!(fs::read_dir(&root).unwrap().next().is_none(), "{name}");
         assert!(!t.p(&format!("root{i}/evil.txt")).exists());
         assert!(!t.p("evil.txt").exists());
     }
@@ -417,10 +447,10 @@ fn targz_malicious_entries_are_refused() {
     let root = t.p("r/in");
     fs::create_dir_all(&root).unwrap();
     for e in svc().list(&z).unwrap() {
-        let dst = safe_entry_path(&e.name).map(|r| root.join(r)).unwrap_or_else(|| root.join("rechazada"));
-        let r = svc().extract(&z, &e, &dst, &mut |_| Flow::Continue);
+        let r = svc().extract(&z, &e, &root, None, &mut |_| Flow::Continue);
         assert!(r.is_err(), "{}", e.name);
     }
+    assert!(extract_all(&z, &root).is_err());
     assert!(!t.p("r/evil.txt").exists());
     assert!(fs::symlink_metadata(root.join("l")).is_err());
     assert!(fs::symlink_metadata(root.join("m")).is_err());
@@ -433,4 +463,198 @@ fn error_messages_and_kinds() {
     assert_eq!(kind_of(&io::Error::from(io::ErrorKind::StorageFull)), ErrKind::DiskFull);
     assert_eq!(Error::other("x", Path::new("a")).message(), "x");
     assert_eq!(Error { kind: ErrKind::DiskFull, path: PathBuf::new() }.message(), "El disco está lleno");
+}
+
+// ---- Ronda de arreglos 1: regresiones de seguridad ----
+
+#[cfg(unix)]
+fn outside_marker(t: &Tmp) -> PathBuf {
+    t.p("raiz/pwned.txt")
+}
+
+#[cfg(unix)]
+#[test]
+fn reg_zip_redirected_symlink_cannot_write_outside() {
+    // l -> b/.. (b todavía no existe), b -> ., y luego un archivo l/pwned.txt.
+    let t = Tmp::new();
+    let z = t.p("r.zip");
+    fs::write(&z, raw_zip(&[link_entry(b"l", b"b/.."), link_entry(b"b", b"."), raw(b"l/pwned.txt", b"pwn")])).unwrap();
+    let root = t.p("raiz/in");
+    fs::create_dir_all(&root).unwrap();
+    assert!(extract_all(&z, &root).is_err());
+    assert!(!outside_marker(&t).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reg_zip_redirected_symlink_folder_entry() {
+    let t = Tmp::new();
+    let z = t.p("r.zip");
+    fs::write(&z, raw_zip(&[link_entry(b"l", b"b/.."), link_entry(b"b", b"."), raw(b"l/sub/", b"")])).unwrap();
+    let root = t.p("raiz/in");
+    fs::create_dir_all(&root).unwrap();
+    assert!(extract_all(&z, &root).is_err());
+    assert!(!t.p("raiz/sub").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reg_targz_redirected_symlink_cannot_write_outside() {
+    let t = Tmp::new();
+    let z = t.p("r.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"l", tar::EntryType::Symlink, Some(b"b/.."), b"");
+        tar_entry(b, b"b", tar::EntryType::Symlink, Some(b"."), b"");
+        tar_entry(b, b"l/pwned.txt", tar::EntryType::Regular, None, b"pwn");
+    });
+    let root = t.p("raiz/in");
+    fs::create_dir_all(&root).unwrap();
+    assert!(extract_all(&z, &root).is_err());
+    assert!(!outside_marker(&t).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reg_existing_symlink_in_destination_is_not_traversed() {
+    let t = Tmp::new();
+    let z = t.p("r.zip");
+    fs::write(&z, raw_zip(&[raw(b"enlace/pwned.txt", b"pwn"), raw(b"enlace/sub/", b"")])).unwrap();
+    let root = t.p("raiz/in");
+    let fuera = t.p("fuera");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&fuera).unwrap();
+    std::os::unix::fs::symlink(&fuera, root.join("enlace")).unwrap();
+    assert!(extract_all(&z, &root).is_err());
+    assert!(!fuera.join("pwned.txt").exists());
+    assert!(!fuera.join("sub").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reg_each_entry_order_also_refused() {
+    let t = Tmp::new();
+    let z = t.p("r.zip");
+    fs::write(&z, raw_zip(&[link_entry(b"l", b"b/.."), link_entry(b"b", b"."), raw(b"l/pwned.txt", b"pwn")])).unwrap();
+    let root = t.p("raiz/in");
+    fs::create_dir_all(&root).unwrap();
+    assert!(extract_each(&z, &root).is_err());
+    assert!(!outside_marker(&t).exists());
+    // b primero y después l -> b/.. : en el disco sale de la raíz.
+    let z2 = t.p("r2.zip");
+    fs::write(&z2, raw_zip(&[link_entry(b"b", b"."), link_entry(b"l", b"b/..")])).unwrap();
+    let root2 = t.p("raiz2/in");
+    fs::create_dir_all(&root2).unwrap();
+    assert!(extract_each(&z2, &root2).is_err());
+    assert!(fs::symlink_metadata(root2.join("l")).is_err());
+    assert!(extract_all(&z2, &t.p("raiz2/in")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn reg_targz_folder_entry_and_existing_symlink() {
+    let t = Tmp::new();
+    let z = t.p("r.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"l", tar::EntryType::Symlink, Some(b"b/.."), b"");
+        tar_entry(b, b"b", tar::EntryType::Symlink, Some(b"."), b"");
+        tar_entry(b, b"l/sub/", tar::EntryType::Directory, None, b"");
+    });
+    let root = t.p("raiz/in");
+    fs::create_dir_all(&root).unwrap();
+    assert!(extract_all(&z, &root).is_err());
+    assert!(!t.p("raiz/sub").exists());
+    let z2 = t.p("r2.tar.gz");
+    tar_gz(&z2, |b| tar_entry(b, b"enlace/pwned.txt", tar::EntryType::Regular, None, b"pwn"));
+    let root2 = t.p("r2/in");
+    let fuera = t.p("fuera");
+    fs::create_dir_all(&root2).unwrap();
+    fs::create_dir_all(&fuera).unwrap();
+    std::os::unix::fs::symlink(&fuera, root2.join("enlace")).unwrap();
+    assert!(extract_all(&z2, &root2).is_err());
+    assert!(!fuera.join("pwned.txt").exists());
+}
+
+#[test]
+fn zip_long_symlink_target_is_rejected() {
+    let t = Tmp::new();
+    let z = t.p("largo.zip");
+    let target = vec![b'a'; 5000];
+    fs::write(&z, raw_zip(&[Raw { eattr: 0o120777 << 16, ..raw(b"l", &target) }])).unwrap();
+    let list = svc().list(&z).unwrap();
+    assert_eq!(list[0].link, None);
+    let root = t.p("r");
+    fs::create_dir(&root).unwrap();
+    assert!(svc().extract(&z, &list[0], &root, None, &mut |_| Flow::Continue).is_err());
+}
+
+#[test]
+fn missing_entry_is_not_found_and_declared_total() {
+    let t = Tmp::new();
+    let (_, items) = sample(&t);
+    let z = t.p("out.zip");
+    svc().create(&z, &items, &mut |_| Flow::Continue).unwrap();
+    assert_eq!(svc().declared_total(&z).unwrap(), 200_004);
+    let ghost = ArchiveEntry { index: 99, name: "x".into(), size: 0, kind: ItemKind::File, link: None, modified: 0 };
+    let err = svc().extract(&z, &ghost, &t.0, None, &mut |_| Flow::Continue).unwrap_err();
+    assert_eq!(err.kind, ErrKind::NotFound);
+}
+
+#[test]
+fn create_cancels_with_many_empty_items_and_normalizes_names() {
+    let t = Tmp::new();
+    let d = t.p("d");
+    fs::create_dir(&d).unwrap();
+    let items: Vec<_> = (0..50).map(|i| (d.clone(), format!("d{i}/"))).collect();
+    let z = t.p("o.zip");
+    let mut calls = 0;
+    let err = svc().create(&z, &items, &mut |_| {
+        calls += 1;
+        if calls >= 3 { Flow::Stop } else { Flow::Continue }
+    })
+    .unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
+    assert!(!z.exists());
+    for bad in ["a\\b", "./a", "a/./b", "a/../b", "/a"] {
+        let z = t.p("n.zip");
+        let r = svc().create(&z, &[(d.clone(), format!("{bad}/"))], &mut |_| Flow::Continue);
+        assert!(r.is_err(), "{bad}");
+        assert!(!z.exists());
+    }
+    let z = t.p("n2.zip");
+    svc().create(&z, &[(d.clone(), "a//b/".to_string())], &mut |_| Flow::Continue).unwrap();
+    assert_eq!(svc().list(&z).unwrap()[0].name, "a/b/");
+}
+
+#[cfg(unix)]
+#[test]
+fn create_refuses_fifos() {
+    let t = Tmp::new();
+    let f = t.p("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&f).status().unwrap().success());
+    let z = t.p("o.zip");
+    let err = svc().create(&z, &[(f, "fifo".to_string())], &mut |_| Flow::Continue).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Other("No se puede comprimir este tipo de elemento".into()));
+    assert!(!z.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn targz_list_is_cancellable_and_extract_all_one_pass() {
+    let t = Tmp::new();
+    let z = t.p("a.tar.gz");
+    tar_gz(&z, |b| {
+        tar_entry(b, b"a.txt", tar::EntryType::Regular, None, b"hola");
+        tar_entry(b, b"b.txt", tar::EntryType::Regular, None, b"mundo");
+    });
+    let err = svc().list_cancellable(&z, &mut || Flow::Stop).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
+    let root = t.p("r");
+    fs::create_dir(&root).unwrap();
+    let err = svc().extract_all(&z, &root, &mut |_| Flow::Stop).unwrap_err();
+    assert_eq!(err.kind, ErrKind::Cancelled);
+    let root2 = t.p("r2");
+    fs::create_dir(&root2).unwrap();
+    assert_eq!(svc().extract_all(&z, &root2, &mut |_| Flow::Continue).unwrap(), 0);
+    assert_eq!(fs::read(root2.join("b.txt")).unwrap(), b"mundo");
+    assert_eq!(svc().declared_total(&z).unwrap(), 9);
 }

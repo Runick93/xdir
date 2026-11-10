@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -5,7 +6,12 @@ use std::path::Path;
 use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 
-use crate::{ArchiveEntry, Error, Flow, ItemKind, Source, extract_to, io_err};
+use crate::{
+    ArchiveEntry, CancelRead, ErrKind, Error, Flow, ItemKind, MAX_LINK, Shared, Source, cancelled, io_err, resolve_rel,
+    write_entry,
+};
+
+type Reader<'a> = CancelRead<'a, GzDecoder<BufReader<File>>>;
 
 fn kind_of_type(t: EntryType) -> Option<ItemKind> {
     match t {
@@ -17,37 +23,42 @@ fn kind_of_type(t: EntryType) -> Option<ItemKind> {
     }
 }
 
-fn open(path: &Path) -> Result<Archive<GzDecoder<BufReader<File>>>, Error> {
+fn open<'a>(path: &Path, check: &'a mut dyn FnMut() -> Flow) -> Result<Archive<Reader<'a>>, Error> {
     let f = File::open(path).map_err(|e| io_err(e, path))?;
-    Ok(Archive::new(GzDecoder::new(BufReader::new(f))))
+    Ok(Archive::new(CancelRead { inner: GzDecoder::new(BufReader::new(f)), check }))
 }
 
 fn bad(e: std::io::Error, path: &Path) -> Error {
     // Un gzip o tar roto da InvalidInput/InvalidData/UnexpectedEof.
     match e.kind() {
-        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => {
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+            if e.get_ref().is_none_or(|i| !i.is::<crate::Cancelled>()) =>
+        {
             Error::other("El archivo está dañado", path)
         }
         _ => io_err(e, path),
     }
 }
 
-pub fn list(path: &Path) -> Result<Vec<ArchiveEntry>, Error> {
-    let mut a = open(path)?;
+/// Destino del enlace; `None` si es demasiado largo.
+fn link_of<R: std::io::Read>(e: &tar::Entry<'_, R>) -> Option<String> {
+    let l = e.link_name().ok().flatten()?.to_string_lossy().into_owned();
+    (l.len() as u64 <= MAX_LINK).then_some(l)
+}
+
+pub fn list(path: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+    let mut a = open(path, cancel)?;
     let mut out = Vec::new();
     for e in a.entries().map_err(|e| bad(e, path))? {
         let e = e.map_err(|e| bad(e, path))?;
         let Some(kind) = kind_of_type(e.header().entry_type()) else { continue };
         let name = e.path().map_err(|e| bad(e, path))?.to_string_lossy().into_owned();
-        let link = if kind == ItemKind::Symlink {
-            e.link_name().ok().flatten().map(|l| l.to_string_lossy().into_owned())
-        } else {
-            None
-        };
+        let link = if kind == ItemKind::Symlink { link_of(&e) } else { None };
         out.push(ArchiveEntry {
             index: out.len(),
             name,
-            size: e.header().size().unwrap_or(0),
+            // Tamaño real (PAX / GNU sparse), no el de la cabecera.
+            size: e.size(),
             kind,
             link,
             modified: e.header().mtime().unwrap_or(0),
@@ -56,14 +67,18 @@ pub fn list(path: &Path) -> Result<Vec<ArchiveEntry>, Error> {
     Ok(out)
 }
 
-/// Recorre hasta la entrada (el orden de un tar.gz no se puede saltar).
+/// Recorre hasta la entrada (el orden de un tar.gz no se puede saltar); si hay muchas, conviene
+/// `extract_all`.
 pub fn extract(
     archive: &Path,
     entry: &ArchiveEntry,
-    dst: &Path,
+    root: &Path,
+    override_name: Option<&OsStr>,
     progress: &mut dyn FnMut(u64) -> Flow,
 ) -> Result<(), Error> {
-    let mut a = open(archive)?;
+    let sh = Shared::new(progress);
+    let mut check = || sh.check();
+    let mut a = open(archive, &mut check)?;
     let mut n = 0usize;
     for e in a.entries().map_err(|e| bad(e, archive))? {
         let mut e = e.map_err(|e| bad(e, archive))?;
@@ -73,14 +88,61 @@ pub fn extract(
             continue;
         }
         let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
-        let link = e.link_name().ok().flatten().map(|l| l.to_string_lossy().into_owned());
-        let declared = e.header().size().unwrap_or(0);
-        let mode = e.header().mode().ok();
-        return extract_to(
-            Source { kind, name: &name, link: link.as_deref(), declared, mode, reader: &mut e },
-            dst,
-            progress,
-        );
+        let rel = resolve_rel(&name, override_name, archive)?;
+        let link = if kind == ItemKind::Symlink { link_of(&e) } else { None };
+        let (declared, mode) = (e.size(), e.header().mode().ok());
+        return write_entry(
+            Source { kind, rel: &rel, link: link.as_deref(), declared, mode, reader: &mut e },
+            root,
+            &mut |b| sh.report(0, b),
+        )
+        .map(|_| ());
     }
-    Err(Error::other("Ya no existe", archive))
+    Err(Error { kind: ErrKind::NotFound, path: archive.to_path_buf() })
+}
+
+/// Una sola pasada; los enlaces simbólicos se crean al final.
+pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<usize, Error> {
+    let sh = Shared::new(progress);
+    let mut check = || sh.check();
+    let mut a = open(archive, &mut check)?;
+    let mut base = 0u64;
+    let mut links: Vec<(std::path::PathBuf, Option<String>)> = Vec::new();
+    for e in a.entries().map_err(|e| bad(e, archive))? {
+        let mut e = e.map_err(|e| bad(e, archive))?;
+        let Some(kind) = kind_of_type(e.header().entry_type()) else { continue };
+        let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
+        let rel = resolve_rel(&name, None, archive)?;
+        if kind == ItemKind::Symlink {
+            links.push((rel, link_of(&e)));
+            continue;
+        }
+        let (declared, mode) = (e.size(), e.header().mode().ok());
+        let n = write_entry(
+            Source { kind, rel: &rel, link: None, declared, mode, reader: &mut e },
+            root,
+            &mut |b| sh.report(base, b),
+        )?;
+        base += n;
+        if sh.report(base, 0) == Flow::Stop {
+            return Err(cancelled(archive));
+        }
+    }
+    drop(a);
+    let mut omitted = 0usize;
+    for (rel, link) in links {
+        if cfg!(not(unix)) {
+            omitted += 1;
+            continue;
+        }
+        write_entry(
+            Source { kind: ItemKind::Symlink, rel: &rel, link: link.as_deref(), declared: 0, mode: None, reader: &mut std::io::empty() },
+            root,
+            &mut |_| Flow::Continue,
+        )?;
+        if sh.report(base, 0) == Flow::Stop {
+            return Err(cancelled(archive));
+        }
+    }
+    Ok(omitted)
 }

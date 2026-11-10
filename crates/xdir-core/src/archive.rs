@@ -28,7 +28,7 @@ fn has_drive(s: &str) -> bool {
 }
 
 /// Ruta relativa y segura de una entrada, o `None` si es absoluta, con unidad o UNC, con `..`
-/// que sale de la carpeta, con un byte nulo o vacía. `\` cuenta como separador; `.` y los
+/// que sale de la carpeta, con un byte nulo o vacía, y también cualquier componente con `:` o hecho solo de puntos y espacios. `\` cuenta como separador; `.` y los
 /// separadores repetidos se descartan.
 pub fn safe_entry_path(name: &str) -> Option<PathBuf> {
     if name.contains('\0') {
@@ -45,6 +45,9 @@ pub fn safe_entry_path(name: &str) -> Option<PathBuf> {
             ".." => {
                 parts.pop()?;
             }
+            // «C:x», «C:/x» y «a:flujo» son unidades o flujos alternativos en Windows; Windows
+            // también ignora los puntos y espacios del final («...» o «. » serían «» o «..»).
+            c if c.contains(':') || c.trim_end_matches(['.', ' ']).is_empty() => return None,
             c => parts.push(c),
         }
     }
@@ -108,7 +111,7 @@ mod tests {
 
     #[test]
     fn safe_entry_rejects_escapes() {
-        for bad in ["/etc/x", "C:\\x", "c:/x", "\\\\srv\\x", "a/../../x", "..", "", ".", "a\\..\\..\\x", "a\0b"] {
+        for bad in ["/etc/x", "C:\\x", "c:/x", "\\\\srv\\x", "a/../../x", "..", "", ".", "a\\..\\..\\x", "a\0b", "a/C:x", "a/C:/x", "a/b:stream", "a/.../b", "a/ /b", "a/.. /b", "a/. ./b"] {
             assert_eq!(safe_entry_path(bad), None, "{bad:?}");
         }
         assert_eq!(safe_entry_path("a/./b"), Some(PathBuf::from("a/b")));

@@ -328,6 +328,24 @@ pub fn close_all() {
     hide(AuxWindow::Transfers);
 }
 
+/// Estado de la ventana de copia para las pruebas: si se ve, si es hija de la principal y su
+/// lugar en el orden de las ventanas de xdir (0 = la de más arriba).
+#[cfg(feature = "pruebas")]
+pub fn debug_state() -> String {
+    let Some(window) = with(|a| a.window.clone()) else { return "sin ventana".into() };
+    let Some(mtm) = MainThreadMarker::new() else { return String::new() };
+    let ordered = objc2_app_kit::NSApplication::sharedApplication(mtm).orderedWindows();
+    let pos = |w: &NSWindow| ordered.iter().position(|o| std::ptr::eq(&*o, w));
+    let main = crate::app::main_window();
+    format!(
+        "visible={} hija={} orden_copia={:?} orden_principal={:?}",
+        window.isVisible(),
+        window.parentWindow().is_some(),
+        pos(&window),
+        main.as_deref().and_then(pos)
+    )
+}
+
 /// Número de la ventana de copia para el sistema (pruebas: capturar solo esa ventana).
 #[cfg(feature = "pruebas")]
 pub fn window_number() -> Option<isize> {

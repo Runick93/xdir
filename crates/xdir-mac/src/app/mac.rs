@@ -780,6 +780,15 @@ mod pruebas {
         match (verb, nums.as_slice()) {
             ("captura", _) => capture(Path::new(rest)),
             ("pantalla", _) => capture_screen(Path::new(rest)),
+            ("estado_copia", _) => {
+                let _ = std::fs::write(rest, crate::auxwin::debug_state());
+            }
+            // La principal al frente (como al hacerle clic).
+            ("frente", _) => {
+                if let Some(w) = window() {
+                    w.makeKeyAndOrderFront(None);
+                }
+            }
             // Solo la ventana de copia, con su barra de título.
             ("captura_copia", _) => {
                 if let Some(n) = crate::auxwin::window_number() {

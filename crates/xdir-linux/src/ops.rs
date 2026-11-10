@@ -167,7 +167,7 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
             if moved.len() != items.len() {
                 let base = names::folder_with_name(moved.len());
                 let renamed = names::free_name(&parent, &|n| names::numbered_name(&base, true, n), &taken);
-                if !taken(&renamed) && std::fs::rename(&folder, &renamed).is_ok() {
+                if rename_noreplace(&folder, &renamed).is_ok() {
                     for (now, _) in &mut moved {
                         if let Some(name) = now.file_name() {
                             *now = renamed.join(name);
@@ -420,6 +420,29 @@ fn copy_tracked(src: &Path, dst: &Path, created: &mut bool) -> io::Result<()> {
         to.set_permissions(meta.permissions())
     } else {
         Err(io::Error::other("no se copian archivos especiales"))
+    }
+}
+
+/// Renombra sin pisar nunca lo que haya en `to` (`renameat2` con `RENAME_NOREPLACE`). Si el
+/// sistema de archivos no lo admite, mira antes y renombra (como siempre).
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let bad = |_| io::Error::other("ruta inválida");
+    let (a, b) = (std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(bad)?, std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(bad)?);
+    // SAFETY: dos cadenas C válidas; AT_FDCWD como carpeta de las dos.
+    let r = unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) => {
+            if taken(to) {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "ya existe, no se pisa"));
+            }
+            std::fs::rename(from, to)
+        }
+        _ => Err(e),
     }
 }
 
@@ -687,6 +710,19 @@ mod tests {
 
     /// La limpieza depende de quién creó el destino: lo creado por esta copia se quita aunque el
     /// error de adentro sea AlreadyExists; lo que ya estaba no se toca.
+    #[test]
+    fn rename_noreplace_never_overwrites() {
+        let dir = tmp("renombrar-sin-pisar");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        assert!(rename_noreplace(&a, &b).is_err());
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
+        rename_noreplace(&a, &dir.join("c")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("c")).unwrap(), "a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn copy_cleanup_tracks_creation() {
         let dir = tmp("copia-creada");

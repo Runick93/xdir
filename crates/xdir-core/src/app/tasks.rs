@@ -28,7 +28,9 @@ pub(super) enum TaskDone {
     /// Se leyó `red.toml` (con su fecha); `None`: no cambió.
     NetPlaces(Option<(crate::net::NetPlaces, Option<std::time::SystemTime>)>),
     /// Lo conectado (`Network::connections`).
-    NetConnections(Result<super::network::NetListing, crate::net::NetError>),
+    NetConnections(Result<Vec<crate::net::NetConnection>, crate::net::NetError>),
+    /// La identidad del volumen de cada conexión (pedida aparte).
+    NetVolumeIds(Vec<(PathBuf, std::ffi::OsString)>),
     /// Terminó de conectar `addr` (`tab`: la pestaña que lo pidió al fallar por credenciales;
     /// `None`: abrir el resultado en una pestaña nueva del panel `pane`).
     /// `generation`: la del intento (los cancelados se descartan).
@@ -100,6 +102,7 @@ impl App {
             }
             TaskDone::NetPlaces(places) => self.on_net_places(places),
             TaskDone::NetConnections(result) => self.on_net_connections(result),
+            TaskDone::NetVolumeIds(ids) => self.remember_net_volume_ids(ids),
             TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
             TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
             TaskDone::Subfolders { pane, chevron, loc, items } => self.on_subfolders(pane, chevron, loc, items),

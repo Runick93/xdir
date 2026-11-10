@@ -63,9 +63,6 @@ pub(super) struct NetState {
     pub tick_due: Option<std::time::Instant>,
 }
 
-/// Lo conectado y la identidad del volumen de cada conexión.
-pub(super) type NetListing = (Vec<NetConnection>, Vec<(PathBuf, std::ffi::OsString)>);
-
 /// Segundos desde 1970 (UTC).
 pub(super) fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
@@ -113,14 +110,28 @@ impl App {
         self.spawn_task(|| {
             let net = sys::network();
             net.refresh_remote();
-            // Con la identidad de cada volumen: un trabajo sobre la misma conexión por otro camino
-            // también cuenta al desconectar (como los discos de la tanda D).
-            let r = net::with_timeout(LIST_LIMIT, "", move || {
-                let list = sys::network().connections()?;
-                let ids = list.iter().filter(|c| c.connected).filter_map(|c| sys::copy_prims().volume(&c.local).map(|v| (c.local.clone(), v.id))).collect();
-                Ok((list, ids))
-            });
-            TaskDone::NetConnections(r)
+            TaskDone::NetConnections(net::with_timeout(LIST_LIMIT, "", move || sys::network().connections()))
+        });
+    }
+
+    /// La identidad del volumen de cada conexión (un trabajo sobre la misma conexión por otro
+    /// camino también cuenta al desconectar, como los discos de la tanda D). Aparte de la lista y
+    /// una por conexión, cada una con su límite: un recurso colgado queda sin identidad (se
+    /// compara por ruta) y no frena la lista ni su ⏏.
+    fn request_volume_ids(&self, locals: Vec<PathBuf>) {
+        if locals.is_empty() {
+            return;
+        }
+        self.spawn_task(move || {
+            let ids = locals
+                .into_iter()
+                .filter_map(|l| {
+                    let host = l.to_string_lossy().into_owned();
+                    let q = l.clone();
+                    net::with_timeout(net::ITEM_LIMIT, &host, move || Ok(sys::copy_prims().volume(&q))).ok().flatten().map(|v| (l, v.id))
+                })
+                .collect();
+            TaskDone::NetVolumeIds(ids)
         });
     }
 
@@ -226,9 +237,9 @@ impl App {
         }
     }
 
-    pub(super) fn on_net_connections(&mut self, result: Result<NetListing, NetError>) {
-        if let Ok((list, ids)) = result {
-            self.remember_net_volume_ids(ids);
+    pub(super) fn on_net_connections(&mut self, result: Result<Vec<NetConnection>, NetError>) {
+        if let Ok(list) = result {
+            self.request_volume_ids(list.iter().filter(|c| c.connected).map(|c| c.local.clone()).collect());
             self.net.connections = list;
             // «Desconectar unidad de red» abierto: la lista al día, con lo marcado.
             if let Some(u) = &mut self.net.unmap {

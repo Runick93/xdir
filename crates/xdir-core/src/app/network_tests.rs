@@ -1418,6 +1418,8 @@ fn disconnect_finds_jobs_by_volume_identity() {
     FakeNetwork::set_remote(Path::new("/net-r1m2"));
     a.request_connections();
     wait_until(&mut a, |a| a.net.connections.iter().any(|c| c.local == Path::new("/net-r1m2/fotos")));
+    // Las identidades llegan aparte.
+    wait_task(&mut a, |t| matches!(t, TaskDone::NetVolumeIds(_)));
     a.start_transfer(JobSpec::Copy { sources: vec![alias.join("grande.bin")], dest: alias.join("d") });
     // La identidad de los volúmenes del trabajo llega por su canal.
     std::thread::sleep(Duration::from_millis(60));
@@ -1583,4 +1585,21 @@ mod settings_red {
         assert!(a.net.page.editing.is_none());
         assert!(host.text_boxes_of(crate::host::TextKind::Field).is_empty());
     }
+}
+
+// ---------- Ronda 2 ----------
+
+/// R1: un recurso colgado no deja vieja la lista de lo conectado (las identidades de los
+/// volúmenes se piden aparte, cada una con su límite) y se puede desconectar.
+#[test]
+fn hung_share_does_not_block_connection_list() {
+    FakeNetwork::set_connections("nas-r2hung", vec![conn("smb://nas-r2hung/a", "/net-r2hung/a"), conn("smb://nas-r2hung/b", "/net-r2hung/b")]);
+    FakeNetwork::hang("/net-r2hung/a", Duration::from_secs(12));
+    let mut a = net_app();
+    let t0 = Instant::now();
+    a.request_connections();
+    wait_until(&mut a, |a| a.net.connections.iter().any(|c| c.local == Path::new("/net-r2hung/a")));
+    assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+    // Y el colgado se puede desconectar (⏏).
+    assert!(a.network_root(Path::new("/net-r2hung/a")).is_some());
 }

@@ -229,6 +229,19 @@ impl FileList {
         self.regroup_keep_focus();
     }
 
+    /// Si el elemento (índice en `entries`) está en un grupo plegado, lo despliega.
+    pub(super) fn reveal(&mut self, idx: usize) {
+        if self.group_by.is_none() {
+            return;
+        }
+        self.ensure_keys();
+        if let Some(label) = self.label_of(idx).map(str::to_string)
+            && self.collapsed.contains(&label)
+        {
+            self.toggle_group(&label);
+        }
+    }
+
     /// Pliega o despliega el grupo. Si el foco estaba en un elemento del grupo que se pliega,
     /// pasa a su encabezado.
     pub fn toggle_group(&mut self, label: &str) {
@@ -811,6 +824,23 @@ mod list_tests {
         l.on_key(VK_END.0, false, false);
         l.select_pos(5);
         assert!(l.scroll_target <= header_top, "{} > {header_top}", l.scroll_target);
+    }
+
+    /// Un elemento de un grupo plegado que se selecciona por programa (carpeta nueva que se va a
+    /// renombrar, elemento renombrado) despliega su grupo para verse y poder editarse.
+    #[test]
+    fn selecting_item_in_collapsed_group_expands_it() {
+        let mut l = grouped();
+        l.toggle_group("Diminuto (0–16 KB)");
+        let d = l.entries.iter().position(|e| e.display == "d").unwrap();
+        l.select_index(d);
+        assert!(!headers(&l)[1].2, "desplegado");
+        assert_eq!(l.focused_index(), Some(d));
+        assert_eq!(names(&l, &l.selected_positions()), ["d"]);
+        l.toggle_group("Pequeño (16 KB–1 MB)");
+        assert!(l.focus_name(&std::ffi::OsString::from("g")));
+        assert!(!headers(&l)[2].2);
+        assert_eq!(names(&l, &[l.focus_pos().unwrap()]), ["g"]);
     }
 
     /// Ctrl+A (seleccionar todo) e invertir solo tocan lo que se ve.

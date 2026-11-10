@@ -694,6 +694,7 @@ impl FileList {
     /// Pone el foco en un elemento por nombre (p. ej. la carpeta de la que se subió).
     pub fn focus_name(&mut self, name: &OsString) -> bool {
         let Some(idx) = self.entries.iter().position(|e| &e.name == name) else { return false };
+        self.reveal(idx);
         let Some(pos) = self.visible.iter().position(|&v| v as usize == idx) else { return false };
         self.select_only(pos);
         // Al terminar de cargar una carpeta no se anima: ya está donde tiene que estar.
@@ -1785,6 +1786,7 @@ impl FileList {
 
     /// Selecciona solo un elemento por índice y lo deja a la vista.
     pub fn select_index(&mut self, idx: usize) {
+        self.reveal(idx);
         if let Some(pos) = self.visible.iter().position(|&v| v as usize == idx) {
             self.select_only(pos);
             self.ensure_visible(pos);

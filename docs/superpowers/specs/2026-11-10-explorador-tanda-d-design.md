@@ -544,3 +544,10 @@ duplicación de más se deshace con Ctrl+Z).
     guardianes); si falla, quedan en «Este equipo».
 14. **Navegar dentro de zips queda fuera** de esta tanda aunque la C lo anotó acá: no está en lo aprobado y es
     una ubicación nueva (`Location`) con su propia lectura; mejor como tanda propia.
+
+## Decisiones del usuario (2026-11-10), mandan sobre las anteriores
+
+1. **Ventana de información = panel**, como la columna de vista previa: se abre a la derecha de la ventana cuando se pide (Alt+Enter / ⌘I, menú «Propiedades / Obtener información») y muestra lo del panel activo; se cierra con su botón o con el mismo atajo. Una a la vez. Reemplaza a la Decisión 1 para la información.
+2. **Diálogo de copia = ventana aparte del sistema** (como la de Windows), no dibujada dentro de xdir: muestra la cola, el avance de cada operación y, como Windows, **un gráfico de velocidad** de la copia en curso (velocidad a lo largo del tiempo, con el promedio y lo que falta). Implica una ventana secundaria en el host de Windows y de macOS (Windows ya tiene la base de la ventana de la vista rápida). Reemplaza a la Decisión 1 para la copia.
+3. **Renombrar varios sin ventana:** un panel a la derecha (el mismo lugar que información) con el modo y los campos, y la vista previa en la lista misma: la columna Nombre muestra el nombre nuevo de cada seleccionado mientras se escribe (lo que cambia resaltado y el nombre viejo tachado al lado); los choques se marcan en rojo en la fila. «Renombrar» aplica; «Cancelar» o Esc vuelven a la lista normal. (Propuesta de Claude al usuario; confirmar en el diseño visual.)
+4. **Zip con una librería común para las tres plataformas** (crate compartida, como en la Decisión 7), con avance del proceso en el diálogo de copia. En macOS no se conservan etiquetas ni atributos extendidos dentro del zip (aceptado).

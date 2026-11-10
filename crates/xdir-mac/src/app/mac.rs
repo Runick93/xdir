@@ -188,6 +188,16 @@ fn quick_look_closed() {
 }
 
 /// Guarda la sesión una sola vez (cerrar la ventana y salir con ⌘Q llegan por caminos distintos).
+/// Con operaciones de copia en curso, pregunta si se cancelan (`App::confirm_close`). `false`: no
+/// se cierra.
+fn may_close() -> bool {
+    let mut ok = true;
+    if !CLOSED.with(|c| c.get()) {
+        with_app(|app| ok = app.confirm_close());
+    }
+    ok
+}
+
 fn closing() {
     if !CLOSED.with(|c| c.replace(true)) {
         with_app(|app| app.on_closing());
@@ -265,6 +275,9 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            if !may_close() {
+                return NSApplicationTerminateReply::TerminateCancel;
+            }
             closing();
             NSApplicationTerminateReply::TerminateNow
         }
@@ -278,8 +291,11 @@ define_class!(
     unsafe impl NSWindowDelegate for Delegate {
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
-            closing();
-            true
+            let ok = may_close();
+            if ok {
+                closing();
+            }
+            ok
         }
 
         #[unsafe(method(windowDidResize:))]

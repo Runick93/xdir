@@ -253,3 +253,325 @@ fn second_eject_does_not_drop_the_first() {
     got.sort();
     assert_eq!(got, vec!["/app-ej1", "/app-ej2"]);
 }
+
+// ---------- ventana de copia ----------
+
+use crate::host::{AuxMouse, AuxWindow};
+use crate::sys::testing::FakeShell;
+use crate::transfer::view::{self, ViewHit};
+
+/// App con ventana de copia (los conflictos se preguntan).
+fn app_window() -> (App, Rc<FakeHost>) {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    a.set_auto_skip(false);
+    (a, host)
+}
+
+/// Un archivo grande y lento en `root`/s que se copia a `root`/d (en su propio disco).
+fn slow_copy(f: &FakeCopyPrims, root: &str, delay: u64) -> JobSpec {
+    f.set_volume(&p(root), volume(&root[1..]));
+    let src = p(&format!("{root}/s/grande.bin"));
+    f.add_file(&src, vec![1; 64 * 1024 * 20]);
+    f.add_dir(&p(&format!("{root}/d")));
+    f.set_slow(&src, Some(Duration::from_millis(delay)));
+    JobSpec::Copy { sources: vec![src], dest: p(&format!("{root}/d")) }
+}
+
+/// Clic en el control `h` de la ventana de copia (lo busca recorriendo el área).
+fn click_aux(a: &mut App, h: ViewHit) {
+    let jobs = a.jobs().to_vec();
+    let expanded = a.transfers_expanded();
+    let r = geom::rect(0.0, 0.0, view::WIDTH, view::content_height(&jobs, expanded));
+    let mut y = 0.0;
+    while y < r.bottom {
+        let mut x = 0.0;
+        while x < r.right {
+            if view::hit(r, &jobs, expanded, x, y) == Some(h) {
+                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Move);
+                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Down);
+                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Up);
+                return;
+            }
+            x += 2.0;
+        }
+        y += 2.0;
+    }
+    panic!("no está {h:?} en la ventana");
+}
+
+fn aux_texts(a: &mut App) -> Vec<String> {
+    let p = crate::sys::testing::RecordingPainter::new(a.theme);
+    let h = view::content_height(a.jobs(), a.transfers_expanded());
+    a.paint_aux(AuxWindow::Transfers, &p, view::WIDTH, h);
+    p.texts().into_iter().map(|(_, s, _)| s).collect()
+}
+
+#[test]
+fn window_appears_after_one_second() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    // Uno que termina antes del segundo: nunca muestra nada.
+    f.add_file(&p("/app-w1/s/a.txt"), b"a".to_vec());
+    f.add_dir(&p("/app-w1/d"));
+    let quick = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-w1/s/a.txt")], dest: p("/app-w1/d") });
+    wait(&mut a, idle);
+    a.on_transfer_due(quick);
+    assert!(host.aux_shows().is_empty());
+    // Uno que sigue al segundo: aparece la ventana con su tamaño.
+    let id = a.start_transfer(slow_copy(&f, "/app-w2", 20));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_app_message(crate::transfer::WM_APP_TRANSFER_DUE, 0, id as isize);
+    let shows = host.aux_shows();
+    assert_eq!(shows.len(), 1, "{shows:?}");
+    assert_eq!((shows[0].0, shows[0].1.as_str()), (AuxWindow::Transfers, "Copiando…"));
+    assert_eq!(shows[0].2, (view::WIDTH, view::content_height(a.jobs(), a.transfers_expanded())));
+    // El que corre es el expandido (con el gráfico).
+    assert_eq!(a.transfers_expanded(), Some(id));
+    assert!(aux_texts(&mut a).iter().any(|t| t.contains("% completado")));
+    a.cancel_job(id);
+    wait(&mut a, idle);
+    // Sin trabajos se oculta sola.
+    assert!(!host.aux_visible());
+}
+
+#[test]
+fn conflict_shows_window_now() {
+    let f = fake();
+    f.add_file(&p("/app-wc/s/x.txt"), b"nuevo".to_vec());
+    f.add_file(&p("/app-wc/d/x.txt"), b"viejo".to_vec());
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wc/s/x.txt")], dest: p("/app-wc/d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.state == JobState::Conflict));
+    assert_eq!(host.aux_shows().len(), 1);
+    let t = aux_texts(&mut a);
+    assert!(t.iter().any(|s| s == "Ya existe «x.txt» en «d»"), "{t:?}");
+    a.cancel_job(id);
+    wait(&mut a, idle);
+}
+
+#[test]
+fn conflict_answer_reaches_job() {
+    let f = fake();
+    for n in ["a", "b", "c"] {
+        f.add_file(&p(&format!("/app-wa/s/{n}.txt")), b"nuevo".to_vec());
+        f.add_file(&p(&format!("/app-wa/d/{n}.txt")), b"viejo".to_vec());
+    }
+    let (mut a, _host) = app_window();
+    let sources = ["a", "b", "c"].iter().map(|n| p(&format!("/app-wa/s/{n}.txt"))).collect();
+    let id = a.start_transfer(JobSpec::Copy { sources, dest: p("/app-wa/d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.state == JobState::Conflict));
+    // «Hacer esto con todos» y «Conservar ambos»: los tres quedan con « 2» sin volver a preguntar.
+    click_aux(&mut a, ViewHit::ApplyAll(id));
+    assert!(a.jobs()[0].apply_all);
+    click_aux(&mut a, ViewHit::Choose(id, Choice::KeepBoth));
+    wait(&mut a, idle);
+    for n in ["a", "b", "c"] {
+        assert_eq!(f.contents(&p(&format!("/app-wa/d/{n} 2.txt"))).unwrap(), b"nuevo");
+        assert_eq!(f.contents(&p(&format!("/app-wa/d/{n}.txt"))).unwrap(), b"viejo");
+    }
+}
+
+#[test]
+fn errors_view_and_retry_from_window() {
+    let f = fake();
+    f.add_file(&p("/app-we/s/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-we/s/b.txt"), b"b".to_vec());
+    f.add_dir(&p("/app-we/d"));
+    f.fail(&p("/app-we/s/b.txt"), ErrKind::InUse, 1);
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-we/s/a.txt"), p("/app-we/s/b.txt")], dest: p("/app-we/d") });
+    wait(&mut a, idle);
+    // Termina con un error: la ventana aparece enseguida con la lista.
+    assert_eq!(host.aux_shows().len(), 1);
+    let t = aux_texts(&mut a);
+    assert!(t.iter().any(|s| s == "Terminó con 1 error"), "{t:?}");
+    assert!(t.iter().any(|s| s == "Lo está usando otro programa"), "{t:?}");
+    click_aux(&mut a, ViewHit::Retry(id));
+    wait(&mut a, |a| a.jobs().is_empty());
+    assert!(f.exists(&p("/app-we/d/b.txt")));
+    assert!(!host.aux_visible());
+}
+
+#[test]
+fn dismiss_errors_hides_window() {
+    let f = fake();
+    f.add_file(&p("/app-wd/s/b.txt"), b"b".to_vec());
+    f.add_dir(&p("/app-wd/d"));
+    f.fail(&p("/app-wd/s/b.txt"), ErrKind::InUse, 1);
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wd/s/b.txt")], dest: p("/app-wd/d") });
+    wait(&mut a, idle);
+    assert!(host.aux_visible());
+    click_aux(&mut a, ViewHit::Dismiss(id));
+    assert!(a.jobs().is_empty());
+    assert!(!host.aux_visible());
+}
+
+#[test]
+fn pause_resume_cancel_buttons() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wp", 20));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    click_aux(&mut a, ViewHit::Pause(id));
+    assert!(a.jobs()[0].paused);
+    assert!(aux_texts(&mut a).iter().any(|t| t == "Reanudar"));
+    click_aux(&mut a, ViewHit::Resume(id));
+    assert!(!a.jobs()[0].paused);
+    click_aux(&mut a, ViewHit::Cancel(id));
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-wp/d/grande.bin")));
+}
+
+#[test]
+fn closing_window_keeps_jobs_and_indicator() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wk", 20));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    host.aux_user_closed();
+    a.aux_closed(AuxWindow::Transfers);
+    assert_eq!(a.running_jobs(), 1, "cerrar la ventana no cancela");
+    // El indicador queda en la barra de estado con el avance.
+    a.paint();
+    assert!(host.drawn_texts().iter().any(|(_, t, _)| t.ends_with(" %")), "{:?}", host.drawn_texts());
+    // Seguir copiando no la vuelve a abrir.
+    a.on_transfer_updates();
+    assert_eq!(host.aux_shows().len(), 1);
+    a.cancel_job(id);
+    wait(&mut a, idle);
+}
+
+#[test]
+fn indicator_click_reopens() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wi", 20));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    let r = a.transfers_button_rect();
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(host.aux_shows().len(), 1);
+    // También el comando «Mostrar operaciones».
+    a.aux_closed(AuxWindow::Transfers);
+    a.run_command(Command::ShowTransfers);
+    assert_eq!(host.aux_shows().len(), 2);
+    a.cancel_job(id);
+    wait(&mut a, idle);
+}
+
+#[test]
+fn queue_empty_hides_window() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wq", 5));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    assert!(host.aux_visible());
+    f.set_slow(&p("/app-wq/s/grande.bin"), None);
+    wait(&mut a, idle);
+    assert!(!host.aux_visible());
+    assert!(host.aux_hides() >= 1);
+}
+
+#[test]
+fn without_host_window_only_indicator_and_auto_skip() {
+    let f = fake();
+    f.add_file(&p("/app-wn/s/x.txt"), b"nuevo".to_vec());
+    f.add_file(&p("/app-wn/d/x.txt"), b"viejo".to_vec());
+    let (mut a, host) = app_window();
+    host.set_aux_native(false);
+    let _ = a.start_transfer(slow_copy(&f, "/app-wn2", 5));
+    let id = a.jobs()[0].id;
+    a.on_transfer_due(id);
+    // Sin ventana del sistema no hay a quién preguntar: se vuelve a «Omitir».
+    let _ = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wn/s/x.txt")], dest: p("/app-wn/d") });
+    f.set_slow(&p("/app-wn2/s/grande.bin"), None);
+    wait(&mut a, idle);
+    assert_eq!(f.contents(&p("/app-wn/d/x.txt")).unwrap(), b"viejo");
+    assert!(host.aux_shows().is_empty());
+}
+
+#[test]
+fn paste_uses_engine() {
+    let f = fake();
+    f.add_file(&p("/app-paste/s/a.txt"), b"a".to_vec());
+    f.add_dir(&p("/app-paste/d"));
+    let (mut a, _host) = app_window();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(p("/app-paste/d")));
+    FakeFileOps::take_ops();
+    FakeShell::set_clipboard(Some((vec![p("/app-paste/s/a.txt")], true)));
+    a.run_command(Command::Paste);
+    wait(&mut a, idle);
+    assert!(FakeFileOps::take_ops().is_empty(), "pegar no pasa por FileOps");
+    assert!(f.exists(&p("/app-paste/d/a.txt")));
+    assert!(!f.exists(&p("/app-paste/s/a.txt")), "lo cortado se mueve");
+    // Copiar (no cortado) deja el original.
+    f.add_file(&p("/app-paste/s/b.txt"), b"b".to_vec());
+    FakeShell::set_clipboard(Some((vec![p("/app-paste/s/b.txt")], false)));
+    a.run_command(Command::Paste);
+    wait(&mut a, idle);
+    assert!(f.exists(&p("/app-paste/d/b.txt")) && f.exists(&p("/app-paste/s/b.txt")));
+}
+
+#[test]
+fn drop_uses_engine() {
+    let f = fake();
+    f.add_file(&p("/app-drop/s/a.txt"), b"a".to_vec());
+    f.add_dir(&p("/app-drop/d"));
+    let (mut a, _host) = app_window();
+    a.paint();
+    let point = (300.0, 600.0);
+    let Hit::Pane(pane, PaneHit::List) = a.hit(point.0, point.1) else { panic!("{:?}", a.hit(point.0, point.1)) };
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[pane].tab_mut().navigate(hwnd, &tx, Location::Path(p("/app-drop/d")));
+    FakeFileOps::take_ops();
+    let paths = vec![p("/app-drop/s/a.txt")];
+    let mut ev = DragEvent { kind: DragKind::Drop, point, ctrl: true, shift: false, paths: Some(&paths), allowed: Effect::COPY, effect: Effect::NONE };
+    a.on_drag(&mut ev);
+    assert_eq!(ev.effect, Effect::COPY);
+    wait(&mut a, idle);
+    assert!(FakeFileOps::take_ops().is_empty(), "soltar no pasa por FileOps");
+    assert!(f.exists(&p("/app-drop/d/a.txt")));
+}
+
+#[test]
+fn undo_move_uses_engine() {
+    let f = fake();
+    f.add_file(&p("/app-um/b/x.txt"), b"x".to_vec());
+    f.add_dir(&p("/app-um/a"));
+    let mut a = app();
+    FakeFileOps::take_ops();
+    a.undo.push(Undo::Moved(vec![(p("/app-um/b/x.txt"), p("/app-um/a/x.txt"))]));
+    a.run_command(Command::Undo);
+    assert!(FakeFileOps::take_ops().is_empty(), "deshacer un movimiento lo hace el motor");
+    wait(&mut a, idle);
+    assert!(f.exists(&p("/app-um/a/x.txt")) && !f.exists(&p("/app-um/b/x.txt")));
+}
+
+#[test]
+fn confirm_close_with_jobs() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    // Sin trabajos: se cierra sin preguntar.
+    assert!(a.confirm_close());
+    a.start_transfer(slow_copy(&f, "/app-close", 20));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    host.set_answer(None);
+    assert!(!a.confirm_close());
+    host.set_answer(Some(false));
+    assert!(!a.confirm_close());
+    assert_eq!(a.running_jobs(), 1);
+    // Sí: cancela, espera que limpie y deja cerrar.
+    host.set_answer(Some(true));
+    assert!(a.confirm_close());
+    assert_eq!(a.running_jobs(), 0);
+    assert!(!f.exists(&p("/app-close/d/grande.bin")));
+    assert_eq!(super::transfers::close_question(2), "Hay 2 operaciones en curso. ¿Cancelarlas y salir?");
+    assert_eq!(super::transfers::close_question(1), "Hay 1 operación en curso. ¿Cancelarla y salir?");
+}

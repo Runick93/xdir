@@ -1140,6 +1140,9 @@ impl Painter for RecordingPainter {
     }
 }
 
+/// Un pedido de `aux_show`: ventana, título y tamaño.
+pub type AuxShow = (AuxWindow, String, (f32, f32));
+
 /// Ventana falsa para las pruebas de `App`: no crea nada. El área mide 1280×800 DIPs (se puede
 /// cambiar con `client`), registra títulos, pedidos de repintar y pitidos, expande variables del
 /// entorno y responde lo que el test le fije a las preguntas, al selector de color y al arrastre.
@@ -1175,7 +1178,7 @@ pub struct FakeHost {
     /// (ventana, título, tamaño), los cambios de tamaño, los repintados, las que se ocultaron y si
     /// está a la vista.
     aux_native: Cell<bool>,
-    aux_shows: RefCell<Vec<(AuxWindow, String, (f32, f32))>>,
+    aux_shows: RefCell<Vec<AuxShow>>,
     aux_sizes: RefCell<Vec<(AuxWindow, (f32, f32))>>,
     aux_invalidations: Cell<usize>,
     aux_hides: Cell<usize>,
@@ -1219,7 +1222,7 @@ impl FakeHost {
     }
 
     /// Lo que se pidió mostrar con `aux_show` (ventana, título y tamaño), en orden.
-    pub fn aux_shows(&self) -> Vec<(AuxWindow, String, (f32, f32))> {
+    pub fn aux_shows(&self) -> Vec<AuxShow> {
         self.aux_shows.borrow().clone()
     }
 

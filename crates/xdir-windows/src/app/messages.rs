@@ -249,6 +249,10 @@ pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 LRESULT(1)
             }
             WM_CLOSE => {
+                // Con operaciones de copia en curso se pregunta; «No» o «Cancelar» no cierran.
+                if !app.confirm_close() {
+                    return LRESULT(0);
+                }
                 app.on_closing();
                 // Un visor de la vista rápida quedó colgado en `prevhost.exe`: destruir las
                 // ventanas esperaría por él para siempre. Con el estado ya guardado, se sale.

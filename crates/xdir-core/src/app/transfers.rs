@@ -3,10 +3,12 @@
 //! manda su estado por canal con `WM_APP_TRANSFER`. El hilo de interfaz nunca espera al disco:
 //! solo arma los `JobView` con lo que llega.
 //!
-//! Todavía sin ventana de copia (Tasks 11–12): los conflictos se responden solos con «Omitir»
-//! (`auto_skip`) y se avisa en la barra de estado («Se omitieron N elementos que ya existían»), lo
-//! mismo que los errores; responder, pausar, cancelar y reintentar ya están (`answer_job`,
-//! `pause_job`…) para cuando la ventana apague `auto_skip`.
+//! La ventana de copia es una ventana secundaria del sistema (`WindowHost::aux_show`) cuyo
+//! contenido dibuja `transfer::view`: aparece si un trabajo lleva más de 1 s
+//! (`WM_APP_TRANSFER_DUE`) o enseguida con un conflicto o un error, se ajusta al contenido y se
+//! oculta sola con la cola vacía. Cerrarla no cancela nada: queda el indicador de la barra de
+//! estado, que la vuelve a abrir. Donde el host no tiene ventanas (Linux sin interfaz) los
+//! conflictos se responden solos con «Omitir» (`auto_skip`) y se avisa en la barra de estado.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -16,7 +18,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use super::App;
+use crate::geom::rect;
+use crate::host::{AuxMouse, AuxWindow};
+use crate::keys::{Key, keys::VK_ESCAPE};
 use crate::ops::Undo;
+use crate::paint::Painter;
+use crate::transfer::view::{self, ViewHit};
 use crate::sys::{self, CopyPrims};
 use crate::transfer::sched::Scheduler;
 use crate::transfer::speed::Speed;
@@ -46,6 +53,22 @@ pub(super) struct Transfers {
     /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco; varios
     /// pedidos esperan cada uno los suyos.
     pending_eject: Vec<(Vec<JobId>, AfterJobs)>,
+    window: CopyWindow,
+}
+
+/// Estado de la ventana de copia.
+#[derive(Default)]
+struct CopyWindow {
+    /// Está a la vista (la mostró la `App` y nadie la cerró).
+    shown: bool,
+    /// El trabajo que se eligió expandir (si no, el primero que corre).
+    chosen: Option<JobId>,
+    /// Se plegó con «Menos detalles».
+    collapsed: bool,
+    hover: Option<ViewHit>,
+    pressed: Option<ViewHit>,
+    /// El último tamaño pedido (para no repetir `aux_resize`).
+    size: (f32, f32),
 }
 
 /// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
@@ -61,9 +84,10 @@ impl Transfers {
             meta: HashMap::new(),
             next: 1,
             sched: Arc::new(Scheduler::new()),
-            // TODO(task 12): la ventana de copia lo apaga y pregunta.
+            // La plataforma con ventana de copia lo apaga (`set_auto_skip(false)`) y se pregunta.
             auto_skip: true,
             pending_eject: Vec::new(),
+            window: CopyWindow::default(),
         }
     }
 }
@@ -150,6 +174,23 @@ fn skipped_text(n: usize) -> String {
     if n == 1 { "Se omitió 1 elemento que ya existía".into() } else { format!("Se omitieron {n} elementos que ya existían") }
 }
 
+/// «Hay 2 operaciones en curso. ¿Cancelarlas y salir?» (al cerrar xdir).
+pub fn close_question(jobs: usize) -> String {
+    if jobs == 1 {
+        "Hay 1 operación en curso. ¿Cancelarla y salir?".into()
+    } else {
+        format!("Hay {jobs} operaciones en curso. ¿Cancelarlas y salir?")
+    }
+}
+
+/// Manda `WM_APP_TRANSFER_DUE` del trabajo `id` dentro de 1 s.
+fn post_due(hwnd: crate::sys::Handle, id: JobId) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        hwnd.post(transfer::WM_APP_TRANSFER_DUE, 0, id as isize);
+    });
+}
+
 fn plural_errors(n: usize) -> String {
     if n == 1 { "1 error".into() } else { format!("{n} errores") }
 }
@@ -201,6 +242,7 @@ impl App {
                 send(u)
             });
         });
+        post_due(self.hwnd, id);
         id
     }
 
@@ -208,6 +250,7 @@ impl App {
     pub fn on_transfer_updates(&mut self) {
         let now = Instant::now();
         let mut finished = Vec::new();
+        let mut show = false;
         while let Ok((id, update)) = self.transfers.rx.try_recv() {
             let Some(v) = self.transfers.jobs.iter_mut().find(|j| j.id == id) else { continue };
             match update {
@@ -243,6 +286,8 @@ impl App {
                     }
                     v.conflict = Some(info);
                     v.state = JobState::Conflict;
+                    v.apply_all = false;
+                    show = show || !self.transfers.auto_skip;
                 }
                 Update::Finished(outcome) => {
                     v.state = JobState::Done;
@@ -254,8 +299,213 @@ impl App {
             }
         }
         for (id, outcome) in finished {
+            // Terminó con errores o sin poder hacerlo: la ventana lo muestra enseguida.
+            show = show || !outcome.errors.is_empty() || outcome.stopped.is_some();
             self.on_job_done(id, outcome);
         }
+        if show {
+            self.show_transfers();
+        } else {
+            self.sync_transfers_window();
+        }
+    }
+
+    /// Pasó 1 s desde que empezó el trabajo `id` (`WM_APP_TRANSFER_DUE`): si sigue, aparece la
+    /// ventana de copia.
+    pub(super) fn on_transfer_due(&mut self, id: JobId) {
+        self.on_transfer_updates();
+        if self.transfers.jobs.iter().any(|j| j.id == id && j.state != JobState::Done) && !self.transfers.window.shown {
+            self.show_transfers();
+        }
+    }
+
+    /// El trabajo con los detalles y el gráfico: el elegido, o el primero que está corriendo.
+    pub(super) fn transfers_expanded(&self) -> Option<JobId> {
+        let w = &self.transfers.window;
+        if w.collapsed {
+            return None;
+        }
+        let active = |j: &&JobView| matches!(j.state, JobState::Running | JobState::Preparing);
+        let jobs = &self.transfers.jobs;
+        w.chosen.and_then(|id| jobs.iter().filter(active).find(|j| j.id == id)).or_else(|| jobs.iter().find(active)).map(|j| j.id)
+    }
+
+    fn transfers_size(&self) -> (f32, f32) {
+        (view::WIDTH, view::content_height(&self.transfers.jobs, self.transfers_expanded()))
+    }
+
+    /// Muestra (o trae al frente) la ventana de copia. Sin ventana del host queda solo el
+    /// indicador, y los conflictos vuelven a responderse solos.
+    pub(super) fn show_transfers(&mut self) {
+        if self.transfers.jobs.is_empty() {
+            return;
+        }
+        let size = self.transfers_size();
+        let host = self.host.clone();
+        if host.aux_show(AuxWindow::Transfers, &view::window_title(&self.transfers.jobs), size) {
+            let w = &mut self.transfers.window;
+            w.shown = true;
+            w.size = size;
+            host.aux_invalidate(AuxWindow::Transfers);
+        } else {
+            self.transfers.window.shown = false;
+            if !self.transfers.auto_skip {
+                self.transfers.auto_skip = true;
+                // Los que ya esperan una respuesta no tienen a quién preguntar.
+                let waiting: Vec<JobId> = self.transfers.jobs.iter().filter(|j| j.state == JobState::Conflict).map(|j| j.id).collect();
+                for id in waiting {
+                    self.answer_job(id, Answer { choice: Choice::Skip, all: false });
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// La ventana sigue al contenido: cambia de alto, se repinta, y con la cola vacía se oculta.
+    fn sync_transfers_window(&mut self) {
+        if !self.transfers.window.shown {
+            return;
+        }
+        let host = self.host.clone();
+        if self.transfers.jobs.is_empty() {
+            self.transfers.window = CopyWindow::default();
+            host.aux_hide(AuxWindow::Transfers);
+            return;
+        }
+        let size = self.transfers_size();
+        if size != self.transfers.window.size {
+            self.transfers.window.size = size;
+            host.aux_resize(AuxWindow::Transfers, size);
+        }
+        host.aux_invalidate(AuxWindow::Transfers);
+    }
+
+    /// Avance total de la cola para el indicador de la barra de estado (`None` sin trabajos).
+    pub(super) fn transfers_progress(&self) -> Option<f32> {
+        let jobs = &self.transfers.jobs;
+        if jobs.is_empty() {
+            return None;
+        }
+        let open: Vec<&JobView> = jobs.iter().filter(|j| j.state != JobState::Done).collect();
+        if open.is_empty() {
+            return Some(1.0);
+        }
+        let (done, total) = open.iter().fold((0u64, 0u64), |(d, t), j| (d + j.bytes.0.min(j.bytes.1), t + j.bytes.1));
+        Some(if total == 0 { 0.0 } else { (done as f64 / total as f64) as f32 })
+    }
+
+    /// La ventana de copia se pinta (la llama la plataforma desde su ventana).
+    pub fn paint_aux(&mut self, w: AuxWindow, p: &dyn Painter, width: f32, height: f32) {
+        match w {
+            AuxWindow::Transfers => {
+                let expanded = self.transfers_expanded();
+                view::draw(p, rect(0.0, 0.0, width, height), &self.transfers.jobs, expanded, self.transfers.window.hover, sys::env());
+            }
+        }
+    }
+
+    /// El mouse en la ventana de copia (DIPs de su área).
+    pub fn aux_mouse(&mut self, w: AuxWindow, x: f32, y: f32, ev: AuxMouse) {
+        let AuxWindow::Transfers = w;
+        let (width, height) = self.transfers_size();
+        let at = view::hit(rect(0.0, 0.0, width, height), &self.transfers.jobs, self.transfers_expanded(), x, y);
+        let host = self.host.clone();
+        match ev {
+            AuxMouse::Move => {
+                if self.transfers.window.hover != at {
+                    self.transfers.window.hover = at;
+                    host.aux_invalidate(w);
+                }
+            }
+            AuxMouse::Leave => {
+                if self.transfers.window.hover.take().is_some() {
+                    host.aux_invalidate(w);
+                }
+            }
+            AuxMouse::Down => self.transfers.window.pressed = at,
+            AuxMouse::Up => {
+                let pressed = self.transfers.window.pressed.take();
+                if let Some(h) = at.filter(|h| pressed == Some(*h)) {
+                    self.on_view_hit(h);
+                    self.transfers.window.hover = None;
+                    self.sync_transfers_window();
+                    self.redraw();
+                }
+            }
+        }
+    }
+
+    fn on_view_hit(&mut self, h: ViewHit) {
+        match h {
+            ViewHit::Pause(id) => self.pause_job(id),
+            ViewHit::Resume(id) => self.resume_job(id),
+            ViewHit::Cancel(id) | ViewHit::Dismiss(id) => self.cancel_job(id),
+            ViewHit::Expand(id) => {
+                let w = &mut self.transfers.window;
+                if !w.collapsed && self.transfers_expanded() == Some(id) {
+                    self.transfers.window.collapsed = true;
+                } else {
+                    self.transfers.window.collapsed = false;
+                    self.transfers.window.chosen = Some(id);
+                }
+            }
+            ViewHit::Choose(id, choice) => {
+                let all = self.transfers.jobs.iter().any(|j| j.id == id && j.apply_all);
+                self.answer_job(id, Answer { choice, all });
+            }
+            ViewHit::ApplyAll(id) => {
+                if let Some(v) = self.job_mut(id) {
+                    v.apply_all = !v.apply_all;
+                }
+            }
+            ViewHit::Retry(id) => {
+                self.retry_job(id);
+            }
+        }
+    }
+
+    /// Una tecla en la ventana de copia: Esc la cierra (los trabajos siguen). `true` si se usó.
+    pub fn aux_key(&mut self, w: AuxWindow, vk: Key) -> bool {
+        if vk == VK_ESCAPE {
+            self.host.clone().aux_hide(w);
+            self.aux_closed(w);
+            return true;
+        }
+        false
+    }
+
+    /// El usuario cerró la ventana: se oculta, los trabajos siguen y queda el indicador.
+    pub fn aux_closed(&mut self, w: AuxWindow) {
+        let AuxWindow::Transfers = w;
+        let win = &mut self.transfers.window;
+        win.shown = false;
+        win.hover = None;
+        win.pressed = None;
+        self.redraw();
+    }
+
+    /// Antes de cerrar xdir: con trabajos en curso pregunta si se cancelan; si sí, los cancela y
+    /// espera (hasta 5 s) que borren lo a medio copiar. `false`: no se cierra.
+    pub fn confirm_close(&mut self) -> bool {
+        let n = self.running_jobs();
+        if n == 0 {
+            return true;
+        }
+        let host = self.host.clone();
+        if host.ask_yes_no_cancel("xdir", &close_question(n)) != Some(true) {
+            return false;
+        }
+        for m in self.transfers.meta.values() {
+            m.ctl.cancel();
+        }
+        let until = Instant::now() + std::time::Duration::from_secs(5);
+        while self.running_jobs() > 0 && Instant::now() < until {
+            self.on_transfer_updates();
+            if self.running_jobs() > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        true
     }
 
     fn on_job_done(&mut self, id: JobId, outcome: JobOutcome) {
@@ -347,6 +597,7 @@ impl App {
         // Uno ya terminado (con errores) se descarta.
         if self.job_mut(id).is_some_and(|v| v.state == JobState::Done) {
             self.forget_job(id);
+            self.sync_transfers_window();
         }
     }
 
@@ -371,7 +622,9 @@ impl App {
         let pairs: Vec<_> = v.errors.iter().filter(|e| e.retry).map(|e| (e.src.clone(), e.dst.clone())).collect();
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
         self.forget_job(id);
-        (!pairs.is_empty()).then(|| self.start_transfer(JobSpec::Retry { moving, pairs }))
+        let again = (!pairs.is_empty()).then(|| self.start_transfer(JobSpec::Retry { moving, pairs }));
+        self.sync_transfers_window();
+        again
     }
 
     /// Los trabajos (para la ventana de copia).

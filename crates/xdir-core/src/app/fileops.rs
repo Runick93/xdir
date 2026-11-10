@@ -1,6 +1,7 @@
 //! Operaciones de archivos: portapapeles, borrar, arrastrar y soltar, menú contextual.
 
 use super::*;
+use crate::transfer::JobSpec;
 
 impl App {
     // ---------- operaciones de archivos ----------
@@ -53,8 +54,8 @@ impl App {
             }
             return;
         };
-        let op = if cut { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
-        sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op);
+        // Copiar y mover entre rutas de disco van por el motor (con la ventana de copia).
+        self.start_transfer(if cut { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
         // Lo cortado se pega una sola vez, como en el Explorador.
         if cut {
             sys::shell().clear_clipboard();
@@ -199,8 +200,7 @@ impl App {
         if ev.kind == DragKind::Drop && ev.effect != Effect::NONE {
             if let (Some((pane, _, dest)), Some(paths)) = (target, ev.paths) {
                 let sources = paths.to_vec();
-                let op = if ev.effect == Effect::MOVE { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
-                sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op);
+                self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
                 self.set_active(pane);
             }
         }

@@ -57,6 +57,9 @@ impl App {
         if contains(&ui::preview_rect(w, h), x, y) {
             return Hit::PreviewToggle;
         }
+        if self.transfers_progress().is_some() && contains(&self.transfers_button_rect(), x, y) {
+            return Hit::Transfers;
+        }
         // La vista de xtree tapa los paneles, la franja de grupos y el árbol.
         if self.xtree_open {
             if let Some(l) = ui::layout_at(w, h, x, y) {
@@ -202,6 +205,7 @@ impl App {
             Hit::Groups => self.show_groups_menu(),
             Hit::Xtree => self.toggle_xtree(),
             Hit::PreviewToggle => self.run_command(Command::TogglePreview),
+            Hit::Transfers => self.show_transfers(),
             Hit::RenamePanel(h) => {
                 self.rename_panel_click(h);
                 return;

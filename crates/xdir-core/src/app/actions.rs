@@ -133,6 +133,7 @@ impl App {
             Command::Copy => self.copy_selection(false),
             Command::Cut => self.copy_selection(true),
             Command::Paste => self.paste(),
+            Command::ShowTransfers => self.show_transfers(),
             Command::CopyPaths => {
                 let paths = self.selection(active);
                 if !paths.is_empty() {
@@ -141,7 +142,7 @@ impl App {
             }
             Command::Undo => match self.undo.pop() {
                 // Lo que armó el motor de copia lo deshace el motor (un paso, con su progreso).
-                Some(undo @ (Undo::Batch(_) | Undo::CreatedFolder(_))) => {
+                Some(undo @ (Undo::Batch(_) | Undo::CreatedFolder(_) | Undo::Moved(_))) => {
                     self.start_transfer(crate::transfer::JobSpec::Undo(undo));
                 }
                 // Renombrar varios se deshace en el núcleo, con el mismo cruce seguro.
@@ -336,6 +337,12 @@ impl App {
     pub(super) fn xtree_button_rect(&self) -> geom::Rect {
         let (w, h) = self.client_dips();
         ui::xtree_rect(w, h, self.xtree_badge())
+    }
+
+    /// Indicador de las operaciones de copia, a la izquierda del botón «xtree».
+    pub(super) fn transfers_button_rect(&self) -> geom::Rect {
+        let (w, h) = self.client_dips();
+        ui::transfers_rect(w, h, self.xtree_badge())
     }
 
     /// Área de la vista de xtree en la ventana.

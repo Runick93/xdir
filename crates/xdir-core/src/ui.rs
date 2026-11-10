@@ -17,6 +17,8 @@ const GROUPS_W: f32 = 84.0;
 const XTREE_W: f32 = 74.0;
 /// Ancho del botón «xtree» con el porcentaje del escaneo («◔ 37 %  xtree»).
 const XTREE_WIDE_W: f32 = 105.0;
+/// Indicador de las operaciones de copia: anillo y «100 %».
+const TRANSFERS_W: f32 = 68.0;
 /// Lado del indicador del escaneo de xtree.
 pub const BADGE: f32 = 14.0;
 const MIN_SPLIT: f32 = 0.15;
@@ -334,6 +336,12 @@ pub fn xtree_rect(w: f32, h: f32, badge: XtreeBadge) -> Rect {
     rect(g.left - 10.0 - bw, g.top, g.left - 10.0, g.bottom)
 }
 
+/// Indicador de las operaciones de copia (anillo y porcentaje), a la izquierda de «xtree».
+pub fn transfers_rect(w: f32, h: f32, badge: XtreeBadge) -> Rect {
+    let x = xtree_rect(w, h, badge);
+    rect(x.left - 10.0 - TRANSFERS_W, x.top, x.left - 10.0, x.bottom)
+}
+
 /// Puntos de un sector de anillo de `BADGE`×`BADGE` en `r` (radio interior 64 % del exterior),
 /// desde el ángulo `start` (radianes; 0 = derecha, sentido horario) y de largo `sweep`.
 fn ring_sector(r: Rect, start: f32, sweep: f32) -> Vec<(f32, f32, f32)> {
@@ -408,16 +416,32 @@ pub struct StatusButtons {
     /// Botón de la vista previa bajo el mouse, y si la columna está prendida.
     pub preview_hot: bool,
     pub preview_on: bool,
+    /// Indicador de las operaciones de copia (avance total de 0 a 1), si hay alguna.
+    pub transfers: Option<f32>,
+    pub transfers_hot: bool,
 }
 
 pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) {
-    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on } = b;
+    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on, transfers, transfers_hot } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
     let xtree = xtree_rect(w, h, badge);
-    let text_r = rect(GAP * 2.0, h - STATUSBAR_H, xtree.left - GAP, h);
+    let text_end = if transfers.is_some() { transfers_rect(w, h, badge).left } else { xtree.left };
+    let text_r = rect(GAP * 2.0, h - STATUSBAR_H, text_end - GAP, h);
     p.text(FontId::Ui, text, text_r, th.text_dim);
+
+    if let Some(f) = transfers {
+        let r = transfers_rect(w, h, badge);
+        if transfers_hot {
+            p.round_fill(r, 4.0, th.hover);
+        }
+        let pct = (f.clamp(0.0, 1.0) * 100.0).floor() as u8;
+        let top = (r.top + r.bottom - BADGE) / 2.0;
+        draw_xtree_badge(p, rect(r.left + 6.0, top, r.left + 6.0 + BADGE, top + BADGE), XtreeBadge::Progress(pct));
+        let color = if transfers_hot { th.text } else { th.text_dim };
+        p.text(FontId::Ui, &format!("{pct} %"), rect(r.left + 26.0, r.top, r.right - 4.0, r.bottom), color);
+    }
 
     if groups_hot {
         p.round_fill(groups, 4.0, th.hover);

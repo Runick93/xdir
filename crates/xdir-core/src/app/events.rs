@@ -101,6 +101,7 @@ impl App {
                     }
                 }
             }
+            crate::transfer::WM_APP_TRANSFER_DUE => self.on_transfer_due(lparam as crate::transfer::JobId),
             crate::transfer::WM_APP_TRANSFER => {
                 self.on_transfer_updates();
                 self.redraw();

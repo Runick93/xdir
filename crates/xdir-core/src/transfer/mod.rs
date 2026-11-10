@@ -33,6 +33,10 @@ pub type JobId = u64;
 /// Llegaron `Update`s de un trabajo al canal de la `App`.
 pub const WM_APP_TRANSFER: u32 = crate::WM_APP + 27;
 
+/// Pasó 1 s desde que empezó un trabajo (`lparam` = su `JobId`): si sigue, aparece la ventana de
+/// copia.
+pub const WM_APP_TRANSFER_DUE: u32 = crate::WM_APP + 28;
+
 /// En qué está un trabajo.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JobState {

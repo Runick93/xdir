@@ -150,6 +150,8 @@ enum Hit {
     Xtree,
     /// Botón de la columna de vista previa.
     PreviewToggle,
+    /// Indicador de las operaciones de copia en la barra de estado (abre la ventana de copia).
+    Transfers,
     /// Borde izquierdo de la columna de vista previa (cambiar su ancho).
     PreviewEdge,
     /// El panel de información (en el lugar de la columna).

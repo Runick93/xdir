@@ -365,9 +365,11 @@ fn copy_unchecked(src: &Path, dst: &Path) -> Result<()> {
     // `copyfile` con una carpeta que ya existe copia adentro de ella: la carpeta la crea esta copia.
     std::fs::create_dir(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
     let result = (|| {
+        // Cada elemento de adentro igual: las carpetas, creadas por esta copia; los archivos y
+        // enlaces, uno por uno (nunca con COPYFILE_RECURSIVE, que copia adentro de lo que haya).
         for child in std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))? {
             let child = child.map_err(|e| format!("{}: {e}", src.display()))?;
-            copy_entry(&child.path(), &dst.join(child.file_name()), false)?;
+            copy_unchecked(&child.path(), &dst.join(child.file_name()))?;
         }
         // Los metadatos de la carpeta (permisos, atributos extendidos, fechas) al final.
         copy_entry(src, dst, true)
@@ -378,25 +380,24 @@ fn copy_unchecked(src: &Path, dst: &Path) -> Result<()> {
     result
 }
 
-/// `copyfile` de `src` en `dst` (que no existe; con `meta_only`, solo los metadatos sobre `dst`).
+/// `copyfile` de un archivo o enlace `src` en `dst` (que no existe; con `meta_only`, solo los
+/// metadatos de una carpeta sobre `dst`). Sin `COPYFILE_RECURSIVE`: con `COPYFILE_EXCL`, un
+/// destino que apareció en el medio (archivo, carpeta o enlace) da EEXIST y no se toca.
 fn copy_entry(src: &Path, dst: &Path, meta_only: bool) -> Result<()> {
     let (from, to) = (c_path(src)?, c_path(dst)?);
     let flags = if meta_only {
         libc::COPYFILE_METADATA | libc::COPYFILE_NOFOLLOW_SRC
     } else {
-        libc::COPYFILE_METADATA
-        | libc::COPYFILE_DATA
-        | libc::COPYFILE_RECURSIVE
-        | libc::COPYFILE_CLONE
-        | libc::COPYFILE_NOFOLLOW_SRC
-        | libc::COPYFILE_EXCL
+        libc::COPYFILE_METADATA | libc::COPYFILE_DATA | libc::COPYFILE_CLONE | libc::COPYFILE_NOFOLLOW_SRC | libc::COPYFILE_EXCL
     };
+    // ¿Había algo antes? Si no y después de fallar hay, lo creó esta copia.
+    let existed = taken(dst);
     // SAFETY: dos cadenas C válidas; sin estado de copyfile.
     let r = unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), flags) };
     if r != 0 {
         let e = std::io::Error::last_os_error();
         // EEXIST: no lo creó esta copia, no se toca.
-        if !meta_only && e.raw_os_error() != Some(libc::EEXIST) {
+        if !meta_only && !existed && e.raw_os_error() != Some(libc::EEXIST) && taken(dst) {
             let _ = remove_tree(dst);
         }
         return Err(format!("{}: {e}", src.display()));
@@ -776,6 +777,39 @@ mod tests {
         // A una carpeta nueva: entera, con su contenido.
         copy_unchecked(&src, &dir.join("nueva")).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("nueva/sub/b")).unwrap(), "b");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un archivo o un enlace sobre un destino que apareció en el medio (archivo, carpeta,
+    /// enlace a una carpeta, enlace roto): error, sin copiar adentro ni tocar lo que había.
+    #[test]
+    fn copy_file_or_link_never_goes_into_existing() {
+        use std::os::unix::fs::symlink;
+        let dir = tmp("copia-archivo-carrera");
+        let f = dir.join("f");
+        std::fs::write(&f, "f").unwrap();
+        symlink("objetivo", dir.join("srclink")).unwrap();
+        let entries = |p: &Path| std::fs::read_dir(p).map(|r| r.count()).unwrap_or(0);
+        for (i, src) in [f.clone(), dir.join("srclink")].iter().enumerate() {
+            let d = dir.join(format!("d{i}"));
+            std::fs::create_dir(&d).unwrap();
+            let target = dir.join(format!("t{i}"));
+            std::fs::create_dir(&target).unwrap();
+            let dirlink = dir.join(format!("dirlink{i}"));
+            symlink(&target, &dirlink).unwrap();
+            let file = dir.join(format!("dst{i}"));
+            std::fs::write(&file, "viejo").unwrap();
+            let dangling = dir.join(format!("roto{i}"));
+            symlink(dir.join("no-existe"), &dangling).unwrap();
+            for dst in [&d, &dirlink, &file, &dangling] {
+                assert!(copy_unchecked(src, dst).is_err(), "{} → {}", src.display(), dst.display());
+            }
+            assert_eq!(entries(&d), 0, "nada adentro de la carpeta");
+            assert_eq!(entries(&target), 0, "nada adentro de la carpeta del enlace");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "viejo");
+            assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+            assert!(!dir.join("no-existe").exists());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

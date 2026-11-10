@@ -435,10 +435,8 @@ fn remote_navigation_no_ui_io() {
     pump_pane(&mut a, 0);
     a.paint();
     // Ronda 1: la flecha de las migas, arrastrar, xtree y el desplegable de la barra.
-    let k = (0..10).find(|&k| a.panes[0].chevron(k).is_some_and(|(_, l)| l == Location::Path(root.clone())));
-    if let Some(k) = k {
-        a.show_subfolder_menu(0, k);
-    }
+    let k = (0..10).find(|&k| a.panes[0].chevron(k).is_some_and(|(_, l)| l == Location::Path(root.clone()))).expect("la flecha de la carpeta de red");
+    a.show_subfolder_menu(0, k);
     let roots = vec![root.clone()];
     let _ = super::fileops::drop_effect(&[root.join("a.txt")], &root.join("sub"), false, false, crate::drop::Effect::ALL, &roots);
     let _x = crate::xtree::view::Xtree::new(a.hwnd, root.clone(), false);

@@ -109,6 +109,9 @@ pub enum JobSpec {
 /// Lo que manda el hilo de un trabajo al de interfaz.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Update {
+    /// Los discos que toca el trabajo (su identidad: `VolumeInfo::id`), apenas se saben. Lo manda
+    /// la cola de la `App`, no el motor.
+    Volumes(Vec<std::ffi::OsString>),
     /// Recorriendo el origen: «Preparando… N elementos».
     Preparing { items: u64 },
     Started { title: String, items: u64, bytes: u64 },

@@ -693,3 +693,27 @@ fn no_new_copies_onto_a_disk_being_ejected() {
     wait(&mut a, idle);
     assert!(f.exists(&p("/app-ejn/d/otro.txt")));
 }
+
+#[test]
+fn eject_finds_jobs_on_the_volume_by_identity() {
+    // Ronda 2: el mismo disco por otro camino (un enlace, otras mayúsculas) también cuenta, para
+    // preguntar antes de expulsar y para no empezar copias nuevas mientras se espera.
+    let f = fake();
+    let usb = VolumeInfo { id: "app-ejid".into(), label: "USB (G:)".into(), case_insensitive: true, has_trash: true, max_file: None, free: u64::MAX };
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let spec = slow_copy(&f, "/app-ejid-enlace", 20);
+    f.set_volume(&p("/app-ejid"), usb.clone());
+    f.set_volume(&p("/app-ejid-enlace"), usb);
+    let id = a.start_transfer(spec);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    assert_eq!(a.jobs_on_volume(Path::new("/app-ejid")), vec![id]);
+    host.set_answer(Some(true));
+    assert!(a.eject_after_jobs(Path::new("/app-ejid"), "USB (G:)", Box::new(|_: &mut App| {})));
+    // Una copia nueva por el otro camino, mientras se espera: no empieza.
+    f.add_file(&p("/app-ejid-enlace/s/otro.txt"), b"o".to_vec());
+    a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejid-enlace/s/otro.txt")], dest: p("/app-ejid-enlace/d") });
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-ejid-enlace/d/otro.txt")));
+    assert!(!f.exists(&p("/app-ejid-enlace/d/grande.bin")));
+}

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
@@ -41,6 +41,8 @@ struct JobMeta {
     label: &'static str,
     /// Rutas que toca (para saber si usa un disco que se quiere expulsar).
     paths: Vec<PathBuf>,
+    /// Los discos que toca (identidad), cuando el hilo del trabajo los averiguó.
+    volumes: Vec<OsString>,
 }
 
 /// Estado de los trabajos de copia de la `App`.
@@ -58,6 +60,9 @@ pub(super) struct Transfers {
     /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco; varios
     /// pedidos esperan cada uno los suyos.
     pending_eject: Vec<PendingEject>,
+    /// Los discos (identidad y nombre) que se están por expulsar: los lee el hilo de cada trabajo
+    /// nuevo para no empezar sobre ellos.
+    ejecting: Arc<Mutex<Vec<(OsString, String)>>>,
     window: CopyWindow,
     /// Lo que se lanzó (pruebas).
     #[cfg(test)]
@@ -87,6 +92,7 @@ pub type AfterJobs = Box<dyn FnOnce(&mut App)>;
 /// tanto no empiezan otros que lo usen.
 struct PendingEject {
     root: PathBuf,
+    volume: Option<OsString>,
     label: String,
     jobs: Vec<JobId>,
     then: AfterJobs,
@@ -105,6 +111,7 @@ impl Transfers {
             // La plataforma con ventana de copia lo apaga (`set_auto_skip(false)`) y se pregunta.
             auto_skip: Arc::new(AtomicBool::new(true)),
             pending_eject: Vec::new(),
+            ejecting: Arc::new(Mutex::new(Vec::new())),
             window: CopyWindow::default(),
             #[cfg(test)]
             started: Vec::new(),
@@ -185,6 +192,12 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
         JobSpec::Retry { moving: true, .. } => ("Mover", true),
         JobSpec::Retry { moving: false, .. } => ("Copiar", false),
     }
+}
+
+/// La identidad del disco de `root` (lo que se quiere expulsar). Es un `statfs` de la raíz de un
+/// disco montado: lo único de disco que hace la interfaz acá, al pedir expulsar.
+fn root_volume(root: &Path) -> Option<OsString> {
+    sys::copy_prims().volume(root).map(|v| v.id)
 }
 
 /// Discos que toca un trabajo (lee el disco: corre en el hilo del trabajo).
@@ -289,8 +302,8 @@ impl App {
             done_items: None,
         });
         let restore = matches!(spec, JobSpec::Restore { .. });
-        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone() });
-        let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone());
+        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new() });
+        let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
             let send = |u: Update| {
@@ -299,6 +312,13 @@ impl App {
                 }
             };
             let vols = volumes(prims, &paths);
+            send(Update::Volumes(vols.clone()));
+            // Un disco que se está por expulsar (también por otro camino): no empieza.
+            let busy = ejecting.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(v, _)| vols.contains(v)).map(|(_, l)| l.clone());
+            if let Some(label) = busy {
+                send(Update::Finished(JobOutcome { stopped: Some(format!("Se está expulsando \"{label}\"")), ..Default::default() }));
+                return;
+            }
             if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
                 send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
                 return;
@@ -324,8 +344,15 @@ impl App {
         // Conflictos que llegaron sin a quién preguntar (el hilo los mandó antes de saberlo).
         let mut skip_now = Vec::new();
         while let Ok((id, update)) = self.transfers.rx.try_recv() {
-            let Some(v) = self.transfers.jobs.iter_mut().find(|j| j.id == id) else { continue };
+            if let Update::Volumes(vols) = &update {
+            if let Some(m) = self.transfers.meta.get_mut(&id) {
+                m.volumes = vols.clone();
+            }
+            continue;
+        }
+        let Some(v) = self.transfers.jobs.iter_mut().find(|j| j.id == id) else { continue };
             match update {
+                Update::Volumes(_) => {}
                 Update::Preparing { items } => {
                     v.state = JobState::Preparing;
                     v.items.1 = items;
@@ -699,6 +726,10 @@ impl App {
             .into_iter()
             .partition(|e| !e.jobs.iter().any(|id| self.transfers.jobs.iter().any(|j| j.id == *id && j.state != JobState::Done)));
         self.transfers.pending_eject = waiting;
+        if !ready.is_empty() {
+            let still: Vec<Option<OsString>> = self.transfers.pending_eject.iter().map(|e| e.volume.clone()).collect();
+            self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).retain(|(v, _)| still.contains(&Some(v.clone())));
+        }
         for e in ready {
             (e.then)(self);
         }
@@ -808,11 +839,16 @@ impl App {
 
     /// Trabajos sin terminar que tocan algo dentro de `root` (un disco que se quiere expulsar).
     pub fn jobs_on_volume(&self, root: &Path) -> Vec<JobId> {
+        let id = root_volume(root);
         self.transfers
             .jobs
             .iter()
             .filter(|j| j.state != JobState::Done)
-            .filter(|j| self.transfers.meta.get(&j.id).is_some_and(|m| m.paths.iter().any(|p| p.starts_with(root))))
+            .filter(|j| {
+                self.transfers.meta.get(&j.id).is_some_and(|m| {
+                    m.paths.iter().any(|p| p.starts_with(root)) || id.as_ref().is_some_and(|id| m.volumes.contains(id))
+                })
+            })
             .map(|j| j.id)
             .collect()
     }
@@ -837,7 +873,11 @@ impl App {
                 c.cancel();
             }
         }
-        self.transfers.pending_eject.push(PendingEject { root: root.to_path_buf(), label: label.to_string(), jobs: ids, then });
+        let volume = root_volume(root);
+        if let Some(v) = &volume {
+            self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push((v.clone(), label.to_string()));
+        }
+        self.transfers.pending_eject.push(PendingEject { root: root.to_path_buf(), volume, label: label.to_string(), jobs: ids, then });
         true
     }
 }

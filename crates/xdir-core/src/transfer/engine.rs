@@ -198,6 +198,8 @@ struct Job<'a> {
     cancelled: bool,
     stopped: Option<String>,
     skipped: Vec<PathBuf>,
+    /// Lo que el recorrido no pudo leer (cuenta como error de la carpeta que lo contiene).
+    walk_failed: Vec<PathBuf>,
     /// Conflictos de arriba que se ven por delante (por índice de elemento).
     ahead: Vec<bool>,
     index: usize,
@@ -225,6 +227,7 @@ impl<'a> Job<'a> {
             cancelled: false,
             stopped: None,
             skipped: Vec::new(),
+            walk_failed: Vec::new(),
             ahead: Vec::new(),
             index: 0,
             moves_as_created: false,
@@ -435,6 +438,7 @@ impl<'a> Job<'a> {
         for e in errors {
             let dst = e.path.strip_prefix(&base).map(|rel| dst_base.join(rel)).unwrap_or_else(|_| hint.clone());
             let src = e.path.clone();
+            self.walk_failed.push(src.clone());
             self.fail(&src, &dst, e);
         }
     }
@@ -932,7 +936,9 @@ impl<'a> Job<'a> {
             let _ = self.prims.remove(&frame.src);
         }
         let Some(aside) = frame.aside else { return };
-        let ok = self.errors.len() == frame.errors_before && !self.halted();
+        // Un error adentro, también del recorrido (anotado antes de abrir la carpeta), hace que
+        // vuelva la carpeta vieja.
+        let ok = self.errors.len() == frame.errors_before && !self.halted() && !self.walk_failed.iter().any(|p| p.starts_with(&frame.src));
         if ok {
             self.dispose_aside(&aside, &frame.dst);
             if frame.record_later {

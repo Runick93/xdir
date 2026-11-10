@@ -941,3 +941,18 @@ fn replace_same_file_from_another_folder_never_deletes() {
     assert_eq!(fake.contents(&p("/hl/b/x copia.txt")).unwrap(), b"unico");
     assert!(fake.trashed().is_empty());
 }
+
+#[test]
+fn replace_folder_with_unreadable_part_restores_old() {
+    // Lo que no se pudo leer al recorrer también cuenta: la carpeta vieja vuelve.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/rw/s/C/a.txt"), b"a".to_vec());
+    fake.add_file(&p("/rw/s/C/cerrada/x"), b"x".to_vec());
+    fake.add_file(&p("/rw/d/C/v.txt"), b"v".to_vec());
+    fake.fail(&p("/rw/s/C/cerrada"), ErrKind::Denied, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/rw/s/C")], dest: p("/rw/d") }, &[answer(Choice::Replace)]);
+    assert_eq!(r.messages(), vec!["No tenés permiso".to_string()]);
+    assert_eq!(fake.list_all(&p("/rw/d")), vec![p("/rw/d/C"), p("/rw/d/C/v.txt")]);
+    assert!(fake.trashed().is_empty());
+    assert_eq!(r.out.result.undo, None);
+}

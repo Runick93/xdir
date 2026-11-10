@@ -965,7 +965,6 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "revisión 2, punto 3"]
         fn rv_walk_error_inside_replaced_folder() {
             let dir = tmp("rv-recorrido");
             std::fs::create_dir_all(dir.join("s/C/cerrada")).unwrap();

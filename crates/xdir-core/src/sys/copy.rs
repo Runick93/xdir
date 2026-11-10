@@ -140,6 +140,11 @@ pub trait CopyPrims: Send + Sync {
     /// Manda a la Papelera; devuelve cómo encontrarlo ahí (como `Undo::Recycled`; el texto es de
     /// la plataforma). Si el sistema lo borró en vez de mandarlo a la Papelera, es un error.
     fn trash(&self, p: &Path) -> Result<String, CopyError>;
+    /// Manda `p` a la Papelera como si fuera `shown` (lo que reemplazó: nombre y lugar para
+    /// «Devolver» o «Poner de nuevo»), donde el sistema lo permite. Por defecto, `trash(p)`.
+    fn trash_as(&self, p: &Path, _shown: &Path) -> Result<String, CopyError> {
+        self.trash(p)
+    }
     /// Lugar original de un elemento de la Papelera, si se sabe.
     fn trash_origin(&self, _in_trash: &Path) -> Option<PathBuf> {
         None

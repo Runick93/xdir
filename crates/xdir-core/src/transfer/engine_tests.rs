@@ -242,9 +242,11 @@ fn conflict_replace_trashes_old() {
     conflict_setup(&fake);
     let r = go(&fake, copy_informe(), &[answer(Choice::Replace)]);
     assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"nuevo");
-    // Lo que va a la Papelera es lo apartado (con un nombre temporal), pero se devuelve al lugar.
+    // En la Papelera figura con el nombre y el lugar de lo que se reemplazó.
     let trashed = fake.trashed();
     assert_eq!(trashed.len(), 1);
+    assert_eq!(trashed[0].1, p("/k/dst/informe.pdf"));
+    assert!(trashed[0].0.starts_with("informe.pdf"));
     no_tmp_left(&fake, &p("/k/dst"));
     let undo = r.out.result.undo.clone().unwrap();
     assert_eq!(
@@ -770,9 +772,9 @@ fn replace_trash_failure_keeps_old_visible() {
     });
     let Some(Update::Finished(out)) = updates.last() else { panic!() };
     assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"nuevo");
-    assert_eq!(fake.contents(&p("/k/dst/informe 2.pdf")).unwrap(), b"viejo");
+    assert_eq!(fake.contents(&p("/k/dst/informe (reemplazado).pdf")).unwrap(), b"viejo");
     assert_eq!(out.errors.len(), 1);
-    assert!(out.errors[0].message.contains("«informe 2.pdf»"), "{:?}", out.errors);
+    assert!(out.errors[0].message.contains("«informe (reemplazado).pdf»"), "{:?}", out.errors);
     no_tmp_left(&fake, &p("/k/dst"));
 }
 

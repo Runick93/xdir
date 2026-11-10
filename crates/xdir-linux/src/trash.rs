@@ -90,16 +90,22 @@ fn make_dir(dir: &Path) -> io::Result<()> {
 /// `.trashinfo` (creándolo en exclusiva, así dos borrados con el mismo nombre no se pisan) y
 /// después mueve; si el movimiento falla, el original queda y se quita la reserva.
 pub fn recycle(path: &Path, trash: &Path) -> io::Result<String> {
-    recycle_with(path, trash, move_path)
+    recycle_with(path, path, trash, move_path)
+}
+
+/// Como `recycle`, pero en la papelera figura como `shown`: su nombre y su `Path=` (lo que usa
+/// «Restaurar»). El motor de copia lo usa para lo apartado por «Reemplazar».
+pub fn recycle_as(path: &Path, shown: &Path, trash: &Path) -> io::Result<String> {
+    recycle_with(path, shown, trash, move_path)
 }
 
 /// `recycle` con la forma de mover recibida (los tests fuerzan el camino de copiar y borrar).
 /// Si la copia a la papelera quedó completa pero el original no se pudo borrar del todo, la
 /// entrada de la papelera (archivo y `.trashinfo`) queda: es la única copia entera.
-fn recycle_with(path: &Path, trash: &Path, mover: impl Fn(&Path, &Path) -> Result<(), MoveError>) -> io::Result<String> {
+fn recycle_with(path: &Path, shown: &Path, trash: &Path, mover: impl Fn(&Path, &Path) -> Result<(), MoveError>) -> io::Result<String> {
     let meta = std::fs::symlink_metadata(path)?;
-    let name = path.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ruta sin nombre"))?;
-    let original = std::path::absolute(path)?;
+    let name = shown.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ruta sin nombre"))?;
+    let original = std::path::absolute(shown)?;
     let (files, info) = (trash.join("files"), trash.join("info"));
     make_dir(&files)?;
     make_dir(&info)?;
@@ -231,7 +237,7 @@ mod tests {
         let ro = std::fs::Permissions::from_mode(0o500);
         std::fs::set_permissions(src.join("sub"), ro).unwrap();
         // Camino de otro disco: copiar y borrar.
-        let r = recycle_with(&src, &trash, crate::ops::copy_then_remove);
+        let r = recycle_with(&src, &src, &trash, crate::ops::copy_then_remove);
         let rw = std::fs::Permissions::from_mode(0o755);
         let _ = std::fs::set_permissions(src.join("sub"), rw.clone());
         let _ = std::fs::set_permissions(trash.join("files/carpeta/sub"), rw);

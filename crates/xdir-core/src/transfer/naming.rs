@@ -33,6 +33,13 @@ pub fn numbered_name(name: &str, is_dir: bool, n: u32) -> String {
     format!("{stem} {n}{ext}")
 }
 
+/// Lo apartado por «Reemplazar»: n = 1 «informe (reemplazado).pdf», n ≥ 2 «informe (reemplazado
+/// 2).pdf».
+pub fn replaced_name(name: &str, is_dir: bool, n: u32) -> String {
+    let (stem, ext) = split_ext(name, is_dir);
+    if n <= 1 { format!("{stem} (reemplazado){ext}") } else { format!("{stem} (reemplazado {n}){ext}") }
+}
+
 /// La primera ruta libre `dir/make(n)` con n = 1, 2, …
 pub fn free_name(dir: &Path, make: &dyn Fn(u32) -> String, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
     let mut n = 1;

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::naming::{copy_name, folder_with_name, free_name, numbered_name};
+use super::naming::{copy_name, folder_with_name, free_name, numbered_name, replaced_name};
 use super::walk::{Planned, totals, walk};
 use super::{Answer, Choice, ConflictInfo, Control, Flow, JobError, JobOutcome, JobSpec, Update};
 use crate::format::thousands;
@@ -643,7 +643,12 @@ impl<'a> Job<'a> {
 
     /// Aparta lo que está en `dst` (renombrado sin pisar a un temporal oculto al lado).
     fn set_aside(&mut self, src: &Path, dst: &Path) -> Option<PathBuf> {
-        let aside = tmp_in(dst.parent().unwrap_or(Path::new("")));
+        // A la vista y con un nombre que lo explica («informe (reemplazado).pdf»): si xdir se
+        // corta antes de tirarlo, queda ahí; y en la Papelera se reconoce.
+        let is_dir = self.exists(dst).is_some_and(|s| s.kind == ItemKind::Dir);
+        let name = name_of(dst);
+        let parent = dst.parent().unwrap_or(Path::new(""));
+        let aside = free_name(parent, &|n| replaced_name(&name, is_dir, n), &|p| self.exists(p).is_some());
         match self.prims.rename_noreplace(dst, &aside) {
             Ok(()) => Some(aside),
             Err(e) => {
@@ -660,12 +665,9 @@ impl<'a> Job<'a> {
         }
     }
 
-    /// Lo apartado queda al lado de `dst` con un nombre libre a la vista («informe 2.pdf»).
+    /// Lo apartado se queda donde está (a la vista, «… (reemplazado)»): se avisa.
     fn keep_visible(&mut self, aside: &Path, dst: &Path, why: &str) {
-        let is_dir = self.exists(aside).is_some_and(|s| s.kind == ItemKind::Dir);
-        let keep = self.free_numbered(dst, is_dir);
-        let shown = if self.prims.rename_noreplace(aside, &keep).is_ok() { keep } else { aside.to_path_buf() };
-        self.fail_msg(dst, &shown, &format!("{why} «{}»", name_of(&shown)), false);
+        self.fail_msg(dst, aside, &format!("{why} «{}»", name_of(aside)), false);
     }
 
     /// Lo nuevo ya está en `dst`: lo apartado va a la Papelera (si el disco no tiene, se borra,
@@ -675,7 +677,8 @@ impl<'a> Job<'a> {
             self.remove_tree(aside);
             return;
         }
-        match self.prims.trash(aside) {
+        // En la Papelera, con el nombre y el lugar de lo que reemplazó donde el sistema lo permite.
+        match self.prims.trash_as(aside, dst) {
             Ok(name) => self.record(Undo::Recycled(vec![(name, dst.to_path_buf())])),
             Err(e) => {
                 if self.exists(aside).is_some() {

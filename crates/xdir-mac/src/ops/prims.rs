@@ -8,7 +8,7 @@ use std::io;
 use std::os::macos::fs::MetadataExt as MacMetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use xdir_core::sys::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, VolumeInfo};
 
@@ -260,6 +260,19 @@ impl CopyPrims for MacCopyPrims {
         Ok(in_trash.to_string_lossy().into_owned())
     }
 
+    /// Adentro de la Papelera se le pone el nombre de `shown` si está libre (así se reconoce lo
+    /// que reemplazó); «Deshacer» lo devuelve igual, por la ruta que se devuelve acá.
+    fn trash_as(&self, p: &Path, shown: &Path) -> Result<String, CopyError> {
+        let in_trash = PathBuf::from(self.trash(p)?);
+        if let (Some(dir), Some(name)) = (in_trash.parent(), shown.file_name()) {
+            let named = dir.join(name);
+            if named != in_trash && self.rename_noreplace(&in_trash, &named).is_ok() {
+                return Ok(named.to_string_lossy().into_owned());
+            }
+        }
+        Ok(in_trash.to_string_lossy().into_owned())
+    }
+
     fn untrash(&self, in_trash: &str, original: &Path) -> Result<(), CopyError> {
         self.rename_noreplace(Path::new(in_trash), original)
     }
@@ -270,7 +283,6 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use xdir_core::ops::Undo;
     use xdir_core::transfer::{Answer, Choice, Control, JobOutcome, JobSpec, Update, run};
@@ -735,5 +747,290 @@ mod tests {
         assert!(names(&dir.join("bin")).is_empty());
         no_tmp(&dir.join("d"));
         assert_eq!(out.result.undo, None);
+    }
+
+    /// Pruebas de la revisión 2 del motor (puertos de las del revisor), sobre disco real.
+    mod rv {
+        use super::*;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Hook {
+            bin: PathBuf,
+            /// 0 papelera-carpeta, 1 borra y falla, 2 falla sin tocar, 3 pánico
+            trash_mode: u8,
+            no_trash_volume: bool,
+            volume_none: bool,
+            alias: Option<PathBuf>,
+            fail_copy: Option<(String, ErrKind)>,
+            cancel_on_aside: Option<Arc<Control>>,
+            log: Mutex<Vec<String>>,
+        }
+        impl CopyPrims for Hook {
+            fn stat(&self, p: &Path) -> Result<ItemStat, CopyError> { MacCopyPrims.stat(p) }
+            fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> { MacCopyPrims.read_dir(p) }
+            fn volume(&self, p: &Path) -> Option<VolumeInfo> {
+                if self.volume_none { return None; }
+                let mut v = MacCopyPrims.volume(p)?;
+                v.has_trash = !self.no_trash_volume;
+                if self.alias.as_ref().is_some_and(|o| p.starts_with(o)) { v.id = "otro".into(); }
+                Some(v)
+            }
+            fn copy_file(&self, s: &Path, d: &Path, pr: &mut dyn FnMut(u64) -> Flow) -> Result<(), CopyError> {
+                if let Some((n, k)) = &self.fail_copy && s.file_name().is_some_and(|x| x.to_string_lossy() == *n) {
+                    return Err(CopyError::new(k.clone(), d));
+                }
+                copy_data(s, d, pr, 0)
+            }
+            fn copy_symlink(&self, s: &Path, d: &Path) -> Result<(), CopyError> { MacCopyPrims.copy_symlink(s, d) }
+            fn create_dir(&self, d: &Path) -> Result<(), CopyError> { MacCopyPrims.create_dir(d) }
+            fn finish_dir(&self, d: &Path, l: &Path) -> Result<(), CopyError> { MacCopyPrims.finish_dir(d, l) }
+            fn rename_noreplace(&self, f: &Path, t: &Path) -> Result<(), CopyError> {
+                let r = MacCopyPrims.rename_noreplace(f, t);
+                self.log.lock().unwrap().push(format!("rename {} -> {} = {:?}", f.display(), t.display(), r.as_ref().err().map(|e| &e.kind)));
+                // Apartar lo que estaba: el destino es «… (reemplazado)».
+                let aside = t.file_name().is_some_and(|n| n.to_string_lossy().contains("(reemplazado"));
+                if r.is_ok() && aside && let Some(c) = &self.cancel_on_aside { c.cancel(); }
+                r
+            }
+            fn replace(&self, f: &Path, t: &Path) -> Result<(), CopyError> { MacCopyPrims.replace(f, t) }
+            fn remove(&self, p: &Path) -> Result<(), CopyError> { MacCopyPrims.remove(p) }
+            fn trash(&self, p: &Path) -> Result<String, CopyError> {
+                self.log.lock().unwrap().push(format!("trash {}", p.display()));
+                match self.trash_mode {
+                    1 => {
+                        let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+                        Err(CopyError::new(ErrKind::Other("E_FAIL".into()), p))
+                    }
+                    2 => Err(CopyError::new(ErrKind::Other("no".into()), p)),
+                    3 => panic!("crash simulado en trash"),
+                    _ => {
+                        std::fs::create_dir_all(&self.bin).unwrap();
+                        let n = std::fs::read_dir(&self.bin).unwrap().count();
+                        let to = self.bin.join(format!("{n}-{}", p.file_name().unwrap().to_string_lossy()));
+                        std::fs::rename(p, &to).map_err(|e| err(e, p))?;
+                        Ok(to.to_string_lossy().into_owned())
+                    }
+                }
+            }
+            fn untrash(&self, t: &str, o: &Path) -> Result<(), CopyError> { MacCopyPrims.rename_noreplace(Path::new(t), o) }
+        }
+        fn rep() -> Answer { Answer { choice: Choice::Replace, all: true } }
+        fn all_names(dir: &Path) -> Vec<String> { names(dir) }
+        fn rd(p: &Path) -> String { String::from_utf8_lossy(&std::fs::read(p).unwrap_or_else(|e| format!("<{e}>").into_bytes())).into_owned() }
+
+        #[test]
+        fn rv_aside_collision_existing_numbered() {
+            let dir = tmp("rv-colision");
+            std::fs::create_dir_all(dir.join("s")).unwrap();
+            std::fs::create_dir_all(dir.join("d")).unwrap();
+            std::fs::write(dir.join("s/informe.pdf"), b"nuevo").unwrap();
+            std::fs::write(dir.join("d/informe.pdf"), b"viejo").unwrap();
+            std::fs::write(dir.join("d/informe 2.pdf"), b"otro").unwrap();
+            let p = Hook { bin: dir.join("bin"), trash_mode: 2, ..Default::default() };
+            let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/informe.pdf")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
+            eprintln!("errors {:?}\nd={:?}", out.errors, all_names(&dir.join("d")));
+            assert_eq!(rd(&dir.join("d/informe.pdf")), "nuevo");
+            assert_eq!(rd(&dir.join("d/informe 2.pdf")), "otro");
+            // La Papelera falló: lo viejo queda a la vista con el nombre que lo explica.
+            assert_eq!(rd(&dir.join("d/informe (reemplazado).pdf")), "viejo");
+            assert_eq!(out.errors.len(), 1);
+            no_tmp(&dir.join("d"));
+        }
+
+        #[test]
+        fn rv_replace_dst_symlink_keeps_target() {
+            let dir = tmp("rv-enlace");
+            std::fs::create_dir_all(dir.join("s")).unwrap();
+            std::fs::create_dir_all(dir.join("d")).unwrap();
+            std::fs::create_dir_all(dir.join("real")).unwrap();
+            std::fs::write(dir.join("real/tesis.docx"), b"tesis").unwrap();
+            std::os::unix::fs::symlink(dir.join("real"), dir.join("d/X")).unwrap();
+            std::fs::create_dir_all(dir.join("s/X")).unwrap();
+            std::fs::write(dir.join("s/X/n.txt"), b"n").unwrap();
+            let p = Hook { bin: dir.join("bin"), ..Default::default() };
+            let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/X")], dest: dir.join("d") }, &[rep(), rep()], &Control::new(), &mut |_| {});
+            eprintln!("errors {:?} bin={:?}", out.errors, all_names(&dir.join("bin")));
+            assert_eq!(rd(&dir.join("real/tesis.docx")), "tesis");
+            assert_eq!(rd(&dir.join("d/X/n.txt")), "n");
+            // y un archivo sobre el enlace
+            std::fs::remove_dir_all(dir.join("d/X")).unwrap();
+            std::os::unix::fs::symlink(dir.join("real"), dir.join("d/X")).unwrap();
+            std::fs::remove_dir_all(dir.join("s/X")).unwrap();
+            std::fs::write(dir.join("s/X"), b"archivo").unwrap();
+            let p2 = Hook { bin: dir.join("bin2"), no_trash_volume: true, ..Default::default() };
+            let out = go(&p2, JobSpec::Copy { sources: vec![dir.join("s/X")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
+            eprintln!("errors {:?}", out.errors);
+            assert_eq!(rd(&dir.join("real/tesis.docx")), "tesis");
+            assert_eq!(rd(&dir.join("d/X")), "archivo");
+        }
+
+        #[test]
+        fn rv_replace_folder_containing_source_via_alias() {
+            let dir = tmp("rv-contiene");
+            std::fs::create_dir_all(dir.join("w/X/X")).unwrap();
+            std::fs::write(dir.join("w/X/X/dato"), b"dato").unwrap();
+            std::fs::write(dir.join("w/X/hermano"), b"h").unwrap();
+            std::os::unix::fs::symlink(dir.join("w"), dir.join("alias")).unwrap();
+            for (moving, alias) in [(true, false), (true, true), (false, true), (false, false)] {
+                let p = Hook { bin: dir.join("bin"), alias: alias.then(|| dir.join("alias")), ..Default::default() };
+                let dest = if alias { dir.join("alias") } else { dir.join("w") };
+                let spec = if moving { JobSpec::Move { sources: vec![dir.join("w/X/X")], dest } } else { JobSpec::Copy { sources: vec![dir.join("w/X/X")], dest } };
+                let out = go(&p, spec, &[rep(), rep()], &Control::new(), &mut |_| {});
+                eprintln!("moving={moving} alias={alias} errors {:?}", out.errors);
+                assert_eq!(rd(&dir.join("w/X/X/dato")), "dato");
+                assert_eq!(rd(&dir.join("w/X/hermano")), "h");
+            }
+        }
+
+        #[test]
+        fn rv_undo_replace_file_and_folder() {
+            for moving in [false, true] {
+                let dir = tmp(&format!("rv-deshacer-{moving}"));
+                std::fs::create_dir_all(dir.join("s/C")).unwrap();
+                std::fs::create_dir_all(dir.join("d/C")).unwrap();
+                std::fs::write(dir.join("s/f.txt"), b"nuevo").unwrap();
+                std::fs::write(dir.join("d/f.txt"), b"viejo").unwrap();
+                std::fs::write(dir.join("s/C/n"), b"n").unwrap();
+                std::fs::write(dir.join("d/C/v"), b"v").unwrap();
+                let p = Hook { bin: dir.join("bin"), alias: Some(dir.join("d")), ..Default::default() };
+                let srcs = vec![dir.join("s/f.txt"), dir.join("s/C")];
+                let spec = if moving { JobSpec::Move { sources: srcs, dest: dir.join("d") } } else { JobSpec::Copy { sources: srcs, dest: dir.join("d") } };
+                let out = go(&p, spec, &[rep(), rep()], &Control::new(), &mut |_| {});
+                eprintln!("moving={moving} errors {:?} undo {:?} bin={:?}", out.errors, out.result.undo, all_names(&dir.join("bin")));
+                assert_eq!(rd(&dir.join("d/f.txt")), "nuevo");
+                let undo = out.result.undo.clone().unwrap();
+                let out2 = go(&p, JobSpec::Undo(undo), &[], &Control::new(), &mut |_| {});
+                eprintln!("undo errors {:?} d={:?} s={:?} bin={:?}", out2.errors, all_names(&dir.join("d")), all_names(&dir.join("s")), all_names(&dir.join("bin")));
+                assert_eq!(rd(&dir.join("d/f.txt")), "viejo");
+                assert_eq!(rd(&dir.join("d/C/v")), "v");
+                assert!(!dir.join("d/C/n").exists());
+                if moving {
+                    assert_eq!(rd(&dir.join("s/f.txt")), "nuevo");
+                    assert_eq!(rd(&dir.join("s/C/n")), "n");
+                }
+                no_tmp(&dir.join("d"));
+            }
+        }
+
+        #[test]
+        fn rv_cancel_right_after_aside() {
+            for moving in [false, true] {
+                let dir = tmp(&format!("rv-cancel-aparte-{moving}"));
+                std::fs::create_dir_all(dir.join("s/C")).unwrap();
+                std::fs::create_dir_all(dir.join("d/C")).unwrap();
+                std::fs::write(dir.join("s/f.txt"), b"nuevo").unwrap();
+                std::fs::write(dir.join("d/f.txt"), b"viejo").unwrap();
+                std::fs::write(dir.join("s/C/n"), b"n").unwrap();
+                std::fs::write(dir.join("d/C/v"), b"v").unwrap();
+                for src in ["f.txt", "C"] {
+                    let ctl = Control::new();
+                    let p = Hook { bin: dir.join("bin"), alias: Some(dir.join("d")), cancel_on_aside: Some(ctl.clone()), ..Default::default() };
+                    let srcs = vec![dir.join("s").join(src)];
+                    let spec = if moving { JobSpec::Move { sources: srcs, dest: dir.join("d") } } else { JobSpec::Copy { sources: srcs, dest: dir.join("d") } };
+                    let out = go(&p, spec, &[rep()], &ctl, &mut |_| {});
+                    eprintln!("moving={moving} {src}: cancelled={} errors {:?} d={:?} s={:?} bin={:?}", out.cancelled, out.errors, all_names(&dir.join("d")), all_names(&dir.join("s")), all_names(&dir.join("bin")));
+                    no_tmp(&dir.join("d"));
+                }
+                // no se perdió nada: o viejo en d, o en bin
+                let old_f = rd(&dir.join("d/f.txt")) == "viejo" || all_names(&dir.join("bin")).iter().any(|n| rd(&dir.join("bin").join(n)) == "viejo");
+                assert!(old_f);
+                assert!(dir.join("d/C/v").exists() || all_names(&dir.join("bin")).iter().any(|n| dir.join("bin").join(n).join("v").exists()));
+                assert!(dir.join("s/C/n").exists() || dir.join("d/C/n").exists());
+            }
+        }
+
+        #[test]
+        fn rv_disk_full_and_error_in_folder_replace() {
+            for (moving, kind) in [(false, ErrKind::DiskFull), (true, ErrKind::DiskFull), (true, ErrKind::Other("x".into())), (false, ErrKind::Other("x".into()))] {
+                let dir = tmp(&format!("rv-lleno-{moving}-{kind:?}").replace(['(', ')', '"', ' '], ""));
+                std::fs::create_dir_all(dir.join("s/C")).unwrap();
+                std::fs::create_dir_all(dir.join("d/C")).unwrap();
+                std::fs::write(dir.join("s/C/a.bin"), b"a").unwrap();
+                std::fs::write(dir.join("s/C/b.bin"), b"b").unwrap();
+                std::fs::write(dir.join("s/C/c.bin"), b"c").unwrap();
+                std::fs::write(dir.join("d/C/v"), b"v").unwrap();
+                let p = Hook { bin: dir.join("bin"), alias: Some(dir.join("d")), fail_copy: Some(("b.bin".into(), kind.clone())), ..Default::default() };
+                let srcs = vec![dir.join("s/C")];
+                let spec = if moving { JobSpec::Move { sources: srcs, dest: dir.join("d") } } else { JobSpec::Copy { sources: srcs, dest: dir.join("d") } };
+                let out = go(&p, spec, &[rep()], &Control::new(), &mut |_| {});
+                eprintln!("moving={moving} {kind:?}: stopped={:?} errors {:?} d={:?} d/C={:?} s/C={:?} bin={:?} undo={:?}", out.stopped, out.errors, all_names(&dir.join("d")), all_names(&dir.join("d/C")), all_names(&dir.join("s/C")), all_names(&dir.join("bin")), out.result.undo);
+                assert_eq!(rd(&dir.join("d/C/v")), "v");
+                for f in ["a.bin", "b.bin", "c.bin"] {
+                    let somewhere = dir.join("s/C").join(f).exists() || dir.join("d/C 2").join(f).exists();
+                    assert!(somewhere, "{f} perdido");
+                }
+                no_tmp(&dir.join("d"));
+            }
+        }
+
+        #[test]
+        #[ignore = "revisión 2, punto 3"]
+        fn rv_walk_error_inside_replaced_folder() {
+            let dir = tmp("rv-recorrido");
+            std::fs::create_dir_all(dir.join("s/C/cerrada")).unwrap();
+            std::fs::write(dir.join("s/C/cerrada/x"), b"x").unwrap();
+            std::fs::write(dir.join("s/C/a"), b"a").unwrap();
+            std::fs::create_dir_all(dir.join("d/C")).unwrap();
+            std::fs::write(dir.join("d/C/v"), b"v").unwrap();
+            std::fs::set_permissions(dir.join("s/C/cerrada"), std::fs::Permissions::from_mode(0o000)).unwrap();
+            let p = Hook { bin: dir.join("bin"), ..Default::default() };
+            let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/C")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
+            std::fs::set_permissions(dir.join("s/C/cerrada"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("errors {:?} d/C={:?} bin={:?}", out.errors, all_names(&dir.join("d/C")), all_names(&dir.join("bin")));
+            // Con un error adentro (aunque sea del recorrido), vuelve la carpeta vieja.
+            assert!(!out.errors.is_empty());
+            assert_eq!(all_names(&dir.join("d/C")), vec!["v"]);
+            assert!(all_names(&dir.join("bin")).is_empty());
+            no_tmp(&dir.join("d"));
+        }
+
+        #[test]
+        fn rv_volume_none_trash_deletes() {
+            let dir = tmp("rv-sin-volumen");
+            std::fs::create_dir_all(dir.join("s")).unwrap();
+            std::fs::create_dir_all(dir.join("d")).unwrap();
+            std::fs::write(dir.join("s/f"), b"nuevo").unwrap();
+            std::fs::write(dir.join("d/f"), b"viejo").unwrap();
+            let p = Hook { bin: dir.join("bin"), volume_none: true, trash_mode: 1, ..Default::default() };
+            let out = go(&p, JobSpec::Move { sources: vec![dir.join("s/f")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
+            eprintln!("errors {:?} d={:?} s={:?}", out.errors, all_names(&dir.join("d")), all_names(&dir.join("s")));
+            assert_eq!(rd(&dir.join("d/f")), "nuevo");
+        }
+
+        #[test]
+        fn rv_crash_after_aside_leaves_visible_old() {
+            let dir = tmp("rv-crash");
+            std::fs::create_dir_all(dir.join("s")).unwrap();
+            std::fs::create_dir_all(dir.join("d")).unwrap();
+            std::fs::write(dir.join("s/f"), b"nuevo").unwrap();
+            std::fs::write(dir.join("d/f"), b"viejo").unwrap();
+            let p = Hook { bin: dir.join("bin"), trash_mode: 3, ..Default::default() };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                go(&p, JobSpec::Copy { sources: vec![dir.join("s/f")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
+            }));
+            eprintln!("panicked={} d={:?}", r.is_err(), all_names(&dir.join("d")));
+            // Si xdir se cae entre apartar y tirar a la Papelera, lo viejo queda a la vista.
+            assert!(r.is_err());
+            assert_eq!(rd(&dir.join("d/f (reemplazado)")), "viejo");
+            assert_eq!(rd(&dir.join("d/f")), "nuevo");
+        }
+
+        #[test]
+        fn rv_trash_name_is_visible() {
+            let dir = tmp("rv-nombre-papelera");
+            std::fs::create_dir_all(dir.join("s")).unwrap();
+            std::fs::create_dir_all(dir.join("d")).unwrap();
+            std::fs::write(dir.join("s/informe.pdf"), b"nuevo").unwrap();
+            std::fs::write(dir.join("d/informe.pdf"), b"viejo").unwrap();
+            let p = Hook { bin: dir.join("bin"), ..Default::default() };
+            let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/informe.pdf")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
+            let calls: Vec<String> = p.log.lock().unwrap().iter().filter(|l| l.starts_with("trash")).cloned().collect();
+            eprintln!("undo {:?} trash calls {calls:?}", out.result.undo);
+            assert_eq!(calls, vec![format!("trash {}", dir.join("d/informe (reemplazado).pdf").display())]);
+            // Deshacer lo devuelve a su nombre.
+            go(&p, JobSpec::Undo(out.result.undo.unwrap()), &[], &Control::new(), &mut |_| {});
+            assert_eq!(rd(&dir.join("d/informe.pdf")), "viejo");
+        }
     }
 }

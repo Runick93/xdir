@@ -544,6 +544,11 @@ impl CopyPrims for FakeCopyPrims {
     }
 
     fn trash(&self, p: &Path) -> Result<String, CopyError> {
+        self.trash_as(p, p)
+    }
+
+    /// Como `trash`, pero en la Papelera figura como `shown` (nombre y lugar).
+    fn trash_as(&self, p: &Path, shown: &Path) -> Result<String, CopyError> {
         let mut fs = self.fs();
         fs.check_fail(p)?;
         let key = fs.key(p).ok_or_else(|| CopyError::new(ErrKind::NotFound, p))?;
@@ -556,9 +561,10 @@ impl CopyPrims for FakeCopyPrims {
             return Err(CopyError::new(ErrKind::Other("Se borró definitivamente".into()), p));
         }
         fs.trash_count += 1;
-        let base = key.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let base = shown.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let name = format!("{base} {}", fs.trash_count);
-        fs.trash.push((name.clone(), key, tree));
+        let shown = if shown == p { key } else { fs.canon(shown) };
+        fs.trash.push((name.clone(), shown, tree));
         Ok(name)
     }
 

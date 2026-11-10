@@ -300,6 +300,11 @@ impl CopyPrims for LinuxCopyPrims {
         trash::recycle(p, &trash_dir(p)?).map_err(|e| err(e, p))
     }
 
+    /// En la papelera de freedesktop figura con el nombre y el `Path=` de `shown`.
+    fn trash_as(&self, p: &Path, shown: &Path) -> Result<String, CopyError> {
+        trash::recycle_as(p, shown, &trash_dir(p)?).map_err(|e| err(e, p))
+    }
+
     // TODO(merge tanda D): `trash_origin` = `trash::origin` (Task 3, otra rama). Sin él, «Devolver»
     // dice «No se sabe de dónde vino».
 
@@ -617,6 +622,22 @@ mod tests {
             assert!(!other.join("Dir/sub/cerrado.txt").exists());
         }
         let _ = std::fs::set_permissions(src.join("Dir/sub/cerrado.txt"), std::fs::Permissions::from_mode(0o644));
+    }
+
+    #[test]
+    fn prims_trash_as_shows_what_was_replaced() {
+        // Lo apartado por «Reemplazar» figura en la papelera con el nombre y el lugar del
+        // reemplazado, y «Deshacer» lo devuelve ahí.
+        let dir = tmp("papelera-como");
+        let (aside, shown) = (dir.join("informe (reemplazado).pdf"), dir.join("informe.pdf"));
+        std::fs::write(&aside, b"viejo").unwrap();
+        let name = LinuxCopyPrims.trash_as(&aside, &shown).unwrap();
+        assert!(name.starts_with("informe"), "{name}");
+        assert!(!name.contains("reemplazado"), "{name}");
+        let info = std::fs::read_to_string(trash_dir(&shown).unwrap().join("info").join(format!("{name}.trashinfo"))).unwrap();
+        assert!(info.lines().any(|l| l.starts_with("Path=") && l.ends_with("/informe.pdf")), "{info}");
+        LinuxCopyPrims.untrash(&name, &shown).unwrap();
+        assert_eq!(std::fs::read(&shown).unwrap(), b"viejo");
     }
 
     #[test]

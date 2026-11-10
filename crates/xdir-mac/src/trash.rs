@@ -39,14 +39,23 @@ pub fn origin_in(log: Option<&Path>, in_trash: &Path) -> Option<PathBuf> {
     }
     let dir = in_trash.parent()?;
     let name = in_trash.file_name()?.to_string_lossy().into_owned();
-    // Un `.DS_Store` de Papelera pesa pocos KB: uno de más de 4 MB no se lee (origen desconocido).
-    let ds = dir.join(".DS_Store");
-    if std::fs::metadata(&ds).ok()?.len() > DS_STORE_MAX {
-        return None;
-    }
-    let bytes = std::fs::read(ds).ok()?;
+    let bytes = read_ds_store(dir)?;
     let (folder, original) = parse_ds_store(&bytes).remove(&name)?;
     safe_origin(&volume_root(dir), &folder, &original)
+}
+
+/// El `.DS_Store` de `dir`, si es un archivo común (sin seguir enlaces, sin quedarse esperando
+/// en una FIFO) de hasta `DS_STORE_MAX` bytes: uno de Papelera pesa pocos KB.
+fn read_ds_store(dir: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(dir.join(".DS_Store")).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(DS_STORE_MAX + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= DS_STORE_MAX).then_some(bytes)
 }
 
 /// `root` + `ptbL` + `ptbN`, solo si no se sale del disco: `ptbN` tiene que ser un nombre suelto y
@@ -702,6 +711,37 @@ mod tests {
         assert!(prepare_parent(&vol, &vol.join("falta"), false).is_err());
         // Fuera del disco, nunca.
         assert!(prepare_parent(&vol, &outside, true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un `.DS_Store` que no es un archivo común (enlace a `/dev/zero`, FIFO) o que es enorme no
+    /// se lee, y no se queda esperando.
+    #[test]
+    fn ds_store_must_be_small_regular_file() {
+        let dir = tmp("ds-raro");
+        let run = |bin: PathBuf| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read_ds_store(&bin));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(2)).expect("no se colgó")
+        };
+        let a = dir.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", a.join(".DS_Store")).unwrap();
+        assert_eq!(run(a.clone()), None);
+        let b = dir.join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        let fifo = std::ffi::CString::new(b.join(".DS_Store").as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: cadena C válida.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        assert_eq!(run(b.clone()), None);
+        let c = dir.join("c");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join(".DS_Store"), vec![0u8; DS_STORE_MAX as usize + 1]).unwrap();
+        assert_eq!(run(c.clone()), None);
+        std::fs::write(c.join(".DS_Store"), b"Bud1").unwrap();
+        assert_eq!(run(c.clone()), Some(b"Bud1".to_vec()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

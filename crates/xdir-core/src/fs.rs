@@ -339,7 +339,6 @@ pub fn is_zip(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
 }
 
-/// ¿Es una ruta de red (`\\servidor\recurso\...`)? Los prefijos `\\?\` y `\\.\` no cuentan.
 /// ¿Es una carpeta? `None` si la ruta es de red (`Network::is_remote`, sin E/S): en el hilo de
 /// interfaz no se toca; quien llama navega igual y deja que la carga (en su hilo) decida.
 pub fn probe_dir(p: &Path) -> Option<bool> {
@@ -368,6 +367,7 @@ pub fn true_case_local(p: &Path) -> PathBuf {
     if crate::sys::network().is_remote(p) { p.to_path_buf() } else { crate::sys::file_system().true_case(p) }
 }
 
+/// ¿Es una ruta de red (`\\servidor\recurso\...`)? Los prefijos `\\?\` y `\\.\` no cuentan.
 pub fn is_unc(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.starts_with(r"\\") && !s.starts_with(r"\\?\") && !s.starts_with(r"\\.\")

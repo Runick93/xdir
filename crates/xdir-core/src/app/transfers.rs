@@ -232,7 +232,6 @@ impl Drop for Release {
     }
 }
 
-/// «Hay 2 operaciones sobre "USB (E:)". ¿Cancelarlas y expulsar?» (antes de expulsar un disco).
 /// Qué se hace con el disco o la conexión después de los trabajos (`eject_after_jobs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verb {
@@ -249,6 +248,7 @@ pub fn disconnect_question(jobs: usize, label: &str) -> String {
     }
 }
 
+/// «Hay 2 operaciones sobre "USB (E:)". ¿Cancelarlas y expulsar?» (antes de expulsar un disco).
 pub fn eject_question(jobs: usize, label: &str) -> String {
     if jobs == 1 {
         format!("Hay 1 operación sobre \"{label}\". ¿Cancelarla y expulsar?")

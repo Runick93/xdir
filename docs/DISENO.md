@@ -147,6 +147,12 @@ Notas de X39–X44:
   - En el panel inactivo, la selección de la tira es el gris de la lista (`text_dim` al 18 %), no `selection`.
   - La imagen grande y las miniaturas de la tira se dibujan con esquinas rectas, no con radio 6 y 4: `Painter` todavía no
     recorta imágenes con esquinas redondeadas.
+  - X42 no escribe nombres; la app sí, para distinguir una carpeta de carpetas (todas con el mismo ícono). Debajo de la
+    imagen grande, dentro de su área (`list::gallery::CAPTION_H`, 28), una línea centrada con el nombre del enfocado
+    (`Ui`, `text`) y al lado, chico y tenue, el tipo y el tamaño («JPEG image · 115 KB»; las carpetas, solo el tipo).
+    En la tira, el nombre debajo de cada miniatura en una línea (`Small`, `text_dim`; seleccionada o con foco, `text`)
+    cortado con «…» al ancho de la celda. Por eso la tira mide 132 de alto (no 112) y las celdas 88×108: la miniatura
+    de 72 con 8 de margen arriba y a los lados, y la línea del nombre de 18 debajo.
 
 ### Lo nativo, que no se dibuja
 

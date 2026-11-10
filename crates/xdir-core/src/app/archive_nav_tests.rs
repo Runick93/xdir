@@ -549,3 +549,22 @@ fn superseded_open_never_opens() {
     assert!(FakeShell::take_calls().iter().all(|c| !matches!(c, ShellCall::OpenFile(..))));
     assert!(a.archive.opening.is_none());
 }
+
+/// La extracción para la vista previa se cortó (el foco se fue) pero el elemento volvió a tener
+/// el foco antes de que llegara la respuesta: se pide de nuevo, la vista previa no queda vacía.
+#[test]
+fn cancelled_preview_for_refocused_item_is_requested_again() {
+    let mut a = app(FakeHost::new());
+    a.preview.on = true;
+    let (_, zip) = fixture("vuelve", &[("foto.png", b"png")]);
+    go(&mut a, 0, root(&zip));
+    a.set_active(0);
+    select(&mut a, 0, "foto.png");
+    let path = crate::archive_nav::temps::global().entry_path(&zip, &[], "foto.png").unwrap();
+    // Como si la pedida antes siguiera en camino y llegara cancelada.
+    a.archive.pending.insert(path.clone());
+    a.archive.prefetch_last = Some(path.clone());
+    a.on_task_done(tasks::TaskDone::ArchivePrepared { path: path.clone(), ok: false, cancelled: true });
+    task(&mut a);
+    assert!(a.archive.ready.contains(&path));
+}

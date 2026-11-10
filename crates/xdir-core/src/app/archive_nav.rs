@@ -430,15 +430,22 @@ impl App {
             let cancel = || turn.load(Ordering::Relaxed) != mine;
             // Un gemelo (mismo nombre en otro uso de mayúsculas) queda en otra carpeta: la vista
             // previa no lo muestra en lugar del de la fila.
-            let ok = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: limit, cancel: &cancel }).is_ok_and(|p| p == path);
-            TaskDone::ArchivePrepared { path, ok }
+            let res = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: limit, cancel: &cancel });
+            let cancelled = matches!(&res, Err(e) if e.kind == sys::ErrKind::Cancelled);
+            let ok = res.is_ok_and(|p| p == path);
+            TaskDone::ArchivePrepared { path, ok, cancelled }
         });
     }
 
     /// Llegó una extracción para la vista previa: lo que se ve de ese elemento se vuelve a pedir.
-    pub(super) fn on_archive_prepared(&mut self, path: PathBuf, ok: bool) {
+    pub(super) fn on_archive_prepared(&mut self, path: PathBuf, ok: bool, cancelled: bool) {
         self.archive.pending.remove(&path);
         if !ok {
+            // Cortada porque el foco se fue: si volvió a este elemento, se pide otra vez (un error
+            // de verdad no se reintenta).
+            if cancelled {
+                self.archive_prefetch();
+            }
             return;
         }
         self.archive.ready.insert(path.clone());

@@ -28,7 +28,8 @@ pub(super) enum TaskDone {
     /// Se extrajo a la temporal un archivo de adentro de un archivo comprimido para abrirlo.
     ArchiveOpened { name: String, with: bool, token: std::sync::Arc<std::sync::atomic::AtomicBool>, result: Result<PathBuf, String> },
     /// Se extrajo (o no) a la temporal un elemento para la vista previa.
-    ArchivePrepared { path: PathBuf, ok: bool },
+    /// `cancelled`: se cortó porque el foco se fue (si volvió, se pide de nuevo).
+    ArchivePrepared { path: PathBuf, ok: bool, cancelled: bool },
 }
 
 impl App {
@@ -57,7 +58,7 @@ impl App {
             TaskDone::Renamed { dir, result, undoing } => self.on_renamed(dir, result, undoing),
             TaskDone::CaseInfo { dir, case_insensitive } => self.on_case_info(&dir, case_insensitive),
             TaskDone::ArchiveOpened { name, with, token, result } => self.on_archive_opened(name, with, token, result),
-            TaskDone::ArchivePrepared { path, ok } => self.on_archive_prepared(path, ok),
+            TaskDone::ArchivePrepared { path, ok, cancelled } => self.on_archive_prepared(path, ok, cancelled),
             TaskDone::Original { pane, link, target } => {
                 let name = link.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 match target.as_ref().and_then(|t| Some((t.parent()?, t.file_name()?))) {

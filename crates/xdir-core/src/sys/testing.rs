@@ -71,6 +71,8 @@ thread_local! {
     static KEYS_DOWN: RefCell<Vec<Key>> = const { RefCell::new(Vec::new()) };
     /// Fecha local que informa el falso (por hilo; ver `FakeEnv::set_local_now`).
     static LOCAL_NOW: Cell<LocalNow> = const { Cell::new(FakeEnv::DEFAULT_NOW) };
+    /// Estilo de los atajos que informa el falso (por hilo; ver `FakeEnv::set_key_style`).
+    static KEY_STYLE: Cell<super::KeyStyle> = const { Cell::new(super::KeyStyle::Windows) };
 }
 
 /// `SystemEnv` falso: tema claro, sin animaciones, sin teclas apretadas salvo las de `hold_keys`, una carpeta de
@@ -85,6 +87,11 @@ impl FakeEnv {
 
     /// Fecha fija de `local_now` si no se configura otra: miércoles 11/11/2026, en UTC.
     pub const DEFAULT_NOW: LocalNow = LocalNow { day: 20_768, weekday: 2, month: 11, year: 2026, offset: 0 };
+
+    /// Desde ahora (en este hilo) `key_style` devuelve este estilo (por defecto, Windows).
+    pub fn set_key_style(style: super::KeyStyle) {
+        KEY_STYLE.with(|k| k.set(style));
+    }
 
     /// Desde ahora (en este hilo) `local_now` devuelve esta fecha.
     pub fn set_local_now(now: LocalNow) {
@@ -107,6 +114,10 @@ impl SystemEnv for FakeEnv {
 
     fn key_down(&self, k: Key) -> bool {
         KEYS_DOWN.with(|d| d.borrow().contains(&k))
+    }
+
+    fn key_style(&self) -> super::KeyStyle {
+        KEY_STYLE.with(Cell::get)
     }
 
     /// En pruebas la configuración nunca es la real: cada hilo de prueba tiene su propia carpeta
@@ -477,6 +488,8 @@ thread_local! {
     static CLOUD: RefCell<BTreeSet<PathBuf>> = const { RefCell::new(BTreeSet::new()) };
     /// Cuántas veces se preguntó `cloud_only` en este hilo.
     static CLOUD_CHECKS: Cell<usize> = const { Cell::new(0) };
+    /// Carpeta que el falso trata como la Papelera (por hilo; ver `set_trash`).
+    static TRASH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
@@ -491,6 +504,11 @@ impl FakeFileSystem {
     /// nombres. Con una lista vacía vuelve a no haber unidades.
     pub fn set_drives(drives: &[(&Path, &str)]) {
         DRIVES.with(|d| *d.borrow_mut() = drives.iter().map(|(p, n)| (p.to_path_buf(), n.to_string())).collect());
+    }
+
+    /// Desde ahora (en este hilo) `is_trash` dice que sí para esa carpeta (o para ninguna).
+    pub fn set_trash(path: Option<&Path>) {
+        TRASH.with(|t| *t.borrow_mut() = path.map(Path::to_path_buf));
     }
 
     /// Cuántas veces se preguntó `cloud_only` en este hilo (las vistas rápidas lo preguntan por
@@ -701,6 +719,10 @@ impl FileSystem for FakeFileSystem {
 
     fn shell_location(&self, _text: &str) -> Option<Location> {
         None
+    }
+
+    fn is_trash(&self, loc: &Location) -> bool {
+        TRASH.with(|t| t.borrow().as_deref().is_some_and(|p| loc.is_path(p)))
     }
 
     fn network_place(&self) -> &'static str {

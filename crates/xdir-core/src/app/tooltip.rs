@@ -78,6 +78,7 @@ pub(super) fn tooltip_for(hit: Hit, keymap: &Keymap, tab_path: &dyn Fn(usize, us
             PaneHit::SearchClear => "Terminar la búsqueda".to_string(),
             PaneHit::FavOverflow => "Más favoritos".to_string(),
             PaneHit::NewFolderButton => command(Command::NewFolder),
+            PaneHit::Restore => command(Command::Restore),
             PaneHit::ViewButton => "Cambiar la vista".to_string(),
             _ => return None,
         },

@@ -434,6 +434,11 @@ impl Shell for Win32Shell {
 struct Win32FileSystem;
 
 impl FileSystem for Win32FileSystem {
+    /// La Papelera es la carpeta virtual `::{645FF040-…}` del Shell.
+    fn is_trash(&self, loc: &Location) -> bool {
+        matches!(loc, Location::Shell { parsing, .. } if parsing.to_ascii_uppercase().contains("::{645FF040-5081-101B-9F08-00AA002F954E}"))
+    }
+
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
         fsp::spawn_load(hwnd, tx, panel, generation, current, location)
     }

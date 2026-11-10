@@ -52,6 +52,10 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     if let Op::Undo(undo) = &op {
         return undo_any(hwnd, undo);
     }
+    // En Windows «Devolver» lo hace el Shell (verbo `undelete` sobre la Papelera virtual).
+    if let Op::Restore { .. } = &op {
+        return Err(Error::new(E_FAIL, "Se devuelve desde la Papelera del Explorador"));
+    }
     let fo: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
     let recorder: IFileOperationProgressSink = Recorder::default().into();
     unsafe {
@@ -128,6 +132,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             }
         }
         Op::Undo(undo) => return undo_any(hwnd, undo),
+        Op::Restore { .. } => return Ok(OpResult::default()),
     }
 
     unsafe {
@@ -186,7 +191,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             focus = created.first().cloned();
             Some(Undo::Created(created))
         }
-        Op::Undo(_) => None,
+        Op::Undo(_) | Op::Restore { .. } => None,
     };
     // Nada que deshacer si no pasó nada (todo cancelado u omitido).
     let undo = undo.filter(|u| match u {

@@ -392,6 +392,10 @@ impl Shell for MacShell {
 struct MacFileSystem;
 
 impl FileSystem for MacFileSystem {
+    fn is_trash(&self, loc: &Location) -> bool {
+        matches!(loc, Location::Path(p) if crate::trash::is_trash_dir(p))
+    }
+
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
         fsp::spawn_load(hwnd, tx, panel, generation, current, location)
     }

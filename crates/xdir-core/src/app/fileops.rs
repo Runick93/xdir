@@ -83,6 +83,29 @@ impl App {
         }
     }
 
+    /// Devolver: cada seleccionado de la Papelera vuelve a su lugar. En la Papelera virtual de
+    /// Windows lo hace el Shell (verbo `undelete`); en las demás, `Op::Restore`.
+    pub(super) fn restore_selection(&mut self) {
+        let location = self.panes[self.active].tab().location.clone();
+        if !sys::file_system().is_trash(&location) {
+            return;
+        }
+        if let Location::Shell { .. } = location {
+            let items = self.selection_items(self.active);
+            if !items.is_empty() {
+                if let Err(e) = sys::shell().invoke_verb(self.hwnd, &location, &items, "undelete") {
+                    self.notice = Some(format!("No se pudo devolver: {e}"));
+                }
+                self.reload_shell_tabs();
+            }
+            return;
+        }
+        let items = self.selection(self.active);
+        if !items.is_empty() {
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Restore { items });
+        }
+    }
+
     pub(super) fn delete_selection(&mut self, recycle: bool) {
         // En carpetas virtuales borra el propio Shell (en la Papelera: eliminar definitivamente).
         let location = self.panes[self.active].tab().location.clone();
@@ -354,11 +377,17 @@ impl App {
         // El menú del fondo del Shell solo trae las extensiones: Ver, Ordenar, Actualizar, Pegar y
         // Deshacer los pone la vista del Explorador, así que se agregan acá.
         let mut cmds = Vec::new();
-        let own = match (items.is_empty(), intercept) {
+        let mut own = Vec::new();
+        // En la Papelera, «Devolver» primero (también en la del Shell de Windows).
+        if !items.is_empty() && sys::file_system().is_trash(&location) {
+            cmds.push(Command::Restore);
+            own.push(shell::Entry::Item { id: 0, label: "Devolver".into(), enabled: true, checked: false });
+        }
+        own.extend(match (items.is_empty(), intercept) {
             (true, true) => self.background_entries(pane, &mut cmds),
             (false, true) => self.item_entries(&mut cmds),
             _ => Vec::new(),
-        };
+        });
         let before: Option<std::collections::HashSet<String>> = (items.is_empty() && matches!(location, Location::Path(_)))
             .then(|| self.panes[pane].tab().list.entries.iter().map(|e| e.display.to_lowercase()).collect());
         // Una sola carpeta anclada: su menú dice "Desanclar de Acceso rápido".

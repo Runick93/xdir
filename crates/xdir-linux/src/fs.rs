@@ -53,6 +53,11 @@ impl FileSystem for LinuxFileSystem {
 
     /// Otro disco montado adentro: su dispositivo (`st_dev`) es distinto del de la carpeta padre.
     /// También las carpetas del sistema de la raíz, aunque no estén montadas aparte.
+    fn is_trash(&self, loc: &Location) -> bool {
+        let files = crate::trash::data_home().map(|d| crate::trash::trash_dir(&d).join("files"));
+        matches!((loc, files), (Location::Path(p), Some(f)) if *p == f)
+    }
+
     fn is_mount_point(&self, path: &Path) -> bool {
         if SYSTEM_DIRS.iter().any(|d| path == Path::new(d)) {
             return true;

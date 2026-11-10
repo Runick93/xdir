@@ -283,6 +283,11 @@ pub trait FileSystem: Send + Sync {
     fn folder_type(&self) -> Arc<str> {
         Arc::from("Carpeta")
     }
+    /// ¿Es la Papelera? (sin E/S: solo mira la ruta). Windows: la carpeta virtual de la
+    /// Papelera; macOS: `~/.Trash` o `/Volumes/*/.Trashes/<uid>`; Linux: `<datos>/Trash/files`.
+    fn is_trash(&self, _loc: &Location) -> bool {
+        false
+    }
     /// Lo escrito en la barra de dirección como lugar especial del Shell ("shell:RecycleBinFolder").
     fn shell_location(&self, text: &str) -> Option<Location>;
     /// Nombre de análisis de la Red del Explorador (vacío si no existe en el sistema).

@@ -155,7 +155,12 @@ impl App {
                 }
             }
             Command::NewFolderWithSelection => self.new_folder_with_selection(),
+            // En la Papelera de la Mac, ⌘⌫ devuelve (como el Finder).
+            Command::Recycle if sys::env().key_style() == sys::KeyStyle::Mac && sys::file_system().is_trash(&self.panes[active].tab().location) => {
+                self.restore_selection()
+            }
             Command::Recycle => self.delete_selection(true),
+            Command::Restore => self.restore_selection(),
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.begin_rename(active),
             Command::Properties => {

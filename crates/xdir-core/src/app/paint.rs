@@ -67,6 +67,10 @@ impl App {
         animating |= tree_animating;
         for i in self.shown_panes() {
             animating |= self.panes[i].tab_mut().list.tick(dt);
+            // Botón «Devolver» con la Papelera a la vista (apagado sin selección).
+            let tab = self.panes[i].tab();
+            let restore = sys::file_system().is_trash(&tab.location).then(|| tab.list.selected_indices().next().is_some());
+            self.panes[i].restore = restore;
         }
         self.last_frame = animating.then_some(now);
         for p in &mut self.panes {

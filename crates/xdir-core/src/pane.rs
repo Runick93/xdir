@@ -59,6 +59,8 @@ const TERM_W: f32 = 32.0;
 const FAV_MAX_W: f32 = 170.0;
 const OVERFLOW_W: f32 = 28.0;
 const BTN: f32 = 30.0;
+/// Botón «Devolver» de la Papelera (la barra de dirección se achica esto más el margen).
+const RESTORE_W: f32 = 102.0;
 const TAB_MIN_W: f32 = 90.0;
 const TAB_MAX_W: f32 = 220.0;
 const CHEVRON_W: f32 = 18.0;
@@ -121,6 +123,8 @@ pub enum PaneHit {
     /// Botón del pie del panel: pasa a la vista siguiente (como Ctrl+rueda).
     ViewButton,
     NewFolderButton,
+    /// Botón «Devolver» junto a la barra de dirección (solo en la Papelera).
+    Restore,
     List,
 }
 
@@ -188,6 +192,10 @@ pub struct Pane {
     pub favbar: Rect,
     view_button: Rect,
     new_folder_button: Rect,
+    /// Con la Papelera a la vista, el botón «Devolver» (encendido si hay selección); lo pone la
+    /// `App` antes de dibujar.
+    pub restore: Option<bool>,
+    restore_button: Rect,
     pub list: Rect,
 }
 
@@ -225,6 +233,8 @@ impl Pane {
             favbar: zero,
             view_button: zero,
             new_folder_button: zero,
+            restore: None,
+            restore_button: zero,
             list: zero,
         }
     }
@@ -419,6 +429,9 @@ impl Pane {
         if contains(&self.terminal, x, y) {
             return PaneHit::Terminal;
         }
+        if self.restore.is_some() && contains(&self.restore_button, x, y) {
+            return PaneHit::Restore;
+        }
         if contains(&self.search_clear, x, y) {
             return PaneHit::SearchClear;
         }
@@ -457,6 +470,11 @@ impl Pane {
             return PaneHit::List;
         }
         PaneHit::None
+    }
+
+    /// Dónde se dibujó el botón «Devolver» (solo con la Papelera a la vista).
+    pub fn restore_button(&self) -> Option<Rect> {
+        self.restore.map(|_| self.restore_button)
     }
 
     /// Flecha `i`: dónde está y de qué carpeta muestra las subcarpetas.
@@ -556,8 +574,27 @@ impl Pane {
         let search_box = rect(nav.right - 8.0 - search_w, top, nav.right - 8.0, top + BTN);
         self.draw_search(p, search_box, &search, hover);
 
+        // «Devolver» en la Papelera, entre la barra de dirección y la búsqueda (la barra se achica).
+        let mut addr_right = search_box.left - 6.0;
+        self.restore_button = rect(0.0, 0.0, 0.0, 0.0);
+        if let Some(enabled) = self.restore {
+            let b = rect(addr_right - RESTORE_W, top, addr_right, top + BTN);
+            let fill = if enabled && hover == PaneHit::Restore {
+                if pressed == hover { alpha(th.text, 0.12) } else { th.hover }
+            } else {
+                th.surface_alt
+            };
+            p.round_fill(b, 6.0, fill);
+            p.round_stroke(b, 6.0, th.border);
+            let color = if enabled { th.text } else { alpha(th.text_dim, 0.45) };
+            p.text(FontId::GlyphsSmall, "\u{E7A7}", rect(b.left + 6.0, b.top, b.left + 30.0, b.bottom), color);
+            p.text(FontId::Ui, "Devolver", rect(b.left + 32.0, b.top, b.right - 6.0, b.bottom), color);
+            self.restore_button = b;
+            addr_right = b.left - 6.0;
+        }
+
         // Barra de dirección.
-        let addr = rect(x + 6.0, top, search_box.left - 6.0, top + BTN);
+        let addr = rect(x + 6.0, top, addr_right, top + BTN);
         self.address = addr;
         p.round_fill(addr, 6.0, th.surface_alt);
         self.star = rect(0.0, 0.0, 0.0, 0.0);

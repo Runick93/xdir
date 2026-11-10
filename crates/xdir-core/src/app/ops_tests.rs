@@ -270,3 +270,74 @@ fn menu_new_folder_with_needs_two() {
     let ops = FakeFileOps::take_ops();
     assert!(matches!(ops.as_slice(), [Op::NewFolderWith { items, .. }] if items.len() == 2), "{ops:?}");
 }
+
+// ---------- Devolver desde la Papelera ----------
+
+/// Con la Papelera a la vista: «Devolver» primero en el menú; el botón de la barra está apagado
+/// sin selección y con dos seleccionados manda `Op::Restore`.
+#[test]
+fn restore_menu_and_button_in_trash() {
+    use crate::sys::testing::FakeFileSystem;
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let d = fixture("papelera", &["a.txt", "b.txt", "c.txt"]);
+    FakeFileSystem::set_trash(Some(&d));
+    go(&mut a, &d);
+    a.paint();
+    let r = a.panes[0].restore_button().expect("botón Devolver en la Papelera");
+    assert!(host.drawn_texts().iter().any(|(_, s, _)| s == "Devolver"));
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    FakeFileOps::take_ops();
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(FakeFileOps::take_ops(), [], "apagado sin selección");
+    select(&mut a, &["a.txt", "b.txt"]);
+    assert_eq!(own_menu(&mut a).first().map(String::as_str), Some("Devolver"));
+    a.paint();
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    let ops = FakeFileOps::take_ops();
+    let [Op::Restore { items }] = ops.as_slice() else { panic!("{ops:?}") };
+    let mut items = items.clone();
+    items.sort();
+    assert_eq!(items, [d.join("a.txt"), d.join("b.txt")]);
+    choose_menu(&mut a, "Devolver");
+    assert!(matches!(FakeFileOps::take_ops().as_slice(), [Op::Restore { .. }]));
+    FakeFileSystem::set_trash(None);
+}
+
+/// En la Mac, ⌘⌫ (`Recycle`) dentro de la Papelera devuelve, como el Finder; en Windows sigue
+/// siendo mandar a la Papelera.
+#[test]
+fn recycle_in_trash_restores_on_mac() {
+    use crate::sys::KeyStyle;
+    use crate::sys::testing::FakeFileSystem;
+    let mut a = app();
+    let d = fixture("papelera-mac", &["a.txt"]);
+    FakeFileSystem::set_trash(Some(&d));
+    go(&mut a, &d);
+    select(&mut a, &["a.txt"]);
+    FakeFileOps::take_ops();
+    FakeEnv::set_key_style(KeyStyle::Mac);
+    a.run_command(Command::Recycle);
+    FakeEnv::set_key_style(KeyStyle::Windows);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Restore { items: vec![d.join("a.txt")] }]);
+    a.run_command(Command::Recycle);
+    assert_eq!(FakeFileOps::take_ops(), [Op::Delete { paths: vec![d.join("a.txt")], recycle: true }]);
+    FakeFileSystem::set_trash(None);
+}
+
+/// Fuera de la Papelera no hay «Devolver» (ni menú, ni botón, ni comando).
+#[test]
+fn restore_not_offered_outside_trash() {
+    let mut a = app();
+    let d = fixture("no-papelera", &["a.txt"]);
+    go(&mut a, &d);
+    select(&mut a, &["a.txt"]);
+    assert!(!own_menu(&mut a).iter().any(|l| l == "Devolver"));
+    a.paint();
+    assert!(a.panes[0].restore_button().is_none());
+    FakeFileOps::take_ops();
+    a.run_command(Command::Restore);
+    assert_eq!(FakeFileOps::take_ops(), []);
+}

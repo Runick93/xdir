@@ -22,6 +22,8 @@ pub enum Op {
     Duplicate { sources: Vec<PathBuf> },
     /// Crea «Carpeta nueva con N elementos» en `parent` y mueve `items` adentro.
     NewFolderWith { parent: PathBuf, items: Vec<PathBuf> },
+    /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux).
+    Restore { items: Vec<PathBuf> },
     Undo(Undo),
 }
 

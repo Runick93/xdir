@@ -133,6 +133,38 @@ fn recycle_with(path: &Path, trash: &Path, mover: impl Fn(&Path, &Path) -> Resul
     unreachable!("siempre hay un nombre libre")
 }
 
+/// Lugar original de `files/<name>`: el `Path=` de su `.trashinfo`, decodificado (`%20` → espacio).
+pub fn origin(name: &str, trash: &Path) -> io::Result<PathBuf> {
+    let text = std::fs::read_to_string(info_path(trash, OsStr::new(name)))?;
+    let raw = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Path="))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "el .trashinfo no tiene Path="))?;
+    let path = PathBuf::from(OsString::from_vec(decode_path(raw.trim())));
+    // Una ruta relativa es relativa a la carpeta que tiene a la papelera (papeleras de discos).
+    Ok(if path.is_absolute() { path } else { trash.parent().unwrap_or(Path::new("/")).join(path) })
+}
+
+/// `%XX` → byte.
+fn decode_path(text: &str) -> Vec<u8> {
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Devuelve `files/<name>` de la papelera a `original` y borra su `.trashinfo`. Si en `original`
 /// ya hay algo, no se pisa: error y todo queda como estaba.
 pub fn restore(name: &str, original: &Path, trash: &Path) -> io::Result<()> {
@@ -157,6 +189,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `origin` lee el `Path=` del `.trashinfo` y lo decodifica.
+    #[test]
+    fn trashinfo_origin_decodes_path() {
+        let dir = tmp("origen");
+        let trash = dir.join("Trash");
+        let f = dir.join("mi informe ñ.txt");
+        std::fs::write(&f, "x").unwrap();
+        let name = recycle(&f, &trash).unwrap();
+        assert_eq!(origin(&name, &trash).unwrap(), std::path::absolute(&f).unwrap());
+        std::fs::write(trash.join("info/raro.trashinfo"), "[Trash Info]\nPath=/home/a/con%20espacio/b%25.txt\n").unwrap();
+        assert_eq!(origin("raro", &trash).unwrap(), PathBuf::from("/home/a/con espacio/b%.txt"));
+        assert!(origin("no-esta", &trash).is_err());
+        assert_eq!(decode_path("a%2"), b"a%2");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

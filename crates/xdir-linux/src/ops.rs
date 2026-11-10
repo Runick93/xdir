@@ -171,8 +171,40 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
             let undo = Undo::Batch(vec![Undo::CreatedFolder(folder.clone()), Undo::Moved(moved)]);
             ok(Some(undo), Some(folder), true, errors)
         }
+        Op::Restore { items } => {
+            let (mut restored, mut errors) = (Vec::new(), Vec::new());
+            for item in &items {
+                match restore_item(item) {
+                    Ok(to) => restored.push(to),
+                    Err(e) => errors.push(e),
+                }
+            }
+            let focus = restored.last().cloned();
+            let mut r = ok((!restored.is_empty()).then(|| Undo::Created(restored.clone())), focus, false, errors)?;
+            r.select = restored;
+            Ok(r)
+        }
         Op::Undo(undo) => undo_op(undo, trash),
     }
+}
+
+/// Devuelve `<papelera>/files/<nombre>` a su lugar (de su `.trashinfo`), creando la carpeta si ya
+/// no está; nunca pisa.
+fn restore_item(item: &Path) -> Result<PathBuf> {
+    let name = item.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let unknown = || format!("No se sabe de dónde vino «{name}»");
+    let files = item.parent().filter(|p| p.file_name().is_some_and(|n| n == "files")).ok_or_else(unknown)?;
+    let trash = files.parent().ok_or_else(unknown)?;
+    let to = trash::origin(&name, trash).map_err(|_| unknown())?;
+    let parent = to.parent().ok_or_else(unknown)?;
+    if taken(&to) {
+        let folder = parent.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| parent.display().to_string());
+        let shown = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return Err(format!("Ya existe «{shown}» en «{folder}»"));
+    }
+    std::fs::create_dir_all(parent).map_err(|e| err_at(parent, e))?;
+    trash::restore(&name, &to, trash).map_err(|e| err_at(item, e))?;
+    Ok(to)
 }
 
 /// Nombre de una carpeta nueva (con " (2)", " (3)"... si ya existe, como en Windows).
@@ -457,6 +489,39 @@ mod tests {
         // Ninguno se pudo mover: no queda la carpeta y vuelve el error.
         assert!(run(Op::NewFolderWith { parent: dir.clone(), items: vec![dir.join("no-existe")] }, Some(&trash)).is_err());
         assert!(!dir.join("Carpeta nueva con 1 elemento 2").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Devolver desde la Papelera: vuelve a su carpeta (creándola si se borró), no pisa lo que
+    /// haya, y el deshacer los manda otra vez a la Papelera.
+    #[test]
+    fn restore_op_returns_undo_created() {
+        let dir = tmp("devolver");
+        let trash = dir.join("Trash");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let (a, b) = (sub.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let na = trash::recycle(&a, &trash).unwrap();
+        let nb = trash::recycle(&b, &trash).unwrap();
+        std::fs::remove_dir(&sub).unwrap();
+        std::fs::write(&b, "nuevo").unwrap();
+        let items = vec![trash.join("files").join(&na), trash.join("files").join(&nb)];
+        let r = run(Op::Restore { items }, Some(&trash)).unwrap();
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "nuevo");
+        assert_eq!(r.undo, Some(Undo::Created(vec![a.clone()])));
+        assert_eq!(r.select, [a.clone()]);
+        assert!(r.error.unwrap().contains("Ya existe «b.txt» en «"));
+        assert!(trash.join("files").join(&nb).exists());
+        // Sin `.trashinfo` no se sabe de dónde vino.
+        std::fs::write(trash.join("files/suelto"), "s").unwrap();
+        let r = run(Op::Restore { items: vec![trash.join("files/suelto")] }, Some(&trash)).unwrap();
+        assert_eq!(r.error.as_deref(), Some("No se sabe de dónde vino «suelto»"));
+        let r = run(Op::Undo(Undo::Created(vec![a.clone()])), Some(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        assert!(!a.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

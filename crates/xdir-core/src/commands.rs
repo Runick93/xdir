@@ -53,6 +53,8 @@ pub enum Command {
     NewFolderWithSelection,
     Recycle,
     Delete,
+    /// Devolver de la Papelera a su lugar original.
+    Restore,
     Rename,
     Properties,
     /// Copia de cada seleccionado a su lado («nombre copia»).
@@ -182,6 +184,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::NewFolderWithSelection, "carpeta_con_seleccion", "Carpeta nueva con la selección", &["Ctrl+Alt+Shift+N"]),
     spec(Command::Recycle, "papelera", "Enviar a la papelera", &["Supr"]),
     spec(Command::Delete, "eliminar", "Eliminar definitivamente", &["Shift+Supr"]),
+    spec(Command::Restore, "devolver", "Devolver", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
     spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),

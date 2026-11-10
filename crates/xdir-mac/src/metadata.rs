@@ -93,10 +93,17 @@ fn dimensions_of(item: &MDItem) -> Option<(u32, u32)> {
 const SF_DATALESS: u32 = 0x4000_0000;
 
 /// ¿El archivo solo está en la nube? Leer su cabecera haría que el sistema lo baje entero, así que
-/// no se busca en él lo que Spotlight no tenga. Con `lstat`: no sigue enlaces.
+/// no se busca en él lo que Spotlight no tenga. Mira el enlace y el archivo al que apunta: con
+/// cualquiera de los dos sin datos locales, está en la nube.
 fn cloud_only(path: &Path) -> bool {
+    file_flags(path).iter().any(|f| f & SF_DATALESS != 0)
+}
+
+/// Banderas de `chflags` del elemento (`lstat`, no sigue enlaces) y del archivo al que lleva
+/// (`stat`, los sigue); las que se pudieron leer.
+fn file_flags(path: &Path) -> Vec<u32> {
     use std::os::macos::fs::MetadataExt;
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.st_flags() & SF_DATALESS != 0)
+    [std::fs::symlink_metadata(path), std::fs::metadata(path)].into_iter().filter_map(|m| m.ok()).map(|m| m.st_flags()).collect()
 }
 
 /// ¿La extensión es de una imagen? Así no se abre cada archivo de la carpeta para buscarle
@@ -220,6 +227,25 @@ mod tests {
         std::fs::write(&file, PNG_3X2).unwrap();
         assert!(!cloud_only(&file));
         assert!(!cloud_only(&dir.join("no-existe.png")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Las banderas que mira `cloud_only` en un enlace incluyen las del archivo al que apunta
+    /// (con `UF_HIDDEN`, que se puede poner sin la nube, en lugar de `SF_DATALESS`).
+    #[test]
+    fn cloud_flags_follow_symlinks() {
+        const UF_HIDDEN: u32 = 0x8000;
+        let dir = temp_dir("nube-enlace");
+        let target = dir.join("destino.png");
+        std::fs::write(&target, PNG_3X2).unwrap();
+        let ok = std::process::Command::new("chflags").arg("hidden").arg(&target).status().unwrap().success();
+        assert!(ok, "chflags hidden");
+        let link = dir.join("enlace.png");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let flags = file_flags(&link);
+        assert_eq!(flags.len(), 2, "lstat y stat");
+        assert!(flags.iter().any(|f| f & UF_HIDDEN != 0), "{flags:x?}");
+        assert!(file_flags(&dir.join("no-existe.png")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

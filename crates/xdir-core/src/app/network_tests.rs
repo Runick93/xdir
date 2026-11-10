@@ -434,6 +434,17 @@ fn remote_navigation_no_ui_io() {
     a.apply_group(gi);
     pump_pane(&mut a, 0);
     a.paint();
+    // Ronda 1: la flecha de las migas, arrastrar, xtree y el desplegable de la barra.
+    let k = (0..10).find(|&k| a.panes[0].chevron(k).is_some_and(|(_, l)| l == Location::Path(root.clone())));
+    if let Some(k) = k {
+        a.show_subfolder_menu(0, k);
+    }
+    let roots = vec![root.clone()];
+    let _ = super::fileops::drop_effect(&[root.join("a.txt")], &root.join("sub"), false, false, crate::drop::Effect::ALL, &roots);
+    let _x = crate::xtree::view::Xtree::new(a.hwnd, root.clone());
+    let mut sug = crate::typed::Suggest::new(crate::geom::Rect::default(), "");
+    sug.set_query(&format!("{}{}s", root.display(), std::path::MAIN_SEPARATOR));
+    assert!(sug.items.iter().all(|i| !i.ends_with("sub")), "{:?}", sug.items);
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
 }
 

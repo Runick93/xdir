@@ -108,7 +108,7 @@ Notas de X38, T08 y T09:
 
 ## Tanda C: vista previa, Galería y vista rápida (X39–X44)
 
-Diseñadas antes de programar (spec `docs/superpowers/specs/2026-11-09-explorador-tanda-c-design.md`). Van debajo de X38
+Diseñadas antes de programar (spec `docs/superpowers/specs/2026-11-09-explorador-tanda-c-design.md`) y ya programadas. Van debajo de X38
 (filas y = 34260…38760; marco de la página hasta 39800), en oscuro y claro.
 
 | N.º | Pantalla | Qué muestra | Qué se hace | Rust |
@@ -117,7 +117,7 @@ Diseñadas antes de programar (spec `docs/superpowers/specs/2026-11-09-explorado
 | X40 | Columna con un archivo de texto | El panel activo es el de la derecha (`src` de xdir-core, about.rs con foco): la columna sigue al panel activo y muestra las primeras líneas en letra de ancho fijo (Liberation Mono 11,5 en el diseño; Consolas/Menlo en la app) sobre `background` con borde, sin ajustar (las líneas largas se cortan), y los detalles («Archivo RS», 5 KB, fechas) | Cambiar de panel activo cambia la columna | `preview::draw` (texto), `preview::draw_details` |
 | X41 | Variantes de la columna | Cuatro columnas lado a lado: carpeta (ícono de 96, «12 elementos · 1,24 GB» con el tamaño de xtree), «3 elementos seleccionados» (tres miniaturas en abanico con la cantidad en acento, «12,4 MB · Imagen JPEG»), solo en línea (ícono del tipo con la nube y «Disponible solo en línea», sin descargar) y cargando (ícono del tipo; la imagen lo reemplaza sin parpadeo) | — | `preview::draw`, `preview::draw_details` |
 | X42 | Vista Galería | Base X02 (un panel), «Viaje» en la vista Galería con la columna cerrada: imagen grande (4:3, centrada, 16 de margen) y abajo la tira de 112 de alto con celdas de 88 (paso 96) y el enfocado (IMG_3101.jpg) centrado y resaltado; una celda bajo el mouse; carpeta y archivos sin vista previa con el ícono de 48. Botón de la columna apagado | ←/→ (y ↑/↓) pasan; clic enfoca; doble clic o Enter abre; Ctrl/⇧ en la tira; Ctrl+Shift+7 / ⌥⌘7 | `list::FileList::draw_gallery`, `list::FileList::draw_strip_cell` |
-| X43 | Vista rápida en Windows con visor (PDF) | Ventana propia de xdir de 960×680 centrada sobre la principal (radio 8, sombra), barra de título con ícono y nombre, ‹ «2 de 12» ›, «Abrir» y cerrar; el resto es el visor del sistema (`IPreviewHandler` del PDF) con una página de muestra y su barra de desplazamiento | Espacio o Esc cierran; flechas pasan al anterior o siguiente (la selección de la lista acompaña); rueda y clic van al visor | `quicklook::draw_title_bar`, `quicklook` (Windows: `sys::win::quicklook`) |
+| X43 | Vista rápida en Windows con visor (PDF) | Ventana propia de xdir de 960×680 centrada sobre la principal (radio 8, sombra), barra de título con ícono y nombre, ‹ «2 de 12» ›, «Abrir» y cerrar; el resto es el visor del sistema (`IPreviewHandler` del PDF) con una página de muestra y su barra de desplazamiento | Espacio o Esc cierran; flechas pasan al anterior o siguiente (la selección de la lista acompaña); rueda y clic van al visor | `quicklook::draw_title_bar`; Windows: `crates/xdir-windows/src/quicklook` (`window.rs`, `handler.rs`) |
 | X44 | Vista rápida en Windows sin visor (video) | Misma ventana con VID_3102.mp4 («12 de 12»): la imagen grande del servicio de miniaturas (768×432, marca de video y duración), «No hay un visor para este tipo de archivo», «Abrir con…» y «Abrir» | «Abrir» lo abre con su programa; «Abrir con…» muestra el diálogo del sistema | `quicklook::draw_title_bar`, `quicklook::draw_fallback` |
 
 Medidas que fija el diseño:

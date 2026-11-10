@@ -570,12 +570,12 @@ pub fn folder_icon() -> Option<i32> {
     TYPE_CACHE.get()?.lock().ok()?.get("\\dir").map(|v| v.1)
 }
 
-/// Nombre de tipo e ícono genérico por extensión, cacheados para todo el proceso.
 /// Tipo de una carpeta, el mismo que lleva en la lista.
 pub fn folder_type() -> Arc<str> {
     type_info(None, true).0
 }
 
+/// Nombre de tipo e ícono genérico por extensión, cacheados para todo el proceso.
 fn type_info(ext: Option<&str>, is_dir: bool) -> (Arc<str>, i32) {
     let cache_cell = &TYPE_CACHE;
     let key = match (is_dir, ext) {

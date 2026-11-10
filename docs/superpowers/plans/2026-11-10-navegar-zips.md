@@ -70,3 +70,13 @@
 
 ### T14 — Cierre
 - `docs/DISENO.md` (pantallas X68–X71 si existen), smoke en la Mac, informe.
+
+## Desvíos de la implementación
+
+- Arrastrar desde adentro de un zip solo suelta en otro panel de xdir (no hay rutas de disco que darle al Finder o al Explorador); copiar y pegar sí va a cualquier panel.
+- El menú contextual de adentro es propio (no hay menú del sistema para lo que no está en el disco), con las entradas de X69: Abrir, Abrir con…, Extraer aquí, Extraer en…, Copiar, Copiar como ruta de acceso; Cortar, Eliminar, Renombrar, Nueva carpeta y Comprimir deshabilitadas.
+- Todas las carpetas de adentro de los archivos comprimidos comparten una vista (clave `comprimido` en `carpetas.toml`).
+- Un zip con alguna entrada cifrada se trata entero como «con contraseña».
+- Más de 100.000 entradas: se listan las primeras 100.000, sin aviso.
+- «Cargando…» aparece apenas empieza la lectura (sin la espera de 0,5 s de la carpeta remota de la tanda D+, que todavía no está en `develop`).
+- La flecha de subcarpetas de la barra no lista nada dentro de un zip.

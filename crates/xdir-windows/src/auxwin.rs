@@ -49,6 +49,16 @@ pub fn initial_rect(work: RECT, size: SIZE) -> RECT {
     RECT { left, top, right: left + size.cx, bottom: top + size.cy }
 }
 
+/// La ventana en `old` pasa a medir `size`: queda fija la esquina de arriba a la izquierda, salvo
+/// que el borde de abajo salga de `work` (entonces sube, sin pasar el de arriba).
+pub fn resized_rect(old: RECT, size: SIZE, work: RECT) -> RECT {
+    let mut top = old.top;
+    if top + size.cy > work.bottom - MARGIN {
+        top = (work.bottom - MARGIN - size.cy).max(work.top);
+    }
+    RECT { left: old.left, top, right: old.left + size.cx, bottom: top + size.cy }
+}
+
 /// Tamaño de la ventana para un área de `client` píxeles; `border` es lo que da
 /// `AdjustWindowRectExForDpi` para un área vacía (izquierda y arriba negativos).
 pub fn client_to_window_size(client: SIZE, border: RECT) -> SIZE {
@@ -219,7 +229,12 @@ pub fn resize(w: AuxWindow, size: (f32, f32)) {
     };
     let ws = window_size(hwnd, size);
     unsafe {
-        let _ = SetWindowPos(hwnd, None, 0, 0, ws.cx, ws.cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let mut old = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut old);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let work = if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() { info.rcWork } else { old };
+        let r = resized_rect(old, ws, work);
+        let _ = SetWindowPos(hwnd, None, r.left, r.top, ws.cx, ws.cy, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     invalidate(hwnd);
 }
@@ -395,6 +410,17 @@ mod tests {
         // Más grande que el área: queda pegada arriba a la izquierda.
         let r = initial_rect(RECT { left: 0, top: 0, right: 400, bottom: 300 }, SIZE { cx: 576, cy: 450 });
         assert_eq!((r.left, r.top), (0, 0));
+    }
+
+    #[test]
+    fn resized_rect_stays_on_screen() {
+        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        // Lejos del borde: crece hacia abajo.
+        let r = resized_rect(RECT { left: 100, top: 100, right: 676, bottom: 400 }, SIZE { cx: 576, cy: 450 }, work);
+        assert_eq!((r.left, r.top, r.bottom), (100, 100, 550));
+        // Abajo a la derecha: sube para no salirse.
+        let r = resized_rect(RECT { left: 1328, top: 724, right: 1904, bottom: 1024 }, SIZE { cx: 576, cy: 450 }, work);
+        assert_eq!((r.top, r.bottom), (574, 1024));
     }
 
     #[test]

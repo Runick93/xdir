@@ -1618,11 +1618,12 @@ impl<'a> Job<'a> {
             };
             archives.extract_all(archive, &staging, &mut on_bytes, &mut |name, e| failed.push((name.to_string(), e)))
         };
-        // Cada entrada que no se pudo extraer: con su nombre (sin reintento: sería lo mismo).
+        // Cada entrada que no se pudo extraer: con su nombre, como si estuviera adentro del archivo
+        // (sin el camino que traía, que puede ser «../..»), y sin reintento (sería lo mismo).
         for (name, e) in failed {
-            let rel = name.trim_start_matches(['/', '\\']);
+            let last = name.rsplit(['/', '\\']).find(|c| !c.is_empty() && *c != "." && *c != "..").unwrap_or("?");
             let message = e.message();
-            self.errors.push(super::JobError { src: archive.join(rel), dst: dir.join(rel), message, retry: false });
+            self.errors.push(super::JobError { src: archive.join(last), dst: dir.join(last), message, retry: false });
         }
         match res {
             Ok(n) => self.omitted = n,

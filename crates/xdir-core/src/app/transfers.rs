@@ -649,7 +649,8 @@ impl App {
     /// Comandos de prueba (feature `pruebas`): `copiar <destino>|<origen>|…` y `mover …` lanzan un
     /// trabajo; `ventana <control>` hace clic en la ventana de copia sobre el control del primer
     /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `detalles`, `reemplazar`, `ambos`,
-    /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`).
+    /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`). `comprimir <a>|<b>…`, `extraer_aqui
+    /// <archivo>` y `extraer_en <archivo>` lanzan esos trabajos.
     #[cfg(feature = "pruebas")]
     pub(super) fn transfer_test(&mut self, verb: &str, rest: &str) {
         let parts: Vec<PathBuf> = rest.trim().split('|').map(PathBuf::from).collect();
@@ -657,6 +658,13 @@ impl App {
             "copiar" | "mover" if parts.len() >= 2 => {
                 let (dest, sources) = (parts[0].clone(), parts[1..].to_vec());
                 self.start_transfer(if verb == "mover" { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
+            }
+            "comprimir" if !rest.trim().is_empty() => {
+                self.start_transfer(JobSpec::Compress { sources: parts });
+            }
+            "extraer_aqui" | "extraer_en" if !rest.trim().is_empty() => {
+                let archive = parts[0].clone();
+                self.start_transfer(JobSpec::Extract { archive, into_folder: verb == "extraer_en" });
             }
             "ventana" => {
                 let what = rest.trim();

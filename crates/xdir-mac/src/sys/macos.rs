@@ -615,6 +615,7 @@ pub fn install() {
         overlays: Box::new(MacOverlays),
         metadata: Box::new(MacMetadata),
         preview: Box::new(MacPreview),
+        copy_prims: Box::new(crate::ops::MacCopyPrims),
         info: Box::new(crate::info::MacInfo),
     });
 }

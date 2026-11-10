@@ -17,7 +17,7 @@ use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField,
 use crate::config::ColorRule;
 use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
 use crate::geom::{Color, Rect};
-use crate::host::{MenuPos, TextBox, TextKind, WindowHost};
+use crate::host::{AuxWindow, MenuPos, TextBox, TextKind, WindowHost};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
 use crate::paint::{FontId, Painter};
@@ -27,6 +27,9 @@ use crate::theme::Theme;
 use crate::thumbs;
 use crate::xtree::scan::{DirListing, DriveEntry, FastScan, FileEntry, ListError, Lister, Progress};
 use crate::xtree::tree::Node;
+
+mod copy_fake;
+pub use copy_fake::FakeCopyPrims;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
 /// instala, y si ya había servicios instalados no hace nada.
@@ -41,6 +44,7 @@ pub fn install_fakes() {
         overlays: Box::new(FakeOverlays),
         metadata: Box::new(FakeMetadata),
         preview: Box::new(FakePreview),
+        copy_prims: Box::new(FakeCopyPrims::shared()),
         info: Box::new(FakeInfo),
     });
 }
@@ -1207,6 +1211,9 @@ impl Painter for RecordingPainter {
     }
 }
 
+/// Un pedido de `aux_show`: ventana, título y tamaño.
+pub type AuxShow = (AuxWindow, String, (f32, f32));
+
 /// Ventana falsa para las pruebas de `App`: no crea nada. El área mide 1280×800 DIPs (se puede
 /// cambiar con `client`), registra títulos, pedidos de repintar y pitidos, expande variables del
 /// entorno y responde lo que el test le fije a las preguntas, al selector de color y al arrastre.
@@ -1240,6 +1247,15 @@ pub struct FakeHost {
     quick_look_closes: Cell<usize>,
     quick_look_native: Cell<bool>,
     quick_look_cloud: Cell<bool>,
+    /// Ventanas secundarias: si el host las tiene (por defecto, sí), lo que se pidió mostrar
+    /// (ventana, título, tamaño), los cambios de tamaño, los repintados, las que se ocultaron y si
+    /// está a la vista.
+    aux_native: Cell<bool>,
+    aux_shows: RefCell<Vec<AuxShow>>,
+    aux_sizes: RefCell<Vec<(AuxWindow, (f32, f32))>>,
+    aux_invalidations: Cell<usize>,
+    aux_hides: Cell<usize>,
+    aux_visible: Cell<bool>,
 }
 
 impl FakeHost {
@@ -1265,7 +1281,48 @@ impl FakeHost {
             quick_look_closes: Cell::new(0),
             quick_look_native: Cell::new(true),
             quick_look_cloud: Cell::new(false),
+            aux_native: Cell::new(true),
+            aux_shows: RefCell::new(Vec::new()),
+            aux_sizes: RefCell::new(Vec::new()),
+            aux_invalidations: Cell::new(0),
+            aux_hides: Cell::new(0),
+            aux_visible: Cell::new(false),
         })
+    }
+
+    /// Si el host tiene ventanas secundarias (por defecto, sí; sin ellas `aux_show` da `false`).
+    pub fn set_aux_native(&self, on: bool) {
+        self.aux_native.set(on);
+    }
+
+    /// Lo que se pidió mostrar con `aux_show` (ventana, título y tamaño), en orden.
+    pub fn aux_shows(&self) -> Vec<AuxShow> {
+        self.aux_shows.borrow().clone()
+    }
+
+    /// Los tamaños pedidos con `aux_resize`, en orden.
+    pub fn aux_sizes(&self) -> Vec<(AuxWindow, (f32, f32))> {
+        self.aux_sizes.borrow().clone()
+    }
+
+    /// Cuántas veces se pidió repintar una ventana secundaria.
+    pub fn aux_invalidations(&self) -> usize {
+        self.aux_invalidations.get()
+    }
+
+    /// Cuántas veces se ocultó una ventana secundaria desde la `App`.
+    pub fn aux_hides(&self) -> usize {
+        self.aux_hides.get()
+    }
+
+    /// La ventana secundaria está a la vista (`aux_show` sin `aux_hide` después).
+    pub fn aux_visible(&self) -> bool {
+        self.aux_visible.get()
+    }
+
+    /// El usuario cerró la ventana (lo que hace la plataforma antes de `App::aux_closed`).
+    pub fn aux_user_closed(&self) {
+        self.aux_visible.set(false);
     }
 
     /// Imágenes grandes pedidas en el último cuadro dibujado.
@@ -1486,6 +1543,34 @@ impl WindowHost for FakeHost {
 
     fn quick_look_shows_cloud(&self) -> bool {
         self.quick_look_cloud.get()
+    }
+
+    fn aux_show(&self, w: AuxWindow, title: &str, size: (f32, f32)) -> bool {
+        if !self.aux_native.get() {
+            return false;
+        }
+        self.aux_shows.borrow_mut().push((w, title.to_string(), size));
+        self.aux_visible.set(true);
+        true
+    }
+
+    fn aux_set_title(&self, w: AuxWindow, title: &str) {
+        if let Some(last) = self.aux_shows.borrow_mut().iter_mut().rev().find(|s| s.0 == w) {
+            last.1 = title.to_string();
+        }
+    }
+
+    fn aux_resize(&self, w: AuxWindow, size: (f32, f32)) {
+        self.aux_sizes.borrow_mut().push((w, size));
+    }
+
+    fn aux_invalidate(&self, _w: AuxWindow) {
+        self.aux_invalidations.set(self.aux_invalidations.get() + 1);
+    }
+
+    fn aux_hide(&self, _w: AuxWindow) {
+        self.aux_hides.set(self.aux_hides.get() + 1);
+        self.aux_visible.set(false);
     }
 
     fn text_width(&self, s: &str, _bold: bool) -> f32 {

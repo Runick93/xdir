@@ -64,7 +64,7 @@ thread_local! {
 }
 
 /// La aplicación, si ya existe (los eventos de AppKit pueden llegar antes o después).
-fn with_app(f: impl FnOnce(&mut App)) {
+pub(crate) fn with_app(f: impl FnOnce(&mut App)) {
     let ptr = APP.with(|a| a.get());
     if !ptr.is_null() {
         // SAFETY: la aplicación vive hasta que termina el proceso; los eventos llegan en el hilo
@@ -73,7 +73,7 @@ fn with_app(f: impl FnOnce(&mut App)) {
     }
 }
 
-pub(super) fn window() -> Option<Retained<NSWindow>> {
+pub(crate) fn window() -> Option<Retained<NSWindow>> {
     WINDOW.with(|w| w.borrow().clone())
 }
 
@@ -95,6 +95,8 @@ pub fn run() -> Result<(), String> {
     let host = MacHost::install()?;
     init.marks.push(("fabricas d2d/dwrite", ms_since(started)));
     let mut app = Box::new(App::new(init, host.clone()));
+    // Con la ventana de copia, los conflictos se preguntan (sin ella se omiten solos).
+    app.set_auto_skip(false);
 
     let nsapp = NSApplication::sharedApplication(mtm);
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -188,7 +190,18 @@ fn quick_look_closed() {
 }
 
 /// Guarda la sesión una sola vez (cerrar la ventana y salir con ⌘Q llegan por caminos distintos).
+/// Con operaciones de copia en curso, pregunta si se cancelan (`App::confirm_close`). `false`: no
+/// se cierra.
+fn may_close() -> bool {
+    let mut ok = true;
+    if !CLOSED.with(|c| c.get()) {
+        with_app(|app| ok = app.confirm_close());
+    }
+    ok
+}
+
 fn closing() {
+    crate::auxwin::close_all();
     if !CLOSED.with(|c| c.replace(true)) {
         with_app(|app| app.on_closing());
     }
@@ -265,6 +278,9 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            if !may_close() {
+                return NSApplicationTerminateReply::TerminateCancel;
+            }
             closing();
             NSApplicationTerminateReply::TerminateNow
         }
@@ -278,8 +294,11 @@ define_class!(
     unsafe impl NSWindowDelegate for Delegate {
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
-            closing();
-            true
+            let ok = may_close();
+            if ok {
+                closing();
+            }
+            ok
         }
 
         #[unsafe(method(windowDidResize:))]
@@ -629,7 +648,7 @@ fn dragged_paths(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<Vec<Path
 }
 
 /// Tecla del evento con la numeración de `platform::Key` (la de Windows).
-fn translate_key(event: &NSEvent) -> Option<Key> {
+pub(crate) fn translate_key(event: &NSEvent) -> Option<Key> {
     let chars = event.charactersIgnoringModifiers().map(|s| s.to_string());
     key_from(event.keyCode(), chars.as_deref())
 }
@@ -761,6 +780,21 @@ mod pruebas {
         match (verb, nums.as_slice()) {
             ("captura", _) => capture(Path::new(rest)),
             ("pantalla", _) => capture_screen(Path::new(rest)),
+            ("estado_copia", _) => {
+                let _ = std::fs::write(rest, crate::auxwin::debug_state());
+            }
+            // La principal al frente (como al hacerle clic).
+            ("frente", _) => {
+                if let Some(w) = window() {
+                    w.makeKeyAndOrderFront(None);
+                }
+            }
+            // Solo la ventana de copia, con su barra de título.
+            ("captura_copia", _) => {
+                if let Some(n) = crate::auxwin::window_number() {
+                    capture_window(n, Path::new(rest));
+                }
+            }
             // El panel de la vista rápida con el foco: una tecla (código físico) que le llega a
             // él, o su botón de cerrar.
             ("tecla_panel", [code]) => quick_look_panel_key(*code as u16),
@@ -860,6 +894,21 @@ mod pruebas {
         let f = screen.frame();
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(f.size.width, f.size.height));
         let Some(image) = CGWindowListCreateImage(bounds, CGWindowListOption::OptionOnScreenOnly, 0, CGWindowImageOption::BestResolution) else { return };
+        let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
+        let props = objc2_foundation::NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+        if let Some(data) = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) } {
+            let _ = std::fs::write(path, data.to_vec());
+        }
+    }
+
+    /// Guarda una sola ventana de xdir (con su barra de título y su sombra) en un PNG.
+    #[allow(deprecated)]
+    fn capture_window(number: isize, path: &Path) {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey};
+        use objc2_core_graphics::{CGWindowImageOption, CGWindowListCreateImage, CGWindowListOption};
+        // Un rectángulo nulo: el de la ventana.
+        let null = unsafe { objc2_core_graphics::CGRectNull };
+        let Some(image) = CGWindowListCreateImage(null, CGWindowListOption::OptionIncludingWindow, number as u32, CGWindowImageOption::BestResolution) else { return };
         let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
         let props = objc2_foundation::NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
         if let Some(data) = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) } {

@@ -492,6 +492,7 @@ impl App {
             "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
             "close" => self.close_palette(),
             "info" => self.info_test(a, nb),
+            "copiar" | "mover" | "ventana" => self.transfer_test(verb, &format!("{a} {b}")),
             _ => {}
         }
         self.redraw();

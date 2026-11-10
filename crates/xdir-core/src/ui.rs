@@ -17,6 +17,8 @@ const GROUPS_W: f32 = 84.0;
 const XTREE_W: f32 = 74.0;
 /// Ancho del botón «xtree» con el porcentaje del escaneo («◔ 37 %  xtree»).
 const XTREE_WIDE_W: f32 = 105.0;
+/// Indicador de las operaciones de copia: anillo y «100 %».
+const TRANSFERS_W: f32 = 68.0;
 /// Lado del indicador del escaneo de xtree.
 pub const BADGE: f32 = 14.0;
 const MIN_SPLIT: f32 = 0.15;
@@ -334,6 +336,12 @@ pub fn xtree_rect(w: f32, h: f32, badge: XtreeBadge) -> Rect {
     rect(g.left - 10.0 - bw, g.top, g.left - 10.0, g.bottom)
 }
 
+/// Indicador de las operaciones de copia (anillo y porcentaje), a la izquierda de «xtree».
+pub fn transfers_rect(w: f32, h: f32, badge: XtreeBadge) -> Rect {
+    let x = xtree_rect(w, h, badge);
+    rect(x.left - 10.0 - TRANSFERS_W, x.top, x.left - 10.0, x.bottom)
+}
+
 /// Puntos de un sector de anillo de `BADGE`×`BADGE` en `r` (radio interior 64 % del exterior),
 /// desde el ángulo `start` (radianes; 0 = derecha, sentido horario) y de largo `sweep`.
 fn ring_sector(r: Rect, start: f32, sweep: f32) -> Vec<(f32, f32, f32)> {
@@ -408,16 +416,35 @@ pub struct StatusButtons {
     /// Botón de la vista previa bajo el mouse, y si la columna está prendida.
     pub preview_hot: bool,
     pub preview_on: bool,
+    /// Indicador de las operaciones de copia (avance total de 0 a 1), si hay alguna.
+    pub transfers: Option<f32>,
+    /// Solo quedan trabajos que terminaron con errores: el aviso en vez del porcentaje.
+    pub transfers_failed: bool,
+    pub transfers_hot: bool,
 }
 
 pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) {
-    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on } = b;
+    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on, transfers, transfers_failed, transfers_hot } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
     let xtree = xtree_rect(w, h, badge);
-    let text_r = rect(GAP * 2.0, h - STATUSBAR_H, xtree.left - GAP, h);
+    let text_end = if transfers.is_some() { transfers_rect(w, h, badge).left } else { xtree.left };
+    let text_r = rect(GAP * 2.0, h - STATUSBAR_H, text_end - GAP, h);
     p.text(FontId::Ui, text, text_r, th.text_dim);
+
+    if let Some(f) = transfers {
+        let r = transfers_rect(w, h, badge);
+        if transfers_hot {
+            p.round_fill(r, 4.0, th.hover);
+        }
+        let pct = (f.clamp(0.0, 1.0) * 100.0).floor() as u8;
+        let top = (r.top + r.bottom - BADGE) / 2.0;
+        let (badge, label) = if transfers_failed { (XtreeBadge::DoneWithIssues, "Errores".to_string()) } else { (XtreeBadge::Progress(pct), format!("{pct} %")) };
+        draw_xtree_badge(p, rect(r.left + 6.0, top, r.left + 6.0 + BADGE, top + BADGE), badge);
+        let color = if transfers_hot { th.text } else { th.text_dim };
+        p.text(FontId::Ui, &label, rect(r.left + 26.0, r.top, r.right - 4.0, r.bottom), color);
+    }
 
     if groups_hot {
         p.round_fill(groups, 4.0, th.hover);
@@ -872,6 +899,23 @@ mod tests {
         let buttons = StatusButtons { xtree: badge, ..StatusButtons::default() };
         draw_status(&p, w, h, "15 elementos", Layout::TwoSide, None, buttons);
         (p, xtree_rect(w, h, badge))
+    }
+
+    /// El indicador de las copias: el avance, o «Errores» si solo quedan trabajos que fallaron.
+    #[test]
+    fn transfers_indicator_marks_failed_jobs() {
+        let theme = Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true));
+        let draw = |b: StatusButtons| {
+            let p = RecordingPainter::new(theme);
+            draw_status(&p, 1280.0, 800.0, "", Layout::One, None, b);
+            p.texts().into_iter().map(|(_, s, _)| s).collect::<Vec<_>>()
+        };
+        let t = draw(StatusButtons { transfers: Some(0.58), ..StatusButtons::default() });
+        assert!(t.iter().any(|s| s == "58 %"), "{t:?}");
+        // Solo quedan trabajos que terminaron con errores: no «100 %», sino el aviso.
+        let t = draw(StatusButtons { transfers: Some(1.0), transfers_failed: true, ..StatusButtons::default() });
+        assert!(t.iter().any(|s| s == "Errores"), "{t:?}");
+        assert!(!t.iter().any(|s| s.ends_with(" %")), "{t:?}");
     }
 
     /// Escaneando un volumen: el anillo reemplaza al ícono del mapa, va el porcentaje y el botón se

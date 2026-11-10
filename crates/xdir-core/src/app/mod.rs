@@ -19,6 +19,7 @@ mod preview;
 mod rename_many;
 mod tasks;
 mod tooltip;
+mod transfers;
 
 #[cfg(test)]
 mod tests;
@@ -29,12 +30,15 @@ mod preview_tests;
 #[cfg(test)]
 mod quick_look_tests;
 #[cfg(test)]
+mod transfers_tests;
+#[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
 mod rename_many_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
+pub use transfers::eject_question;
 use tooltip::{Tip, WM_APP_TOOLTIP};
 #[cfg(test)]
 use tooltip::{tooltip_for, tooltip_rect};
@@ -148,6 +152,8 @@ enum Hit {
     Xtree,
     /// Botón de la columna de vista previa.
     PreviewToggle,
+    /// Indicador de las operaciones de copia en la barra de estado (abre la ventana de copia).
+    Transfers,
     /// Borde izquierdo de la columna de vista previa (cambiar su ancho).
     PreviewEdge,
     /// El panel de información (en el lugar de la columna).
@@ -409,6 +415,8 @@ pub struct App {
     renaming: bool,
     /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
     swallow_space: bool,
+    /// Trabajos del motor de copia (cola, estado de cada uno).
+    transfers: transfers::Transfers,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -592,6 +600,7 @@ impl App {
             rename_many: None,
             renaming: false,
             swallow_space: false,
+            transfers: transfers::Transfers::new(),
         };
         app.restore_panes(&session, start_path);
         app.sync_folder_views();

@@ -38,6 +38,8 @@ thread_local! {
     /// El host de la ventana, para el código de AppKit que necesita el tipo concreto (`drawRect:`
     /// le pasa el tamaño de la vista al renderizador): la `App` lo tiene como `dyn WindowHost`.
     static HOST: RefCell<Option<Rc<MacHost>>> = const { RefCell::new(None) };
+    /// El tema del último cuadro (lo usa la ventana de copia al crearse).
+    static THEME: Cell<Option<Theme>> = const { Cell::new(None) };
 }
 
 /// La ventana principal de macOS. La ventana y la vista viven en los `thread_local!` de `mac.rs`.
@@ -103,6 +105,8 @@ impl WindowHost for MacHost {
 
     /// Dibuja en el contexto actual de AppKit (dentro de `drawRect:`).
     fn draw(&self, theme: &Theme, file_colors: &[ColorRule], paint: &mut dyn FnMut(&dyn Painter, f32, f32)) -> Result<(), String> {
+        THEME.with(|t| t.set(Some(*theme)));
+        crate::auxwin::set_theme(theme);
         self.renderer.borrow_mut().draw(self.window.get(), theme, file_colors, |p, w, h| paint(p, w, h))
     }
 
@@ -185,6 +189,15 @@ impl WindowHost for MacHost {
     }
 
     fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool> {
+        // Pruebas: «Sí» sin mostrar el cuadro (que frenaría el guion); la pregunta queda anotada.
+        #[cfg(feature = "pruebas")]
+        if let Some(log) = std::env::var_os("XDIR_PRUEBAS_RESPONDER_SI") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+                let _ = writeln!(f, "{title}: {text}");
+            }
+            return Some(true);
+        }
         let mtm = MainThreadMarker::new()?;
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(title));
@@ -440,6 +453,28 @@ impl WindowHost for MacHost {
 
     fn quick_look_close(&self) {
         crate::quicklook::close();
+    }
+
+    /// La ventana de copia (`crate::auxwin`).
+    fn aux_show(&self, w: xdir_core::host::AuxWindow, title: &str, size: (f32, f32)) -> bool {
+        let theme = THEME.with(|t| t.get()).unwrap_or_else(|| Theme::from_system(xdir_core::theme::DEFAULT_ACCENT, None));
+        crate::auxwin::show(self.window.get(), w, title, size, &theme)
+    }
+
+    fn aux_set_title(&self, w: xdir_core::host::AuxWindow, title: &str) {
+        crate::auxwin::set_title(w, title);
+    }
+
+    fn aux_resize(&self, w: xdir_core::host::AuxWindow, size: (f32, f32)) {
+        crate::auxwin::resize(w, size);
+    }
+
+    fn aux_invalidate(&self, w: xdir_core::host::AuxWindow) {
+        crate::auxwin::invalidate(w);
+    }
+
+    fn aux_hide(&self, w: xdir_core::host::AuxWindow) {
+        crate::auxwin::hide(w);
     }
 }
 

@@ -1,6 +1,7 @@
 //! Operaciones de archivos: portapapeles, borrar, arrastrar y soltar, menú contextual.
 
 use super::*;
+use crate::transfer::JobSpec;
 
 impl App {
     // ---------- operaciones de archivos ----------
@@ -53,8 +54,8 @@ impl App {
             }
             return;
         };
-        let op = if cut { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
-        sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op);
+        // Copiar y mover entre rutas de disco van por el motor (con la ventana de copia).
+        self.start_transfer(if cut { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
         // Lo cortado se pega una sola vez, como en el Explorador.
         if cut {
             sys::shell().clear_clipboard();
@@ -73,7 +74,7 @@ impl App {
         }
         let sources = self.selection(self.active);
         if !sources.is_empty() {
-            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Duplicate { sources });
+            self.start_transfer(JobSpec::Duplicate { sources });
         }
     }
 
@@ -87,12 +88,14 @@ impl App {
         }
         let items = self.selection(self.active);
         if !items.is_empty() {
-            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::NewFolderWith { parent, items });
+            self.start_transfer(JobSpec::NewFolderWith { parent, items });
         }
     }
 
     /// Devolver: cada seleccionado de la Papelera vuelve a su lugar. En la Papelera virtual de
-    /// Windows lo hace el Shell (verbo `undelete`); en las demás, `Op::Restore`.
+    /// Windows lo hace el Shell (verbo `undelete`); en las demás, el motor de copia
+    /// (`JobSpec::Restore`, con el lugar original que lee cada sistema y su carpeta preparada sin
+    /// seguir enlaces).
     pub(super) fn restore_selection(&mut self) {
         let location = self.panes[self.active].tab().location.clone();
         if !sys::file_system().is_trash(&location) {
@@ -110,7 +113,7 @@ impl App {
         }
         let items = self.selection(self.active);
         if !items.is_empty() {
-            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Restore { items });
+            self.start_transfer(JobSpec::Restore { items });
         }
     }
 
@@ -271,8 +274,7 @@ impl App {
         if ev.kind == DragKind::Drop && ev.effect != Effect::NONE {
             if let (Some((pane, _, dest)), Some(paths)) = (target, ev.paths) {
                 let sources = paths.to_vec();
-                let op = if ev.effect == Effect::MOVE { Op::Move { sources, dest } } else { Op::Copy { sources, dest } };
-                sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op);
+                self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
                 self.set_active(pane);
             }
         }

@@ -114,6 +114,22 @@ pub trait Accessibility {
     fn notify_focus(&self, el: El);
 }
 
+/// Ventanas secundarias del sistema cuyo contenido dibuja el núcleo (`App::paint_aux`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AuxWindow {
+    /// La ventana de copia: la cola de trabajos del motor (`transfer::view`).
+    Transfers,
+}
+
+/// Lo que hace el mouse sobre una ventana secundaria (`App::aux_mouse`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AuxMouse {
+    Move,
+    Down,
+    Up,
+    Leave,
+}
+
 /// La ventana principal. Los tamaños y posiciones están en DIPs: el host lee el DPI de su ventana.
 pub trait WindowHost {
     /// La ventana ya existe (en Windows el `HWND` llega después de armar la `App`).
@@ -215,4 +231,21 @@ pub trait WindowHost {
     fn quick_look_shows_cloud(&self) -> bool {
         false
     }
+
+    /// Crea la ventana secundaria `w` (o la trae al frente si ya estaba) con `title` y un área de
+    /// `size` DIPs. `false` si el host no tiene ventanas secundarias (Linux sin interfaz): la
+    /// `App` muestra solo el indicador. La ventana pinta con `App::paint_aux`, manda el mouse a
+    /// `App::aux_mouse` y las teclas a `App::aux_key`; si el usuario la cierra, se oculta y avisa
+    /// `App::aux_closed`.
+    fn aux_show(&self, _w: AuxWindow, _title: &str, _size: (f32, f32)) -> bool {
+        false
+    }
+    /// Cambia el título (el trabajo pasó a esperar un conflicto, terminó con errores…).
+    fn aux_set_title(&self, _w: AuxWindow, _title: &str) {}
+    /// Cambia el tamaño del área (el contenido creció o se achicó).
+    fn aux_resize(&self, _w: AuxWindow, _size: (f32, f32)) {}
+    /// Pide repintarla (sin ventana, no hace nada).
+    fn aux_invalidate(&self, _w: AuxWindow) {}
+    /// La oculta (sin avisar `aux_closed`).
+    fn aux_hide(&self, _w: AuxWindow) {}
 }

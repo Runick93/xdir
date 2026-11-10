@@ -18,11 +18,9 @@ pub enum Op {
     NewFolder { parent: PathBuf },
     /// Archivo de texto vacío «Nuevo documento de texto.txt» (« (2)», « (3)»… si ya existe).
     NewFile { parent: PathBuf },
-    /// «nombre copia», «nombre copia 2»… al lado de cada uno (`names::copy_name`).
-    Duplicate { sources: Vec<PathBuf> },
-    /// Crea «Carpeta nueva con N elementos» en `parent` y mueve `items` adentro.
-    NewFolderWith { parent: PathBuf, items: Vec<PathBuf> },
-    /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux).
+    /// Devuelve elementos de la Papelera a su lugar original (macOS y Linux). La `App` lo hace con
+    /// el motor de copia (`JobSpec::Restore`); queda como respaldo, como `Copy` y `Move`. Duplicar
+    /// y «Carpeta nueva con la selección» son solo del motor.
     Restore { items: Vec<PathBuf> },
     /// Un acceso directo (alias, enlace) junto a cada uno (`names::shortcut_name`).
     Shortcuts { targets: Vec<PathBuf> },
@@ -36,6 +34,10 @@ pub enum Undo {
     Rename { path: PathBuf, old_name: String },
     /// Copias, carpetas o archivos nuevos: se mandan a la papelera.
     Created(Vec<PathBuf>),
+    /// Lo mismo, con la identidad de cada uno al crearlo (disco, número de archivo: `ItemStat::
+    /// file_id`). Deshacer manda a la Papelera solo lo que en esa ruta sigue siendo lo mismo (si
+    /// apareció otra cosa en su lugar, no se toca). Lo arma el motor de copia y lo deshace él.
+    CreatedIds(Vec<(PathBuf, (u64, u64))>),
     /// (dónde quedó, dónde estaba).
     Moved(Vec<(PathBuf, PathBuf)>),
     /// (nombre del elemento dentro de la papelera, dónde estaba).
@@ -47,6 +49,17 @@ pub enum Undo {
     /// Renombrar varios: (cómo se llama ahora, nombre anterior). Se deshace en el núcleo, con
     /// `rename_many::rename_all` (el mismo cruce seguro), nunca por `FileOps`.
     Renames(Vec<(PathBuf, String)>),
+}
+
+impl Undo {
+    /// Lo mismo sin las identidades de lo creado (`CreatedIds` → `Created`): para comparar.
+    pub fn without_ids(self) -> Undo {
+        match self {
+            Undo::CreatedIds(v) => Undo::Created(v.into_iter().map(|(p, _)| p).collect()),
+            Undo::Batch(v) => Undo::Batch(v.into_iter().map(Undo::without_ids).collect()),
+            other => other,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVE_FILE_FLAGS, MoveFileExW};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::Win32::UI::Shell::{
-    BHID_SFUIObject, CMINVOKECOMMANDINFO, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
+    BHID_SFUIObject, CMINVOKECOMMANDINFO, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
     FOF_RENAMEONCOLLISION, FOFX_RECYCLEONDELETE, FileOperation, IContextMenu, IFileOperation,
     IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem, SHCreateItemFromParsingName,
     SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
@@ -69,9 +69,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     let mut rename_after = false;
     let mut focus = None;
     // Carpeta que creó «Carpeta nueva con la selección» (se quita si no se movió nada).
-    let mut created_folder: Option<PathBuf> = None;
     // Error de `PerformOperations` cuando igual hay algo hecho que deshacer.
-    let mut perform_error: Option<String> = None;
 
     match &op {
         Op::Copy { sources, dest } | Op::Move { sources, dest } => {
@@ -86,38 +84,6 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                     }
                 }
             }
-        }
-        Op::Duplicate { sources } => {
-            // «nombre copia», «nombre copia 2»… como en macOS y Linux (no « - copia» del Explorador):
-            // el nombre se calcula acá y se pasa a `CopyItem`, sin `FOF_RENAMEONCOLLISION`.
-            for src in sources {
-                let (Some(parent), Some(name)) = (src.parent(), src.file_name()) else { continue };
-                let name = name.to_string_lossy();
-                let is_dir = src.is_dir();
-                let target = names::free_name(parent, &|n| names::copy_name(&name, is_dir, n), &|p| std::fs::symlink_metadata(p).is_ok());
-                let Some(copy_name) = target.file_name() else { continue };
-                unsafe { fo.CopyItem(&item(src)?, &item(parent)?, &HSTRING::from(copy_name), None)? };
-            }
-        }
-        Op::NewFolderWith { parent, items } => {
-            let base = names::folder_with_name(items.len());
-            let folder = names::free_name(parent, &|n| names::numbered_name(&base, true, n), &|p| std::fs::symlink_metadata(p).is_ok());
-            std::fs::create_dir(&folder).map_err(|e| Error::new(E_FAIL, format!("{}: {e}", folder.display())))?;
-            created_folder = Some(folder.clone());
-            // Si no se pudo armar la operación, la carpeta (vacía) no queda.
-            let queued = (|| -> Result<()> {
-                let dest = item(&folder)?;
-                for src in items {
-                    unsafe { fo.MoveItem(&item(src)?, &dest, PCWSTR::null(), None)? };
-                }
-                Ok(())
-            })();
-            if let Err(e) = queued {
-                let _ = std::fs::remove_dir(&folder);
-                return Err(e);
-            }
-            rename_after = true;
-            focus = Some(folder);
         }
         Op::Delete { paths, recycle } => {
             flags = if *recycle { FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE } else { FILEOPERATION_FLAGS(0) };
@@ -156,62 +122,13 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         if let Err(e) = performed
             && !aborted
         {
-            // «Carpeta nueva con la selección» sigue: lo que ya se movió necesita su deshacer.
-            if created_folder.is_none() {
-                return Err(e);
-            }
-            perform_error = Some(e.message().to_string());
+            return Err(e);
         }
     }
 
     let log = recorder_log(&recorder);
-    let mut select = Vec::new();
+    let select = Vec::new();
     let undo = match op {
-        Op::Duplicate { sources } => {
-            // Solo las copias de primer nivel (las de una carpeta copiada también avisan).
-            let parents: Vec<String> = sources.iter().filter_map(|s| s.parent()).map(path_key).collect();
-            select = log
-                .iter()
-                .filter_map(|r| r.created.clone())
-                .map(PathBuf::from)
-                .filter(|c| c.parent().is_some_and(|p| parents.contains(&path_key(p))))
-                .collect::<Vec<_>>();
-            focus = select.last().cloned();
-            Some(Undo::Created(select.clone()))
-        }
-        Op::NewFolderWith { parent, items } => {
-            let mut folder = created_folder.clone().unwrap_or_default();
-            let mut moved: Vec<(PathBuf, PathBuf)> = log
-                .iter()
-                .filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?)))
-                .filter(|(now, _)| now.parent().map(path_key) == Some(path_key(&folder)))
-                .collect();
-            if moved.is_empty() {
-                let _ = std::fs::remove_dir(&folder);
-                return Err(Error::new(E_FAIL, perform_error.as_deref().unwrap_or("No se movió ningún elemento")));
-            }
-            // El nombre cuenta lo que de verdad quedó adentro.
-            if moved.len() != items.len() {
-                let base = names::folder_with_name(moved.len());
-                let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
-                let renamed = names::free_name(&parent, &|n| names::numbered_name(&base, true, n), &taken);
-                // Sin MOVEFILE_REPLACE_EXISTING: nunca pisa algo que haya aparecido en el medio.
-                let moved_ok = unsafe {
-                    MoveFileExW(&HSTRING::from(folder.as_os_str()), &HSTRING::from(renamed.as_os_str()), MOVE_FILE_FLAGS(0))
-                }
-                .is_ok();
-                if moved_ok {
-                    for (now, _) in &mut moved {
-                        if let Some(name) = now.file_name() {
-                            *now = renamed.join(name);
-                        }
-                    }
-                    folder = renamed;
-                    focus = Some(folder.clone());
-                }
-            }
-            Some(Undo::Batch(vec![Undo::CreatedFolder(folder), Undo::Moved(moved)]))
-        }
         Op::Copy { .. } => Some(Undo::Created(log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect())),
         Op::Move { .. } => Some(Undo::Moved(
             log.iter().filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?))).collect(),
@@ -242,17 +159,10 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Moved(v) => !v.is_empty(),
         Undo::Recycled(v) => !v.is_empty(),
         Undo::Rename { .. } | Undo::Batch(_) | Undo::CreatedFolder(_) => true,
+        Undo::CreatedIds(v) => !v.is_empty(),
         Undo::Renames(v) => !v.is_empty(),
     });
-    Ok(OpResult { undo, focus, rename_after, error: perform_error, select })
-}
-
-/// Ruta para comparar como lo hace Windows: sin el prefijo `\\?\`, sin separador final y sin
-/// distinguir mayúsculas (el registro del Shell puede devolverla distinta a como se pidió).
-pub fn path_key(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    let s = s.strip_prefix(r"\\?\UNC\").map(|r| format!(r"\\{r}")).unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
-    s.trim_end_matches(['\\', '/']).replace('/', "\\").to_lowercase()
+    Ok(OpResult { undo, focus, rename_after, error: None, select })
 }
 
 /// «Crear acceso directo»: un `.lnk` junto a cada uno («nombre - Acceso directo.lnk», « (2)»…).
@@ -336,8 +246,14 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                 }
             }
             Undo::Recycled(items) => {
-                // "Restaurar" de la papelera devuelve cada elemento a su lugar original.
+                // "Restaurar" de la papelera devuelve cada elemento a su lugar original, si está
+                // libre: lo que apareció después con ese nombre no se pisa.
+                let mut taken = Vec::new();
                 for (recycled, original) in items {
+                    if let Some(busy) = super::prims::first_taken(&[original.as_path()], &|p| p.exists()) {
+                        taken.push(format!("{}: ya existe, no se pisa", busy.display()));
+                        continue;
+                    }
                     if restore_from_recycle_bin(recycled).is_err() {
                         let (Some(parent), Some(name)) = (original.parent(), original.file_name()) else { continue };
                         let it: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(recycled.as_str()), None)?;
@@ -346,17 +262,25 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                     focus = Some(original.clone());
                 }
                 fo.PerformOperations().ok();
-                return Ok(OpResult { focus, ..Default::default() });
+                let error = (!taken.is_empty()).then(|| taken.join("; "));
+                return Ok(OpResult { focus, error, ..Default::default() });
             }
             // Los resuelve `undo_any` antes de llegar acá.
             Undo::Batch(_) | Undo::CreatedFolder(_) => return Ok(OpResult::default()),
+            // Lo arma y lo deshace el motor de copia (compara la identidad antes de tocar).
+            Undo::CreatedIds(_) => return Ok(OpResult { error: Some("lo deshace el motor de copia".into()), ..Default::default() }),
         }
         fo.PerformOperations()?;
     }
     Ok(OpResult { focus, ..Default::default() })
 }
 
-fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
+/// `CMIC_MASK_NOASYNC`: `InvokeCommand` no vuelve hasta que el verbo terminó (el motor de copia
+/// renombra lo restaurado enseguida). Sin `CMIC_MASK_FLAG_NO_UI`: si el lugar está ocupado, el
+/// sistema pregunta (Reemplazar / Omitir) en vez de decidir solo.
+const CMIC_MASK_NOASYNC: u32 = 0x0000_0100;
+
+pub(super) fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
     unsafe {
         let it: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(parsing_name), None)?;
         let menu: IContextMenu = it.BindToHandler(None, &BHID_SFUIObject)?;
@@ -365,6 +289,7 @@ fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
         let _ = menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, 0);
         let info = CMINVOKECOMMANDINFO {
             cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            fMask: CMIC_MASK_NOASYNC,
             lpVerb: s!("undelete"),
             nShow: 1,
             ..Default::default()
@@ -373,6 +298,26 @@ fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {
         let _ = DestroyMenu(hmenu);
         result
     }
+}
+
+/// Manda un elemento a la Papelera (para el motor de copia: lo reemplazado). Devuelve su nombre de
+/// análisis dentro de la Papelera (lo que usa `restore_from_recycle_bin`), o `None` si no quedó
+/// ahí: borrado definitivamente (no entraba) o no se hizo nada. `FOF_WANTNUKEWARNING` hace que el
+/// sistema pregunte antes de borrar algo que no entra en la Papelera. COM tiene que estar iniciado
+/// en el hilo.
+pub(super) fn recycle_one(path: &Path) -> Result<Option<String>> {
+    let fo: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
+    let recorder: IFileOperationProgressSink = Recorder::default().into();
+    unsafe {
+        fo.Advise(&recorder)?;
+        fo.SetOperationFlags(FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_WANTNUKEWARNING)?;
+        fo.DeleteItem(&item(path)?, None)?;
+        fo.PerformOperations()?;
+        if fo.GetAnyOperationsAborted().map(|b| b.as_bool()).unwrap_or(false) {
+            return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+        }
+    }
+    Ok(recorder_log(&recorder).into_iter().find_map(|r| r.created))
 }
 
 pub fn item(path: &Path) -> Result<IShellItem> {
@@ -481,13 +426,6 @@ impl IFileOperationProgressSink_Impl for Recorder_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn path_keys_compare_like_windows() {
-        assert_eq!(path_key(Path::new(r"\\?\C:\Users\Ana\Docs\")), path_key(Path::new(r"c:\users\ana\docs")));
-        assert_eq!(path_key(Path::new(r"\\?\UNC\srv\share\x")), path_key(Path::new(r"\\SRV\share\X")));
-        assert_ne!(path_key(Path::new(r"C:\a")), path_key(Path::new(r"C:\b")));
-    }
 
     /// «Crear acceso directo»: «a.txt - Acceso directo.lnk» (y « (2)»), que `link_target` resuelve.
     #[test]

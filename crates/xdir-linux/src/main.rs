@@ -14,6 +14,8 @@ mod info;
 #[cfg(target_os = "linux")]
 mod ops;
 #[cfg(target_os = "linux")]
+mod prims;
+#[cfg(target_os = "linux")]
 mod scan;
 #[cfg(target_os = "linux")]
 mod shell;

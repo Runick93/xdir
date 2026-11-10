@@ -24,6 +24,7 @@ pub mod keys;
 pub mod list;
 pub mod names;
 pub mod ops;
+pub mod transfer;
 pub mod paint;
 pub mod palette;
 pub mod pane;

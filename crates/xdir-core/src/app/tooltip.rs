@@ -120,6 +120,9 @@ impl App {
             // La entrada del árbol no dice qué es por sí sola cuando está en franja: sin escaneo,
             // «xtree».
             Hit::TreeXtree => return Some(self.xtree.as_ref().and_then(|x| x.badge_tip()).unwrap_or_else(|| "xtree".to_string())),
+            // Renombrar varios: el motivo del choque de la fila bajo el mouse.
+            Hit::Pane(i, PaneHit::List) if self.rename_many.as_ref().is_some_and(|r| r.pane == i) => return self.panes[i].tab().list.rename_clash_tip(),
+            Hit::RenamePanel(crate::rename_many_draw::PanelHit::Close) => return Some("Cerrar".to_string()),
             _ => {}
         }
         let tab_path = |p: usize, t: usize| {

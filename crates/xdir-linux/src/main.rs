@@ -10,6 +10,8 @@ mod fs;
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
+mod info;
+#[cfg(target_os = "linux")]
 mod ops;
 #[cfg(target_os = "linux")]
 mod prims;

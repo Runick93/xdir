@@ -36,6 +36,9 @@ pub enum Undo {
     Batch(Vec<Undo>),
     /// Carpeta creada para la operación: a la papelera solo si quedó vacía (si no, se deja).
     CreatedFolder(PathBuf),
+    /// Renombrar varios: (cómo se llama ahora, nombre anterior). Se deshace en el núcleo, con
+    /// `rename_many::rename_all` (el mismo cruce seguro), nunca por `FileOps`.
+    Renames(Vec<(PathBuf, String)>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

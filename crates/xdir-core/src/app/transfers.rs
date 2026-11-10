@@ -77,6 +77,7 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
             Undo::Moved(v) => v.iter().for_each(|(a, b)| out.extend([a.clone(), b.clone()])),
             Undo::Recycled(v) => out.extend(v.iter().map(|(_, p)| p.clone())),
             Undo::Rename { path, .. } => out.push(path.clone()),
+            Undo::Renames(v) => out.extend(v.iter().map(|(p, _)| p.clone())),
             Undo::CreatedFolder(p) => out.push(p.clone()),
         }
     }

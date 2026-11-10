@@ -380,6 +380,7 @@ impl App {
             group: self.group_name.clone(),
             preview_on: self.preview.on,
             preview_width: self.preview.width,
+            info_sections: self.info.sections,
             // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
             columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),
@@ -406,6 +407,9 @@ impl App {
                 tab.set_visible(hwnd, &tx, i < visible_panes && j == active);
             }
         }
+        // Cambió la pestaña a la vista (o el layout): Renombrar varios se recalcula o se cierra.
+        self.refresh_rename_many();
+        self.sync_rename_boxes();
     }
 
     pub(super) fn set_active(&mut self, pane: usize) {
@@ -442,7 +446,7 @@ impl App {
     /// Comandos de prueba (feature `pruebas`): `cmd <id>` ejecuta una acción de `commands::ALL`;
     /// `picker`, `term <panel>`, `tabdrop <panel> <pos>`, `droptarget <panel> <pos>`,
     /// `select <panel> <pos>`, `addsel <panel> <pos>`, `hover <panel> <x> <y>`, `casillas`,
-    /// `active <panel>` y `notice <texto>` dejan la interfaz en un estado que se quiere mostrar.
+    /// `active <panel>`, `info <qué>` (un clic en el panel de información) y `notice <texto>` dejan la interfaz en un estado que se quiere mostrar.
     #[cfg(feature = "pruebas")]
     pub fn test_hook(&mut self, text: &str) {
         let mut it = text.splitn(3, ' ');
@@ -481,6 +485,7 @@ impl App {
             "active" => self.set_active(na),
             "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
             "close" => self.close_palette(),
+            "info" => self.info_test(a, nb),
             _ => {}
         }
         self.redraw();

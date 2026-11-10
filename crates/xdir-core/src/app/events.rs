@@ -31,6 +31,7 @@ impl App {
                 }
                 self.ui_load_ms += ms_since(t0);
                 if changed {
+                    self.refresh_rename_many();
                     self.try_pending_rename();
                     self.try_new_watch();
                     self.redraw();
@@ -47,6 +48,9 @@ impl App {
             WM_APP_FAVEDIT_DONE => self.end_fav_edit(wparam == 1),
             WM_APP_FILTER_DONE => self.end_filter(wparam == 1),
             WM_APP_RENAME_DONE => self.end_rename(wparam == 1),
+            WM_APP_FIELD_DONE => self.on_field_done(wparam == 1),
+            WM_APP_FIELD_TAB => self.on_field_tab(wparam == 1),
+            tasks::WM_APP_TASK => self.on_tasks(),
             WM_APP_SUGGEST_KEY => self.on_suggest_key(Key(wparam as u16)),
             WM_APP_PALETTE_KEY => self.on_palette_key(Key(wparam as u16), lparam == 1),
             WM_APP_TEXT_CHANGED => self.on_text_changed(lparam),
@@ -58,6 +62,8 @@ impl App {
                 self.on_quick_look_reply();
             }
             preview::WM_APP_PREVIEW_DUE => self.on_preview_due(),
+            crate::info::WM_APP_INFO => self.on_info_message(wparam),
+            crate::info::WM_APP_INFO_EDIT_DONE => self.end_info_edit(wparam == 1),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {
                 self.tree.on_loaded();
@@ -136,6 +142,9 @@ impl App {
     /// Cambió el texto de una caja de edición: el filtro y la paleta se actualizan con cada tecla,
     /// y la barra de dirección actualiza el desplegable de rutas.
     pub fn on_text_changed(&mut self, id: isize) {
+        if self.rename_text_changed(id) {
+            return;
+        }
         if let Some((edit, pane)) = self.filter_edit {
             if edit.0 as isize == id {
                 let text = self.host.text_get(edit);
@@ -158,9 +167,12 @@ impl App {
 
     /// Cambió el tamaño (o la escala) del área de la ventana: los controles flotantes se cierran.
     pub fn on_resized(&mut self) {
+        self.end_info_edit(true);
         self.end_edit(false);
         self.end_filter(true);
         self.close_palette();
+        // El panel de Renombrar varios sigue: sus cajas van a su nuevo lugar.
+        self.sync_rename_boxes();
     }
 
     /// Cambió el modo claro/oscuro del sistema.
@@ -361,6 +373,10 @@ impl App {
                 if self.panes[i].tab_mut().list.filter_menu_wheel(delta * lines) {
                     self.redraw();
                 }
+                return;
+            }
+            Hit::Info(_) => {
+                self.info_wheel(delta * lines);
                 return;
             }
             Hit::Pane(i, _) => i,

@@ -43,10 +43,22 @@ struct Fingerprint {
     len: usize,
 }
 
+/// De quién es el lugar de la derecha (el de la columna de vista previa): de la vista previa, del
+/// panel de información o del de Renombrar varios. Hay uno solo a la vez: abrir uno cierra el otro y
+/// al cerrar información o Renombrar varios vuelve la vista previa si estaba prendida.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum RightPanel {
+    Preview,
+    Info,
+    RenameMany,
+}
+
 /// Estado de la columna en la `App`.
 pub(super) struct PreviewState {
     /// Prendida (se ve salvo con xtree abierto).
     pub on: bool,
+    /// Quién ocupa el lugar (con otro dueño que la vista previa, se ve aunque esté apagada).
+    pub owner: RightPanel,
     /// Ancho elegido (240–640); el que se usa puede ser menor para no achicar los paneles.
     pub width: f32,
     pub(super) generation: u64,
@@ -74,6 +86,7 @@ impl PreviewState {
         let (tx, rx) = channel();
         PreviewState {
             on,
+            owner: RightPanel::Preview,
             width: width.clamp(ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W),
             generation: 0,
             current: Arc::new(AtomicU64::new(0)),
@@ -108,9 +121,9 @@ fn source_of(tab: &Tab, idx: usize) -> thumbs::Source {
 }
 
 impl App {
-    /// ¿Se ve la columna? (prendida y sin la vista de xtree encima).
+    /// ¿Se ve la columna? (prendida o con otro panel en su lugar, y sin la vista de xtree encima).
     pub(super) fn preview_visible(&self) -> bool {
-        if !self.preview.on || self.xtree_open {
+        if !(self.preview.on || self.preview.owner != RightPanel::Preview) || self.xtree_open {
             return false;
         }
         // Si ni el mínimo entra sin achicar los paneles, no se ve en este cuadro (sigue prendida).
@@ -162,15 +175,32 @@ impl App {
         self.preview.width = clamped.clamp(ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W);
     }
 
+    /// Cierra el panel que esté en el lugar de la vista previa (información o Renombrar varios).
+    pub(super) fn close_right_panel(&mut self) {
+        match self.preview.owner {
+            RightPanel::Preview => {}
+            RightPanel::Info => self.close_info(),
+            RightPanel::RenameMany => self.close_rename_many(),
+        }
+    }
+
     /// Prende la columna (venía de xtree, donde no se veía).
     pub(super) fn show_preview(&mut self) {
+        self.close_right_panel();
         self.preview.on = true;
         self.sync_preview();
         self.redraw();
     }
 
-    /// Prende o apaga la columna.
+    /// Prende o apaga la columna. Con otro panel en su lugar, lo cierra y muestra la vista previa.
     pub(super) fn toggle_preview(&mut self) {
+        if self.preview.owner != RightPanel::Preview {
+            self.close_right_panel();
+            self.preview.on = true;
+            self.sync_preview();
+            self.redraw();
+            return;
+        }
         self.begin_layout_anim();
         self.preview.on = !self.preview.on;
         self.sync_preview();
@@ -246,7 +276,8 @@ impl App {
     }
 
     pub(super) fn sync_preview(&mut self) {
-        if !self.preview_visible() {
+        // Con otro panel en su lugar, la vista previa no muestra ni pide nada.
+        if !self.preview_visible() || self.preview.owner != RightPanel::Preview {
             if self.preview.subject.is_some() || self.preview.fingerprint.is_some() {
                 self.preview.subject = None;
                 self.preview.info = None;

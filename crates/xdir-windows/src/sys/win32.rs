@@ -558,6 +558,30 @@ impl FileSystem for Win32FileSystem {
     fn cloud_only(&self, path: &Path) -> bool {
         crate::metadata::cloud_only(&HSTRING::from(path))
     }
+
+    fn name_rules(&self) -> xdir_core::rename_many::NameRules {
+        xdir_core::rename_many::NameRules::WINDOWS
+    }
+
+    /// NTFS, FAT y exFAT no distinguen mayúsculas (salvo carpetas marcadas para WSL: se marcan
+    /// choques de más, nunca de menos).
+    fn case_insensitive(&self, _dir: &Path) -> bool {
+        true
+    }
+
+    /// `MoveFileExW` sin `MOVEFILE_REPLACE_EXISTING`: falla si el destino existe.
+    fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
+        use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+        let (f, t) = (wide_path(from), wide_path(to));
+        match unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVE_FILE_FLAGS(0)) } {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let io = std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF);
+                let at = if io.kind() == std::io::ErrorKind::AlreadyExists { to } else { from };
+                Err(xdir_core::rename_many::io_message(&io, at))
+            }
+        }
+    }
 }
 
 /// El sistema de archivos real de Windows (lo que instala `install`).
@@ -619,6 +643,7 @@ pub fn install() {
         metadata: Box::new(Win32Metadata),
         preview: Box::new(Win32Preview),
         copy_prims: Box::new(crate::ops::WinCopyPrims),
+        info: Box::new(crate::info::Win32Info),
     });
 }
 

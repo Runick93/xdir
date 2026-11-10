@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use crate::info::{InfoChange, InfoReply, InfoRequest, ItemInfo};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
 use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
@@ -44,6 +45,7 @@ pub fn install_fakes() {
         metadata: Box::new(FakeMetadata),
         preview: Box::new(FakePreview),
         copy_prims: Box::new(FakeCopyPrims::shared()),
+        info: Box::new(FakeInfo),
     });
 }
 
@@ -771,6 +773,29 @@ impl FileSystem for FakeFileSystem {
         CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
         CLOUD.with(|c| c.borrow().contains(path))
     }
+
+    /// Sobre el disco real (las carpetas temporales de cada test), sin pisar: falla si `to` existe
+    /// o si está en `fail_rename_to`.
+    fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
+        if RENAME_FAILS.lock().unwrap_or_else(|e| e.into_inner()).contains(to) {
+            return Err(format!("No se pudo renombrar «{}»", from.display()));
+        }
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(format!("Ya existe «{}»", to.display()));
+        }
+        std::fs::rename(from, to).map_err(|e| crate::rename_many::io_message(&e, from))
+    }
+}
+
+/// Destinos con los que `FakeFileSystem::rename_noreplace` falla (de todo el proceso: renombra
+/// desde hilos de trabajo; cada test usa rutas propias).
+static RENAME_FAILS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+impl FakeFileSystem {
+    /// Desde ahora, renombrar algo a `to` falla.
+    pub fn fail_rename_to(to: &Path) {
+        RENAME_FAILS.lock().unwrap_or_else(|e| e.into_inner()).insert(to.to_path_buf());
+    }
 }
 
 /// Guardián del `FileSystem` falso: al soltarlo, cuenta una baja para su carpeta.
@@ -890,6 +915,85 @@ impl Preview for FakePreview {
     }
 }
 
+thread_local! {
+    /// Información que devuelve el falso, por ruta (por hilo de prueba).
+    static INFO_DATA: RefCell<HashMap<PathBuf, ItemInfo>> = RefCell::new(HashMap::new());
+    /// Pedidos recibidos (las rutas de cada uno).
+    static INFO_REQUESTS: RefCell<Vec<Vec<PathBuf>>> = const { RefCell::new(Vec::new()) };
+    /// Cambios aplicados.
+    static INFO_APPLIED: RefCell<Vec<InfoChange>> = const { RefCell::new(Vec::new()) };
+    /// Error con que responden los cambios (`None`: bien).
+    static INFO_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// ¿Hay diálogo del sistema? Y cuántas veces se abrió.
+    static INFO_MORE: Cell<bool> = const { Cell::new(true) };
+    static INFO_MORE_CALLS: RefCell<Vec<Vec<PathBuf>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `Info` falso: anota cada pedido y responde al pedir, en el hilo del test, con lo cargado con
+/// `serve` para cada ruta o, si no hay nada, con la lectura mínima del núcleo (con la nube de
+/// `FakeFileSystem`, que no abre nada). Los cambios se anotan y responden con `fail_with`.
+pub struct FakeInfo;
+
+impl FakeInfo {
+    pub fn serve(path: &Path, info: ItemInfo) {
+        INFO_DATA.with(|d| d.borrow_mut().insert(path.to_path_buf(), info));
+    }
+
+    /// Pedidos recibidos hasta ahora (y los olvida).
+    pub fn take_requests() -> Vec<Vec<PathBuf>> {
+        INFO_REQUESTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// Cambios aplicados hasta ahora (y los olvida).
+    pub fn take_applied() -> Vec<InfoChange> {
+        INFO_APPLIED.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// Desde ahora los cambios fallan con este texto (`None`: andan).
+    pub fn fail_with(error: Option<&str>) {
+        INFO_ERROR.with(|e| *e.borrow_mut() = error.map(str::to_string));
+    }
+
+    /// ¿El sistema tiene diálogo propio? (por defecto, sí).
+    pub fn set_more_in_system(on: bool) {
+        INFO_MORE.with(|m| m.set(on));
+    }
+
+    /// Veces que se abrió el diálogo del sistema (y las olvida).
+    pub fn take_more_calls() -> Vec<Vec<PathBuf>> {
+        INFO_MORE_CALLS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+}
+
+impl Info for FakeInfo {
+    fn request(&self, req: InfoRequest) {
+        INFO_REQUESTS.with(|r| r.borrow_mut().push(req.paths.clone()));
+        let fs = FakeFileSystem;
+        let items = req
+            .paths
+            .iter()
+            .map(|p| INFO_DATA.with(|d| d.borrow().get(p).cloned()).unwrap_or_else(|| crate::info::read_minimal(p, &|x| fs.cloud_only(x))))
+            .collect();
+        req.send(items);
+    }
+
+    fn apply(&self, owner: Handle, tx: Sender<InfoReply>, generation: u64, change: InfoChange) {
+        let section = change.section();
+        INFO_APPLIED.with(|r| r.borrow_mut().push(change));
+        let error = INFO_ERROR.with(|e| e.borrow().clone());
+        crate::info::send_applied(owner, &tx, generation, section, error);
+    }
+
+    fn more_in_system(&self, _owner: Handle, items: &[Item]) -> bool {
+        INFO_MORE_CALLS.with(|r| r.borrow_mut().push(paths(items)));
+        INFO_MORE.with(Cell::get)
+    }
+
+    fn has_more_in_system(&self) -> bool {
+        INFO_MORE.with(Cell::get)
+    }
+}
+
 /// `Overlays` falso: no hay superposiciones (no responde nada).
 pub struct FakeOverlays;
 
@@ -910,6 +1014,7 @@ pub struct RecordingPainter {
     big_ready: Cell<bool>,
     forgotten: RefCell<Vec<thumbs::Source>>,
     icons: RefCell<Vec<(f32, f32, f32)>>,
+    fills: RefCell<Vec<(Rect, Color)>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -926,7 +1031,13 @@ impl RecordingPainter {
             big_ready: Cell::new(false),
             forgotten: RefCell::new(Vec::new()),
             icons: RefCell::new(Vec::new()),
+            fills: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Los rectángulos rellenados con `fill` (rectángulo y color), en orden.
+    pub fn fills(&self) -> Vec<(Rect, Color)> {
+        self.fills.borrow().clone()
     }
 
     /// Claves pedidas a `big_image`, en orden.
@@ -971,7 +1082,9 @@ impl RecordingPainter {
 }
 
 impl Painter for RecordingPainter {
-    fn fill(&self, _r: Rect, _c: Color) {}
+    fn fill(&self, r: Rect, c: Color) {
+        self.fills.borrow_mut().push((r, c));
+    }
     fn round_fill(&self, _r: Rect, _radius: f32, _c: Color) {}
     fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, _stroke: Option<(Color, f32)>) {
         self.paths.borrow_mut().push((pts.iter().map(|&(x, y, _)| (x, y)).collect(), closed, fill));
@@ -1043,6 +1156,7 @@ pub struct FakeHost {
     answer: Cell<Option<bool>>,
     drag_result: RefCell<Result<(), String>>,
     drawn: RefCell<Vec<(FontId, String, Rect)>>,
+    drawn_fills: RefCell<Vec<(Rect, Color)>>,
     /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
     text_boxes: RefCell<HashMap<u32, (TextKind, String, bool)>>,
     next_text_box: Cell<u32>,
@@ -1070,6 +1184,7 @@ impl FakeHost {
             answer: Cell::new(None),
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
+            drawn_fills: RefCell::new(Vec::new()),
             text_boxes: RefCell::new(HashMap::new()),
             next_text_box: Cell::new(1),
             menu_choice: Cell::new(None),
@@ -1127,6 +1242,19 @@ impl FakeHost {
     /// Los textos del último cuadro dibujado, en orden.
     pub fn drawn_texts(&self) -> Vec<(FontId, String, Rect)> {
         self.drawn.borrow().clone()
+    }
+
+    /// Los rectángulos rellenados del último cuadro dibujado.
+    pub fn drawn_fills(&self) -> Vec<(Rect, Color)> {
+        self.drawn_fills.borrow().clone()
+    }
+
+    /// Las cajas de texto abiertas de ese tipo (número y texto).
+    pub fn text_boxes_of(&self, kind: TextKind) -> Vec<(TextBox, String)> {
+        let mut v: Vec<(TextBox, String)> =
+            self.text_boxes.borrow().iter().filter(|(_, (k, _, _))| *k == kind).map(|(id, (_, t, _))| (TextBox(*id), t.clone())).collect();
+        v.sort_by_key(|(b, _)| b.0);
+        v
     }
 
     /// Los títulos que se pusieron, en orden.
@@ -1201,6 +1329,11 @@ impl WindowHost for FakeHost {
         self.answer.get()
     }
 
+    /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No.
+    fn ask_yes_no(&self, _title: &str, _text: &str) -> bool {
+        self.answer.get() == Some(true)
+    }
+
     fn open_url(&self, _url: &str) {}
     fn open_in_editor(&self, _path: &Path) {}
 
@@ -1258,6 +1391,7 @@ impl WindowHost for FakeHost {
         let (w, h) = self.client.get();
         paint(&p, w, h);
         *self.drawn.borrow_mut() = p.texts();
+        *self.drawn_fills.borrow_mut() = p.fills();
         *self.drawn_big.borrow_mut() = p.big_requests();
         Ok(())
     }

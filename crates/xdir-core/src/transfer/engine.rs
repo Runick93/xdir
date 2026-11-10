@@ -103,6 +103,7 @@ fn count_steps(u: &Undo) -> u64 {
         Undo::Created(v) => v.len() as u64,
         Undo::Moved(v) => v.len() as u64,
         Undo::Recycled(v) => v.len() as u64,
+        Undo::Renames(v) => v.len() as u64,
         Undo::Rename { .. } | Undo::CreatedFolder(_) => 1,
     }
 }
@@ -1223,6 +1224,21 @@ impl<'a> Job<'a> {
                     self.fail(&path, &to, e);
                 }
                 self.items_done += 1;
+            }
+            // Renombrar varios se deshace en el núcleo (`App::undo_renames`, con su cruce seguro) y
+            // no llega acá; si llegara, uno por uno sin pisar nada (un intercambio queda en error).
+            Undo::Renames(pairs) => {
+                for (path, old_name) in pairs {
+                    if self.halted() {
+                        break;
+                    }
+                    self.current = name_of(&path);
+                    let to = path.with_file_name(&old_name);
+                    if let Err(e) = self.prims.rename_noreplace(&path, &to) {
+                        self.fail(&path, &to, e);
+                    }
+                    self.items_done += 1;
+                }
             }
         }
     }

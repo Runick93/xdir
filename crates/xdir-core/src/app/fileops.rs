@@ -290,7 +290,13 @@ impl App {
         };
         // «Vista rápida» primero. «Copiar como ruta de acceso» usa las mismas comillas y saltos de
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
-        vec![item("Vista rápida", Command::QuickLook), item("Copiar como ruta de acceso", Command::CopyPaths)]
+        let mut entries = vec![item("Vista rápida", Command::QuickLook), item("Copiar como ruta de acceso", Command::CopyPaths)];
+        // Con varios seleccionados en una carpeta del disco: Renombrar varios.
+        let n = self.panes[self.active].tab().list.selected_positions().len();
+        if n > 1 && self.can_rename_many(self.active) {
+            entries.push(item(&format!("Renombrar {n} elementos…"), Command::RenameMany));
+        }
+        entries
     }
 
     /// Menú contextual de la lista en `at` (DIPs del área de la ventana). Sin punto (tecla de
@@ -349,6 +355,8 @@ impl App {
             Some("cut") => self.copy_selection(true),
             Some("copy") => self.copy_selection(false),
             Some("paste") => self.paste(),
+            // «Propiedades» / «Obtener información» del menú: el panel de información.
+            Some("properties") => self.open_info(),
             _ => {}
         }
         self.redraw();

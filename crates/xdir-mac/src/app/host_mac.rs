@@ -200,6 +200,17 @@ impl WindowHost for MacHost {
         }
     }
 
+    fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(text));
+        alert.setAlertStyle(NSAlertStyle::Informational);
+        alert.addButtonWithTitle(&NSString::from_str("Sí"));
+        alert.addButtonWithTitle(&NSString::from_str("No"));
+        alert.runModal() == NSAlertFirstButtonReturn
+    }
+
     fn open_url(&self, url: &str) {
         if let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) {
             NSWorkspace::sharedWorkspace().openURL(&url);
@@ -331,7 +342,7 @@ impl WindowHost for MacHost {
         let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
         field.setStringValue(&NSString::from_str(text));
         field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename);
+        let bordered = matches!(kind, TextKind::Rename | TextKind::FavRename | TextKind::Info);
         field.setBezeled(bordered);
         field.setBordered(bordered);
         field.setDrawsBackground(true);
@@ -480,6 +491,8 @@ define_class!(
                 // Perder el foco: la dirección se cancela, el resto se aplica.
                 TextKind::Address => h.post(WM_APP_EDIT_DONE, 0, 0),
                 TextKind::Palette => h.post(WM_APP_PALETTE_KEY, 0, 0),
+                // Un campo de panel sigue abierto: no avisa.
+                TextKind::Field => {}
                 kind => h.post(kind.done_msg(), 1, 0),
             }
         }
@@ -511,6 +524,13 @@ impl TextDelegate {
         } else {
             None
         };
+        // Tab y Shift+Tab en un campo de panel: el núcleo pasa el foco a la caja siguiente o a la
+        // anterior (las cajas se crean y destruyen al cambiar el modo: no hay cadena fija de
+        // `nextKeyView`).
+        if iv.kind == TextKind::Field && (command == sel!(insertTab:) || command == sel!(insertBacktab:)) {
+            h.post(xdir_core::host::WM_APP_FIELD_TAB, (command == sel!(insertBacktab:)) as usize, 0);
+            return true;
+        }
         if let Some(vk) = nav {
             match iv.kind {
                 TextKind::Address => h.post(WM_APP_SUGGEST_KEY, vk.0 as usize, 0),

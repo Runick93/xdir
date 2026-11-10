@@ -163,4 +163,79 @@ impl FileSystem for LinuxFileSystem {
     fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
         watch::Watcher::new(path, move || hwnd.post(msg, panel, lparam)).map(|w| Box::new(w) as Box<dyn Watch>)
     }
+
+    /// Los discos de Linux distinguen mayúsculas (ext4, btrfs…); FAT y exFAT montados no, pero ahí
+    /// el renombrado igual pasa por un temporal.
+    fn case_insensitive(&self, _dir: &Path) -> bool {
+        false
+    }
+
+    /// `renameat2` con `RENAME_NOREPLACE`; donde el disco no lo admite (`EINVAL`), se mira antes
+    /// si el destino existe y se usa `rename`.
+    fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
+        rename_noreplace(from, to).map_err(|e| {
+            let at = if e.kind() == std::io::ErrorKind::AlreadyExists { to } else { from };
+            xdir_core::rename_many::io_message(&e, at)
+        })
+    }
+}
+
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let cstr = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let (f, t) = (cstr(from)?, cstr(to)?);
+    let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    if matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS)) {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        return std::fs::rename(from, to);
+    }
+    Err(e)
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use xdir_core::ops::Undo;
+    use xdir_core::rename_many::{RenamePrims, rename_all};
+
+    struct Real;
+    impl RenamePrims for Real {
+        fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
+            LinuxFileSystem.rename_noreplace(from, to)
+        }
+    }
+
+    /// Renombrar varios en una carpeta temporal real: nombres cruzados, cambio de mayúsculas y
+    /// deshacer en un paso; nunca pisa lo que ya está.
+    #[test]
+    fn rename_many_real_disk() {
+        let dir = std::env::temp_dir().join(format!("xdir-renvarios-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (n, body) in [("a.txt", "A"), ("b.txt", "B"), ("foto.jpg", "F")] {
+            std::fs::write(dir.join(n), body).unwrap();
+        }
+        assert!(Real.rename_noreplace(&dir.join("a.txt"), &dir.join("b.txt")).unwrap_err().contains("Ya existe"));
+        let pairs: Vec<(PathBuf, String)> =
+            vec![(dir.join("a.txt"), "b.txt".into()), (dir.join("b.txt"), "a.txt".into()), (dir.join("foto.jpg"), "FOTO.jpg".into())];
+        let Undo::Renames(back) = rename_all(&Real, &pairs).unwrap() else { panic!("se esperaba Renames") };
+        let names = |d: &Path| {
+            let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&dir), ["FOTO.jpg", "a.txt", "b.txt"]);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "B");
+        rename_all(&Real, &back).unwrap();
+        assert_eq!(names(&dir), ["a.txt", "b.txt", "foto.jpg"]);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "A");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

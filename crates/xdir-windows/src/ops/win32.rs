@@ -151,6 +151,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Rename { .. } => true,
         Undo::Batch(v) => !v.is_empty(),
         Undo::CreatedFolder(_) => true,
+        Undo::Renames(v) => !v.is_empty(),
     });
     Ok(OpResult { undo, focus, rename_after, error: None, ..Default::default() })
 }
@@ -160,6 +161,8 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
     unsafe {
         fo.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)?;
         match undo {
+            // Renombrar varios se deshace en el núcleo (`rename_many::rename_all`): nunca llega acá.
+            Undo::Renames(_) => return Err(windows::core::Error::new(windows::Win32::Foundation::E_NOTIMPL, "Renombrar varios se deshace en el núcleo")),
             Undo::Rename { path, old_name } => {
                 fo.RenameItem(&item(path)?, &HSTRING::from(old_name.as_str()), None)?;
                 focus = path.parent().map(|p| p.join(old_name));

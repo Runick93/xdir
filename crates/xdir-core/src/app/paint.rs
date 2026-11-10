@@ -54,7 +54,24 @@ impl App {
         self.sync_gallery_stamps();
         let preview_w = self.preview_width();
         let preview_col = self.preview_column();
-        let preview_shown = preview_col.map(|_| self.preview_shown());
+        // El lugar de la derecha es de la vista previa, de Renombrar varios o del panel de
+        // información (armado acá: el dibujo y los clics usan lo mismo).
+        let rename_panel = self.rename_panel_state();
+        let rename_hover = match self.hover {
+            Hit::RenamePanel(h) => Some(h),
+            _ => None,
+        };
+        self.sync_info();
+        let info_shown = self.info_open();
+        if let Some(r) = preview_col.filter(|_| info_shown) {
+            self.layout_info(r);
+        }
+        let preview_shown =
+            preview_col.filter(|_| !info_shown && rename_panel.is_none()).map(|_| self.preview_shown());
+        let info_hover = match self.hover {
+            Hit::Info(h) => Some(h),
+            _ => None,
+        };
         let preview_forget = std::mem::take(&mut self.preview.forget);
         let preview_on = self.preview.on;
         #[cfg(feature = "arbol")]
@@ -98,6 +115,7 @@ impl App {
         let xtree_open = self.xtree_open;
         let mut xtree = self.xtree.as_mut().filter(|_| xtree_open);
         let (marks, started) = (&mut self.marks, self.started);
+        let info_layout = &self.info.layout;
         // El host crea el destino de dibujo en el primer cuadro y recién ahí llama a la clausura:
         // las marcas de `--probe` "render target" e "inicio frame con la carpeta" se toman al
         // empezar a dibujar, en el mismo orden que antes. Los campos de `App` se prestan por
@@ -162,6 +180,12 @@ impl App {
             }
             if let (Some(r), Some(shown)) = (preview_col, &preview_shown) {
                 crate::preview::draw::draw(p, r, shown);
+            }
+            if let (Some(r), Some(st)) = (preview_col, &rename_panel) {
+                crate::rename_many_draw::draw(p, r, st, rename_hover);
+            }
+            if info_shown && preview_col.is_some() {
+                crate::info::draw::draw(p, info_layout, info_hover);
             }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);

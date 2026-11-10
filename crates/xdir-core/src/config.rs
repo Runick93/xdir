@@ -47,6 +47,40 @@ pub struct ColorRule {
     pub color: Color,
 }
 
+/// `[opciones] xtree_abrir`: qué carpeta analiza xtree al abrirse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum XtreeOpen {
+    /// El disco del sistema (`DiskScan::default_root`).
+    System,
+    /// La carpeta del panel activo (si no es una carpeta, la del sistema).
+    #[default]
+    Pane,
+    /// La última analizada (si ya no existe, la del panel).
+    Last,
+}
+
+impl XtreeOpen {
+    pub const ALL: [XtreeOpen; 3] = [XtreeOpen::System, XtreeOpen::Pane, XtreeOpen::Last];
+
+    /// Valor en `config.toml`.
+    pub fn id(self) -> &'static str {
+        match self {
+            XtreeOpen::System => "sistema",
+            XtreeOpen::Pane => "panel",
+            XtreeOpen::Last => "ultimo",
+        }
+    }
+
+    /// Nombre en la configuración.
+    pub fn title(self) -> &'static str {
+        match self {
+            XtreeOpen::System => "El del sistema",
+            XtreeOpen::Pane => "El de la carpeta del panel",
+            XtreeOpen::Last => "El último analizado",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keymap: Keymap,
@@ -58,6 +92,10 @@ pub struct Config {
     /// `[opciones] arbol_sigue_panel`: el árbol de carpetas despliega y muestra la carpeta del
     /// panel activo cuando cambia (por defecto, sí).
     pub tree_follows_pane: bool,
+    /// `[opciones] xtree_por_tipo`: xtree arranca coloreando por tipo de archivo (tecla T).
+    pub xtree_by_type: bool,
+    /// `[opciones] xtree_abrir`: qué analiza xtree al abrirse.
+    pub xtree_open: XtreeOpen,
     /// Problemas al leer el archivo, para avisar en la barra de estado.
     pub errors: Vec<String>,
     /// Cuántas de `colors` son del usuario (van primero; el resto son las de fábrica).
@@ -68,7 +106,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, errors: Vec::new(), own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, errors: Vec::new(), own_colors: 0, modified: None }
     }
 }
 
@@ -232,6 +270,12 @@ impl Config {
                             ("animaciones", None) => c.errors.push(format!("línea {}: animaciones va como true o false", e.line)),
                             ("arbol_sigue_panel", Some(on)) => c.tree_follows_pane = on,
                             ("arbol_sigue_panel", None) => c.errors.push(format!("línea {}: arbol_sigue_panel va como true o false", e.line)),
+                            ("xtree_por_tipo", Some(on)) => c.xtree_by_type = on,
+                            ("xtree_por_tipo", None) => c.errors.push(format!("línea {}: xtree_por_tipo va como true o false", e.line)),
+                            ("xtree_abrir", _) => match XtreeOpen::ALL.into_iter().find(|o| e.value.as_str() == Some(o.id())) {
+                                Some(o) => c.xtree_open = o,
+                                None => c.errors.push(format!("línea {}: xtree_abrir va como \"sistema\", \"panel\" o \"ultimo\"", e.line)),
+                            },
                             (other, _) => c.errors.push(format!("línea {}: opción desconocida «{other}»", e.line)),
                         }
                     }
@@ -368,7 +412,12 @@ pub fn template() -> String {
             # animaciones = true\n\
             # El árbol de carpetas despliega y muestra la carpeta del panel activo cuando cambia;\n\
             # false lo apaga.\n\
-            # arbol_sigue_panel = true\n";
+            # arbol_sigue_panel = true\n\
+            # xtree arranca coloreando el mapa por tipo de archivo (como la tecla T).\n\
+            # xtree_por_tipo = false\n\
+            # Qué analiza xtree al abrirse: \"sistema\" (el disco del sistema), \"panel\" (la\n\
+            # carpeta del panel activo) o \"ultimo\" (la última analizada).\n\
+            # xtree_abrir = \"panel\"\n";
     out
 }
 
@@ -476,6 +525,32 @@ mod tests {
         let bad = Config::parse("[opciones]\nanimaciones = \"no\"\nzoom = 2\n");
         assert_eq!(bad.animations, None);
         assert_eq!(bad.errors.len(), 2, "{:?}", bad.errors);
+    }
+
+    #[test]
+    fn xtree_options_parse() {
+        crate::sys::testing::install_fakes();
+        let c = Config::parse("");
+        assert!(!c.xtree_by_type);
+        assert_eq!(c.xtree_open, XtreeOpen::Pane, "sin la opción, la carpeta del panel (como hasta ahora)");
+        let c = Config::parse("[opciones]\nxtree_por_tipo = true\nxtree_abrir = \"ultimo\"\n");
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert!(c.xtree_by_type);
+        assert_eq!(c.xtree_open, XtreeOpen::Last);
+        assert_eq!(Config::parse("[opciones]\nxtree_abrir = \"sistema\"\n").xtree_open, XtreeOpen::System);
+        let bad = Config::parse("[opciones]\nxtree_abrir = \"otro\"\nxtree_por_tipo = 1\n");
+        assert_eq!(bad.xtree_open, XtreeOpen::Pane);
+        assert_eq!(bad.errors.len(), 2, "{:?}", bad.errors);
+        assert!(bad.errors[0].starts_with("línea 2: "), "{:?}", bad.errors);
+    }
+
+    #[test]
+    fn template_has_xtree_examples() {
+        crate::sys::testing::install_fakes();
+        let t = template();
+        assert!(t.contains("\n# xtree_por_tipo = false\n") && t.contains("\n# xtree_abrir = \"panel\"\n"));
+        let on = crate::toml_edit::set(&t, "opciones", "xtree_abrir", "\"ultimo\"");
+        assert!(on.contains("# xtree_abrir = \"panel\"\nxtree_abrir = \"ultimo\"\n"));
     }
 
     #[test]

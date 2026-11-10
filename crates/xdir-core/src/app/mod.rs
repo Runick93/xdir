@@ -410,6 +410,10 @@ pub struct App {
     config_pending: Vec<config::ConfigEdit>,
     /// La última escritura de `config.toml` falló: el error, para la pestaña Configuración.
     config_error: Option<String>,
+    /// Cómo terminó el último cambio del modo portable (para la sección Avanzado).
+    portable_msg: Option<String>,
+    /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`), de la sesión.
+    xtree_last: Option<PathBuf>,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -610,6 +614,8 @@ impl App {
             config_saving: false,
             config_pending: Vec::new(),
             config_error: None,
+            portable_msg: None,
+            xtree_last: session.xtree_last.clone(),
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

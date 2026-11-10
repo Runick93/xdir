@@ -400,6 +400,7 @@ impl App {
             preview_width: self.preview.width,
             info_sections: self.info.sections,
             settings_page: self.settings_session_page(),
+            xtree_last: self.xtree.as_ref().map(|x| x.root().to_path_buf()).or_else(|| self.xtree_last.clone()),
             // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
             columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),
@@ -505,6 +506,27 @@ impl App {
             "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
             "close" => self.close_palette(),
             "info" => self.info_test(a, nb),
+            // Configuración: `config_pagina <id>` va a esa página; `config_parte <id> <parte>` es
+            // un clic en esa parte de una fila (como la vio el último cuadro).
+            "config_pagina" => {
+                let page = Self::page_from_id(a);
+                if let Some(v) = self.settings_view_mut(self.active) {
+                    v.set_page(page);
+                }
+            }
+            "config_parte" => {
+                let id = crate::settings::options::OPTIONS
+                    .iter()
+                    .map(|o| o.id)
+                    .chain(["reglas_color", "error_config", "restablecer_atajos"])
+                    .chain(crate::commands::ALL.iter().map(|s| s.id))
+                    .find(|id| *id == a);
+                if let Some(r) = id.and_then(|id| self.part_rect(self.active, id, nb)) {
+                    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+                    self.on_left_down(x, y, false);
+                    self.on_left_up(x, y);
+                }
+            }
             "copiar" | "mover" | "ventana" => self.transfer_test(verb, &format!("{a} {b}")),
             _ => {}
         }

@@ -302,11 +302,9 @@ impl App {
             self.close_xtree();
         } else {
             if self.xtree.is_none() {
-                let root = match &self.panes[self.active].tab().location {
-                    Location::Path(p) => p.clone(),
-                    _ => crate::sys::disk_scan().default_root(),
-                };
-                self.xtree = Some(Xtree::new(self.hwnd, root));
+                let root = self.xtree_root();
+                self.xtree_last = Some(root.clone());
+                self.xtree = Some(Xtree::new(self.hwnd, root, self.config.xtree_by_type));
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.close_quick_look();
@@ -324,6 +322,21 @@ impl App {
         }
         self.hover = Hit::None;
         self.redraw();
+    }
+
+    /// Qué analiza xtree al abrirse (`[opciones] xtree_abrir`): la carpeta del panel (si no es una
+    /// carpeta, el disco del sistema), el disco del sistema o la última analizada (si ya no existe,
+    /// la del panel).
+    pub(super) fn xtree_root(&self) -> PathBuf {
+        let pane = || match &self.panes[self.active].tab().location {
+            Location::Path(p) => p.clone(),
+            _ => crate::sys::disk_scan().default_root(),
+        };
+        match self.config.xtree_open {
+            config::XtreeOpen::Pane => pane(),
+            config::XtreeOpen::System => crate::sys::disk_scan().default_root(),
+            config::XtreeOpen::Last => self.xtree_last.clone().filter(|p| p.is_dir()).unwrap_or_else(pane),
+        }
     }
 
     /// Cierra la vista de xtree (el escaneo sigue) y su menú de discos.

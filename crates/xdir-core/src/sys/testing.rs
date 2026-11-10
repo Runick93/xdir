@@ -79,6 +79,7 @@ thread_local! {
     static LOCAL_NOW: Cell<LocalNow> = const { Cell::new(FakeEnv::DEFAULT_NOW) };
     /// Estilo de los atajos que informa el falso (por hilo; ver `FakeEnv::set_key_style`).
     static KEY_STYLE: Cell<super::KeyStyle> = const { Cell::new(super::KeyStyle::Windows) };
+    static PORTABLE_SUPPORTED: Cell<bool> = const { Cell::new(true) };
 }
 
 /// `SystemEnv` falso: tema claro, sin animaciones, sin teclas apretadas salvo las de `hold_keys`, una carpeta de
@@ -97,6 +98,11 @@ impl FakeEnv {
     /// Desde ahora (en este hilo) `key_style` devuelve este estilo (por defecto, Windows).
     pub fn set_key_style(style: super::KeyStyle) {
         KEY_STYLE.with(|k| k.set(style));
+    }
+
+    /// Desde ahora (en este hilo) `portable_supported` devuelve esto (por defecto, sí).
+    pub fn set_portable_supported(on: bool) {
+        PORTABLE_SUPPORTED.with(|p| p.set(on));
     }
 
     /// Desde ahora (en este hilo) `local_now` devuelve esta fecha.
@@ -124,6 +130,10 @@ impl SystemEnv for FakeEnv {
 
     fn key_style(&self) -> super::KeyStyle {
         KEY_STYLE.with(Cell::get)
+    }
+
+    fn portable_supported(&self) -> bool {
+        PORTABLE_SUPPORTED.with(Cell::get)
     }
 
     /// En pruebas la configuración nunca es la real: cada hilo de prueba tiene su propia carpeta

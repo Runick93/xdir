@@ -179,6 +179,50 @@ impl App {
             }
             "vista_previa" => one(row(Control::Switch(self.preview.on))),
             "vista_previa_ancho" => one(row(Control::Slider { value: self.preview.width, min: ui::PREVIEW_MIN_W, max: ui::PREVIEW_MAX_W })),
+            "xtree_por_tipo" => one(row(Control::Switch(self.config.xtree_by_type))),
+            "xtree_abrir" => one(row(Control::Dropdown(self.config.xtree_open.title().to_string()))),
+            "xtree_teclas" => vec![
+                Item::Row(row(Control::Table(
+                    [
+                        ("T", "Colorear el mapa por tipo de archivo o por carpeta"),
+                        ("F5", "Volver a analizar"),
+                        ("⌫", "Subir a la carpeta de arriba"),
+                        ("A", "Analizar de nuevo con permisos de administrador"),
+                        ("Esc", "Cerrar xtree"),
+                    ]
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                ))),
+                Item::Action("ver_atajos", "Ver los atajos".to_string()),
+            ],
+            "abrir_config" => {
+                let path = config::file_path().map(|p| p.display().to_string()).unwrap_or_default();
+                one(Row { desc: path, ..row(Control::Buttons(vec![("Abrir config.toml".to_string(), true)])) })
+            }
+            "carpeta_config" => {
+                let dir = session::config_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "(no hay)".into());
+                let label = format!("Mostrar en {}", sys::env().file_manager_name());
+                one(Row { desc: dir, ..row(Control::Buttons(vec![(label, true)])) })
+            }
+            "archivos" => {
+                let mac = sys::env().key_style() == sys::KeyStyle::Mac;
+                let rows = session::files(mac).into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+                one(row(Control::Table(rows)))
+            }
+            "portable" => {
+                let on = session::portable_active();
+                let mut desc = if on { "Los archivos se guardan junto a xdir" } else { "Los archivos se guardan en la carpeta del usuario" }.to_string();
+                if let Some(m) = &self.portable_msg {
+                    desc = format!("{desc} · {m}");
+                }
+                let control = if sys::env().portable_supported() {
+                    Control::Buttons(vec![if on { ("Desactivar".to_string(), true) } else { ("Activar el modo portable".to_string(), true) }])
+                } else {
+                    Control::None
+                };
+                one(Row { desc, ..row(control) })
+            }
             _ => Vec::new(),
         }
     }
@@ -231,9 +275,12 @@ impl App {
             // configuración; su fecha evita que `reload_config` lo tome como un cambio de afuera.
             // Si hay más cambios esperando, la memoria ya los tiene: solo se toma la fecha.
             Ok(c) if self.config_pending.is_empty() => {
+                let animations_changed = c.animations != self.config.animations;
                 self.config = c;
                 self.config_error = None;
-                self.apply_animation_setting();
+                if animations_changed {
+                    self.apply_settings_animations();
+                }
             }
             Ok(c) => {
                 self.config.take_modified(&c);
@@ -256,10 +303,18 @@ impl App {
         self.redraw();
     }
 
+    /// Aplica la opción de animaciones. En las pruebas no: es un estado de todo el proceso y
+    /// otras pruebas que corren a la vez miran el scroll suave.
+    fn apply_settings_animations(&mut self) {
+        if !cfg!(test) {
+            self.apply_animation_setting();
+        }
+    }
+
     /// Animaciones: `None` sigue al sistema (se quita la línea de `config.toml`).
     pub(super) fn set_animations(&mut self, on: Option<bool>) {
         self.config.animations = on;
-        self.apply_animation_setting();
+        self.apply_settings_animations();
         let key = "animaciones".to_string();
         self.edit_config(vec![match on {
             None => ConfigEdit::Remove { section: "opciones", key },
@@ -326,6 +381,25 @@ impl App {
             ("arbol_sigue", _) => self.set_tree_follow_option(Some(!self.tree_follows())),
             ("arbol_config", _) => self.set_tree_follow_option(None),
             ("vista_previa", _) => self.run_command(Command::TogglePreview),
+            ("xtree_por_tipo", _) => {
+                let on = !self.config.xtree_by_type;
+                self.config.xtree_by_type = on;
+                let key = "xtree_por_tipo".to_string();
+                self.edit_config(vec![if on {
+                    ConfigEdit::Set { section: "opciones", key, value: "true".into() }
+                } else {
+                    ConfigEdit::Remove { section: "opciones", key }
+                }]);
+            }
+            ("xtree_abrir", _) => self.xtree_open_menu(pane),
+            ("ver_atajos", _) => self.open_settings(Some(PageId::Builtin(Section::Keys))),
+            ("abrir_config", _) => self.run_command(Command::OpenConfig),
+            ("carpeta_config", _) => {
+                if let Some(dir) = session::config_dir() {
+                    sys::shell().open_file(self.hwnd, &dir, None);
+                }
+            }
+            ("portable", _) => self.toggle_portable(),
             ("vista_previa_ancho", _) => {
                 self.host.capture_mouse();
                 self.drag = Drag::SettingsSlider(pane, id);
@@ -342,6 +416,59 @@ impl App {
         if id == "vista_previa_ancho" {
             self.preview.width = crate::settings::controls::slider_value(r, x, ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W);
         }
+        self.redraw();
+    }
+
+    /// Qué analiza xtree al abrirse.
+    pub(super) fn set_xtree_open(&mut self, open: config::XtreeOpen) {
+        self.config.xtree_open = open;
+        let key = "xtree_abrir".to_string();
+        self.edit_config(vec![match open {
+            config::XtreeOpen::Pane => ConfigEdit::Remove { section: "opciones", key },
+            o => ConfigEdit::Set { section: "opciones", key, value: crate::toml::quote(o.id()) },
+        }]);
+    }
+
+    /// El desplegable de «Disco que se analiza al abrir».
+    fn xtree_open_menu(&mut self, pane: usize) {
+        let current = self.config.xtree_open;
+        let entries: Vec<shell::Entry> = config::XtreeOpen::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, o)| shell::Entry::Item { id: i as u32 + 1, label: o.title().to_string(), enabled: true, checked: *o == current })
+            .collect();
+        let at = self.part_rect(pane, "xtree_abrir", 0).map_or(MenuPos::Cursor, |r| MenuPos::At(r.left, r.bottom + 2.0));
+        if let Some(i) = self.host.popup_menu(&entries, at, None, None).and_then(|c| (c as usize).checked_sub(1))
+            && let Some(o) = config::XtreeOpen::ALL.get(i)
+        {
+            self.set_xtree_open(*o);
+        }
+    }
+
+    /// Modo portable: activarlo (pregunta, copia los archivos y crea la marca, en un hilo) o
+    /// desactivarlo (borra la marca). Se aplica al volver a abrir xdir.
+    fn toggle_portable(&mut self) {
+        if !sys::env().portable_supported() {
+            return;
+        }
+        let (Some(exe), Some(from)) = (session::exe_dir(), session::config_dir()) else { return };
+        let on = !session::portable_active();
+        if on {
+            let question = format!("¿Activar el modo portable? Se copian los archivos de configuración a {} y se usan los de ahí.", exe.display());
+            if !self.host.ask_yes_no("Modo portable", &question) {
+                return;
+            }
+        }
+        self.spawn_task(move || tasks::TaskDone::Portable { on, result: if on { session::portable_files(&from, &exe) } else { session::portable_off(&exe) } });
+    }
+
+    /// Terminó de activar o desactivar el modo portable.
+    pub(super) fn on_portable_done(&mut self, on: bool, result: Result<(), String>) {
+        self.portable_msg = Some(match result {
+            Ok(()) if on => "Activado: se aplica al volver a abrir xdir".to_string(),
+            Ok(()) => "Desactivado: se aplica al volver a abrir xdir".to_string(),
+            Err(e) => e,
+        });
         self.redraw();
     }
 

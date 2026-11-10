@@ -116,6 +116,15 @@ const NAMES: &[(Command, &str)] = &[
 struct MacEnv;
 
 impl SystemEnv for MacEnv {
+    /// El ejecutable está dentro del `.app` firmado: el modo portable solo se informa.
+    fn portable_supported(&self) -> bool {
+        false
+    }
+
+    fn file_manager_name(&self) -> &'static str {
+        "el Finder"
+    }
+
     /// ¿El sistema está en modo oscuro?
     fn system_dark(&self) -> bool {
         let defaults = NSUserDefaults::standardUserDefaults();

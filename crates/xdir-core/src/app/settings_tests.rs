@@ -3,7 +3,7 @@
 use super::*;
 use crate::keys::keys::{VK_CONTROL, VK_SHIFT};
 use crate::commands;
-use crate::settings::{AccentChoice, Control, Item, PageId, Section, SettingsHit};
+use crate::settings::{AccentChoice, Control, Item, PageId, Row, Section, SettingsHit};
 use crate::sys::testing::{FakeEnv, FakeFileSystem, FakeHost, FakeShell};
 
 fn app() -> App {
@@ -321,8 +321,9 @@ fn animations_writes_and_removes_line() {
 fn config_writes_are_serialized() {
     fresh_config();
     let (mut a, _) = settings_app(Section::Appearance);
+    // Sin apagar las animaciones: es un estado del proceso y lo miran otras pruebas.
     a.set_animations(Some(true));
-    a.set_animations(Some(false));
+    a.set_animations(None);
     a.set_animations(Some(true));
     assert!(a.config_saving, "una escritura en camino");
     assert_eq!(a.config_pending.len(), 2, "las otras esperan");
@@ -338,19 +339,19 @@ fn config_writes_are_serialized() {
 fn edit_after_external_change_keeps_both() {
     fresh_config();
     let (mut a, _) = settings_app(Section::Appearance);
-    a.set_animations(Some(false));
+    a.set_animations(Some(true));
     wait_config(&mut a);
     // Cambio a mano entre dos cambios de la pestaña, con \r\n y sin salto final.
     let hand = config_text().replace('\n', "\r\n") + "\r\n[colores]\r\n\"*.log\" = \"#112233\" # mío";
     std::fs::write(config::file_path().unwrap(), &hand).unwrap();
-    a.set_animations(Some(true));
+    a.set_animations(None);
     wait_config(&mut a);
     let text = config_text();
     assert!(text.contains("[colores]\r\n\"*.log\" = \"#112233\" # mío"), "{text}");
-    assert!(text.contains("\r\nanimaciones = true\r\n"));
+    assert!(text.contains("\r\n# animaciones = true\r\n") && !text.contains("\nanimaciones = true"));
     assert!(!text.ends_with('\n'));
     assert!(a.config.colors.iter().any(|r| config::rule_label(r) == "*.log"));
-    assert_eq!(a.config.animations, Some(true));
+    assert_eq!(a.config.animations, None);
 }
 
 #[test]
@@ -374,7 +375,7 @@ fn config_write_error_shown() {
 fn own_write_not_reported_as_external() {
     fresh_config();
     let (mut a, _) = settings_app(Section::Appearance);
-    a.set_animations(Some(false));
+    a.set_animations(Some(true));
     wait_config(&mut a);
     a.notice = None;
     a.reload_config();
@@ -471,4 +472,97 @@ fn color_rules_listed_own_first() {
     assert!(rules[0].2, "propia");
     assert_eq!(rules[1].0, "*.pdf");
     assert!(!rules[1].2, "de fábrica");
+}
+
+// ---------- xtree y Avanzado ----------
+
+#[test]
+fn xtree_open_uses_option() {
+    use crate::config::XtreeOpen;
+    use crate::sys::testing::FakeDiskScan;
+    let mut a = app();
+    let dir = std::env::temp_dir();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(dir.clone()));
+    let Location::Path(here) = a.panes[0].tab().location.clone() else { panic!() };
+    assert_eq!(a.config.xtree_open, XtreeOpen::Pane);
+    assert_eq!(a.xtree_root(), here);
+    a.config.xtree_open = XtreeOpen::System;
+    assert_eq!(a.xtree_root(), FakeDiskScan::root());
+    a.config.xtree_open = XtreeOpen::Last;
+    let last = std::env::temp_dir().join(format!("xdir-xtree-ultimo-{}", std::process::id()));
+    std::fs::create_dir_all(&last).unwrap();
+    a.xtree_last = Some(last.clone());
+    assert_eq!(a.xtree_root(), last);
+    std::fs::remove_dir_all(&last).unwrap();
+    assert_eq!(a.xtree_root(), here, "si ya no existe, la del panel");
+    // Cada análisis nuevo anota su raíz (y va a la sesión).
+    a.config.xtree_open = XtreeOpen::Pane;
+    a.run_command(Command::Xtree);
+    assert_eq!(a.session().xtree_last, Some(here));
+}
+
+#[test]
+fn xtree_starts_by_type_from_config() {
+    let mut a = app();
+    a.config.xtree_by_type = true;
+    a.run_command(Command::Xtree);
+    assert!(a.xtree.as_ref().unwrap().by_type());
+    let mut b = app();
+    b.run_command(Command::Xtree);
+    assert!(!b.xtree.as_ref().unwrap().by_type());
+}
+
+#[test]
+fn xtree_switch_writes_option() {
+    fresh_config();
+    let (mut a, host) = settings_app(Section::Xtree);
+    click(&mut a, "xtree_por_tipo", 0);
+    assert!(a.config.xtree_by_type);
+    wait_config(&mut a);
+    assert!(config_text().contains("# xtree_por_tipo = false\nxtree_por_tipo = true\n"));
+    host.set_menu_choice(Some(3));
+    click(&mut a, "xtree_abrir", 0);
+    wait_config(&mut a);
+    assert_eq!(a.config.xtree_open, config::XtreeOpen::Last);
+    assert!(config_text().contains("\nxtree_abrir = \"ultimo\"\n"));
+    // «Ver los atajos» lleva a la página Atajos.
+    click(&mut a, "ver_atajos", 0);
+    assert_eq!(page(&a), PageId::Builtin(Section::Keys));
+}
+
+fn row_of(items: &[Item], id: &str) -> Row {
+    items.iter().find_map(|i| match i {
+        Item::Row(r) if r.id == id => Some(r.clone()),
+        _ => None,
+    }).unwrap_or_else(|| panic!("falta la fila {id}"))
+}
+
+#[test]
+fn advanced_lists_files_and_dir() {
+    let a = app();
+    let items = a.settings_items(Section::Advanced);
+    let Control::Table(files) = row_of(&items, "archivos").control else { panic!() };
+    let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["config.toml", "sesion.toml", "carpetas.toml", "favoritos.txt", "grupos.toml", "historial.txt", "red.toml"]);
+    let dir = row_of(&items, "carpeta_config");
+    assert_eq!(dir.desc, session::config_dir().unwrap().display().to_string());
+    assert_eq!(dir.control, Control::Buttons(vec![("Mostrar en el Explorador".to_string(), true)]));
+    FakeEnv::set_key_style(sys::KeyStyle::Mac);
+    let items = a.settings_items(Section::Advanced);
+    FakeEnv::set_key_style(sys::KeyStyle::Windows);
+    let Control::Table(files) = row_of(&items, "archivos").control else { panic!() };
+    assert_eq!(files.last().unwrap().0, "rutas.txt");
+}
+
+#[test]
+fn portable_info_only_when_unsupported() {
+    let a = app();
+    let r = row_of(&a.settings_items(Section::Advanced), "portable");
+    assert_eq!(r.desc, "Los archivos se guardan en la carpeta del usuario");
+    assert_eq!(r.control, Control::Buttons(vec![("Activar el modo portable".to_string(), true)]));
+    FakeEnv::set_portable_supported(false);
+    let r = row_of(&a.settings_items(Section::Advanced), "portable");
+    FakeEnv::set_portable_supported(true);
+    assert_eq!(r.control, Control::None, "solo se informa");
 }

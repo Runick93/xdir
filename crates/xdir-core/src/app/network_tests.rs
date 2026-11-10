@@ -1684,3 +1684,23 @@ fn map_finish_waits_for_free_letters() {
     wait_until(&mut a, |a| a.net.map.is_none());
     assert_eq!(FakeNetwork::connects_to("srv-r2m5").len(), 1);
 }
+
+/// Merge con zips: un archivo comprimido en una carpeta de red se abre como carpeta sin mirar el
+/// disco en el hilo de la ventana (la lista se lee en su hilo).
+#[test]
+fn archive_on_network_share_opens_without_ui_io() {
+    let root = remote_dir("zip-remote");
+    std::fs::write(root.join("fotos.zip"), b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0").unwrap();
+    FakeNetwork::mark_ui_thread();
+    let mut a = net_app();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(root.clone()));
+    wait_until(&mut a, |a| !a.panes[0].tab().loading);
+    let i = a.panes[0].tab().list.entries.iter().position(|e| e.name == "fotos.zip").unwrap();
+    assert!(a.panes[0].tab_mut().open(hwnd, &tx, i));
+    assert!(a.panes[0].tab().location.is_archive());
+    a.go_to_text(0, &root.join("fotos.zip").to_string_lossy());
+    assert!(a.panes[0].tab().location.is_archive(), "escrito en la barra también entra al comprimido");
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+}

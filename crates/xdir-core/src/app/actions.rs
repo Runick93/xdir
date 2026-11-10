@@ -363,7 +363,8 @@ impl App {
         match self.config.xtree_open {
             config::XtreeOpen::Pane => pane(),
             config::XtreeOpen::System => crate::sys::disk_scan().default_root(),
-            config::XtreeOpen::Last => self.xtree_last.clone().filter(|p| p.is_dir()).unwrap_or_else(pane),
+            // El último analizado, si sigue (sin mirar el disco si es de red).
+            config::XtreeOpen::Last => self.xtree_last.clone().filter(|p| crate::fs::probe_dir(p) != Some(false)).unwrap_or_else(pane),
         }
     }
 

@@ -335,10 +335,14 @@ impl App {
         }
         // Una ruta de red no se toca en este hilo: se navega y la carga (en su hilo) decide.
         let is_dir = fs::probe_dir(&path);
-        if is_dir != Some(false) {
+        let archive_name = path.file_name().is_some_and(|n| crate::archive_nav::is_navigable_archive(&n.to_string_lossy()));
+        if is_dir.is_none() && archive_name {
+            // Un comprimido en una carpeta de red: se entra sin mirarlo (lo lee la carga, en su hilo).
+            tab.navigate(hwnd, &tx, Location::Archive { file: path, nested: Vec::new(), inner: String::new() });
+        } else if is_dir != Some(false) {
             // Con las mayúsculas del disco, no como se escribió (se ve en pestañas e historial).
             tab.navigate(hwnd, &tx, Location::Path(fs::true_case_local(&path)));
-        } else if path.file_name().is_some_and(|n| crate::archive_nav::is_navigable_archive(&n.to_string_lossy())) && path.is_file() {
+        } else if archive_name && path.is_file() {
             // Un archivo comprimido escrito en la barra: se entra como carpeta.
             tab.navigate(hwnd, &tx, Location::Archive { file: path, nested: Vec::new(), inner: String::new() });
         } else if path.is_file() {

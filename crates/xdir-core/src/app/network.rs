@@ -46,6 +46,9 @@ pub(super) struct NetState {
     pub tree_pending: Option<u64>,
     /// Las máquinas que llegan de `browse` (mientras corre).
     pub host_rx: Option<std::sync::mpsc::Receiver<sys::HostEvent>>,
+    /// «Conectar unidad de red» y «Desconectar unidad de red» (Windows).
+    pub map: Option<crate::net::drives_dialog::MapDialog>,
+    pub unmap: Option<crate::net::drives_dialog::DisconnectDialog>,
     /// La sección «Red» de la configuración.
     pub page: super::network_page::PageState,
     /// Fecha de `red.toml` leída (para volver a leerlo si cambió).
@@ -143,6 +146,11 @@ impl App {
     pub(super) fn on_net_connections(&mut self, result: Result<Vec<NetConnection>, NetError>) {
         if let Ok(list) = result {
             self.net.connections = list;
+            // «Desconectar unidad de red» abierto: la lista al día, con lo marcado.
+            if let Some(u) = &mut self.net.unmap {
+                let marked: Vec<std::path::PathBuf> = u.rows.iter().filter(|(_, on)| *on).map(|(c, _)| c.local.clone()).collect();
+                u.rows = self.net.connections.iter().filter(|c| c.letter.is_some()).map(|c| (c.clone(), marked.contains(&c.local))).collect();
+            }
             self.net_changed();
         }
     }
@@ -187,6 +195,10 @@ impl App {
     /// Volvió la conexión del panel: abre la ruta en una pestaña nueva del panel y la suma a los
     /// recientes; si falló, el error queda en el panel. Un intento cancelado se descarta.
     fn connected_from_dialog(&mut self, pane: usize, generation: u64, addr: &Address, result: Result<PathBuf, NetError>) {
+        if self.net.map.as_ref().is_some_and(|m| m.busy == Some(generation)) {
+            self.mapped(pane, addr, result);
+            return;
+        }
         if self.net.tree_pending == Some(generation) {
             self.net.tree_pending = None;
             self.connected_from_tree(pane, addr, result);
@@ -380,6 +392,220 @@ impl App {
         self.redraw();
     }
 
+    // ---------- unidades de red (Windows) ----------
+
+    /// «Conectar unidad de red…»: letras libres (de Z hacia abajo; lo recordado lo lee Windows
+    /// del registro, sin ir a la red), la carpeta con el foco.
+    pub(super) fn open_map_dialog(&mut self) {
+        if self.net.map.is_none() {
+            self.net.map = Some(crate::net::drives_dialog::MapDialog::new(sys::network().free_drive_letters()));
+        }
+        self.sync_map_boxes();
+        if let Some(b) = self.net.map.as_ref().and_then(|m| m.folder) {
+            self.host.text_focus(b);
+        }
+        self.redraw();
+    }
+
+    pub(super) fn close_map_dialog(&mut self) {
+        if let Some(b) = self.net.map.take().and_then(|m| m.folder) {
+            self.host.text_destroy(b);
+            self.host.focus_main();
+        }
+        self.redraw();
+    }
+
+    pub(super) fn sync_map_boxes(&mut self) {
+        let (w, h) = self.client_dips();
+        let Some(m) = &self.net.map else { return };
+        let r = crate::net::drives_dialog::map_layout(w, h).folder;
+        if m.boxes_at == Some(r) {
+            return;
+        }
+        let old = m.folder.map(|b| (self.host.text_get(b), self.host.text_has_focus(b), b));
+        if let Some((_, _, b)) = old {
+            self.host.text_destroy(b);
+        }
+        let b = self.host.text_create(TextKind::Field, inner(r), old.as_ref().map_or("", |o| &o.0), &self.theme);
+        if old.as_ref().is_some_and(|o| o.1) {
+            b.inspect(|b| self.host.text_focus(*b));
+        }
+        if let Some(m) = &mut self.net.map {
+            m.folder = b;
+            m.boxes_at = Some(r);
+        }
+    }
+
+    /// Cambió el texto de una caja: `true` si era la carpeta del panel de unidades.
+    pub(super) fn map_text_changed(&mut self, id: isize) -> bool {
+        let style = self.net_style();
+        let Some(m) = &self.net.map else { return false };
+        let Some(b) = m.folder.filter(|b| b.0 as isize == id) else { return false };
+        let text = self.host.text_get(b);
+        let s = crate::net::drives_dialog::suggest(&text, &self.net.places, style);
+        if let Some(m) = &mut self.net.map {
+            m.suggestion = s;
+            m.error = None;
+        }
+        self.redraw();
+        true
+    }
+
+    fn set_map_folder(&mut self, text: &str) {
+        if let Some(b) = self.net.map.as_ref().and_then(|m| m.folder) {
+            self.host.text_set(b, text);
+            self.host.text_focus(b);
+        }
+        if let Some(m) = &mut self.net.map {
+            m.suggestion = None;
+            m.error = None;
+        }
+    }
+
+    /// «Finalizar»: conecta la carpeta con la letra en un hilo.
+    pub(super) fn map_finish(&mut self) {
+        let text = self.net.map.as_ref().and_then(|m| m.folder).map(|b| self.host.text_get(b)).unwrap_or_default();
+        let Some(m) = &mut self.net.map else { return };
+        if m.busy.is_some() {
+            return;
+        }
+        let addr = match Address::parse(&text) {
+            Ok(a) if a.scheme == "smb" && a.share.is_some() => a,
+            Ok(_) => {
+                m.error = Some("Escribí una carpeta como \\servidor\recurso".into());
+                self.redraw();
+                return;
+            }
+            Err(e) => {
+                m.error = Some(e);
+                self.redraw();
+                return;
+            }
+        };
+        let opts = ConnectOptions { drive_letter: Some(m.letter), reconnect: m.reconnect, other_credentials: m.other_credentials, credentials: None };
+        let pane = self.active;
+        let generation = self.spawn_connect(pane, None, addr, opts);
+        if let Some(m) = &mut self.net.map {
+            m.busy = Some(generation);
+            m.error = None;
+        }
+        self.redraw();
+    }
+
+    fn mapped(&mut self, pane: usize, addr: &Address, result: Result<PathBuf, NetError>) {
+        match result {
+            Ok(path) => {
+                self.close_map_dialog();
+                let pane = pane.min(self.panes.len().saturating_sub(1));
+                self.new_tab(pane, Location::Path(path), true);
+                self.net.places.add_recent(addr, unix_now());
+                self.save_net_places();
+                self.sys_refresh_after_map();
+            }
+            Err(e) => {
+                if let Some(m) = &mut self.net.map {
+                    m.busy = None;
+                    m.error = Some(e.message());
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// Una unidad nueva: «Este equipo» y el árbol la muestran.
+    fn sys_refresh_after_map(&mut self) {
+        self.drives_changed();
+    }
+
+    /// Clic con el panel de unidades abierto (`None`: afuera, lo cierra).
+    pub(super) fn map_click(&mut self, h: Option<crate::net::drives_dialog::DrivesHit>) {
+        use crate::net::drives_dialog::DrivesHit as H;
+        match h {
+            None | Some(H::Close) => self.close_map_dialog(),
+            Some(H::Cancel) => match &mut self.net.map {
+                Some(m) if m.busy.is_some() => m.busy = None,
+                _ => self.close_map_dialog(),
+            },
+            Some(H::Finish) => self.map_finish(),
+            Some(H::Letter) => {
+                let Some(m) = &self.net.map else { return };
+                let entries: Vec<crate::shell::Entry> = m
+                    .letters
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| crate::shell::Entry::Item { id: i as u32, label: format!("{l}:"), enabled: true, checked: *l == m.letter })
+                    .collect();
+                let (w, h) = self.client_dips();
+                let r = crate::net::drives_dialog::map_layout(w, h).letter;
+                if let Some(i) = self.host.popup_menu(&entries, crate::host::MenuPos::At(r.left, r.bottom + 2.0), None, None)
+                    && let Some(m) = &mut self.net.map
+                    && let Some(&l) = m.letters.get(i as usize)
+                {
+                    m.letter = l;
+                }
+            }
+            Some(H::Browse) => {
+                if let Some(p) = sys::shell().pick_folder(self.hwnd, "Carpeta de red") {
+                    self.set_map_folder(&p.to_string_lossy());
+                }
+            }
+            Some(H::Suggestion) => {
+                if let Some(s) = self.net.map.as_ref().and_then(|m| m.suggestion.clone()) {
+                    self.set_map_folder(&s);
+                }
+            }
+            Some(H::Reconnect) => {
+                if let Some(m) = &mut self.net.map {
+                    m.reconnect = !m.reconnect;
+                }
+            }
+            Some(H::OtherCredentials) => {
+                if let Some(m) = &mut self.net.map {
+                    m.other_credentials = !m.other_credentials;
+                }
+            }
+            Some(H::Folder) => {
+                if let Some(b) = self.net.map.as_ref().and_then(|m| m.folder) {
+                    self.host.text_focus(b);
+                }
+            }
+            Some(H::Row(_) | H::Panel) => {}
+        }
+        self.redraw();
+    }
+
+    /// «Desconectar unidad de red…»: las unidades de red (también las recordadas desconectadas).
+    pub(super) fn open_unmap_dialog(&mut self) {
+        let rows = self.net.connections.iter().filter(|c| c.letter.is_some()).map(|c| (c.clone(), false)).collect();
+        self.net.unmap = Some(crate::net::drives_dialog::DisconnectDialog { rows });
+        self.request_connections();
+        self.redraw();
+    }
+
+    pub(super) fn unmap_click(&mut self, h: Option<crate::net::drives_dialog::DrivesHit>) {
+        use crate::net::drives_dialog::DrivesHit as H;
+        match h {
+            None | Some(H::Close | H::Cancel) => self.net.unmap = None,
+            Some(H::Row(i)) => {
+                if let Some(r) = self.net.unmap.as_mut().and_then(|u| u.rows.get_mut(i)) {
+                    r.1 = !r.1;
+                }
+            }
+            Some(H::Finish) => {
+                let marked: Vec<PathBuf> = self.net.unmap.as_ref().map(|u| u.rows.iter().filter(|(_, on)| *on).map(|(c, _)| c.local.clone()).collect()).unwrap_or_default();
+                if !marked.is_empty() {
+                    self.net.unmap = None;
+                    // El flujo de ⏏ para cada una.
+                    for local in marked {
+                        self.disconnect(local);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.redraw();
+    }
+
     /// Cómo se muestran las direcciones: UNC solo donde el único esquema es `smb` (Windows).
     pub(super) fn net_style(&self) -> KeyStyle {
         let n = sys::network();
@@ -552,6 +778,10 @@ impl App {
 
     /// Enter o Esc en una caja del panel. `true` si el panel lo atendió.
     pub(super) fn connect_field_done(&mut self, commit: bool) -> bool {
+        if self.net.map.is_some() {
+            if commit { self.map_finish() } else { self.close_map_dialog() }
+            return true;
+        }
         let Some(d) = &self.net.dialog else { return false };
         if let Some(nb) = d.naming {
             let name = self.host.text_get(nb);

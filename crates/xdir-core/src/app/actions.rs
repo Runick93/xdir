@@ -31,6 +31,8 @@ impl App {
         match vk {
             VK_ESCAPE if self.about_open => self.about_open = false,
             VK_ESCAPE if self.net.dialog.is_some() => self.close_connect_dialog(),
+            VK_ESCAPE if self.net.map.is_some() => self.close_map_dialog(),
+            VK_ESCAPE if self.net.unmap.is_some() => self.net.unmap = None,
             VK_ESCAPE if self.picker_open => self.picker_open = false,
             VK_ESCAPE if self.term_menu.is_some() => self.term_menu = None,
             VK_ESCAPE if self.filter_menu_pane().is_some() => {
@@ -178,8 +180,8 @@ impl App {
                 }
             }
             Command::ConnectServer => self.open_connect_dialog(),
-            // Las unidades de red de Windows (N10).
-            Command::MapNetworkDrive | Command::DisconnectNetworkDrive => {}
+            Command::MapNetworkDrive => self.open_map_dialog(),
+            Command::DisconnectNetworkDrive => self.open_unmap_dialog(),
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.rename_command(active),
             Command::RenameMany => self.open_rename_many(active),

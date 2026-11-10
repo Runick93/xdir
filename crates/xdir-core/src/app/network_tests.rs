@@ -1087,3 +1087,133 @@ mod red_page {
         assert!(items.iter().all(|i| i.keywords.iter().any(|k| k == "servidor")));
     }
 }
+
+// ---------- N10: unidades de red (Windows) ----------
+
+mod drives {
+    use super::*;
+    use crate::net::drives_dialog::{DrivesHit, MAP_TITLE, NO_DRIVES};
+
+    fn map_app(host: Rc<FakeHost>) -> App {
+        FakeNetwork::set_free_letters(vec!['Z', 'Y']);
+        let mut a = net_app_with(host);
+        a.run_command(Command::MapNetworkDrive);
+        a
+    }
+
+    fn type_folder(a: &mut App, text: &str) {
+        let b = a.net.map.as_ref().and_then(|m| m.folder).unwrap();
+        crate::host::WindowHost::text_set(&*a.host, b, text);
+        a.on_text_changed(b.0 as isize);
+    }
+
+    #[test]
+    fn map_dialog_defaults() {
+        let host = FakeHost::new();
+        let mut a = map_app(host.clone());
+        let m = a.net.map.as_ref().unwrap();
+        assert_eq!((m.letter, m.reconnect, m.other_credentials), ('Z', true, false));
+        assert!(crate::host::WindowHost::text_has_focus(&*host, m.folder.unwrap()));
+        a.paint();
+        assert!(host.drawn_texts().iter().any(|t| t.1 == MAP_TITLE));
+        // La letra se elige con un menú.
+        host.set_menu_choice(Some(1));
+        a.map_click(Some(DrivesHit::Letter));
+        assert_eq!(a.net.map.as_ref().unwrap().letter, 'Y');
+        let labels: Vec<String> = host.menus().last().unwrap().iter().filter_map(|e| match e {
+            crate::shell::Entry::Item { label, .. } => Some(label.clone()),
+            _ => None,
+        }).collect();
+        assert_eq!(labels, ["Z:", "Y:"]);
+    }
+
+    #[test]
+    fn map_finish_connects_with_letter() {
+        let z = tmp_dir("n10-z");
+        FakeNetwork::set_connect("srv-n10", Ok(z.clone()));
+        let mut a = map_app(FakeHost::new());
+        type_folder(&mut a, r"\\srv-n10\compartido");
+        a.map_click(Some(DrivesHit::OtherCredentials));
+        let tabs = a.panes[a.active].tabs.len();
+        a.map_click(Some(DrivesHit::Finish));
+        wait_until(&mut a, |a| a.net.map.is_none());
+        let (url, opts) = FakeNetwork::connects_to("srv-n10").pop().unwrap();
+        assert_eq!(url, "smb://srv-n10/compartido");
+        assert_eq!((opts.drive_letter, opts.reconnect, opts.other_credentials), (Some('Z'), true, true));
+        assert_eq!(a.panes[a.active].tabs.len(), tabs + 1);
+        assert_eq!(a.panes[a.active].tab().location, Location::Path(z));
+        assert_eq!(a.net.places.recents[0].address, "smb://srv-n10/compartido");
+    }
+
+    #[test]
+    fn map_error_stays() {
+        FakeNetwork::set_connect("srv-n10e", Err(NetError::Other("La letra ya está en uso".into())));
+        let mut a = map_app(FakeHost::new());
+        type_folder(&mut a, r"\\srv-n10e\x");
+        a.on_field_done(true);
+        wait_until(&mut a, |a| a.net.map.as_ref().is_some_and(|m| m.busy.is_none() && m.error.is_some()));
+        assert_eq!(a.net.map.as_ref().unwrap().error.as_deref(), Some("La letra ya está en uso"));
+        // Sin recurso: lo dice sin conectar.
+        type_folder(&mut a, r"\\srv-n10e");
+        a.map_click(Some(DrivesHit::Finish));
+        assert!(a.net.map.as_ref().unwrap().error.as_deref().unwrap().contains("servidor"));
+        // Esc cierra.
+        a.on_field_done(false);
+        assert!(a.net.map.is_none());
+    }
+
+    #[test]
+    fn map_autocomplete_from_places() {
+        let mut a = map_app(FakeHost::new());
+        a.net.places.toggle_favorite(&Address::parse(r"\\srv-n10a\compartido").unwrap(), None);
+        type_folder(&mut a, r"\\srv-n10");
+        let s = a.net.map.as_ref().unwrap().suggestion.clone();
+        assert!(s.is_some(), "sugiere algo de favoritos o recientes");
+        a.map_click(Some(DrivesHit::Suggestion));
+        let b = a.net.map.as_ref().and_then(|m| m.folder).unwrap();
+        assert_eq!(crate::host::WindowHost::text_get(&*a.host, b), s.unwrap());
+    }
+
+    #[test]
+    fn disconnect_dialog_lists_and_runs_flow() {
+        let host = FakeHost::new();
+        let mut a = net_app_with(host.clone());
+        let mut z = conn("smb://srv-n10d/compartido", "/net-n10d/Z");
+        z.letter = Some('Z');
+        let mut x = conn("smb://srv-n10d/respaldo", "/net-n10d/X");
+        (x.letter, x.connected) = (Some('X'), false);
+        a.net.connections = vec![z, x, conn("smb://sin-letra-n10d/y", "/net-n10d/sin")];
+        a.run_command(Command::DisconnectNetworkDrive);
+        a.paint();
+        let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+        assert!(texts.iter().any(|t| t == "desconectada") && texts.iter().any(|t| t == "Z:"));
+        assert_eq!(a.net.unmap.as_ref().unwrap().rows.len(), 2);
+        a.unmap_click(Some(DrivesHit::Row(0)));
+        a.unmap_click(Some(DrivesHit::Finish));
+        assert!(a.net.unmap.is_none());
+        wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
+        assert_eq!(FakeNetwork::disconnects(Path::new("/net-n10d")), vec![(PathBuf::from("/net-n10d/Z"), false)]);
+    }
+
+    #[test]
+    fn disconnect_dialog_empty_text() {
+        let host = FakeHost::new();
+        let mut a = net_app_with(host.clone());
+        a.net.connections.clear();
+        a.run_command(Command::DisconnectNetworkDrive);
+        a.paint();
+        assert!(host.drawn_texts().iter().any(|t| t.1 == NO_DRIVES));
+    }
+
+    #[test]
+    fn drive_commands_in_computer_menu() {
+        // Ya cubierto en `computer_background_menu_has_connect` (los tres textos); acá, que
+        // elegirlos abre los paneles.
+        let mut a = net_app();
+        a.run_command(Command::MapNetworkDrive);
+        assert!(a.net.map.is_some());
+        a.close_map_dialog();
+        a.run_command(Command::DisconnectNetworkDrive);
+        assert!(a.net.unmap.is_some());
+    }
+}

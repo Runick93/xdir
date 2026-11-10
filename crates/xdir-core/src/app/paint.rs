@@ -118,6 +118,8 @@ impl App {
         // «Conectar a un servidor»: las cajas en su lugar y lo que se dibuja, antes de prestar
         // los campos por separado.
         self.sync_connect_boxes();
+        self.sync_map_boxes();
+        let drives_style = self.net_style();
         self.update_placeholders();
         self.sync_browse();
         let connect_extra = self.net.dialog.as_ref().map(|_| {
@@ -127,6 +129,7 @@ impl App {
             let fav = crate::net::Address::parse(&self.connect_field_text()).is_ok_and(|a| self.net.places.is_favorite(&a));
             (style, self.net_example(), dates, fav)
         });
+        let (map_view, unmap_view) = (self.net.map.as_ref(), self.net.unmap.as_ref());
         let connect_view = self.net.dialog.as_ref().zip(connect_extra).map(|(d, x)| (d, &self.net.places, x));
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
@@ -296,6 +299,16 @@ impl App {
                 };
                 let args = crate::net::dialog::DrawArgs { style: *style, example, recent_dates: dates, is_favorite: *fav, hover };
                 crate::net::dialog::draw(p, w, h, d, places, &args);
+            }
+            let drives_hover = match hover {
+                Hit::Drives(k) => Some(k),
+                _ => None,
+            };
+            if let Some(m) = map_view {
+                crate::net::drives_dialog::map_draw(p, w, h, m, drives_hover);
+            }
+            if let Some(u) = unmap_view {
+                crate::net::drives_dialog::unmap_draw(p, w, h, u, drives_style, drives_hover);
             }
             // El cartel de ayuda va último: encima de todo.
             if let Some((text, x, y)) = &tooltip {

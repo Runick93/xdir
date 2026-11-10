@@ -152,7 +152,7 @@ impl App {
     /// Cambió el texto de una caja de edición: el filtro y la paleta se actualizan con cada tecla,
     /// y la barra de dirección actualiza el desplegable de rutas.
     pub fn on_text_changed(&mut self, id: isize) {
-        if self.rename_text_changed(id) {
+        if self.rename_text_changed(id) || self.map_text_changed(id) {
             return;
         }
         if let Some((edit, pane)) = self.filter_edit {

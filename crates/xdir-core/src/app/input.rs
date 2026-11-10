@@ -15,7 +15,15 @@ impl App {
         if self.about_open {
             return about::at(w, h, x, y).map_or(Hit::None, Hit::About);
         }
-        // «Conectar a un servidor» también es modal.
+        // Los paneles de unidades de red y «Conectar a un servidor» también son modales.
+        if let Some(m) = &self.net.map {
+            let l = crate::net::drives_dialog::map_layout(w, h);
+            return crate::net::drives_dialog::map_hit(&l, m, x, y).map_or(Hit::None, Hit::Drives);
+        }
+        if let Some(u) = &self.net.unmap {
+            let l = crate::net::drives_dialog::unmap_layout(w, h, u);
+            return crate::net::drives_dialog::unmap_hit(&l, x, y).map_or(Hit::None, Hit::Drives);
+        }
         if let Some(d) = &self.net.dialog {
             let l = crate::net::dialog::layout(w, h, d, &self.net.places);
             return crate::net::dialog::hit(&l, x, y).map_or(Hit::None, Hit::Connect);
@@ -127,6 +135,14 @@ impl App {
                 _ => self.about_open = false,
             }
             self.redraw();
+            return;
+        }
+        if self.net.map.is_some() || self.net.unmap.is_some() {
+            let h = match hit {
+                Hit::Drives(h) => Some(h),
+                _ => None,
+            };
+            if self.net.map.is_some() { self.map_click(h) } else { self.unmap_click(h) }
             return;
         }
         if self.net.dialog.is_some() {
@@ -371,7 +387,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
+            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
         // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
         self.quick_look_follow_list();

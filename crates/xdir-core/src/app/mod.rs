@@ -173,6 +173,8 @@ enum Hit {
     About(about::AboutHit),
     /// «Conectar a un servidor» abierto: un control, o el panel sin nada debajo.
     Connect(crate::net::dialog::DialogHit),
+    /// Los paneles de unidades de red (Windows).
+    Drives(crate::net::drives_dialog::DrivesHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.

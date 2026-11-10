@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, POINTL, WPARAM};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IDataObject};
-use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl};
+use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl};
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
@@ -113,6 +113,13 @@ impl IDropTarget_Impl for DropTarget_Impl {
 
     fn Drop(&self, data: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let result = self.dispatch(DragKind::Drop, keys, pt, effect);
+        // Un movimiento de rutas de disco lo hace xdir (el motor de copia, en su hilo, después de
+        // volver de acá): al origen se le dice «copiar» para que no borre nada por su cuenta. Con
+        // «mover», un programa que no sea el Explorador puede borrar los originales mientras el
+        // motor todavía los está copiando («movimiento no optimizado»).
+        if !effect.is_null() {
+            unsafe { *effect = performed_effect(result, self.paths.borrow().is_some()) };
+        }
         if let (Some(h), Some(d)) = (self.helper.borrow().as_ref(), data.as_ref()) {
             unsafe {
                 let _ = h.Drop(d, &POINT { x: pt.x, y: pt.y }, result);
@@ -124,8 +131,28 @@ impl IDropTarget_Impl for DropTarget_Impl {
     }
 }
 
+/// Lo que `Drop` le contesta al origen: un «mover» que hace xdir mismo (hay rutas de disco) se
+/// informa como «copiar», así el origen nunca borra los originales.
+fn performed_effect(chosen: DROPEFFECT, own_move: bool) -> DROPEFFECT {
+    if own_move && chosen == DROPEFFECT_MOVE { DROPEFFECT_COPY } else { chosen }
+}
+
 pub fn register(hwnd: HWND) -> Result<IDropTarget> {
     let target: IDropTarget = DropTarget::new(hwnd).into();
     unsafe { windows::Win32::System::Ole::RegisterDragDrop(hwnd, &target)? };
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_moves_are_reported_as_copies() {
+        assert_eq!(performed_effect(DROPEFFECT_MOVE, true), DROPEFFECT_COPY);
+        assert_eq!(performed_effect(DROPEFFECT_COPY, true), DROPEFFECT_COPY);
+        assert_eq!(performed_effect(DROPEFFECT_NONE, true), DROPEFFECT_NONE);
+        // Sin rutas de disco (lo resuelve el Shell): lo que se eligió.
+        assert_eq!(performed_effect(DROPEFFECT_MOVE, false), DROPEFFECT_MOVE);
+    }
 }

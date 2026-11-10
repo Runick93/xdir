@@ -213,7 +213,8 @@ fn write_all(
     let mut seen = std::collections::HashSet::new();
     for (src, name) in items {
         let name = stored_name(name, src)?;
-        if !seen.insert(name.clone()) {
+        // Un archivo «a» y una carpeta «a/» también chocan al extraer.
+        if !seen.insert(name.trim_end_matches('/').to_string()) {
             let shown = name.trim_end_matches('/');
             return Err(other(&format!("Hay dos elementos con el mismo nombre: \"{shown}\""), src));
         }

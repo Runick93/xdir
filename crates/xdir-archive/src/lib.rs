@@ -380,6 +380,8 @@ fn physically_inside(root: &Path, parent: &Path, target: &str) -> bool {
                 cur.push(c);
                 match cur.canonicalize() {
                     Ok(real) => cur = real,
+                    // Un enlace que todavía no lleva a nada: podría llevar afuera mañana.
+                    Err(_) if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) => return false,
                     Err(_) => unresolved = true,
                 }
             }

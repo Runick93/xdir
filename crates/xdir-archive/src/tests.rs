@@ -880,3 +880,29 @@ fn escaping_links_say_not_allowed() {
     let (_, failed) = extract_keep_going(&z, &root);
     assert_eq!(failed, vec![("l".to_string(), xdir_core::sys::NOT_ALLOWED.to_string())]);
 }
+
+#[test]
+fn create_file_and_folder_with_the_same_name_is_an_error() {
+    let t = Tmp::new();
+    fs::create_dir_all(t.p("x")).unwrap();
+    fs::create_dir_all(t.p("y/a")).unwrap();
+    fs::write(t.p("x/a"), b"1").unwrap();
+    let z = t.p("dup.zip");
+    let items = [(t.p("x/a"), "a".to_string()), (t.p("y/a"), "a/".to_string())];
+    let err = svc().create(&z, &items, &mut |_| Flow::Continue).unwrap_err();
+    assert_eq!(err.message(), "Hay dos elementos con el mismo nombre: \"a\"");
+    assert!(!z.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn links_through_a_dangling_link_count_as_outside() {
+    let t = Tmp::new();
+    let root = t.p("in");
+    fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink("../outside/nope", root.join("b")).unwrap();
+    std::os::unix::fs::symlink("b/x", root.join("y")).unwrap();
+    std::os::unix::fs::symlink("todavia/no", root.join("z")).unwrap();
+    let out = Archives::links_outside(&svc(), &root, &[root.join("y"), root.join("z")]);
+    assert_eq!(out, vec![root.join("y")]);
+}

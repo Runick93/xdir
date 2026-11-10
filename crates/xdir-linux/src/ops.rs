@@ -32,7 +32,31 @@ impl FileOps for LinuxFileOps {
 }
 
 fn ok(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, errors: Vec<String>) -> Result<OpResult> {
+    let undo = with_ids(undo);
     Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")), ..Default::default() })
+}
+
+/// Lo creado se anota con su identidad (disco, número de archivo, como `ItemStat::file_id`):
+/// deshacer solo manda a la Papelera lo que en esa ruta sigue siendo lo mismo.
+fn with_ids(undo: Option<Undo>) -> Option<Undo> {
+    use std::os::unix::fs::MetadataExt;
+    match undo {
+        Some(Undo::Created(paths)) => {
+            let ids: Option<Vec<_>> = paths.iter().map(|p| std::fs::symlink_metadata(p).ok().map(|m| (p.clone(), (m.dev(), m.ino())))).collect();
+            Some(ids.map_or(Undo::Created(paths), Undo::CreatedIds))
+        }
+        other => other,
+    }
+}
+
+/// ¿En `p` sigue estando `id`? (`Ok(None)`: ya no hay nada ahí).
+fn same_item(p: &Path, id: (u64, u64)) -> std::result::Result<Option<bool>, String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(p) {
+        Ok(m) => Ok(Some((m.dev(), m.ino()) == id)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
 }
 
 /// Error de una ruta como lo ve el usuario.
@@ -291,6 +315,22 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
                 }
             }
         }
+        // Solo lo que en esa ruta sigue siendo lo que se creó (un enlace propio en el camino no
+        // molesta; otra cosa en su lugar no se toca).
+        Undo::CreatedIds(items) => {
+            for (p, id) in items {
+                match same_item(&p, id) {
+                    Ok(None) => {}
+                    Ok(Some(true)) => {
+                        if let Err(e) = to_trash(&p, trash) {
+                            errors.push(e);
+                        }
+                    }
+                    Ok(Some(false)) => errors.push(format!("{}: ahí ya no está lo que se había creado, no se manda a la Papelera", p.display())),
+                    Err(e) => errors.push(e),
+                }
+            }
+        }
         Undo::Moved(pairs) => {
             for (now, before) in pairs {
                 // Lo que apareció después en el lugar de antes no se pisa (`rename` lo reemplazaría).
@@ -487,7 +527,7 @@ mod tests {
         let r = run(Op::Copy { sources: vec![src.clone()], dest: dir.clone() }, None).unwrap();
         assert_eq!(r.error, None);
         assert_eq!(r.focus, Some(dir.join("informe copia.txt")));
-        assert_eq!(r.undo, Some(Undo::Created(vec![dir.join("informe copia.txt")])));
+        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![dir.join("informe copia.txt")])));
         run(Op::Copy { sources: vec![src.clone()], dest: dir.clone() }, None).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("informe copia 2.txt")).unwrap(), "datos");
         // En otra carpeta, el mismo nombre si está libre; si no, "copia". Las carpetas se copian enteras.
@@ -522,6 +562,34 @@ mod tests {
         let r = run(Op::Undo(Undo::Created(vec![dir.join("docs/importante.txt")])), Some(&trash)).unwrap();
         assert!(r.error.is_some());
         assert!(outside.join("importante.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ronda 3: lo creado se anota con su identidad. Deshacer lo manda a la Papelera aunque la
+    /// ruta pase por un enlace propio del usuario, y no toca lo que apareció en su lugar.
+    #[test]
+    fn undo_created_by_identity() {
+        let dir = tmp("deshacer-identidad");
+        let trash = dir.join("Trash");
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("enlace")).unwrap();
+        let a = run(Op::NewFile { parent: dir.join("enlace") }, Some(&trash)).unwrap();
+        let b = run(Op::NewFile { parent: dir.join("enlace") }, Some(&trash)).unwrap();
+        assert!(matches!(a.undo, Some(Undo::CreatedIds(_))), "{:?}", a.undo);
+        // El segundo se cambió por otro archivo con el mismo nombre (el original se apartó: los dos
+        // existen a la vez, como lo que ya estaba del otro lado de un enlace).
+        let second = b.focus.clone().unwrap();
+        std::fs::rename(&second, real.join("apartado")).unwrap();
+        std::fs::write(&second, "otro").unwrap();
+        let r = run(Op::Undo(b.undo.unwrap()), Some(&trash)).unwrap();
+        assert!(r.error.is_some());
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "otro");
+        // El primero sigue siendo el mismo: va a la Papelera aunque la ruta pase por el enlace.
+        let first = a.focus.clone().unwrap();
+        let r = run(Op::Undo(a.undo.unwrap()), Some(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        assert!(!first.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -562,7 +630,7 @@ mod tests {
         let r = run(Op::Restore { items }, Some(&trash)).unwrap();
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "nuevo");
-        assert_eq!(r.undo, Some(Undo::Created(vec![a.clone()])));
+        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![a.clone()])));
         assert_eq!(r.select, [a.clone()]);
         assert!(r.error.unwrap().contains("Ya existe «b.txt» en «"));
         assert!(trash.join("files").join(&nb).exists());
@@ -586,7 +654,7 @@ mod tests {
         let link = dir.join("Enlace a a.txt");
         assert_eq!(r.error, None);
         assert_eq!((r.focus.clone(), r.rename_after), (Some(link.clone()), true));
-        assert_eq!(r.undo, Some(Undo::Created(vec![link.clone()])));
+        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![link.clone()])));
         assert_eq!(crate::shell::link_target(&link), Some(a.clone()));
         assert_eq!(crate::shell::link_target(&a), None);
         let r = run(Op::Shortcuts { targets: vec![a.clone()] }, None).unwrap();
@@ -773,7 +841,7 @@ mod tests {
         assert_eq!(r.focus, Some(dir.join("Nueva carpeta")));
         assert!(r.rename_after);
         assert!(dir.join("Nueva carpeta").is_dir());
-        assert_eq!(r.undo, Some(Undo::Created(vec![dir.join("Nueva carpeta")])));
+        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![dir.join("Nueva carpeta")])));
         let r = run(Op::NewFolder { parent: dir.clone() }, None).unwrap();
         assert_eq!(r.focus, Some(dir.join("Nueva carpeta (2)")));
         let _ = std::fs::remove_dir_all(&dir);
@@ -797,9 +865,9 @@ mod tests {
         let first = dir.join("Nuevo documento de texto.txt");
         let second = dir.join("Nuevo documento de texto (2).txt");
         let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None, ..Default::default() });
+        assert_eq!(OpResult { undo: r.undo.clone().map(Undo::without_ids), ..r.clone() }, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None, ..Default::default() });
         let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None, ..Default::default() });
+        assert_eq!(OpResult { undo: r.undo.clone().map(Undo::without_ids), ..r.clone() }, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None, ..Default::default() });
         assert_eq!(std::fs::read(&first).unwrap(), b"");
         assert_eq!(std::fs::read(&second).unwrap(), b"");
         let _ = std::fs::remove_dir_all(&dir);

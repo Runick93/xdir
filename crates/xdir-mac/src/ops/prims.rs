@@ -918,7 +918,7 @@ mod tests {
         assert_eq!(std::fs::read(dst.join("Fotos/a.jpg")).unwrap(), big(3 << 20));
         assert_eq!(std::fs::read(dst.join("Fotos/sub/b.jpg")).unwrap(), b"bbb");
         assert_eq!(std::fs::read_link(dst.join("Fotos/enlace")).unwrap(), PathBuf::from("a.jpg"));
-        assert_eq!(out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![dst.join("Fotos")])])));
+        assert_eq!(out.result.undo.clone().map(Undo::without_ids), Some(Undo::Batch(vec![Undo::Created(vec![dst.join("Fotos")])])));
         // «Foto.JPG» sobre «b.jpg» con otras mayúsculas: en APFS (sin distinción) es conflicto.
         if !MacCopyPrims.volume(&dir).unwrap().case_insensitive {
             return;

@@ -144,7 +144,7 @@ impl App {
             }
             Command::Undo => match self.undo.pop() {
                 // Lo que armó el motor de copia lo deshace el motor (un paso, con su progreso).
-                Some(undo @ (Undo::Batch(_) | Undo::CreatedFolder(_) | Undo::Moved(_))) => {
+                Some(undo @ (Undo::Batch(_) | Undo::CreatedFolder(_) | Undo::Moved(_) | Undo::CreatedIds(_))) => {
                     self.start_transfer(crate::transfer::JobSpec::Undo(undo));
                 }
                 // Renombrar varios se deshace en el núcleo, con el mismo cruce seguro.

@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(std::fs::read(dst.join("Fotos/a.jpg")).unwrap(), big(3 << 20));
         assert_eq!(std::fs::read(dst.join("Fotos/sub/b.jpg")).unwrap(), b"bbb");
         assert_eq!(std::fs::read_link(dst.join("Fotos/enlace")).unwrap(), PathBuf::from("a.jpg"));
-        assert_eq!(out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![dst.join("Fotos")])])));
+        assert_eq!(out.result.undo.clone().map(Undo::without_ids), Some(Undo::Batch(vec![Undo::Created(vec![dst.join("Fotos")])])));
 
         // Conflicto «Conservar ambos» y pegar en la misma carpeta (nombres de Duplicar).
         let out = go(&prims, JobSpec::Copy { sources: vec![src.join("Fotos/sub/b.jpg")], dest: dst.join("Fotos/sub") }, &[Answer { choice: Choice::KeepBoth, all: false }], &Control::new(), &mut |_| {});

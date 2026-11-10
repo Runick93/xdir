@@ -49,7 +49,31 @@ fn confirm_delete(paths: &[PathBuf]) -> bool {
 }
 
 fn ok(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, errors: Vec<String>) -> Result<OpResult> {
+    let undo = with_ids(undo);
     Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")), ..Default::default() })
+}
+
+/// Lo creado se anota con su identidad (disco, número de archivo, como `ItemStat::file_id`):
+/// deshacer solo manda a la Papelera lo que en esa ruta sigue siendo lo mismo.
+fn with_ids(undo: Option<Undo>) -> Option<Undo> {
+    use std::os::unix::fs::MetadataExt;
+    match undo {
+        Some(Undo::Created(paths)) => {
+            let ids: Option<Vec<_>> = paths.iter().map(|p| std::fs::symlink_metadata(p).ok().map(|m| (p.clone(), (m.dev(), m.ino())))).collect();
+            Some(ids.map_or(Undo::Created(paths), Undo::CreatedIds))
+        }
+        other => other,
+    }
+}
+
+/// ¿En `p` sigue estando `id`? (`Ok(None)`: ya no hay nada ahí).
+fn same_item(p: &Path, id: (u64, u64)) -> std::result::Result<Option<bool>, String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(p) {
+        Ok(m) => Ok(Some((m.dev(), m.ino()) == id)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
 }
 
 /// Lo que las operaciones usan de la Papelera: los tests ponen las suyas (nunca la real).
@@ -217,6 +241,22 @@ fn undo_op(undo: Undo, hooks: &Hooks) -> Result<OpResult> {
                     errors.push(e);
                 } else if let Err(e) = trash(&p) {
                     errors.push(e);
+                }
+            }
+        }
+        // Solo lo que en esa ruta sigue siendo lo que se creó (un enlace propio en el camino no
+        // molesta; otra cosa en su lugar no se toca).
+        Undo::CreatedIds(items) => {
+            for (p, id) in items {
+                match same_item(&p, id) {
+                    Ok(None) => {}
+                    Ok(Some(true)) => {
+                        if let Err(e) = trash(&p) {
+                            errors.push(e);
+                        }
+                    }
+                    Ok(Some(false)) => errors.push(format!("{}: ahí ya no está lo que se había creado, no se manda a la Papelera", p.display())),
+                    Err(e) => errors.push(e),
                 }
             }
         }
@@ -463,6 +503,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ronda 3: lo creado se anota con su identidad. Deshacer lo manda a la Papelera aunque la
+    /// ruta pase por un enlace propio del usuario, y no toca lo que apareció en su lugar.
+    #[test]
+    fn undo_created_by_identity() {
+        let dir = tmp("deshacer-identidad");
+        let trash = fake_trash(&dir);
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("enlace")).unwrap();
+        let a = run_with(Op::NewFile { parent: dir.join("enlace") }, &hooks(&trash)).unwrap();
+        let b = run_with(Op::NewFile { parent: dir.join("enlace") }, &hooks(&trash)).unwrap();
+        assert!(matches!(a.undo, Some(Undo::CreatedIds(_))), "{:?}", a.undo);
+        // El segundo se cambió por otro archivo con el mismo nombre (el original se apartó: los dos
+        // existen a la vez, como lo que ya estaba del otro lado de un enlace).
+        let second = b.focus.clone().unwrap();
+        std::fs::rename(&second, real.join("apartado")).unwrap();
+        std::fs::write(&second, "otro").unwrap();
+        let r = run_with(Op::Undo(b.undo.unwrap()), &hooks(&trash)).unwrap();
+        assert!(r.error.is_some());
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "otro");
+        // El primero sigue siendo el mismo: va a la Papelera aunque la ruta pase por el enlace.
+        let first = a.focus.clone().unwrap();
+        let r = run_with(Op::Undo(a.undo.unwrap()), &hooks(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        assert!(!first.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn undo_created_folder_keeps_non_empty() {
         let dir = tmp("carpeta-con-llena");
@@ -510,7 +578,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&a_to).unwrap(), "a.txt");
         assert_eq!(std::fs::read_to_string(&b_to).unwrap(), "nuevo");
         assert!(bin.join("b.txt").exists() && bin.join("c.txt").exists());
-        assert_eq!(r.undo, Some(Undo::Created(vec![a_to.clone()])));
+        assert_eq!(r.undo.clone().map(Undo::without_ids), Some(Undo::Created(vec![a_to.clone()])));
         assert_eq!(r.select, std::slice::from_ref(&a_to));
         let e = r.error.unwrap();
         assert!(e.contains("Ya existe «b.txt» en «"), "{e}");
@@ -687,9 +755,9 @@ mod tests {
         let first = dir.join("Nuevo documento de texto.txt");
         let second = dir.join("Nuevo documento de texto (2).txt");
         let r = run(Op::NewFile { parent: dir.clone() }).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None, ..Default::default() });
+        assert_eq!(OpResult { undo: r.undo.clone().map(Undo::without_ids), ..r.clone() }, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None, ..Default::default() });
         let r = run(Op::NewFile { parent: dir.clone() }).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None, ..Default::default() });
+        assert_eq!(OpResult { undo: r.undo.clone().map(Undo::without_ids), ..r.clone() }, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None, ..Default::default() });
         assert_eq!(std::fs::read(&first).unwrap(), b"");
         assert_eq!(std::fs::read(&second).unwrap(), b"");
         let _ = std::fs::remove_dir_all(&dir);

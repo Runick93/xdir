@@ -723,7 +723,7 @@ mod tests {
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         assert_eq!(std::fs::read(dst.join("Fotos").join("a.jpg")).unwrap(), big(3 << 20));
         assert_eq!(std::fs::read(dst.join("Fotos").join("sub").join("b.jpg")).unwrap(), b"bbb");
-        assert_eq!(out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![dst.join("Fotos")])])));
+        assert_eq!(out.result.undo.clone().map(Undo::without_ids), Some(Undo::Batch(vec![Undo::Created(vec![dst.join("Fotos")])])));
         // «B.JPG» sobre «b.jpg»: en NTFS es conflicto.
         std::fs::write(src.join("B.JPG"), b"otra").unwrap();
         let sub = dst.join("Fotos").join("sub");

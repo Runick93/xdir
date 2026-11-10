@@ -32,6 +32,8 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 const INTO_ITSELF: &str = "No se puede copiar una carpeta dentro de sí misma";
 const NOT_SAME: &str = "La copia no quedó igual";
 const NO_ORIGIN: &str = "No se sabe de dónde vino";
+/// Deshacer «lo creado»: en esa ruta ahora hay otra cosa (no se toca).
+const NOT_THE_SAME: &str = "Ahí ya no está lo que se había creado: no se manda a la Papelera";
 const REPLACE_PARENT: &str = "No se puede reemplazar una carpeta que contiene lo que se copia";
 const CHANGED: &str = "El original cambió durante la copia";
 
@@ -101,6 +103,7 @@ fn count_steps(u: &Undo) -> u64 {
     match u {
         Undo::Batch(v) => v.iter().map(count_steps).sum(),
         Undo::Created(v) => v.len() as u64,
+        Undo::CreatedIds(v) => v.len() as u64,
         Undo::Moved(v) => v.len() as u64,
         Undo::Recycled(v) => v.len() as u64,
         Undo::Renames(v) => v.len() as u64,
@@ -212,6 +215,7 @@ fn remap_undo(u: &mut Undo, from: &Path, to: &Path) {
     match u {
         Undo::Batch(v) => v.iter_mut().for_each(|u| remap_undo(u, from, to)),
         Undo::Created(v) => v.iter_mut().for_each(fix),
+        Undo::CreatedIds(v) => v.iter_mut().for_each(|(p, _)| fix(p)),
         Undo::Moved(v) => v.iter_mut().for_each(|(now, _)| fix(now)),
         Undo::Recycled(v) => v.iter_mut().for_each(|(_, p)| fix(p)),
         Undo::CreatedFolder(p) => fix(p),
@@ -380,8 +384,20 @@ impl<'a> Job<'a> {
             Undo::Moved(pairs) if self.moves_as_created => Undo::Created(pairs.into_iter().map(|(now, _)| now).collect()),
             other => other,
         };
+        // Lo creado se recuerda con su identidad (si el disco la da): deshacer solo toca eso.
+        let step = match step {
+            Undo::Created(paths) => {
+                let ids: Option<Vec<_>> = paths.iter().map(|p| self.prims.stat(p).ok().and_then(|s| s.file_id).map(|id| (p.clone(), id))).collect();
+                match ids {
+                    Some(ids) => Undo::CreatedIds(ids),
+                    None => Undo::Created(paths),
+                }
+            }
+            other => other,
+        };
         match (self.undo.last_mut(), step) {
             (Some(Undo::Created(a)), Undo::Created(b)) => a.extend(b),
+            (Some(Undo::CreatedIds(a)), Undo::CreatedIds(b)) => a.extend(b),
             (Some(Undo::Moved(a)), Undo::Moved(b)) => a.extend(b),
             (Some(Undo::Recycled(a)), Undo::Recycled(b)) => a.extend(b),
             (_, step) => self.undo.push(step),
@@ -1435,6 +1451,24 @@ impl<'a> Job<'a> {
                         && let Err(e) = self.prims.trash(&p)
                     {
                         self.fail(&p, &p, e);
+                    }
+                    self.items_done += 1;
+                    self.progress(0, false);
+                }
+            }
+            Undo::CreatedIds(items) => {
+                for (p, id) in items {
+                    self.current = name_of(&p);
+                    match self.prims.stat(&p) {
+                        // Ya no está: nada que hacer.
+                        Err(e) if e.kind == ErrKind::NotFound => {}
+                        Ok(s) if s.file_id == Some(id) => {
+                            if let Err(e) = self.prims.trash(&p) {
+                                self.fail(&p, &p, e);
+                            }
+                        }
+                        Ok(_) => self.fail_msg(&p, &p, NOT_THE_SAME, false),
+                        Err(e) => self.fail(&p, &p, e),
                     }
                     self.items_done += 1;
                     self.progress(0, false);

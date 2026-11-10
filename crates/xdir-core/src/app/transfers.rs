@@ -125,6 +125,7 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
         match u {
             Undo::Batch(v) => v.iter().for_each(|u| undo_paths(u, out)),
             Undo::Created(v) => out.extend(v.iter().cloned()),
+            Undo::CreatedIds(v) => out.extend(v.iter().map(|(p, _)| p.clone())),
             Undo::Moved(v) => v.iter().for_each(|(a, b)| out.extend([a.clone(), b.clone()])),
             Undo::Recycled(v) => out.extend(v.iter().map(|(_, p)| p.clone())),
             Undo::Rename { path, .. } => out.push(path.clone()),

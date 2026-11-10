@@ -80,7 +80,7 @@ fn copy_tree_and_undo() {
     // El origen sigue.
     assert!(fake.exists(&p("/c1/src/Fotos/sub/b.jpg")));
     let tops = vec![p("/c1/dst/Fotos"), p("/c1/dst/n.txt")];
-    assert_eq!(r.out.result.undo, Some(Undo::Batch(vec![Undo::Created(tops.clone())])));
+    assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(tops.clone())])));
     assert_eq!(r.out.result.select, tops);
     assert_eq!(r.out.result.focus, Some(p("/c1/dst/n.txt")));
     assert!(r.out.errors.is_empty() && !r.out.cancelled && r.out.stopped.is_none());
@@ -250,7 +250,7 @@ fn conflict_replace_trashes_old() {
     no_tmp_left(&fake, &p("/k/dst"));
     let undo = r.out.result.undo.clone().unwrap();
     assert_eq!(
-        undo,
+        plain(Some(undo.clone())).unwrap(),
         Undo::Batch(vec![Undo::Recycled(vec![(trashed[0].0.clone(), p("/k/dst/informe.pdf"))]), Undo::Created(vec![p("/k/dst/informe.pdf")])])
     );
     // Deshacer devuelve el viejo.
@@ -269,7 +269,7 @@ fn conflict_replace_without_trash_deletes() {
     assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"nuevo");
     assert!(fake.trashed().is_empty());
     no_tmp_left(&fake, &p("/k/dst"));
-    assert_eq!(r.out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![p("/k/dst/informe.pdf")])])));
+    assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/k/dst/informe.pdf")])])));
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn replace_folder_trashes_whole_existing() {
     assert_eq!(fake.trashed().len(), 1);
     // Un paso de deshacer: primero se va lo nuevo y después vuelve la carpeta vieja entera.
     let undo = r.out.result.undo.clone().unwrap();
-    assert!(matches!(&undo, Undo::Batch(steps) if matches!(steps[..], [Undo::Recycled(_), Undo::Created(_)])), "{undo:?}");
+    assert!(matches!(&undo, Undo::Batch(steps) if matches!(steps[..], [Undo::Recycled(_), Undo::Created(_) | Undo::CreatedIds(_)])), "{undo:?}");
     go(&fake, JobSpec::Undo(undo), &[]);
     assert_eq!(fake.list_all(&p("/kd/dst")), vec![p("/kd/dst/D"), p("/kd/dst/D/viejo.txt")]);
 }
@@ -359,7 +359,7 @@ fn conflict_merge_folders() {
     assert_eq!(fake.contents(&p("/g/d/D/a.txt")).unwrap(), b"a nuevo");
     assert_eq!(fake.contents(&p("/g/d/D/b.txt")).unwrap(), b"b");
     assert_eq!(fake.contents(&p("/g/d/D/c.txt")).unwrap(), b"c");
-    let Some(Undo::Batch(steps)) = r.out.result.undo else { panic!() };
+    let Some(Undo::Batch(steps)) = plain(r.out.result.undo) else { panic!() };
     assert!(matches!(&steps[0], Undo::Recycled(v) if v[0].1 == p("/g/d/D/a.txt")));
     assert_eq!(steps[1], Undo::Created(vec![p("/g/d/D/a.txt"), p("/g/d/D/b.txt")]));
     assert_eq!(r.out.result.select, vec![p("/g/d/D")]);
@@ -478,7 +478,7 @@ fn retry_only_failed_pairs() {
     assert!(again.out.errors.is_empty());
     assert!(fake.exists(&p("/rt/d/2.txt")));
     assert_eq!((fake.reads(&files[0]), fake.reads(&files[2])), (1, 1));
-    assert_eq!(again.out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![p("/rt/d/2.txt")])])));
+    assert_eq!(plain(again.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/rt/d/2.txt")])])));
 }
 
 #[test]
@@ -489,7 +489,7 @@ fn disk_full_stops() {
     let r = go(&fake, JobSpec::Copy { sources: files, dest: p("/df/d") }, &[]);
     assert_eq!(r.out.stopped.as_deref(), Some("El disco está lleno"));
     assert_eq!(fake.list_all(&p("/df/d")), vec![p("/df/d/1.txt")]);
-    assert_eq!(r.out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![p("/df/d/1.txt")])])));
+    assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/df/d/1.txt")])])));
 }
 
 #[test]
@@ -566,7 +566,7 @@ fn pause_and_cancel_midfile() {
     assert!(r.out.cancelled);
     assert!(fake.exists(&p("/pc/d/1.txt")));
     assert!(!fake.exists(&p("/pc/d/2.bin")), "quedó el archivo a medio copiar");
-    assert_eq!(r.out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![p("/pc/d/1.txt")])])));
+    assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/pc/d/1.txt")])])));
 }
 
 #[test]
@@ -639,7 +639,7 @@ fn restore_job_uses_trash_origin() {
     assert_eq!(r.messages(), vec!["No se sabe de dónde vino".to_string()]);
     assert!(fake.exists(&p("/r/.Trash/perdido.txt")));
     // Un paso de deshacer: vuelve a la Papelera.
-    assert_eq!(r.out.result.undo, Some(Undo::Batch(vec![Undo::Created(vec![p("/r/Docs/sub/x.txt")])])));
+    assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/r/Docs/sub/x.txt")])])));
     assert_eq!(r.out.result.select, vec![p("/r/Docs/sub/x.txt")]);
 }
 
@@ -1352,4 +1352,40 @@ fn undo_created_refuses_a_symlinked_parent() {
     assert!(!r.out.errors[0].retry);
     assert!(fake.exists(&p("/uc/afuera/importante.txt")));
     assert!(!fake.exists(&p("/uc/otra/copia.txt")), "lo demás sí");
+}
+
+/// Lo creado sin las identidades (para comparar con lo esperado).
+fn plain(u: Option<Undo>) -> Option<Undo> {
+    fn strip(u: Undo) -> Undo {
+        match u {
+            Undo::CreatedIds(v) => Undo::Created(v.into_iter().map(|(p, _)| p).collect()),
+            Undo::Batch(v) => Undo::Batch(v.into_iter().map(strip).collect()),
+            other => other,
+        }
+    }
+    u.map(strip)
+}
+
+#[test]
+fn undo_created_trashes_only_the_same_item() {
+    // Ronda 3: lo creado se recuerda con su identidad. Deshacer lo manda a la Papelera solo si en
+    // esa ruta sigue estando lo mismo: un enlace propio del usuario en el camino no molesta, y lo
+    // que apareció en su lugar (otra cosa) no se toca.
+    let fake = FakeCopyPrims::new();
+    fake.add_dir(&p("/ui/real"));
+    fake.add_alias(&p("/ui/enlace"), &p("/ui/real"));
+    fake.add_file(&p("/ui/s/a.txt"), b"a".to_vec());
+    fake.add_file(&p("/ui/s/b.txt"), b"b".to_vec());
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/ui/s/a.txt"), p("/ui/s/b.txt")], dest: p("/ui/enlace") }, &[]);
+    let undo = r.out.result.undo.clone().unwrap();
+    assert!(matches!(&undo, Undo::Batch(v) if matches!(v[..], [Undo::CreatedIds(_)])), "{undo:?}");
+    assert_eq!(plain(Some(undo.clone())), Some(Undo::Batch(vec![Undo::Created(vec![p("/ui/enlace/a.txt"), p("/ui/enlace/b.txt")])])));
+    // b.txt fue reemplazado por otra cosa con el mismo nombre.
+    crate::sys::CopyPrims::remove(&fake, &p("/ui/enlace/b.txt")).unwrap();
+    fake.add_file(&p("/ui/real/b.txt"), b"otro".to_vec());
+    let u = go(&fake, JobSpec::Undo(undo), &[]);
+    assert_eq!(u.out.errors.len(), 1, "{:?}", u.messages());
+    assert!(!u.out.errors[0].retry);
+    assert!(!fake.exists(&p("/ui/real/a.txt")), "lo mismo que se creó: a la Papelera");
+    assert_eq!(fake.contents(&p("/ui/real/b.txt")).unwrap(), b"otro");
 }

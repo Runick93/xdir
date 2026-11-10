@@ -159,6 +159,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Moved(v) => !v.is_empty(),
         Undo::Recycled(v) => !v.is_empty(),
         Undo::Rename { .. } | Undo::Batch(_) | Undo::CreatedFolder(_) => true,
+        Undo::CreatedIds(v) => !v.is_empty(),
         Undo::Renames(v) => !v.is_empty(),
     });
     Ok(OpResult { undo, focus, rename_after, error: None, select })
@@ -266,6 +267,8 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
             }
             // Los resuelve `undo_any` antes de llegar acá.
             Undo::Batch(_) | Undo::CreatedFolder(_) => return Ok(OpResult::default()),
+            // Lo arma y lo deshace el motor de copia (compara la identidad antes de tocar).
+            Undo::CreatedIds(_) => return Ok(OpResult { error: Some("lo deshace el motor de copia".into()), ..Default::default() }),
         }
         fo.PerformOperations()?;
     }

@@ -467,3 +467,55 @@ fn extract_here_unreadable_arrival_is_reported_not_deleted() {
     assert!(disk.exists(&p("/w2/in/d/z")));
     assert!(!r.messages().contains(&NOT_ALLOWED.to_string()));
 }
+
+/// Copiar desde adentro de un archivo comprimido: solo lo elegido (un archivo de una carpeta y
+/// una carpeta entera) llega al destino, con los conflictos de siempre y sin temporales.
+#[test]
+fn extract_entries_copies_selected_with_conflicts() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    let root = p("/xe");
+    let zip = root.join("a.zip");
+    let dest = root.join("destino");
+    arch.add_archive(&zip, &[("fotos/a.jpg", b"a"), ("fotos/b.jpg", b"b"), ("docs/", b""), ("docs/x.txt", b"x"), ("docs/sub/y.txt", b"y"), ("otro.txt", b"o")], 5);
+    disk.add_dir(&dest);
+    disk.add_file(&dest.join("a.jpg"), b"viejo".to_vec());
+    let keep = Answer { choice: Choice::KeepBoth, all: false };
+    let spec = JobSpec::ExtractEntries { archive: zip.clone(), entries: vec!["fotos/a.jpg".into(), "docs".into()], dest: dest.clone() };
+    assert_eq!(title(&spec, 2), "Copiando 2 elementos de «a.zip» a «destino»");
+    let r = go(&disk, &arch, spec, &[keep], true, &mut |_, _| {});
+    assert_eq!(r.conflicts().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["a.jpg"]);
+    assert_eq!(disk.contents(&dest.join("a.jpg")).unwrap(), b"viejo");
+    assert_eq!(disk.contents(&dest.join("a 2.jpg")).unwrap(), b"a");
+    assert_eq!(disk.contents(&dest.join("docs").join("sub").join("y.txt")).unwrap(), b"y");
+    assert!(disk.contents(&dest.join("b.jpg")).is_none());
+    assert!(disk.contents(&dest.join("otro.txt")).is_none());
+    assert!(r.out.errors.is_empty() && r.out.stopped.is_none(), "{:?}", r.messages());
+    no_tmp_left(&disk, &dest);
+    let one = JobSpec::ExtractEntries { archive: zip, entries: vec!["fotos/b.jpg".into()], dest: dest.clone() };
+    assert_eq!(title(&one, 1), "Copiando «b.jpg» a «destino»");
+}
+
+/// Extraer (todo o solo lo elegido) marca lo extraído con el origen del archivo antes de llevarlo
+/// a su lugar.
+#[test]
+fn extraction_propagates_origin() {
+    let disk = FakeCopyPrims::new();
+    let arch = FakeArchives::new(&disk);
+    let root = p("/xo");
+    let zip = root.join("bajado.zip");
+    arch.add_archive(&zip, &[("d/", b""), ("d/a.exe", b"a"), ("b.js", b"b")], 5);
+    simple(&disk, &arch, JobSpec::Extract { archive: zip.clone(), into_folder: true });
+    let names = |v: Vec<PathBuf>| -> Vec<String> {
+        let mut n: Vec<String> = v.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(arch.propagated(&zip)), ["a.exe", "b.js", "d"]);
+    let dest = root.join("destino");
+    disk.add_dir(&dest);
+    let arch2 = FakeArchives::new(&disk);
+    arch2.add_archive(&zip, &[("d/", b""), ("d/a.exe", b"a"), ("b.js", b"b")], 5);
+    simple(&disk, &arch2, JobSpec::ExtractEntries { archive: zip.clone(), entries: vec!["d".into()], dest });
+    assert_eq!(names(arch2.propagated(&zip)), ["a.exe", "d"]);
+}

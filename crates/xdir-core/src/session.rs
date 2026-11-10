@@ -16,6 +16,8 @@ const COMPUTER: &str = "Este equipo";
 const SETTINGS: &str = "xdir:configuracion";
 /// Carpetas virtuales: "shell:<nombre de análisis>|<nombre visible>".
 const SHELL_PREFIX: &str = "shell:";
+/// Dentro de un archivo comprimido (ver `location_str`).
+const ARCHIVE_PREFIX: &str = "comprimido:";
 
 /// Pestañas de un panel y cuál está activa.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -112,12 +114,30 @@ pub fn location_str(l: &Location) -> String {
         Location::Settings => SETTINGS.to_string(),
         Location::Path(p) => p.to_string_lossy().into_owned(),
         Location::Shell { parsing, name, .. } => format!("{SHELL_PREFIX}{parsing}|{name}"),
+        // «comprimido:<archivo>//<anidado>//…//<carpeta interior>» (`//` no aparece en ninguna
+        // de las partes: las rutas de adentro van saneadas).
+        Location::Archive { file, nested, inner } => {
+            let mut s = format!("{ARCHIVE_PREFIX}{}", file.to_string_lossy());
+            for part in nested.iter().chain([inner]) {
+                s.push_str("//");
+                s.push_str(part);
+            }
+            s
+        }
     }
 }
 
 pub fn location_from(s: &str) -> Location {
     if s == COMPUTER {
         return Location::Computer;
+    }
+    if let Some(rest) = s.strip_prefix(ARCHIVE_PREFIX) {
+        let mut parts: Vec<&str> = rest.split("//").collect();
+        if parts.len() >= 2 {
+            let inner = parts.pop().unwrap_or_default().to_string();
+            let file = PathBuf::from(parts.remove(0));
+            return Location::Archive { file, nested: parts.into_iter().map(String::from).collect(), inner };
+        }
     }
     if settings_anchor(s).is_some() {
         return Location::Settings;
@@ -473,6 +493,16 @@ fn parse_list(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Una pestaña dentro de un archivo comprimido (también anidado) se guarda y se lee igual.
+    #[test]
+    fn archive_location_roundtrip() {
+        let file = PathBuf::from("/datos").join("fotos.zip");
+        for (nested, inner) in [(vec![], ""), (vec![], "2024/viaje"), (vec!["a/b.zip".to_string(), "c.tar.gz".to_string()], "x")] {
+            let l = Location::Archive { file: file.clone(), nested, inner: inner.into() };
+            assert_eq!(location_from(&location_str(&l)), l);
+        }
+    }
 
     /// Activar copia los archivos que existan (sin pisar) y crea la marca; desactivar solo la
     /// borra.

@@ -27,6 +27,10 @@ const TAB_FIRST_INSET: f32 = 10.0;
 pub const ADDRESS_CLEAR_W: f32 = 26.0;
 /// Lugar del ícono de monitor delante de "Este equipo" en la barra de dirección.
 const THIS_PC_ICON_W: f32 = 22.0;
+/// Tramo de la barra que es un archivo comprimido (`draw_archive_crumb`): el nombre va en x = 21.
+const ARCHIVE_ICON_W: f32 = 17.0;
+/// Ícono de archivo comprimido (Segoe MDL2 «ZipFolder»; en macOS, `doc.zipper`).
+pub const ARCHIVE_GLYPH: &str = "\u{F012}";
 
 /// Contorno de una pestaña sin base: (abajo izquierda, arriba izquierda, arriba derecha,
 /// abajo derecha). `left_slant`: inclinación del lado izquierdo.
@@ -708,9 +712,14 @@ impl Pane {
         let tab = &mut self.tabs[self.active];
         tab.list.folder = match &tab.location {
             Location::Path(p) => Some(p.clone()),
+            // Dentro de un archivo comprimido cada elemento bueno trae su ruta temporal en `full`
+            // (los de nombre no permitido, ninguna): nunca carpeta + nombre crudo.
             _ => None,
         };
         tab.list.draw(p, self.list, active_pane);
+        if tab.loading && tab.location.is_archive() && tab.list.entries.is_empty() {
+            draw_list_loading(p, self.list);
+        }
         // Carpeta de red que tarda: el aviso en lugar de la lista vacía (debajo del encabezado).
         tab.list.placeholder_buttons = match &tab.list.placeholder {
             Some(ph) => {
@@ -998,7 +1007,9 @@ impl Pane {
         let widths: Vec<f32> = all
             .iter()
             .enumerate()
-            .map(|(i, (label, _))| p.measure(FontId::Ui, label) + 16.0 + if i == 0 { THIS_PC_ICON_W } else { 0.0 })
+            .map(|(i, (label, loc))| {
+                p.measure(FontId::Ui, label) + 16.0 + if i == 0 { THIS_PC_ICON_W } else if is_archive_crumb(loc) { ARCHIVE_ICON_W } else { 0.0 }
+            })
             .collect();
 
         // Si no entran, se descartan los primeros (los más lejanos).
@@ -1032,6 +1043,8 @@ impl Pane {
                 let icon = rect(r.left + 4.0, r.top, r.left + 4.0 + THIS_PC_ICON_W, r.bottom);
                 p.text(FontId::GlyphsSmall, "\u{E7F4}", icon, color);
                 p.text(FontId::UiCenter, label, rect(r.left + THIS_PC_ICON_W, r.top, r.right, r.bottom), color);
+            } else if is_archive_crumb(loc) {
+                draw_archive_crumb(p, r, label, color);
             } else {
                 p.text(FontId::UiCenter, label, r, color);
             }
@@ -1087,6 +1100,29 @@ impl Pane {
         p.text(FontId::GlyphsSmall, glyph, r, if hot { th.text } else { th.text_dim });
         self.chevrons.push((r, of));
     }
+}
+
+/// ¿El tramo de la barra es un archivo comprimido (su raíz)? Lleva el ícono.
+fn is_archive_crumb(loc: &Location) -> bool {
+    matches!(loc, Location::Archive { inner, .. } if inner.is_empty())
+}
+
+/// Tramo de la barra de dirección que es un archivo comprimido (diseño
+/// `pane::Pane::draw_archive_crumb`): ícono de archivo comprimido de 12×14 en x = 4 y el nombre en
+/// x = 21; el fondo bajo el mouse lo pone quien llama.
+fn draw_archive_crumb(p: &dyn Painter, r: Rect, label: &str, color: crate::geom::Color) {
+    p.text(FontId::GlyphsSmall, ARCHIVE_GLYPH, rect(r.left + 4.0, r.top, r.left + 16.0, r.bottom), color);
+    p.text(FontId::UiCenter, label, rect(r.left + ARCHIVE_ICON_W, r.top, r.right, r.bottom), color);
+}
+
+/// «Cargando…» sobre la lista vacía mientras se lee un archivo comprimido (pantalla X70): el
+/// indicador girando y el texto, centrados a lo ancho a 80 del borde de arriba de la lista.
+fn draw_list_loading(p: &dyn Painter, list: Rect) {
+    let th = p.theme();
+    let cx = (list.left + list.right) / 2.0;
+    let top = list.top + crate::list::HEADER_H + 50.0;
+    spinner(p, cx, top + 20.0, th.accent);
+    p.text(FontId::UiCenter, "Cargando…", rect(cx - 180.0, top + 34.0, cx + 180.0, top + 58.0), th.text_secondary);
 }
 
 /// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).

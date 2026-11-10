@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::archive::{ArchiveEntry, ArchiveFormat, EntryKind, format_of, is_root_entry, safe_entry_path, symlink_inside};
-use crate::sys::{Archives, CopyError, CopyPrims, ErrKind, Flow, ItemKind, NOT_ALLOWED, PASSWORD, UNSUPPORTED};
+use crate::sys::{Archives, Pick, CopyError, CopyPrims, ErrKind, Flow, ItemKind, NOT_ALLOWED, PASSWORD, UNSUPPORTED};
 
 use super::FakeCopyPrims;
 
@@ -29,6 +29,8 @@ struct State {
     password: Vec<PathBuf>,
     /// Bytes por aviso de progreso al extraer y comprimir.
     block: Option<usize>,
+    /// Lo que recibió `propagate_origin`: (archivo, rutas).
+    origins: Vec<(PathBuf, Vec<PathBuf>)>,
 }
 
 /// Comprimir y extraer en memoria. `formats` simula el sistema (Windows: solo zip) y `links`, si
@@ -99,6 +101,11 @@ impl FakeArchives {
         self.st().password.push(archive.to_path_buf());
     }
 
+    /// Las rutas que heredaron el origen de `archive` (todas las llamadas juntas).
+    pub fn propagated(&self, archive: &Path) -> Vec<PathBuf> {
+        self.st().origins.iter().filter(|(a, _)| a == archive).flat_map(|(_, v)| v.clone()).collect()
+    }
+
     pub fn set_block(&self, n: usize) {
         self.st().block = Some(n);
     }
@@ -119,7 +126,7 @@ impl FakeArchives {
             return Err(CopyError::new(ErrKind::Other(UNSUPPORTED.into()), archive));
         }
         let id = self.disk.stat(archive)?.file_id.unwrap_or_default();
-        self.st().archives.get(&id).cloned().ok_or_else(|| CopyError::new(ErrKind::Other("El zip está dañado".into()), archive))
+        self.st().archives.get(&id).cloned().ok_or_else(|| CopyError::new(ErrKind::Other(crate::sys::DAMAGED_ZIP.into()), archive))
     }
 
     /// Adónde lleva el enlace `link` siguiendo los enlaces del disco falso (`None`: un ciclo).
@@ -173,12 +180,20 @@ impl Archives for FakeArchives {
         self.formats
     }
 
-    fn list(&self, archive: &Path, _cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError> {
+    fn list(&self, archive: &Path, max: usize, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, CopyError> {
+        let encrypted = self.st().password.iter().any(|p| p == archive);
+        if cancel() == Flow::Stop {
+            return Err(CopyError::new(ErrKind::Cancelled, archive));
+        }
         Ok(self
             .entries(archive)?
             .into_iter()
+            .take(max.saturating_add(1))
             .enumerate()
-            .map(|(index, e)| ArchiveEntry { index, name: e.name, size: e.size.unwrap_or(e.data.len() as u64), kind: e.kind, link: e.link, modified: 0 })
+            .map(|(index, e)| {
+                let size = e.size.unwrap_or(e.data.len() as u64);
+                ArchiveEntry { index, name: e.name, size, kind: e.kind, link: e.link, modified: 0, packed: size / 2, encrypted }
+            })
             .collect())
     }
 
@@ -189,7 +204,28 @@ impl Archives for FakeArchives {
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, CopyError),
     ) -> Result<usize, CopyError> {
-        let entries = self.entries(archive)?;
+        self.extract_some(archive, root, &|_, _| Pick::Take, progress, failed)
+    }
+
+    fn extract_some(
+        &self,
+        archive: &Path,
+        root: &Path,
+        want: &dyn Fn(usize, &str) -> Pick,
+        progress: &mut dyn FnMut(u64) -> Flow,
+        failed: &mut dyn FnMut(&str, CopyError),
+    ) -> Result<usize, CopyError> {
+        let mut entries = Vec::new();
+        for (i, e) in self.entries(archive)?.into_iter().enumerate() {
+            match want(i, &e.name) {
+                Pick::Skip => {}
+                Pick::Take => entries.push(e),
+                Pick::Last => {
+                    entries.push(e);
+                    break;
+                }
+            }
+        }
         if self.st().password.iter().any(|p| p == archive) {
             return Err(CopyError::new(ErrKind::Other(PASSWORD.into()), archive));
         }
@@ -256,6 +292,10 @@ impl Archives for FakeArchives {
             }
         }
         Ok(omitted)
+    }
+
+    fn propagate_origin(&self, archive: &Path, written: &[PathBuf]) {
+        self.st().origins.push((archive.to_path_buf(), written.to_vec()));
     }
 
     fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf> {

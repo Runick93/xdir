@@ -1111,6 +1111,7 @@ fn file_entry(name: &str) -> fs::Entry {
         icon: 0,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     }
 }
 

@@ -59,6 +59,8 @@ pub struct Tab {
     pub visited: Option<PathBuf>,
     /// Mientras hay una búsqueda, la lista muestra sus resultados en vez de la carpeta.
     pub search: Option<Search>,
+    /// Aviso de la última carga (un archivo comprimido con más entradas de las que se listan).
+    pub load_notice: Option<String>,
     /// La pestaña Configuración: su página, búsqueda y grabación (`None` en las demás).
     pub settings: Option<crate::settings::SettingsView>,
     /// Vista de la carpeta que tiene la lista: su clave y cómo era al aplicarla o al guardarla
@@ -219,6 +221,7 @@ impl Tab {
             auth_nav: 0,
             visited: None,
             search: None,
+            load_notice: None,
             settings,
             view_applied: None,
             left_view: None,
@@ -365,6 +368,14 @@ impl Tab {
         self.counts_as_visit = true;
     }
 
+    /// Cambia la ubicación por otra sin dejar la de ahora en el historial (lo que se iba a ver ya
+    /// no está: un archivo comprimido que se borró).
+    pub fn replace_location(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, to: Location) {
+        self.location = to;
+        self.start(hwnd, tx);
+        self.counts_as_visit = true;
+    }
+
     pub fn go_back(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
         self.go_back_n(1, hwnd, tx);
     }
@@ -445,7 +456,7 @@ impl Tab {
             // llegó se vuelve a pedir (si la recarga falla, la lista sigue igual y sin «Leyendo…» colgado).
             self.list.forget_unanswered_meta();
             self.reload_buf = Some(Vec::new());
-            sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
+            self.spawn_load(hwnd, tx, generation);
         } else {
             self.focus_after_load = self.list.focused_index().map(|i| self.list.entries[i].name.clone());
             self.start(hwnd, tx);
@@ -488,8 +499,9 @@ impl Tab {
             Location::Path(p) => (vec![p.clone()], Some(p.clone())),
             Location::Computer => (sys::file_system().drives(), None),
             Location::Settings => return,
-            // Las carpetas virtuales no se recorren: se filtra lo que muestran.
-            Location::Shell { .. } => {
+            // Las carpetas virtuales y las de un archivo comprimido no se recorren: se filtra lo
+            // que muestran.
+            Location::Shell { .. } | Location::Archive { .. } => {
                 let now = Instant::now();
                 self.search = Some(Search { query: query.to_string(), scanned: 0, progress: 1.0, done: true, started: now, finished: Some(now), in_place: true });
                 self.list.set_name_filter(Some(query));
@@ -562,6 +574,7 @@ impl Tab {
         // Quien navega la vuelve a marcar como visita después; una recarga no cuenta.
         self.counts_as_visit = false;
         self.list.clear();
+        self.load_notice = None;
         // Solo las carpetas de disco tienen de dónde leer metadatos.
         self.list.meta_enabled = matches!(self.location, Location::Path(_));
         self.loading = true;
@@ -576,7 +589,18 @@ impl Tab {
             Location::Path(p) if sys::network().is_remote(p) => Some(Instant::now()),
             _ => None,
         };
-        sys::file_system().spawn_load(hwnd, tx.clone(), self.id, generation, self.generation.clone(), self.location.clone());
+        self.spawn_load(hwnd, tx, generation);
+    }
+
+    /// Lanza la lectura de la ubicación: la del sistema, o la del núcleo dentro de un archivo
+    /// comprimido (en los dos casos en otro hilo).
+    fn spawn_load(&self, hwnd: Handle, tx: &Sender<LoadEvent>, generation: u64) {
+        let (id, current, location) = (self.id, self.generation.clone(), self.location.clone());
+        if location.is_archive() {
+            crate::archive_nav::spawn_load(hwnd, tx.clone(), id, generation, current, location);
+        } else {
+            sys::file_system().spawn_load(hwnd, tx.clone(), id, generation, current, location);
+        }
     }
 
     /// Aviso del vigilante: recarga silenciosa si sigue siendo la misma navegación.
@@ -602,6 +626,7 @@ impl Tab {
                 }
                 None => self.list.append(batch),
             },
+            LoadMsg::Notice(text) => self.load_notice = Some(text),
             LoadMsg::Progress { scanned, done } => {
                 if let Some(s) = &mut self.search {
                     s.scanned = scanned;
@@ -680,8 +705,17 @@ impl Tab {
         }
         match &self.location {
             Location::Path(p) => p.join(&e.name),
+            // Dentro de un archivo comprimido, la ruta temporal llega en `full`; sin ella (nombre no
+            // permitido) no hay ninguna ruta del disco: nunca se arma una con el nombre crudo.
+            Location::Archive { .. } => PathBuf::new(),
             _ => PathBuf::from(&e.name),
         }
+    }
+
+    /// La ruta interior (con `/`) del elemento `idx` de un archivo comprimido.
+    pub fn archive_rel(&self, idx: usize) -> Option<String> {
+        let Location::Archive { inner, .. } = &self.location else { return None };
+        Some(fs::inner_join(inner, &self.list.entries.get(idx)?.name.to_string_lossy()))
     }
 
     /// Pide las superposiciones de las filas que se acaban de ver (solo carpetas de disco).
@@ -731,8 +765,28 @@ impl Tab {
         crate::shell::Item { path: self.entry_path(idx), pidl: self.list.entries[idx].pidl.clone() }
     }
 
-    /// Abre un elemento: las carpetas se navegan, los archivos se abren con su programa.
-    pub fn open(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, idx: usize) {
+    /// Abre un elemento: las carpetas se navegan, los archivos se abren con su programa. Un
+    /// archivo comprimido que se sabe leer se abre como carpeta. Dentro de un archivo comprimido
+    /// solo navega (carpetas y archivos anidados): abrir un archivo de adentro lo hace la `App`
+    /// con la extracción temporal; devuelve `false` si no navegó.
+    pub fn open(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, idx: usize) -> bool {
+        if self.location.is_archive() {
+            let e = &self.list.entries[idx];
+            if e.attrs & (fs::ATTR_ARCHIVE_BAD | fs::ATTR_LINK) != 0 {
+                return false;
+            }
+            let name = e.name.to_string_lossy().into_owned();
+            let to = if e.is_dir {
+                self.location.archive_child(&name)
+            } else if crate::archive_nav::is_navigable_archive(&name) {
+                self.location.archive_nested(&name)
+            } else {
+                None
+            };
+            let Some(to) = to else { return false };
+            self.navigate(hwnd, tx, to);
+            return true;
+        }
         let path = self.entry_path(idx);
         let e = &self.list.entries[idx];
         if e.is_dir {
@@ -748,28 +802,26 @@ impl Tab {
                 }
             };
             self.navigate(hwnd, tx, to);
-            return;
+            return true;
         }
-        // Un .zip de disco se abre como carpeta dentro del mismo panel (lo lista el Shell).
-        if fs::is_zip(&path) && fs::probe_file(&path) != Some(false) {
-            let to = Location::Shell {
-                parsing: path.to_string_lossy().into_owned(),
-                name: e.display.clone(),
-                parent: Some(Box::new(self.location.clone())),
-            };
-            self.navigate(hwnd, tx, to);
-            return;
+        // Un archivo comprimido de disco (de un formato que se sabe leer) se abre como carpeta
+        // dentro del mismo panel; lo lista el núcleo (en un hilo). En una carpeta de red no se
+        // mira el disco acá (`probe_file`).
+        if crate::archive_nav::is_navigable_archive(&e.name.to_string_lossy()) && matches!(self.location, Location::Path(_)) && fs::probe_file(&path) != Some(false) {
+            self.navigate(hwnd, tx, Location::Archive { file: path, nested: Vec::new(), inner: String::new() });
+            return true;
         }
         if fs::probe_exists(&path) == Some(false) {
-            // Archivo virtual (en un teléfono, dentro de un ZIP): lo abre el Shell.
+            // Archivo virtual (en un teléfono, dentro de un ZIP del Shell): lo abre el Shell.
             sys::shell().open_item(hwnd, &self.entry_item(idx));
-            return;
+            return false;
         }
         let dir = match &self.location {
             Location::Path(p) => Some(p.as_path()),
             _ => None,
         };
         sys::shell().open_file(hwnd, &path, dir);
+        false
     }
 
     /// Si la carpeta de red falló por credenciales (usuario o contraseña incorrectos, acceso
@@ -866,6 +918,9 @@ impl Tab {
         if self.loading {
             s.push_str("   ·   cargando…");
         }
+        if let Some(n) = &self.load_notice {
+            s = format!("{n}   ·   {s}");
+        }
         if count > 0 {
             s.push_str("   ·   ");
             s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
@@ -895,9 +950,21 @@ fn child_name(parent: &Location, descendant: &Location) -> Option<OsString> {
     if let Location::Shell { name, .. } = descendant {
         return Some(OsString::from(name));
     }
+    if let Location::Archive { file, nested, inner } = descendant {
+        // Lo que sigue a la ruta interior del padre, hasta la próxima barra.
+        let rest = match parent {
+            Location::Path(p) => return (file.parent() == Some(p.as_path())).then(|| file.file_name().map(|n| n.to_os_string())).flatten(),
+            Location::Archive { file: f, nested: n, inner: i } if f == file && nested.starts_with(n) => {
+                let tail = if nested.len() > n.len() { &nested[n.len()] } else if n.len() == nested.len() { inner } else { return None };
+                if i.is_empty() { tail.as_str() } else { tail.strip_prefix(i.as_str())?.strip_prefix('/')? }
+            }
+            _ => return None,
+        };
+        return rest.split('/').next().filter(|s| !s.is_empty()).map(OsString::from);
+    }
     let Location::Path(d) = descendant else { return None };
     match parent {
-        Location::Shell { .. } | Location::Settings => None,
+        Location::Shell { .. } | Location::Settings | Location::Archive { .. } => None,
         Location::Computer => d.components().next().map(|c| {
             // La unidad se lista como "C:\".
             let mut s = c.as_os_str().to_os_string();
@@ -955,6 +1022,95 @@ mod tests {
         assert_eq!(names, ["sub", "uno.txt"]);
         assert!(tab.list.entries.iter().any(|e| e.is_dir && e.name == "sub"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn pump(tab: &mut Tab, rx: &std::sync::mpsc::Receiver<LoadEvent>) {
+        while tab.loading {
+            let ev = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la carga termina");
+            tab.on_load(ev);
+        }
+    }
+
+    fn shown(tab: &Tab) -> Vec<String> {
+        let mut v: Vec<String> = (0..tab.list.count()).map(|p| tab.list.entries[tab.list.entry_of_pos(p).unwrap()].display.clone()).collect();
+        v.sort();
+        v
+    }
+
+    /// Dentro de un archivo comprimido la pestaña lista en un hilo del núcleo (no el sistema de
+    /// archivos), entra a una carpeta (también implícita), filtra en el lugar al buscar y al subir
+    /// desde la raíz vuelve a la carpeta del archivo con el archivo enfocado.
+    #[test]
+    fn tab_lists_archive_and_navigates() {
+        install_fakes();
+        let dir = std::env::temp_dir().join(format!("xdir-tab-zip-{}", std::process::id()));
+        let zip = dir.join("fotos.zip");
+        crate::sys::testing::FakeArchives::shared().add_archive(&zip, &[("2024/viaje/a.jpg", b"jpg"), ("2024/b.jpg", b"b"), ("nota.txt", b"n")], 9);
+        let (tx, rx) = channel();
+        let loc = Location::Archive { file: zip.clone(), nested: vec![], inner: String::new() };
+        let mut tab = Tab::new(4, loc.clone(), false);
+        tab.set_visible(Handle(0), &tx, true);
+        pump(&mut tab, &rx);
+        assert_eq!(tab.error, None);
+        assert_eq!(FakeFileSystem::loads(&zip), 0, "no lo lista el sistema");
+        assert_eq!(shown(&tab), ["2024", "nota.txt"]);
+        assert!(!tab.list.meta_enabled);
+        let i = tab.list.entries.iter().position(|e| e.name == "2024").unwrap();
+        assert!(tab.open(Handle(0), &tx, i));
+        pump(&mut tab, &rx);
+        assert_eq!(tab.location, Location::Archive { file: zip.clone(), nested: vec![], inner: "2024".into() });
+        assert_eq!(shown(&tab), ["b.jpg", "viaje"]);
+        // Un archivo de adentro no lo abre la pestaña (lo hace la App con la temporal).
+        let b = tab.list.entries.iter().position(|e| e.name == "b.jpg").unwrap();
+        assert!(!tab.open(Handle(0), &tx, b));
+        assert_eq!(tab.archive_rel(b).as_deref(), Some("2024/b.jpg"));
+        assert!(tab.entry_path(b).ends_with(Path::new("2024").join("b.jpg")));
+        // Buscar: filtra lo que muestra, sin recorrer.
+        tab.search(Handle(0), &tx, "via");
+        assert_eq!(shown(&tab), ["viaje"]);
+        tab.end_search(Handle(0), &tx);
+        tab.go_up(Handle(0), &tx);
+        pump(&mut tab, &rx);
+        tab.go_up(Handle(0), &tx);
+        assert_eq!(tab.location, Location::Path(dir.clone()));
+        assert_eq!(tab.focus_after_load, Some("fotos.zip".into()));
+    }
+
+    /// Más entradas que el tope: se listan las primeras y la barra de estado lo dice.
+    #[test]
+    fn archive_cap_shows_notice() {
+        install_fakes();
+        let dir = std::env::temp_dir().join(format!("xdir-tab-zip-tope-{}", std::process::id()));
+        let zip = dir.join("muchos.zip");
+        let names: Vec<String> = (0..crate::archive_nav::MAX_ENTRIES + 3).map(|i| format!("f{i}")).collect();
+        let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b""[..])).collect();
+        crate::sys::testing::FakeArchives::shared().add_archive(&zip, &entries, 9);
+        let (tx, rx) = channel();
+        let mut tab = Tab::new(6, Location::Archive { file: zip, nested: vec![], inner: String::new() }, false);
+        tab.set_visible(Handle(0), &tx, true);
+        pump(&mut tab, &rx);
+        assert_eq!(tab.list.entries.len(), crate::archive_nav::MAX_ENTRIES);
+        assert!(tab.status().starts_with("Se muestran los primeros 100.000 elementos"), "{}", tab.status());
+    }
+
+    /// Una carpeta interior que ya no está, o un zip con contraseña: error de la carga.
+    #[test]
+    fn archive_errors_reach_the_tab() {
+        install_fakes();
+        let dir = std::env::temp_dir().join(format!("xdir-tab-zip-err-{}", std::process::id()));
+        let zip = dir.join("clave.zip");
+        crate::sys::testing::FakeArchives::shared().add_archive(&zip, &[("a.txt", b"a")], 9);
+        let (tx, rx) = channel();
+        let mut tab = Tab::new(5, Location::Archive { file: zip.clone(), nested: vec![], inner: "no".into() }, false);
+        tab.set_visible(Handle(0), &tx, true);
+        pump(&mut tab, &rx);
+        assert_eq!(tab.error.as_deref(), Some(crate::archive_nav::NO_FOLDER));
+        let locked = dir.join("otra.zip");
+        crate::sys::testing::FakeArchives::shared().add_archive(&locked, &[("a.txt", b"a")], 9);
+        crate::sys::testing::FakeArchives::shared().set_password(&locked);
+        tab.navigate(Handle(0), &tx, Location::Archive { file: locked, nested: vec![], inner: String::new() });
+        pump(&mut tab, &rx);
+        assert_eq!(tab.error.as_deref(), Some(sys::PASSWORD));
     }
 
     /// Pestaña a la vista que ya pasó por `paths` en orden (cada una, una navegación).
@@ -1054,6 +1210,7 @@ mod tests {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         };
         tab.list.append(vec![entry("a.jpg"), entry("b.png"), entry("c.png")]);
         assert_eq!(tab.status(), "3 elementos");

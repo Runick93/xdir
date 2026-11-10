@@ -22,18 +22,21 @@ impl App {
     /// Rutas seleccionadas en la pestaña activa de un panel.
     pub(super) fn selection(&self, pane: usize) -> Vec<PathBuf> {
         let tab = self.panes[pane].tab();
-        tab.list.selected_indices().map(|i| tab.entry_path(i)).collect()
+        tab.list.selected_indices().filter(|&i| has_disk_path(tab, i)).map(|i| tab.entry_path(i)).collect()
     }
 
     /// Selección como elementos del Shell (con PIDL si son virtuales).
     pub(super) fn selection_items(&self, pane: usize) -> Vec<shell::Item> {
         let tab = self.panes[pane].tab();
-        tab.list.selected_indices().map(|i| tab.entry_item(i)).collect()
+        tab.list.selected_indices().filter(|&i| has_disk_path(tab, i)).map(|i| tab.entry_item(i)).collect()
     }
 
     /// Arrastra la selección hacia otras ventanas (o dentro de la misma). Si el sistema no puede
     /// arrastrar, se avisa en la barra de estado.
     pub(super) fn start_drag(&mut self, pane: usize) {
+        if self.start_archive_drag(pane) {
+            return;
+        }
         let items = self.selection_items(pane);
         if items.is_empty() {
             return;
@@ -48,6 +51,11 @@ impl App {
     }
 
     pub(super) fn copy_selection(&mut self, cut: bool) {
+        if !cut && self.copy_from_archive() {
+            return;
+        }
+        // Copiar otra cosa reemplaza lo copiado de un archivo comprimido.
+        self.archive.clip = None;
         let items = self.selection_items(self.active);
         if !items.is_empty() {
             if let Err(e) = sys::shell().copy_files(&items, cut) {
@@ -58,6 +66,10 @@ impl App {
 
     pub(super) fn paste(&mut self) {
         let Some(dest) = self.panes[self.active].tab().location.target() else { return };
+        // Lo copiado dentro de un archivo comprimido se extrae con el motor.
+        if self.paste_from_archive(&dest) {
+            return;
+        }
         let Some((sources, cut)) = sys::shell().clipboard_files() else {
             // Sin rutas de disco (copiado por RDP, desde un zip...): pega la carpeta destino.
             match sys::shell().paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
@@ -117,6 +129,11 @@ impl App {
 
     /// Extraer el archivo seleccionado: en su carpeta o en una nueva con su nombre.
     pub(super) fn extract_selection(&mut self, into_folder: bool) {
+        // Dentro de un archivo comprimido: lo elegido, afuera (como el menú de adentro).
+        if self.in_archive() {
+            self.extract_from_archive(self.active, into_folder);
+            return;
+        }
         if let Some((archive, _)) = self.selected_archive() {
             self.start_transfer(JobSpec::Extract { archive, into_folder });
         }
@@ -272,6 +289,10 @@ impl App {
     pub(super) fn drop_folder(&self, x: f32, y: f32) -> Option<(usize, Option<usize>, PathBuf)> {
         let Hit::Pane(i, ph) = self.hit(x, y) else { return None };
         let tab = self.panes[i].tab();
+        // Dentro de un archivo comprimido no se suelta nada (solo lectura).
+        if tab.location.is_archive() {
+            return None;
+        }
         if ph == PaneHit::List {
             if let Some(idx) = tab.list.entry_at(x, y) {
                 if tab.list.entries[idx].is_dir {
@@ -453,6 +474,11 @@ impl App {
         let pane = self.active;
         let at = at.unwrap_or_else(|| self.panes[pane].tab().list.focus_point().unwrap_or((40.0, 80.0)));
         let location = self.panes[pane].tab().location.clone();
+        if location.is_archive() {
+            self.archive_context_menu(pane);
+            self.redraw();
+            return;
+        }
         let items = self.selection_items(pane);
         // En carpetas virtuales el Shell resuelve todo: conoce el contexto (p. ej. la Papelera).
         let intercept = !matches!(location, Location::Shell { .. });
@@ -532,6 +558,12 @@ impl App {
         }
         self.redraw();
     }
+}
+
+/// ¿El elemento tiene ruta del disco? Dentro de un archivo comprimido, los de nombre no permitido
+/// no (se muestran, pero nada los lee ni los copia).
+fn has_disk_path(tab: &Tab, i: usize) -> bool {
+    !(tab.location.is_archive() && tab.list.entries[i].attrs & crate::fs::ATTR_ARCHIVE_BAD != 0)
 }
 
 /// Rutas entre comillas dobles, una por línea, como «Copiar como ruta de acceso» del Explorador

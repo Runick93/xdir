@@ -21,6 +21,8 @@ mod net;
 #[cfg(target_os = "macos")]
 mod ops;
 #[cfg(target_os = "macos")]
+mod origin;
+#[cfg(target_os = "macos")]
 mod platform;
 #[cfg(target_os = "macos")]
 mod quicklook;

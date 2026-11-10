@@ -9,6 +9,7 @@ pub mod app;
 pub mod about;
 pub mod anim;
 pub mod archive;
+pub mod archive_nav;
 pub mod commands;
 pub mod config;
 pub mod console;

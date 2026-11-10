@@ -164,6 +164,7 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
         JobSpec::Retry { pairs, .. } => pairs.iter().for_each(|(a, b)| out.extend([a.clone(), b.clone()])),
         JobSpec::Compress { sources } => out.extend(sources.iter().cloned()),
         JobSpec::Extract { archive, .. } => out.push(archive.clone()),
+        JobSpec::ExtractEntries { archive, dest, .. } => out.extend([archive.clone(), dest.clone()]),
     }
     out
 }
@@ -187,6 +188,7 @@ fn spec_route(spec: &JobSpec) -> transfer::JobRoute {
         JobSpec::Undo(_) => ("Se deshizo", "Se deshicieron", None, None, Vec::new()),
         JobSpec::Compress { sources } => ("Se comprimió", "Se comprimieron", folder(sources), None, sources.clone()),
         JobSpec::Extract { archive, .. } => ("Se extrajo", "Se extrajeron", None, None, vec![archive.clone()]),
+        JobSpec::ExtractEntries { archive, dest, .. } => ("Se copió", "Se copiaron", name(archive), name(dest), vec![archive.clone()]),
     };
     transfer::JobRoute { done_one, done_many, from, to, sources }
 }
@@ -199,6 +201,7 @@ fn spec_count(spec: &JobSpec) -> u64 {
         JobSpec::Retry { pairs, .. } => pairs.len(),
         JobSpec::Compress { sources } => sources.len(),
         JobSpec::Extract { .. } => 1,
+        JobSpec::ExtractEntries { entries, .. } => entries.len(),
         JobSpec::Undo(_) => 0,
     }) as u64
 }
@@ -215,6 +218,7 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
         JobSpec::Retry { moving: false, .. } => ("Copiar", false),
         JobSpec::Compress { .. } => ("Comprimir", false),
         JobSpec::Extract { .. } => ("Extraer", false),
+        JobSpec::ExtractEntries { .. } => ("Copiar", false),
     }
 }
 

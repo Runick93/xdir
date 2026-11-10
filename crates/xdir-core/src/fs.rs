@@ -39,6 +39,25 @@ pub enum Location {
     /// La pestaña Configuración: no se carga ni se vigila; dibuja `settings::draw` en vez de la
     /// lista (su página y su estado van en `Tab::settings`).
     Settings,
+    /// Dentro de un archivo comprimido (solo lectura): `file` es el archivo del disco, `nested`
+    /// la ruta interior (con `/`) de cada archivo comprimido metido dentro del anterior y `inner`
+    /// la carpeta interior que se ve (con `/`, sin barra final; vacía en la raíz).
+    Archive { file: PathBuf, nested: Vec<String>, inner: String },
+}
+
+/// Une una carpeta interior con un nombre (`""` + `a` → `a`, `a` + `b` → `a/b`).
+pub fn inner_join(inner: &str, name: &str) -> String {
+    if inner.is_empty() { name.to_string() } else { format!("{inner}/{name}") }
+}
+
+/// Último tramo de una ruta interior (`a/b/c.zip` → `c.zip`).
+fn inner_last(inner: &str) -> &str {
+    inner.rsplit('/').next().unwrap_or(inner)
+}
+
+/// La carpeta de una ruta interior (`a/b/c.zip` → `a/b`; `c.zip` → ``).
+fn inner_parent(inner: &str) -> &str {
+    inner.rfind('/').map_or("", |i| &inner[..i])
 }
 
 impl Location {
@@ -50,6 +69,56 @@ impl Location {
                 None => Location::Computer,
             }),
             Location::Shell { parent, .. } => Some(parent.as_deref().cloned().unwrap_or(Location::Computer)),
+            Location::Archive { file, nested, inner } => Some(if !inner.is_empty() {
+                Location::Archive { file: file.clone(), nested: nested.clone(), inner: inner_parent(inner).to_string() }
+            } else if let Some((last, rest)) = nested.split_last() {
+                Location::Archive { file: file.clone(), nested: rest.to_vec(), inner: inner_parent(last).to_string() }
+            } else {
+                match file.parent() {
+                    Some(p) => Location::Path(p.to_path_buf()),
+                    None => Location::Computer,
+                }
+            }),
+        }
+    }
+
+    /// Lo que hay adentro de esta ubicación con nombre `name`, si es una carpeta de un archivo
+    /// comprimido: la subcarpeta.
+    pub fn archive_child(&self, name: &str) -> Option<Location> {
+        let Location::Archive { file, nested, inner } = self else { return None };
+        Some(Location::Archive { file: file.clone(), nested: nested.clone(), inner: inner_join(inner, name) })
+    }
+
+    /// Entrar en el archivo comprimido `name` que está dentro de esta carpeta de un archivo
+    /// comprimido.
+    pub fn archive_nested(&self, name: &str) -> Option<Location> {
+        let Location::Archive { file, nested, inner } = self else { return None };
+        let mut nested = nested.clone();
+        nested.push(inner_join(inner, name));
+        Some(Location::Archive { file: file.clone(), nested, inner: String::new() })
+    }
+
+    /// ¿Está dentro de un archivo comprimido? (solo lectura)
+    pub fn is_archive(&self) -> bool {
+        matches!(self, Location::Archive { .. })
+    }
+
+    /// Texto de la barra de dirección: la ruta, o para un archivo comprimido la del archivo con
+    /// lo de adentro («/x/fotos.zip/2024/viaje»).
+    pub fn address_text(&self) -> String {
+        match self {
+            Location::Computer => "Este equipo".to_string(),
+            Location::Settings => SETTINGS_TITLE.into(),
+            Location::Path(p) => p.to_string_lossy().into_owned(),
+            Location::Shell { parsing, .. } => parsing.clone(),
+            Location::Archive { file, nested, inner } => {
+                let mut s = file.to_string_lossy().into_owned();
+                for part in nested.iter().map(String::as_str).chain([inner.as_str()]).filter(|p| !p.is_empty()) {
+                    s.push('/');
+                    s.push_str(part);
+                }
+                s
+            }
         }
     }
 
@@ -69,6 +138,11 @@ impl Location {
                 None => env.root_title(p).unwrap_or_else(|| p.to_string_lossy().trim_end_matches('\\').to_string()),
             },
             Location::Shell { name, .. } => name.clone(),
+            Location::Archive { file, nested, inner } => match (inner.is_empty(), nested.last()) {
+                (false, _) => inner_last(inner).to_string(),
+                (true, Some(last)) => inner_last(last).to_string(),
+                (true, None) => file.file_name().map_or_else(|| file.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()),
+            },
         }
     }
 
@@ -110,6 +184,35 @@ impl Location {
                 }
                 out.push((name.clone(), self.clone()));
             }
+            Location::Archive { file, nested, inner } => {
+                // Las del archivo, después un tramo por carpeta y por archivo anidado de adentro.
+                if let Some(parent) = file.parent() {
+                    out = Location::Path(parent.to_path_buf()).crumbs_in(env);
+                }
+                let name = file.file_name().map_or_else(|| file.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+                out.push((name, Location::Archive { file: file.clone(), nested: Vec::new(), inner: String::new() }));
+                let mut chain: Vec<String> = Vec::new();
+                let walk = |out: &mut Vec<(String, Location)>, chain: &[String], path: &str, last_enters: bool| {
+                    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+                    let mut acc = String::new();
+                    for (i, part) in parts.iter().enumerate() {
+                        acc = inner_join(&acc, part);
+                        let loc = if last_enters && i + 1 == parts.len() {
+                            let mut n = chain.to_vec();
+                            n.push(acc.clone());
+                            Location::Archive { file: file.clone(), nested: n, inner: String::new() }
+                        } else {
+                            Location::Archive { file: file.clone(), nested: chain.to_vec(), inner: acc.clone() }
+                        };
+                        out.push((part.to_string(), loc));
+                    }
+                };
+                for n in nested {
+                    walk(&mut out, &chain, n, true);
+                    chain.push(n.clone());
+                }
+                walk(&mut out, &chain, inner, false);
+            }
         }
         out
     }
@@ -126,6 +229,8 @@ impl Location {
             Location::Computer | Location::Settings => None,
             Location::Path(p) => Some(p.clone()),
             Location::Shell { parsing, .. } => Some(PathBuf::from(parsing)),
+            // Solo lectura: no es destino de nada.
+            Location::Archive { .. } => None,
         }
     }
 }
@@ -160,11 +265,18 @@ pub struct Entry {
     pub overlay: u8,
     /// Ya se consultó la superposición (se hace solo para las filas que se llegan a ver).
     pub overlay_checked: bool,
+    /// Tamaño comprimido de un elemento de adentro de un archivo comprimido (columna «Tamaño
+    /// comprimido»); 0 si no aplica o el formato no lo dice.
+    pub packed: u64,
 }
 
 /// Atributo de enlace (`FILE_ATTRIBUTE_REPARSE_POINT` en Windows): las cargas lo ponen en los
 /// enlaces simbólicos y, en macOS, en los alias del Finder.
 pub const ATTR_LINK: u32 = 0x400;
+
+/// Atributo propio de un elemento de un archivo comprimido con nombre no permitido (sale de la
+/// carpeta, es absoluto, es un nombre reservado…): se muestra pero no se abre ni se copia.
+pub const ATTR_ARCHIVE_BAD: u32 = 0x4000_0000;
 
 impl Entry {
     pub fn is_hidden(&self) -> bool {
@@ -187,6 +299,9 @@ pub enum LoadMsg {
     Metadata(Vec<(usize, Meta)>),
     /// Avance de una búsqueda: elementos revisados y fracción estimada del recorrido (0 a 1).
     Progress { scanned: u64, done: f32 },
+    /// Un aviso de la carga para la barra de estado («Se muestran los primeros 100.000
+    /// elementos»).
+    Notice(String),
 }
 
 pub struct LoadEvent {
@@ -520,6 +635,36 @@ mod tests {
         assert_eq!(bin.parent(), Some(Location::Computer));
         assert_eq!(bin.target(), Some(PathBuf::from("::{bin}")));
         assert_eq!(Location::Computer.target(), None);
+    }
+
+    /// Dentro de un archivo comprimido: título, migas (las del archivo, más cada carpeta y cada
+    /// archivo anidado) y subir hasta la carpeta del archivo.
+    #[test]
+    fn archive_parent_title_crumbs() {
+        let dir = PathBuf::from("/a");
+        let file = dir.join("fotos.zip");
+        let at = |nested: &[&str], inner: &str| Location::Archive { file: file.clone(), nested: nested.iter().map(|s| s.to_string()).collect(), inner: inner.into() };
+        let deep = at(&["2024/viejo.zip"], "x/y");
+        assert_eq!(deep.title_in(&FakeFileSystem), "y");
+        assert_eq!(at(&["2024/viejo.zip"], "").title_in(&FakeFileSystem), "viejo.zip");
+        assert_eq!(at(&[], "").title_in(&FakeFileSystem), "fotos.zip");
+        let crumbs = deep.crumbs_in(&FakeFileSystem);
+        let names: Vec<&str> = crumbs.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(names, ["Este equipo", "a", "fotos.zip", "2024", "viejo.zip", "x", "y"]);
+        assert_eq!(crumbs[3].1, at(&[], "2024"));
+        assert_eq!(crumbs[4].1, at(&["2024/viejo.zip"], ""));
+        assert_eq!(crumbs[6].1, deep);
+        // Subir: x/y → x → raíz del anidado → su carpeta en el de afuera → raíz → carpeta del disco.
+        let ups: Vec<Location> = std::iter::successors(Some(deep.clone()), |l| l.parent()).take(6).collect();
+        assert_eq!(ups[1], at(&["2024/viejo.zip"], "x"));
+        assert_eq!(ups[2], at(&["2024/viejo.zip"], ""));
+        assert_eq!(ups[3], at(&[], "2024"));
+        assert_eq!(ups[4], at(&[], ""));
+        assert_eq!(ups[5], Location::Path(dir.clone()));
+        assert_eq!(deep.target(), None);
+        assert_eq!(at(&[], "").archive_child("b"), Some(at(&[], "b")));
+        assert_eq!(at(&[], "b").archive_nested("c.zip"), Some(at(&["b/c.zip"], "")));
+        assert_eq!(deep.address_text(), format!("{}/2024/viejo.zip/x/y", file.display()));
     }
 
     // ---------- búsqueda en subcarpetas (con el `FileSystem` falso) ----------

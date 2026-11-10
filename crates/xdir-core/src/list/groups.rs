@@ -49,7 +49,9 @@ pub fn group_key(col: Column, e: &Entry, meta: Option<&Meta>, now: LocalNow) -> 
         Column::Modified => date_group(e.modified, now),
         Column::Created => date_group(e.created, now),
         Column::Type => type_group(e),
-        Column::Size => size_group(e),
+        Column::Size => size_group(e.is_dir, e.size),
+        // Por los mismos tramos que el tamaño, con lo que ocupa comprimido.
+        Column::Packed => size_group(e.is_dir, e.packed),
         Column::Extension => value_group(&extension_of(e).to_uppercase()),
         Column::Attributes => value_group(&attr_letters(e.attrs)),
         Column::Folder => value_group(&parent_of(e)),
@@ -134,14 +136,14 @@ fn type_group(e: &Entry) -> GroupKey {
 }
 
 /// Tamaño: de chico a grande; las carpetas aparte, primero.
-fn size_group(e: &Entry) -> GroupKey {
+fn size_group(is_dir: bool, size: u64) -> GroupKey {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;
-    if e.is_dir {
+    if is_dir {
         return key(PINNED_FIRST - 1, "Carpetas");
     }
-    match e.size {
+    match size {
         0 => key(0, "Vacío"),
         s if s <= 16 * KB => key(1, "Diminuto (0–16 KB)"),
         s if s <= MB => key(2, "Pequeño (16 KB–1 MB)"),
@@ -513,6 +515,7 @@ mod tests {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         }
     }
 
@@ -672,6 +675,7 @@ mod list_tests {
             icon: 0,
             overlay: 0,
             overlay_checked: true,
+            packed: 0,
         }
     }
 

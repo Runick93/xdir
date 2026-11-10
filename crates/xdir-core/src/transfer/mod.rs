@@ -112,6 +112,9 @@ pub enum JobSpec {
     /// Extrae `archive` en su carpeta (con los conflictos de siempre) o, con `into_folder`, en
     /// una carpeta nueva con su nombre («fotos», « 2» si existe).
     Extract { archive: PathBuf, into_folder: bool },
+    /// Copia elementos de adentro de `archive` (rutas interiores con `/`: archivos o carpetas,
+    /// con todo lo de adentro) a la carpeta `dest`, con los conflictos de siempre.
+    ExtractEntries { archive: PathBuf, entries: Vec<String>, dest: PathBuf },
 }
 
 /// Lo que manda el hilo de un trabajo al de interfaz.

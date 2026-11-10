@@ -47,6 +47,10 @@ impl App {
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
+            // Lo último: si nada más tomó el Escape, corta la apertura desde un archivo comprimido.
+            VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {
+                self.cancel_archive_open();
+            }
             _ => match self.config.keymap.lookup(vk, ctrl, shift, alt, meta) {
                 Some(c) => self.run_command(c),
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
@@ -71,6 +75,10 @@ impl App {
         }
         // Un comando (del menú, de la paleta, de un botón) termina la grabación de un atajo.
         self.end_recording();
+        // Dentro de un archivo comprimido, lo que escribe no se hace (aviso).
+        if self.refuse_in_archive(c) {
+            return;
+        }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
         // Con la configuración a la vista, lo que necesita una carpeta no hace nada.
@@ -153,6 +161,8 @@ impl App {
             Command::Cut => self.copy_selection(true),
             Command::Paste => self.paste(),
             Command::ShowTransfers => self.show_transfers(),
+            // Dentro de un archivo comprimido, la ruta de adentro (la del menú).
+            Command::CopyPaths if self.in_archive() => self.copy_archive_paths(active),
             Command::CopyPaths => {
                 let paths = self.selection(active);
                 if !paths.is_empty() {
@@ -452,10 +462,7 @@ impl App {
         match action {
             Action::None => return,
             Action::Redraw => {}
-            Action::Open(idx) => {
-                let (hwnd, tx) = (self.hwnd, self.tx.clone());
-                self.panes[pane].tab_mut().open(hwnd, &tx, idx);
-            }
+            Action::Open(idx) => self.open_entry(pane, idx),
             Action::BeginDrag => {
                 self.start_drag(pane);
                 return;

@@ -44,7 +44,8 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
         match &location {
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
-            Location::Shell { .. } | Location::Settings => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en macOS".into()))),
+            // Dentro de un archivo comprimido lista el núcleo (`archive_nav`).
+            Location::Shell { .. } | Location::Settings | Location::Archive { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en macOS".into()))),
         }
     });
 }
@@ -117,6 +118,19 @@ fn is_package(ext: Option<&str>) -> bool {
 /// ¿Está oculto? Nombre con punto o marcado oculto en el Finder.
 pub fn is_hidden(meta: &std::fs::Metadata, name: &OsStr) -> bool {
     name.to_string_lossy().starts_with('.') || meta.st_flags() & UF_HIDDEN != 0
+}
+
+/// Ícono y tipo de un elemento de adentro de un archivo comprimido, por su nombre.
+pub fn archive_look(name: &str, is_dir: bool) -> (i32, Arc<str>) {
+    if is_dir {
+        return (icons::index_of(IconKey::Folder), folder_type());
+    }
+    let ext = extension(name);
+    let icon = match &ext {
+        Some(e) => icons::index_of(IconKey::Ext(e.clone())),
+        None => icons::index_of(IconKey::File),
+    };
+    (icon, type_name(ext.as_deref(), false, false))
 }
 
 /// Tipo de una carpeta, el mismo que lleva en la lista.
@@ -198,6 +212,7 @@ fn entry_for(path: &Path, name: OsString, meta: &std::fs::Metadata, group: u8, d
         icon,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     }
 }
 
@@ -402,7 +417,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } | Location::Settings => Vec::new(),
+        Location::Shell { .. } | Location::Settings | Location::Archive { .. } => Vec::new(),
     }
 }
 

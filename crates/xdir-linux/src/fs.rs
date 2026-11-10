@@ -112,6 +112,10 @@ impl FileSystem for LinuxFileSystem {
         None
     }
 
+    fn archive_look(&self, name: &str, is_dir: bool) -> (i32, Arc<str>) {
+        load::archive_look(name, is_dir)
+    }
+
     fn shell_location(&self, _text: &str) -> Option<Location> {
         None
     }

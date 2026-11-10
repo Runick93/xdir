@@ -19,7 +19,7 @@ mod zip;
 mod tests;
 
 pub use xdir_core::archive::{ArchiveEntry, EntryKind as ItemKind};
-pub use xdir_core::sys::{CopyError as Error, ErrKind, Flow};
+pub use xdir_core::sys::{CopyError as Error, ErrKind, Flow, Pick};
 
 /// Un error con su texto.
 pub(crate) fn other(msg: &str, path: &Path) -> Error {
@@ -100,6 +100,10 @@ pub struct Service {
     /// (segundos desde 1970, UTC), según la zona del sistema. Las horas de un zip (DOS) son
     /// locales: con esto se escriben y se leen. La da cada plataforma.
     pub utc_offset: fn(i64) -> i64,
+    /// Copia el origen del archivo comprimido (primer argumento: la marca de la web de Windows,
+    /// la cuarentena de macOS) a algo extraído de él (segundo). La da cada plataforma; en Linux,
+    /// nada.
+    pub copy_origin: fn(&Path, &Path),
 }
 
 use xdir_core::sys::NOT_ALLOWED;
@@ -126,9 +130,14 @@ impl Service {
     /// Como `list`, pero consulta `cancel` mientras lee (un tar.gz grande se descomprime entero
     /// para listarlo); `Stop` da `ErrKind::Cancelled`.
     pub fn list_cancellable(&self, archive: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+        self.list_limited(archive, usize::MAX, true, cancel)
+    }
+
+    /// Como mucho `max + 1` entradas; `read_links`: leer el destino de los enlaces de un zip.
+    fn list_limited(&self, archive: &Path, max: usize, read_links: bool, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
         match self.format(archive)? {
-            ArchiveFormat::Zip => zip::list(archive, self.utc_offset),
-            ArchiveFormat::TarGz => targz::list(archive, cancel),
+            ArchiveFormat::Zip => zip::list(archive, self.utc_offset, zip::ListOpts { max, read_links, cancel }),
+            ArchiveFormat::TarGz => targz::list(archive, max, cancel),
         }
     }
 
@@ -166,14 +175,21 @@ impl Service {
     /// mientras se descomprime. Devuelve cuántos enlaces se omitieron (en Windows todos). Si se
     /// corta o falla, lo ya extraído queda: lo limpia quien llama.
     pub fn extract_all(&self, archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<usize, Error> {
-        self.extract_each(archive, root, progress, &mut |_, e| Err(e))
+        self.extract_each(archive, root, &|_, _| Pick::Take, progress, &mut |_, e| Err(e))
     }
 
     /// Como `extract_all`, pero cada entrada que falla va a `on_fail`, que decide si se sigue.
-    fn extract_each(&self, archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
+    fn extract_each(
+        &self,
+        archive: &Path,
+        root: &Path,
+        want: &dyn Fn(usize, &str) -> Pick,
+        progress: &mut dyn FnMut(u64) -> Flow,
+        on_fail: OnFail,
+    ) -> Result<usize, Error> {
         match self.format(archive)? {
-            ArchiveFormat::Zip => zip::extract_all(archive, root, progress, on_fail),
-            ArchiveFormat::TarGz => targz::extract_all(archive, root, progress, on_fail),
+            ArchiveFormat::Zip => zip::extract_all(archive, root, want, progress, on_fail),
+            ArchiveFormat::TarGz => targz::extract_all(archive, root, want, progress, on_fail),
         }
     }
 
@@ -323,7 +339,7 @@ fn copy_limited(
         }
         done += n as u64;
         if done > declared {
-            return Err(other("El archivo está dañado", path));
+            return Err(other(xdir_core::sys::DAMAGED, path));
         }
         w.write_all(&buf[..n]).map_err(|e| io_err(e, path))?;
         if progress(done) == Flow::Stop {
@@ -445,8 +461,8 @@ impl Archives for Service {
         Service::formats(self)
     }
 
-    fn list(&self, archive: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
-        self.list_cancellable(archive, cancel)
+    fn list(&self, archive: &Path, max: usize, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+        self.list_limited(archive, max, false, cancel)
     }
 
     fn extract_all(
@@ -456,13 +472,30 @@ impl Archives for Service {
         progress: &mut dyn FnMut(u64) -> Flow,
         failed: &mut dyn FnMut(&str, Error),
     ) -> Result<usize, Error> {
-        self.extract_each(archive, root, progress, &mut |name, e| {
+        self.extract_some(archive, root, &|_, _| Pick::Take, progress, failed)
+    }
+
+    fn extract_some(
+        &self,
+        archive: &Path,
+        root: &Path,
+        want: &dyn Fn(usize, &str) -> Pick,
+        progress: &mut dyn FnMut(u64) -> Flow,
+        failed: &mut dyn FnMut(&str, Error),
+    ) -> Result<usize, Error> {
+        self.extract_each(archive, root, want, progress, &mut |name, e| {
             if fatal(&e) {
                 return Err(e);
             }
             failed(name, e);
             Ok(())
         })
+    }
+
+    fn propagate_origin(&self, archive: &Path, written: &[PathBuf]) {
+        for p in written {
+            (self.copy_origin)(archive, p);
+        }
     }
 
     fn links_outside(&self, root: &Path, links: &[PathBuf]) -> Vec<PathBuf> {

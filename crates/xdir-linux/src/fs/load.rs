@@ -27,7 +27,7 @@ pub fn spawn_load(hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation:
         match &location {
             Location::Computer => list_computer(&mut out),
             Location::Path(path) => list_dir(&mut out, path),
-            Location::Shell { .. } | Location::Settings => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en Linux".into()))),
+            Location::Shell { .. } | Location::Settings | Location::Archive { .. } => out.send(LoadMsg::Listed(Err("Esta ubicación no existe en Linux".into()))),
         }
     });
 }
@@ -92,6 +92,12 @@ pub fn is_hidden(name: &OsStr) -> bool {
     name.as_bytes().first() == Some(&b'.')
 }
 
+/// Ícono (ninguno todavía) y tipo de un elemento de adentro de un archivo comprimido.
+pub fn archive_look(name: &str, is_dir: bool) -> (i32, Arc<str>) {
+    let ext = if is_dir { None } else { extension(name) };
+    (0, type_name(ext.as_deref(), is_dir))
+}
+
 /// Nombre del tipo de archivo: "Carpeta", "Archivo PDF" o "Documento" (sin extensión).
 fn type_name(ext: Option<&str>, is_dir: bool) -> Arc<str> {
     Arc::from(match (is_dir, ext) {
@@ -126,6 +132,7 @@ pub fn entry_for(name: OsString, meta: &Metadata, group: u8, display: Option<Str
         icon: 0,
         overlay: 0,
         overlay_checked: true,
+        packed: 0,
     }
 }
 

@@ -7,7 +7,7 @@ use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 
 use crate::{
-    ArchiveEntry, CancelRead, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other,
+    Pick, ArchiveEntry, CancelRead, ErrKind, Error, Flow, ItemKind, MAX_LINK, OnFail, Shared, Source, cancelled, io_err, other,
     resolve_rel, write_entry,
 };
 
@@ -34,7 +34,7 @@ fn bad(e: std::io::Error, path: &Path) -> Error {
         std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
             if e.get_ref().is_none_or(|i| !i.is::<crate::Cancelled>()) =>
         {
-            other("El archivo está dañado", path)
+            other(xdir_core::sys::DAMAGED, path)
         }
         _ => io_err(e, path),
     }
@@ -46,10 +46,13 @@ fn link_of<R: std::io::Read>(e: &tar::Entry<'_, R>) -> Option<String> {
     (l.len() as u64 <= MAX_LINK).then_some(l)
 }
 
-pub fn list(path: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
+pub fn list(path: &Path, max: usize, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<ArchiveEntry>, Error> {
     let mut a = open(path, cancel)?;
     let mut out = Vec::new();
     for e in a.entries().map_err(|e| bad(e, path))? {
+        if out.len() > max {
+            break;
+        }
         let e = e.map_err(|e| bad(e, path))?;
         let kind = kind_of_type(e.header().entry_type());
         let name = e.path().map_err(|e| bad(e, path))?.to_string_lossy().into_owned();
@@ -62,6 +65,8 @@ pub fn list(path: &Path, cancel: &mut dyn FnMut() -> Flow) -> Result<Vec<Archive
             kind,
             link,
             modified: e.header().mtime().unwrap_or(0),
+            packed: 0,
+            encrypted: false,
         });
     }
     Ok(out)
@@ -107,21 +112,38 @@ pub fn extract(
 }
 
 /// Una sola pasada; los enlaces simbólicos se crean al final.
-pub fn extract_all(archive: &Path, root: &Path, progress: &mut dyn FnMut(u64) -> Flow, on_fail: OnFail) -> Result<usize, Error> {
+pub fn extract_all(
+    archive: &Path,
+    root: &Path,
+    want: &dyn Fn(usize, &str) -> Pick,
+    progress: &mut dyn FnMut(u64) -> Flow,
+    on_fail: OnFail,
+) -> Result<usize, Error> {
     let sh = Shared::new(progress);
     let mut check = || sh.check();
     let mut a = open(archive, &mut check)?;
     let mut base = 0u64;
     let mut omitted = 0usize;
     let mut links: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+    let mut index = 0usize;
+    let mut last = false;
     for e in a.entries().map_err(|e| bad(e, archive))? {
+        if last {
+            break;
+        }
         let mut e = e.map_err(|e| bad(e, archive))?;
         let kind = kind_of_type(e.header().entry_type());
+        let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
+        index += 1;
+        match want(index - 1, &name) {
+            Pick::Skip => continue,
+            Pick::Take => {}
+            Pick::Last => last = true,
+        }
         if kind == ItemKind::Omitted {
             omitted += 1;
             continue;
         }
-        let name = e.path().map_err(|e| bad(e, archive))?.to_string_lossy().into_owned();
         let rel = match resolve_rel(&name, None, kind == ItemKind::Dir) {
             Ok(Some(rel)) => rel,
             Ok(None) => continue,

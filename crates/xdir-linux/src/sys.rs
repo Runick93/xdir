@@ -64,7 +64,7 @@ pub fn install() {
         metadata: Box::new(LinuxMetadata),
         preview: Box::new(LinuxPreview),
         copy_prims: Box::new(crate::prims::LinuxCopyPrims),
-        archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset: crate::env::utc_offset }),
+        archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset: crate::env::utc_offset, copy_origin: |_, _| {} }),
         info: Box::new(crate::info::LinuxInfo),
         network: Box::new(crate::net::LinuxNetwork::new()),
     });

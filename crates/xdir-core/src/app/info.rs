@@ -266,10 +266,11 @@ impl App {
 
     /// Qué se muestra: rutas y su versión. La selección del panel activo; sin selección, la carpeta
     /// (o en «Este equipo», el disco enfocado). Las carpetas virtuales no tienen de dónde leer.
-    fn info_wanted(&self) -> (Vec<PathBuf>, Vec<(u64, u64)>) {
+    pub(super) fn info_wanted(&self) -> (Vec<PathBuf>, Vec<(u64, u64)>) {
         let tab = self.panes[self.active].tab();
         let list = &tab.list;
-        if matches!(tab.location, Location::Shell { .. }) {
+        // Ni las carpetas virtuales ni lo de adentro de un archivo comprimido tienen de dónde leer.
+        if matches!(tab.location, Location::Shell { .. } | Location::Archive { .. }) {
             return (Vec::new(), Vec::new());
         }
         let selected: Vec<usize> = list.selected_indices().collect();

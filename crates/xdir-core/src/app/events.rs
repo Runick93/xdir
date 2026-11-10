@@ -130,6 +130,13 @@ impl App {
         // Terminó de cargar «Este equipo»: se averigua qué discos se pueden expulsar.
         let computer_listed = matches!(tab.location, Location::Computer) && matches!(event.msg, fs::LoadMsg::Listed(_));
         let views_changed = tab.sync_view(views);
+        let listed = matches!(event.msg, fs::LoadMsg::Listed(Err(_))) && tab.location.is_archive();
+        // Se volvió a leer un archivo comprimido: lo extraído para la vista previa puede ser viejo.
+        let archive_listed = match (&event.msg, &tab.location) {
+            (fs::LoadMsg::Listed(_), Location::Archive { file, nested, .. }) => Some(crate::archive_nav::temps::global().dir_for(file, nested)),
+            _ => None,
+        };
+        let tab_id = tab.id;
         let changed = tab.on_load(event);
         let retry = tab.retry_with_credentials().map(|p| (tab.id, p));
         if let Some(path) = tab.visited.take() {
@@ -147,6 +154,12 @@ impl App {
         }
         if let Some((id, path)) = retry {
             self.connect_for_tab(id, &path);
+        }
+        if listed {
+            self.after_archive_load(tab_id);
+        }
+        if let Some(dir) = archive_listed {
+            self.archive.ready.retain(|p| !p.starts_with(&dir));
         }
         changed
     }
@@ -486,6 +499,7 @@ impl App {
             self.folder_views.save_if_dirty();
             let _ = session::save(&self.session());
             let _ = self.history.save();
+            crate::archive_nav::temps::clean_at_exit();
         }
     }
 }

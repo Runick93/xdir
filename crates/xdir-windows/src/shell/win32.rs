@@ -571,6 +571,8 @@ fn build_menu(hwnd: HWND, folder: &Location, items: &[Item]) -> Result<IContextM
             Location::Path(p) => crate::ops::item(p)?,
             Location::Shell { parsing, .. } => crate::ops::item(Path::new(parsing))?,
             Location::Settings => return Err(windows::Win32::Foundation::E_INVALIDARG.into()),
+            // Sin menú del Shell dentro de un archivo comprimido (la App arma el suyo).
+            Location::Archive { .. } => return Err(windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG)),
         };
         let sf: IShellFolder = folder_item.BindToHandler(None, &BHID_SFObject)?;
         sf.CreateViewObject(hwnd)

@@ -241,6 +241,8 @@ impl App {
     /// `at`: punto del clic derecho, en DIPs del área de la ventana.
     pub(super) fn show_columns_menu(&mut self, pane: usize, at: (f32, f32)) {
         const RESET: usize = 100;
+        // Ids de «Ordenar por» y «Agrupar por»: después de las columnas y de RESET.
+        const SUB_BASE: u32 = 200;
         let current = self.panes[pane].tab().list.columns.clone();
         let mut entries: Vec<shell::Entry> = list::COLUMNS
             .iter()
@@ -255,10 +257,33 @@ impl App {
             })
             .collect();
         entries.push(shell::Entry::Sep);
+        let mut cmds = Vec::new();
+        let mut item = |label: &str, command: Command, enabled: bool, checked: bool| {
+            cmds.push(command);
+            shell::Entry::Item { id: SUB_BASE + cmds.len() as u32 - 1, label: label.to_string(), enabled, checked }
+        };
+        let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
+        entries.push(sorts);
+        entries.push(groupings);
+        entries.push(shell::Entry::Sep);
         entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
         let cmd = self.host.popup_menu(&entries, MenuPos::At(at.0, at.1), None, None).map_or(0, |c| c as usize);
         let list = &mut self.panes[pane].tab_mut().list;
         match cmd {
+            c if c >= SUB_BASE as usize => {
+                // Lo mismo que en el menú del fondo, pero sobre el panel del encabezado.
+                match cmds.get(c - SUB_BASE as usize) {
+                    Some(&Command::SortBy(i)) => match list::COLUMNS.get(i as usize) {
+                        Some(&(col, ..)) => list.set_sort(col),
+                        None => return,
+                    },
+                    Some(&Command::GroupBy(i)) => match list::GROUPINGS.get(i as usize) {
+                        Some(&col) => list.set_group(col),
+                        None => return,
+                    },
+                    _ => return,
+                }
+            }
             RESET => {
                 // La columna de carpeta de una búsqueda se queda donde está.
                 let folder = list.columns.iter().position(|c| c.col == list::Column::Folder).map(|i| (i, list.columns[i]));

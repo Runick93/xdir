@@ -21,6 +21,7 @@ use crate::fs::{Location, QuickItem};
 use crate::geom::{Color, Rect, contains, rect};
 use crate::paint::{FontId, Painter};
 use crate::theme::{Theme, alpha};
+use crate::ui::{self, XtreeBadge};
 
 /// Terminó de leerse una carpeta del árbol.
 pub const WM_APP_TREE: u32 = WM_APP + 20;
@@ -57,6 +58,8 @@ enum Kind {
     Cloud,
     /// "Inicio": lleva a "Este equipo"; sin subcarpetas en el árbol.
     Home,
+    /// "xtree": abre o cierra la vista de xtree, con el indicador de su escaneo; no navega.
+    Xtree,
     Drive,
     /// "Este equipo": no es una ruta.
     Computer,
@@ -157,7 +160,7 @@ impl Node {
     /// Lo que abre en el panel activo (None si no es navegable).
     fn location(&self) -> Option<Location> {
         match self.kind {
-            Kind::Separator | Kind::QuickAccess => None,
+            Kind::Separator | Kind::QuickAccess | Kind::Xtree => None,
             Kind::Computer | Kind::Home => Some(Location::Computer),
             Kind::Network | Kind::Linux => {
                 Some(Location::Shell { parsing: self.path.to_string_lossy().into_owned(), name: self.name.clone(), parent: None })
@@ -177,6 +180,8 @@ pub enum TreeHit {
     Pin,
     /// La chincheta de una carpeta anclada: la desancla del Acceso rápido (como en el Explorador).
     Unpin(PathBuf),
+    /// La entrada «xtree»: abrir o cerrar la vista de xtree (como el botón de la barra de estado).
+    Xtree,
     Nothing,
 }
 
@@ -275,6 +280,10 @@ impl Tree {
         t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
         let home = t.roots[t.roots.len() - 1];
         t.nodes[home].children = Some(Vec::new());
+        // xtree, debajo de Inicio: sin subcarpetas.
+        t.add_root(Kind::Xtree, PathBuf::new(), "xtree".to_string(), 0);
+        let xtree = t.roots[t.roots.len() - 1];
+        t.nodes[xtree].children = Some(Vec::new());
         if let Some(cloud) = std::env::var_os("OneDrive").map(PathBuf::from).filter(|p| p.is_dir()) {
             t.add_root(Kind::Cloud, cloud, "OneDrive".to_string(), 0);
         }
@@ -658,11 +667,20 @@ impl Tree {
         let chevron_right = self.area.left + SIDE + 2.0 + n.depth as f32 * INDENT + 18.0 - self.hscroll;
         match n.kind {
             Kind::Separator => TreeHit::Nothing,
+            Kind::Xtree => TreeHit::Xtree,
             _ if self.settled() && x < chevron_right => TreeHit::Toggle(id),
             // El grupo no es una carpeta: al tocarlo se abre o cierra.
             Kind::QuickAccess => TreeHit::Toggle(id),
             _ => n.location().map_or(TreeHit::Nothing, TreeHit::Open),
         }
+    }
+
+    /// ¿El punto está sobre la entrada «xtree»? (para su cartel).
+    pub fn xtree_at(&self, x: f32, y: f32) -> bool {
+        self.contains(x, y)
+            && y >= self.area.top + TOP_PAD
+            && !(self.pin_btn_shown() && contains(&self.toggle_rect(), x, y))
+            && self.node_at(y).is_some_and(|id| self.nodes[id].kind == Kind::Xtree)
     }
 
     /// Ruta de disco del elemento bajo el mouse, para su menú contextual.
@@ -787,6 +805,8 @@ impl Tree {
         match n.kind {
             Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
+            // El ícono del mapa, como el botón «xtree» de la barra de estado.
+            Kind::Xtree => ("\u{E9D9}", th.accent),
             Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
             // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
             Kind::QuickAccess => ("\u{EC50}", rgb(0.93, 0.50, 0.55)),
@@ -812,8 +832,15 @@ impl Tree {
         n.pinned || (n.kind == Kind::Pinned && self.is_pinned(&n.path))
     }
 
-    /// `current`: carpeta del panel activo, resaltada si está a la vista.
-    pub fn draw(&mut self, p: &dyn Painter, area: Rect, current: Option<&Path>) {
+    /// ¿La fila de `n` es la carpeta del panel activo (`current`)? Solo las carpetas de disco.
+    fn is_current(&self, n: &Node, current: Option<&Path>) -> bool {
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive)
+            && current.is_some_and(|c| crate::sys::file_system().same_path(c, &n.path))
+    }
+
+    /// `current`: carpeta del panel activo, resaltada si está a la vista. `xtree`: indicador del
+    /// escaneo de xtree, a la derecha de su entrada.
+    pub fn draw(&mut self, p: &dyn Painter, area: Rect, current: Option<&Path>, xtree: XtreeBadge) {
         self.area = area;
         let th = p.theme();
         let e = (self.expand.value / 100.0).clamp(0.0, 1.0);
@@ -893,8 +920,7 @@ impl Tree {
                     continue;
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
-                let is_current = !matches!(n.kind, Kind::Computer | Kind::Home | Kind::Network | Kind::Linux | Kind::QuickAccess)
-                    && current.is_some_and(|c| crate::sys::file_system().same_path(c, &n.path));
+                let is_current = self.is_current(n, current);
                 if is_current {
                     p.round_fill(row, 5.0, alpha(th.text, 0.11));
                 } else if self.hover == Some(id) {
@@ -921,6 +947,22 @@ impl Tree {
                         }
                         let c = if hot { th.text } else { th.text_dim };
                         p.text(FontId::GlyphsSmall, PIN_GLYPH, slot, alpha(c, e * e));
+                    }
+                    // Indicador del escaneo a la derecha (en el lugar de la chincheta) y, con
+                    // avance, el porcentaje a su izquierda.
+                    if n.kind == Kind::Xtree && xtree != XtreeBadge::Idle {
+                        let top = y + (ROW_H - ui::BADGE) / 2.0;
+                        let badge = rect(row.right - 22.0, top, row.right - 22.0 + ui::BADGE, top + ui::BADGE);
+                        ui::draw_xtree_badge(p, badge, xtree);
+                        // En un árbol angosto el porcentaje no pisa el nombre: si no entra, queda
+                        // solo el anillo.
+                        if let XtreeBadge::Progress(pct) = xtree {
+                            let text = format!("{pct} %");
+                            let left = (row.right - 90.0).max(icon_x + 28.0 + n.text_w + 6.0);
+                            if row.right - 34.0 - left >= p.measure(FontId::Ui, &text) {
+                                p.text(FontId::UiRight, &text, rect(left, y, row.right - 34.0, y + ROW_H), alpha(th.text_dim, e * e));
+                            }
+                        }
                     }
                 }
             }
@@ -1074,7 +1116,7 @@ mod tests {
         // Un área de pocas filas: hay que desplazarse para ver «gama».
         let area = rect(0.0, 0.0, 240.0, 200.0);
         let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
-        t.draw(&p, area, Some(&target));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         assert!(t.scroll > 0.0, "se desplazó");
         let texts = p.texts();
         let (_, _, r) = texts.iter().find(|(_, s, _)| s == "gama").expect("se dibujó gama");
@@ -1103,7 +1145,7 @@ mod tests {
         finish_reveal(&mut t);
         let area = rect(0.0, 0.0, 240.0, 200.0);
         let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
-        t.draw(&p, area, Some(&target));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         let scroll = t.scroll;
         assert!(scroll > 0.0, "se desplazó hasta c29");
 
@@ -1114,7 +1156,7 @@ mod tests {
         let rows = t.rows();
         let c29_row = rows.iter().position(|&id| t.nodes[id].kind == Kind::Folder && t.nodes[id].path == target).unwrap();
         t.scroll_to = Some(rows[c29_row]);
-        t.draw(&p, area, Some(&target));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         let scroll = t.scroll;
         assert!(scroll > 0.0 && t.row_in_view(c29_row));
         let pinned_row = rows.iter().position(|&id| t.nodes[id].kind == Kind::Pinned && t.nodes[id].path == target).unwrap();
@@ -1123,16 +1165,16 @@ mod tests {
         let flags = expanded_flags(&t);
         t.reveal(Handle(0), &target, false);
         assert!(t.revealing().is_none());
-        t.draw(&p, area, Some(&target));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         assert_eq!(t.scroll, scroll, "no saltó a la fila anclada");
         assert_eq!(expanded_flags(&t), flags);
 
         // Si ninguna se ve (desplazado a la mitad), se desplaza hasta la primera (la anclada).
         t.scroll = (scroll / 2.0).floor();
-        t.draw(&p, area, Some(&target));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         assert!(!t.row_in_view(pinned_row) && !t.row_in_view(c29_row));
         t.reveal(Handle(0), &target, false);
-        t.draw(&p, area, Some(&target));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         assert_eq!(t.scroll, 0.0);
         assert!(t.row_in_view(pinned_row));
         let _ = std::fs::remove_dir_all(&root);
@@ -1165,5 +1207,111 @@ mod tests {
         assert_eq!(t.revealing(), Some(root.join("uno").as_path()));
         finish_reveal(&mut t);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- entrada «xtree» ----------
+
+    fn xtree_row(t: &Tree) -> usize {
+        t.rows().iter().position(|&id| t.nodes[id].kind == Kind::Xtree).expect("entrada xtree")
+    }
+
+    /// Árbol dibujado en un área de 240×700 con el indicador `badge`.
+    fn drawn(badge: XtreeBadge) -> (Tree, crate::sys::testing::RecordingPainter, Rect) {
+        install_fakes();
+        let mut t = Tree::new();
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        let area = rect(0.0, 0.0, WIDTH, 700.0);
+        t.draw(&p, area, None, badge);
+        (t, p, area)
+    }
+
+    /// Centro vertical de la fila `i`.
+    fn row_y(area: Rect, i: usize) -> f32 {
+        area.top + TOP_PAD + i as f32 * ROW_H + ROW_H / 2.0
+    }
+
+    #[test]
+    fn tree_has_xtree_entry_below_home() {
+        install_fakes();
+        let t = Tree::new();
+        let kinds: Vec<Kind> = t.rows().iter().map(|&id| t.nodes[id].kind).collect();
+        assert!(kinds[0] == Kind::Home && kinds[1] == Kind::Xtree);
+        let sep = kinds.iter().position(|&k| k == Kind::Separator).unwrap();
+        assert!(kinds[2..sep].iter().all(|&k| k == Kind::Cloud), "entre xtree y el separador solo OneDrive");
+        assert_eq!(kinds.iter().filter(|&&k| k == Kind::Xtree).count(), 1);
+        let n = &t.nodes[t.rows()[1]];
+        assert_eq!(n.name, "xtree");
+        assert_eq!(n.location(), None, "no navega");
+        assert!(n.children.as_ref().is_some_and(|c| c.is_empty()), "sin subcarpetas");
+    }
+
+    #[test]
+    fn tree_xtree_entry_draws_badge() {
+        let (t, p, area) = drawn(XtreeBadge::Progress(37));
+        let y = row_y(area, xtree_row(&t));
+        let in_row = |r: &Rect| r.top <= y && r.bottom >= y;
+        let texts = p.texts();
+        assert!(texts.iter().any(|(_, s, r)| s == "xtree" && in_row(r)), "{texts:?}");
+        assert!(texts.iter().any(|(_, s, r)| s == "37 %" && in_row(r)), "{texts:?}");
+        assert!(texts.iter().any(|(_, s, r)| s == "\u{E9D9}" && in_row(r)), "ícono del mapa");
+        // El anillo, a la derecha de la fila.
+        assert!(p.paths().iter().any(|(pts, closed, _)| *closed && pts.iter().all(|&(px, py)| px > area.right - 40.0 && (py - y).abs() <= 8.0)));
+        // Sin escaneo: solo el ícono y el nombre.
+        let (t, p, area) = drawn(XtreeBadge::Idle);
+        let y = row_y(area, xtree_row(&t));
+        assert!(!p.texts().iter().any(|(_, s, _)| s.ends_with(" %")));
+        assert!(!p.paths().iter().any(|(pts, _, _)| pts.iter().all(|&(_, py)| (py - y).abs() <= 8.0)));
+    }
+
+    /// Un clic en cualquier parte de la fila (también donde iría el chevron) es la entrada xtree.
+    #[test]
+    fn tree_xtree_entry_hit() {
+        let (t, _, area) = drawn(XtreeBadge::Idle);
+        let y = row_y(area, xtree_row(&t));
+        for x in [area.left + SIDE + 4.0, area.left + 60.0, area.right - 20.0] {
+            assert!(matches!(t.hit(x, y), TreeHit::Xtree), "x = {x}");
+            assert!(t.xtree_at(x, y));
+        }
+        assert!(!t.xtree_at(area.left + 60.0, row_y(area, 0)));
+        assert_eq!(t.path_at(area.left + 60.0, y), None);
+    }
+
+    /// Que el árbol siga al panel nunca resalta ni revela la entrada xtree (no es una carpeta).
+    #[test]
+    fn tree_xtree_entry_not_selectable_by_follow() {
+        install_fakes();
+        let mut t = Tree::new();
+        let id = t.rows()[1];
+        assert!(!t.is_current(&t.nodes[id], Some(Path::new(""))));
+        assert!(!t.is_current(&t.nodes[id], Some(Path::new("/"))));
+        t.reveal(Handle::default(), Path::new(""), false);
+        finish_reveal(&mut t);
+        assert_ne!(t.scroll_to, Some(id));
+    }
+
+    /// En un árbol angosto (ancho mínimo) el porcentaje no pisa el nombre: o entra a su derecha o
+    /// no se dibuja (queda el anillo).
+    #[test]
+    fn tree_xtree_percent_does_not_overlap_name() {
+        for w in [MIN_W, 165.0, 170.0, WIDTH] {
+            install_fakes();
+            let mut t = Tree::new();
+            t.visible = true;
+            t.width = w;
+            let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+            let area = rect(0.0, 0.0, w, 700.0);
+            t.draw(&p, area, None, XtreeBadge::Progress(37));
+            let y = row_y(area, xtree_row(&t));
+            let in_row = |r: &Rect| r.top <= y && r.bottom >= y;
+            let texts = p.texts();
+            let name = texts.iter().find(|(_, s, r)| s == "xtree" && in_row(r)).expect("nombre");
+            let name_end = name.2.left + p.measure(FontId::Ui, "xtree");
+            if let Some((_, s, r)) = texts.iter().find(|(_, s, r)| s == "37 %" && in_row(r)) {
+                // Alineado a la derecha: el texto ocupa el final de su cuadro.
+                assert!(r.right - p.measure(FontId::Ui, s) >= name_end, "ancho {w}: {r:?} pisa el nombre (termina en {name_end})");
+            }
+            assert!(p.paths().iter().any(|(pts, closed, _)| *closed && pts.iter().all(|&(_, py)| (py - y).abs() <= 8.0)), "ancho {w}: sin anillo");
+        }
     }
 }

@@ -25,7 +25,7 @@ use tooltip::{Tip, WM_APP_TOOLTIP};
 use tooltip::{tooltip_for, tooltip_rect};
 
 use crate::{about, anim, config, jump, list, palette, pane, session, theme, typed, ui};
-use crate::xtree::view::{self as xtree_view, Xtree};
+use crate::xtree::view::{self as xtree_view, Xtree, XtreeBadge};
 #[cfg(feature = "arbol")]
 use crate::tree;
 
@@ -151,6 +151,9 @@ enum Hit {
     // Solo existe con el árbol (feature `arbol`).
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     TreePin,
+    /// La entrada «xtree» del árbol (abre o cierra la vista; su cartel dice cómo va el escaneo).
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    TreeXtree,
 }
 
 /// Lo que se está arrastrando con el botón izquierdo.

@@ -259,6 +259,10 @@ impl App {
             self.end_edit(false);
             self.end_filter(true);
             self.xtree_open = true;
+            // El resultado terminado ya se ve: el indicador de la barra vuelve al botón de siempre.
+            if let Some(x) = &mut self.xtree {
+                x.mark_seen();
+            }
         }
         self.hover = Hit::None;
         self.redraw();
@@ -290,6 +294,17 @@ impl App {
             }
         }
         self.redraw();
+    }
+
+    /// Estado del escaneo de xtree para el indicador de la barra de estado.
+    pub(super) fn xtree_badge(&self) -> XtreeBadge {
+        self.xtree.as_ref().map_or(XtreeBadge::Idle, |x| x.badge())
+    }
+
+    /// Botón «xtree» de la barra de estado (más ancho mientras muestra el porcentaje).
+    pub(super) fn xtree_button_rect(&self) -> geom::Rect {
+        let (w, h) = self.client_dips();
+        ui::xtree_rect(w, h, self.xtree_badge())
     }
 
     /// Área de la vista de xtree en la ventana.

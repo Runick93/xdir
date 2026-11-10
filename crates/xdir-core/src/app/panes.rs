@@ -125,6 +125,9 @@ impl App {
             tree::TreeHit::Pin => self.run_command(Command::ToggleTreePin),
             // La chincheta de una carpeta anclada la desancla, como en el Explorador.
             tree::TreeHit::Unpin(path) => self.toggle_quick_pin(path),
+            // Como el botón «xtree» de la barra: abre la vista sobre la carpeta del panel activo
+            // o la cierra si está abierta. No navega el panel.
+            tree::TreeHit::Xtree => self.toggle_xtree(),
             tree::TreeHit::Nothing => {}
         }
         self.redraw();

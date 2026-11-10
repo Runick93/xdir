@@ -43,10 +43,24 @@ struct Fingerprint {
     len: usize,
 }
 
+/// De quién es el lugar de la derecha (el de la columna de vista previa): de la vista previa, del
+/// panel de información o del de Renombrar varios. Usan el mismo ancho y borde; al cerrar
+/// información o Renombrar varios vuelve la vista previa si estaba prendida.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum RightPanel {
+    Preview,
+    /// El panel de información (tanda D, Task 18, en otra rama).
+    #[allow(dead_code)]
+    Info,
+    RenameMany,
+}
+
 /// Estado de la columna en la `App`.
 pub(super) struct PreviewState {
     /// Prendida (se ve salvo con xtree abierto).
     pub on: bool,
+    /// De quién es el lugar de la derecha ahora.
+    pub owner: RightPanel,
     /// Ancho elegido (240–640); el que se usa puede ser menor para no achicar los paneles.
     pub width: f32,
     pub(super) generation: u64,
@@ -74,6 +88,7 @@ impl PreviewState {
         let (tx, rx) = channel();
         PreviewState {
             on,
+            owner: RightPanel::Preview,
             width: width.clamp(ui::PREVIEW_MIN_W, ui::PREVIEW_MAX_W),
             generation: 0,
             current: Arc::new(AtomicU64::new(0)),
@@ -110,7 +125,8 @@ fn source_of(tab: &Tab, idx: usize) -> thumbs::Source {
 impl App {
     /// ¿Se ve la columna? (prendida y sin la vista de xtree encima).
     pub(super) fn preview_visible(&self) -> bool {
-        if !self.preview.on || self.xtree_open {
+        // Se ve si la vista previa está prendida o si el lugar es de otro panel.
+        if !(self.preview.on || self.preview.owner != RightPanel::Preview) || self.xtree_open {
             return false;
         }
         // Si ni el mínimo entra sin achicar los paneles, no se ve en este cuadro (sigue prendida).
@@ -246,7 +262,8 @@ impl App {
     }
 
     pub(super) fn sync_preview(&mut self) {
-        if !self.preview_visible() {
+        // Con el lugar en manos de otro panel, la vista previa no pide nada.
+        if !self.preview_visible() || self.preview.owner != RightPanel::Preview {
             if self.preview.subject.is_some() || self.preview.fingerprint.is_some() {
                 self.preview.subject = None;
                 self.preview.info = None;

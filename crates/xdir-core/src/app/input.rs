@@ -67,6 +67,9 @@ impl App {
         if self.preview_edge_at(x, y) {
             return Hit::PreviewEdge;
         }
+        if let Some(h) = self.rename_panel_hit(x, y) {
+            return Hit::RenamePanel(h);
+        }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
             return if self.tree.on_pin_button(x, y) {
@@ -195,6 +198,10 @@ impl App {
             Hit::Groups => self.show_groups_menu(),
             Hit::Xtree => self.toggle_xtree(),
             Hit::PreviewToggle => self.run_command(Command::TogglePreview),
+            Hit::RenamePanel(h) => {
+                self.rename_panel_click(h);
+                return;
+            }
             Hit::PreviewEdge => {
                 self.host.capture_mouse();
                 let grab = self.preview_column().map_or(0.0, |r| r.left - x);
@@ -466,6 +473,7 @@ impl App {
             }
             Drag::PreviewEdge(grab) => {
                 self.drag_preview_edge(x + grab);
+                self.sync_rename_boxes();
                 redraw = true;
             }
             Drag::List(i) => {

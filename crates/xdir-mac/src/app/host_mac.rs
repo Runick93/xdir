@@ -480,6 +480,8 @@ define_class!(
                 // Perder el foco: la dirección se cancela, el resto se aplica.
                 TextKind::Address => h.post(WM_APP_EDIT_DONE, 0, 0),
                 TextKind::Palette => h.post(WM_APP_PALETTE_KEY, 0, 0),
+                // Un campo de panel sigue abierto: no avisa.
+                TextKind::Field => {}
                 kind => h.post(kind.done_msg(), 1, 0),
             }
         }

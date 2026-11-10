@@ -36,6 +36,10 @@ pub const WM_APP_SUGGEST_KEY: u32 = WM_APP + 15;
 /// Cambió el texto de una caja de edición. `lparam` = el número de la `TextBox`.
 pub const WM_APP_TEXT_CHANGED: u32 = WM_APP + 16;
 
+/// Terminó la edición en un campo de un panel (`TextKind::Field`): `wparam` = 1 con Enter, 0 con
+/// Escape. Perder el foco no avisa (el panel sigue abierto).
+pub const WM_APP_FIELD_DONE: u32 = WM_APP + 31;
+
 /// Para qué es una caja de edición: decide qué mensaje manda al terminar y qué teclas reenvía.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextKind {
@@ -49,6 +53,9 @@ pub enum TextKind {
     Filter,
     /// Paleta: flechas, Re Pág / Av Pág, Enter, Escape y Ctrl+P van a la ventana.
     Palette,
+    /// Campo de un panel (Renombrar varios): Enter y Escape avisan con `WM_APP_FIELD_DONE`;
+    /// perder el foco no avisa nada.
+    Field,
 }
 
 impl TextKind {
@@ -60,6 +67,7 @@ impl TextKind {
             TextKind::FavRename => WM_APP_FAVEDIT_DONE,
             TextKind::Filter => WM_APP_FILTER_DONE,
             TextKind::Palette => WM_APP_PALETTE_KEY,
+            TextKind::Field => WM_APP_FIELD_DONE,
         }
     }
 }

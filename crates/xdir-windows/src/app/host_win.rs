@@ -759,6 +759,8 @@ unsafe extern "system" fn edit_proc(
             // Evita el "ding" de Enter/Escape en un edit de una línea.
             WM_CHAR if wparam.0 == '\r' as usize || wparam.0 == 0x1B => return LRESULT(0),
             // Al perder el foco: el renombrado se aplica (como en el Explorador), la dirección no.
+            // Un campo de panel sigue abierto: perder el foco no avisa.
+            WM_KILLFOCUS if done_msg as u32 == xdir_core::host::WM_APP_FIELD_DONE => {}
             WM_KILLFOCUS => {
                 let commit = done_msg as u32 != WM_APP_EDIT_DONE;
                 let _ = PostMessageW(Some(parent), done_msg as u32, WPARAM(commit as usize), LPARAM(0));

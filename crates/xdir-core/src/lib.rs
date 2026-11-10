@@ -30,6 +30,8 @@ pub mod preview;
 pub mod quicklook;
 /// Renombrar varios: nombres nuevos, choques y renombrado seguro.
 pub mod rename_many;
+/// El panel de Renombrar varios: dibujo y hit-test.
+pub mod rename_many_draw;
 pub mod session;
 pub mod shell;
 pub mod sys;

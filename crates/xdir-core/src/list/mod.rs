@@ -19,6 +19,7 @@ pub mod filters;
 pub mod gallery;
 pub mod groups;
 pub mod meta;
+mod rename_preview;
 
 pub use filters::ListHit;
 pub use gallery::{CellState, strip_offset};
@@ -421,6 +422,10 @@ pub struct FileList {
     gallery_press: Option<(usize, bool)>,
     /// Galería: rueda acumulada que todavía no llegó a un paso (touchpad).
     wheel_acc: f32,
+    /// Renombrar varios: (posición en `entries`, nombre nuevo, choque) de cada elemento que se
+    /// renombra; la columna Nombre (o la etiqueta) muestra el nombre nuevo. Lo fija la `App` con
+    /// `set_rename_preview` (queda ordenado por posición).
+    pub rename_preview: Option<Vec<(usize, String, Option<crate::rename_many::Clash>)>>,
 }
 
 /// Carpeta de un elemento con ruta completa (resultado de búsqueda).
@@ -531,6 +536,7 @@ impl Default for FileList {
             strip_focus: None,
             gallery_press: None,
             wheel_acc: 0.0,
+            rename_preview: None,
         }
     }
 }
@@ -2320,9 +2326,13 @@ impl FileList {
                     _ => rect(item.left + 4.0, item.top + 1.0, item.right, item.bottom - 1.0),
                 };
 
+                let renamed = self.rename_of(idx);
                 if self.drop_target == Some(idx) {
                     p.round_fill(row, 4.0, th.selection);
                     p.round_stroke(row, 4.0, th.accent);
+                } else if renamed.is_some_and(|(_, c)| c.is_some()) {
+                    // Choque de Renombrar varios: la fila en rojo en lugar de la selección.
+                    p.round_fill(row, 4.0, alpha(th.danger, 0.18));
                 } else if self.selected[idx] {
                     let c = if active { th.selection } else { alpha(th.text_dim, 0.18) };
                     p.round_fill(row, 4.0, c);
@@ -2351,6 +2361,15 @@ impl FileList {
                 // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
                 let color = crate::config::color_for(p.file_colors(), &e.sort_key, e.is_dir, e.attrs)
                     .unwrap_or(if e.is_hidden() { th.text_dim } else { th.text });
+                // Renombrar varios en las vistas sin columna Nombre: la etiqueta con el nombre nuevo.
+                let relabeled;
+                let (e, color) = match renamed.filter(|_| self.view != View::Details) {
+                    Some((new, clash)) => {
+                        relabeled = self.relabeled(e, new);
+                        (&relabeled, if clash.is_some() { th.danger } else { color })
+                    }
+                    None => (e, color),
+                };
                 match self.view {
                     v if v.is_grid() => {
                         self.draw_cell(p, e, row, color);
@@ -2377,8 +2396,13 @@ impl FileList {
                             p.shell_icon(e.icon, e.overlay, cell.left + shift, iy, ICON);
                             let text = rect(cell.left + shift + ICON + 8.0, y, cell.right, y + ROW_H);
                             let name = shown_name(e, self.show_extensions);
-                            p.text(FontId::Ui, name, text, color);
-                            ends.push(text.left + p.measure(FontId::Ui, name) + 6.0);
+                            match renamed {
+                                Some((new, clash)) => ends.push(self.draw_rename_name(p, e, text, color, new, clash)),
+                                None => {
+                                    p.text(FontId::Ui, name, text, color);
+                                    ends.push(text.left + p.measure(FontId::Ui, name) + 6.0);
+                                }
+                            }
                         }
                         Column::Modified => p.text(FontId::Ui, &format::date(e.modified), cell, th.text_secondary),
                         Column::Created => p.text(FontId::Ui, &format::date(e.created), cell, th.text_secondary),

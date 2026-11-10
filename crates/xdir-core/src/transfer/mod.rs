@@ -112,8 +112,10 @@ pub struct ConflictInfo {
     pub can_merge: bool,
     pub incoming: ItemStat,
     pub existing: ItemStat,
-    /// Otros conflictos que se ven por delante en este trabajo (para «Hacer esto con todos»).
-    pub remaining: usize,
+    /// Otros conflictos de la misma clase (archivos o carpetas) que quedan por delante en este
+    /// trabajo, para «Hacer esto con todos»; `None` si no se puede saber (adentro de una carpeta
+    /// que se combina, o con una carpeta por delante que se podría combinar y tener más).
+    pub remaining: Option<usize>,
 }
 
 /// Algo que no se pudo hacer: el par sirve para «Reintentar».

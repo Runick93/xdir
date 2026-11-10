@@ -346,6 +346,17 @@ fn choice_label(c: Choice) -> &'static str {
     }
 }
 
+/// «Hacer esto con todos los archivos (12 conflictos)», «… todas las carpetas …»: vale para todos
+/// los conflictos de esa clase que quedan en el trabajo (también adentro de las carpetas que se
+/// combinen); el número va solo si se sabe exacto (este y los que quedan).
+fn apply_all_label(c: &super::ConflictInfo) -> String {
+    let base = if c.is_dir { "Hacer esto con todas las carpetas" } else { "Hacer esto con todos los archivos" };
+    match c.remaining {
+        Some(r) => format!("{base} ({})", plural(r + 1, "conflicto", "conflictos")),
+        None => base.to_string(),
+    }
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
 }
@@ -429,11 +440,7 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
                     }
                 }
                 if let Some(b) = find(ViewHit::ApplyAll(id)) {
-                    let label = if c.remaining == 0 {
-                        "Hacer esto con todos".to_string()
-                    } else {
-                        format!("Hacer esto con todos (quedan {})", plural(c.remaining, "conflicto", "conflictos"))
-                    };
+                    let label = apply_all_label(c);
                     checkbox(p, b, j.apply_all, &label, hot(ViewHit::ApplyAll(id)));
                 }
             }

@@ -116,6 +116,14 @@ enum Target {
     Duplicate(PathBuf),
 }
 
+/// Un conflicto de arriba que se ve por delante.
+#[derive(Clone, Copy)]
+struct Ahead {
+    is_dir: bool,
+    /// Carpeta sobre carpeta: si se combina, puede haber más conflictos adentro.
+    can_merge: bool,
+}
+
 /// Cómo se lleva.
 enum How {
     /// Renombrar (mover en el mismo disco).
@@ -202,8 +210,11 @@ struct Job<'a> {
     skipped: Vec<PathBuf>,
     /// Lo que el recorrido no pudo leer (cuenta como error de la carpeta que lo contiene).
     walk_failed: Vec<PathBuf>,
-    /// Conflictos de arriba que se ven por delante (por índice de elemento).
-    ahead: Vec<bool>,
+    /// Conflictos de arriba que se ven por delante (por índice de elemento): `None` si no choca.
+    ahead: Vec<Option<Ahead>>,
+    /// Se está resolviendo adentro de una carpeta que se combina (los conflictos de adentro no
+    /// se cuentan por delante).
+    merging: usize,
     index: usize,
     /// «Devolver»: lo movido se deshace mandándolo de nuevo a la Papelera.
     moves_as_created: bool,
@@ -231,6 +242,7 @@ impl<'a> Job<'a> {
             skipped: Vec::new(),
             walk_failed: Vec::new(),
             ahead: Vec::new(),
+            merging: 0,
             index: 0,
             moves_as_created: false,
         }
@@ -521,7 +533,10 @@ impl<'a> Job<'a> {
         self.start(title, total_items, total_bytes);
         self.ahead = items
             .iter()
-            .map(|i| matches!(&i.target, Target::Fixed(dst) if !self.same_path(&i.src, dst) && self.exists(dst).is_some()))
+            .map(|i| match &i.target {
+                Target::Fixed(dst) if !self.same_path(&i.src, dst) => self.ahead_of(&i.src, dst),
+                _ => None,
+            })
             .collect();
         for (i, item) in items.into_iter().enumerate() {
             self.index = i;
@@ -530,6 +545,25 @@ impl<'a> Job<'a> {
             }
             self.process(item, moving);
         }
+    }
+
+    /// Si `dst` ya existe, qué conflicto va a ser (sin leer contenido).
+    fn ahead_of(&self, src: &Path, dst: &Path) -> Option<Ahead> {
+        let existing = self.exists(dst)?;
+        let is_dir = self.prims.stat(src).is_ok_and(|s| s.kind == ItemKind::Dir);
+        Some(Ahead { is_dir, can_merge: is_dir && existing.kind == ItemKind::Dir })
+    }
+
+    /// Cuántos conflictos de la misma clase quedan por delante, si se puede saber.
+    fn remaining(&self, is_dir: bool) -> Option<usize> {
+        if self.merging > 0 {
+            return None;
+        }
+        let rest: Vec<Ahead> = self.ahead.iter().skip(self.index + 1).flatten().copied().collect();
+        if rest.iter().any(|a| a.can_merge) {
+            return None;
+        }
+        Some(rest.iter().filter(|a| a.is_dir == is_dir).count())
     }
 
     /// Destino aproximado de un elemento (para los errores de antes de decidir).
@@ -649,7 +683,7 @@ impl<'a> Job<'a> {
     }
 
     fn ask(&mut self, src: &Path, dst: &Path, incoming: &ItemStat, existing: ItemStat, is_dir: bool, can_merge: bool) -> Option<Choice> {
-        let remaining = self.ahead.iter().skip(self.index + 1).filter(|c| **c).count();
+        let remaining = self.remaining(is_dir);
         let folder = dst.parent().map(name_of).unwrap_or_default();
         let info = ConflictInfo { name: name_of(src), folder, is_dir, can_merge, incoming: *incoming, existing, remaining };
         // Una respuesta que llegó tarde a otro conflicto no vale para este.
@@ -751,7 +785,15 @@ impl<'a> Job<'a> {
                         Some(Some((dir, created))) => {
                             let dst = dir.join(item.src.file_name().unwrap_or_default());
                             // Adentro de una carpeta creada por este trabajo no hay nada.
-                            let d = if *created { Decision::Fresh(dst) } else { self.decide(&item.src, &item.stat, &dst, moving) };
+                            let d = if *created {
+                                Decision::Fresh(dst)
+                            } else {
+                                // Adentro de una carpeta que se combina.
+                                self.merging += 1;
+                                let d = self.decide(&item.src, &item.stat, &dst, moving);
+                                self.merging -= 1;
+                                d
+                            };
                             (d, *created)
                         }
                         _ => (Decision::Skip, false),
@@ -1043,6 +1085,7 @@ impl<'a> Job<'a> {
                 match self.prims.read_dir(src) {
                     Ok(mut names) => {
                         names.sort();
+                        self.merging += 1;
                         for n in names {
                             if self.should_stop() {
                                 break;
@@ -1052,6 +1095,7 @@ impl<'a> Job<'a> {
                                 self.copy_with(&child, decision, true);
                             }
                         }
+                        self.merging -= 1;
                         let _ = self.prims.remove(src);
                     }
                     Err(e) => self.fail(src, &to, e),
@@ -1128,7 +1172,7 @@ impl<'a> Job<'a> {
             list.push((src.clone(), origin));
         }
         self.start(title(&JobSpec::Restore { items: vec![] }, items.len() as u64), list.len() as u64, 0);
-        self.ahead = list.iter().map(|(_, o)| self.exists(o).is_some()).collect();
+        self.ahead = list.iter().map(|(s, o)| self.ahead_of(s, o)).collect();
         for (i, (src, origin)) in list.into_iter().enumerate() {
             self.index = i;
             if self.should_stop() {

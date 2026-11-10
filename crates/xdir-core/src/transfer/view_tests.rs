@@ -81,7 +81,7 @@ fn conflict(id: u64, dir: bool) -> JobView {
         can_merge: dir,
         incoming: stat(2_200_000, 20, kind),
         existing: stat(1_990_000, 10, kind),
-        remaining: 12,
+        remaining: Some(11),
     });
     j
 }
@@ -175,7 +175,7 @@ fn graph_drawn_for_expanded() {
 fn conflict_view_buttons() {
     let file = [conflict(1, false)];
     let t = texts(&file, None);
-    for s in ["Ya existe «informe.pdf» en «Respaldo»", "El que se copia", "El que ya está", "Más nuevo", "Reemplazar", "Conservar ambos", "Omitir", "Hacer esto con todos (quedan 12 conflictos)"] {
+    for s in ["Ya existe «informe.pdf» en «Respaldo»", "El que se copia", "El que ya está", "Más nuevo", "Reemplazar", "Conservar ambos", "Omitir", "Hacer esto con todos los archivos (12 conflictos)"] {
         assert!(has(&t, s), "falta {s:?} en {t:?}");
     }
     assert!(!has(&t, "Combinar"));
@@ -186,6 +186,11 @@ fn conflict_view_buttons() {
     let folder = [conflict(1, true)];
     let t = texts(&folder, None);
     assert!(has(&t, "Combinar"), "{t:?}");
+    assert!(t.iter().any(|s| s == "Hacer esto con todas las carpetas (12 conflictos)"), "{t:?}");
+    // Sin cuenta exacta (adentro de una carpeta que se combina): sin número.
+    let mut nested = conflict(1, false);
+    nested.conflict.as_mut().unwrap().remaining = None;
+    assert!(texts(&[nested], None).iter().any(|s| s == "Hacer esto con todos los archivos"));
     assert!(center_of(&folder, None, ViewHit::Choose(1, Choice::Merge)).is_some());
     assert!(center_of(&folder, None, ViewHit::ApplyAll(1)).is_some());
 }

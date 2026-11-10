@@ -384,8 +384,46 @@ fn apply_to_all_separate_for_files_and_dirs() {
     assert!(fake.exists(&p("/aa/d/D2/nuevo.txt")));
     assert_eq!(fake.contents(&p("/aa/d/f2 2.txt")).unwrap(), b"nuevo");
     assert_eq!(fake.contents(&p("/aa/d/f2.txt")).unwrap(), b"viejo");
-    // Quedaban conflictos por delante cuando se preguntó el primero.
-    assert!(c[0].remaining >= 3, "{}", c[0].remaining);
+    // Por delante hay otra carpeta que se puede combinar: la cuenta no sería exacta.
+    assert_eq!(c[0].remaining, None);
+}
+
+#[test]
+fn conflict_count_is_per_kind_and_exact() {
+    // Tres archivos que chocan: el primero dice que quedan otros dos (de su clase).
+    let fake = FakeCopyPrims::new();
+    for f in ["f1.txt", "f2.txt", "f3.txt"] {
+        fake.add_file(&p(&format!("/cc/s/{f}")), b"nuevo".to_vec());
+        fake.add_file(&p(&format!("/cc/d/{f}")), b"viejo".to_vec());
+    }
+    let sources = ["f1.txt", "f2.txt", "f3.txt"].iter().map(|n| p(&format!("/cc/s/{n}"))).collect();
+    let r = go(&fake, JobSpec::Copy { sources, dest: p("/cc/d") }, &[answer(Choice::Skip), answer(Choice::Skip), answer(Choice::Skip)]);
+    assert_eq!(r.conflicts().iter().map(|c| c.remaining).collect::<Vec<_>>(), vec![Some(2), Some(1), Some(0)]);
+}
+
+#[test]
+fn conflict_count_unknown_inside_or_before_a_merge() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/cm/s/D1/adentro.txt"), b"nuevo".to_vec());
+    fake.add_file(&p("/cm/d/D1/adentro.txt"), b"viejo".to_vec());
+    fake.add_file(&p("/cm/s/a.txt"), b"nuevo".to_vec());
+    fake.add_file(&p("/cm/d/a.txt"), b"viejo".to_vec());
+    fake.add_file(&p("/cm/s/z.txt"), b"nuevo".to_vec());
+    fake.add_file(&p("/cm/d/z.txt"), b"viejo".to_vec());
+    // a.txt, D1 (se combina, adentro choca adentro.txt) y z.txt.
+    let sources = vec![p("/cm/s/a.txt"), p("/cm/s/D1"), p("/cm/s/z.txt")];
+    let answers = [answer(Choice::Skip), answer(Choice::Merge), answer(Choice::Skip), answer(Choice::Skip)];
+    let r = go(&fake, JobSpec::Copy { sources, dest: p("/cm/d") }, &answers);
+    let c = r.conflicts();
+    assert_eq!(c.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["a.txt", "D1", "adentro.txt", "z.txt"]);
+    // a.txt: por delante hay una carpeta que se puede combinar (no se sabe cuántos archivos chocan).
+    assert_eq!(c[0].remaining, None);
+    // D1: no quedan otras carpetas que choquen.
+    assert_eq!(c[1].remaining, Some(0));
+    // Adentro de la carpeta combinada: sin cuenta.
+    assert_eq!(c[2].remaining, None);
+    // z.txt: ya no hay nada que combinar por delante.
+    assert_eq!(c[3].remaining, Some(0));
 }
 
 #[test]

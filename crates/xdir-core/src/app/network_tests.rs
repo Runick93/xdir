@@ -1219,3 +1219,25 @@ mod drives {
         assert!(a.net.unmap.is_some());
     }
 }
+
+// ---------- Ronda 1: más llamadas del hilo de interfaz ----------
+
+/// C1: el desplegable de la barra no lista una carpeta de red (solo el historial).
+#[test]
+fn address_suggestions_skip_remote_folders() {
+    install_fakes();
+    let remote = tmp_dir("r1-sug-remote");
+    std::fs::create_dir_all(remote.join("subcarpeta")).unwrap();
+    let local = tmp_dir("r1-sug-local");
+    std::fs::create_dir_all(local.join("subcarpeta")).unwrap();
+    FakeNetwork::set_remote(&remote);
+    let typed = |dir: &Path| format!("{}{}sub", dir.display(), std::path::MAIN_SEPARATOR);
+    let mut s = crate::typed::Suggest::new(crate::geom::Rect::default(), "");
+    s.set_query(&typed(&local));
+    assert!(s.items.iter().any(|i| i.ends_with("subcarpeta")), "{:?}", s.items);
+    s.set_query(&typed(&remote));
+    assert!(s.items.iter().all(|i| !i.ends_with("subcarpeta")), "{:?}", s.items);
+    // Una ruta UNC tampoco (resolver el nombre ya es ir a la red).
+    s.set_query(r"\\servidor-r1\recurso\");
+    assert!(s.items.is_empty() || s.items.iter().all(|i| !i.contains("servidor-r1\\recurso\\")));
+}

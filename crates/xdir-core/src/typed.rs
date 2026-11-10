@@ -49,8 +49,15 @@ fn suggestions(query: &str) -> Vec<String> {
     if let Some(cut) = query.rfind(['\\', '/']) {
         let (dir, leaf) = query.split_at(cut + 1);
         let leaf = leaf.to_lowercase();
-        let mut dirs: Vec<String> = std::fs::read_dir(if dir.ends_with(':') { format!("{dir}\\") } else { dir.to_string() })
+        let dir_path = if dir.ends_with(':') { format!("{dir}\\") } else { dir.to_string() };
+        // Una carpeta de red no se lista acá (corre con cada tecla en el hilo de la ventana): solo
+        // el historial. Una ruta UNC tampoco: resolver el nombre del servidor ya es ir a la red.
+        let p = std::path::Path::new(&dir_path);
+        let remote = crate::fs::is_unc(p) || dir_path.starts_with("//") || crate::sys::network().is_remote(p);
+        let mut dirs: Vec<String> = (!remote)
+            .then(|| std::fs::read_dir(&dir_path))
             .into_iter()
+            .flatten()
             .flatten()
             .flatten()
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))

@@ -67,6 +67,9 @@ pub struct JobView {
     pub started: Instant,
     /// La casilla «Hacer esto con todos» del conflicto está marcada.
     pub apply_all: bool,
+    /// Desde cuándo se ve el conflicto (los clics de los primeros 400 ms no cuentan: venían para
+    /// otra cosa que estaba ahí).
+    pub conflict_since: Option<Instant>,
 }
 
 /// Un trabajo del motor.

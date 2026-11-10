@@ -188,6 +188,9 @@ fn skipped_text(n: usize) -> String {
     if n == 1 { "Se omitió 1 elemento que ya existía".into() } else { format!("Se omitieron {n} elementos que ya existían") }
 }
 
+/// Los clics en un conflicto recién aparecido no cuentan durante este tiempo.
+const CONFLICT_GUARD: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// «Hay 2 operaciones en curso. ¿Cancelarlas y salir?» (al cerrar xdir).
 pub fn close_question(jobs: usize) -> String {
     if jobs == 1 {
@@ -234,6 +237,7 @@ impl App {
             paused: false,
             started: now,
             apply_all: false,
+            conflict_since: None,
         });
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, label, paths: paths.clone() });
         let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone());
@@ -307,6 +311,7 @@ impl App {
                     v.conflict = Some(info);
                     v.state = JobState::Conflict;
                     v.apply_all = false;
+                    v.conflict_since = Some(now);
                     show = show || !auto;
                 }
                 Update::Finished(outcome) => {
@@ -466,6 +471,12 @@ impl App {
     }
 
     fn on_view_hit(&mut self, h: ViewHit) {
+        if let ViewHit::Choose(id, _) | ViewHit::ApplyAll(id) = h
+            && self.transfers.jobs.iter().any(|j| j.id == id && j.conflict_since.is_some_and(|t| t.elapsed() < CONFLICT_GUARD))
+        {
+            // El bloque recién apareció bajo el mouse: el clic era para otra cosa.
+            return;
+        }
         match h {
             ViewHit::Pause(id) => self.pause_job(id),
             ViewHit::Resume(id) => self.resume_job(id),

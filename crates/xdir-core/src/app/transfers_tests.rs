@@ -380,6 +380,7 @@ fn conflict_answer_reaches_job() {
     let sources = ["a", "b", "c"].iter().map(|n| p(&format!("/app-wa/s/{n}.txt"))).collect();
     let id = a.start_transfer(JobSpec::Copy { sources, dest: p("/app-wa/d") });
     wait(&mut a, |a| a.jobs().iter().any(|j| j.state == JobState::Conflict));
+    std::thread::sleep(Duration::from_millis(450));
     // «Hacer esto con todos» y «Conservar ambos»: los tres quedan con « 2» sin volver a preguntar.
     click_aux(&mut a, ViewHit::ApplyAll(id));
     assert!(a.jobs()[0].apply_all);
@@ -627,4 +628,24 @@ fn running_job_skips_conflicts_once_there_is_no_window() {
     wait(&mut a, idle);
     assert_eq!(f.contents(&p("/app-nw/d/z.txt")).unwrap(), b"viejo");
     assert_eq!(a.notice.as_deref(), Some("Se omitió 1 elemento que ya existía"));
+}
+
+#[test]
+fn conflict_buttons_ignore_clicks_right_after_appearing() {
+    let f = fake();
+    f.add_file(&p("/app-wg/s/x.txt"), b"nuevo".to_vec());
+    f.add_file(&p("/app-wg/d/x.txt"), b"viejo".to_vec());
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wg/s/x.txt")], dest: p("/app-wg/d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.state == JobState::Conflict));
+    // Un clic que venía para otra cosa (el bloque recién apareció debajo del mouse): no cuenta.
+    click_aux(&mut a, ViewHit::ApplyAll(id));
+    click_aux(&mut a, ViewHit::Choose(id, Choice::Replace));
+    assert!(!a.jobs()[0].apply_all);
+    assert_eq!(a.jobs()[0].state, JobState::Conflict);
+    std::thread::sleep(Duration::from_millis(450));
+    click_aux(&mut a, ViewHit::Choose(id, Choice::KeepBoth));
+    wait(&mut a, idle);
+    assert_eq!(f.contents(&p("/app-wg/d/x 2.txt")).unwrap(), b"nuevo");
+    assert_eq!(f.contents(&p("/app-wg/d/x.txt")).unwrap(), b"viejo");
 }

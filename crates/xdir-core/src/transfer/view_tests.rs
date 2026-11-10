@@ -29,6 +29,7 @@ fn job(id: u64, state: JobState) -> JobView {
         paused: false,
         started: now,
         apply_all: false,
+        conflict_since: None,
     }
 }
 

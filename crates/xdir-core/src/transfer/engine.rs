@@ -196,9 +196,21 @@ fn part_name(dst: &Path, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
     if name.len() <= 200 && !taken(&part) {
         return part;
     }
-    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    dir.join(format!(".xdir-{}-{n}.xdir-part", std::process::id()))
+    short_part_name(dst)
 }
+
+/// Un parcial corto y único del motor (si el disco no acepta el nombre largo).
+fn short_part_name(dst: &Path) -> PathBuf {
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dst.parent().unwrap_or(Path::new("")).join(format!(".xdir-{}-{n}.xdir-part", std::process::id()))
+}
+
+/// Reintentos del renombre final mientras el archivo está ocupado, y la pausa entre ellos.
+const RENAME_RETRIES: u32 = 5;
+#[cfg(not(test))]
+const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+#[cfg(test)]
+const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 
 fn name_of(p: &Path) -> String {
     p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
@@ -229,6 +241,8 @@ struct Job<'a> {
     /// Se está resolviendo adentro de una carpeta que se combina (los conflictos de adentro no
     /// se cuentan por delante).
     merging: usize,
+    /// Elementos que llegaron (`JobOutcome::done_items`).
+    ok_items: u64,
     index: usize,
     /// «Devolver»: lo movido se deshace mandándolo de nuevo a la Papelera.
     moves_as_created: bool,
@@ -257,6 +271,7 @@ impl<'a> Job<'a> {
             walk_failed: Vec::new(),
             ahead: Vec::new(),
             merging: 0,
+            ok_items: 0,
             index: 0,
             moves_as_created: false,
         }
@@ -305,6 +320,7 @@ impl<'a> Job<'a> {
             stopped: self.stopped.take(),
             cancelled: self.cancelled,
             skipped: std::mem::take(&mut self.skipped),
+            done_items: self.ok_items,
         };
         (self.out)(Update::Finished(outcome));
     }
@@ -594,6 +610,7 @@ impl<'a> Job<'a> {
         if let (How::Rename, Target::Fixed(dst)) = (&item.how, &item.target) {
             match self.rename_tree(&item.src, dst) {
                 Renamed::Done(done) => {
+                    self.ok_items += done.is_some() as u64;
                     self.select.extend(done);
                     self.items_done += 1;
                     self.progress(0, false);
@@ -824,6 +841,7 @@ impl<'a> Job<'a> {
                     }
                 }
                 Decision::Merge(dst) => {
+                    self.ok_items += 1;
                     dests.insert(item.rel.clone(), Some((dst.clone(), false)));
                     if is_root {
                         self.select.push(dst.clone());
@@ -843,12 +861,16 @@ impl<'a> Job<'a> {
                     }
                 }
                 Decision::Fresh(dst) => {
-                    if self.copy_one(&item, &dst, moving, record) && is_root {
+                    let ok = self.copy_one(&item, &dst, moving, record);
+                    self.ok_items += ok as u64;
+                    if ok && is_root {
                         self.select.push(dst);
                     }
                 }
                 Decision::Replace(dst) => {
-                    if self.replace_one(&item, &dst, moving, record) && is_root {
+                    let ok = self.replace_one(&item, &dst, moving, record);
+                    self.ok_items += ok as u64;
+                    if ok && is_root {
                         self.select.push(dst);
                     }
                 }
@@ -878,6 +900,7 @@ impl<'a> Job<'a> {
     ) {
         match self.prims.create_dir(&dst) {
             Ok(()) => {
+                self.ok_items += 1;
                 // Con algo apartado, el deshacer se anota al cerrar (después de la Papelera).
                 let record_later = record && aside.is_some();
                 if record && aside.is_none() {
@@ -905,8 +928,14 @@ impl<'a> Job<'a> {
     fn copy_one(&mut self, item: &Planned, dst: &Path, moving: bool, record: bool) -> bool {
         // Se escribe con un nombre parcial y recién entero toma el suyo: si xdir se corta a mitad,
         // nunca queda algo a medias con el nombre del archivo.
-        let part = part_name(dst, &|p| self.exists(p).is_some());
-        if let Err(e) = self.write(item, &part) {
+        let mut part = part_name(dst, &|p| self.exists(p).is_some());
+        let mut written = self.write(item, &part);
+        if matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+            // El disco no acepta el nombre largo del parcial: uno corto del motor.
+            part = short_part_name(dst);
+            written = self.write(item, &part);
+        }
+        if let Err(e) = written {
             if e.kind != ErrKind::Exists {
                 let _ = self.prims.remove(&part);
             }
@@ -921,10 +950,20 @@ impl<'a> Job<'a> {
             self.cancelled = true;
             return false;
         }
-        if let Err(e) = self.prims.rename_noreplace(&part, dst) {
+        if let Err(e) = self.rename_final(&part, dst) {
             // Algo ocupó el nombre mientras se copiaba: no se pisa.
             let _ = self.prims.remove(&part);
             self.fail(&item.src, dst, e);
+            return false;
+        }
+        // Al mover: el nombre nuevo también queda guardado antes de borrar el original.
+        if moving
+            && let Err(e) = self.prims.sync_dir(dst.parent().unwrap_or(Path::new("")))
+        {
+            self.fail(&item.src, dst, e);
+            if record {
+                self.record(Undo::Created(vec![dst.to_path_buf()]));
+            }
             return false;
         }
         if moving
@@ -941,6 +980,21 @@ impl<'a> Job<'a> {
             self.record_done(&item.src, dst, moving);
         }
         true
+    }
+
+    /// El parcial toma su nombre de verdad. Si el archivo está ocupado o sin permiso por un momento
+    /// (un antivirus o el indexador lo abrieron recién escrito), se reintenta un rato.
+    fn rename_final(&self, part: &Path, dst: &Path) -> Result<(), CopyError> {
+        let mut tries = 0;
+        loop {
+            match self.prims.rename_noreplace(part, dst) {
+                Err(e) if matches!(e.kind, ErrKind::InUse | ErrKind::Denied) && tries < RENAME_RETRIES && !self.ctl.is_cancelled() => {
+                    tries += 1;
+                    std::thread::sleep(RENAME_PAUSE);
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Escribe el contenido de `item` en `to` (que no existe), con progreso.

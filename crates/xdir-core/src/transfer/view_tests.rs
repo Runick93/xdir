@@ -30,6 +30,7 @@ fn job(id: u64, state: JobState) -> JobView {
         started: now,
         apply_all: false,
         conflict_since: None,
+        done_items: None,
         route: JobRoute { done_one: "Se copió", done_many: "Se copiaron", from: Some("Descargas".into()), to: Some("Respaldo".into()), sources: vec![PathBuf::from("/u/Descargas/Facturas"), PathBuf::from("/u/Descargas/Instalador-Rust.exe")] },
     }
 }
@@ -284,6 +285,12 @@ fn finished_header_counts_and_relative_folders() {
     // Fuera de lo elegido (no debería pasar): la ruta entera.
     let full = std::path::Path::new("/otro/lado").display().to_string();
     assert!(t.contains(&full), "{t:?}");
+    // Con la cuenta del motor (lo de adentro de una carpeta que no se pudo crear no llegó).
+    let mut counted = job(3, JobState::Done);
+    counted.items = (1284, 1284);
+    counted.done_items = Some(1000);
+    counted.errors = vec![err("/u/Descargas/Facturas", "No tenés permiso")];
+    assert!(texts(&[counted], None).iter().any(|s| s == "Se copiaron 1.000 de 1.284 elementos de «Descargas» a «Respaldo»"));
     // En singular.
     let mut one = job(2, JobState::Done);
     one.items = (1, 1);

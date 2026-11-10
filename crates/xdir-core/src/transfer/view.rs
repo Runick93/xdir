@@ -512,7 +512,7 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
 /// «Se copiaron 1.281 de 1.284 elementos de «Descargas» a «Respaldo»» (al terminar con errores).
 pub fn done_line(j: &JobView) -> String {
     let total = j.items.1;
-    let done = total.saturating_sub(j.errors.iter().filter(|e| e.retry).count() as u64);
+    let done = j.done_items.map_or_else(|| total.saturating_sub(j.errors.iter().filter(|e| e.retry).count() as u64), |d| d.min(total));
     let r = &j.route;
     let verb = if done == 1 { r.done_one } else { r.done_many };
     let what = if total == 1 { "elemento" } else { "elementos" };

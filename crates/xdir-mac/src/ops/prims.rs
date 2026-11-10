@@ -32,6 +32,7 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
         libc::EEXIST => ErrKind::Exists,
         libc::ECANCELED => ErrKind::Cancelled,
         libc::EXDEV => ErrKind::CrossDevice,
+        libc::ENAMETOOLONG => ErrKind::NameTooLong,
         n => ErrKind::Other(io::Error::from_raw_os_error(n).to_string()),
     }
 }
@@ -241,6 +242,11 @@ impl CopyPrims for MacCopyPrims {
             f.sync_all().map_err(|e| err(e, p))?;
         }
         Ok(())
+    }
+
+    /// La carpeta (con lo recién renombrado adentro), igual que `sync`.
+    fn sync_dir(&self, dir: &Path) -> Result<(), CopyError> {
+        self.sync(dir)
     }
 
     fn remove(&self, p: &Path) -> Result<(), CopyError> {

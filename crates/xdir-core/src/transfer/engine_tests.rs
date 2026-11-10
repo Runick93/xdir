@@ -918,7 +918,7 @@ fn move_syncs_copy_before_deleting_source() {
     fake.add_file(&p("/v1/a/y.txt"), b"y".to_vec());
     go(&fake, JobSpec::Move { sources: vec![p("/v1/a/x.txt")], dest: p("/v2/dst") }, &[]);
     // Se asegura la copia (todavía con su nombre parcial) antes de borrar el original.
-    assert_eq!(fake.syncs(), vec![p("/v2/dst/.x.txt.xdir-part")]);
+    assert_eq!(fake.syncs(), vec![p("/v2/dst/.x.txt.xdir-part"), p("/v2/dst")]);
     assert!(!fake.exists(&p("/v1/a/x.txt")));
     // Si no se puede asegurar la copia, el original queda.
     fake.fail(&p("/v2/dst/.y.txt.xdir-part"), ErrKind::Other("No se pudo guardar".into()), 1);
@@ -1112,4 +1112,70 @@ fn restore_tells_the_platform_what_came_back() {
     let r = go(&fake, JobSpec::Restore { items: vec![p("/rf/.Trash/a.txt"), p("/rf/.Trash/b.txt")] }, &[answer(Choice::Skip)]);
     assert!(r.out.errors.is_empty(), "{:?}", r.messages());
     assert_eq!(fake.restored(), vec![p("/rf/.Trash/a.txt")]);
+}
+
+#[test]
+fn move_flushes_destination_folder_before_deleting_source() {
+    // Entre discos: la copia y el nombre nuevo quedan guardados (también la carpeta) antes de borrar
+    // el original; si la carpeta no se puede asegurar, el original queda.
+    let fake = FakeCopyPrims::new();
+    two_volumes(&fake);
+    fake.add_file(&p("/v1/a/x.txt"), b"x".to_vec());
+    go(&fake, JobSpec::Move { sources: vec![p("/v1/a/x.txt")], dest: p("/v2/dst") }, &[]);
+    assert_eq!(fake.syncs(), vec![p("/v2/dst/.x.txt.xdir-part"), p("/v2/dst")]);
+    assert!(!fake.exists(&p("/v1/a/x.txt")));
+    fake.add_file(&p("/v1/a/y.txt"), b"y".to_vec());
+    fake.fail(&p("/v2/dst"), ErrKind::Other("No se pudo guardar".into()), 1);
+    let r = go(&fake, JobSpec::Move { sources: vec![p("/v1/a/y.txt")], dest: p("/v2/dst") }, &[]);
+    assert_eq!(r.messages(), vec!["No se pudo guardar".to_string()]);
+    assert!(fake.exists(&p("/v1/a/y.txt")), "el original queda");
+    assert!(fake.exists(&p("/v2/dst/y.txt")), "la copia queda (deshacer la borra)");
+}
+
+#[test]
+fn long_partial_name_falls_back_to_a_short_one() {
+    // El disco no acepta «.nombre.xdir-part» (pasa del largo máximo): se reintenta con uno corto.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/ln/s/largo.txt"), b"datos".to_vec());
+    fake.add_dir(&p("/ln/d"));
+    fake.fail(&p("/ln/d/.largo.txt.xdir-part"), ErrKind::NameTooLong, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/ln/s/largo.txt")], dest: p("/ln/d") }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.contents(&p("/ln/d/largo.txt")).unwrap(), b"datos");
+    no_tmp_left(&fake, &p("/ln/d"));
+}
+
+#[test]
+fn final_rename_retries_while_the_file_is_busy() {
+    // Un antivirus o el indexador abren el archivo recién escrito: el renombre final se reintenta
+    // un rato antes de fallar.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/rb/s/a.txt"), b"a".to_vec());
+    fake.add_dir(&p("/rb/d"));
+    fake.fail(&p("/rb/d/a.txt"), ErrKind::InUse, 2);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/rb/s/a.txt")], dest: p("/rb/d") }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.contents(&p("/rb/d/a.txt")).unwrap(), b"a");
+    // Siempre ocupado: error y no queda el parcial.
+    fake.add_file(&p("/rb/s/b.txt"), b"b".to_vec());
+    fake.fail(&p("/rb/d/b.txt"), ErrKind::InUse, 100);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/rb/s/b.txt")], dest: p("/rb/d") }, &[]);
+    assert_eq!(r.out.errors.len(), 1);
+    no_tmp_left(&fake, &p("/rb/d"));
+}
+
+#[test]
+fn done_items_count_only_what_arrived() {
+    // Una carpeta que no se pudo crear no cuenta sus archivos como copiados; lo omitido tampoco.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/dn/s/A/sub/1.txt"), b"1".to_vec());
+    fake.add_file(&p("/dn/s/A/sub/2.txt"), b"2".to_vec());
+    fake.add_file(&p("/dn/s/A/ok.txt"), b"ok".to_vec());
+    fake.add_file(&p("/dn/s/z.txt"), b"z".to_vec());
+    fake.add_file(&p("/dn/d/z.txt"), b"viejo".to_vec());
+    fake.add_dir(&p("/dn/d"));
+    fake.fail(&p("/dn/d/A/sub"), ErrKind::Denied, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/dn/s/A"), p("/dn/s/z.txt")], dest: p("/dn/d") }, &[answer(Choice::Skip)]);
+    // A, sub, 1, 2, ok y z: llegaron A y ok.
+    assert_eq!(r.out.done_items, 2);
 }

@@ -71,6 +71,8 @@ pub struct JobView {
     pub conflict_since: Option<Instant>,
     /// De dónde a dónde, para el resumen al terminar con errores.
     pub route: JobRoute,
+    /// Al terminar: cuántos elementos llegaron (`JobOutcome::done_items`).
+    pub done_items: Option<u64>,
 }
 
 /// De dónde a dónde va un trabajo: «Se copiaron 1.281 de 1.284 elementos de «Descargas» a
@@ -157,6 +159,9 @@ pub struct JobOutcome {
     pub cancelled: bool,
     /// Lo que no se llevó porque ya existía y se eligió «Omitir» (los de origen).
     pub skipped: Vec<PathBuf>,
+    /// Elementos que llegaron (para «Se copiaron N de M»): no cuenta lo omitido ni lo que falló,
+    /// tampoco lo de adentro de una carpeta que no se pudo crear.
+    pub done_items: u64,
 }
 
 /// Qué hacer con un conflicto (el destino ya existe).

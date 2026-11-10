@@ -10,7 +10,7 @@ use std::path::{Component, Path, Prefix};
 
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
-    ERROR_FILE_TOO_LARGE, ERROR_HANDLE_DISK_FULL, ERROR_LOCK_VIOLATION, ERROR_NOT_SAME_DEVICE, ERROR_PATH_NOT_FOUND,
+    ERROR_FILE_TOO_LARGE, ERROR_HANDLE_DISK_FULL, ERROR_LOCK_VIOLATION, ERROR_FILENAME_EXCED_RANGE, ERROR_NOT_SAME_DEVICE, ERROR_PATH_NOT_FOUND,
     ERROR_REQUEST_ABORTED, ERROR_SHARING_VIOLATION, FILETIME, HANDLE,
 };
 use windows::Win32::Storage::FileSystem::{
@@ -21,7 +21,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_NO_RECALL, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
     FILE_WRITE_ATTRIBUTES, FileIdInfo, FindClose, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetFileAttributesExW,
-    GetFileExInfoStandard, GetVolumeInformationW, GetVolumePathNameW, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING,
+    GetFileExInfoStandard, GetVolumeInformationW, GetVolumePathNameW, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, RemoveDirectoryW, SetFileAttributesW, SetFileTime,
     WIN32_FILE_ATTRIBUTE_DATA, WIN32_FIND_DATAW,
 };
@@ -48,6 +48,7 @@ pub(crate) fn err_kind(code: u32) -> ErrKind {
         c if c == ERROR_FILE_EXISTS.0 || c == ERROR_ALREADY_EXISTS.0 => ErrKind::Exists,
         c if c == ERROR_REQUEST_ABORTED.0 => ErrKind::Cancelled,
         c if c == ERROR_NOT_SAME_DEVICE.0 => ErrKind::CrossDevice,
+        c if c == ERROR_FILENAME_EXCED_RANGE.0 => ErrKind::NameTooLong,
         c => ErrKind::Other(std::io::Error::from_raw_os_error(c as i32).to_string()),
     }
 }
@@ -366,7 +367,9 @@ impl CopyPrims for WinCopyPrims {
     fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
         let (f, t) = (long_path(from), long_path(to));
         // Sin `MOVEFILE_COPY_ALLOWED` (no copia entre discos) ni `REPLACE_EXISTING` (no pisa).
-        unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVE_FILE_FLAGS(0)) }.map_err(|e| err(e, from))
+        // `WRITE_THROUGH`: el nombre nuevo queda en el disco al volver (antes de borrar el
+        // original al mover; Windows no tiene cómo asegurar una carpeta como `fsync`).
+        unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_WRITE_THROUGH) }.map_err(|e| err(e, from))
     }
 
     fn replace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {

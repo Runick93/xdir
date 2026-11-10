@@ -538,6 +538,11 @@ impl CopyPrims for FakeCopyPrims {
         Ok(())
     }
 
+    /// Anota la carpeta en `syncs`, como `sync`.
+    fn sync_dir(&self, dir: &Path) -> Result<(), CopyError> {
+        self.sync(dir)
+    }
+
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
         let mut fs = self.fs();
         fs.check_fail(p)?;

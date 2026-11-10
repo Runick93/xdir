@@ -267,6 +267,7 @@ impl App {
             apply_all: false,
             conflict_since: None,
             route: spec_route(&spec),
+            done_items: None,
         });
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, label, paths: paths.clone() });
         let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone());
@@ -348,6 +349,7 @@ impl App {
                     v.conflict = None;
                     v.errors = outcome.errors.clone();
                     v.stopped = outcome.stopped.clone();
+                    v.done_items = Some(outcome.done_items);
                     finished.push((id, outcome));
                 }
             }

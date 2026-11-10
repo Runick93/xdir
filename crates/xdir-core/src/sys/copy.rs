@@ -73,6 +73,8 @@ pub enum ErrKind {
     Cancelled,
     /// Renombrar no puede llevarlo a otro disco (hay que copiar).
     CrossDevice,
+    /// El nombre (o la ruta) es más largo de lo que acepta el disco.
+    NameTooLong,
     Other(String),
 }
 
@@ -99,6 +101,7 @@ impl CopyError {
             ErrKind::Exists => "Ya existe".into(),
             ErrKind::Cancelled => "Cancelado".into(),
             ErrKind::CrossDevice => "Está en otro disco".into(),
+            ErrKind::NameTooLong => "El nombre es demasiado largo para ese disco".into(),
             ErrKind::Other(text) => text.clone(),
         }
     }
@@ -133,6 +136,11 @@ pub trait CopyPrims: Send + Sync {
     fn replace(&self, from: &Path, to: &Path) -> Result<(), CopyError>;
     /// Deja en el disco lo escrito en `p` (antes de borrar el original al mover).
     fn sync(&self, _p: &Path) -> Result<(), CopyError> {
+        Ok(())
+    }
+    /// Deja en el disco la carpeta `dir` (sus nombres: lo recién renombrado ahí adentro), antes de
+    /// borrar el original al mover.
+    fn sync_dir(&self, _dir: &Path) -> Result<(), CopyError> {
         Ok(())
     }
     /// Borra un archivo, un enlace o una carpeta vacía.

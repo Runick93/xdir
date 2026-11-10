@@ -901,8 +901,7 @@ mod tests {
         (p, xtree_rect(w, h, badge))
     }
 
-    /// Escaneando un volumen: el anillo reemplaza al ícono del mapa, va el porcentaje y el botón se
-    /// ensancha; sin escaneo, el botón de siempre.
+    /// El indicador de las copias: el avance, o «Errores» si solo quedan trabajos que fallaron.
     #[test]
     fn transfers_indicator_marks_failed_jobs() {
         let theme = Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true));
@@ -919,6 +918,8 @@ mod tests {
         assert!(!t.iter().any(|s| s.ends_with(" %")), "{t:?}");
     }
 
+    /// Escaneando un volumen: el anillo reemplaza al ícono del mapa, va el porcentaje y el botón se
+    /// ensancha; sin escaneo, el botón de siempre.
     #[test]
     fn status_bar_draws_ring_and_widens_button() {
         let (p, r) = status_with(XtreeBadge::Progress(37));

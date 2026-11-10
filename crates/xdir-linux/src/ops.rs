@@ -11,6 +11,7 @@ use xdir_core::names;
 use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use xdir_core::sys::{FileOps, Handle};
 
+use crate::fs::rename_noreplace;
 use crate::trash;
 
 type Result<T> = std::result::Result<T, String>;
@@ -362,29 +363,6 @@ fn copy_tracked(src: &Path, dst: &Path, created: &mut bool) -> io::Result<()> {
         to.set_permissions(meta.permissions())
     } else {
         Err(io::Error::other("no se copian archivos especiales"))
-    }
-}
-
-/// Renombra sin pisar nunca lo que haya en `to` (`renameat2` con `RENAME_NOREPLACE`). Si el
-/// sistema de archivos no lo admite, mira antes y renombra (como siempre).
-fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let bad = |_| io::Error::other("ruta inválida");
-    let (a, b) = (std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(bad)?, std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(bad)?);
-    // SAFETY: dos cadenas C válidas; AT_FDCWD como carpeta de las dos.
-    let r = unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
-    if r == 0 {
-        return Ok(());
-    }
-    let e = io::Error::last_os_error();
-    match e.raw_os_error() {
-        Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-            if taken(to) {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "ya existe, no se pisa"));
-            }
-            std::fs::rename(from, to)
-        }
-        _ => Err(e),
     }
 }
 

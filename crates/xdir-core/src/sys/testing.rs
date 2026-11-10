@@ -780,6 +780,7 @@ pub struct RecordingPainter {
     theme: Theme,
     texts: RefCell<Vec<(FontId, String, Rect)>>,
     paths: RefCell<Vec<RecordedPath>>,
+    strokes: RefCell<Vec<(Rect, Color)>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -787,12 +788,17 @@ pub type RecordedPath = (Vec<(f32, f32)>, bool, Option<Color>);
 
 impl RecordingPainter {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, texts: RefCell::new(Vec::new()), paths: RefCell::new(Vec::new()) }
+        Self { theme, texts: RefCell::new(Vec::new()), paths: RefCell::new(Vec::new()), strokes: RefCell::new(Vec::new()) }
     }
 
     /// Los trazos dibujados con `rounded_path`, en orden.
     pub fn paths(&self) -> Vec<RecordedPath> {
         self.paths.borrow().clone()
+    }
+
+    /// Los bordes dibujados con `round_stroke_w` (rectángulo y color), en orden.
+    pub fn strokes(&self) -> Vec<(Rect, Color)> {
+        self.strokes.borrow().clone()
     }
 
     /// Los textos dibujados, en orden.
@@ -809,7 +815,9 @@ impl Painter for RecordingPainter {
     }
     fn circle(&self, _cx: f32, _cy: f32, _radius: f32, _fill: Color) {}
     fn circle_stroke(&self, _cx: f32, _cy: f32, _radius: f32, _c: Color, _width: f32) {}
-    fn round_stroke_w(&self, _r: Rect, _radius: f32, _c: Color, _width: f32) {}
+    fn round_stroke_w(&self, r: Rect, _radius: f32, c: Color, _width: f32) {
+        self.strokes.borrow_mut().push((r, c));
+    }
     fn round_stroke(&self, _r: Rect, _radius: f32, _c: Color) {}
 
     fn text(&self, font: FontId, s: &str, r: Rect, _c: Color) {

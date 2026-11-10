@@ -2153,11 +2153,9 @@ impl FileList {
                 if active && self.focus_visible && item_focus == Some(pos) {
                     p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
                 }
-                // Casilla: con el mouse encima o si está seleccionado. En la cuadrícula va después
-                // de la celda para que una miniatura ancha no la tape.
-                let checkbox = if (self.hover == Some(pos) || self.selected[idx])
-                    && let Some(r) = self.checkbox_rect_in(item, name_left)
-                {
+                // Casilla: con el switch prendido, en todos los elementos (vacía o marcada). En la
+                // cuadrícula va después de la celda para que una miniatura ancha no la tape.
+                let checkbox = if let Some(r) = self.checkbox_rect_in(item, name_left) {
                     Some((r, if self.selected[idx] { CheckState::Checked } else { CheckState::Empty }))
                 } else {
                     None
@@ -2329,7 +2327,9 @@ fn draw_checkbox(p: &dyn Painter, r: Rect, state: CheckState) {
     match state {
         CheckState::Empty => {
             p.round_fill(r, 3.0, th.surface);
-            p.round_stroke_w(grow(r, -0.6), 2.5, th.text_dim, 1.2);
+            // En oscuro `text_dim` casi no se distingue de la superficie ni del fondo de la fila.
+            let edge = if th.dark { th.text_secondary } else { th.text_dim };
+            p.round_stroke_w(grow(r, -0.6), 2.5, edge, 1.2);
         }
         CheckState::Checked => {
             p.round_fill(r, 3.0, th.accent);
@@ -2983,6 +2983,18 @@ mod checkbox_tests {
         l.draw(&p, AREA, true);
         assert!(!p.paths().iter().any(|(_, closed, _)| *closed));
         assert_eq!(l.check_state(), CheckState::Checked);
+    }
+
+    /// Con el switch prendido cada fila visible tiene su casilla, sin selección ni mouse encima.
+    #[test]
+    fn checkboxes_visible_on_all_rows_when_on() {
+        let mut l = five(true);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        // Una casilla vacía es un borde cuadrado de lado CHECK_BOX (menos el recorte del trazo).
+        let boxes = p.strokes().iter().filter(|(r, _)| (r.right - r.left - (CHECK - 1.2)).abs() < 0.01).count();
+        // Las 5 filas y la casilla del encabezado.
+        assert_eq!(boxes, 6, "una casilla por fila");
     }
 
     /// Con el switch apagado no hay casillas: nada se dibuja, el nombre queda donde siempre y un

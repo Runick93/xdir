@@ -3,8 +3,14 @@
 //! cada uno a un nombre temporal y después al final, así los nombres que se cruzan (a→b y b→a) no
 //! se pisan; si algo falla en el medio, se vuelve todo atrás. Lógica pura: el sistema solo
 //! renombra (`RenamePrims`).
+//!
+//! Los nombres no se normalizan (NFC/NFD): se comparan tal como los da el sistema. macOS los
+//! guarda descompuestos y la lista los muestra igual, así que un «ñ» escrito en el panel y uno del
+//! disco pueden no coincidir al buscar; el choque con un nombre que ya existe lo atrapa igual el
+//! sistema al renombrar (`rename_noreplace` no pisa), y entonces se vuelve todo atrás.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ops::Undo;
 
@@ -12,6 +18,43 @@ use crate::ops::Undo;
 pub const INVALID_WINDOWS: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 /// Caracteres que no puede tener un nombre en macOS y Linux.
 pub const INVALID_UNIX: &[char] = &['/'];
+
+/// Las reglas de nombres del sistema (las da `FileSystem::name_rules`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NameRules {
+    /// Caracteres que no puede tener (además de los de control).
+    pub chars: &'static [char],
+    /// Windows quita el punto o el espacio del final: «a.» sería «a».
+    pub no_trailing_dot_space: bool,
+    /// Los nombres de dispositivo de DOS (CON, PRN, AUX, NUL, COM1–9, LPT1–9), con o sin extensión.
+    pub reserved_dos: bool,
+    /// Largo máximo de un nombre: en unidades UTF-16 si `utf16` (Windows), si no en bytes UTF-8.
+    pub max_len: usize,
+    pub utf16: bool,
+}
+
+impl NameRules {
+    pub const WINDOWS: NameRules = NameRules { chars: INVALID_WINDOWS, no_trailing_dot_space: true, reserved_dos: true, max_len: 255, utf16: true };
+    pub const UNIX: NameRules = NameRules { chars: INVALID_UNIX, no_trailing_dot_space: false, reserved_dos: false, max_len: 255, utf16: false };
+
+    fn too_long(&self, name: &str) -> bool {
+        let len = if self.utf16 { name.encode_utf16().count() } else { name.len() };
+        len > self.max_len
+    }
+}
+
+/// ¿Es un nombre de dispositivo de DOS? Cuenta lo que va antes del primer punto, sin los espacios
+/// del final y sin distinguir mayúsculas («con.txt», «Nul .tar.gz»).
+fn reserved_dos(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    match base.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            let b = base.as_bytes();
+            b.len() == 4 && (base.starts_with("COM") || base.starts_with("LPT")) && (b'1'..=b'9').contains(&b[3])
+        }
+    }
+}
 
 /// Qué se le hace al nombre (siempre sin la extensión, que queda igual).
 #[derive(Clone, Debug, PartialEq)]
@@ -53,8 +96,16 @@ pub enum Clash {
     Exists,
     /// El nombre queda vacío (o solo la extensión).
     Empty,
+    /// Empezaría con punto (y quedaría oculto) sin haberlo estado antes.
+    Hidden,
     /// Tiene un carácter que el sistema no permite.
     Invalid(char),
+    /// Termina en punto o en espacio (Windows los quita).
+    TrailingDotSpace,
+    /// Es un nombre de dispositivo de Windows (CON, NUL, COM1…).
+    Reserved,
+    /// Pasa del largo máximo del sistema.
+    TooLong,
 }
 
 impl Clash {
@@ -64,7 +115,11 @@ impl Clash {
             Clash::Duplicate => format!("Otro elemento también se llamaría «{new_name}»"),
             Clash::Exists => format!("Ya existe «{new_name}» en esta carpeta"),
             Clash::Empty => "El nombre no puede quedar vacío".to_string(),
+            Clash::Hidden => "Empezaría con punto y quedaría oculto".to_string(),
             Clash::Invalid(c) => format!("El nombre no puede tener «{c}»"),
+            Clash::TrailingDotSpace => "El nombre no puede terminar en punto ni en espacio".to_string(),
+            Clash::Reserved => format!("«{new_name}» es un nombre reservado de Windows"),
+            Clash::TooLong => "El nombre es demasiado largo (más de 255 caracteres)".to_string(),
         }
     }
 
@@ -74,7 +129,11 @@ impl Clash {
             Clash::Duplicate => format!("«{new_name}» se repite"),
             Clash::Exists => format!("«{new_name}» ya existe"),
             Clash::Empty => "un nombre queda vacío".to_string(),
+            Clash::Hidden => format!("«{new_name}» quedaría oculto"),
             Clash::Invalid(c) => format!("«{c}» no se permite en un nombre"),
+            Clash::TrailingDotSpace => format!("«{new_name}» termina en punto o espacio"),
+            Clash::Reserved => format!("«{new_name}» es un nombre reservado"),
+            Clash::TooLong => "un nombre es demasiado largo".to_string(),
         }
     }
 }
@@ -160,7 +219,7 @@ pub fn compute(items: &[Source], mode: &Mode) -> Vec<String> {
 /// `others` son los nombres de la carpeta que no se renombran; `case_insensitive`: el disco no
 /// distingue mayúsculas (un nombre que solo cambia mayúsculas no choca consigo mismo). Los que no
 /// cambian no tienen choque (los demás sí chocan con ellos: siguen ocupando su nombre).
-pub fn clashes(old: &[String], new: &[String], others: &[String], case_insensitive: bool, invalid: &[char]) -> Vec<Option<Clash>> {
+pub fn clashes(old: &[String], new: &[String], others: &[String], case_insensitive: bool, rules: &NameRules) -> Vec<Option<Clash>> {
     let key = |s: &str| if case_insensitive { s.to_lowercase() } else { s.to_string() };
     let mut count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for n in new {
@@ -173,11 +232,25 @@ pub fn clashes(old: &[String], new: &[String], others: &[String], case_insensiti
             if o == n {
                 return None;
             }
-            if n.trim().is_empty() || n == "." || n == ".." || (n.starts_with('.') && !o.starts_with('.')) {
+            // Vacío, o solo la extensión que tenía («a.txt» → «.txt»).
+            let (_, ext) = split_ext(o, false);
+            if n.trim().is_empty() || n == "." || n == ".." || (!ext.is_empty() && n == ext) {
                 return Some(Clash::Empty);
             }
-            if let Some(c) = n.chars().find(|c| invalid.contains(c) || c.is_control()) {
+            if n.starts_with('.') && !o.starts_with('.') {
+                return Some(Clash::Hidden);
+            }
+            if let Some(c) = n.chars().find(|c| rules.chars.contains(c) || c.is_control()) {
                 return Some(Clash::Invalid(c));
+            }
+            if rules.no_trailing_dot_space && (n.ends_with('.') || n.ends_with(' ')) {
+                return Some(Clash::TrailingDotSpace);
+            }
+            if rules.reserved_dos && reserved_dos(n) {
+                return Some(Clash::Reserved);
+            }
+            if rules.too_long(n) {
+                return Some(Clash::TooLong);
             }
             let k = key(n);
             if count.get(&k).copied().unwrap_or(0) > 1 {
@@ -217,43 +290,95 @@ pub fn io_message(e: &std::io::Error, path: &Path) -> String {
     }
 }
 
-/// Renombra cada `(ruta, nombre nuevo)` en su carpeta, en dos pasos: todos a un temporal
-/// `.xdir-ren-<pid>-<i>` y después al nombre final. Si un paso falla, deshace lo hecho en orden
-/// inverso y devuelve el error. Devuelve cómo deshacerlo todo junto (`Undo::Renames`).
+/// Número de llamada a `rename_all` (con el pid, hace únicos los temporales aunque corran dos a la
+/// vez en la misma carpeta).
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// El nombre temporal del elemento `i` de la llamada `seq`: visible (sin punto adelante) y con el
+/// nombre original, para que alguien lo reconozca y lo arregle a mano si quedara así:
+/// «IMG_1 (xdir renombrando 4321-7-0).jpg». Si no entra en 255 bytes, se acorta el nombre.
+fn temp_name(original: &str, seq: u64, i: usize) -> String {
+    let (stem, ext) = split_ext(original, false);
+    let tag = format!(" (xdir renombrando {}-{seq}-{i})", std::process::id());
+    let room = 255usize.saturating_sub(tag.len() + ext.len());
+    let mut cut = stem.len().min(room);
+    while !stem.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{tag}{ext}", &stem[..cut])
+}
+
+/// Dónde está cada elemento durante `rename_all`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum At {
+    Original,
+    Temp,
+    Final,
+}
+
+/// Renombra cada `(ruta, nombre nuevo)` en su carpeta, en dos pasos: todos a un temporal visible
+/// (`temp_name`, único por llamada) y después al nombre final. Si un paso falla, deshace lo que
+/// hizo esta llamada (solo mueve lo que ella movió) y devuelve el error; si algo no se pudo
+/// devolver, el error dice cómo quedó cada uno. Devuelve cómo deshacerlo todo junto
+/// (`Undo::Renames`).
 pub fn rename_all(prims: &dyn RenamePrims, pairs: &[(PathBuf, String)]) -> Result<Undo, String> {
-    let pid = std::process::id();
-    let temps: Vec<PathBuf> = pairs.iter().enumerate().map(|(i, (p, _))| p.with_file_name(format!(".xdir-ren-{pid}-{i}"))).collect();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let name_of = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temps: Vec<PathBuf> = pairs.iter().enumerate().map(|(i, (p, _))| p.with_file_name(temp_name(&name_of(p), seq, i))).collect();
     let finals: Vec<PathBuf> = pairs.iter().map(|(p, n)| p.with_file_name(n)).collect();
-    // Paso 1: a los temporales.
+    let mut at = vec![At::Original; pairs.len()];
+    // Paso 1: a los temporales; paso 2: a los finales.
     for (i, (path, _)) in pairs.iter().enumerate() {
         if let Err(e) = prims.rename_noreplace(path, &temps[i]) {
-            back(prims, &temps[..i], &pairs[..i].iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
-            return Err(e);
+            return Err(with_stranded(e, &rollback(prims, pairs, &temps, &finals, &mut at)));
         }
+        at[i] = At::Temp;
     }
-    // Paso 2: a los finales.
     for i in 0..pairs.len() {
         if let Err(e) = prims.rename_noreplace(&temps[i], &finals[i]) {
-            back(prims, &finals[..i], &temps[..i]);
-            let originals: Vec<PathBuf> = pairs.iter().map(|(p, _)| p.clone()).collect();
-            back(prims, &temps, &originals);
-            return Err(e);
+            return Err(with_stranded(e, &rollback(prims, pairs, &temps, &finals, &mut at)));
         }
+        at[i] = At::Final;
     }
-    let undo = finals
-        .into_iter()
-        .zip(pairs)
-        .map(|(now, (old, _))| (now, old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
-        .collect();
+    let undo = finals.into_iter().zip(pairs).map(|(now, (old, _))| (now, name_of(old))).collect();
     Ok(Undo::Renames(undo))
 }
 
-/// Vuelve cada `from[i]` a `to[i]`, del último al primero (lo que falle acá ya no tiene arreglo:
-/// queda con el nombre temporal, que se ve en la carpeta).
-fn back(prims: &dyn RenamePrims, from: &[PathBuf], to: &[PathBuf]) {
-    for (f, t) in from.iter().zip(to).rev() {
-        let _ = prims.rename_noreplace(f, t);
+/// Vuelve atrás lo que hizo esta llamada, del último al primero: los finales a su temporal (así
+/// quedan libres los nombres originales aunque se crucen) y los temporales al original. Devuelve
+/// los que no volvieron: (dónde quedaron, nombre original).
+fn rollback(prims: &dyn RenamePrims, pairs: &[(PathBuf, String)], temps: &[PathBuf], finals: &[PathBuf], at: &mut [At]) -> Vec<(PathBuf, String)> {
+    for i in (0..at.len()).rev() {
+        if at[i] == At::Final && prims.rename_noreplace(&finals[i], &temps[i]).is_ok() {
+            at[i] = At::Temp;
+        }
     }
+    for i in (0..at.len()).rev() {
+        if at[i] == At::Temp && prims.rename_noreplace(&temps[i], &pairs[i].0).is_ok() {
+            at[i] = At::Original;
+        }
+    }
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    (0..at.len())
+        .filter_map(|i| match at[i] {
+            At::Original => None,
+            At::Temp => Some((temps[i].clone(), name(&pairs[i].0))),
+            At::Final => Some((finals[i].clone(), name(&pairs[i].0))),
+        })
+        .collect()
+}
+
+/// El error con los que quedaron sin volver: «…; no se pudo volver atrás y quedaron así: «x» (era
+/// «1»)».
+fn with_stranded(e: String, stranded: &[(PathBuf, String)]) -> String {
+    if stranded.is_empty() {
+        return e;
+    }
+    let list: Vec<String> = stranded
+        .iter()
+        .map(|(now, was)| format!("«{}» (era «{was}»)", now.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()))
+        .collect();
+    format!("{e}; no se pudo volver atrás y quedaron así: {}", list.join(", "))
 }
 
 #[cfg(test)]
@@ -328,36 +453,36 @@ mod tests {
     fn clash_duplicate_and_exists() {
         let old = strings(&["a.jpg", "b.jpg", "c.jpg", "d.jpg"]);
         let new = strings(&["x.jpg", "x.jpg", "otro.jpg", "d.jpg"]);
-        let c = clashes(&old, &new, &strings(&["otro.jpg"]), false, INVALID_UNIX);
+        let c = clashes(&old, &new, &strings(&["otro.jpg"]), false, &NameRules::UNIX);
         assert_eq!(c, [Some(Clash::Duplicate), Some(Clash::Duplicate), Some(Clash::Exists), None]);
         // Con uno que no cambia: choca el que va a su nombre, no él.
-        let c = clashes(&strings(&["a", "b"]), &strings(&["b", "b"]), &[], false, INVALID_UNIX);
+        let c = clashes(&strings(&["a", "b"]), &strings(&["b", "b"]), &[], false, &NameRules::UNIX);
         assert_eq!(c, [Some(Clash::Duplicate), None]);
         // Sin distinguir mayúsculas, «X.jpg» y «x.jpg» son el mismo.
-        let c = clashes(&strings(&["a", "b"]), &strings(&["X.jpg", "x.jpg"]), &[], true, INVALID_UNIX);
+        let c = clashes(&strings(&["a", "b"]), &strings(&["X.jpg", "x.jpg"]), &[], true, &NameRules::UNIX);
         assert_eq!(c, [Some(Clash::Duplicate), Some(Clash::Duplicate)]);
-        let c = clashes(&strings(&["a", "b"]), &strings(&["X.jpg", "x.jpg"]), &[], false, INVALID_UNIX);
+        let c = clashes(&strings(&["a", "b"]), &strings(&["X.jpg", "x.jpg"]), &[], false, &NameRules::UNIX);
         assert_eq!(c, [None, None]);
-        let c = clashes(&strings(&["a"]), &strings(&["OTRO.jpg"]), &strings(&["otro.jpg"]), true, INVALID_UNIX);
+        let c = clashes(&strings(&["a"]), &strings(&["OTRO.jpg"]), &strings(&["otro.jpg"]), true, &NameRules::UNIX);
         assert_eq!(c, [Some(Clash::Exists)]);
     }
 
     #[test]
     fn clash_empty_and_invalid() {
-        let c = clashes(&strings(&["a.txt", "b.txt", "c"]), &strings(&[".txt", "a:b.txt", " "]), &[], false, INVALID_WINDOWS);
+        let c = clashes(&strings(&["a.txt", "b.txt", "c"]), &strings(&[".txt", "a:b.txt", " "]), &[], false, &NameRules::WINDOWS);
         assert_eq!(c, [Some(Clash::Empty), Some(Clash::Invalid(':')), Some(Clash::Empty)]);
         // En macOS y Linux «:» se permite; «/» nunca.
-        let c = clashes(&strings(&["a", "b"]), &strings(&["a:b", "a/b"]), &[], false, INVALID_UNIX);
+        let c = clashes(&strings(&["a", "b"]), &strings(&["a:b", "a/b"]), &[], false, &NameRules::UNIX);
         assert_eq!(c, [None, Some(Clash::Invalid('/'))]);
     }
 
     #[test]
     fn rename_many_case_only_change() {
         // «a.txt» → «A.txt» en un disco que no distingue mayúsculas: no choca consigo mismo.
-        let c = clashes(&strings(&["a.txt"]), &strings(&["A.txt"]), &strings(&["b.txt"]), true, INVALID_UNIX);
+        let c = clashes(&strings(&["a.txt"]), &strings(&["A.txt"]), &strings(&["b.txt"]), true, &NameRules::UNIX);
         assert_eq!(c, [None]);
         // Y con otro elemento que no se renombra llamado «A.txt» sí.
-        let c = clashes(&strings(&["a.txt"]), &strings(&["B.txt"]), &strings(&["b.txt"]), true, INVALID_UNIX);
+        let c = clashes(&strings(&["a.txt"]), &strings(&["B.txt"]), &strings(&["b.txt"]), true, &NameRules::UNIX);
         assert_eq!(c, [Some(Clash::Exists)]);
         // Por el disco: con el falso que no distingue mayúsculas, el cambio pasa por el temporal.
         let fake = FakeRenames::new(&["/d/a.txt"], true);
@@ -370,11 +495,21 @@ mod tests {
         files: RefCell<BTreeSet<String>>,
         ci: bool,
         fail_to: RefCell<Vec<String>>,
+        /// Fallan los destinos que empiezan con alguno de estos nombres (sin la carpeta).
+        fail_names: RefCell<Vec<String>>,
+        /// Los renombrados hechos (desde, hasta), en orden.
+        log: RefCell<Vec<(String, String)>>,
     }
 
     impl FakeRenames {
         fn new(files: &[&str], ci: bool) -> FakeRenames {
-            FakeRenames { files: RefCell::new(files.iter().map(|f| f.to_string()).collect()), ci, fail_to: RefCell::new(Vec::new()) }
+            FakeRenames {
+                files: RefCell::new(files.iter().map(|f| f.to_string()).collect()),
+                ci,
+                fail_to: RefCell::new(Vec::new()),
+                fail_names: RefCell::new(Vec::new()),
+                log: RefCell::new(Vec::new()),
+            }
         }
         fn key(&self, s: &str) -> String {
             if self.ci { s.to_lowercase() } else { s.to_string() }
@@ -387,7 +522,8 @@ mod tests {
     impl RenamePrims for FakeRenames {
         fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), String> {
             let (f, t) = (from.to_string_lossy().into_owned(), to.to_string_lossy().into_owned());
-            if self.fail_to.borrow().contains(&t) {
+            let short = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if self.fail_to.borrow().contains(&t) || self.fail_names.borrow().iter().any(|p| short.starts_with(p.as_str())) {
                 return Err(format!("falla {t}"));
             }
             let mut files = self.files.borrow_mut();
@@ -396,6 +532,7 @@ mod tests {
                 return Err(format!("ya existe {t}"));
             }
             files.remove(&existing);
+            self.log.borrow_mut().push((f, t.clone()));
             files.insert(t);
             Ok(())
         }
@@ -408,7 +545,7 @@ mod tests {
         assert_eq!(fake.names(), ["/d/a", "/d/b"]);
         assert_eq!(undo, Undo::Renames(vec![(PathBuf::from("/d/b"), "a".into()), (PathBuf::from("/d/a"), "b".into())]));
         // Sin temporales sueltos.
-        assert!(fake.names().iter().all(|n| !n.contains(".xdir-ren-")));
+        assert!(fake.names().iter().all(|n| !n.contains("xdir renombrando")));
     }
 
     #[test]
@@ -420,8 +557,7 @@ mod tests {
         assert_eq!(fake.names(), ["/d/1", "/d/2", "/d/3"]);
         // Falla en el primer paso (el temporal del tercero).
         let fake = FakeRenames::new(&["/d/1", "/d/2", "/d/3"], false);
-        let pid = std::process::id();
-        fake.fail_to.borrow_mut().push(format!("/d/.xdir-ren-{pid}-2"));
+        fake.fail_names.borrow_mut().push("3 (xdir renombrando".into());
         assert!(rename_all(&fake, &pairs).is_err());
         assert_eq!(fake.names(), ["/d/1", "/d/2", "/d/3"]);
     }
@@ -438,6 +574,74 @@ mod tests {
         // Deshacer es otro `rename_all` con esos mismos pares.
         rename_all(&fake, &back).unwrap();
         assert_eq!(fake.names(), ["/d/IMG_1.jpg", "/d/IMG_2.jpg"]);
+    }
+
+    #[test]
+    fn rollback_failure_names_what_stayed() {
+        // Falla el paso 2 del tercero y, al volver, también el original del primero: el error lo
+        // dice y el temporal es visible y lleva el nombre original.
+        let fake = FakeRenames::new(&["/d/1.jpg", "/d/2.jpg", "/d/3.jpg"], false);
+        fake.fail_to.borrow_mut().extend(["/d/z.jpg".to_string(), "/d/1.jpg".to_string()]);
+        let pairs = [(PathBuf::from("/d/1.jpg"), "x.jpg".into()), (PathBuf::from("/d/2.jpg"), "y.jpg".into()), (PathBuf::from("/d/3.jpg"), "z.jpg".into())];
+        let e = rename_all(&fake, &pairs).unwrap_err();
+        let names = fake.names();
+        let stuck = names.iter().find(|n| n.contains("xdir renombrando")).expect("queda un temporal");
+        let stuck = stuck.trim_start_matches("/d/");
+        assert!(stuck.starts_with("1 (xdir renombrando ") && stuck.ends_with(").jpg"), "{stuck}");
+        assert!(e.starts_with("falla /d/z.jpg; no se pudo volver atrás y quedaron así: "), "{e}");
+        assert!(e.contains(&format!("«{stuck}» (era «1.jpg»)")), "{e}");
+        assert!(names.contains(&"/d/2.jpg".to_string()) && names.contains(&"/d/3.jpg".to_string()));
+    }
+
+    #[test]
+    fn temp_names_unique_per_call_and_rollback_owns_only_its_own() {
+        let fake = FakeRenames::new(&["/d/a", "/d/b", "/d/c"], false);
+        rename_all(&fake, &[(PathBuf::from("/d/a"), "a2".into())]).unwrap();
+        rename_all(&fake, &[(PathBuf::from("/d/b"), "b2".into())]).unwrap();
+        let temps: Vec<String> = fake.log.borrow().iter().map(|(_, t)| t.clone()).filter(|t| t.contains("renombrando")).collect();
+        assert_eq!(temps.len(), 2);
+        let tag = |t: &str| t.split("renombrando ").nth(1).unwrap().to_string();
+        assert_ne!(tag(&temps[0]), tag(&temps[1]), "cada llamada tiene su número: {temps:?}");
+        // Falla el temporal del segundo: solo se devuelve el primero (nunca se toca otro temporal).
+        fake.log.borrow_mut().clear();
+        fake.fail_names.borrow_mut().push("b2 (xdir".into());
+        assert!(rename_all(&fake, &[(PathBuf::from("/d/a2"), "x".into()), (PathBuf::from("/d/b2"), "y".into())]).is_err());
+        let log = fake.log.borrow().clone();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[1].1, "/d/a2");
+        assert_eq!(fake.names(), ["/d/a2", "/d/b2", "/d/c"]);
+    }
+
+    #[test]
+    fn temp_name_is_visible_and_fits() {
+        let t = temp_name("IMG_1.jpg", 7, 0);
+        assert_eq!(t, format!("IMG_1 (xdir renombrando {}-7-0).jpg", std::process::id()));
+        let long = "ñ".repeat(127) + ".txt";
+        let t = temp_name(&long, 1, 2);
+        assert!(t.len() <= 255 && t.ends_with(".txt") && t.starts_with("ññ"), "{t}");
+    }
+
+    #[test]
+    fn clash_windows_rules() {
+        let old = strings(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"]);
+        let long = "x".repeat(252) + ".txt";
+        let new = vec!["a.".to_string(), "b ".into(), "CON.txt".into(), "lpt1.tar.gz".into(), long.clone(), "COM10.txt".into()];
+        let c = clashes(&old, &new, &[], true, &NameRules::WINDOWS);
+        assert_eq!(c, [Some(Clash::TrailingDotSpace), Some(Clash::TrailingDotSpace), Some(Clash::Reserved), Some(Clash::Reserved), Some(Clash::TooLong), None]);
+        // En macOS y Linux esos nombres valen; el largo se cuenta en bytes.
+        let c = clashes(&old[..4], &new[..4], &[], false, &NameRules::UNIX);
+        assert_eq!(c, [None, None, None, None]);
+        let c = clashes(&strings(&["a"]), &["é".repeat(128)], &[], false, &NameRules::UNIX);
+        assert_eq!(c, [Some(Clash::TooLong)]);
+        let c = clashes(&strings(&["a"]), &["é".repeat(128)], &[], false, &NameRules::WINDOWS);
+        assert_eq!(c, [None]);
+    }
+
+    #[test]
+    fn clash_hidden_is_its_own_reason() {
+        let c = clashes(&strings(&["a.txt", ".env"]), &strings(&[".a.txt", ".env2"]), &[], false, &NameRules::UNIX);
+        assert_eq!(c, [Some(Clash::Hidden), None]);
+        assert_eq!(Clash::Hidden.tip(".a.txt"), "Empezaría con punto y quedaría oculto");
     }
 
     #[test]

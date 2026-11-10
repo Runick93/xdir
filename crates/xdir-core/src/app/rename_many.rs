@@ -185,7 +185,7 @@ impl App {
         let taken: std::collections::HashSet<usize> = found.iter().map(|(_, i)| *i).collect();
         let others: Vec<String> =
             list.entries.iter().enumerate().filter(|(i, _)| !taken.contains(i)).map(|(_, e)| e.name.to_string_lossy().into_owned()).collect();
-        let marks = clashes(&old, &new, &others, st.case_insensitive, sys::file_system().invalid_name_chars());
+        let marks = clashes(&old, &new, &others, st.case_insensitive, &sys::file_system().name_rules());
         let rows: Vec<Row> = found.iter().zip(old).zip(new).zip(marks).map(|((((_, i), o), n), c)| (*i, o, n, c)).collect();
         let preview = rows.iter().map(|(i, _, n, c)| (*i, n.clone(), *c)).collect();
         let (pane, items) = (st.pane, found.into_iter().map(|(n, _)| n).collect());

@@ -559,8 +559,8 @@ impl FileSystem for Win32FileSystem {
         crate::metadata::cloud_only(&HSTRING::from(path))
     }
 
-    fn invalid_name_chars(&self) -> &'static [char] {
-        xdir_core::rename_many::INVALID_WINDOWS
+    fn name_rules(&self) -> xdir_core::rename_many::NameRules {
+        xdir_core::rename_many::NameRules::WINDOWS
     }
 
     /// NTFS, FAT y exFAT no distinguen mayúsculas (salvo carpetas marcadas para WSL: se marcan

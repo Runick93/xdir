@@ -315,9 +315,10 @@ pub trait FileSystem: Send + Sync {
     fn cloud_only(&self, _path: &Path) -> bool {
         false
     }
-    /// Caracteres que no puede tener un nombre (`rename_many::INVALID_WINDOWS` o `INVALID_UNIX`).
-    fn invalid_name_chars(&self) -> &'static [char] {
-        crate::rename_many::INVALID_UNIX
+    /// Las reglas de nombres del sistema (`rename_many::NameRules::WINDOWS` o `UNIX`: en macOS
+    /// «:» vale, el Finder lo muestra como «/»).
+    fn name_rules(&self) -> crate::rename_many::NameRules {
+        crate::rename_many::NameRules::UNIX
     }
     /// ¿El disco de `dir` no distingue mayúsculas? Bloqueante (corre en un hilo de trabajo). Por
     /// defecto sí: así se marcan más choques, nunca menos.

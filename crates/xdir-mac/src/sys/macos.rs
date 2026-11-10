@@ -166,12 +166,7 @@ impl SystemEnv for MacEnv {
     /// Hoy en hora local, con la zona horaria del sistema (`localtime_r`).
     fn local_now(&self) -> LocalNow {
         let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        let t = unix as libc::time_t;
-        // SAFETY: `localtime_r` escribe en `tm`, que es nuestro (la versión `_r` no comparte
-        // memoria entre hilos).
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let offset = if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() { 0 } else { tm.tm_gmtoff as i64 };
-        LocalNow::from_unix(unix, offset)
+        LocalNow::from_unix(unix, utc_offset(unix))
     }
 
     /// Como lo muestra el Finder: "1,2 MB".
@@ -616,7 +611,17 @@ pub fn install() {
         metadata: Box::new(MacMetadata),
         preview: Box::new(MacPreview),
         copy_prims: Box::new(crate::ops::MacCopyPrims),
-        archives: Box::new(xdir_archive::Service { tar_gz: true }),
+        archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset }),
         info: Box::new(crate::info::MacInfo),
     });
+}
+
+/// Diferencia con UTC (en segundos) de la hora local en el instante `unix` (segundos desde 1970),
+/// según la zona horaria del sistema (`localtime_r`); 0 si no se puede saber.
+pub(crate) fn utc_offset(unix: i64) -> i64 {
+    let t = unix as libc::time_t;
+    // SAFETY: `localtime_r` escribe en `tm`, que es nuestro (la versión `_r` no comparte
+    // memoria entre hilos).
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() { 0 } else { tm.tm_gmtoff as i64 }
 }

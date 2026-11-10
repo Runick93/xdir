@@ -77,7 +77,11 @@ pub(super) struct InfoState {
     /// Generación de la suma de carpeta: cambia solo con el sujeto (releer después de un cambio
     /// no corta una suma larga).
     pub(super) size_generation: u64,
-    size_current: Arc<AtomicU64>,
+    /// Señal de corte de la suma en curso, compartida con su hilo: cambiar de sujeto (o soltar el
+    /// disco) la pone en `true` y el hilo deja de abrir carpetas enseguida.
+    pub(super) size_cancel: Arc<AtomicBool>,
+    /// El hilo de la suma y su carpeta (expulsar espera a que suelte el disco).
+    pub(super) size_worker: Option<(PathBuf, std::thread::JoinHandle<()>)>,
 }
 
 impl InfoState {
@@ -104,14 +108,16 @@ impl InfoState {
             focused: false,
             size_thread: true,
             size_generation: 0,
-            size_current: Arc::new(AtomicU64::new(0)),
+            size_cancel: Arc::new(AtomicBool::new(false)),
+            size_worker: None,
         }
     }
 
     /// Corta la suma en curso (cambió el sujeto o se cerró el panel).
     fn bump_size(&mut self) {
         self.size_generation += 1;
-        self.size_current.store(self.size_generation, Ordering::Relaxed);
+        self.size_cancel.store(true, Ordering::Relaxed);
+        self.size_cancel = Arc::new(AtomicBool::new(false));
     }
 
     fn bump(&mut self) -> u64 {
@@ -187,13 +193,14 @@ impl App {
         if self.info_open() {
             return;
         }
-        // Hay un solo panel a la vez: Renombrar varios se cierra (sin dejar ver la vista previa).
+        // Hay un solo panel a la vez: Renombrar varios se cierra. El dueño pasa a ser la
+        // información antes de cerrarlo, así la vista previa no llega a pedir nada en el medio.
         let shown = self.preview_visible();
+        self.preview.owner = RightPanel::Info;
         self.close_rename_many();
         if !shown {
             self.begin_layout_anim();
         }
-        self.preview.owner = RightPanel::Info;
         self.info.scroll = 0.0;
         self.sync_info();
         self.redraw();
@@ -222,6 +229,39 @@ impl App {
         st.layout = idraw::Layout::default();
         self.sync_preview();
         self.redraw();
+    }
+
+    /// Expulsar: si el panel muestra algo del disco de `root` (o suma una carpeta de ahí), lo suelta
+    /// y corta la suma. Devuelve el hilo de la suma de ese disco para esperarlo antes de expulsar.
+    pub(super) fn release_info_under(&mut self, root: &Path) -> Option<std::thread::JoinHandle<()>> {
+        let st = &self.info;
+        let under = st.subject.iter().any(|p| p.starts_with(root)) || st.folder.as_ref().is_some_and(|f| f.path.starts_with(root));
+        if under {
+            self.end_info_edit(false);
+            let st = &mut self.info;
+            st.bump();
+            st.subject.clear();
+            st.stamps.clear();
+            st.items = None;
+            st.folder = None;
+            st.bump_size();
+            st.errors.clear();
+            st.pending = false;
+            self.redraw();
+        }
+        self.info.size_worker.take_if(|(p, _)| p.starts_with(root)).map(|(_, h)| h)
+    }
+
+    /// Pruebas: la carpeta que se está sumando (o ya sumada) y si terminó.
+    #[cfg(test)]
+    pub(super) fn info_folder(&self) -> Option<(PathBuf, bool)> {
+        self.info.folder.as_ref().map(|f| (f.path.clone(), f.done))
+    }
+
+    /// Pruebas: lo que muestra el panel.
+    #[cfg(test)]
+    pub(super) fn info_subject(&self) -> &[PathBuf] {
+        &self.info.subject
     }
 
     /// Qué se muestra: rutas y su versión. La selección del panel activo; sin selección, la carpeta
@@ -383,16 +423,14 @@ impl App {
         if !self.info.size_thread {
             return;
         }
-        let (hwnd, tx, generation, current) = (self.hwnd, self.info.tx.clone(), self.info.size_generation, self.info.size_current.clone());
+        let (hwnd, tx, generation, ctl) = (self.hwnd, self.info.tx.clone(), self.info.size_generation, self.info.size_cancel.clone());
+        let at = path.clone();
         let spawned = std::thread::Builder::new().name("xdir-tamano-carpeta".into()).spawn(move || {
-            let ctl = AtomicBool::new(false);
-            let stale = || current.load(Ordering::Relaxed) != generation;
+            let stale = || ctl.load(Ordering::Relaxed);
             let mut last = (0, 0, 0);
             let skipped = crate::info::size::folder_size(&path, &|p| sys::file_system().cloud_only(p), &ctl, &mut |b, f, fo| {
                 last = (b, f, fo);
-                if stale() {
-                    ctl.store(true, Ordering::Relaxed);
-                } else if tx.send(InfoReply::FolderSize { generation, path: path.clone(), bytes: b, files: f, folders: fo, skipped: 0, done: false }).is_ok() {
+                if !stale() && tx.send(InfoReply::FolderSize { generation, path: path.clone(), bytes: b, files: f, folders: fo, skipped: 0, done: false }).is_ok() {
                     hwnd.post(WM_APP_INFO, 0, 0);
                 }
             });
@@ -401,6 +439,7 @@ impl App {
             }
         });
         debug_assert!(spawned.is_ok(), "hilo del tamaño de la carpeta");
+        self.info.size_worker = spawned.ok().map(|h| (at, h));
     }
 
     /// Lo que se ve de un elemento antes de que llegue la respuesta (o lo que falta en ella): de la

@@ -1209,7 +1209,6 @@ mod tests {
             std::fs::write(dir.join("d/informe 2.pdf"), b"otro").unwrap();
             let p = Hook { bin: dir.join("bin"), trash_mode: 2, ..Default::default() };
             let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/informe.pdf")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
-            eprintln!("errors {:?}\nd={:?}", out.errors, all_names(&dir.join("d")));
             assert_eq!(rd(&dir.join("d/informe.pdf")), "nuevo");
             assert_eq!(rd(&dir.join("d/informe 2.pdf")), "otro");
             // La Papelera falló: lo viejo queda a la vista con el nombre que lo explica.
@@ -1229,8 +1228,7 @@ mod tests {
             std::fs::create_dir_all(dir.join("s/X")).unwrap();
             std::fs::write(dir.join("s/X/n.txt"), b"n").unwrap();
             let p = Hook { bin: dir.join("bin"), ..Default::default() };
-            let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/X")], dest: dir.join("d") }, &[rep(), rep()], &Control::new(), &mut |_| {});
-            eprintln!("errors {:?} bin={:?}", out.errors, all_names(&dir.join("bin")));
+            go(&p, JobSpec::Copy { sources: vec![dir.join("s/X")], dest: dir.join("d") }, &[rep(), rep()], &Control::new(), &mut |_| {});
             assert_eq!(rd(&dir.join("real/tesis.docx")), "tesis");
             assert_eq!(rd(&dir.join("d/X/n.txt")), "n");
             // y un archivo sobre el enlace
@@ -1239,8 +1237,7 @@ mod tests {
             std::fs::remove_dir_all(dir.join("s/X")).unwrap();
             std::fs::write(dir.join("s/X"), b"archivo").unwrap();
             let p2 = Hook { bin: dir.join("bin2"), no_trash_volume: true, ..Default::default() };
-            let out = go(&p2, JobSpec::Copy { sources: vec![dir.join("s/X")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
-            eprintln!("errors {:?}", out.errors);
+            go(&p2, JobSpec::Copy { sources: vec![dir.join("s/X")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
             assert_eq!(rd(&dir.join("real/tesis.docx")), "tesis");
             assert_eq!(rd(&dir.join("d/X")), "archivo");
         }
@@ -1256,8 +1253,7 @@ mod tests {
                 let p = Hook { bin: dir.join("bin"), alias: alias.then(|| dir.join("alias")), ..Default::default() };
                 let dest = if alias { dir.join("alias") } else { dir.join("w") };
                 let spec = if moving { JobSpec::Move { sources: vec![dir.join("w/X/X")], dest } } else { JobSpec::Copy { sources: vec![dir.join("w/X/X")], dest } };
-                let out = go(&p, spec, &[rep(), rep()], &Control::new(), &mut |_| {});
-                eprintln!("moving={moving} alias={alias} errors {:?}", out.errors);
+                go(&p, spec, &[rep(), rep()], &Control::new(), &mut |_| {});
                 assert_eq!(rd(&dir.join("w/X/X/dato")), "dato");
                 assert_eq!(rd(&dir.join("w/X/hermano")), "h");
             }
@@ -1277,11 +1273,9 @@ mod tests {
                 let srcs = vec![dir.join("s/f.txt"), dir.join("s/C")];
                 let spec = if moving { JobSpec::Move { sources: srcs, dest: dir.join("d") } } else { JobSpec::Copy { sources: srcs, dest: dir.join("d") } };
                 let out = go(&p, spec, &[rep(), rep()], &Control::new(), &mut |_| {});
-                eprintln!("moving={moving} errors {:?} undo {:?} bin={:?}", out.errors, out.result.undo, all_names(&dir.join("bin")));
                 assert_eq!(rd(&dir.join("d/f.txt")), "nuevo");
                 let undo = out.result.undo.clone().unwrap();
-                let out2 = go(&p, JobSpec::Undo(undo), &[], &Control::new(), &mut |_| {});
-                eprintln!("undo errors {:?} d={:?} s={:?} bin={:?}", out2.errors, all_names(&dir.join("d")), all_names(&dir.join("s")), all_names(&dir.join("bin")));
+                go(&p, JobSpec::Undo(undo), &[], &Control::new(), &mut |_| {});
                 assert_eq!(rd(&dir.join("d/f.txt")), "viejo");
                 assert_eq!(rd(&dir.join("d/C/v")), "v");
                 assert!(!dir.join("d/C/n").exists());
@@ -1308,8 +1302,7 @@ mod tests {
                     let p = Hook { bin: dir.join("bin"), alias: Some(dir.join("d")), cancel_on_aside: Some(ctl.clone()), ..Default::default() };
                     let srcs = vec![dir.join("s").join(src)];
                     let spec = if moving { JobSpec::Move { sources: srcs, dest: dir.join("d") } } else { JobSpec::Copy { sources: srcs, dest: dir.join("d") } };
-                    let out = go(&p, spec, &[rep()], &ctl, &mut |_| {});
-                    eprintln!("moving={moving} {src}: cancelled={} errors {:?} d={:?} s={:?} bin={:?}", out.cancelled, out.errors, all_names(&dir.join("d")), all_names(&dir.join("s")), all_names(&dir.join("bin")));
+                    go(&p, spec, &[rep()], &ctl, &mut |_| {});
                     no_tmp(&dir.join("d"));
                 }
                 // no se perdió nada: o viejo en d, o en bin
@@ -1333,8 +1326,7 @@ mod tests {
                 let p = Hook { bin: dir.join("bin"), alias: Some(dir.join("d")), fail_copy: Some(("b.bin".into(), kind.clone())), ..Default::default() };
                 let srcs = vec![dir.join("s/C")];
                 let spec = if moving { JobSpec::Move { sources: srcs, dest: dir.join("d") } } else { JobSpec::Copy { sources: srcs, dest: dir.join("d") } };
-                let out = go(&p, spec, &[rep()], &Control::new(), &mut |_| {});
-                eprintln!("moving={moving} {kind:?}: stopped={:?} errors {:?} d={:?} d/C={:?} s/C={:?} bin={:?} undo={:?}", out.stopped, out.errors, all_names(&dir.join("d")), all_names(&dir.join("d/C")), all_names(&dir.join("s/C")), all_names(&dir.join("bin")), out.result.undo);
+                go(&p, spec, &[rep()], &Control::new(), &mut |_| {});
                 assert_eq!(rd(&dir.join("d/C/v")), "v");
                 for f in ["a.bin", "b.bin", "c.bin"] {
                     let somewhere = dir.join("s/C").join(f).exists() || dir.join("d/C 2").join(f).exists();
@@ -1356,7 +1348,6 @@ mod tests {
             let p = Hook { bin: dir.join("bin"), ..Default::default() };
             let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/C")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
             std::fs::set_permissions(dir.join("s/C/cerrada"), std::fs::Permissions::from_mode(0o755)).unwrap();
-            eprintln!("errors {:?} d/C={:?} bin={:?}", out.errors, all_names(&dir.join("d/C")), all_names(&dir.join("bin")));
             // Con un error adentro (aunque sea del recorrido), vuelve la carpeta vieja.
             assert!(!out.errors.is_empty());
             assert_eq!(all_names(&dir.join("d/C")), vec!["v"]);
@@ -1372,8 +1363,7 @@ mod tests {
             std::fs::write(dir.join("s/f"), b"nuevo").unwrap();
             std::fs::write(dir.join("d/f"), b"viejo").unwrap();
             let p = Hook { bin: dir.join("bin"), volume_none: true, trash_mode: 1, ..Default::default() };
-            let out = go(&p, JobSpec::Move { sources: vec![dir.join("s/f")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
-            eprintln!("errors {:?} d={:?} s={:?}", out.errors, all_names(&dir.join("d")), all_names(&dir.join("s")));
+            go(&p, JobSpec::Move { sources: vec![dir.join("s/f")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
             assert_eq!(rd(&dir.join("d/f")), "nuevo");
         }
 
@@ -1388,7 +1378,6 @@ mod tests {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 go(&p, JobSpec::Copy { sources: vec![dir.join("s/f")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
             }));
-            eprintln!("panicked={} d={:?}", r.is_err(), all_names(&dir.join("d")));
             // Si xdir se cae entre apartar y tirar a la Papelera, lo viejo queda a la vista.
             assert!(r.is_err());
             assert_eq!(rd(&dir.join("d/f (reemplazado)")), "viejo");
@@ -1405,7 +1394,6 @@ mod tests {
             let p = Hook { bin: dir.join("bin"), ..Default::default() };
             let out = go(&p, JobSpec::Copy { sources: vec![dir.join("s/informe.pdf")], dest: dir.join("d") }, &[rep()], &Control::new(), &mut |_| {});
             let calls: Vec<String> = p.log.lock().unwrap().iter().filter(|l| l.starts_with("trash")).cloned().collect();
-            eprintln!("undo {:?} trash calls {calls:?}", out.result.undo);
             assert_eq!(calls, vec![format!("trash {}", dir.join("d/informe (reemplazado).pdf").display())]);
             // Deshacer lo devuelve a su nombre.
             go(&p, JobSpec::Undo(out.result.undo.unwrap()), &[], &Control::new(), &mut |_| {});

@@ -362,8 +362,24 @@ impl App {
             let tab = self.panes[pane].tab_mut();
             tab.focus_after_load(OsString::from(name));
         }
+        self.spawn_renames(dir, None, move || rename_all(&SysRenames, &pairs));
+    }
+
+    /// Corre un renombrado (o su deshacer, `undoing`) en un hilo con `renaming` prendido. Aunque
+    /// `work` entre en pánico llega `TaskDone::Renamed` (con error), así `renaming` siempre se
+    /// apaga y un deshacer que no se hizo vuelve a la pila.
+    pub(super) fn spawn_renames(
+        &mut self,
+        dir: PathBuf,
+        undoing: Option<Vec<(PathBuf, String)>>,
+        work: impl FnOnce() -> Result<Undo, String> + Send + 'static,
+    ) {
         self.renaming = true;
-        self.spawn_task(move || TaskDone::Renamed { result: rename_all(&SysRenames, &pairs), dir, undoing: None });
+        self.spawn_task(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .unwrap_or_else(|_| Err("falló de forma inesperada; revisá los nombres en la carpeta".to_string()));
+            TaskDone::Renamed { result, dir, undoing }
+        });
     }
 
     /// Con un renombrado corriendo no se larga otro (dos a la vez en la misma carpeta podrían
@@ -385,11 +401,8 @@ impl App {
             return;
         }
         let dir = renames.first().and_then(|(p, _)| p.parent()).map(Path::to_path_buf).unwrap_or_default();
-        self.renaming = true;
-        self.spawn_task(move || {
-            let result = rename_all(&SysRenames, &renames);
-            TaskDone::Renamed { result, dir, undoing: Some(renames) }
-        });
+        let pairs = renames.clone();
+        self.spawn_renames(dir, Some(renames), move || rename_all(&SysRenames, &pairs));
     }
 
     /// Terminó un renombrado (o su deshacer): se apila el deshacer, se avisa el error y se recargan

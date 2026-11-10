@@ -150,17 +150,32 @@ pub fn write_edits_at(path: &Path, edits: &[ConfigEdit]) -> Result<Config, Strin
         Err(e) => return Err(e.to_string()),
     };
     let out = apply_edits(&text, edits);
-    let dir = path.parent().ok_or("ruta sin carpeta")?;
+    // Un enlace (a un repo de dotfiles) sigue siendo enlace: se escribe en el archivo de verdad.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target.parent().ok_or("ruta sin carpeta")?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let tmp = dir.join(format!("{FILE_NAME}.tmp"));
+    let tmp = temp_path(&target);
     std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    // Con los permisos que tenía.
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
     }
     let mut c = Config::parse(&out);
     c.modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     Ok(c)
+}
+
+/// Temporal al lado de `target`, propio de este proceso y de esta escritura (dos xdir que
+/// escriben a la vez no se pisan el temporal).
+fn temp_path(target: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = target.file_name().map_or_else(|| FILE_NAME.into(), |n| n.to_string_lossy().into_owned());
+    target.with_file_name(format!("{name}.{}.{n}.tmp", std::process::id()))
 }
 
 pub fn file_path() -> Option<PathBuf> {
@@ -491,6 +506,35 @@ mod tests {
         assert!(write_edits_at(&path, &edit).is_err());
         assert!(path.is_dir());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Un `config.toml` que es un enlace (a un repo de dotfiles) sigue siendo enlace: se escribe
+    /// en el archivo de verdad, con sus permisos; el temporal lleva el número de proceso.
+    #[cfg(unix)]
+    #[test]
+    fn write_edits_through_symlink_keeps_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        crate::sys::testing::install_fakes();
+        let link = temp_file("enlace");
+        let dir = link.parent().unwrap().to_path_buf();
+        let real = dir.join("dotfiles-config.toml");
+        std::fs::write(&real, "# mío\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_edits_at(&link, &[ConfigEdit::Set { section: "opciones", key: "animaciones".into(), value: "true".into() }]).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "sigue siendo un enlace");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "# mío\n\n[opciones]\nanimaciones = true\n");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temp_name_is_per_process() {
+        let a = temp_path(Path::new("/x/config.toml"));
+        let b = temp_path(Path::new("/x/config.toml"));
+        assert_ne!(a, b);
+        assert!(a.file_name().unwrap().to_string_lossy().starts_with(&format!("config.toml.{}.", std::process::id())));
     }
 
     #[test]

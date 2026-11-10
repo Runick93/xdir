@@ -32,6 +32,10 @@ pub enum Undo {
     Moved(Vec<(PathBuf, PathBuf)>),
     /// (nombre del elemento dentro de la papelera, dónde estaba).
     Recycled(Vec<(String, PathBuf)>),
+    /// Varios pasos de una misma operación: se deshacen en orden inverso.
+    Batch(Vec<Undo>),
+    /// Carpeta creada para la operación: a la papelera solo si quedó vacía (si no, se deja).
+    CreatedFolder(PathBuf),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,4 +46,6 @@ pub struct OpResult {
     /// Carpeta o archivo nuevo: se abre el renombrado en línea sobre él.
     pub rename_after: bool,
     pub error: Option<String>,
+    /// Elementos que quedan seleccionados al recargar (las copias de Duplicar, lo copiado).
+    pub select: Vec<PathBuf>,
 }

@@ -31,7 +31,7 @@ impl FileOps for LinuxFileOps {
 }
 
 fn ok(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, errors: Vec<String>) -> Result<OpResult> {
-    Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")) })
+    Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")), ..Default::default() })
 }
 
 /// Error de una ruta como lo ve el usuario.
@@ -191,6 +191,8 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
                 }
             }
         }
+        // Solo los arman los trabajos del motor de copia, que los deshace él (`transfer`).
+        Undo::Batch(_) | Undo::CreatedFolder(_) => return Err("lo deshace el motor de copia".into()),
     }
     ok(None, None, false, errors)
 }
@@ -438,9 +440,9 @@ mod tests {
         let first = dir.join("Nuevo documento de texto.txt");
         let second = dir.join("Nuevo documento de texto (2).txt");
         let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None });
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None, ..Default::default() });
         let r = run(Op::NewFile { parent: dir.clone() }, None).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None });
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None, ..Default::default() });
         assert_eq!(std::fs::read(&first).unwrap(), b"");
         assert_eq!(std::fs::read(&second).unwrap(), b"");
         let _ = std::fs::remove_dir_all(&dir);

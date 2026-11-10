@@ -25,7 +25,7 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
         }
     }
     std::thread::spawn(move || {
-        let result = run(op).unwrap_or_else(|e| OpResult { undo: None, focus: None, rename_after: false, error: Some(e) });
+        let result = run(op).unwrap_or_else(|e| OpResult { error: Some(e), ..Default::default() });
         if tx.send(result).is_ok() {
             owner.post(WM_APP_OP_DONE, 0, 0);
         }
@@ -48,7 +48,7 @@ fn confirm_delete(paths: &[PathBuf]) -> bool {
 }
 
 fn ok(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, errors: Vec<String>) -> Result<OpResult> {
-    Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")) })
+    Ok(OpResult { undo, focus, rename_after, error: (!errors.is_empty()).then(|| errors.join("; ")), ..Default::default() })
 }
 
 fn run(op: Op) -> Result<OpResult> {
@@ -158,6 +158,8 @@ fn undo_op(undo: Undo) -> Result<OpResult> {
                 }
             }
         }
+        // Solo los arman los trabajos del motor de copia, que los deshace él (`transfer`).
+        Undo::Batch(_) | Undo::CreatedFolder(_) => return Err("lo deshace el motor de copia".into()),
     }
     ok(None, None, false, errors)
 }
@@ -254,9 +256,9 @@ mod tests {
         let first = dir.join("Nuevo documento de texto.txt");
         let second = dir.join("Nuevo documento de texto (2).txt");
         let r = run(Op::NewFile { parent: dir.clone() }).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None });
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![first.clone()])), focus: Some(first.clone()), rename_after: true, error: None, ..Default::default() });
         let r = run(Op::NewFile { parent: dir.clone() }).unwrap();
-        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None });
+        assert_eq!(r, OpResult { undo: Some(Undo::Created(vec![second.clone()])), focus: Some(second.clone()), rename_after: true, error: None, ..Default::default() });
         assert_eq!(std::fs::read(&first).unwrap(), b"");
         assert_eq!(std::fs::read(&second).unwrap(), b"");
         let _ = std::fs::remove_dir_all(&dir);

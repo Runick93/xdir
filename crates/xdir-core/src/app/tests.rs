@@ -748,7 +748,7 @@ fn go_to_text_with_a_file_opens_its_folder() {
 // ---------- operaciones terminadas ----------
 
 fn result(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, error: Option<&str>) -> OpResult {
-    OpResult { undo, focus, rename_after, error: error.map(String::from) }
+    OpResult { undo, focus, rename_after, error: error.map(String::from), ..Default::default() }
 }
 
 #[test]

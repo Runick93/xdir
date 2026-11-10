@@ -39,6 +39,7 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
             focus: None,
             rename_after: false,
             error: Some(e.message().to_string()),
+            ..Default::default()
         });
         if tx.send(result).is_ok() {
             unsafe {
@@ -148,8 +149,10 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Moved(v) => !v.is_empty(),
         Undo::Recycled(v) => !v.is_empty(),
         Undo::Rename { .. } => true,
+        Undo::Batch(v) => !v.is_empty(),
+        Undo::CreatedFolder(_) => true,
     });
-    Ok(OpResult { undo, focus, rename_after, error: None })
+    Ok(OpResult { undo, focus, rename_after, error: None, ..Default::default() })
 }
 
 fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
@@ -184,12 +187,16 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                     focus = Some(original.clone());
                 }
                 fo.PerformOperations().ok();
-                return Ok(OpResult { undo: None, focus, rename_after: false, error: None });
+                return Ok(OpResult { undo: None, focus, rename_after: false, error: None, ..Default::default() });
+            }
+            // Solo los arman los trabajos del motor de copia, que los deshace él (`transfer`).
+            Undo::Batch(_) | Undo::CreatedFolder(_) => {
+                return Ok(OpResult { error: Some("lo deshace el motor de copia".into()), ..Default::default() });
             }
         }
         fo.PerformOperations()?;
     }
-    Ok(OpResult { undo: None, focus, rename_after: false, error: None })
+    Ok(OpResult { undo: None, focus, rename_after: false, error: None, ..Default::default() })
 }
 
 fn restore_from_recycle_bin(parsing_name: &str) -> Result<()> {

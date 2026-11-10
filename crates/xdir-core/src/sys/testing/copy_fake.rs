@@ -11,7 +11,8 @@ use crate::sys::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, Volume
 #[derive(Clone, Debug)]
 enum Node {
     Dir { modified: u64 },
-    File { data: Vec<u8>, modified: u64, cloud: bool },
+    /// `size`: el tamaño que informa `stat` si no es el del contenido (archivos «grandes»).
+    File { data: Vec<u8>, modified: u64, cloud: bool, size: Option<u64> },
     Link { target: PathBuf },
 }
 
@@ -144,7 +145,7 @@ impl FakeCopyPrims {
     pub fn add_file(&self, path: &Path, bytes: Vec<u8>) {
         let mut fs = self.fs();
         fs.add_parents(path);
-        fs.nodes.insert(path.to_path_buf(), Node::File { data: bytes, modified: 0, cloud: false });
+        fs.nodes.insert(path.to_path_buf(), Node::File { data: bytes, modified: 0, cloud: false, size: None });
     }
 
     pub fn add_symlink(&self, path: &Path, target: &Path) {
@@ -158,6 +159,13 @@ impl FakeCopyPrims {
         match fs.nodes.get_mut(path) {
             Some(Node::File { modified: m, .. }) | Some(Node::Dir { modified: m }) => *m = modified,
             _ => {}
+        }
+    }
+
+    /// El tamaño que informa `stat` (sin guardar tanto contenido); copiarlo copia el contenido.
+    pub fn set_size(&self, path: &Path, bytes: u64) {
+        if let Some(Node::File { size, .. }) = self.fs().nodes.get_mut(path) {
+            *size = Some(bytes);
         }
     }
 
@@ -250,8 +258,8 @@ impl CopyPrims for FakeCopyPrims {
         let key = fs.key(p).ok_or_else(|| CopyError::new(ErrKind::NotFound, p))?;
         Ok(match &fs.nodes[&key] {
             Node::Dir { modified } => ItemStat { kind: ItemKind::Dir, size: 0, modified: *modified, cloud_only: false },
-            Node::File { data, modified, cloud } => {
-                ItemStat { kind: ItemKind::File, size: data.len() as u64, modified: *modified, cloud_only: *cloud }
+            Node::File { data, modified, cloud, size } => {
+                ItemStat { kind: ItemKind::File, size: size.unwrap_or(data.len() as u64), modified: *modified, cloud_only: *cloud }
             }
             Node::Link { target } => {
                 ItemStat { kind: ItemKind::Symlink, size: target.as_os_str().len() as u64, modified: 0, cloud_only: false }
@@ -288,7 +296,7 @@ impl CopyPrims for FakeCopyPrims {
             }
             fs.need_parent_dir(dst)?;
             *fs.reads.entry(src.to_path_buf()).or_insert(0) += 1;
-            fs.nodes.insert(dst.to_path_buf(), Node::File { data: Vec::new(), modified, cloud: false });
+            fs.nodes.insert(dst.to_path_buf(), Node::File { data: Vec::new(), modified, cloud: false, size: None });
             (data, fs.block.unwrap_or(64 * 1024), fs.delay, fs.fail_after.get(src).cloned(), fs.short.get(src).copied())
         };
         let total = short.unwrap_or(data.len() as u64).min(data.len() as u64);

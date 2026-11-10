@@ -63,6 +63,9 @@ pub(super) struct NetState {
     pub tick_due: Option<std::time::Instant>,
 }
 
+/// Lo conectado y la identidad del volumen de cada conexión.
+pub(super) type NetListing = (Vec<NetConnection>, Vec<(PathBuf, std::ffi::OsString)>);
+
 /// Segundos desde 1970 (UTC).
 pub(super) fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
@@ -223,7 +226,7 @@ impl App {
         }
     }
 
-    pub(super) fn on_net_connections(&mut self, result: Result<(Vec<NetConnection>, Vec<(PathBuf, std::ffi::OsString)>), NetError>) {
+    pub(super) fn on_net_connections(&mut self, result: Result<NetListing, NetError>) {
         if let Ok((list, ids)) = result {
             self.remember_net_volume_ids(ids);
             self.net.connections = list;

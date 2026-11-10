@@ -292,12 +292,11 @@ impl App {
         if self.connect_field_done(commit) {
             return;
         }
-        // Una caja de la sección «Red» de la configuración (la que tiene el foco).
-        if let Some((_, n, a, _)) = self.net.page.editing.as_ref().map(|(i, n, a, r)| (*i, *n, *a, *r)) {
-            let b = if self.host.text_has_focus(n) { n } else { a };
-            if super::network_page::field_done(self, b, commit) {
-                return;
-            }
+        // La caja de la sección «Red» de la configuración.
+        if let Some(b) = self.net.page.editing.as_ref().map(|e| e.field)
+            && super::network_page::field_done(self, b, commit)
+        {
+            return;
         }
         if commit {
             self.apply_rename_many();
@@ -309,6 +308,11 @@ impl App {
     /// Tab (o Shift+Tab con `back`) en una caja del panel: el foco pasa a la siguiente (o a la
     /// anterior), dando la vuelta.
     pub(super) fn on_field_tab(&mut self, back: bool) {
+        if let Some(b) = self.net.page.editing.as_ref().map(|e| e.field)
+            && super::network_page::field_tab(self, b, back)
+        {
+            return;
+        }
         let Some(st) = &self.rename_many else { return };
         let n = st.boxes.len();
         if n == 0 {

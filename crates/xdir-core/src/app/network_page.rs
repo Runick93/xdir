@@ -44,18 +44,29 @@ pub(super) enum PageHit {
     OpenLocalNetwork,
 }
 
+/// Un favorito en edición: una sola caja a la vez (la del nombre o la de la dirección; Tab pasa
+/// de una a otra), como pide el contrato de las páginas extra (`App::settings_field`).
+pub(super) struct Editing {
+    /// Índice; `favorites.len()`: uno nuevo.
+    pub index: usize,
+    pub on_address: bool,
+    pub name: String,
+    pub address: String,
+    /// La caja abierta (del host).
+    pub field: TextBox,
+}
+
 /// Estado de la página (dentro de `NetState`).
 #[derive(Default)]
 pub(super) struct PageState {
-    /// Favorito en edición: (índice; `favorites.len()` = uno nuevo, caja del nombre, caja de la
-    /// dirección, dónde están).
-    pub editing: Option<(usize, TextBox, TextBox, (Rect, Rect))>,
+    pub editing: Option<Editing>,
     /// Error de la dirección de una fila (índice, texto).
     pub error: Option<(usize, String)>,
-    /// Dónde quedó cada control en el último cuadro.
+    /// Geometría del último cuadro (lo único que anota `draw`): dónde quedó cada control y los
+    /// rectángulos del nombre y la dirección de cada fila de favoritos (la última, la de uno
+    /// nuevo).
     pub hits: Vec<(Rect, PageHit)>,
-    /// Ya se pidió lo conectado al abrir la página.
-    pub asked_connections: bool,
+    pub fields: Vec<(Rect, Rect)>,
 }
 
 const ROW: f32 = 40.0;
@@ -113,10 +124,6 @@ fn icon_button(p: &dyn Painter, r: Rect, glyph: &str, hot: bool) {
 
 /// Dibuja la página en `r` (arriba a la izquierda del contenido) y devuelve el alto que ocupa.
 pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, f32)>) -> f32 {
-    if !app.net.page.asked_connections {
-        app.net.page.asked_connections = true;
-        app.request_connections();
-    }
     let th = p.theme();
     let style = app.net_style();
     let net = sys::network();
@@ -135,23 +142,27 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
     hits.push((add, PageHit::AddFavorite));
     y += 32.0;
     let nf = app.net.places.favorites.len();
-    let editing = app.net.page.editing.as_ref().map(|(i, ..)| *i);
-    let rows = nf + usize::from(editing == Some(nf));
-    let mut edit_rects = None;
+    let editing = app.net.page.editing.as_ref().map(|e| (e.index, e.on_address, e.name.clone(), e.address.clone()));
+    let rows = nf + usize::from(editing.as_ref().is_some_and(|e| e.0 == nf));
+    let mut fields = Vec::new();
     for i in 0..rows {
         let row = rect(left, y, right, y + ROW);
-        let is_edit = editing == Some(i);
+        let is_edit = editing.as_ref().is_some_and(|e| e.0 == i);
         p.round_fill(row, 6.0, th.surface_alt);
         p.round_stroke(row, 6.0, if is_edit { th.accent } else { th.border });
         p.text(FontId::Glyphs, "\u{E735}", rect(left + 8.0, y + 11.0, left + 32.0, y + ROW - 9.0), th.accent);
         let name_r = rect(left + 36.0, y + 6.0, left + 244.0, y + ROW - 6.0);
         let addr_r = rect(left + 252.0, y + 6.0, right - 208.0, y + ROW - 6.0);
-        if is_edit {
-            for b in [name_r, addr_r] {
+        fields.push((name_r, addr_r));
+        if let Some((_, on_address, name, address)) = editing.as_ref().filter(|_| is_edit) {
+            // La caja abierta va encima de una de las dos; la otra muestra lo que tiene.
+            for (b, active, text) in [(name_r, !on_address, name), (addr_r, *on_address, address)] {
                 p.round_fill(b, 4.0, th.surface);
-                p.round_stroke(b, 4.0, th.border);
+                p.round_stroke(b, 4.0, if active { th.accent } else { th.border });
+                if !active {
+                    p.text(FontId::Ui, text, rect(b.left + 6.0, y + 12.0, b.right - 4.0, y + ROW), th.text);
+                }
             }
-            edit_rects = Some((name_r, addr_r));
         } else if let Some(f) = app.net.places.favorites.get(i) {
             p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &f.name, name_r.right - name_r.left), rect(name_r.left, y + 12.0, name_r.right, y + ROW), th.text);
             p.text(FontId::Ui, &shown(&f.address, style), rect(addr_r.left, y + 12.0, addr_r.right, y + ROW), th.text_dim);
@@ -176,6 +187,10 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
             p.text(FontId::Small, e, rect(left + 252.0, y - 2.0, right, y + 14.0), th.danger);
             y += 16.0;
         }
+    }
+    // Dónde iría uno nuevo (para «Agregar…»).
+    if rows == nf {
+        fields.push((rect(left + 36.0, y + 6.0, left + 244.0, y + ROW - 6.0), rect(left + 252.0, y + 6.0, right - 208.0, y + ROW - 6.0)));
     }
     if rows == 0 {
         p.text(FontId::Small, "Todavía no hay favoritos: la estrella de «Conectar a un servidor» los agrega.", rect(left, y, right, y + 18.0), th.text_dim);
@@ -269,9 +284,7 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         y += 54.0 + 12.0;
     }
     app.net.page.hits = hits;
-    if let Some(rects) = edit_rects {
-        app.place_page_boxes(rects);
-    }
+    app.net.page.fields = fields;
     y - r.top
 }
 
@@ -323,10 +336,9 @@ pub(super) fn click(app: &mut App, x: f32, y: f32) -> bool {
     true
 }
 
-/// Enter (`commit`) o Esc en una caja de la página: `true` si era de acá.
+/// Enter (`commit`) o Esc en la caja de la página: `true` si era de acá.
 pub(super) fn field_done(app: &mut App, b: TextBox, commit: bool) -> bool {
-    let Some((i, name_b, addr_b, _)) = app.net.page.editing.as_ref().map(|(i, n, a, r)| (*i, *n, *a, *r)) else { return false };
-    if b != name_b && b != addr_b {
+    if app.net.page.editing.as_ref().is_none_or(|e| e.field != b) {
         return false;
     }
     if !commit {
@@ -335,11 +347,17 @@ pub(super) fn field_done(app: &mut App, b: TextBox, commit: bool) -> bool {
         app.redraw();
         return true;
     }
-    let (name, address) = (app.host.text_get(name_b), app.host.text_get(addr_b));
+    app.keep_page_text();
+    let Some(e) = &app.net.page.editing else { return true };
+    let (i, name, address) = (e.index, e.name.clone(), e.address.clone());
     let addr = match Address::parse(&address) {
         Ok(a) => a,
-        Err(e) => {
-            app.net.page.error = Some((i, e));
+        Err(err) => {
+            app.net.page.error = Some((i, err));
+            // El foco va a la dirección, que es lo que hay que corregir.
+            if !app.net.page.editing.as_ref().is_some_and(|e| e.on_address) {
+                app.switch_page_field();
+            }
             app.redraw();
             return true;
         }
@@ -361,55 +379,68 @@ pub(super) fn field_done(app: &mut App, b: TextBox, commit: bool) -> bool {
     true
 }
 
+/// Tab (o Shift+Tab) en la caja de la página: pasa del nombre a la dirección y al revés.
+pub(super) fn field_tab(app: &mut App, b: TextBox, _back: bool) -> bool {
+    if app.net.page.editing.as_ref().is_none_or(|e| e.field != b) {
+        return false;
+    }
+    app.switch_page_field();
+    true
+}
+
 impl App {
-    /// Empieza a editar el favorito `i` (o uno nuevo con `i == len`): las cajas se crean en su
-    /// lugar al dibujar.
+    /// Empieza a editar el favorito `i` (o uno nuevo con `i == len`) con la caja del nombre (la
+    /// de la dirección si es nuevo), en el lugar del último cuadro.
     pub(super) fn start_page_edit(&mut self, i: usize) {
         self.end_page_edit();
         let (name, address) = self.net.places.favorites.get(i).map_or((String::new(), String::new()), |f| (f.name.clone(), shown(&f.address, self.net_style())));
-        let zero = Rect::default();
-        let (Some(n), Some(a)) = (
-            self.host.text_create(TextKind::Field, zero, &name, &self.theme),
-            self.host.text_create(TextKind::Field, zero, &address, &self.theme),
-        ) else {
-            return;
-        };
-        self.host.text_focus(if i < self.net.places.favorites.len() { n } else { a });
-        self.net.page.editing = Some((i, n, a, (zero, zero)));
+        let on_address = i >= self.net.places.favorites.len();
+        let Some(field) = self.page_box(i, on_address, if on_address { &address } else { &name }) else { return };
+        self.net.page.editing = Some(Editing { index: i, on_address, name, address, field });
+        self.redraw();
+    }
+
+    /// La caja de la fila `i` (nombre o dirección), con el foco.
+    fn page_box(&mut self, i: usize, on_address: bool, text: &str) -> Option<TextBox> {
+        let (n, a) = self.net.page.fields.get(i).copied()?;
+        let r = if on_address { a } else { n };
+        let b = self.host.text_create(TextKind::Field, rect(r.left + 4.0, r.top + 3.0, r.right - 4.0, r.bottom - 3.0), text, &self.theme)?;
+        self.host.text_focus(b);
+        Some(b)
+    }
+
+    /// Lo escrito en la caja abierta pasa a su campo.
+    fn keep_page_text(&mut self) {
+        let Some(e) = &self.net.page.editing else { return };
+        let text = self.host.text_get(e.field);
+        if let Some(e) = &mut self.net.page.editing {
+            if e.on_address { e.address = text } else { e.name = text }
+        }
+    }
+
+    /// Cierra la caja abierta y abre la del otro campo de la misma fila.
+    fn switch_page_field(&mut self) {
+        self.keep_page_text();
+        let Some(e) = &self.net.page.editing else { return };
+        let (i, on_address, old) = (e.index, !e.on_address, e.field);
+        let text = if on_address { e.address.clone() } else { e.name.clone() };
+        self.host.text_destroy(old);
+        match self.page_box(i, on_address, &text) {
+            Some(b) => {
+                if let Some(e) = &mut self.net.page.editing {
+                    e.field = b;
+                    e.on_address = on_address;
+                }
+            }
+            None => self.net.page.editing = None,
+        }
         self.redraw();
     }
 
     pub(super) fn end_page_edit(&mut self) {
-        if let Some((_, n, a, _)) = self.net.page.editing.take() {
-            self.host.text_destroy(n);
-            self.host.text_destroy(a);
+        if let Some(e) = self.net.page.editing.take() {
+            self.host.text_destroy(e.field);
             self.host.focus_main();
         }
-    }
-
-    /// Las cajas de la fila en edición en su lugar (se recrean si la fila se movió).
-    fn place_page_boxes(&mut self, rects: (Rect, Rect)) {
-        let Some((i, n, a, at)) = self.net.page.editing.as_ref().map(|(i, n, a, r)| (*i, *n, *a, *r)) else { return };
-        if at == rects {
-            return;
-        }
-        let inner = |r: Rect| rect(r.left + 4.0, r.top + 3.0, r.right - 4.0, r.bottom - 3.0);
-        let (tn, ta) = (self.host.text_get(n), self.host.text_get(a));
-        let (fn_, fa) = (self.host.text_has_focus(n), self.host.text_has_focus(a));
-        self.host.text_destroy(n);
-        self.host.text_destroy(a);
-        let (Some(n2), Some(a2)) = (
-            self.host.text_create(TextKind::Field, inner(rects.0), &tn, &self.theme),
-            self.host.text_create(TextKind::Field, inner(rects.1), &ta, &self.theme),
-        ) else {
-            self.net.page.editing = None;
-            return;
-        };
-        if fn_ {
-            self.host.text_focus(n2);
-        } else if fa {
-            self.host.text_focus(a2);
-        }
-        self.net.page.editing = Some((i, n2, a2, rects));
     }
 }

@@ -1368,12 +1368,27 @@ fn auth_retry_ignored_after_navigation() {
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(path.clone()));
     wait_until(&mut a, |_| FakeNetwork::connects_to("nas-r1auth").len() == 1);
     let local = tmp_dir("r1-auth-local");
+    let before = FakeFileSystem::loads(&local);
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local.clone()));
-    wait_until(&mut a, |a| !a.panes[0].tab().loading);
-    let loads = FakeFileSystem::loads(&local);
-    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
+    // La conexión puede volver antes o después de que cargue la carpeta nueva: se espera a las
+    // dos cosas sin suponer un orden.
+    let t0 = Instant::now();
+    let mut connected = false;
+    while !(connected && !a.panes[0].tab().loading) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "no terminó a tiempo");
+        if let Ok(t) = a.task_rx.recv_timeout(Duration::from_millis(20)) {
+            connected |= matches!(t, TaskDone::Connected { .. });
+            a.on_task_done(t);
+        }
+        while let Ok(ev) = a.rx.try_recv() {
+            a.on_load_event(ev);
+        }
+    }
     std::thread::sleep(Duration::from_millis(30));
-    assert_eq!(FakeFileSystem::loads(&local), loads, "no recarga la carpeta nueva");
+    while let Ok(ev) = a.rx.try_recv() {
+        a.on_load_event(ev);
+    }
+    assert_eq!(FakeFileSystem::loads(&local), before + 1, "no recarga la carpeta nueva");
     FakeFileSystem::set_load_error(&path, None);
 }
 

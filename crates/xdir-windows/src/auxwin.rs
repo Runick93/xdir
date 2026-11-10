@@ -12,10 +12,10 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Once;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT,
+    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
@@ -49,6 +49,20 @@ pub fn initial_rect(owner: RECT, work: RECT, size: SIZE) -> RECT {
     let left = (cx - size.cx / 2).min(work.right - size.cx).max(work.left);
     let top = (cy - size.cy / 2).min(work.bottom - size.cy).max(work.top);
     RECT { left, top, right: left + size.cx, bottom: top + size.cy }
+}
+
+/// `r` corrido lo justo para entrar en `work` (una posición recordada en un monitor que ya no
+/// está o que quedó medio afuera); si es más grande, pegado arriba a la izquierda.
+pub fn clamp_rect(r: RECT, work: RECT) -> RECT {
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let left = r.left.min(work.right - w).max(work.left);
+    let top = r.top.min(work.bottom - h).max(work.top);
+    RECT { left, top, right: left + w, bottom: top + h }
+}
+
+/// `WM_SYSCOMMAND` de minimizar (los 4 bits de abajo los usa el sistema).
+pub fn is_minimize(wparam: usize) -> bool {
+    wparam & 0xFFF0 == SC_MINIMIZE as usize
 }
 
 /// La ventana en `old` pasa a medir `size`: queda fija la esquina de arriba a la izquierda, salvo
@@ -162,7 +176,11 @@ fn dpi_of(hwnd: HWND) -> u32 {
 
 /// Tamaño de la ventana (con el borde del sistema) para un área de `size` DIPs.
 fn window_size(hwnd: HWND, size: (f32, f32)) -> SIZE {
-    let dpi = dpi_of(hwnd);
+    window_size_at(dpi_of(hwnd), size)
+}
+
+/// Lo mismo con el DPI de otro monitor (la primera vez se ubica en el de la principal).
+fn window_size_at(dpi: u32, size: (f32, f32)) -> SIZE {
     let k = dpi as f32 / 96.0;
     let client = SIZE { cx: (size.0 * k).round() as i32, cy: (size.1 * k).round() as i32 };
     let mut border = RECT::default();
@@ -246,21 +264,28 @@ pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &The
             }
             let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, ws.cx, ws.cy, SWP_NOMOVE | SWP_NOACTIVATE);
         } else {
-            let (x, y) = PLACE.with(|p| p.get()).unwrap_or_else(|| {
+            let work_of = |monitor| {
                 let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-                let work = if GetMonitorInfoW(MonitorFromWindow(main, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
-                    info.rcWork
-                } else {
-                    RECT { left: 0, top: 0, right: 1280, bottom: 800 }
-                };
-                let mut owner = RECT::default();
-                if GetWindowRect(main, &mut owner).is_err() {
-                    owner = work;
+                if GetMonitorInfoW(monitor, &mut info).as_bool() { info.rcWork } else { RECT { left: 0, top: 0, right: 1280, bottom: 800 } }
+            };
+            let r = match PLACE.with(|p| p.get()) {
+                // Donde la dejó el usuario, entera en el monitor más cercano a ese punto.
+                Some((x, y)) => {
+                    let work = work_of(MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST));
+                    clamp_rect(RECT { left: x, top: y, right: x + ws.cx, bottom: y + ws.cy }, work)
                 }
-                let r = initial_rect(owner, work, ws);
-                (r.left, r.top)
-            });
-            let _ = SetWindowPos(hwnd, Some(HWND_TOP), x, y, ws.cx, ws.cy, SWP_NOACTIVATE);
+                // La primera vez: centrada sobre la principal, con el DPI de su monitor (la de
+                // copia se creó en otro, quizás con otra escala).
+                None => {
+                    let work = work_of(MonitorFromWindow(main, MONITOR_DEFAULTTONEAREST));
+                    let mut owner = RECT::default();
+                    if GetWindowRect(main, &mut owner).is_err() {
+                        owner = work;
+                    }
+                    initial_rect(owner, work, window_size_at(dpi_of(main), size))
+                }
+            };
+            let _ = SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
     }
@@ -439,6 +464,12 @@ unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 if used { LRESULT(0) } else { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
             // Cerrar (la ✕ o Alt+F4) la oculta: los trabajos siguen y queda el indicador.
+            // Minimizar la oculta, como cerrar: queda el indicador de la barra de estado para
+            // volver a abrirla (una ventana minimizada aparte se perdería en la barra de tareas).
+            WM_SYSCOMMAND if is_minimize(wparam.0) => {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                LRESULT(0)
+            }
             // Con la `App` ocupada en un diálogo, cerrar espera (no se le puede avisar ahora).
             WM_CLOSE if with(|a| a.main).is_some_and(|m| !input_ok(m)) => LRESULT(0),
             WM_CLOSE => {
@@ -481,6 +512,25 @@ mod tests {
         // Más grande que el área: queda pegada arriba a la izquierda.
         let r = initial_rect(RECT { left: 0, top: 0, right: 400, bottom: 300 }, RECT { left: 0, top: 0, right: 400, bottom: 300 }, size);
         assert_eq!((r.left, r.top), (0, 0));
+    }
+
+    #[test]
+    fn remembered_rect_is_brought_back_on_screen() {
+        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        let r = clamp_rect(RECT { left: 100, top: 100, right: 676, bottom: 550 }, work);
+        assert_eq!((r.left, r.top), (100, 100));
+        // Quedó en un monitor que ya no está: vuelve entera al más cercano.
+        let r = clamp_rect(RECT { left: 2500, top: 900, right: 3076, bottom: 1350 }, work);
+        assert_eq!((r.right, r.bottom, r.right - r.left), (1920, 1040, 576));
+        let r = clamp_rect(RECT { left: -900, top: -300, right: -324, bottom: 150 }, work);
+        assert_eq!((r.left, r.top), (0, 0));
+    }
+
+    #[test]
+    fn minimize_hides() {
+        assert!(is_minimize(SC_MINIMIZE as usize));
+        assert!(is_minimize(SC_MINIMIZE as usize | 0x2));
+        assert!(!is_minimize(SC_CLOSE as usize));
     }
 
     #[test]

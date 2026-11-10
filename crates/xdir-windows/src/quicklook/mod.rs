@@ -21,4 +21,4 @@ mod window;
 pub use pure::{WM_APP_QL_CLOSED, WM_APP_QL_KEY};
 use pure::{WM_QL_DIED, WM_QL_SETTLED, encode_outcome};
 
-pub use window::{close, set_theme, show, shutdown};
+pub use window::{close, exit_now, set_theme, show, shutdown};

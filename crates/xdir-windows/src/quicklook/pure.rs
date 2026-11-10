@@ -40,6 +40,11 @@ pub fn isolation_disabled(value: Option<u32>) -> bool {
     matches!(value, Some(v) if v != 0)
 }
 
+/// Las teclas de la tabla de aceleradores que se le da al visor (`GetWindowContext`): muchos
+/// visores (Office, el ejemplo del SDK) solo llaman a `TranslateAccelerator` del marco si la tecla
+/// está en esa tabla. Son las de `forwarded`.
+pub const ACCEL_KEYS: [u16; 6] = [VK_SPACE.0, VK_ESCAPE.0, VK_LEFT.0, VK_UP.0, VK_RIGHT.0, VK_DOWN.0];
+
 /// Las teclas que el visor le devuelve a xdir (`IPreviewHandlerFrame::TranslateAccelerator`):
 /// Espacio y Esc cierran, las flechas recorren. Las demás quedan para el visor.
 pub fn forwarded(vk: u16) -> bool {
@@ -113,6 +118,46 @@ pub fn decode_outcome(v: isize) -> Outcome<Status> {
         2 => Outcome::Done(Status::Cloud),
         3 => Outcome::Timeout,
         _ => Outcome::Gone,
+    }
+}
+
+/// Al cerrar xdir: si algún hilo de visor abandonado (colgado en `prevhost.exe`) sigue vivo, se
+/// termina el proceso sin destruir ventanas. Destruir la ventana de la vista rápida le manda
+/// `WM_DESTROY` de forma síncrona a la ventana colgada, que es hija suya, y xdir no terminaría nunca.
+pub fn hard_exit(abandoned_alive: &[bool]) -> bool {
+    abandoned_alive.iter().any(|a| *a)
+}
+
+/// Si el visor que se ve sigue vivo, mirado cada `ALIVE_MS` desde su hilo: murió si su ventana
+/// desapareció (se cerró `prevhost.exe`) o si no contesta dos veces seguidas (colgado).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Liveness {
+    had_child: bool,
+    misses: u8,
+}
+
+/// Veces seguidas que el visor no contesta antes de darlo por colgado.
+pub const HUNG_MISSES: u8 = 2;
+
+impl Liveness {
+    pub const fn new() -> Liveness {
+        Liveness { had_child: false, misses: 0 }
+    }
+
+    /// Un vistazo: `child`, la ventana del visor existe; `responsive`, contestó a tiempo.
+    /// Devuelve `true` si el visor murió o se colgó.
+    pub fn tick(&mut self, child: bool, responsive: bool) -> bool {
+        if !child {
+            // Antes de que aparezca su ventana no se juzga (algunos visores la crean tarde).
+            return self.had_child;
+        }
+        self.had_child = true;
+        if responsive {
+            self.misses = 0;
+            return false;
+        }
+        self.misses = self.misses.saturating_add(1);
+        self.misses >= HUNG_MISSES
     }
 }
 
@@ -292,6 +337,37 @@ mod tests {
             assert!(!forwarded(vk), "{vk:#x}");
             assert!(!forward_key(KEYDOWN, vk, false), "{vk:#x}");
         }
+    }
+
+    #[test]
+    fn accelerator_table_is_forwarded_keys() {
+        assert!(ACCEL_KEYS.iter().all(|k| forwarded(*k)));
+        let all: Vec<u16> = (0..=0xFF).filter(|k| forwarded(*k)).collect();
+        assert_eq!(all.len(), ACCEL_KEYS.len(), "la tabla tiene todas las teclas de xdir");
+    }
+
+    #[test]
+    fn hard_exit_only_with_live_abandoned_viewer() {
+        assert!(!hard_exit(&[]));
+        assert!(!hard_exit(&[false, false]));
+        assert!(hard_exit(&[false, true]));
+    }
+
+    #[test]
+    fn viewer_liveness() {
+        let mut l = Liveness::default();
+        // Sin ventana todavía: no se juzga.
+        assert!(!l.tick(false, false));
+        assert!(!l.tick(true, true));
+        // Una vez lento no alcanza; dos seguidas, colgado.
+        assert!(!l.tick(true, false));
+        assert!(!l.tick(true, true));
+        assert!(!l.tick(true, false));
+        assert!(l.tick(true, false));
+        // La ventana desapareció (prevhost.exe cerrado).
+        let mut l = Liveness::default();
+        assert!(!l.tick(true, true));
+        assert!(l.tick(false, false));
     }
 
     #[test]

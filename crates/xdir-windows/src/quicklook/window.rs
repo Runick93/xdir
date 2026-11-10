@@ -74,6 +74,15 @@ thread_local! {
     static QL: RefCell<Option<Ql>> = const { RefCell::new(None) };
     /// Direct2D de la superficie; aparte de `QL` porque dibujar no debe tener el estado prestado.
     static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
+    /// El DPI que tiene el renderizador (`set_dpi` vacía sus cachés: solo si cambió).
+    static RENDERER_DPI: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Lleva el renderizador al DPI de la ventana, si cambió.
+fn sync_dpi(dpi: u32) {
+    if RENDERER_DPI.with(|d| d.replace(dpi)) != dpi {
+        with_renderer(|r| r.set_dpi(dpi));
+    }
 }
 
 /// Corre `f` con el estado, si existe y no está prestado (un mensaje anidado no hace nada).
@@ -126,15 +135,26 @@ pub fn show(main: Handle, item: &QuickLookItem, theme: &Theme) -> bool {
     }
     let (w, h, k) = client_dips(popup);
     let job_rect = to_px(viewer_rect(w, h), k);
+    let dpi = unsafe { GetDpiForWindow(popup) }.max(96);
+    // El renderizador sigue el DPI de la ventana (pudo abrirse en otro monitor).
+    sync_dpi(dpi);
     let started = with(|q| {
-        if let Some(old) = q.viewer.take() {
-            old.stop();
-        }
+        retire(q);
         let generation = q.slot.start(clsid.is_some(), item.cloud_only);
         q.item = Some(item.clone());
         q.hover = (None, None);
         if let (Some(clsid), Some(path)) = (clsid, &item.path) {
-            let job = Job { clsid, path: path.clone(), parent: popup.0 as isize, main: q.main.0 as isize, rect: job_rect, generation };
+            let job = Job {
+                clsid,
+                path: path.clone(),
+                parent: popup.0 as isize,
+                main: q.main.0 as isize,
+                rect: job_rect,
+                generation,
+                back: colorref(q.theme.surface).0,
+                text: colorref(q.theme.text).0,
+                dpi,
+            };
             q.viewer = Some(handler::start(job));
         }
     });
@@ -161,9 +181,7 @@ pub fn show(main: Handle, item: &QuickLookItem, theme: &Theme) -> bool {
 /// Cierra la ventana (la oculta; se reusa la próxima vez) y descarga el visor.
 pub fn close() {
     let Some(popup) = with(|q| {
-        if let Some(v) = q.viewer.take() {
-            v.stop();
-        }
+        retire(q);
         q.item = None;
         q.slot.start(false, false);
         q.popup
@@ -173,6 +191,21 @@ pub fn close() {
     unsafe {
         let _ = ShowWindow(popup, SW_HIDE);
     }
+}
+
+/// Suelta el visor actual: si todavía se lo espera (puede estar colgado arrancando), se lo
+/// abandona; si no, se lo descarga.
+fn retire(q: &mut Ql) {
+    if let Some(v) = q.viewer.take() {
+        if q.slot.mode == Mode::Loading { v.abandon() } else { v.stop() }
+    }
+}
+
+/// Al cerrar xdir (con el estado ya guardado): cierra la vista rápida y dice si hay que terminar
+/// el proceso sin destruir ventanas porque un visor abandonado sigue colgado.
+pub fn exit_now() -> bool {
+    close();
+    handler::must_exit_hard()
 }
 
 /// El tema cambió (o se dibujó la ventana principal): si es otro, se repinta con el nuevo.
@@ -279,6 +312,8 @@ fn ensure_window(main: HWND, theme: &Theme) -> Option<(HWND, HWND)> {
         };
         QL.with(|q| *q.borrow_mut() = Some(ql));
         RENDERER.with(|r| *r.borrow_mut() = Some(renderer));
+        RENDERER_DPI.with(|d| d.set(0));
+        sync_dpi(GetDpiForWindow(popup).max(96));
         Some((popup, canvas))
     }
 }
@@ -545,7 +580,7 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             }
             WM_DPICHANGED => {
                 let dpi = (wparam.0 & 0xFFFF) as u32;
-                with_renderer(|r| r.set_dpi(dpi));
+                sync_dpi(dpi);
                 let r = &*(lparam.0 as *const RECT);
                 let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
                 LRESULT(0)

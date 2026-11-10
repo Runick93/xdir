@@ -250,6 +250,11 @@ pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             }
             WM_CLOSE => {
                 app.on_closing();
+                // Un visor de la vista rápida quedó colgado en `prevhost.exe`: destruir las
+                // ventanas esperaría por él para siempre. Con el estado ya guardado, se sale.
+                if crate::quicklook::exit_now() {
+                    std::process::exit(0);
+                }
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }

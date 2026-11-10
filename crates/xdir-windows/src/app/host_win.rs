@@ -221,6 +221,9 @@ impl Win32Host {
 impl WindowHost for Win32Host {
     fn attach(&self, window: Handle) {
         self.hwnd.set(window);
+        // Los íconos y las imágenes se rasterizan al DPI del monitor donde abre la ventana (antes
+        // quedaban a 96 hasta el primer `WM_DPICHANGED`).
+        self.renderer.borrow_mut().set_dpi(self.dpi());
     }
 
     /// El primer cuadro crea el destino de dibujo (espera al hilo que crea el dispositivo de GPU).

@@ -23,7 +23,7 @@ use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromIDList, SHCreateItemFromParsingName, SIIGBF, SIIGBF_BIGGERSIZEOK, SIIGBF_INCACHEONLY,
     SIIGBF_RESIZETOFIT,
 };
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PostMessageW};
 use windows::core::{HSTRING, PCWSTR};
 
 use crate::platform::Handle;
@@ -101,7 +101,8 @@ pub fn take_done() -> Vec<(Key, Option<Arc<Pixels>>)> {
 pub fn take_done_big(hwnd: Handle) -> Vec<(Key, Option<Arc<Pixels>>)> {
     let mut done = done_big().lock().unwrap();
     let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *done).into_iter().partition(|(h, ..)| *h == hwnd.0 as usize);
-    *done = rest;
+    // Las de ventanas que ya no existen no las va a retirar nadie.
+    *done = rest.into_iter().filter(|(h, ..)| *h == 0 || unsafe { IsWindow(Some(HWND(*h as *mut _))) }.as_bool()).collect();
     mine.into_iter().map(|(_, k, px)| (k, px)).collect()
 }
 

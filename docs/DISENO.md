@@ -18,23 +18,24 @@ Las pantallas usan **instancias** de los componentes (barra de estado, píldoras
 
 ### Cómo están ordenadas las pantallas
 
-En las dos páginas de pantallas cada tema (una tanda o una parte de la app) es un **grupo** con su título arriba (texto
-con el estilo `S:3`, Inter SemiBold 16 en ámbar, el mismo de los títulos de sección de Componentes). Dentro del grupo las
+En las dos páginas de pantallas cada tema (una tanda o una parte de la app) es un **grupo** con su título arriba: Inter
+SemiBold **120** en ámbar (la familia, el peso y el color de los títulos de sección de Componentes, `S:3`, pero sin el
+estilo, que es de 16, para que se lea con la página entera a la vista); caja de 145 de alto. Dentro del grupo las
 pantallas van en orden, lado a lado, en **filas de hasta 6**; debajo de cada fila oscura va la misma fila en claro, y después
-la siguiente tanda de 6 (oscura, clara…). Medidas: margen 60 alrededor de todo; título a 60 por encima de su primera fila;
+la siguiente tanda de 6 (oscura, clara…). Medidas: margen 60 alrededor de todo; el título arriba del grupo y su primera fila 225 más abajo (145 del título + 80 de aire);
 200 entre pantallas, a lo ancho y a lo alto (también entre la fila oscura y la clara); **400 entre grupos**. Con pantallas
 de 1400×820 la fila llena mide 9400 y el marco de la página 9520 de ancho; el alto se ajusta al último grupo
-(Pantallas · xdir: 19120; Pantallas · xtree: 6360). No hay marcos de grupo: títulos y pantallas son hijos directos del
+(Pantallas · xdir: 19780; Pantallas · xtree: 6690). No hay marcos de grupo: títulos y pantallas son hijos directos del
 marco de la página, y en la lista de capas van en ese orden (título, fila oscura, fila clara…).
 
 | Página | Grupo | y del título | Filas (oscura / clara) |
 |---|---|---|---|
 | Pantallas · xdir | Ventana principal (X01–X31) | 60 | 6 pares (X01–X06 … X25–X30, X31 sola) |
-| Pantallas · xdir | Tanda B: organizar la lista (X32–X37) | 12560 | 1 par |
-| Pantallas · xdir | Estado de xtree (X38) | 14860 | 1 par |
-| Pantallas · xdir | Tanda C: vista previa, Galería y vista rápida (X39–X44) | 17160 | 1 par |
+| Pantallas · xdir | Tanda B: organizar la lista (X32–X37) | 12725 | 1 par |
+| Pantallas · xdir | Estado de xtree (X38) | 15190 | 1 par |
+| Pantallas · xdir | Tanda C: vista previa, Galería y vista rápida (X39–X44) | 17655 | 1 par |
 | Pantallas · xtree | Vista de xtree (T01–T07) | 60 | 2 pares (T01–T06, T07 sola) |
-| Pantallas · xtree | Estado de xtree: cronómetro y porcentaje (T08–T09) | 4400 | 1 par |
+| Pantallas · xtree | Estado de xtree: cronómetro y porcentaje (T08–T09) | 4565 | 1 par |
 
 Pantallas nuevas (la tanda D en adelante): van como **un grupo nuevo al final** de su página, 400 debajo del último,
 con la misma regla (título, filas de 6, la clara debajo de la oscura) y agrandando el alto del marco para que quede 60 de

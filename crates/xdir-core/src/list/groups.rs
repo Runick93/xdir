@@ -793,6 +793,26 @@ mod list_tests {
         assert_eq!(label, "Ayer");
     }
 
+    /// Llevar a la vista el primer elemento de un grupo muestra también su encabezado.
+    #[test]
+    fn ensure_visible_shows_group_header() {
+        use crate::keys::keys::{VK_END, VK_HOME};
+        let mut l = grouped();
+        l.area = rect(0.0, 0.0, 800.0, 110.0);
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_END.0, false, false);
+        assert!(l.scroll_target > GROUP_H);
+        l.on_key(VK_HOME.0, false, false);
+        assert_eq!(l.scroll_target, 0.0, "el encabezado «Vacío» queda a la vista");
+        // Primer elemento del grupo «Pequeño» (f, pos 5) desde arriba: entra su encabezado.
+        let layout = l.layout.as_ref().unwrap();
+        let li = layout.pos_line[5] as usize;
+        let header_top = layout.lines[li - 1].top;
+        l.on_key(VK_END.0, false, false);
+        l.select_pos(5);
+        assert!(l.scroll_target <= header_top, "{} > {header_top}", l.scroll_target);
+    }
+
     /// Ctrl+A (seleccionar todo) e invertir solo tocan lo que se ve.
     #[test]
     fn ctrl_a_selects_visible_only() {

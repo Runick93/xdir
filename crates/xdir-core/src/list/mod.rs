@@ -1066,8 +1066,15 @@ impl FileList {
         }
         let mut lh = self.line_h();
         let mut top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
-        if let Some(l) = self.layout.as_ref().and_then(|l| Some(l.lines[*l.pos_line.get(pos)? as usize])) {
+        if let Some(layout) = &self.layout
+            && let Some(&li) = layout.pos_line.get(pos)
+        {
+            let l = layout.lines[li as usize];
             (top, lh) = (l.top, l.h);
+            // La primera línea de un grupo lleva también su encabezado a la vista.
+            if let Some(h) = (li as usize).checked_sub(1).map(|i| layout.lines[i]).filter(|h| h.header.is_some()) {
+                (top, lh) = (h.top, l.top + l.h - h.top);
+            }
         }
         self.ensure_span(top, lh);
     }

@@ -18,6 +18,8 @@ pub struct MapDialog {
     /// Letras libres (de Z hacia abajo) y la elegida.
     pub letters: Vec<char>,
     pub letter: char,
+    /// Ya llegaron las letras libres (se piden en otro hilo); hasta entonces no se conecta.
+    pub letters_loaded: bool,
     pub folder: Option<TextBox>,
     /// «Conectar de nuevo al iniciar sesión» (prendida al abrir, como el Explorador).
     pub reconnect: bool,
@@ -32,7 +34,7 @@ pub struct MapDialog {
 impl MapDialog {
     pub fn new(letters: Vec<char>) -> MapDialog {
         let letter = letters.first().copied().unwrap_or('Z');
-        MapDialog { letters, letter, folder: None, reconnect: true, other_credentials: false, error: None, busy: None, suggestion: None, boxes_at: None }
+        MapDialog { letters_loaded: !letters.is_empty(), letters, letter, folder: None, reconnect: true, other_credentials: false, error: None, busy: None, suggestion: None, boxes_at: None }
     }
 }
 
@@ -199,7 +201,8 @@ pub fn map_draw(p: &dyn Painter, w: f32, h: f32, d: &MapDialog, hover: Option<Dr
     }
     checkbox(p, l.reconnect, d.reconnect, "Conectar de nuevo al iniciar sesión");
     checkbox(p, l.other, d.other_credentials, "Conectar con otras credenciales");
-    buttons(p, l.cancel, l.finish, if d.busy.is_some() { "Conectando…" } else { "Finalizar" }, hot(DrivesHit::Cancel), hot(DrivesHit::Finish), d.busy.is_none());
+    let ready = d.busy.is_none() && d.letters_loaded && !d.letters.is_empty();
+    buttons(p, l.cancel, l.finish, if d.busy.is_some() { "Conectando…" } else { "Finalizar" }, hot(DrivesHit::Cancel), hot(DrivesHit::Finish), ready);
 }
 
 pub struct UnmapLayout {

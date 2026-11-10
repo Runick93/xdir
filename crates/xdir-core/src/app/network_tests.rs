@@ -1126,6 +1126,7 @@ mod drives {
         FakeNetwork::set_free_letters(vec!['Z', 'Y']);
         let mut a = net_app_with(host);
         a.run_command(Command::MapNetworkDrive);
+        wait_until(&mut a, |a| a.net.map.as_ref().is_some_and(|m| m.letters_loaded));
         a
     }
 
@@ -1141,7 +1142,6 @@ mod drives {
         let mut a = map_app(host.clone());
         // M12: las letras libres se piden en otro hilo.
         assert_eq!(FakeNetwork::free_letters_here(), 0);
-        wait_until(&mut a, |a| a.net.map.as_ref().is_some_and(|m| !m.letters.is_empty()));
         let m = a.net.map.as_ref().unwrap();
         assert_eq!((m.letter, m.reconnect, m.other_credentials), ('Z', true, false));
         assert!(crate::host::WindowHost::text_has_focus(&*host, m.folder.unwrap()));
@@ -1666,4 +1666,22 @@ fn cancelled_late_success_only_notifies() {
     assert_eq!(a.notice.as_deref(), Some("Se conectó \"fotos\""));
     assert_eq!(a.panes[a.active].tabs.len(), tabs);
     assert!(a.net.dialog.is_some());
+}
+
+/// m5: «Finalizar» espera a que lleguen las letras libres (si no, usaría una letra ocupada).
+#[test]
+fn map_finish_waits_for_free_letters() {
+    FakeNetwork::set_free_letters(vec!['Z', 'Y']);
+    FakeNetwork::set_connect("srv-r2m5", Ok(tmp_dir("r2-m5")));
+    let mut a = net_app();
+    a.run_command(Command::MapNetworkDrive);
+    let b = a.net.map.as_ref().and_then(|m| m.folder).unwrap();
+    crate::host::WindowHost::text_set(&*a.host, b, r"\\srv-r2m5\x");
+    a.net.map.as_mut().unwrap().letters_loaded = false;
+    a.map_finish();
+    assert!(a.net.map.as_ref().unwrap().busy.is_none(), "sin letras todavía no conecta");
+    wait_until(&mut a, |a| a.net.map.as_ref().is_some_and(|m| m.letters_loaded));
+    a.map_finish();
+    wait_until(&mut a, |a| a.net.map.is_none());
+    assert_eq!(FakeNetwork::connects_to("srv-r2m5").len(), 1);
 }

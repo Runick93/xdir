@@ -581,7 +581,11 @@ impl App {
             if !letters.contains(&m.letter) {
                 m.letter = letters.first().copied().unwrap_or(m.letter);
             }
+            if letters.is_empty() {
+                m.error = Some("No hay letras libres para una unidad de red".into());
+            }
             m.letters = letters;
+            m.letters_loaded = true;
         }
         self.redraw();
     }
@@ -645,7 +649,8 @@ impl App {
     pub(super) fn map_finish(&mut self) {
         let text = self.net.map.as_ref().and_then(|m| m.folder).map(|b| self.host.text_get(b)).unwrap_or_default();
         let Some(m) = &mut self.net.map else { return };
-        if m.busy.is_some() {
+        // Sin las letras libres todavía (o sin ninguna) no se conecta: la letra podría estar usada.
+        if m.busy.is_some() || !m.letters_loaded || m.letters.is_empty() {
             return;
         }
         let addr = match Address::parse(&text) {

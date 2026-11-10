@@ -77,8 +77,49 @@ impl App {
     /// Flecha de la barra de dirección: menú con las subcarpetas del tramo anterior (o las unidades,
     /// si es "Este equipo"); elegir una navega a ella.
     pub(super) fn show_subfolder_menu(&mut self, pane: usize, k: usize) {
-        let Some((r, loc)) = self.panes[pane].chevron(k) else { return };
+        let Some((_, loc)) = self.panes[pane].chevron(k) else { return };
+        // Una carpeta de red (o «Este equipo», con los nombres de las unidades de red) se lista en
+        // otro hilo: el menú se abre al volver (`TaskDone::Subfolders`).
+        let remote = match &loc {
+            Location::Path(p) => sys::network().is_remote(p),
+            Location::Computer => true,
+            Location::Shell { .. } => false,
+        };
+        if remote {
+            self.set_active(pane);
+            self.panes[pane].open_chevron = Some(k);
+            self.redraw();
+            let l = loc.clone();
+            self.spawn_task(move || {
+                let host = match &l {
+                    Location::Path(p) => crate::tab::remote_host(p),
+                    _ => String::new(),
+                };
+                let q = l.clone();
+                let items = crate::net::with_timeout(super::network::LIST_LIMIT, &host, move || Ok(sys::file_system().subfolders(&q))).unwrap_or_default();
+                super::tasks::TaskDone::Subfolders { pane, chevron: k, loc: l, items }
+            });
+            return;
+        }
         let items = sys::file_system().subfolders(&loc);
+        self.show_subfolder_items(pane, k, &loc, items);
+    }
+
+    /// Volvieron las subcarpetas de una flecha: el menú, si la flecha sigue siendo de ese lugar.
+    pub(super) fn on_subfolders(&mut self, pane: usize, k: usize, loc: Location, items: Vec<(String, Location)>) {
+        let still = self.panes.get(pane).and_then(|p| p.chevron(k)).is_some_and(|(_, l)| l == loc);
+        if !still || self.panes[pane].open_chevron != Some(k) {
+            if let Some(p) = self.panes.get_mut(pane) {
+                p.open_chevron = None;
+            }
+            self.redraw();
+            return;
+        }
+        self.show_subfolder_items(pane, k, &loc, items);
+    }
+
+    fn show_subfolder_items(&mut self, pane: usize, k: usize, _loc: &Location, items: Vec<(String, Location)>) {
+        let Some((r, _)) = self.panes[pane].chevron(k) else { return };
         self.set_active(pane);
         self.panes[pane].open_chevron = Some(k);
         self.redraw();

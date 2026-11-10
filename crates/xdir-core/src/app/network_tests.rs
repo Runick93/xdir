@@ -1241,3 +1241,27 @@ fn address_suggestions_skip_remote_folders() {
     s.set_query(r"\\servidor-r1\recurso\");
     assert!(s.items.is_empty() || s.items.iter().all(|i| !i.contains("servidor-r1\\recurso\\")));
 }
+
+/// I1: la flecha de las migas de una carpeta de red lista en otro hilo y abre el menú al volver.
+#[test]
+fn chevron_of_remote_folder_lists_off_thread() {
+    let root = remote_dir("r1-chevron");
+    FakeNetwork::mark_ui_thread();
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(root.join("sub")));
+    a.paint();
+    let k = (0..10).find(|&k| a.panes[0].chevron(k).is_some_and(|(_, l)| l == Location::Path(root.clone()))).expect("flecha de la carpeta");
+    host.set_menu_choice(None);
+    let menus = host.menus().len();
+    a.show_subfolder_menu(0, k);
+    assert_eq!(host.menus().len(), menus, "el menú espera a la lista");
+    wait_task(&mut a, |t| matches!(t, TaskDone::Subfolders { .. }));
+    let labels: Vec<String> = host.menus().last().unwrap().iter().filter_map(|e| match e {
+        crate::shell::Entry::Item { label, .. } => Some(label.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(labels, ["sub"]);
+    assert!(FakeNetwork::ui_io_calls().is_empty(), "{:?}", FakeNetwork::ui_io_calls());
+}

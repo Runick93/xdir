@@ -805,6 +805,7 @@ impl FileSystem for FakeFileSystem {
 
     fn subfolders(&self, loc: &Location) -> Vec<(String, Location)> {
         let Location::Path(dir) = loc else { return Vec::new() };
+        FakeNetwork::note_io("subfolders", dir);
         let mut out: Vec<(String, Location)> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()

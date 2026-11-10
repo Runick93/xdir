@@ -47,7 +47,7 @@ impl App {
         if contains(&ui::groups_rect(w, h), x, y) {
             return Hit::Groups;
         }
-        if contains(&ui::xtree_rect(w, h), x, y) {
+        if contains(&self.xtree_button_rect(), x, y) {
             return Hit::Xtree;
         }
         // La vista de xtree tapa los paneles, la franja de grupos y el árbol.

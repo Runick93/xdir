@@ -68,7 +68,16 @@ impl App {
                 self.redraw();
             }
             crate::xtree::scan::WM_APP_XTREE => {
-                if self.xtree.as_mut().is_some_and(|v| v.on_message(wparam, lparam)) && self.xtree_open {
+                // Con la vista cerrada también se repinta: el indicador de la barra de estado sigue
+                // el escaneo con estos avisos (cada 250 ms), sin un temporizador propio.
+                let open = self.xtree_open;
+                if let Some(v) = &mut self.xtree
+                    && v.on_message(wparam, lparam)
+                {
+                    // Con la vista abierta, el resultado que llega ya se está viendo.
+                    if open {
+                        v.mark_seen();
+                    }
                     self.redraw();
                 }
             }

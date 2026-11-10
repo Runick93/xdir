@@ -25,7 +25,7 @@ use tooltip::{Tip, WM_APP_TOOLTIP};
 use tooltip::{tooltip_for, tooltip_rect};
 
 use crate::{about, anim, config, jump, list, palette, pane, session, theme, typed, ui};
-use crate::xtree::view::{self as xtree_view, Xtree};
+use crate::xtree::view::{self as xtree_view, Xtree, XtreeBadge};
 #[cfg(feature = "arbol")]
 use crate::tree;
 

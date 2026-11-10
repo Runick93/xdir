@@ -289,7 +289,7 @@ fn status_bar_buttons_are_hit() {
     assert_eq!(a.hit(x, y), Hit::Gear);
     let (x, y) = center(&ui::groups_rect(w, h));
     assert_eq!(a.hit(x, y), Hit::Groups);
-    let (x, y) = center(&ui::xtree_rect(w, h));
+    let (x, y) = center(&ui::xtree_rect(w, h, XtreeBadge::Idle));
     assert_eq!(a.hit(x, y), Hit::Xtree);
     for (layout, r) in ui::layout_buttons(w, h) {
         let (x, y) = center(&r);
@@ -945,8 +945,7 @@ fn app_in(name: &str) -> (App, PathBuf) {
 }
 
 fn click_xtree_button(a: &mut App) {
-    let (w, h) = a.client_dips();
-    let (x, y) = center(&ui::xtree_rect(w, h));
+    let (x, y) = center(&a.xtree_button_rect());
     a.on_left_down(x, y, false);
     a.on_left_up(x, y);
 }
@@ -2215,4 +2214,46 @@ fn tooltip_does_not_return_after_click() {
     assert!(!shown(&mut a));
     deliver_tip(&mut a);
     assert!(shown(&mut a));
+}
+
+/// El botón «xtree» lleva como cartel el estado del escaneo; sin escaneo, no lleva.
+#[test]
+fn status_tooltip_uses_badge_tip() {
+    let (mut a, dir) = app_in("cartel");
+    assert_eq!(a.tooltip_text(Hit::Xtree), None);
+    click_xtree_button(&mut a);
+    click_xtree_button(&mut a);
+    let x = a.xtree.as_ref().unwrap();
+    let tip = a.tooltip_text(Hit::Xtree).expect("cartel con el escaneo en curso");
+    assert_eq!(Some(tip.clone()), x.badge_tip());
+    assert!(tip.starts_with(&format!("Escaneando {}", dir.display())), "{tip}");
+    a.on_closing();
+}
+
+/// Los avisos del escaneo repintan la barra de estado aunque la vista esté cerrada (el indicador
+/// avanza); abrir la vista con el escaneo terminado lo marca como visto.
+#[test]
+fn scan_notices_repaint_status_with_view_closed() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = xtree_dir("repinta");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
+    click_xtree_button(&mut a);
+    click_xtree_button(&mut a);
+    assert!(!a.xtree_open);
+    let id = a.xtree.as_ref().unwrap().scan_id();
+    let before = host.invalidations();
+    assert!(a.on_app_message(crate::xtree::scan::WM_APP_XTREE, id, 0));
+    assert!(host.invalidations() > before, "el aviso no repintó la barra");
+    // Espera el árbol del escáner (disco falso) y entrega su aviso con la vista cerrada.
+    let t0 = std::time::Instant::now();
+    while a.xtree.as_ref().unwrap().badge() != XtreeBadge::Done {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "el escaneo no terminó");
+        a.on_app_message(crate::xtree::scan::WM_APP_XTREE, id, 1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    click_xtree_button(&mut a);
+    assert_eq!(a.xtree.as_ref().unwrap().badge(), XtreeBadge::Idle);
+    a.on_closing();
 }

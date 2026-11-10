@@ -6,6 +6,24 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+/// Los tramos de una ruta en minúsculas, para comparar rutas en discos que no distinguen
+/// mayúsculas. Por tramos (no el texto): en Windows `C:/a/b` y `C:\a\b` (o lo armado con `join`,
+/// que pone `\`) son la misma ruta.
+pub fn folded(p: &Path) -> Vec<String> {
+    p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect()
+}
+
+/// ¿Es la misma ruta sin distinguir mayúsculas? (por tramos).
+pub fn same_path_folded(a: &Path, b: &Path) -> bool {
+    folded(a) == folded(b)
+}
+
+/// ¿`inner` está dentro de `outer` (o es la misma) sin distinguir mayúsculas? (por tramos).
+pub fn starts_with_folded(inner: &Path, outer: &Path) -> bool {
+    let (i, o) = (folded(inner), folded(outer));
+    i.len() >= o.len() && i[..o.len()] == o[..]
+}
+
 /// Qué es un elemento, sin seguir enlaces.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ItemKind {
@@ -244,5 +262,20 @@ impl CopyPrims for UnimplementedCopyPrims {
     }
     fn untrash(&self, _in_trash: &str, original: &Path) -> Result<(), CopyError> {
         unimplemented(original)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folded_paths_compare_by_components() {
+        assert!(same_path_folded(Path::new("/ci0/Docs/a.txt"), &Path::new("/ci0/docs").join("A.TXT")));
+        assert!(!same_path_folded(Path::new("/ci0/Docs/a.txt"), Path::new("/ci0/Docs/b.txt")));
+        assert!(starts_with_folded(&Path::new("/X/Y").join("z"), Path::new("/x/y")));
+        assert!(!starts_with_folded(Path::new("/x/yz"), Path::new("/x/y")));
+        #[cfg(windows)]
+        assert!(same_path_folded(Path::new(r"C:\Docs\a.txt"), Path::new("C:/docs/A.txt")));
     }
 }

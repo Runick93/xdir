@@ -25,7 +25,10 @@ mod copy;
 mod archives;
 
 pub use archives::{Archives, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
-pub use copy::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo};
+pub use copy::{
+    CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
+    starts_with_folded,
+};
 
 #[cfg(test)]
 mod tests;

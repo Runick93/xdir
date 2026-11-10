@@ -109,6 +109,17 @@ impl App {
         // El texto del cartel de ayuda se arma antes de prestar los campos de `App` por separado.
         let tooltip = self.visible_tooltip();
         let switches = self.picker_switches();
+        // «Conectar a un servidor»: las cajas en su lugar y lo que se dibuja, antes de prestar
+        // los campos por separado.
+        self.sync_connect_boxes();
+        let connect_extra = self.net.dialog.as_ref().map(|_| {
+            let style = self.net_style();
+            let (now, offset) = (super::network::unix_now(), sys::env().local_now().offset);
+            let dates: Vec<String> = self.net.places.recents.iter().map(|r| crate::net::places::ago(now, r.date, offset)).collect();
+            let fav = crate::net::Address::parse(&self.connect_field_text()).is_ok_and(|a| self.net.places.is_favorite(&a));
+            (style, self.net_example(), dates, fav)
+        });
+        let connect_view = self.net.dialog.as_ref().zip(connect_extra).map(|(d, x)| (d, &self.net.places, x));
         #[cfg(feature = "arbol")]
         let tree = &mut self.tree;
         let (panes, layout, splits, active, maximized) = (&mut self.panes, self.layout, self.splits, self.active, self.maximized);
@@ -269,6 +280,14 @@ impl App {
                     _ => None,
                 };
                 about::draw(p, w, h, about_hover);
+            }
+            if let Some((d, places, (style, example, dates, fav))) = &connect_view {
+                let hover = match hover {
+                    Hit::Connect(k) => Some(k),
+                    _ => None,
+                };
+                let args = crate::net::dialog::DrawArgs { style: *style, example, recent_dates: dates, is_favorite: *fav, hover };
+                crate::net::dialog::draw(p, w, h, d, places, &args);
             }
             // El cartel de ayuda va último: encima de todo.
             if let Some((text, x, y)) = &tooltip {

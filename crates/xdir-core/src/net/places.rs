@@ -39,6 +39,26 @@ fn same_text(a: &str, b: &Address) -> bool {
     Address::parse(a).is_ok_and(|a| a.same(b))
 }
 
+/// Hace cuánto fue `date` visto desde `now` (segundos UTC; `offset`: la zona horaria en
+/// segundos): «hoy, 10:42», «ayer», «hace 3 días», «la semana pasada» o la fecha.
+pub fn ago(now: i64, date: i64, offset: i64) -> String {
+    let day = |t: i64| (t + offset).div_euclid(86_400);
+    let days = day(now) - day(date);
+    match days {
+        i64::MIN..=0 => {
+            let secs = (date + offset).rem_euclid(86_400);
+            format!("hoy, {:02}:{:02}", secs / 3600, secs % 3600 / 60)
+        }
+        1 => "ayer".into(),
+        2..=6 => format!("hace {days} días"),
+        7..=13 => "la semana pasada".into(),
+        _ => {
+            let (y, m, d) = crate::format::civil_from_days(day(date));
+            format!("{d:02}/{m:02}/{y}")
+        }
+    }
+}
+
 pub fn file_path() -> Option<PathBuf> {
     session::config_dir().map(|d| d.join(FILE_NAME))
 }

@@ -15,6 +15,11 @@ impl App {
         if self.about_open {
             return about::at(w, h, x, y).map_or(Hit::None, Hit::About);
         }
+        // «Conectar a un servidor» también es modal.
+        if let Some(d) = &self.net.dialog {
+            let l = crate::net::dialog::layout(w, h, d, &self.net.places);
+            return crate::net::dialog::hit(&l, x, y).map_or(Hit::None, Hit::Connect);
+        }
         // La paleta va encima de todo, y después los menús flotantes.
         if let Some((pal, _)) = &self.palette {
             if let Some(i) = pal.item_at(w, x, y) {
@@ -122,6 +127,14 @@ impl App {
                 _ => self.about_open = false,
             }
             self.redraw();
+            return;
+        }
+        if self.net.dialog.is_some() {
+            let h = match hit {
+                Hit::Connect(h) => Some(h),
+                _ => None,
+            };
+            self.connect_dialog_click(h, double);
             return;
         }
         if matches!(hit, Hit::QuickLookTitle(_) | Hit::QuickLookBody(_)) {
@@ -350,7 +363,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
+            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
         // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
         self.quick_look_follow_list();

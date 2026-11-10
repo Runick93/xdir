@@ -240,6 +240,11 @@ impl App {
 
     /// Navega a lo que se escribió en la barra de dirección.
     pub(super) fn go_to_text(&mut self, pane: usize, text: &str) {
+        // `smb://…`, `afp://…`, `sftp://…`: se conecta en otro hilo, en esta misma pestaña.
+        if super::network::is_server_url(text.trim().trim_matches('"')) {
+            self.connect_from_bar(pane, text.trim().trim_matches('"'));
+            return;
+        }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let tab = self.panes[pane].tab_mut();
         let text = text.trim().trim_matches('"');

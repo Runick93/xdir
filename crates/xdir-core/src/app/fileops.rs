@@ -413,6 +413,19 @@ impl App {
             cmds.push(Command::Eject);
             own.push(shell::Entry::Item { id: cmds.len() as u32 - 1, label: "Expulsar".into(), enabled: true, checked: false });
         }
+        // El fondo de «Este equipo»: conectar a un servidor (y las unidades de red de Windows).
+        if matches!(location, Location::Computer) && items.is_empty() {
+            for (c, label) in [
+                (Command::ConnectServer, "Conectar a un servidor…"),
+                (Command::MapNetworkDrive, "Conectar unidad de red…"),
+                (Command::DisconnectNetworkDrive, "Desconectar unidad de red…"),
+            ] {
+                if crate::commands::available(c) {
+                    cmds.push(c);
+                    own.push(shell::Entry::Item { id: cmds.len() as u32 - 1, label: label.into(), enabled: true, checked: false });
+                }
+            }
+        }
         own.extend(match (items.is_empty(), intercept) {
             (true, true) => self.background_entries(pane, &mut cmds),
             (false, true) => self.item_entries(&mut cmds),

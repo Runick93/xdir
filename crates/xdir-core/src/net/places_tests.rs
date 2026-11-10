@@ -82,3 +82,15 @@ fn save_is_atomic_and_load_reads() {
     assert_eq!(NetPlaces::load_from(&dir), p);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ago_texts() {
+    let now = 1_731_234_567; // 10/11/2024 10:29:27 UTC
+    assert_eq!(ago(now, now - 60, 0), "hoy, 10:28");
+    assert_eq!(ago(now, now - 86_400, 0), "ayer");
+    assert_eq!(ago(now, now - 2 * 86_400, 0), "hace 2 días");
+    assert_eq!(ago(now, now - 8 * 86_400, 0), "la semana pasada");
+    assert_eq!(ago(now, now - 40 * 86_400, 0), "01/10/2024");
+    // Con la zona horaria: las 01:00 de hoy en UTC-3 son ayer.
+    assert_eq!(ago(now, now - 10 * 3600, -3 * 3600), "ayer");
+}

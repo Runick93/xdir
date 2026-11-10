@@ -170,6 +170,8 @@ enum Hit {
     RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
+    /// «Conectar a un servidor» abierto: un control, o el panel sin nada debajo.
+    Connect(crate::net::dialog::DialogHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.

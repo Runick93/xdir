@@ -289,6 +289,9 @@ impl App {
 
     /// Enter (aplicar) o Escape (cerrar) en una caja del panel.
     pub(super) fn on_field_done(&mut self, commit: bool) {
+        if self.connect_field_done(commit) {
+            return;
+        }
         if commit {
             self.apply_rename_many();
         } else {

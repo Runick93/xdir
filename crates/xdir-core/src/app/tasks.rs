@@ -27,7 +27,8 @@ pub(super) enum TaskDone {
     NetConnections(Result<Vec<crate::net::NetConnection>, crate::net::NetError>),
     /// Terminó de conectar `addr` (`tab`: la pestaña que lo pidió al fallar por credenciales;
     /// `None`: abrir el resultado en una pestaña nueva del panel `pane`).
-    Connected { pane: usize, tab: Option<usize>, addr: crate::net::Address, result: Result<PathBuf, crate::net::NetError> },
+    /// `generation`: la del intento (los cancelados se descartan).
+    Connected { pane: usize, tab: Option<usize>, generation: u64, addr: crate::net::Address, result: Result<PathBuf, crate::net::NetError> },
 }
 
 impl App {
@@ -81,7 +82,7 @@ impl App {
             }
             TaskDone::NetPlaces(places) => self.on_net_places(places),
             TaskDone::NetConnections(result) => self.on_net_connections(result),
-            TaskDone::Connected { pane, tab, addr, result } => self.on_connected(pane, tab, addr, result),
+            TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
         }
     }
 

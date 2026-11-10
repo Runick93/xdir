@@ -45,6 +45,11 @@ fn utc_offset(unix: i64) -> i64 {
 pub struct LinuxEnv;
 
 impl SystemEnv for LinuxEnv {
+    /// Las unidades de red con letra son solo de Windows.
+    fn command_available(&self, c: xdir_core::commands::Command) -> bool {
+        !matches!(c, xdir_core::commands::Command::MapNetworkDrive | xdir_core::commands::Command::DisconnectNetworkDrive)
+    }
+
     /// Sin interfaz no hay tema del sistema: claro.
     fn system_dark(&self) -> bool {
         false

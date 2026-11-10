@@ -61,6 +61,12 @@ pub enum Command {
     ShowOriginal,
     /// Expulsar el disco enfocado en «Este equipo» o el de la carpeta del panel.
     Eject,
+    /// Conectar a un servidor… (el panel con la dirección, favoritos y recientes).
+    ConnectServer,
+    /// Conectar unidad de red… (solo Windows).
+    MapNetworkDrive,
+    /// Desconectar unidad de red… (solo Windows).
+    DisconnectNetworkDrive,
     Rename,
     /// Renombrar varios: el panel de la derecha con la vista previa en la lista.
     RenameMany,
@@ -198,6 +204,9 @@ pub const ALL: &[Spec] = &[
     spec(Command::CreateShortcut, "crear_acceso_directo", "Crear acceso directo", &[]),
     spec(Command::ShowOriginal, "mostrar_original", "Mostrar el original", &[]),
     spec(Command::Eject, "expulsar", "Expulsar", &[]),
+    spec(Command::ConnectServer, "conectar_servidor", "Conectar a un servidor…", &["Ctrl+K"]),
+    spec(Command::MapNetworkDrive, "conectar_unidad_red", "Conectar unidad de red…", &[]),
+    spec(Command::DisconnectNetworkDrive, "desconectar_unidad_red", "Desconectar unidad de red…", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::RenameMany, "renombrar_varios", "Renombrar varios…", &[]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
@@ -542,9 +551,10 @@ mod tests {
         let mut km = Keymap::default();
         let ctrl_k = parse_combo("Ctrl+K").unwrap();
         let ctrl_w = parse_combo("Ctrl+W").unwrap();
-        // pestana_nueva = ["Ctrl+K", "Ctrl+W"]: Ctrl+T deja de funcionar y Ctrl+W se le saca a cerrar.
+        // pestana_nueva = ["Ctrl+K", "Ctrl+W"]: Ctrl+T deja de funcionar, y Ctrl+K y Ctrl+W se les
+        // sacan a conectar a un servidor y a cerrar.
         let displaced = km.set(Command::NewTab, &[ctrl_k, ctrl_w]);
-        assert_eq!(displaced, [Command::CloseTab]);
+        assert_eq!(displaced, [Command::ConnectServer, Command::CloseTab]);
         assert_eq!(km.lookup(Key(b'K' as u16), true, false, false, false), Some(Command::NewTab));
         assert_eq!(km.lookup(Key(b'W' as u16), true, false, false, false), Some(Command::NewTab));
         assert_eq!(km.lookup(Key(b'T' as u16), true, false, false, false), None);

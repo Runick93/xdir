@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::sys::KeyStyle;
 
+pub mod dialog;
 pub mod places;
 
 pub use places::{NetFavorite, NetPlaces, NetRecent};

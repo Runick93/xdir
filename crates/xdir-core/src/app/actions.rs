@@ -236,6 +236,10 @@ impl App {
                 }
             }
         }
+        // Ordenar, agrupar, filtrar u ocultar cambian el recorrido de la vista rápida.
+        if c != Command::QuickLook {
+            self.sync_quick_look();
+        }
         self.redraw();
     }
 
@@ -389,6 +393,8 @@ impl App {
             Action::ColumnsChanged => {}
         }
         self.sync_folder_views();
+        // Orden, filtros o grupos plegados: la vista rápida rearma su recorrido.
+        self.sync_quick_look();
         self.redraw();
     }
 

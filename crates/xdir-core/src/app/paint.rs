@@ -91,7 +91,7 @@ impl App {
         let filter_pane = self.filter_edit.map(|(_, p)| p);
         let palette = self.palette.as_ref().map(|(p, _)| p);
         // Vista rápida sin visor del sistema: la tarjeta de xdir encima de los paneles.
-        let quick_look = self.quick_look.as_ref().filter(|s| !s.ql.native).map(|s| &s.ql);
+        let quick_look = self.quick_look.as_ref().filter(|s| !s.ql.native);
         let suggest = self.suggest.as_ref();
         // Vista de xtree abierta: se dibuja en lugar de los paneles, la franja de grupos y el árbol.
         let xtree_open = self.xtree_open;
@@ -213,8 +213,8 @@ impl App {
                 };
                 ui::draw_picker(p, w, h, accent, picker_hover, switches);
             }
-            if let Some(ql) = quick_look {
-                quick_look::paint_quick_look(p, w, h, panes[ql.pane].tab(), ql, hover);
+            if let Some(st) = quick_look {
+                quick_look::paint_quick_look(p, w, h, st, hover);
             }
             if let Some(sg) = suggest {
                 sg.draw(p);

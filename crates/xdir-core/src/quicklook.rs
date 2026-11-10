@@ -11,7 +11,7 @@
 //! abierta, `resync` vuelve a ubicar el actual, o el que quedó en su lugar si se borró.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ pub const MIN_H: f32 = 360.0;
 /// Lo que se deja libre alrededor de la tarjeta dentro de la ventana de xdir.
 const OVERLAY_MARGIN: f32 = 24.0;
 /// Lado de la imagen grande que se pide (el ancho de la imagen de X44).
-const IMAGE_DIPS: f32 = 768.0;
+pub const IMAGE_DIPS: f32 = 768.0;
 /// Ícono grande de la tarjeta (sin imagen, o solo en la nube).
 const ICON: f32 = 96.0;
 
@@ -55,7 +55,8 @@ pub struct QuickLookItem {
     /// Posición en el recorrido (desde 0) y largo del recorrido: «k de n».
     pub index: usize,
     pub total: usize,
-    /// Solo en la nube: no se lee ni se pide su imagen (macOS: no va a `QLPreviewPanel`).
+    /// Solo en la nube: no se lee ni se pide su imagen (macOS: no va a `QLPreviewPanel`). `item`
+    /// no lo sabe (no toca el disco): lo completa la `App` con la respuesta de `sys::preview()`.
     pub cloud_only: bool,
     /// Imagen grande (vista sin visor del sistema).
     pub key: thumbs::Key,
@@ -68,8 +69,8 @@ pub fn position_text(index: usize, total: usize) -> String {
 
 /// Cómo se reconoce un elemento entre recargas: su ruta completa si la tiene (resultados de
 /// búsqueda, donde el nombre se puede repetir), si no su nombre.
-fn ident(e: &Entry) -> OsString {
-    e.full.clone().unwrap_or_else(|| e.name.clone())
+fn ident(e: &Entry) -> &OsStr {
+    e.full.as_deref().unwrap_or(&e.name)
 }
 
 /// Lo que recorre la vista rápida abierta.
@@ -103,7 +104,7 @@ impl QuickLook {
             .and_then(|f| positions.iter().position(|&p| p == f))
             .or_else(|| positions.iter().position(|&p| p == selected[0]))
             .unwrap_or(0);
-        let names = positions.iter().filter_map(|&p| list.entry_of_pos(p)).map(|i| ident(&list.entries[i])).collect();
+        let names = positions.iter().filter_map(|&p| list.entry_of_pos(p)).map(|i| ident(&list.entries[i]).to_os_string()).collect();
         Some(QuickLook { pane, names, cur: start, native: false, selection })
     }
 
@@ -120,40 +121,44 @@ impl QuickLook {
     /// La lista cambió (recarga, filtro, borrado): rearma el recorrido por nombre. Si el actual ya
     /// no está, queda el que ocupó su lugar. `false` si no queda ninguno (hay que cerrar).
     pub fn resync(&mut self, list: &FileList) -> bool {
-        let current = self.names.get(self.cur).cloned();
         let visible = (0..list.count()).filter_map(|p| list.entry_of_pos(p)).map(|i| ident(&list.entries[i]));
-        let names: Vec<OsString> = if self.selection {
-            let keep: HashSet<&OsString> = self.names.iter().collect();
+        let kept: Vec<&OsStr> = if self.selection {
+            let keep: HashSet<&OsStr> = self.names.iter().map(OsString::as_os_str).collect();
             visible.filter(|n| keep.contains(n)).collect()
         } else {
             visible.collect()
         };
-        if names.is_empty() {
+        if kept.is_empty() {
             self.names.clear();
             self.cur = 0;
             return false;
         }
-        self.cur = current.and_then(|c| names.iter().position(|n| *n == c)).unwrap_or(self.cur.min(names.len() - 1));
-        self.names = names;
+        let current = self.names.get(self.cur).map(OsString::as_os_str);
+        let cur = current.and_then(|c| kept.iter().position(|n| *n == c)).unwrap_or(self.cur.min(kept.len() - 1));
+        // Solo se copian los nombres si el recorrido cambió.
+        let same = kept.len() == self.names.len() && kept.iter().zip(&self.names).all(|(a, b)| *a == b.as_os_str());
+        if !same {
+            self.names = kept.iter().map(|n| n.to_os_string()).collect();
+        }
+        self.cur = cur;
         true
     }
 
     /// Posición en la lista del elemento actual.
     pub fn pos_in(&self, list: &FileList) -> Option<usize> {
-        let name = self.names.get(self.cur)?;
-        (0..list.count()).find(|&p| list.entry_of_pos(p).is_some_and(|i| ident(&list.entries[i]) == *name))
+        let name = self.names.get(self.cur)?.as_os_str();
+        (0..list.count()).find(|&p| list.entry_of_pos(p).is_some_and(|i| ident(&list.entries[i]) == name))
     }
 
-    /// El elemento actual para mostrar. `painter_px`: píxeles para unos DIPs (el lado de la
-    /// imagen grande sale del escalón que los cubre).
+    /// El elemento actual para mostrar (solo entre los visibles de la lista). `painter_px`:
+    /// píxeles para unos DIPs (el lado de la imagen grande sale del escalón que los cubre). No toca
+    /// el disco: `cloud_only` queda en `false` hasta que la `App` lo sepa.
     pub fn item(&self, tab: &Tab, painter_px: &dyn Fn(f32) -> u32) -> Option<QuickLookItem> {
         let list = &tab.list;
-        let name = self.names.get(self.cur)?;
-        let idx = list.entries.iter().position(|e| ident(e) == *name)?;
+        let idx = list.entry_of_pos(self.pos_in(list)?)?;
         let e = &list.entries[idx];
         let item = tab.entry_item(idx);
         let path = Some(item.path.clone()).filter(|p| !p.as_os_str().is_empty());
-        let cloud_only = path.as_deref().is_some_and(|p| crate::sys::file_system().cloud_only(p));
         let source = match &item.pidl {
             Some(pidl) => thumbs::Source::Pidl(pidl.clone()),
             None => thumbs::Source::Path(item.path.clone()),
@@ -165,7 +170,7 @@ impl QuickLook {
             icon: e.icon,
             index: self.cur,
             total: self.names.len(),
-            cloud_only,
+            cloud_only: false,
             key: (source, thumbs::big_side(painter_px(IMAGE_DIPS))),
         })
     }

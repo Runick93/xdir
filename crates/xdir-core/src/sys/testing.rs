@@ -475,6 +475,8 @@ thread_local! {
     static DRIVES: RefCell<Vec<(PathBuf, String)>> = const { RefCell::new(Vec::new()) };
     /// Rutas que el falso informa como «solo en la nube» (por hilo; ver `set_cloud_only`).
     static CLOUD: RefCell<BTreeSet<PathBuf>> = const { RefCell::new(BTreeSet::new()) };
+    /// Cuántas veces se preguntó `cloud_only` en este hilo.
+    static CLOUD_CHECKS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
@@ -489,6 +491,12 @@ impl FakeFileSystem {
     /// nombres. Con una lista vacía vuelve a no haber unidades.
     pub fn set_drives(drives: &[(&Path, &str)]) {
         DRIVES.with(|d| *d.borrow_mut() = drives.iter().map(|(p, n)| (p.to_path_buf(), n.to_string())).collect());
+    }
+
+    /// Cuántas veces se preguntó `cloud_only` en este hilo (las vistas rápidas lo preguntan por
+    /// `sys::preview()`, nunca al dibujar).
+    pub fn cloud_checks() -> usize {
+        CLOUD_CHECKS.with(Cell::get)
     }
 
     /// Desde ahora (en este hilo) `cloud_only(path)` dice `cloud`.
@@ -756,6 +764,7 @@ impl FileSystem for FakeFileSystem {
 
     /// Solo lo marcado con `set_cloud_only` en este hilo.
     fn cloud_only(&self, path: &Path) -> bool {
+        CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
         CLOUD.with(|c| c.borrow().contains(path))
     }
 }

@@ -29,6 +29,9 @@ thread_local! {
     static CURRENT: RefCell<Option<Retained<NSURL>>> = const { RefCell::new(None) };
     /// Hay una vista rápida de xdir en el panel (si el panel se cierra, hay que avisar).
     static OPEN: Cell<bool> = const { Cell::new(false) };
+    /// Dentro de `show`: el panel puede cambiar de controlador (`end` y `begin`) mientras se abre,
+    /// y ese `end` no es un cierre.
+    static IN_SHOW: Cell<bool> = const { Cell::new(false) };
     /// Fuente y delegado del panel (vive mientras la aplicación).
     static SOURCE: RefCell<Option<Retained<Source>>> = const { RefCell::new(None) };
     /// Qué hacer con una tecla del panel (`App::on_key`) y con su cierre: los pone `app/mac.rs`.
@@ -148,6 +151,7 @@ pub fn show(item: &QuickLookItem) -> bool {
         OPEN.with(|o| o.set(false));
         return false;
     };
+    IN_SHOW.with(|f| f.set(true));
     let ours = SOURCE.with(|s| s.borrow().as_ref().map(|s| Retained::as_ptr(s).cast::<objc2::runtime::AnyObject>()));
     let controlled = unsafe { panel.dataSource() }.is_some_and(|d| Some(Retained::as_ptr(&d).cast::<objc2::runtime::AnyObject>()) == ours);
     if panel.isVisible() && controlled {
@@ -159,6 +163,7 @@ pub fn show(item: &QuickLookItem) -> bool {
         panel.orderFront(None);
         unsafe { panel.reloadData() };
     }
+    IN_SHOW.with(|f| f.set(false));
     true
 }
 
@@ -197,6 +202,10 @@ pub fn begin(panel: Option<&QLPreviewPanel>) {
 /// `endPreviewPanelControl:`: el panel deja de pedirle datos a xdir (se cerró, o la cadena de
 /// respondedores cambió); si la vista rápida seguía abierta, la `App` se entera.
 pub fn end(panel: Option<&QLPreviewPanel>) {
+    // Mientras `show` abre el panel, un `end` del controlador anterior no cierra lo que se abre.
+    if IN_SHOW.with(Cell::get) {
+        return;
+    }
     if let Some(panel) = panel {
         unsafe {
             panel.setDataSource(None);

@@ -53,7 +53,10 @@ impl App {
             WM_APP_SEARCH => self.on_search_due(lparam as u64),
             WM_APP_VIEWS_SAVE => self.on_views_save_due(),
             WM_APP_TOOLTIP => self.on_tooltip_due(lparam as u64),
-            crate::preview::WM_APP_PREVIEW => self.on_preview_reply(),
+            crate::preview::WM_APP_PREVIEW => {
+                self.on_preview_reply();
+                self.on_quick_look_reply();
+            }
             preview::WM_APP_PREVIEW_DUE => self.on_preview_due(),
             #[cfg(feature = "arbol")]
             tree::WM_APP_TREE => {

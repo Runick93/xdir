@@ -2,18 +2,53 @@
 //! (la lista acompaña), seguir los cambios de la carpeta y cerrarla. Lo muestra el visor del
 //! sistema (`WindowHost::quick_look_show`); si no hay, o el elemento está solo en la nube, la
 //! `App` dibuja su tarjeta encima de los paneles (`paint_quick_look`).
+//!
+//! Si un elemento está solo en la nube se pregunta fuera del hilo de interfaz
+//! (`sys::preview()` con `PreviewTarget::Cloud`): un volumen de red muerto no traba la ventana.
+//! Hasta que llega la respuesta se sigue viendo lo anterior (al abrir, la tarjeta con el ícono), y
+//! al host recién se le pasa el elemento cuando se sabe que no está solo en la nube.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use crate::keys::keys::{VK_LEFT, VK_RIGHT, VK_SPACE};
 use crate::paint::Painter;
+use crate::preview::{PreviewBody, PreviewReply, PreviewRequest, PreviewTarget};
 use crate::quicklook::{self, FallbackHit, QuickLook, QuickLookItem, TitleHit};
+use crate::thumbs;
 
-/// La vista rápida abierta: el recorrido, de qué pestaña y carpeta es, y lo último que se mostró.
+/// La vista rápida abierta: el recorrido, de qué pestaña y carpeta es, lo que se ve y lo que
+/// espera saber si está en la nube.
 pub(super) struct QlState {
     pub ql: QuickLook,
     tab: usize,
     location: Location,
-    shown: Option<QuickLookItem>,
+    /// Lo que se ve, con su estado de nube ya sabido.
+    pub shown: Option<QuickLookItem>,
+    /// El elemento al que se pasó, esperando la respuesta de nube (no va al host todavía).
+    pub pending: Option<QuickLookItem>,
+    /// Estado de nube ya leído en esta vista rápida, por ruta.
+    cloud: HashMap<PathBuf, bool>,
+    generation: u64,
+    current: Arc<AtomicU64>,
+    tx: Sender<PreviewReply>,
+    rx: Receiver<PreviewReply>,
+}
+
+impl QlState {
+    fn new(ql: QuickLook, tab: usize, location: Location) -> QlState {
+        let (tx, rx) = channel();
+        QlState { ql, tab, location, shown: None, pending: None, cloud: HashMap::new(), generation: 0, current: Arc::new(AtomicU64::new(0)), tx, rx }
+    }
+
+    /// Una generación nueva: la respuesta que estaba en camino queda vieja.
+    fn bump(&mut self) -> u64 {
+        self.generation += 1;
+        self.current.store(self.generation, Ordering::Relaxed);
+        self.generation
+    }
 }
 
 impl App {
@@ -34,20 +69,70 @@ impl App {
         let pane = self.active;
         let tab = self.panes[pane].tab();
         let Some(ql) = QuickLook::open(&tab.list, pane) else { return };
-        self.quick_look = Some(QlState { ql, tab: tab.id, location: tab.location.clone(), shown: None });
+        self.quick_look = Some(QlState::new(ql, tab.id, tab.location.clone()));
         self.show_quick_look_item();
     }
 
-    /// Le pasa el elemento actual al host (si cambió). Lo que está solo en la nube no va al visor
-    /// del sistema: lo dibuja la `App` (y si el visor estaba abierto, se cierra).
+    /// Lo que ya contestó la columna de vista previa sobre esta ruta (si está en la nube).
+    fn preview_cloud_of(&self, path: &std::path::Path) -> Option<bool> {
+        self.preview.subject.as_ref().filter(|w| w.target.path() == path)?;
+        self.preview.info.as_ref().map(|i| i.body == PreviewBody::CloudOnly)
+    }
+
+    /// Pasa al elemento actual del recorrido. Si ya se sabe si está en la nube, lo muestra; si no,
+    /// lo pregunta fuera del hilo de interfaz y lo muestra al llegar la respuesta.
     fn show_quick_look_item(&mut self) {
         let px = self.ql_px();
         let Some(st) = &self.quick_look else { return };
-        let item = st.ql.item(self.panes[st.ql.pane].tab(), &px);
-        let Some(item) = item else {
+        let Some(mut item) = st.ql.item(self.panes[st.ql.pane].tab(), &px) else {
             self.close_quick_look();
             return;
         };
+        let known = match item.path.as_deref() {
+            None => Some(false),
+            Some(p) => st.cloud.get(p).copied().or_else(|| self.preview_cloud_of(p)),
+        };
+        if let Some(cloud) = known {
+            item.cloud_only = cloud;
+            self.present_quick_look(item);
+            return;
+        }
+        if st.pending.as_ref() == Some(&item) {
+            return;
+        }
+        let (hwnd, path) = (self.hwnd, item.path.clone().unwrap_or_default());
+        let Some(st) = &mut self.quick_look else { return };
+        let generation = st.bump();
+        st.pending = Some(item);
+        sys::preview().request(PreviewRequest { hwnd, tx: st.tx.clone(), generation, current: st.current.clone(), target: PreviewTarget::Cloud(path) });
+        self.redraw();
+    }
+
+    /// Llegó la respuesta de nube (`WM_APP_PREVIEW`): el elemento que esperaba se muestra.
+    pub(super) fn on_quick_look_reply(&mut self) {
+        let Some(st) = &mut self.quick_look else { return };
+        let mut body = None;
+        while let Ok(r) = st.rx.try_recv() {
+            if r.generation == st.generation {
+                body = Some(r.info.body);
+            }
+        }
+        let (Some(body), Some(mut item)) = (body, st.pending.clone()) else { return };
+        let cloud = body == PreviewBody::CloudOnly;
+        if let Some(p) = &item.path {
+            st.cloud.insert(p.clone(), cloud);
+        }
+        item.cloud_only = cloud;
+        self.present_quick_look(item);
+    }
+
+    /// Muestra el elemento (con su estado de nube ya sabido): lo solo en la nube no va al visor
+    /// del sistema, lo dibuja la `App` (y si el visor estaba abierto, se cierra).
+    fn present_quick_look(&mut self, item: QuickLookItem) {
+        let Some(st) = &mut self.quick_look else { return };
+        if st.pending.take().is_some() {
+            st.bump();
+        }
         if st.shown.as_ref() == Some(&item) {
             return;
         }
@@ -87,6 +172,8 @@ impl App {
     /// Anterior o siguiente del recorrido; la lista acompaña (la selección si recorre la carpeta,
     /// solo el foco si recorre los seleccionados).
     fn quick_look_step(&mut self, delta: isize) {
+        // La lista pudo cambiar (orden, filtro, grupos plegados) sin recargarse.
+        self.sync_quick_look();
         let Some(st) = &mut self.quick_look else { return };
         if !st.ql.step(delta) {
             return;
@@ -121,12 +208,12 @@ impl App {
     /// la búsqueda por tipeo), la vista rápida pasa a ese elemento.
     pub(super) fn quick_look_follow_list(&mut self) {
         let Some(st) = &mut self.quick_look else { return };
-        if st.ql.selection {
-            return;
-        }
         let tab = self.panes[st.ql.pane].tab();
         if tab.id != st.tab || tab.location != st.location {
             self.close_quick_look();
+            return;
+        }
+        if st.ql.selection {
             return;
         }
         let Some(pos) = tab.list.focus_pos() else { return };
@@ -230,7 +317,7 @@ impl App {
 
     /// «Abrir» (con su programa) o «Abrir con…» (el diálogo del sistema) del elemento actual.
     fn quick_look_open_item(&mut self, with: bool) {
-        let Some(item) = self.quick_look.as_ref().and_then(|s| s.shown.clone()) else { return };
+        let Some(item) = self.quick_look.as_ref().and_then(|s| s.pending.clone().or_else(|| s.shown.clone())) else { return };
         let Some(path) = item.path.clone() else { return };
         let target = shell::Item { path, pidl: item.pidl.clone() };
         let pane = self.quick_look.as_ref().map_or(self.active, |s| s.ql.pane);
@@ -249,9 +336,18 @@ fn card_parts(card: geom::Rect) -> (geom::Rect, geom::Rect) {
     (bar, geom::rect(card.left, bar.bottom, card.right, card.bottom))
 }
 
-/// Dibuja la tarjeta de la vista rápida (sombra, fondo, barra y cuerpo) sobre la ventana.
-pub(super) fn paint_quick_look(p: &dyn Painter, w: f32, h: f32, tab: &Tab, ql: &QuickLook, hover: Hit) {
-    let Some(item) = ql.item(tab, &|d| p.thumb_px(d)) else { return };
+/// Dibuja la tarjeta de la vista rápida (sombra, fondo, barra y cuerpo) sobre la ventana, con
+/// lo que ya se sabe del elemento (`QlState::shown`): dibujar no toca el disco. Al abrir, mientras
+/// llega la respuesta de nube, la barra y el ícono del elemento.
+pub(super) fn paint_quick_look(p: &dyn Painter, w: f32, h: f32, st: &QlState, hover: Hit) {
+    let (item, waiting) = match (&st.shown, &st.pending) {
+        (Some(item), _) => (item.clone(), false),
+        (None, Some(item)) => (item.clone(), true),
+        (None, None) => return,
+    };
+    let mut item = item;
+    // El escalón de la imagen con la escala de este pintor.
+    item.key.1 = thumbs::big_side(p.thumb_px(quicklook::IMAGE_DIPS));
     let t = *p.theme();
     let card = quicklook::overlay_rect(w, h);
     // Sombra (diseño: negro al 45 %, 12 abajo, desenfoque 36): capas finas que se suman hacia
@@ -274,6 +370,12 @@ pub(super) fn paint_quick_look(p: &dyn Painter, w: f32, h: f32, tab: &Tab, ql: &
         _ => None,
     };
     quicklook::draw_title_bar(p, bar, &item, title_hover);
-    p.clip(body, &mut || quicklook::draw_fallback(p, body, &item, false, body_hover));
+    if waiting {
+        const ICON: f32 = 96.0;
+        let (cx, cy) = ((body.left + body.right) / 2.0, (body.top + body.bottom) / 2.0);
+        p.shell_icon(item.icon, 0, cx - ICON / 2.0, cy - ICON / 2.0, ICON);
+    } else {
+        p.clip(body, &mut || quicklook::draw_fallback(p, body, &item, false, body_hover));
+    }
     p.round_stroke(card, 8.0, t.border);
 }

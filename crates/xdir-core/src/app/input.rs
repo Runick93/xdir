@@ -145,6 +145,7 @@ impl App {
             if let Some(h) = h {
                 self.panes[i].tab_mut().list.click_filter_menu(h);
                 self.sync_folder_views();
+                self.sync_quick_look();
             }
             self.redraw();
             return;

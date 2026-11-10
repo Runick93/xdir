@@ -15,6 +15,7 @@ pub mod engine;
 mod naming;
 pub mod sched;
 pub mod speed;
+pub mod view;
 pub mod walk;
 
 pub use engine::{run, title};
@@ -23,6 +24,8 @@ pub use engine::{run, title};
 mod engine_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod view_tests;
 
 /// Identifica un trabajo de la cola.
 pub type JobId = u64;
@@ -58,6 +61,8 @@ pub struct JobView {
     pub stopped: Option<String>,
     pub paused: bool,
     pub started: Instant,
+    /// La casilla «Hacer esto con todos» del conflicto está marcada.
+    pub apply_all: bool,
 }
 
 /// Un trabajo del motor.

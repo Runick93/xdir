@@ -177,6 +177,7 @@ impl App {
             stopped: None,
             paused: false,
             started: now,
+            apply_all: false,
         });
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, label, paths: paths.clone() });
         let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip);

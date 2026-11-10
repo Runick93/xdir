@@ -507,6 +507,22 @@ impl<'a> Job<'a> {
         items
     }
 
+    /// Como `restore_still_safe`, pero de la carpeta `dir` misma (antes de ponerle permisos y
+    /// fechas al cerrarla, o de renombrarla): ni ella ni ninguna del camino puede ser un enlace.
+    fn restore_dir_still_safe(&mut self, src: &Path, dir: &Path) -> bool {
+        let Some((in_trash, root)) = self.restore_guard.clone() else { return true };
+        if !dir.starts_with(&root) {
+            return true;
+        }
+        match self.prims.prepare_restore(&in_trash, dir, false) {
+            Ok(()) => true,
+            Err(e) => {
+                self.fail_msg(src, dir, &e.message(), false);
+                false
+            }
+        }
+    }
+
     /// «Devolver» `src` a `origin`: prepara la carpeta sin seguir enlaces (reglas de cada sistema).
     /// Un rechazo no se ofrece para «Reintentar» (sería lo mismo, o un camino sin controles).
     fn restore_item(&mut self, src: &Path, origin: &Path) -> Option<Item> {
@@ -1174,7 +1190,11 @@ impl<'a> Job<'a> {
     /// Termina una carpeta: sus fechas y atributos, borra el origen vacío al mover y resuelve
     /// lo apartado por «Reemplazar» (a la Papelera si todo salió bien; si no, vuelve).
     fn close_dir(&mut self, frame: Frame, moving: bool) {
-        if frame.created {
+        // Devolviendo: la carpeta tiene que seguir siendo una carpeta de verdad del disco (pudo
+        // cambiar por un enlace mientras se copiaba lo de adentro). Si no, no se le pone nada ni
+        // se la renombra: se avisa.
+        let safe = self.restore_dir_still_safe(&frame.src, &frame.dst);
+        if frame.created && safe {
             let _ = self.prims.finish_dir(&frame.dst, &frame.src);
         }
         if moving {
@@ -1194,6 +1214,10 @@ impl<'a> Job<'a> {
         }
         // Algo falló o se canceló: vuelve la carpeta que estaba.
         self.select.retain(|p| p != &frame.dst);
+        if !safe {
+            self.keep_visible(&aside, &frame.dst, "Lo que estaba antes quedó como");
+            return;
+        }
         if moving {
             // Lo que ya se movió no tiene otra copia: queda a la vista con otro nombre.
             let keep = self.free_numbered(&frame.dst, true);

@@ -206,9 +206,16 @@ impl CopyPrims for MacCopyPrims {
         std::fs::create_dir(dst).map_err(|e| err(e, dst))
     }
 
+    /// Nunca sigue enlaces: `dst` tiene que ser una carpeta (no un enlace que alguien puso en su
+    /// lugar) y `copyfile` va con `COPYFILE_NOFOLLOW`.
     fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError> {
+        let is_dir = std::fs::symlink_metadata(dst).map_err(|e| err(e, dst))?.file_type().is_dir();
+        if !is_dir {
+            return Err(CopyError::new(ErrKind::Other("No es una carpeta (es un enlace): no se toca".into()), dst));
+        }
         let (from, to) = (c_path(like)?, c_path(dst)?);
-        if unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), libc::COPYFILE_METADATA) } != 0 {
+        let flags = libc::COPYFILE_METADATA | libc::COPYFILE_NOFOLLOW;
+        if unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), flags) } != 0 {
             return Err(last(dst));
         }
         Ok(())
@@ -484,6 +491,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ronda 3: cerrar una carpeta (permisos, fechas, atributos) nunca sigue un enlace: si en su
+    /// lugar quedó un enlace a otra carpeta, la del otro lado no cambia.
+    #[test]
+    fn prims_finish_dir_never_follows_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("cerrar-sin-seguir");
+        let (like, victim) = (dir.join("modelo"), dir.join("victima"));
+        std::fs::create_dir_all(&like).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::set_permissions(&like, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("enlace")).unwrap();
+        assert!(MacCopyPrims.finish_dir(&dir.join("enlace"), &like).is_err());
+        assert_eq!(std::fs::metadata(&victim).unwrap().permissions().mode() & 0o7777, 0o700);
+        // Una carpeta de verdad sí.
+        std::fs::create_dir(dir.join("nueva")).unwrap();
+        MacCopyPrims.finish_dir(&dir.join("nueva"), &like).unwrap();
+        assert_eq!(std::fs::metadata(dir.join("nueva")).unwrap().permissions().mode() & 0o7777, 0o777);
+        std::fs::set_permissions(&like, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn prims_err_kind_mapping() {
         assert_eq!(err_kind(libc::EBUSY), ErrKind::InUse);
@@ -744,6 +773,133 @@ mod tests {
         assert!(item.exists(), "sigue en la Papelera (era una copia)");
         assert_eq!(std::fs::read_to_string(vol.join("Desktop/f.txt")).unwrap(), "x");
         assert!(!vol.join("docs/f.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    type Hk = std::sync::Mutex<Box<dyn FnMut(&str, &Path, &Path) + Send>>;
+
+    /// Las primitivas reales con un gancho después de copiar un archivo y de cada renombre (para
+    /// cambiar una carpeta por un enlace en el peor momento).
+    struct Hooked {
+        inner: Real,
+        hook: Hk,
+    }
+
+    impl CopyPrims for Hooked {
+        fn stat(&self, p: &Path) -> Result<ItemStat, CopyError> {
+            self.inner.stat(p)
+        }
+        fn read_dir(&self, p: &Path) -> Result<Vec<OsString>, CopyError> {
+            self.inner.read_dir(p)
+        }
+        fn volume(&self, p: &Path) -> Option<VolumeInfo> {
+            self.inner.volume(p)
+        }
+        fn copy_file(&self, src: &Path, dst: &Path, progress: &mut dyn FnMut(u64) -> Flow) -> Result<(), CopyError> {
+            let r = self.inner.copy_file(src, dst, progress);
+            (self.hook.lock().unwrap())("copy", src, dst);
+            r
+        }
+        fn copy_symlink(&self, src: &Path, dst: &Path) -> Result<(), CopyError> {
+            self.inner.copy_symlink(src, dst)
+        }
+        fn create_dir(&self, dst: &Path) -> Result<(), CopyError> {
+            self.inner.create_dir(dst)
+        }
+        fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError> {
+            self.inner.finish_dir(dst, like)
+        }
+        fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
+            let r = self.inner.rename_noreplace(from, to);
+            if r.is_ok() {
+                (self.hook.lock().unwrap())("rename", from, to);
+            }
+            r
+        }
+        fn replace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
+            self.inner.replace(from, to)
+        }
+        fn remove(&self, p: &Path) -> Result<(), CopyError> {
+            self.inner.remove(p)
+        }
+        fn trash(&self, p: &Path) -> Result<String, CopyError> {
+            self.inner.trash(p)
+        }
+        fn untrash(&self, a: &str, o: &Path) -> Result<(), CopyError> {
+            self.inner.untrash(a, o)
+        }
+        fn trash_origin(&self, p: &Path) -> Option<PathBuf> {
+            self.inner.trash_origin(p)
+        }
+        fn prepare_restore(&self, t: &Path, d: &Path, c: bool) -> Result<(), CopyError> {
+            self.inner.prepare_restore(t, d, c)
+        }
+    }
+
+    /// Ronda 3: «Reemplazar» adentro de una carpeta combinada que cambia por un enlace justo
+    /// después de apartar lo que estaba: nada se escribe del otro lado.
+    #[test]
+    fn zz3_replace_swap_after_set_aside() {
+        let dir = tmp("zz3-reemplazar");
+        let (vol, outside) = (dir.join("vol"), dir.join("LaunchAgents"));
+        let tr = vol.join(".Trashes/501/X");
+        std::fs::create_dir_all(&tr).unwrap();
+        std::fs::create_dir_all(vol.join("docs/X")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(tr.join("f.txt"), "evil").unwrap();
+        std::fs::write(vol.join("docs/X/f.txt"), "old").unwrap();
+        let target = vol.join("docs/X");
+        let (t2, o2) = (target.clone(), outside.clone());
+        let mut done = false;
+        let hook: Hk = std::sync::Mutex::new(Box::new(move |k: &str, _f: &Path, to: &Path| {
+            if k == "rename" && !done && to.to_string_lossy().contains("reemplaz") {
+                done = true;
+                std::fs::rename(&t2, t2.with_file_name("moved-real")).unwrap();
+                std::os::unix::fs::symlink(&o2, &t2).unwrap();
+            }
+        }));
+        let prims = Hooked { inner: Real { other: None, origin: Some(target.clone()) }, hook };
+        let answers = [Answer { choice: Choice::Merge, all: false }, Answer { choice: Choice::Replace, all: false }];
+        let out = go(&prims, JobSpec::Restore { items: vec![tr.clone()] }, &answers, &Control::new(), &mut |_| {});
+        let listing: Vec<_> = std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(listing.is_empty(), "escribió afuera: {listing:?}");
+        assert!(out.errors.iter().all(|e| !e.retry), "{:?}", out.errors);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ronda 3 (bloqueante): devolviendo una carpeta entre discos, la carpeta creada cambia por un
+    /// enlace a otra (`~/.ssh`, 0700) mientras se copia lo de adentro: al cerrarla no se le ponen
+    /// los permisos ni las fechas a la del otro lado.
+    #[test]
+    fn zz3_finish_dir_follows_swapped_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("zz3-cerrar-carpeta");
+        let (vol, outside) = (dir.join("vol"), dir.join("ssh"));
+        let trash_root = dir.join("otherdisk/.Trashes/501");
+        let tr = trash_root.join("X");
+        std::fs::create_dir_all(&tr).unwrap();
+        std::fs::create_dir_all(vol.join("docs")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(tr.join("a"), "a").unwrap();
+        std::fs::set_permissions(&tr, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let target = vol.join("docs/X");
+        let (t2, o2) = (target.clone(), outside.clone());
+        let mut done = false;
+        let hook: Hk = std::sync::Mutex::new(Box::new(move |k: &str, _f: &Path, _to: &Path| {
+            if k == "copy" && !done {
+                done = true;
+                std::fs::rename(&t2, t2.with_file_name("moved-real")).unwrap();
+                std::os::unix::fs::symlink(&o2, &t2).unwrap();
+            }
+        }));
+        let prims = Hooked { inner: Real { other: Some(dir.join("otherdisk")), origin: Some(target.clone()) }, hook };
+        let out = go(&prims, JobSpec::Restore { items: vec![tr.clone()] }, &[], &Control::new(), &mut |_| {});
+        let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777;
+        let listing: Vec<_> = std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(listing.is_empty(), "{listing:?}");
+        assert_eq!(mode, 0o700, "cambió los permisos de la carpeta del otro lado del enlace");
+        assert!(!out.errors.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

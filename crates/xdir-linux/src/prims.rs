@@ -260,13 +260,15 @@ impl CopyPrims for LinuxCopyPrims {
         std::fs::create_dir(dst).map_err(|e| err(e, dst))
     }
 
+    /// Nunca sigue enlaces: `dst` se abre con `O_NOFOLLOW | O_DIRECTORY` y todo (atributos, fechas,
+    /// permisos) se pone por ese descriptor.
     fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError> {
         let meta = std::fs::metadata(like).map_err(|e| err(e, like))?;
-        let dir = File::open(dst).map_err(|e| err(e, dst))?;
+        let dir = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY).open(dst).map_err(|e| err(e, dst))?;
         let from = File::open(like).map_err(|e| err(e, like))?;
         copy_xattrs(from.as_raw_fd(), dir.as_raw_fd()).map_err(|e| err(e, like))?;
         set_times(dir.as_raw_fd(), &meta);
-        std::fs::set_permissions(dst, meta.permissions()).map_err(|e| err(e, dst))
+        dir.set_permissions(meta.permissions()).map_err(|e| err(e, dst))
     }
 
     fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
@@ -494,6 +496,28 @@ mod tests {
         }
         let dir = tmp("sync-carpeta");
         LinuxCopyPrims.sync_dir(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ronda 3: cerrar una carpeta (permisos, fechas, atributos) nunca sigue un enlace: si en su
+    /// lugar quedó un enlace a otra carpeta, la del otro lado no cambia.
+    #[test]
+    fn prims_finish_dir_never_follows_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("cerrar-sin-seguir");
+        let (like, victim) = (dir.join("modelo"), dir.join("victima"));
+        std::fs::create_dir_all(&like).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::set_permissions(&like, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("enlace")).unwrap();
+        assert!(LinuxCopyPrims.finish_dir(&dir.join("enlace"), &like).is_err());
+        assert_eq!(std::fs::metadata(&victim).unwrap().permissions().mode() & 0o7777, 0o700);
+        // Una carpeta de verdad sí.
+        std::fs::create_dir(dir.join("nueva")).unwrap();
+        LinuxCopyPrims.finish_dir(&dir.join("nueva"), &like).unwrap();
+        assert_eq!(std::fs::metadata(dir.join("nueva")).unwrap().permissions().mode() & 0o7777, 0o777);
+        std::fs::set_permissions(&like, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

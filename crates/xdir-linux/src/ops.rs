@@ -162,6 +162,20 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                 let _ = std::fs::remove_dir(&folder);
                 return Err(errors.join("; "));
             }
+            // El nombre cuenta lo que de verdad quedó adentro.
+            let mut folder = folder;
+            if moved.len() != items.len() {
+                let base = names::folder_with_name(moved.len());
+                let renamed = names::free_name(&parent, &|n| names::numbered_name(&base, true, n), &taken);
+                if !taken(&renamed) && std::fs::rename(&folder, &renamed).is_ok() {
+                    for (now, _) in &mut moved {
+                        if let Some(name) = now.file_name() {
+                            *now = renamed.join(name);
+                        }
+                    }
+                    folder = renamed;
+                }
+            }
             let undo = Undo::Batch(vec![Undo::CreatedFolder(folder.clone()), Undo::Moved(moved)]);
             ok(Some(undo), Some(folder), true, errors)
         }
@@ -498,6 +512,27 @@ mod tests {
         }
         assert!(!folder.exists());
         assert!(trash.join("files/Carpeta nueva con 3 elementos").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// El nombre cuenta lo que de verdad se movió: de 3 pedidos, si uno ya no existe, «… con 2
+    /// elementos»; el deshacer apunta a la carpeta con su nombre final.
+    #[test]
+    fn new_folder_with_counts_moved() {
+        let dir = tmp("carpeta-cuenta");
+        let trash = dir.join("Trash");
+        let items: Vec<PathBuf> = ["a", "b", "no-esta"].iter().map(|n| dir.join(n)).collect();
+        std::fs::write(&items[0], "a").unwrap();
+        std::fs::write(&items[1], "b").unwrap();
+        let r = run(Op::NewFolderWith { parent: dir.clone(), items: items.clone() }, Some(&trash)).unwrap();
+        let folder = dir.join("Carpeta nueva con 2 elementos");
+        assert_eq!(r.focus, Some(folder.clone()));
+        assert!(r.error.is_some(), "avisa del que no se pudo mover");
+        assert!(folder.join("a").is_file() && folder.join("b").is_file());
+        assert!(!dir.join("Carpeta nueva con 3 elementos").exists());
+        let Some(Undo::Batch(steps)) = r.undo else { panic!("deshacer") };
+        assert_eq!(steps[0], Undo::CreatedFolder(folder.clone()));
+        assert_eq!(steps[1], Undo::Moved(vec![(folder.join("a"), items[0].clone()), (folder.join("b"), items[1].clone())]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -179,9 +179,9 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             focus = select.last().cloned();
             Some(Undo::Created(select.clone()))
         }
-        Op::NewFolderWith { .. } => {
-            let folder = created_folder.clone().unwrap_or_default();
-            let moved: Vec<(PathBuf, PathBuf)> = log
+        Op::NewFolderWith { parent, items } => {
+            let mut folder = created_folder.clone().unwrap_or_default();
+            let mut moved: Vec<(PathBuf, PathBuf)> = log
                 .iter()
                 .filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?)))
                 .filter(|(now, _)| now.parent() == Some(folder.as_path()))
@@ -189,6 +189,21 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             if moved.is_empty() {
                 let _ = std::fs::remove_dir(&folder);
                 return Err(Error::new(E_FAIL, perform_error.as_deref().unwrap_or("No se movió ningún elemento")));
+            }
+            // El nombre cuenta lo que de verdad quedó adentro.
+            if moved.len() != items.len() {
+                let base = names::folder_with_name(moved.len());
+                let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+                let renamed = names::free_name(&parent, &|n| names::numbered_name(&base, true, n), &taken);
+                if !taken(&renamed) && std::fs::rename(&folder, &renamed).is_ok() {
+                    for (now, _) in &mut moved {
+                        if let Some(name) = now.file_name() {
+                            *now = renamed.join(name);
+                        }
+                    }
+                    folder = renamed;
+                    focus = Some(folder.clone());
+                }
             }
             Some(Undo::Batch(vec![Undo::CreatedFolder(folder), Undo::Moved(moved)]))
         }

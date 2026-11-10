@@ -2,25 +2,37 @@
 //! arriba la imagen grande del elemento con foco y abajo una tira horizontal de miniaturas con el
 //! enfocado centrado. La tira muestra `visible` en orden, sin encabezados de grupo.
 
-use super::{Action, CheckState, FileList, draw_checkbox, grow};
+use super::{Action, CheckState, FileList, draw_checkbox, grow, shown_name};
+use crate::fs::Entry;
 use crate::geom::{Rect, contains, rect};
-use crate::paint::Painter;
+use crate::paint::{FontId, Painter, ellipsize};
 use crate::theme::alpha;
 use crate::thumbs;
 
 /// Alto de la tira de miniaturas (con la línea `border` arriba).
-pub const STRIP_H: f32 = 112.0;
-/// Lado de cada celda de la tira.
+pub const STRIP_H: f32 = 132.0;
+/// Ancho de cada celda de la tira.
 pub const CELL: f32 = 88.0;
+/// Alto de cada celda: la miniatura (con el mismo margen que a los lados) y abajo el nombre.
+pub const CELL_H: f32 = 108.0;
 /// Distancia entre el borde izquierdo de una celda y el de la siguiente.
 pub const CELL_STEP: f32 = 96.0;
 /// Lado de la miniatura dentro de la celda.
 pub const STRIP_THUMB: f32 = 72.0;
 /// Margen de la imagen grande y de los extremos de la tira.
 pub const GALLERY_PAD: f32 = 16.0;
+/// Línea del nombre del enfocado, abajo del área de la imagen grande.
+pub const CAPTION_H: f32 = 28.0;
+/// Alto de la línea del nombre en la celda, debajo de la miniatura, y margen a los lados.
+const CELL_NAME_H: f32 = 18.0;
+const CELL_NAME_PAD: f32 = 2.0;
+/// Separación entre el nombre y el tipo debajo de la imagen grande.
+const CAPTION_GAP: f32 = 8.0;
 
 /// Margen de arriba de las celdas dentro de la tira.
-const CELL_TOP: f32 = (STRIP_H - CELL) / 2.0;
+const CELL_TOP: f32 = (STRIP_H - CELL_H) / 2.0;
+/// Margen de la miniatura dentro de la celda (arriba y a los lados).
+const THUMB_INSET: f32 = (CELL - STRIP_THUMB) / 2.0;
 /// Casilla de selección: desde la esquina de arriba a la izquierda de la celda.
 pub(super) const CHECK_INSET: f32 = 12.0;
 /// Ícono de las carpetas y de lo que no tiene imagen: en la tira y en grande.
@@ -137,7 +149,7 @@ impl FileList {
         let s = self.strip_rect();
         let x = s.left + GALLERY_PAD + pos as f32 * CELL_STEP - self.strip_shift();
         let y = s.top + CELL_TOP;
-        rect(x, y, x + CELL, y + CELL)
+        rect(x, y, x + CELL, y + CELL_H)
     }
 
     /// Celdas a la vista: [primera, última).
@@ -232,8 +244,8 @@ impl FileList {
     }
 
     /// Galería (diseño X42): la imagen grande del enfocado arriba (carpetas y lo que no tiene
-    /// imagen, el ícono de 96) y la tira de miniaturas abajo. No escribe nombres: los detalles
-    /// están en la columna de vista previa.
+    /// imagen, el ícono de 96) con su nombre, tipo y tamaño debajo, y la tira de miniaturas con
+    /// sus nombres abajo.
     pub fn draw_gallery(&mut self, p: &dyn Painter, area: Rect, active: bool) {
         self.area = area;
         self.strip_active = active;
@@ -247,14 +259,20 @@ impl FileList {
             && img.bottom - img.top >= 1.0
         {
             let e = &self.entries[idx];
-            let (w, h) = (img.right - img.left, img.bottom - img.top);
-            let drawn = !e.is_dir
-                && self.thumb_source(e).is_some_and(|src| p.big_image(&(src, thumbs::big_side(p.thumb_px(w.max(h)))), img));
-            if !drawn {
-                let size = BIG_ICON.min(w).min(h);
-                let (cx, cy) = ((img.left + img.right) / 2.0, (img.top + img.bottom) / 2.0);
-                p.shell_icon(e.icon, e.overlay, cx - size / 2.0, cy - size / 2.0, size);
+            // La línea del nombre abajo; la imagen, en lo que queda.
+            let caption = rect(img.left, (img.bottom - CAPTION_H + 6.0).max(img.top), img.right, img.bottom);
+            let pic = rect(img.left, img.top, img.right, (img.bottom - CAPTION_H).max(img.top));
+            let (w, h) = (pic.right - pic.left, pic.bottom - pic.top);
+            if h >= 1.0 {
+                let drawn = !e.is_dir
+                    && self.thumb_source(e).is_some_and(|src| p.big_image(&(src, thumbs::big_side(p.thumb_px(w.max(h)))), pic));
+                if !drawn {
+                    let size = BIG_ICON.min(w).min(h);
+                    let (cx, cy) = ((pic.left + pic.right) / 2.0, (pic.top + pic.bottom) / 2.0);
+                    p.shell_icon(e.icon, e.overlay, cx - size / 2.0, cy - size / 2.0, size);
+                }
             }
+            self.draw_caption(p, e, caption);
         }
 
         p.fill(strip, th.surface);
@@ -277,9 +295,41 @@ impl FileList {
         });
     }
 
+    /// Debajo de la imagen grande, en una línea centrada: el nombre y al lado, chico y tenue, el
+    /// tipo y el tamaño («Imagen JPEG · 3,8 MB»; las carpetas, solo el tipo). Si no entra, se
+    /// corta primero el nombre (hasta la mitad del ancho) y después el tipo.
+    fn draw_caption(&self, p: &dyn Painter, e: &Entry, r: Rect) {
+        let th = p.theme();
+        let width = r.right - r.left;
+        let size = match (e.is_dir, e.modified) {
+            (false, _) => crate::format::size_short(e.size),
+            (true, 0) if e.size > 0 => crate::format::size_short(e.size),
+            _ => String::new(),
+        };
+        let meta = match (e.type_name.is_empty(), size.is_empty()) {
+            (_, true) => e.type_name.to_string(),
+            (true, false) => size,
+            (false, false) => format!("{} · {size}", e.type_name),
+        };
+        let meta_w = if meta.is_empty() { 0.0 } else { p.measure(FontId::Small, &meta) + CAPTION_GAP };
+        let name = ellipsize(p, FontId::Ui, shown_name(e, self.show_extensions), (width - meta_w).max(width / 2.0));
+        let name_w = p.measure(FontId::Ui, &name);
+        let meta = ellipsize(p, FontId::Small, &meta, width - name_w - CAPTION_GAP);
+        let meta_w = if meta.is_empty() { 0.0 } else { p.measure(FontId::Small, &meta) + CAPTION_GAP };
+        // Un poco de aire a la derecha de cada texto: lo medido y lo dibujado pueden diferir en
+        // una fracción y el texto se recorta a su rectángulo.
+        let left = r.left + ((width - name_w - meta_w) / 2.0).max(0.0);
+        let name_r = rect(left, r.top, (left + name_w + 1.0).min(r.right), r.bottom);
+        p.text(FontId::Ui, &name, name_r, th.text);
+        if !meta.is_empty() {
+            let x = name_r.right - 1.0 + CAPTION_GAP;
+            p.text(FontId::Small, &meta, rect(x, r.top, r.right.min(x + meta_w - CAPTION_GAP + 1.0), r.bottom), th.text_dim);
+        }
+    }
+
     /// Celda de la tira (diseño `list::FileList::draw_strip_cell`): fondo de 88 con radio 6 según
-    /// el estado, la miniatura de 72 (o el ícono de 48) y, con casillas, la casilla arriba a la
-    /// izquierda si está seleccionada o bajo el mouse.
+    /// el estado, la miniatura de 72 (o el ícono de 48), el nombre debajo en una línea y, con
+    /// casillas, la casilla arriba a la izquierda si está seleccionada o bajo el mouse.
     pub fn draw_strip_cell(&self, p: &dyn Painter, r: Rect, pos: usize, state: CellState) {
         let th = p.theme();
         let Some(&idx) = self.visible.get(pos) else { return };
@@ -306,13 +356,19 @@ impl FileList {
                 }
             }
         }
-        let inset = (CELL - STRIP_THUMB) / 2.0;
-        let thumb = rect(r.left + inset, r.top + inset, r.right - inset, r.bottom - inset);
+        let thumb = rect(r.left + THUMB_INSET, r.top + THUMB_INSET, r.right - THUMB_INSET, r.top + THUMB_INSET + STRIP_THUMB);
         let drawn = !e.is_dir && self.thumb_source(e).is_some_and(|src| p.thumbnail(&(src, p.thumb_px(STRIP_THUMB)), thumb));
         if !drawn {
-            let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+            let (cx, cy) = ((thumb.left + thumb.right) / 2.0, (thumb.top + thumb.bottom) / 2.0);
             p.shell_icon(e.icon, e.overlay, cx - STRIP_ICON / 2.0, cy - STRIP_ICON / 2.0, STRIP_ICON);
         }
+        // El nombre, centrado y cortado al ancho de la celda.
+        let color = if matches!(state, CellState::Selected | CellState::SelectedFocus | CellState::Focus) { th.text } else { th.text_dim };
+        let max = CELL - 2.0 * CELL_NAME_PAD;
+        let name = ellipsize(p, FontId::Small, shown_name(e, self.show_extensions), max - 1.0);
+        let w = (p.measure(FontId::Small, &name) + 1.0).min(max);
+        let (left, top) = (r.left + (CELL - w) / 2.0, thumb.bottom + 2.0);
+        p.text(FontId::Small, &name, rect(left, top, left + w, top + CELL_NAME_H), color);
         let selected = self.selected[idx];
         if let Some(cb) = self.checkbox_rect_in(r, None)
             && (selected || self.hover == Some(pos))
@@ -329,7 +385,7 @@ mod tests {
     use crate::geom::rect;
     use crate::keys::keys::{VK_DOWN, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP};
     use crate::list::{Action, Column, FileList, View};
-    use crate::paint::Painter;
+    use crate::paint::{FontId, Painter};
     use crate::sys::testing::{RecordingPainter, install_fakes};
     use crate::theme::{DEFAULT_ACCENT, Theme};
     use crate::thumbs;
@@ -540,11 +596,105 @@ mod tests {
         assert_eq!(draws.len(), 1);
         let (key, r) = &draws[0];
         assert_eq!(key.0, thumbs::Source::Path("/fotos/f02.jpg".into()));
-        // Arriba de la tira, con 16 de margen.
-        assert_eq!(*r, rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0));
+        // Arriba de la tira, con 16 de margen y la línea del nombre abajo.
+        assert_eq!(*r, rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0 - CAPTION_H));
         assert_eq!(key.1, thumbs::big_side(p.thumb_px(928.0)));
-        // Sin texto de archivos.
-        assert!(p.texts().is_empty(), "{:?}", p.texts());
+    }
+
+    /// Texto dibujado con `font` y exactamente `s`.
+    fn text_of(p: &RecordingPainter, font: FontId, s: &str) -> Option<crate::geom::Rect> {
+        p.texts().into_iter().find(|t| t.0 == font && t.1 == s).map(|t| t.2)
+    }
+
+    fn inside(inner: crate::geom::Rect, outer: crate::geom::Rect) -> bool {
+        inner.left >= outer.left && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom
+    }
+
+    /// Debajo de la imagen grande, dentro del área de la imagen: el nombre del enfocado y al lado,
+    /// chico, el tipo y el tamaño.
+    #[test]
+    fn gallery_caption_under_big_image() {
+        let mut l = blank();
+        let mut e = entry("f02.jpg", "Imagen JPEG", false);
+        e.size = 4_000_000;
+        l.append(vec![entry("f01.jpg", "Imagen JPEG", false), e]);
+        l.set_view(View::Gallery);
+        l.select_index(1);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let area = rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0);
+        let picture = p.big_draws()[0].1;
+        let name = text_of(&p, FontId::Ui, "f02.jpg").expect("nombre del enfocado");
+        let meta = text_of(&p, FontId::Small, &format!("Imagen JPEG · {}", crate::format::size_short(4_000_000))).expect("tipo y tamaño");
+        for r in [name, meta] {
+            assert!(inside(r, area), "{r:?} fuera de {area:?}");
+            assert!(r.top >= picture.bottom, "{r:?} pisa la imagen {picture:?}");
+        }
+        // En una línea, el tipo a la derecha del nombre y el conjunto centrado.
+        assert_eq!((name.top, name.bottom), (meta.top, meta.bottom));
+        assert!(meta.left >= name.right);
+        let mid = (name.left + meta.right) / 2.0;
+        assert!((mid - 480.0).abs() <= 2.0, "centro {mid}");
+        // Una carpeta: solo el tipo.
+        let mut l = blank();
+        l.append(vec![entry("Fotos", "Carpeta de archivos", true)]);
+        l.set_view(View::Gallery);
+        l.select_index(0);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        assert!(text_of(&p, FontId::Ui, "Fotos").is_some(), "{:?}", p.texts());
+        assert!(text_of(&p, FontId::Small, "Carpeta de archivos").is_some(), "{:?}", p.texts());
+    }
+
+    /// En la tira, cada celda con su nombre, dentro de la celda y debajo de la miniatura.
+    #[test]
+    fn gallery_strip_cells_draw_names() {
+        let mut l = gallery(10);
+        l.select_index(l.visible[2] as usize);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let (first, last) = l.visible_range();
+        assert!(last > first);
+        for pos in first..last {
+            let name = &names(&l, std::iter::once(pos))[0];
+            let cell = l.item_rect(pos);
+            let r = p.texts().into_iter().find(|t| t.0 == FontId::Small && &t.1 == name && t.2.top >= l.strip_rect().top);
+            let r = r.unwrap_or_else(|| panic!("sin nombre en la celda {pos}: {:?}", p.texts())).2;
+            assert!(inside(r, cell), "{r:?} fuera de {cell:?}");
+            assert!(r.top >= cell.top + (CELL - STRIP_THUMB) / 2.0 + STRIP_THUMB, "{r:?} pisa la miniatura");
+        }
+    }
+
+    /// Un nombre largo se corta con «…» al ancho de la celda.
+    #[test]
+    fn gallery_long_names_ellipsized() {
+        let long = "un nombre de archivo larguísimo que no entra.jpg";
+        let mut l = blank();
+        l.append(vec![entry(long, "Imagen JPEG", false), entry("b.jpg", "Imagen JPEG", false)]);
+        l.set_view(View::Gallery);
+        let pos = (0..l.count()).find(|&p| l.entries[l.visible[p] as usize].name == long).unwrap();
+        l.select_index(l.visible[1 - pos] as usize);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let cell = l.item_rect(pos);
+        let strip_top = l.strip_rect().top;
+        let (_, s, r) = p.texts().into_iter().find(|t| t.2.top >= strip_top && t.1.starts_with("un nombre")).expect("nombre en la tira");
+        assert!(s.ends_with('…'), "{s}");
+        assert!(p.measure(FontId::Small, &s) <= cell.right - cell.left, "{s}");
+        assert!(inside(r, cell), "{r:?} fuera de {cell:?}");
+        // Enfocado, el nombre de abajo de la imagen también se corta si no entra.
+        let mut l = blank();
+        let huge: String = "x".repeat(400);
+        l.append(vec![entry(&huge, "Imagen JPEG", false)]);
+        l.set_view(View::Gallery);
+        l.select_index(0);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let area = rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0);
+        let (_, s, r) = p.texts().into_iter().find(|t| t.0 == FontId::Ui).expect("nombre");
+        assert!(s.ends_with('…'), "{s}");
+        assert!(inside(r, area), "{r:?}");
+        assert!(p.measure(FontId::Ui, &s) <= area.right - area.left);
     }
 
     /// Una carpeta: el ícono de 96 centrado en vez de la imagen grande; en la tira, el de 48.
@@ -558,10 +708,11 @@ mod tests {
         l.draw(&p, l.area, true);
         assert!(p.big_draws().is_empty());
         let icons = p.icons();
-        let image = rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0);
+        let image = rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0 - CAPTION_H);
         let (cx, cy) = center(image);
         assert!(icons.contains(&(cx - 48.0, cy - 48.0, 96.0)), "{icons:?}");
-        let (sx, sy) = center(l.item_rect(0));
+        let cell = l.item_rect(0);
+        let (sx, sy) = ((cell.left + cell.right) / 2.0, cell.top + (CELL - STRIP_THUMB) / 2.0 + STRIP_THUMB / 2.0);
         assert!(icons.contains(&(sx - 24.0, sy - 24.0, 48.0)), "{icons:?}");
         // Un archivo cuya imagen grande no llega: también el ícono de 96.
         let mut l = gallery(1);

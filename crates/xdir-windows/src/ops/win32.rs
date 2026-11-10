@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::{
     SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, PostMessageW};
-use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s, w};
+use windows::core::{AsImpl, Error, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s, w};
 
 use crate::platform::{Handle, HandleExt};
 use crate::fs::wide_path;
@@ -48,6 +48,10 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
 }
 
 fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
+    // Los deshacer de varios pasos usan una operación del Shell por paso.
+    if let Op::Undo(undo) = &op {
+        return undo_any(hwnd, undo);
+    }
     let fo: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
     let recorder: IFileOperationProgressSink = Recorder::default().into();
     unsafe {
@@ -57,6 +61,8 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
     let mut flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR;
     let mut rename_after = false;
     let mut focus = None;
+    // Carpeta que creó «Carpeta nueva con la selección» (se quita si no se movió nada).
+    let mut created_folder: Option<PathBuf> = None;
 
     match &op {
         Op::Copy { sources, dest } | Op::Move { sources, dest } => {
@@ -84,6 +90,18 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                 unsafe { fo.CopyItem(&item(src)?, &item(parent)?, &HSTRING::from(copy_name), None)? };
             }
         }
+        Op::NewFolderWith { parent, items } => {
+            let base = names::folder_with_name(items.len());
+            let folder = names::free_name(parent, &|n| names::numbered_name(&base, true, n), &|p| std::fs::symlink_metadata(p).is_ok());
+            std::fs::create_dir(&folder).map_err(|e| Error::new(E_FAIL, format!("{}: {e}", folder.display())))?;
+            created_folder = Some(folder.clone());
+            let dest = item(&folder)?;
+            for src in items {
+                unsafe { fo.MoveItem(&item(src)?, &dest, PCWSTR::null(), None)? };
+            }
+            rename_after = true;
+            focus = Some(folder);
+        }
         Op::Delete { paths, recycle } => {
             flags = if *recycle { FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE } else { FILEOPERATION_FLAGS(0) };
             for p in paths {
@@ -109,7 +127,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
                 fo.NewItem(&item(parent)?, FILE_ATTRIBUTE_NORMAL.0, w!("Nuevo documento de texto.txt"), PCWSTR::null(), None)?;
             }
         }
-        Op::Undo(undo) => return run_undo(&fo, undo),
+        Op::Undo(undo) => return undo_any(hwnd, undo),
     }
 
     unsafe {
@@ -119,6 +137,10 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         let aborted = fo.GetAnyOperationsAborted().map(|b| b.as_bool()).unwrap_or(false);
         if let Err(e) = performed {
             if !aborted {
+                // Solo se quita si quedó vacía.
+                if let Some(folder) = &created_folder {
+                    let _ = std::fs::remove_dir(folder);
+                }
                 return Err(e);
             }
         }
@@ -131,6 +153,16 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
             select = log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect::<Vec<_>>();
             focus = select.last().cloned();
             Some(Undo::Created(select.clone()))
+        }
+        Op::NewFolderWith { .. } => {
+            let moved: Vec<(PathBuf, PathBuf)> =
+                log.iter().filter_map(|r| Some((PathBuf::from(r.created.clone()?), r.source.clone()?))).collect();
+            let folder = created_folder.clone().unwrap_or_default();
+            if moved.is_empty() {
+                let _ = std::fs::remove_dir(&folder);
+                return Err(Error::new(E_FAIL, "No se movió ningún elemento"));
+            }
+            Some(Undo::Batch(vec![Undo::CreatedFolder(folder), Undo::Moved(moved)]))
         }
         Op::Copy { .. } => Some(Undo::Created(log.iter().filter_map(|r| r.created.clone()).map(PathBuf::from).collect())),
         Op::Move { .. } => Some(Undo::Moved(
@@ -161,9 +193,44 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::Created(v) => !v.is_empty(),
         Undo::Moved(v) => !v.is_empty(),
         Undo::Recycled(v) => !v.is_empty(),
-        Undo::Rename { .. } => true,
+        Undo::Rename { .. } | Undo::Batch(_) | Undo::CreatedFolder(_) => true,
     });
     Ok(OpResult { undo, focus, rename_after, error: None, select })
+}
+
+/// Deshace `undo`: los pasos de un `Batch` en orden inverso (juntando los errores) y una carpeta
+/// creada solo si quedó vacía; lo demás con `run_undo`.
+fn undo_any(hwnd: HWND, undo: &Undo) -> Result<OpResult> {
+    match undo {
+        Undo::Batch(steps) => {
+            let mut errors = Vec::new();
+            for step in steps.iter().rev() {
+                match undo_any(hwnd, step) {
+                    Ok(r) => errors.extend(r.error),
+                    Err(e) => errors.push(e.message().to_string()),
+                }
+            }
+            Ok(OpResult { error: (!errors.is_empty()).then(|| errors.join("; ")), ..Default::default() })
+        }
+        Undo::CreatedFolder(folder) => {
+            let empty = std::fs::read_dir(folder).is_ok_and(|mut it| it.next().is_none());
+            if empty {
+                unsafe {
+                    let fo: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+                    fo.SetOwnerWindow(hwnd)?;
+                    fo.SetOperationFlags(FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE)?;
+                    fo.DeleteItem(&item(folder)?, None)?;
+                    fo.PerformOperations()?;
+                }
+            }
+            Ok(OpResult::default())
+        }
+        other => {
+            let fo: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
+            unsafe { fo.SetOwnerWindow(hwnd)? };
+            run_undo(&fo, other)
+        }
+    }
 }
 
 fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
@@ -200,6 +267,8 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                 fo.PerformOperations().ok();
                 return Ok(OpResult { focus, ..Default::default() });
             }
+            // Los resuelve `undo_any` antes de llegar acá.
+            Undo::Batch(_) | Undo::CreatedFolder(_) => return Ok(OpResult::default()),
         }
         fo.PerformOperations()?;
     }

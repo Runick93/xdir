@@ -146,6 +146,31 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
             r.select = created;
             Ok(r)
         }
+        Op::NewFolderWith { parent, items } => {
+            let base = names::folder_with_name(items.len());
+            let folder = names::free_name(&parent, &|n| names::numbered_name(&base, true, n), &taken);
+            std::fs::create_dir(&folder).map_err(|e| err_at(&folder, e))?;
+            let (mut moved, mut errors) = (Vec::new(), Vec::new());
+            for src in &items {
+                let Some(name) = src.file_name() else { continue };
+                let target = folder.join(name);
+                // Dos elementos con el mismo nombre (de una búsqueda): el segundo no pisa al primero.
+                if taken(&target) {
+                    errors.push(format!("ya existe «{}» en «{}»", name.to_string_lossy(), base));
+                    continue;
+                }
+                match move_path(src, &target) {
+                    Ok(()) => moved.push((target, src.clone())),
+                    Err(e) => errors.push(err_at(src, e)),
+                }
+            }
+            if moved.is_empty() {
+                let _ = std::fs::remove_dir(&folder);
+                return Err(errors.join("; "));
+            }
+            let undo = Undo::Batch(vec![Undo::CreatedFolder(folder.clone()), Undo::Moved(moved)]);
+            ok(Some(undo), Some(folder), true, errors)
+        }
         Op::Undo(undo) => undo_op(undo, trash),
     }
 }
@@ -208,6 +233,23 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
                 if let Err(e) = trash::restore(&name, &original, trash) {
                     errors.push(err_at(&original, e));
                 }
+            }
+        }
+        // En orden inverso; los errores de cada paso se juntan.
+        Undo::Batch(steps) => {
+            for step in steps.into_iter().rev() {
+                match undo_op(step, trash) {
+                    Ok(r) => errors.extend(r.error),
+                    Err(e) => errors.push(e),
+                }
+            }
+        }
+        // Solo si quedó vacía; si alguien puso algo adentro, se deja.
+        Undo::CreatedFolder(folder) => {
+            if std::fs::read_dir(&folder).is_ok_and(|mut it| it.next().is_none())
+                && let Err(e) = to_trash(&folder, trash)
+            {
+                errors.push(e);
             }
         }
     }
@@ -361,6 +403,60 @@ mod tests {
         let r = run(Op::Duplicate { sources: vec![f.clone()] }, None).unwrap();
         assert_eq!(r.select, [dir.join("Fotos.2024 copia")]);
         assert_eq!(std::fs::read_to_string(dir.join("Fotos.2024 copia/x")).unwrap(), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tres archivos → «Carpeta nueva con 3 elementos» con los tres, enfocada y para renombrar; la
+    /// segunda vez «… 2». Deshacer los devuelve y manda la carpeta vacía a la Papelera.
+    #[test]
+    fn new_folder_with_moves_and_undoes() {
+        let dir = tmp("carpeta-con");
+        let trash = dir.join("Trash");
+        let files: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"].iter().map(|n| dir.join(n)).collect();
+        for f in &files {
+            std::fs::write(f, "x").unwrap();
+        }
+        let folder = dir.join("Carpeta nueva con 3 elementos");
+        let r = run(Op::NewFolderWith { parent: dir.clone(), items: files.clone() }, Some(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        assert_eq!((r.focus.clone(), r.rename_after), (Some(folder.clone()), true));
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            assert!(folder.join(n).is_file(), "{n}");
+            assert!(!dir.join(n).exists(), "{n}");
+        }
+        let more: Vec<PathBuf> = ["d", "e", "f"].iter().map(|n| dir.join(n)).collect();
+        for f in &more {
+            std::fs::write(f, "y").unwrap();
+        }
+        let r2 = run(Op::NewFolderWith { parent: dir.clone(), items: more }, Some(&trash)).unwrap();
+        assert_eq!(r2.focus, Some(dir.join("Carpeta nueva con 3 elementos 2")));
+        let r = run(Op::Undo(r.undo.unwrap()), Some(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        for f in &files {
+            assert!(f.is_file(), "{}", f.display());
+        }
+        assert!(!folder.exists());
+        assert!(trash.join("files/Carpeta nueva con 3 elementos").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Si después de crearla se agregó algo a la carpeta, deshacer devuelve lo movido y la deja.
+    #[test]
+    fn undo_created_folder_keeps_non_empty() {
+        let dir = tmp("carpeta-con-llena");
+        let trash = dir.join("Trash");
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "x").unwrap();
+        let r = run(Op::NewFolderWith { parent: dir.clone(), items: vec![a.clone()] }, Some(&trash)).unwrap();
+        let folder = r.focus.clone().unwrap();
+        std::fs::write(folder.join("nuevo.txt"), "n").unwrap();
+        let r = run(Op::Undo(r.undo.unwrap()), Some(&trash)).unwrap();
+        assert_eq!(r.error, None);
+        assert!(a.is_file());
+        assert!(folder.join("nuevo.txt").is_file());
+        // Ninguno se pudo mover: no queda la carpeta y vuelve el error.
+        assert!(run(Op::NewFolderWith { parent: dir.clone(), items: vec![dir.join("no-existe")] }, Some(&trash)).is_err());
+        assert!(!dir.join("Carpeta nueva con 1 elemento 2").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

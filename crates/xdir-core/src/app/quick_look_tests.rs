@@ -101,7 +101,7 @@ fn quick_look_command_and_menu() {
     let s = ALL.iter().find(|s| s.id == "vista_rapida").expect("vista_rapida");
     assert_eq!((s.command, s.name, s.default_keys), (Command::QuickLook, "Vista rápida", &["Espacio"][..]));
     let c = parse_combo("Espacio").unwrap();
-    assert_eq!(Keymap::default().lookup(crate::keys::Key(c.vk), false, false, false), Some(Command::QuickLook));
+    assert_eq!(Keymap::default().lookup(crate::keys::Key(c.vk), false, false, false, false), Some(Command::QuickLook));
     assert_eq!(Keymap::default().label(Command::QuickLook), "Espacio");
 
     let d = fixture("menu", &["a.txt", "b.txt"]);

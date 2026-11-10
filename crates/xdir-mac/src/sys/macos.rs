@@ -101,6 +101,8 @@ const KEYS: &[(Command, &[&str])] = &[
     (Command::TogglePreview, &["Ctrl+Alt+P"]),
     // ⌘D es Duplicar (como el Finder); favoritos pasa a ⇧⌘D.
     (Command::ToggleFavorite, &["Ctrl+Shift+D"]),
+    // ⌃⌘N, como el Finder (Meta es la tecla Control).
+    (Command::NewFolderWithSelection, &["Meta+Ctrl+N"]),
 ];
 
 /// macOS: nombres distintos a los de Windows.
@@ -133,13 +135,15 @@ impl SystemEnv for MacEnv {
         !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     }
 
-    /// En macOS, Ctrl de los atajos es ⌘ (como Ctrl+C → ⌘C) y Alt es ⌥.
+    /// En macOS, Ctrl de los atajos es ⌘ (como Ctrl+C → ⌘C), Alt es ⌥ y Meta (`VK_LWIN`) es ⌃.
     fn key_down(&self, k: Key) -> bool {
         let flags = NSEvent::modifierFlags_class();
         match k.0 {
             0x10 => flags.contains(NSEventModifierFlags::Shift),
             0x11 => flags.contains(NSEventModifierFlags::Command),
             0x12 => flags.contains(NSEventModifierFlags::Option),
+            // Meta de los atajos (⌃).
+            0x5B => flags.contains(NSEventModifierFlags::Control),
             _ => false,
         }
     }

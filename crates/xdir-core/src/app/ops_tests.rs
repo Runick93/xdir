@@ -197,3 +197,76 @@ fn item_menu_has_duplicate() {
     choose_menu(&mut a, "Duplicar");
     assert_eq!(FakeFileOps::take_ops(), [Op::Duplicate { sources: vec![d.join("a.txt")] }]);
 }
+
+// ---------- Carpeta nueva con la selección ----------
+
+/// Con dos seleccionados, Ctrl+Alt+Shift+N manda `Op::NewFolderWith` con la carpeta del panel; el
+/// resultado con `rename_after` abre el renombrado sobre la carpeta nueva.
+#[test]
+fn new_folder_with_spawns_op() {
+    use crate::host::TextKind;
+    use crate::keys::keys::{VK_CONTROL, VK_MENU, VK_SHIFT};
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let d = fixture("nfw-op", &["a.txt", "b.txt", "c.txt"]);
+    go(&mut a, &d);
+    select(&mut a, &["a.txt", "b.txt"]);
+    let folder = d.join("Carpeta nueva con 2 elementos");
+    std::fs::create_dir(&folder).unwrap();
+    FakeFileOps::respond_with(OpResult { focus: Some(folder.clone()), rename_after: true, ..Default::default() });
+    FakeEnv::hold_keys(&[VK_CONTROL, VK_MENU, VK_SHIFT]);
+    assert!(a.on_key(Key(b'N' as u16)));
+    FakeEnv::hold_keys(&[]);
+    let ops = FakeFileOps::take_ops();
+    let [Op::NewFolderWith { parent, items }] = ops.as_slice() else { panic!("{ops:?}") };
+    assert_eq!(parent, &d);
+    let mut items = items.clone();
+    items.sort();
+    assert_eq!(items, [d.join("a.txt"), d.join("b.txt")]);
+    drain_ops(&mut a);
+    pump(&mut a, 0);
+    a.try_pending_rename();
+    assert_eq!(host.text_of(TextKind::Rename).as_deref(), Some("Carpeta nueva con 2 elementos"));
+    // Sin selección: nada.
+    let mut b = app();
+    go(&mut b, &d);
+    FakeFileOps::take_ops();
+    b.run_command(Command::NewFolderWithSelection);
+    assert_eq!(FakeFileOps::take_ops(), []);
+}
+
+/// Meta (⌃ en la Mac) llega a los atajos: un atajo propio con Meta se resuelve con la tecla
+/// apretada y no sin ella.
+#[test]
+fn meta_key_reaches_shortcuts() {
+    use crate::keys::keys::{VK_CONTROL, VK_LWIN};
+    let mut a = app();
+    let d = fixture("nfw-meta", &["a.txt"]);
+    go(&mut a, &d);
+    select(&mut a, &["a.txt"]);
+    a.config.keymap.set(Command::NewFolderWithSelection, &[crate::commands::parse_combo("Meta+Ctrl+K").unwrap()]);
+    FakeFileOps::take_ops();
+    FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_key(Key(b'K' as u16));
+    assert_eq!(FakeFileOps::take_ops(), []);
+    FakeEnv::hold_keys(&[VK_CONTROL, VK_LWIN]);
+    a.on_key(Key(b'K' as u16));
+    FakeEnv::hold_keys(&[]);
+    assert_eq!(FakeFileOps::take_ops(), [Op::NewFolderWith { parent: d.clone(), items: vec![d.join("a.txt")] }]);
+}
+
+/// El menú del clic derecho ofrece «Carpeta nueva con la selección» solo con dos o más.
+#[test]
+fn menu_new_folder_with_needs_two() {
+    let mut a = app();
+    let d = fixture("nfw-menu", &["a.txt", "b.txt"]);
+    go(&mut a, &d);
+    select(&mut a, &["a.txt"]);
+    assert!(!own_menu(&mut a).iter().any(|l| l == "Carpeta nueva con la selección"));
+    select(&mut a, &["a.txt", "b.txt"]);
+    assert!(own_menu(&mut a).iter().any(|l| l == "Carpeta nueva con la selección"));
+    FakeFileOps::take_ops();
+    choose_menu(&mut a, "Carpeta nueva con la selección");
+    let ops = FakeFileOps::take_ops();
+    assert!(matches!(ops.as_slice(), [Op::NewFolderWith { items, .. }] if items.len() == 2), "{ops:?}");
+}

@@ -78,6 +78,10 @@ impl SystemEnv for Win32Env {
     }
 
     fn key_down(&self, k: Key) -> bool {
+        // Meta de los atajos (`VK_LWIN`): cualquiera de las dos teclas Windows.
+        if k.0 == 0x5B {
+            return unsafe { GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0 };
+        }
         unsafe { GetKeyState(k.0 as i32) < 0 }
     }
 

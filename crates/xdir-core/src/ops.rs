@@ -20,6 +20,8 @@ pub enum Op {
     NewFile { parent: PathBuf },
     /// «nombre copia», «nombre copia 2»… al lado de cada uno (`names::copy_name`).
     Duplicate { sources: Vec<PathBuf> },
+    /// Crea «Carpeta nueva con N elementos» en `parent` y mueve `items` adentro.
+    NewFolderWith { parent: PathBuf, items: Vec<PathBuf> },
     Undo(Undo),
 }
 
@@ -34,6 +36,10 @@ pub enum Undo {
     Moved(Vec<(PathBuf, PathBuf)>),
     /// (nombre del elemento dentro de la papelera, dónde estaba).
     Recycled(Vec<(String, PathBuf)>),
+    /// Varios pasos de una sola operación; se deshacen en orden inverso.
+    Batch(Vec<Undo>),
+    /// Carpeta creada por la operación: va a la Papelera solo si quedó vacía (si no, se deja).
+    CreatedFolder(PathBuf),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

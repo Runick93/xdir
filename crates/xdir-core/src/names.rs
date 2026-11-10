@@ -27,6 +27,11 @@ pub fn numbered_name(name: &str, is_dir: bool, n: u32) -> String {
     format!("{stem} {n}{ext}")
 }
 
+/// «Carpeta nueva con 3 elementos» («con 1 elemento»; si existe, `numbered_name` le suma « 2»…).
+pub fn folder_with_name(count: usize) -> String {
+    if count == 1 { "Carpeta nueva con 1 elemento".to_string() } else { format!("Carpeta nueva con {count} elementos") }
+}
+
 /// Primer `dir/make(n)` (n = 1, 2, …) que no está tomado según `taken` (en las plataformas,
 /// `symlink_metadata().is_ok()`).
 pub fn free_name(dir: &Path, make: &dyn Fn(u32) -> String, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
@@ -63,6 +68,13 @@ mod tests {
         assert_eq!(numbered_name("informe.pdf", false, 1), "informe.pdf");
         assert_eq!(numbered_name("informe.pdf", false, 2), "informe 2.pdf");
         assert_eq!(numbered_name("Fotos.2024", true, 3), "Fotos.2024 3");
+    }
+
+    #[test]
+    fn folder_with_name_text() {
+        assert_eq!(folder_with_name(3), "Carpeta nueva con 3 elementos");
+        assert_eq!(folder_with_name(1), "Carpeta nueva con 1 elemento");
+        assert_eq!(numbered_name(&folder_with_name(3), true, 2), "Carpeta nueva con 3 elementos 2");
     }
 
     #[test]

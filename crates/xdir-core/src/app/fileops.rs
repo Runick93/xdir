@@ -72,6 +72,17 @@ impl App {
         }
     }
 
+    /// Carpeta nueva con la selección: en la carpeta del panel (en una búsqueda, la carpeta
+    /// buscada), solo en carpetas de disco.
+    pub(super) fn new_folder_with_selection(&mut self) {
+        let location = &self.panes[self.active].tab().location;
+        let (Location::Path(_), Some(parent)) = (location, location.target()) else { return };
+        let items = self.selection(self.active);
+        if !items.is_empty() {
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::NewFolderWith { parent, items });
+        }
+    }
+
     pub(super) fn delete_selection(&mut self, recycle: bool) {
         // En carpetas virtuales borra el propio Shell (en la Papelera: eliminar definitivamente).
         let location = self.panes[self.active].tab().location.clone();
@@ -320,7 +331,14 @@ impl App {
         };
         // «Vista rápida» primero. «Copiar como ruta de acceso» usa las mismas comillas y saltos de
         // línea que «Copiar las rutas como texto» (`quoted_paths`).
-        vec![item("Vista rápida", Command::QuickLook), item("Duplicar", Command::Duplicate), item("Copiar como ruta de acceso", Command::CopyPaths)]
+        let many = self.panes[self.active].tab().list.selected_indices().nth(1).is_some();
+        let mut entries = vec![item("Vista rápida", Command::QuickLook), item("Duplicar", Command::Duplicate)];
+        // Con dos o más: juntarlos en una carpeta nueva.
+        if many {
+            entries.push(item("Carpeta nueva con la selección", Command::NewFolderWithSelection));
+        }
+        entries.push(item("Copiar como ruta de acceso", Command::CopyPaths));
+        entries
     }
 
     /// Menú contextual de la lista en `at` (DIPs del área de la ventana). Sin punto (tecla de

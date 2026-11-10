@@ -283,7 +283,7 @@ impl App {
     /// largo (Alt+F4, Alt+Espacio). Devuelve si se usó.
     pub fn on_alt_key(&mut self, vk: Key) -> bool {
         self.dismiss_tooltip();
-        match self.config.keymap.lookup(vk, key_down(VK_CONTROL), key_down(VK_SHIFT), true) {
+        match self.config.keymap.lookup(vk, key_down(VK_CONTROL), key_down(VK_SHIFT), true, key_down(VK_LWIN)) {
             Some(c) => {
                 self.run_command(c);
                 true

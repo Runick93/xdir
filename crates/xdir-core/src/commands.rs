@@ -49,6 +49,8 @@ pub enum Command {
     NewFolder,
     /// Archivo de texto vacío en la carpeta del panel, con el renombrado en línea abierto.
     NewTextFile,
+    /// Carpeta nueva «Carpeta nueva con N elementos» con la selección adentro.
+    NewFolderWithSelection,
     Recycle,
     Delete,
     Rename,
@@ -177,6 +179,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::Undo, "deshacer", "Deshacer", &["Ctrl+Z"]),
     spec(Command::NewFolder, "carpeta_nueva", "Carpeta nueva", &["Ctrl+Shift+N"]),
     spec(Command::NewTextFile, "archivo_texto_nuevo", "Archivo de texto nuevo", &["Ctrl+Alt+N"]),
+    spec(Command::NewFolderWithSelection, "carpeta_con_seleccion", "Carpeta nueva con la selección", &["Ctrl+Alt+Shift+N"]),
     spec(Command::Recycle, "papelera", "Enviar a la papelera", &["Supr"]),
     spec(Command::Delete, "eliminar", "Eliminar definitivamente", &["Shift+Supr"]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
@@ -228,6 +231,8 @@ pub struct Combo {
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    /// Tecla Windows / Super; en macOS, Control (⌃).
+    pub meta: bool,
 }
 
 /// Nombres de teclas que no son una letra, un número ni F1..F24: (nombre en config, tecla, nombre
@@ -261,7 +266,7 @@ const KEY_NAMES: &[(&[&str], Key, &str)] = &[
     (&["menosnum", "numminus", "subtract"], Key(0x6D), "Menos (teclado numérico)"),
 ];
 
-/// Estilo Apple: símbolos, en el orden de Apple (⌥⇧⌘).
+/// Estilo Apple: símbolos, en el orden de Apple (⌃⌥⇧⌘).
 fn mac_key_label(vk: u16) -> Option<&'static str> {
     Some(match vk {
         0x2E => "⌦",
@@ -279,9 +284,10 @@ fn mac_key_label(vk: u16) -> Option<&'static str> {
     })
 }
 
-/// "Ctrl+Shift+T" → combinación. Sin distinguir mayúsculas; acepta "Control" y "Mayús".
+/// "Ctrl+Shift+T" → combinación. Sin distinguir mayúsculas; acepta "Control" y "Mayús", y
+/// "Meta", "Win" o "Super" para la tecla Windows (Control en macOS).
 pub fn parse_combo(text: &str) -> Result<Combo, String> {
-    let mut combo = Combo { vk: 0, ctrl: false, shift: false, alt: false };
+    let mut combo = Combo { vk: 0, ctrl: false, shift: false, alt: false, meta: false };
     let parts: Vec<&str> = text.split('+').map(str::trim).collect();
     let (key, mods) = parts.split_last().ok_or("atajo vacío")?;
     for m in mods {
@@ -289,7 +295,8 @@ pub fn parse_combo(text: &str) -> Result<Combo, String> {
             "ctrl" | "control" => combo.ctrl = true,
             "shift" | "mayús" | "mayus" => combo.shift = true,
             "alt" => combo.alt = true,
-            other => return Err(format!("modificador desconocido «{other}» (usá Ctrl, Shift o Alt)")),
+            "meta" | "win" | "super" => combo.meta = true,
+            other => return Err(format!("modificador desconocido «{other}» (usá Ctrl, Shift, Alt o Meta)")),
         }
     }
     let lower = key.to_lowercase();
@@ -313,9 +320,10 @@ pub fn combo_label(c: Combo) -> String {
 /// `combo_label` con el estilo dado.
 pub fn combo_label_in(style: KeyStyle, c: Combo) -> String {
     let mut s = String::new();
+    // Apple: ⌃⌥⇧⌘ (Meta es ⌃); Windows: Win, Ctrl, Shift, Alt.
     let mods = match style {
-        KeyStyle::Mac => [(c.alt, "⌥"), (c.shift, "⇧"), (c.ctrl, "⌘")],
-        KeyStyle::Windows => [(c.ctrl, "Ctrl+"), (c.shift, "Shift+"), (c.alt, "Alt+")],
+        KeyStyle::Mac => [(c.meta, "⌃"), (c.alt, "⌥"), (c.shift, "⇧"), (c.ctrl, "⌘")],
+        KeyStyle::Windows => [(c.meta, "Win+"), (c.ctrl, "Ctrl+"), (c.shift, "Shift+"), (c.alt, "Alt+")],
     };
     for (on, name) in mods {
         if on {
@@ -375,8 +383,8 @@ impl Keymap {
         displaced
     }
 
-    pub fn lookup(&self, vk: Key, ctrl: bool, shift: bool, alt: bool) -> Option<Command> {
-        let combo = Combo { vk: vk.0, ctrl, shift, alt };
+    pub fn lookup(&self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<Command> {
+        let combo = Combo { vk: vk.0, ctrl, shift, alt, meta };
         self.bindings.iter().find(|(k, _)| *k == combo).map(|(_, c)| *c)
     }
 
@@ -397,7 +405,7 @@ mod tests {
     fn combos_parse_and_print() {
         install_fakes();
         let c = parse_combo("ctrl+shift+t").unwrap();
-        assert_eq!(c, Combo { vk: b'T' as u16, ctrl: true, shift: true, alt: false });
+        assert_eq!(c, Combo { vk: b'T' as u16, ctrl: true, shift: true, alt: false, meta: false });
         assert_eq!(combo_label(c), "Ctrl+Shift+T");
         assert_eq!(combo_label(parse_combo("Alt+Izquierda").unwrap()), "Alt+←");
         // Estilo Apple: símbolos en el orden de Apple; Ctrl es ⌘ y Alt es ⌥.
@@ -407,7 +415,51 @@ mod tests {
         assert_eq!(combo_label(parse_combo("F12").unwrap()), "F12");
         assert_eq!(parse_combo("Mayús+Supr").unwrap().vk, VK_DELETE.0);
         assert!(parse_combo("Ctrl+Hiper").is_err());
-        assert!(parse_combo("Meta+X").is_err());
+        assert!(parse_combo("Hiper+X").unwrap_err().contains("(usá Ctrl, Shift, Alt o Meta)"));
+        assert!(parse_combo("Meta+X").unwrap().meta);
+    }
+
+    /// Meta: la tecla Control en macOS (⌃, primero) y Windows/Super en los demás («Win+»).
+    #[test]
+    fn meta_combos_parse_and_print() {
+        install_fakes();
+        let c = parse_combo("Meta+Ctrl+N").unwrap();
+        assert_eq!(c, Combo { vk: b'N' as u16, ctrl: true, shift: false, alt: false, meta: true });
+        assert_eq!(parse_combo("win+ctrl+n").unwrap(), c);
+        assert_eq!(parse_combo("SUPER+Ctrl+N").unwrap(), c);
+        assert_eq!(combo_label_in(KeyStyle::Mac, c), "⌃⌘N");
+        assert_eq!(combo_label_in(KeyStyle::Windows, c), "Win+Ctrl+N");
+        let all = parse_combo("Meta+Ctrl+Shift+Alt+K").unwrap();
+        assert_eq!(combo_label_in(KeyStyle::Mac, all), "⌃⌥⇧⌘K");
+        assert_eq!(combo_label_in(KeyStyle::Windows, all), "Win+Ctrl+Shift+Alt+K");
+    }
+
+    /// Ctrl+N y Meta+Ctrl+N son atajos distintos.
+    #[test]
+    fn meta_is_part_of_lookup() {
+        install_fakes();
+        let mut km = Keymap::default();
+        km.set(Command::NewTab, &[parse_combo("Ctrl+N").unwrap()]);
+        km.set(Command::NewFolderWithSelection, &[parse_combo("Meta+Ctrl+N").unwrap()]);
+        let n = Key(b'N' as u16);
+        assert_eq!(km.lookup(n, true, false, false, false), Some(Command::NewTab));
+        assert_eq!(km.lookup(n, true, false, false, true), Some(Command::NewFolderWithSelection));
+    }
+
+    /// «Carpeta nueva con la selección»: Ctrl+Alt+Shift+N, después de «Archivo de texto nuevo».
+    #[test]
+    fn new_folder_with_selection_shortcut() {
+        install_fakes();
+        let s = ALL.iter().find(|s| s.id == "carpeta_con_seleccion").unwrap();
+        assert_eq!(
+            (s.command, s.name, s.default_keys),
+            (Command::NewFolderWithSelection, "Carpeta nueva con la selección", &["Ctrl+Alt+Shift+N"][..])
+        );
+        let pos = |id: &str| ALL.iter().position(|s| s.id == id).unwrap();
+        assert_eq!(pos("archivo_texto_nuevo") + 1, pos("carpeta_con_seleccion"));
+        let km = Keymap::default();
+        assert_eq!(km.lookup(Key(b'N' as u16), true, true, true, false), Some(Command::NewFolderWithSelection));
+        assert_eq!(km.label(Command::NewFolderWithSelection), "Ctrl+Shift+Alt+N");
     }
 
     /// Duplicar toma Ctrl+D (⌘D) y favoritos pasa a Ctrl+Shift+D (⇧⌘D).
@@ -422,8 +474,8 @@ mod tests {
         assert_eq!(pos("duplicar") + 1, pos("favorito"));
         let km = Keymap::default();
         let (cd, csd) = (parse_combo("Ctrl+D").unwrap(), parse_combo("Ctrl+Shift+D").unwrap());
-        assert_eq!(km.lookup(Key(cd.vk), cd.ctrl, cd.shift, cd.alt), Some(Command::Duplicate));
-        assert_eq!(km.lookup(Key(csd.vk), csd.ctrl, csd.shift, csd.alt), Some(Command::ToggleFavorite));
+        assert_eq!(km.lookup(Key(cd.vk), cd.ctrl, cd.shift, cd.alt, cd.meta), Some(Command::Duplicate));
+        assert_eq!(km.lookup(Key(csd.vk), csd.ctrl, csd.shift, csd.alt, csd.meta), Some(Command::ToggleFavorite));
         assert_eq!(combo_label_in(KeyStyle::Mac, cd), "⌘D");
         assert_eq!(combo_label_in(KeyStyle::Mac, csd), "⇧⌘D");
     }
@@ -448,7 +500,7 @@ mod tests {
             for k in s.keys() {
                 let c = parse_combo(k).unwrap();
                 assert!(seen.insert(c), "atajo repetido: {k}");
-                assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(s.command), "{k}");
+                assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta), Some(s.command), "{k}");
             }
         }
         let ids: std::collections::HashSet<_> = ALL.iter().map(|s| s.id).collect();
@@ -461,7 +513,7 @@ mod tests {
         install_fakes();
         let km = Keymap::default();
         let e = parse_combo("Ctrl+Shift+E").unwrap();
-        let bound = km.lookup(Key(e.vk), e.ctrl, e.shift, e.alt);
+        let bound = km.lookup(Key(e.vk), e.ctrl, e.shift, e.alt, e.meta);
         assert_eq!(available(Command::ToggleTree), cfg!(feature = "arbol"));
         assert_eq!(bound, cfg!(feature = "arbol").then_some(Command::ToggleTree));
     }
@@ -475,9 +527,9 @@ mod tests {
         // pestana_nueva = ["Ctrl+K", "Ctrl+W"]: Ctrl+T deja de funcionar y Ctrl+W se le saca a cerrar.
         let displaced = km.set(Command::NewTab, &[ctrl_k, ctrl_w]);
         assert_eq!(displaced, [Command::CloseTab]);
-        assert_eq!(km.lookup(Key(b'K' as u16), true, false, false), Some(Command::NewTab));
-        assert_eq!(km.lookup(Key(b'W' as u16), true, false, false), Some(Command::NewTab));
-        assert_eq!(km.lookup(Key(b'T' as u16), true, false, false), None);
+        assert_eq!(km.lookup(Key(b'K' as u16), true, false, false, false), Some(Command::NewTab));
+        assert_eq!(km.lookup(Key(b'W' as u16), true, false, false, false), Some(Command::NewTab));
+        assert_eq!(km.lookup(Key(b'T' as u16), true, false, false, false), None);
         assert_eq!(km.label(Command::CloseTab), "");
         km.set(Command::NewTab, &[]);
         assert_eq!(km.label(Command::NewTab), "");
@@ -496,7 +548,7 @@ mod tests {
             ("Ctrl+MenosNum", Command::DeselectPattern),
         ] {
             let c = parse_combo(text).unwrap();
-            assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(command), "{text}");
+            assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta), Some(command), "{text}");
         }
         assert_eq!(km.label(Command::SelectPattern), "Ctrl+Más");
         assert_eq!(km.label(Command::DeselectPattern), "Ctrl+Menos");
@@ -516,11 +568,11 @@ mod tests {
         assert_eq!((s.command, s.name, s.default_keys), (Command::TogglePreview, "Mostrar u ocultar la vista previa", &["Alt+P"][..]));
         let km = Keymap::default();
         let c = parse_combo("Alt+P").unwrap();
-        assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(Command::TogglePreview));
+        assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta), Some(Command::TogglePreview));
         assert_eq!(km.label(Command::TogglePreview), "Alt+P");
         assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Alt+P").unwrap()), "⌥⌘P");
         let p = parse_combo("Ctrl+Shift+P").unwrap();
-        assert_eq!(km.lookup(Key(p.vk), p.ctrl, p.shift, p.alt), Some(Command::Palette));
+        assert_eq!(km.lookup(Key(p.vk), p.ctrl, p.shift, p.alt, p.meta), Some(Command::Palette));
     }
 
     /// Vistas Lista y Contenido: `Command::View(4)` y `(5)` (índices de `list::VIEWS`), con sus
@@ -538,7 +590,7 @@ mod tests {
             assert_eq!((s.command, s.name, s.default_keys), (Command::View(i), title, &[keys][..]));
             assert_eq!(crate::list::VIEWS[i as usize].0, view);
             let c = parse_combo(keys).unwrap();
-            assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(Command::View(i)), "{keys}");
+            assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta), Some(Command::View(i)), "{keys}");
         }
         assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Shift+5").unwrap()), "⇧⌘5");
     }
@@ -553,7 +605,7 @@ mod tests {
         assert_eq!((s.command, s.name, s.default_keys), (Command::View(6), "Vista: galería", &["Ctrl+Shift+7"][..]));
         assert_eq!(crate::list::VIEWS[6].0, crate::list::View::Gallery);
         let c = parse_combo("Ctrl+Shift+7").unwrap();
-        assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt), Some(Command::View(6)));
+        assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta), Some(Command::View(6)));
         assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Alt+7").unwrap()), "⌥⌘7");
     }
 }

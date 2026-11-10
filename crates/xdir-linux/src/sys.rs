@@ -6,7 +6,8 @@
 //! `crate::shell` y el escaneo de xtree en `crate::scan`. Acá quedan los chicos.
 
 use xdir_core::fs::{MetadataRequest, OverlayRequest};
-use xdir_core::sys::{Handle, Metadata, Overlays, Services, Waker};
+use xdir_core::preview::PreviewRequest;
+use xdir_core::sys::{Handle, Metadata, Overlays, Preview, Services, Waker};
 
 use crate::env::LinuxEnv;
 use crate::fs::LinuxFileSystem;
@@ -39,6 +40,17 @@ impl Metadata for LinuxMetadata {
     }
 }
 
+/// Vista previa de la columna: la lectura neutra del núcleo en un hilo por pedido. Linux no tiene
+/// archivos «solo en la nube» que se bajen al abrirlos.
+struct LinuxPreview;
+
+impl Preview for LinuxPreview {
+    fn request(&self, req: PreviewRequest) {
+        let spawned = std::thread::Builder::new().name("xdir-vista-previa".into()).spawn(move || xdir_core::preview::answer(req, &|_| false));
+        debug_assert!(spawned.is_ok(), "hilo de vista previa");
+    }
+}
+
 /// Instala los servicios de Linux en el registro del núcleo.
 pub fn install() {
     xdir_core::sys::install(Services {
@@ -50,5 +62,32 @@ pub fn install() {
         file_system: Box::new(LinuxFileSystem),
         overlays: Box::new(LinuxOverlays),
         metadata: Box::new(LinuxMetadata),
+        preview: Box::new(LinuxPreview),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use xdir_core::preview::{PreviewBody, PreviewTarget};
+
+    /// La vista previa responde desde su hilo con la lectura neutra.
+    #[test]
+    fn linux_preview_answers_from_thread() {
+        xdir_core::sys::testing::install_fakes();
+        let dir = std::env::temp_dir().join(format!("xdir-linux-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notas.md");
+        std::fs::write(&file, "# Hola\nmundo\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = PreviewTarget::File(file);
+        LinuxPreview.request(PreviewRequest { hwnd: Handle(0), tx, generation: 2, current: Arc::new(AtomicU64::new(2)), target });
+        let reply = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("respuesta del hilo");
+        assert_eq!(reply.generation, 2);
+        assert_eq!(reply.info.body, PreviewBody::Text { lines: vec!["# Hola".into(), "mundo".into()] });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

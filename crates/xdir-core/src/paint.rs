@@ -30,15 +30,18 @@ pub enum FontId {
     GlyphsSmall,
     /// Nombre debajo de una miniatura: centrado, arriba, partido en varias líneas y con "…" si no entra.
     Label,
+    /// Ancho fijo (11,5; Consolas en Windows, Menlo en macOS), sin ajustar líneas: el texto de
+    /// la vista previa.
+    Mono,
 }
 
 impl FontId {
     /// Cantidad de formatos (largo de la tabla de cada plataforma).
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
 }
 
-// `Label` es el último formato: si se agrega uno, hay que actualizar `COUNT`.
-const _: () = assert!(FontId::Label as usize + 1 == FontId::COUNT);
+// `Mono` es el último formato: si se agrega uno, hay que actualizar `COUNT`.
+const _: () = assert!(FontId::Mono as usize + 1 == FontId::COUNT);
 
 /// Píxeles BGRA premultiplicados.
 pub struct Pixels {
@@ -67,6 +70,11 @@ pub trait Painter {
     /// Miniatura centrada en `r`, sin deformar y sin agrandarla más que su tamaño en píxeles.
     /// Devuelve false si todavía no está (se dibuja otra cosa).
     fn thumbnail(&self, key: &thumbs::Key, r: Rect) -> bool;
+    /// Imagen grande (vista previa, Galería, vista rápida) centrada en `r` sin deformar. `key.1`
+    /// es el escalón pedido (`thumbs::big_side`); si todavía no está, lo encarga y dibuja escalado
+    /// el escalón más grande que haya de la misma fuente (`BigCache::best_for`). Devuelve false si
+    /// no hay ninguno (se dibuja el ícono).
+    fn big_image(&self, key: &thumbs::Key, r: Rect) -> bool;
     /// Logo de Runick centrado en `r` sin deformarlo.
     fn logo(&self, r: Rect);
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
@@ -100,8 +108,10 @@ mod tests {
             FontId::Glyphs,
             FontId::GlyphsSmall,
             FontId::Label,
+            FontId::Mono,
         ];
-        assert_eq!(all.iter().collect::<HashSet<_>>().len(), 10);
+        assert_eq!(all.len(), FontId::COUNT);
+        assert_eq!(all.iter().collect::<HashSet<_>>().len(), 11);
     }
 
     #[test]

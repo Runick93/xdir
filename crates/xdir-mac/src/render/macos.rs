@@ -3,7 +3,7 @@
 //! (equivalentes a los glifos de Segoe Fluent Icons que usa Windows).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -55,11 +55,24 @@ pub struct Renderer {
 #[derive(Default)]
 struct Images {
     thumbs: HashMap<thumbs::Key, Option<CFRetained<CGImage>>>,
+    /// Imágenes grandes (vista previa, Galería), con su escalón; LRU por bytes.
+    big: thumbs::BigCache<BigImage>,
+    /// Imágenes grandes que no se pudieron obtener (no se vuelven a pedir).
+    big_failed: HashSet<thumbs::Key>,
     logo: Option<CFRetained<CGImage>>,
     /// SF Symbols por (glifo, tamaño, color).
     symbols: HashMap<(char, u32, [u8; 4]), Option<Retained<NSImage>>>,
     handle: Handle,
 }
+
+/// Una imagen grande y el escalón que se pidió (para escalarla si se dibuja en lugar de otro).
+struct BigImage {
+    image: CFRetained<CGImage>,
+    side: u32,
+}
+
+/// Más imágenes grandes fallidas que esto y se olvidan (se vuelven a intentar).
+const MAX_BIG_FAILED: usize = 500;
 
 /// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
 const MAX_THUMBS: usize = 1500;
@@ -316,6 +329,45 @@ impl paint::Painter for Painter<'_> {
         true
     }
 
+    /// Imagen grande centrada en `r` sin deformar: la del escalón `key.1` o, mientras llega, la
+    /// más grande que haya de la misma fuente, escalada como se vería la justa.
+    fn big_image(&self, key: &thumbs::Key, r: Rect) -> bool {
+        let found = {
+            let mut images = self.images.borrow_mut();
+            for ((src, side), px) in thumbs::take_done_big() {
+                match px.and_then(|px| cgimage_from(&px).map(|img| (img, px.data.len()))) {
+                    Some((image, bytes)) => images.big.insert((src, side), BigImage { image, side }, bytes),
+                    None => {
+                        if images.big_failed.len() > MAX_BIG_FAILED {
+                            images.big_failed.clear();
+                        }
+                        images.big_failed.insert((src, side));
+                    }
+                }
+            }
+            if let Some(hit) = images.big.get(key) {
+                Some((hit.image.clone(), hit.side))
+            } else {
+                if !images.big_failed.contains(key) {
+                    thumbs::request_big(images.handle, key.clone());
+                }
+                images.big.best_for(&key.0).map(|b| (b.image.clone(), b.side))
+            }
+        };
+        let Some((image, side)) = found else { return false };
+        let (bw, bh) = (CGImage::width(Some(&image)) as f32, CGImage::height(Some(&image)) as f32);
+        if bw <= 0.0 || bh <= 0.0 || side == 0 {
+            return false;
+        }
+        // Sin agrandar más que su tamaño en píxeles; la de otro escalón, como se vería la justa.
+        let grow = key.1 as f32 / side as f32;
+        let k = ((r.right - r.left) / bw).min((r.bottom - r.top) / bh).min(grow / self.scale.max(0.01));
+        let (w, h) = (bw * k, bh * k);
+        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        self.draw_cg_image(&image, rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0));
+        true
+    }
+
     /// Logo de Runick centrado en `r` sin deformarlo.
     fn logo(&self, r: Rect) {
         let image = {
@@ -479,12 +531,25 @@ impl Fonts {
             make(10.0, false, NSTextAlignment::Center, false, true),
             // Label: nombre debajo de una miniatura, centrado, arriba y en varias líneas.
             make(12.0, false, NSTextAlignment::Center, true, false),
+            // Mono: ancho fijo (Menlo 11,5), una línea que se corta sin "…" (texto de la vista
+            // previa).
+            mono(11.5),
         ])
     }
 
     fn get(&self, id: FontId) -> &TextFormat {
         &self.0[id as usize]
     }
+}
+
+/// Menlo (o la de ancho fijo del sistema si faltara), sin ajustar ni poner "…".
+fn mono(size: f32) -> TextFormat {
+    let font = NSFont::fontWithName_size(&NSString::from_str("Menlo"), size as CGFloat)
+        .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size as CGFloat, unsafe { NSFontWeightRegular }));
+    let para = NSMutableParagraphStyle::new();
+    para.setAlignment(NSTextAlignment::Left);
+    para.setLineBreakMode(NSLineBreakMode::ByClipping);
+    TextFormat { font, para, wrap: false, glyph: false, size }
 }
 
 /// SF Symbol para un glifo de Segoe Fluent Icons / MDL2 Assets.

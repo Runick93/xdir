@@ -4,4 +4,4 @@
 mod win32;
 pub use self::win32::*;
 
-pub use xdir_core::thumbs::{Key, Source};
+pub use xdir_core::thumbs::{BigCache, Key, Source};

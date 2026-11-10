@@ -1,7 +1,7 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
 //! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
-//! `disk_scan()`, `shell()`, `file_system()`, `overlays()` y `metadata()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()` y `preview()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirEntry, Metadata as FsMetadata};
@@ -14,6 +14,7 @@ use crate::commands::Command;
 use crate::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult};
+use crate::preview::PreviewRequest;
 use crate::shell::{Entry, Item};
 use crate::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use crate::xtree::tree::Node;
@@ -305,6 +306,11 @@ pub trait FileSystem: Send + Sync {
     /// Vigila la carpeta `path` y avisa a `hwnd` con `msg` (`wparam` = `panel`, `lparam`) cuando
     /// cambia algo. Deja de vigilar al soltar el guardián. `None` si no se puede vigilar.
     fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>>;
+    /// ¿El elemento está solo en la nube (iCloud, OneDrive, Dropbox)? Entonces no se lee su
+    /// contenido ni se pide su imagen en macOS: abrirlo lo bajaría entero. No toca el contenido.
+    fn cloud_only(&self, _path: &Path) -> bool {
+        false
+    }
 }
 
 /// Un guardián de carpeta (ver `FileSystem::watch`): vigila mientras viva y al soltarlo
@@ -325,6 +331,12 @@ pub trait Metadata: Send + Sync {
     fn request(&self, req: MetadataRequest);
 }
 
+/// Vista previa de la columna (texto, carpeta, disco, último acceso, nube, sin permiso): se lee
+/// en otro hilo con `preview::answer` y vuelve por el canal del pedido (`PreviewRequest::send`).
+pub trait Preview: Send + Sync {
+    fn request(&self, req: PreviewRequest);
+}
+
 /// Las implementaciones de una plataforma, instaladas juntas con `install`.
 pub struct Services {
     pub waker: Box<dyn Waker>,
@@ -335,6 +347,7 @@ pub struct Services {
     pub file_system: Box<dyn FileSystem>,
     pub overlays: Box<dyn Overlays>,
     pub metadata: Box<dyn Metadata>,
+    pub preview: Box<dyn Preview>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -389,4 +402,8 @@ pub fn overlays() -> &'static dyn Overlays {
 
 pub fn metadata() -> &'static dyn Metadata {
     &*services().metadata
+}
+
+pub fn preview() -> &'static dyn Preview {
+    &*services().preview
 }

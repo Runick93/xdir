@@ -1,7 +1,7 @@
 use xdir_core::commands::{ALL, Command, available_in, combo_label_in, parse_combo};
 use xdir_core::sys::SystemEnv;
 
-use super::{mac_consoles, platform_env, platform_file_system};
+use super::{mac_consoles, platform_env, platform_file_system, platform_preview};
 
 /// El menú de terminales empieza con Terminal, como antes; después iTerm si está instalada en
 /// esta máquina.
@@ -165,4 +165,28 @@ fn search_finds_matches_with_the_real_file_system() {
     assert_eq!(names, [".oculta/informe.txt", "a/nada.txt", "informe.txt"]);
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// La vista previa responde desde su hilo con la lectura neutra; un archivo local no está en la
+/// nube.
+#[test]
+fn mac_preview_answers_from_thread() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use xdir_core::preview::{PreviewBody, PreviewRequest, PreviewTarget};
+    xdir_core::sys::testing::install_fakes();
+    let dir = std::env::temp_dir().join(format!("xdir-mac-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notas.md");
+    std::fs::write(&file, "# Hola\nmundo\n").unwrap();
+    assert!(!platform_file_system().cloud_only(&file));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = PreviewTarget::File(file);
+    platform_preview().request(PreviewRequest { hwnd: Default::default(), tx, generation: 2, current: Arc::new(AtomicU64::new(2)), target });
+    let reply = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("respuesta del hilo");
+    assert_eq!(reply.generation, 2);
+    assert_eq!(reply.info.body, PreviewBody::Text { lines: vec!["# Hola".into(), "mundo".into()] });
+    assert!(reply.info.accessed > 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }

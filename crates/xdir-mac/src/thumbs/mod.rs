@@ -4,4 +4,4 @@
 mod macos;
 pub use self::macos::*;
 
-pub use xdir_core::thumbs::{Key, Source};
+pub use xdir_core::thumbs::{BigCache, Key, Source};

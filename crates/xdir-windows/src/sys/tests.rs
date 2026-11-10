@@ -4,7 +4,7 @@ use xdir_core::sys::SystemEnv;
 // Las pruebas con el sistema real solo corren en Windows; la de la tabla contra el entorno falso
 // corre en todos (fuera de Windows, `main.rs` incluye este archivo suelto).
 #[cfg(windows)]
-use super::{find_wt, platform_env, platform_file_system, windows_consoles, wt_params};
+use super::{find_wt, platform_env, platform_file_system, platform_preview, windows_consoles, wt_params};
 
 /// El menú de terminales empieza como antes (PowerShell, CMD); después Windows Terminal si está
 /// instalada en esta máquina.
@@ -159,4 +159,28 @@ fn search_finds_matches_with_the_real_file_system() {
     assert_eq!(names, [".oculta/informe.txt", "a/nada.txt", "informe.txt"]);
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// La vista previa responde desde su hilo con la lectura neutra; un archivo local no está en la
+/// nube.
+#[test]
+#[cfg(windows)]
+fn windows_preview_answers_from_thread() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use xdir_core::preview::{PreviewBody, PreviewRequest, PreviewTarget};
+    xdir_core::sys::testing::install_fakes();
+    let dir = std::env::temp_dir().join(format!("xdir-win-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notas.md");
+    std::fs::write(&file, "# Hola\r\nmundo\r\n").unwrap();
+    assert!(!platform_file_system().cloud_only(&file));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = PreviewTarget::File(file);
+    platform_preview().request(PreviewRequest { hwnd: Default::default(), tx, generation: 2, current: Arc::new(AtomicU64::new(2)), target });
+    let reply = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("respuesta del hilo");
+    assert_eq!(reply.generation, 2);
+    assert_eq!(reply.info.body, PreviewBody::Text { lines: vec!["# Hola".into(), "mundo".into()] });
+    let _ = std::fs::remove_dir_all(&dir);
 }

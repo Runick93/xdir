@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
 use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short_text};
@@ -20,6 +20,7 @@ use crate::host::{MenuPos, TextBox, TextKind, WindowHost};
 use crate::keys::Key;
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
 use crate::paint::{FontId, Painter};
+use crate::preview::{PreviewInfo, PreviewRequest, PreviewTarget};
 use crate::shell::{Entry, Item};
 use crate::theme::Theme;
 use crate::thumbs;
@@ -38,6 +39,7 @@ pub fn install_fakes() {
         file_system: Box::new(FakeFileSystem),
         overlays: Box::new(FakeOverlays),
         metadata: Box::new(FakeMetadata),
+        preview: Box::new(FakePreview),
     });
 }
 
@@ -471,6 +473,8 @@ static WATCHES: Mutex<BTreeMap<PathBuf, (usize, usize)>> = Mutex::new(BTreeMap::
 thread_local! {
     /// Unidades del falso en este hilo (ruta y nombre); vacío salvo `FakeFileSystem::set_drives`.
     static DRIVES: RefCell<Vec<(PathBuf, String)>> = const { RefCell::new(Vec::new()) };
+    /// Rutas que el falso informa como «solo en la nube» (por hilo; ver `set_cloud_only`).
+    static CLOUD: RefCell<BTreeSet<PathBuf>> = const { RefCell::new(BTreeSet::new()) };
 }
 
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
@@ -485,6 +489,18 @@ impl FakeFileSystem {
     /// nombres. Con una lista vacía vuelve a no haber unidades.
     pub fn set_drives(drives: &[(&Path, &str)]) {
         DRIVES.with(|d| *d.borrow_mut() = drives.iter().map(|(p, n)| (p.to_path_buf(), n.to_string())).collect());
+    }
+
+    /// Desde ahora (en este hilo) `cloud_only(path)` dice `cloud`.
+    pub fn set_cloud_only(path: &Path, cloud: bool) {
+        CLOUD.with(|c| {
+            let mut c = c.borrow_mut();
+            if cloud {
+                c.insert(path.to_path_buf());
+            } else {
+                c.remove(path);
+            }
+        });
     }
 
     /// Cuántas lecturas de `path` se pidieron (en todo el proceso).
@@ -737,6 +753,11 @@ impl FileSystem for FakeFileSystem {
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(path.to_path_buf()).or_insert((0, 0)).0 += 1;
         Some(Box::new(FakeWatch(path.to_path_buf())))
     }
+
+    /// Solo lo marcado con `set_cloud_only` en este hilo.
+    fn cloud_only(&self, path: &Path) -> bool {
+        CLOUD.with(|c| c.borrow().contains(path))
+    }
 }
 
 /// Guardián del `FileSystem` falso: al soltarlo, cuenta una baja para su carpeta.
@@ -803,6 +824,59 @@ impl Metadata for FakeMetadata {
     }
 }
 
+thread_local! {
+    /// Vistas previas que devuelve el falso, por ruta (por hilo de prueba).
+    static PREVIEW_DATA: RefCell<HashMap<PathBuf, PreviewInfo>> = RefCell::new(HashMap::new());
+    /// Pedidos recibidos.
+    static PREVIEW_REQUESTS: RefCell<Vec<PreviewTarget>> = const { RefCell::new(Vec::new()) };
+    /// Demora de la respuesta: `None` responde en el mismo hilo, al pedir.
+    static PREVIEW_DELAY: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+}
+
+/// `Preview` falso: anota cada pedido y responde con lo cargado con `serve` para su ruta o, si no
+/// hay nada cargado, con la lectura real (`preview::read`, con la nube de `FakeFileSystem`). La
+/// lectura se hace al pedir, en el hilo del test; la respuesta sale en ese momento o, con
+/// `set_delay`, desde otro hilo después de la demora (y si el pedido quedó viejo, no sale). Todo
+/// es por hilo de prueba.
+pub struct FakePreview;
+
+impl FakePreview {
+    /// Desde ahora (en este hilo) la ruta tiene esta vista previa.
+    pub fn serve(path: &Path, info: PreviewInfo) {
+        PREVIEW_DATA.with(|d| d.borrow_mut().insert(path.to_path_buf(), info));
+    }
+
+    /// Pedidos recibidos hasta ahora (y los olvida).
+    pub fn take_requests() -> Vec<PreviewTarget> {
+        PREVIEW_REQUESTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// Demora de las respuestas (`None`: en el mismo hilo, al pedir).
+    pub fn set_delay(delay: Option<std::time::Duration>) {
+        PREVIEW_DELAY.with(|d| d.set(delay));
+    }
+}
+
+impl Preview for FakePreview {
+    fn request(&self, req: PreviewRequest) {
+        PREVIEW_REQUESTS.with(|r| r.borrow_mut().push(req.target.clone()));
+        let served = PREVIEW_DATA.with(|d| d.borrow().get(req.target.path()).cloned());
+        let info = served.unwrap_or_else(|| {
+            let fs = FakeFileSystem;
+            crate::preview::read(&req.target, &|p| fs.cloud_only(p))
+        });
+        match PREVIEW_DELAY.with(Cell::get) {
+            None => req.send(info),
+            Some(delay) => {
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    req.send(info);
+                });
+            }
+        }
+    }
+}
+
 /// `Overlays` falso: no hay superposiciones (no responde nada).
 pub struct FakeOverlays;
 
@@ -812,12 +886,15 @@ impl Overlays for FakeOverlays {
 
 /// `Painter` que no dibuja: registra cada `text` (fuente, texto y rectángulo) para que los tests
 /// vean qué se escribió y con qué formato. `measure` da 7 DIPs por carácter; `clip` solo llama a
-/// la clausura; íconos y miniaturas no hacen nada (`thumbnail` da `false`).
+/// la clausura; íconos y miniaturas no hacen nada (`thumbnail` da `false`). `big_image` anota la
+/// clave (`big_requests`) y devuelve lo fijado con `set_big_ready` (de entrada, `false`).
 pub struct RecordingPainter {
     theme: Theme,
     texts: RefCell<Vec<(FontId, String, Rect)>>,
     paths: RefCell<Vec<RecordedPath>>,
     strokes: RefCell<Vec<(Rect, Color)>>,
+    big: RefCell<Vec<(thumbs::Key, Rect)>>,
+    big_ready: Cell<bool>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -825,7 +902,29 @@ pub type RecordedPath = (Vec<(f32, f32)>, bool, Option<Color>);
 
 impl RecordingPainter {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, texts: RefCell::new(Vec::new()), paths: RefCell::new(Vec::new()), strokes: RefCell::new(Vec::new()) }
+        Self {
+            theme,
+            texts: RefCell::new(Vec::new()),
+            paths: RefCell::new(Vec::new()),
+            strokes: RefCell::new(Vec::new()),
+            big: RefCell::new(Vec::new()),
+            big_ready: Cell::new(false),
+        }
+    }
+
+    /// Claves pedidas a `big_image`, en orden.
+    pub fn big_requests(&self) -> Vec<thumbs::Key> {
+        self.big.borrow().iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    /// Claves y rectángulos pedidos a `big_image`, en orden.
+    pub fn big_draws(&self) -> Vec<(thumbs::Key, Rect)> {
+        self.big.borrow().clone()
+    }
+
+    /// Lo que devuelve `big_image` desde ahora (si la imagen "está").
+    pub fn set_big_ready(&self, ready: bool) {
+        self.big_ready.set(ready);
     }
 
     /// Los trazos dibujados con `rounded_path`, en orden.
@@ -869,6 +968,11 @@ impl Painter for RecordingPainter {
 
     fn thumbnail(&self, _key: &thumbs::Key, _r: Rect) -> bool {
         false
+    }
+
+    fn big_image(&self, key: &thumbs::Key, r: Rect) -> bool {
+        self.big.borrow_mut().push((key.clone(), r));
+        self.big_ready.get()
     }
 
     fn logo(&self, _r: Rect) {}

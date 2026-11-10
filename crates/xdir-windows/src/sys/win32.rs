@@ -19,10 +19,11 @@ use windows::core::{HSTRING, PCWSTR, w};
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
 use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
+use xdir_core::preview::PreviewRequest;
 use xdir_core::shell::{Entry, Item};
 use xdir_core::typed::MAX as TYPED_MAX;
 
@@ -548,6 +549,11 @@ impl FileSystem for Win32FileSystem {
     fn watch(&self, hwnd: Handle, msg: u32, panel: usize, lparam: isize, path: &Path) -> Option<Box<dyn Watch>> {
         fsp::Watcher::with_message(hwnd, msg, panel, lparam, path).map(|w| Box::new(w) as Box<dyn Watch>)
     }
+
+    /// Atributos sin conexión o «recuperar al abrir/leer» (ver `crate::metadata::cloud_only`).
+    fn cloud_only(&self, path: &Path) -> bool {
+        crate::metadata::cloud_only(&HSTRING::from(path))
+    }
 }
 
 /// El sistema de archivos real de Windows (lo que instala `install`).
@@ -575,6 +581,26 @@ impl Metadata for Win32Metadata {
     }
 }
 
+/// Vista previa de la columna: un hilo por pedido (una lectura lenta, de la red, no traba a la
+/// siguiente) con la lectura neutra del núcleo y el chequeo de nube (atributos `OFFLINE` y
+/// `RECALL_*`).
+struct Win32Preview;
+
+impl Preview for Win32Preview {
+    fn request(&self, req: PreviewRequest) {
+        let spawned = std::thread::Builder::new()
+            .name("xdir-vista-previa".into())
+            .spawn(move || xdir_core::preview::answer(req, &|p| crate::metadata::cloud_only(&HSTRING::from(p))));
+        debug_assert!(spawned.is_ok(), "hilo de vista previa");
+    }
+}
+
+/// La vista previa real de Windows (lo que instala `install`).
+#[cfg(test)]
+pub fn platform_preview() -> Box<dyn Preview> {
+    Box::new(Win32Preview)
+}
+
 /// Instala los servicios de Windows en el registro del núcleo. El ayudante elevado de xtree
 /// (`--xtree-mft`) sale antes de llegar acá: no usa servicios.
 pub fn install() {
@@ -587,6 +613,7 @@ pub fn install() {
         file_system: Box::new(Win32FileSystem),
         overlays: Box::new(Win32Overlays),
         metadata: Box::new(Win32Metadata),
+        preview: Box::new(Win32Preview),
     });
 }
 

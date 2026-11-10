@@ -2997,6 +2997,23 @@ mod checkbox_tests {
         assert_eq!(boxes, 6, "una casilla por fila");
     }
 
+    /// En oscuro el borde de la casilla vacía usa `text_secondary` (con `text_dim` casi no se ve);
+    /// en claro sigue con `text_dim`.
+    #[test]
+    fn empty_checkbox_edge_by_theme() {
+        let mut l = five(true);
+        for dark in [true, false] {
+            let th = crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(dark));
+            let p = RecordingPainter::new(th.clone());
+            l.draw(&p, AREA, true);
+            let edges: Vec<Color> =
+                p.strokes().iter().filter(|(r, _)| (r.right - r.left - (CHECK - 1.2)).abs() < 0.01).map(|s| s.1).collect();
+            assert_eq!(edges.len(), 6);
+            let want = if dark { th.text_secondary } else { th.text_dim };
+            assert!(edges.iter().all(|c| *c == want), "oscuro={dark}: {edges:?}");
+        }
+    }
+
     /// Con el switch apagado no hay casillas: nada se dibuja, el nombre queda donde siempre y un
     /// clic donde iría la casilla es un clic común (selecciona solo ese elemento).
     #[test]

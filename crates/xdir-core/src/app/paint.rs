@@ -51,6 +51,7 @@ impl App {
         let groups_h = self.groups_bar_h();
         // La columna de vista previa: lo que muestra (y su pedido, después de la pausa).
         self.sync_preview();
+        self.sync_gallery_stamps();
         let preview_w = self.preview_width();
         let preview_col = self.preview_column();
         let preview_shown = preview_col.map(|_| self.preview_shown());

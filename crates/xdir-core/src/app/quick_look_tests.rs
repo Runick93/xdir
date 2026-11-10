@@ -336,6 +336,30 @@ fn quick_look_cloud_item_uses_card() {
     FakeFileSystem::set_cloud_only(&d.join("b.jpg"), false);
 }
 
+/// Un host cuya ventana propia muestra también lo solo en la nube (Windows: la tarjeta va en su
+/// ventana, con «Disponible solo en línea»): recibe el elemento marcado `cloud_only` y la `App` no
+/// dibuja su tarjeta ni cierra el visor.
+#[test]
+fn quick_look_cloud_item_to_host_window() {
+    let host = FakeHost::new();
+    host.set_quick_look_shows_cloud(true);
+    let mut a = app_with_host(host.clone());
+    let d = fixture("nube-ventana", &["a.jpg", "b.jpg"]);
+    go(&mut a, &d);
+    FakeFileSystem::set_cloud_only(&d.join("b.jpg"), true);
+    select(&mut a, "a.jpg");
+    assert!(press(&mut a, VK_SPACE));
+    assert!(!host.quick_look_shown().last().unwrap().cloud_only, "a.jpg es local");
+    press(&mut a, VK_RIGHT);
+    let shown = host.quick_look_shown();
+    let last = shown.last().unwrap();
+    assert_eq!((last.name.as_str(), last.cloud_only), ("b.jpg", true));
+    assert_eq!(host.quick_look_closes(), 0, "el visor sigue abierto");
+    a.paint();
+    assert!(!host.drawn_texts().iter().any(|t| t.1 == "Disponible solo en línea"), "la tarjeta la dibuja el host");
+    FakeFileSystem::set_cloud_only(&d.join("b.jpg"), false);
+}
+
 #[test]
 fn quick_look_overlay_when_host_has_none() {
     let host = FakeHost::new();
@@ -471,4 +495,19 @@ fn quick_look_follows_sort_change() {
     assert_eq!(last_shown(&host), ("a.txt".to_string(), "3 de 3".to_string()));
     press(&mut a, VK_LEFT);
     assert_eq!(last_shown(&host).0, "b.txt");
+}
+
+/// Abrir xtree (pantalla completa) cierra la vista rápida: quedaría encima de la vista.
+#[test]
+fn xtree_closes_quick_look() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let d = fixture("xtree-cierra", &["a.txt", "b.txt"]);
+    go(&mut a, &d);
+    select(&mut a, "a.txt");
+    assert!(press(&mut a, VK_SPACE));
+    assert!(a.quick_look.is_some());
+    a.toggle_xtree();
+    assert!(a.quick_look.is_none());
+    assert_eq!(host.quick_look_closes(), 1);
 }

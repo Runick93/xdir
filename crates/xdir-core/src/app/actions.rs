@@ -277,6 +277,7 @@ impl App {
                 self.xtree = Some(Xtree::new(self.hwnd, root));
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
+            self.close_quick_look();
             self.picker_open = false;
             self.term_menu = None;
             self.close_filter_menus();

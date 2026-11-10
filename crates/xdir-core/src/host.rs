@@ -192,4 +192,10 @@ pub trait WindowHost {
     }
     /// Cierra el visor de la vista rápida (sin avisar `on_quick_look_closed`).
     fn quick_look_close(&self) {}
+    /// La ventana de la vista rápida del host también muestra lo solo en la nube (su propia
+    /// tarjeta «Disponible solo en línea», sin leerlo): la `App` le pasa esos elementos con
+    /// `cloud_only` en vez de dibujar la suya. En macOS no (`QLPreviewPanel` los bajaría).
+    fn quick_look_shows_cloud(&self) -> bool {
+        false
+    }
 }

@@ -64,6 +64,9 @@ pub(super) struct PreviewState {
     posted: bool,
     /// Imágenes grandes que hay que olvidar en el próximo cuadro (el archivo cambió).
     pub(super) forget: Vec<thumbs::Source>,
+    /// Galería: el enfocado de cada panel con su fecha y tamaño, para notar que cambió en el
+    /// disco aunque la columna esté apagada.
+    gallery_stamps: Vec<Option<(thumbs::Source, u64, u64)>>,
 }
 
 impl PreviewState {
@@ -83,6 +86,7 @@ impl PreviewState {
             changed_at: Instant::now(),
             posted: false,
             forget: Vec::new(),
+            gallery_stamps: Vec::new(),
         }
     }
 
@@ -214,6 +218,33 @@ impl App {
     /// programa el pedido después de la pausa. Si cambió solo la versión del mismo archivo (lo
     /// avisó el vigilante de la carpeta), olvida su imagen grande y lo vuelve a pedir sin pasar
     /// por «cargando».
+    /// Galería: si el enfocado de un panel es el mismo archivo que antes pero con otra fecha o
+    /// tamaño (se editó), su imagen grande se olvida y se vuelve a pedir (como hace la columna).
+    pub(super) fn sync_gallery_stamps(&mut self) {
+        let stamps: Vec<_> = self
+            .panes
+            .iter()
+            .map(|pane| {
+                let list = &pane.tab().list;
+                if list.view != list::View::Gallery {
+                    return None;
+                }
+                let e = list.entries.get(list.focused_index()?)?;
+                Some((list.thumb_source(e)?, e.modified, e.size))
+            })
+            .collect();
+        for (i, now) in stamps.iter().enumerate() {
+            if let (Some((src, m, s)), Some(Some((old, om, os)))) = (now, self.preview.gallery_stamps.get(i))
+                && src == old
+                && (m, s) != (om, os)
+                && let thumbs::Source::Path(p) = src
+            {
+                self.preview.forget.push(thumbs::Source::Path(p.clone()));
+            }
+        }
+        self.preview.gallery_stamps = stamps;
+    }
+
     pub(super) fn sync_preview(&mut self) {
         if !self.preview_visible() {
             if self.preview.subject.is_some() || self.preview.fingerprint.is_some() {

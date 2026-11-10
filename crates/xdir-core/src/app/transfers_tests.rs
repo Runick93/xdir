@@ -96,6 +96,8 @@ fn conflict_waits_only_its_job() {
     f.add_file(&p("/app-cw2/s/y.txt"), b"y".to_vec());
     f.add_dir(&p("/app-cw2/d"));
     let mut a = app();
+    // Con la ventana de copia se pregunta (sin ella, se omite solo).
+    a.set_auto_skip(false);
     let stuck = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-cw1/s/x.txt")], dest: p("/app-cw1/d") });
     let free = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-cw2/s/y.txt")], dest: p("/app-cw2/d") });
     wait(&mut a, |a| {
@@ -174,15 +176,39 @@ fn errors_stay_for_retry() {
 }
 
 #[test]
-fn eject_asks_when_jobs_on_volume() {
+fn conflicts_skip_on_their_own_without_window() {
+    // Sin ventana de copia, un conflicto no deja el trabajo esperando para siempre: deshacer un
+    // movimiento cuyo lugar original ya está ocupado termina, omite y lo dice.
+    let f = fake();
+    f.add_file(&p("/app-skip/b/x.txt"), b"movido".to_vec());
+    f.add_file(&p("/app-skip/a/x.txt"), b"aparecio".to_vec());
+    f.add_file(&p("/app-skip/b/y.txt"), b"y".to_vec());
+    let mut a = app();
+    a.undo.push(Undo::Batch(vec![Undo::Moved(vec![(p("/app-skip/b/x.txt"), p("/app-skip/a/x.txt")), (p("/app-skip/b/y.txt"), p("/app-skip/a/y.txt"))])]));
+    a.run_command(Command::Undo);
+    wait(&mut a, idle);
+    assert_eq!(f.contents(&p("/app-skip/a/x.txt")).unwrap(), b"aparecio");
+    assert_eq!(f.contents(&p("/app-skip/b/x.txt")).unwrap(), b"movido");
+    assert!(f.exists(&p("/app-skip/a/y.txt")));
+    assert_eq!(a.notice.as_deref(), Some("Se omitió 1 elemento que ya existía"));
+}
+
+#[test]
+fn eject_waits_for_cancelled_jobs() {
     let f = fake();
     f.set_volume(&p("/app-usb"), volume("app-usb"));
     f.add_file(&p("/app-usb/s/grande.bin"), vec![1; 64 * 1024 * 20]);
     f.add_dir(&p("/app-usb/d"));
     let host = FakeHost::new();
     let mut a = app_with_host(host.clone());
-    // Sin trabajos sobre el disco: se puede expulsar sin preguntar.
-    assert!(a.confirm_eject_jobs(Path::new("/app-usb"), "USB (E:)"));
+    let ejected = std::rc::Rc::new(std::cell::Cell::new(0));
+    let then = |e: &std::rc::Rc<std::cell::Cell<i32>>| {
+        let e = e.clone();
+        Box::new(move |_: &mut App| e.set(e.get() + 1)) as transfers::AfterJobs
+    };
+    // Sin trabajos sobre el disco: se expulsa enseguida, sin preguntar.
+    assert!(a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", then(&ejected)));
+    assert_eq!(ejected.get(), 1);
     f.set_slow(&p("/app-usb/s/grande.bin"), Some(Duration::from_millis(20)));
     let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-usb/s/grande.bin")], dest: p("/app-usb/d") });
     assert_eq!(a.jobs_on_volume(Path::new("/app-usb")), vec![id]);
@@ -191,11 +217,13 @@ fn eject_asks_when_jobs_on_volume() {
     assert_eq!(eject_question(2, "USB (E:)"), "Hay 2 operaciones sobre \"USB (E:)\". ¿Cancelarlas y expulsar?");
     // «No»: no se expulsa y el trabajo sigue.
     host.set_answer(Some(false));
-    assert!(!a.confirm_eject_jobs(Path::new("/app-usb"), "USB (E:)"));
-    assert_eq!(a.running_jobs(), 1);
-    // «Sí»: se cancela.
+    assert!(!a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", then(&ejected)));
+    assert_eq!((a.running_jobs(), ejected.get()), (1, 1));
+    // «Sí»: se cancela y se expulsa recién cuando el trabajo terminó de limpiar.
     host.set_answer(Some(true));
-    assert!(a.confirm_eject_jobs(Path::new("/app-usb"), "USB (E:)"));
+    assert!(a.eject_after_jobs(Path::new("/app-usb"), "USB (E:)", then(&ejected)));
+    assert_eq!(ejected.get(), 1, "no se suelta el disco antes de que termine el trabajo");
     wait(&mut a, idle);
+    assert_eq!(ejected.get(), 2);
     assert!(!f.exists(&p("/app-usb/d/grande.bin")));
 }

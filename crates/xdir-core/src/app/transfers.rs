@@ -3,8 +3,10 @@
 //! manda su estado por canal con `WM_APP_TRANSFER`. El hilo de interfaz nunca espera al disco:
 //! solo arma los `JobView` con lo que llega.
 //!
-//! Todavía sin ventana de copia (Tasks 11–12): un conflicto o un error se ve como aviso en la barra
-//! de estado; responder, pausar, cancelar y reintentar ya están (`answer_job`, `pause_job`…).
+//! Todavía sin ventana de copia (Tasks 11–12): los conflictos se responden solos con «Omitir»
+//! (`auto_skip`) y se avisa en la barra de estado («Se omitieron N elementos que ya existían»), lo
+//! mismo que los errores; responder, pausar, cancelar y reintentar ya están (`answer_job`,
+//! `pause_job`…) para cuando la ventana apague `auto_skip`.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -18,7 +20,7 @@ use crate::ops::Undo;
 use crate::sys::{self, CopyPrims};
 use crate::transfer::sched::Scheduler;
 use crate::transfer::speed::Speed;
-use crate::transfer::{self, Answer, Control, JobId, JobOutcome, JobSpec, JobState, JobView, Update, WM_APP_TRANSFER};
+use crate::transfer::{self, Answer, Choice, Control, JobId, JobOutcome, JobSpec, JobState, JobView, Update, WM_APP_TRANSFER};
 
 /// Lo que la `App` guarda de cada trabajo además de su vista.
 struct JobMeta {
@@ -39,12 +41,29 @@ pub(super) struct Transfers {
     meta: HashMap<JobId, JobMeta>,
     next: JobId,
     sched: Arc<Scheduler>,
+    /// Sin ventana para preguntar: los conflictos se responden «Omitir» en el hilo del trabajo.
+    auto_skip: bool,
+    /// Expulsar espera que terminen (y limpien) los trabajos cancelados sobre el disco.
+    pending_eject: Option<(Vec<JobId>, AfterJobs)>,
 }
+
+/// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
+pub type AfterJobs = Box<dyn FnOnce(&mut App)>;
 
 impl Transfers {
     pub(super) fn new() -> Transfers {
         let (tx, rx) = channel();
-        Transfers { tx, rx, jobs: Vec::new(), meta: HashMap::new(), next: 1, sched: Arc::new(Scheduler::new()) }
+        Transfers {
+            tx,
+            rx,
+            jobs: Vec::new(),
+            meta: HashMap::new(),
+            next: 1,
+            sched: Arc::new(Scheduler::new()),
+            // TODO(task 12): la ventana de copia lo apaga y pregunta.
+            auto_skip: true,
+            pending_eject: None,
+        }
     }
 }
 
@@ -124,6 +143,11 @@ pub fn eject_question(jobs: usize, label: &str) -> String {
     }
 }
 
+/// «Se omitieron 3 elementos que ya existían».
+fn skipped_text(n: usize) -> String {
+    if n == 1 { "Se omitió 1 elemento que ya existía".into() } else { format!("Se omitieron {n} elementos que ya existían") }
+}
+
 fn plural_errors(n: usize) -> String {
     if n == 1 { "1 error".into() } else { format!("{n} errores") }
 }
@@ -153,7 +177,7 @@ impl App {
             started: now,
         });
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, label, paths: paths.clone() });
-        let (tx, hwnd, sched) = (t.tx.clone(), self.hwnd, t.sched.clone());
+        let (tx, hwnd, sched, auto_skip) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip);
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
             let send = |u: Update| {
@@ -167,7 +191,12 @@ impl App {
                 return;
             }
             let _turn = Release(sched, id);
-            transfer::run(spec, prims, &ctl, &mut |u| send(u));
+            transfer::run(spec, prims, &ctl, &mut |u| {
+                if auto_skip && matches!(u, Update::Conflict(_)) {
+                    ctl.answer(Answer { choice: Choice::Skip, all: false });
+                }
+                send(u)
+            });
         });
         id
     }
@@ -195,14 +224,20 @@ impl App {
                     v.items.0 = items;
                     v.bytes.0 = bytes;
                     v.current = current;
-                    v.speed.push(now, bytes);
-                    if v.state != JobState::Conflict {
-                        v.state = JobState::Running;
+                    if v.state == JobState::Conflict {
+                        // Ya se respondió (solo, con «Omitir», o desde la ventana).
+                        v.conflict = None;
+                        v.speed.resume(now);
                     }
+                    v.speed.push(now, bytes);
+                    v.state = JobState::Running;
                 }
                 Update::Conflict(info) => {
-                    // TODO(task 12): la ventana de copia muestra el conflicto con sus botones.
-                    self.notice = Some(format!("Ya existe «{}» en «{}»", info.name, info.folder));
+                    // El tiempo esperando la respuesta no cuenta para la velocidad promedio.
+                    v.speed.pause(now);
+                    if !self.transfers.auto_skip {
+                        self.notice = Some(format!("Ya existe «{}» en «{}»", info.name, info.folder));
+                    }
                     v.conflict = Some(info);
                     v.state = JobState::Conflict;
                 }
@@ -222,6 +257,7 @@ impl App {
 
     fn on_job_done(&mut self, id: JobId, outcome: JobOutcome) {
         let label = self.transfers.meta.get(&id).map_or("La operación", |m| m.label);
+        let previous = self.notice.take();
         self.on_op_done(outcome.result);
         self.notice = if let Some(why) = &outcome.stopped {
             Some(format!("{label}: {why}"))
@@ -229,9 +265,16 @@ impl App {
             let first = &outcome.errors[0];
             let name = first.src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), first.message))
+        } else if !outcome.skipped.is_empty() {
+            Some(skipped_text(outcome.skipped.len()))
+        } else if !self.transfers.auto_skip
+            && let Some(c) = self.transfers.jobs.iter().find_map(|j| j.conflict.as_ref())
+        {
+            // Otro trabajo espera una respuesta: su aviso sigue a la vista.
+            Some(format!("Ya existe «{}» en «{}»", c.name, c.folder))
         } else {
-            // Si otro trabajo espera una respuesta, su aviso sigue a la vista.
-            self.transfers.jobs.iter().find_map(|j| j.conflict.as_ref()).map(|c| format!("Ya existe «{}» en «{}»", c.name, c.folder))
+            // No se borra un aviso de otro trabajo (los omitidos, por ejemplo).
+            previous.filter(|_| self.running_jobs() > 0)
         };
         // Los que terminaron bien se van; los que tienen errores quedan para «Reintentar».
         if outcome.errors.is_empty() && outcome.stopped.is_none() {
@@ -240,6 +283,23 @@ impl App {
             // Ya no usa el disco (no frena «Expulsar»).
             m.paths.clear();
         }
+        self.run_pending_eject();
+    }
+
+    /// Si «Expulsar» esperaba a estos trabajos y ya terminaron todos, sigue.
+    fn run_pending_eject(&mut self) {
+        let waiting = match &self.transfers.pending_eject {
+            Some((ids, _)) => ids.iter().any(|id| self.transfers.jobs.iter().any(|j| j.id == *id && j.state != JobState::Done)),
+            None => return,
+        };
+        if !waiting && let Some((_, then)) = self.transfers.pending_eject.take() {
+            then(self);
+        }
+    }
+
+    /// Con la ventana de copia se pregunta; sin ella (hasta la Task 12), «Omitir».
+    pub fn set_auto_skip(&mut self, on: bool) {
+        self.transfers.auto_skip = on;
     }
 
     fn forget_job(&mut self, id: JobId) {
@@ -261,6 +321,7 @@ impl App {
         }
         if let Some(v) = self.job_mut(id) {
             v.paused = true;
+            v.speed.pause(Instant::now());
         }
     }
 
@@ -270,6 +331,7 @@ impl App {
         }
         if let Some(v) = self.job_mut(id) {
             v.paused = false;
+            v.speed.resume(Instant::now());
         }
     }
 
@@ -294,13 +356,15 @@ impl App {
         {
             v.conflict = None;
             v.state = JobState::Running;
+            v.speed.resume(Instant::now());
         }
     }
 
     /// «Reintentar»: un trabajo nuevo con lo que falló de uno terminado.
     pub fn retry_job(&mut self, id: JobId) -> Option<JobId> {
         let v = self.transfers.jobs.iter().find(|j| j.id == id && j.state == JobState::Done)?;
-        let pairs: Vec<_> = v.errors.iter().map(|e| (e.src.clone(), e.dst.clone())).collect();
+        // Los avisos (lo que quedó con otro nombre) no se reintentan.
+        let pairs: Vec<_> = v.errors.iter().filter(|e| e.retry).map(|e| (e.src.clone(), e.dst.clone())).collect();
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
         self.forget_job(id);
         (!pairs.is_empty()).then(|| self.start_transfer(JobSpec::Retry { moving, pairs }))
@@ -327,21 +391,28 @@ impl App {
             .collect()
     }
 
-    /// Antes de expulsar `root`: si hay trabajos sobre él, pregunta si se cancelan. `true` si se
-    /// puede seguir expulsando (no había, o se cancelaron).
-    // TODO(merge tanda D): lo llama «Expulsar» (Task 5, otra rama) antes de soltar el disco.
-    pub fn confirm_eject_jobs(&mut self, root: &Path, label: &str) -> bool {
+    /// Antes de expulsar `root`: si hay trabajos sobre él, pregunta si se cancelan y, si sí, los
+    /// cancela y espera que terminen (cancelar borra lo a medio copiar, en el disco) antes de
+    /// seguir con `then` (soltar el disco). Sin trabajos, sigue enseguida. Nunca bloquea: `then`
+    /// corre desde `on_transfer_updates` cuando llega el último `Finished`. `false` si no se
+    /// expulsa (dijo que no).
+    // TODO(merge tanda D): lo llama «Expulsar» (Task 5, otra rama) con lo que suelta el disco.
+    pub fn eject_after_jobs(&mut self, root: &Path, label: &str, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
         if ids.is_empty() {
+            then(self);
             return true;
         }
         let host = self.host.clone();
         if host.ask_yes_no_cancel("Expulsar", &eject_question(ids.len(), label)) != Some(true) {
             return false;
         }
-        for id in ids {
-            self.cancel_job(id);
+        for &id in &ids {
+            if let Some(c) = self.job_ctl(id) {
+                c.cancel();
+            }
         }
+        self.transfers.pending_eject = Some((ids, then));
         true
     }
 }

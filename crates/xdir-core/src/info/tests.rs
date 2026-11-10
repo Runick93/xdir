@@ -90,6 +90,29 @@ fn folder_size_skips_cloud_dirs() {
     assert_eq!(calls, 1);
 }
 
+/// Cancelada, no abre ninguna carpeta más (ni la primera): se mira antes de cada `read_dir`, no
+/// cada 500 elementos.
+#[test]
+fn folder_size_cancel_checked_per_directory() {
+    let d = dir("corta-por-carpeta");
+    // No existe: si se intentara leer, contaría como sin permiso.
+    let missing = d.join("no-existe");
+    let skipped = folder_size(&missing, &|_| false, &AtomicBool::new(true), &mut |_, _, _| {});
+    assert_eq!(skipped, 0, "no se abrió nada");
+    // Se corta en medio: después de la primera carpeta no se entra a otra.
+    for sub in ["a", "b", "c"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+        std::fs::write(d.join(sub).join("x.bin"), [0u8; 4]).unwrap();
+    }
+    let ctl = AtomicBool::new(false);
+    let mut last = (0, 0, 0);
+    folder_size(&d, &|_| {
+        ctl.store(true, std::sync::atomic::Ordering::Relaxed);
+        false
+    }, &ctl, &mut |b, f, fo| last = (b, f, fo));
+    assert_eq!(last, (0, 0, 1), "solo vio la primera carpeta, sin entrar");
+}
+
 /// Las carpetas que no se pueden leer se cuentan aparte (para avisar que faltan).
 #[cfg(unix)]
 #[test]

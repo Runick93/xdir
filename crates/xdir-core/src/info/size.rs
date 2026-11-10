@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const STEP: u64 = 500;
 
 /// Suma `path`: llama a `step(bytes, archivos, carpetas)` cada `STEP` elementos y una vez al final
-/// (siempre, aunque se cancele). `ctl` en `true` corta la suma. Los archivos solo en la nube cuentan
+/// (siempre, aunque se cancele). `ctl` en `true` corta la suma: se mira antes de abrir cada carpeta y
+/// en cada elemento. Los archivos solo en la nube cuentan
 /// con su tamaño lógico (sin abrirlos); las carpetas solo en la nube cuentan, pero no se entra.
 /// Devuelve cuántas carpetas no se pudieron leer (sin permiso: quedan fuera de la cuenta).
 pub fn folder_size(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &AtomicBool, step: &mut dyn FnMut(u64, u64, u64)) -> u64 {
@@ -18,6 +19,10 @@ pub fn folder_size(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &Atomic
     let mut stack = vec![path.to_path_buf()];
     let mut seen = 0u64;
     'walk: while let Some(dir) = stack.pop() {
+        // Cortada: no se abre ninguna carpeta más (expulsar no debe encontrar nada abierto).
+        if ctl.load(Ordering::Relaxed) {
+            break;
+        }
         let Ok(rd) = std::fs::read_dir(&dir) else {
             skipped += 1;
             continue;

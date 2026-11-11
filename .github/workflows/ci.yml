@@ -1,0 +1,105 @@
+# Tests en Windows, macOS y Linux (ahí las crates de Windows y macOS compilan vacías) en cada PR, y
+# una prueba de humo en Windows que abre la app compilada con `--features pruebas` y la maneja por
+# WM_COPYDATA (scripts/humo.ps1).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar
+        run: cargo build --locked
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Compilar con pruebas
+        run: cargo build --locked --features pruebas
+
+      - name: Prueba de humo
+        shell: pwsh
+        run: ./scripts/humo.ps1 -Exe target\debug\xdir-windows.exe -Out humo
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: humo-windows
+          path: humo/
+          if-no-files-found: warn
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar
+        run: cargo build --locked
+
+      - name: Tests
+        run: cargo test --locked
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Script del CHANGELOG
+        run: sh scripts/changelog-test.sh
+
+  estilo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust estable
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+
+      - name: Formato
+        run: cargo fmt --check || echo "::warning::cargo fmt --check encontró diferencias"
+
+      - name: Clippy del núcleo
+        run: cargo clippy -p xdir-core -- -D warnings || echo "::warning::cargo clippy encontró avisos"

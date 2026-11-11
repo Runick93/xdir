@@ -1,0 +1,759 @@
+//! De dónde vino lo que está en la Papelera de macOS: el `.DS_Store` de cada Papelera (registros
+//! `ptbL` y `ptbN` que escribe el Finder, solo lectura) y un registro propio de xdir
+//! (`<config>/papelera.tsv`) con lo que manda él, por si el `.DS_Store` no lo tiene.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// ¿Es una Papelera? `~/.Trash` o `/Volumes/<disco>/.Trashes/<uid>` (sin E/S).
+pub fn is_trash_dir(path: &Path) -> bool {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if home.is_some_and(|h| path == h.join(".Trash")) {
+        return true;
+    }
+    // SAFETY: `getuid` no falla ni toca memoria.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let parts: Vec<_> = path.components().collect();
+    parts.len() == 5
+        && path.starts_with("/Volumes")
+        && parts[3].as_os_str() == ".Trashes"
+        && parts[4].as_os_str() == uid.as_str()
+}
+
+/// Raíz del disco de una Papelera: `/Volumes/X` para `/Volumes/X/.Trashes/…`; si no, `/`.
+pub(crate) fn volume_root(trash_dir: &Path) -> PathBuf {
+    let parts: Vec<_> = trash_dir.components().take(3).collect();
+    if trash_dir.starts_with("/Volumes") && parts.len() == 3 { parts.iter().collect() } else { PathBuf::from("/") }
+}
+
+/// Lugar original de un elemento de la Papelera: primero el registro propio, después el
+/// `.DS_Store` de esa Papelera.
+pub fn origin(in_trash: &Path) -> Option<PathBuf> {
+    origin_in(log_file().as_deref(), in_trash)
+}
+
+/// `origin` con el registro en `log` (los tests usan uno propio).
+pub fn origin_in(log: Option<&Path>, in_trash: &Path) -> Option<PathBuf> {
+    if let Some(found) = log.and_then(|l| logged_origin(l, in_trash)) {
+        return Some(found);
+    }
+    let dir = in_trash.parent()?;
+    let name = in_trash.file_name()?.to_string_lossy().into_owned();
+    let bytes = read_ds_store(dir)?;
+    let (folder, original) = parse_ds_store(&bytes).remove(&name)?;
+    safe_origin(&volume_root(dir), &folder, &original)
+}
+
+/// El `.DS_Store` de `dir`, si es un archivo común (sin seguir enlaces, sin quedarse esperando
+/// en una FIFO) de hasta `DS_STORE_MAX` bytes: uno de Papelera pesa pocos KB.
+fn read_ds_store(dir: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(dir.join(".DS_Store")).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(DS_STORE_MAX + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= DS_STORE_MAX).then_some(bytes)
+}
+
+/// `root` + `ptbL` + `ptbN`, solo si no se sale del disco: `ptbN` tiene que ser un nombre suelto y
+/// `ptbL` solo nombres de carpeta (sin «..», «.» ni raíz más que la «/» inicial). El `.DS_Store`
+/// viene del disco: uno armado no puede mandar a escribir en otro lado.
+pub fn safe_origin(root: &Path, folder: &str, name: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut name_parts = Path::new(name).components();
+    let (Some(Component::Normal(n)), None) = (name_parts.next(), name_parts.next()) else { return None };
+    let folder = Path::new(folder.trim_start_matches('/'));
+    if !folder.components().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    let out = root.join(folder).join(n);
+    out.starts_with(root).then_some(out)
+}
+
+/// Deja lista la carpeta `parent` (dentro del disco `root`) para devolver ahí, sin seguir enlaces:
+/// cada carpeta del camino debajo de `root` tiene que ser una carpeta de verdad (no un enlace) y
+/// las que faltan se crean una por una (`create`); al final, la ruta real tiene que seguir dentro
+/// de la ruta real del disco. En el disco de arranque (`/`) valen los enlaces del sistema (de
+/// root, como `/var` o `/tmp`); en otro disco, ninguno. Sin `create` solo revisa (justo antes de
+/// mover).
+pub fn prepare_parent(root: &Path, parent: &Path, create: bool) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    let refuse = |p: &Path| format!("«{}» no es una carpeta de ese disco (es un enlace o está afuera): no se devuelve ahí", p.display());
+    let rest = parent.strip_prefix(root).map_err(|_| refuse(parent))?;
+    let system = root == Path::new("/");
+    // Disco del arranque: un enlace del sistema tiene que estar en el mismo disco que «/».
+    let root_dev = std::fs::symlink_metadata("/").map(|m| m.dev()).ok();
+    let mut cur = root.to_path_buf();
+    for c in rest.components() {
+        let Component::Normal(name) = c else { return Err(refuse(parent)) };
+        cur.push(name);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                // Solo los enlaces de root del primer nivel del disco de arranque («/tmp», «/var»,
+                // «/bin»…), en el mismo disco que «/». Uno de root más adentro o en otro disco
+                // montado (un pendrive armado) no vale.
+                let first_level = cur.parent() == Some(Path::new("/"));
+                if !(system && first_level && m.uid() == 0 && Some(m.dev()) == root_dev) {
+                    return Err(refuse(&cur));
+                }
+            }
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err(refuse(&cur)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+                std::fs::create_dir(&cur).map_err(|e| format!("{}: {e}", cur.display()))?;
+                if !std::fs::symlink_metadata(&cur).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+                    return Err(refuse(&cur));
+                }
+            }
+            Err(e) => return Err(format!("{}: {e}", cur.display())),
+        }
+    }
+    let real_root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let real = std::fs::canonicalize(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    if real.starts_with(&real_root) { Ok(()) } else { Err(refuse(parent)) }
+}
+
+/// Tamaño máximo de un `.DS_Store` que se lee.
+const DS_STORE_MAX: u64 = 4 << 20;
+
+/// `<config>/papelera.tsv`.
+fn log_file() -> Option<PathBuf> {
+    xdir_core::session::config_dir().map(|d| d.join("papelera.tsv"))
+}
+
+/// Anota que `original` quedó en la Papelera como `in_trash`.
+pub fn log_trashed(in_trash: &Path, original: &Path) {
+    if let Some(log) = log_file() {
+        log_trashed_in(&log, in_trash, original);
+    }
+}
+
+/// Olvida un elemento que salió de la Papelera.
+pub fn forget(in_trash: &Path) {
+    if let Some(log) = log_file() {
+        forget_in(&log, in_trash);
+    }
+}
+
+/// Una línea del registro: dónde quedó en la Papelera, de dónde vino y qué archivo es (disco e
+/// inodo, para no confundirlo con otro que después tomó el mismo nombre).
+struct LogLine {
+    in_trash: PathBuf,
+    original: PathBuf,
+    id: (u64, u64),
+}
+
+/// Disco e inodo de un elemento (sin seguir enlaces).
+fn file_id(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(p).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// El registro se lee y reescribe entero: un candado para que dos operaciones no se pisen.
+static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn log_trashed_in(log: &Path, in_trash: &Path, original: &Path) {
+    let Some(id) = file_id(in_trash) else { return };
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut lines = read_log(log);
+    lines.retain(|l| l.in_trash != in_trash);
+    lines.push(LogLine { in_trash: in_trash.to_path_buf(), original: original.to_path_buf(), id });
+    write_log(log, &lines);
+}
+
+pub fn forget_in(log: &Path, in_trash: &Path) {
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut lines = read_log(log);
+    let before = lines.len();
+    lines.retain(|l| l.in_trash != in_trash);
+    if lines.len() != before {
+        write_log(log, &lines);
+    }
+}
+
+/// Origen anotado para `in_trash`, si la línea es de ese mismo archivo.
+fn logged_origin(log: &Path, in_trash: &Path) -> Option<PathBuf> {
+    let id = file_id(in_trash)?;
+    read_log(log).into_iter().find(|l| l.in_trash == in_trash && l.id == id).map(|l| l.original)
+}
+
+/// `\` → `\\`, tabulador → `\t`, salto de línea → `\n` (una línea por entrada, campos por
+/// tabulador).
+fn escape(p: &Path) -> String {
+    let mut out = String::new();
+    for c in p.to_string_lossy().chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape(s: &str) -> PathBuf {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some(o) => out.push(o),
+            None => out.push('\\'),
+        }
+    }
+    PathBuf::from(out)
+}
+
+/// Líneas `papelera<TAB>original<TAB>disco:inodo`; las que no tienen las tres partes se ignoran.
+fn read_log(log: &Path) -> Vec<LogLine> {
+    let Ok(text) = std::fs::read_to_string(log) else { return Vec::new() };
+    text.lines()
+        .filter_map(|l| {
+            let mut parts = l.split('\t');
+            let (t, o, id) = (parts.next()?, parts.next()?, parts.next()?);
+            let (dev, ino) = id.split_once(':')?;
+            Some(LogLine { in_trash: unescape(t), original: unescape(o), id: (dev.parse().ok()?, ino.parse().ok()?) })
+        })
+        .collect()
+}
+
+/// Reescribe el registro sin lo que ya no está en la Papelera (o ya es otro archivo).
+fn write_log(log: &Path, lines: &[LogLine]) {
+    let text: String = lines
+        .iter()
+        .filter(|l| file_id(&l.in_trash) == Some(l.id))
+        .map(|l| format!("{}\t{}\t{}:{}\n", escape(&l.in_trash), escape(&l.original), l.id.0, l.id.1))
+        .collect();
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(log, text);
+}
+
+/// Lector mínimo del `.DS_Store` (formato «Bud1», big endian): nombre en la Papelera →
+/// (`ptbL`, `ptbN`), la carpeta (relativa a la raíz del disco) y el nombre originales. Ante
+/// cualquier inconsistencia devuelve un mapa vacío; nunca entra en pánico.
+pub fn parse_ds_store(bytes: &[u8]) -> HashMap<String, (String, String)> {
+    let mut fields: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    if read_records(bytes, &mut fields).is_none() {
+        return HashMap::new();
+    }
+    fields.into_iter().filter_map(|(k, (l, n))| Some((k, (l?, n?)))).collect()
+}
+
+fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    let s = b.get(at..at.checked_add(4)?)?;
+    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+fn utf16_at(b: &[u8], at: usize, units: usize) -> Option<String> {
+    let s = b.get(at..at.checked_add(units.checked_mul(2)?)?)?;
+    let u: Vec<u16> = s.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
+    String::from_utf16(&u).ok()
+}
+
+fn read_records(b: &[u8], out: &mut HashMap<String, (Option<String>, Option<String>)>) -> Option<()> {
+    if u32_at(b, 0)? != 1 || b.get(4..8)? != b"Bud1" {
+        return None;
+    }
+    // Los desplazamientos del archivo no cuentan los 4 bytes del principio.
+    let root = u32_at(b, 8)? as usize + 4;
+    let count = u32_at(b, root)? as usize;
+    if count > 1 << 16 {
+        return None;
+    }
+    let mut at = root + 8;
+    let mut addrs = Vec::with_capacity(count);
+    for _ in 0..count {
+        addrs.push(u32_at(b, at)?);
+        at += 4;
+    }
+    // Relleno hasta 256 direcciones.
+    if !count.is_multiple_of(256) {
+        at += 4 * (256 - count % 256);
+    }
+    let names = u32_at(b, at)? as usize;
+    at += 4;
+    let mut dsdb = None;
+    for _ in 0..names.min(1 << 16) {
+        let len = *b.get(at)? as usize;
+        let name = b.get(at + 1..at + 1 + len)?;
+        let id = u32_at(b, at + 1 + len)?;
+        at += 1 + len + 4;
+        if name == b"DSDB" {
+            dsdb = Some(id as usize);
+        }
+    }
+    let block = |id: usize| -> Option<usize> {
+        let addr = *addrs.get(id)?;
+        Some((addr & !0x1f) as usize + 4)
+    };
+    let db = block(dsdb?)?;
+    let root_node = u32_at(b, db)? as usize;
+    // Topes: un bloque leído dos veces (por id o por posición: ciclos y ids que apuntan al mismo
+    // lugar), más registros o nodos pendientes de los que puede tener una Papelera razonable, o
+    // más bytes leídos que los del archivo (un árbol válido lee cada byte una vez) → archivo
+    // armado o roto, sin resultado.
+    const MAX: usize = 1 << 16;
+    let mut stack = vec![root_node];
+    let mut visited = std::collections::HashSet::new();
+    let mut offsets = std::collections::HashSet::new();
+    let mut records = 0usize;
+    let mut parsed = 0usize;
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
+            return None;
+        }
+        let start = block(node)?;
+        if !offsets.insert(start) {
+            return None;
+        }
+        let mut at = start;
+        let p = u32_at(b, at)?;
+        let n = u32_at(b, at + 4)? as usize;
+        records += n;
+        if records > MAX {
+            return None;
+        }
+        at += 8;
+        for _ in 0..n {
+            if p != 0 {
+                stack.push(u32_at(b, at)? as usize);
+                if stack.len() > MAX {
+                    return None;
+                }
+                at += 4;
+            }
+            at = read_record(b, at, out)?;
+        }
+        parsed += at - start;
+        if parsed > b.len() {
+            return None;
+        }
+        if p != 0 {
+            stack.push(p as usize);
+        }
+    }
+    Some(())
+}
+
+/// Lee un registro en `at` y devuelve dónde empieza el siguiente.
+fn read_record(b: &[u8], mut at: usize, out: &mut HashMap<String, (Option<String>, Option<String>)>) -> Option<usize> {
+    let len = u32_at(b, at)? as usize;
+    let name = utf16_at(b, at + 4, len)?;
+    at += 4 + len * 2;
+    let code = b.get(at..at + 4)?;
+    let kind = b.get(at + 4..at + 8)?;
+    at += 8;
+    let mut text = None;
+    at += match kind {
+        b"bool" => 1,
+        b"long" | b"shor" | b"type" => 4,
+        b"comp" | b"dutc" => 8,
+        b"blob" => 4 + u32_at(b, at)? as usize,
+        b"ustr" => {
+            let units = u32_at(b, at)? as usize;
+            text = Some(utf16_at(b, at + 4, units)?);
+            4 + units * 2
+        }
+        _ => return None,
+    };
+    let entry = out.entry(name).or_default();
+    match code {
+        b"ptbL" => entry.0 = text,
+        b"ptbN" => entry.1 = text,
+        _ => {}
+    }
+    Some(at)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ustr(s: &str) -> Vec<u8> {
+        let u: Vec<u16> = s.encode_utf16().collect();
+        let mut v = (u.len() as u32).to_be_bytes().to_vec();
+        for c in u {
+            v.extend(c.to_be_bytes());
+        }
+        v
+    }
+
+    /// Un registro: nombre, código y valor `ustr`.
+    fn record(name: &str, code: &[u8; 4], value: &str) -> Vec<u8> {
+        let mut v = ustr(name);
+        v.extend(code);
+        v.extend(b"ustr");
+        v.extend(ustr(value));
+        v
+    }
+
+    /// Un registro de otro tipo (que se salta).
+    fn record_long(name: &str) -> Vec<u8> {
+        let mut v = ustr(name);
+        v.extend(b"Iloc");
+        v.extend(b"blob");
+        v.extend(4u32.to_be_bytes());
+        v.extend([0, 0, 0, 1]);
+        v
+    }
+
+    /// Arma un `.DS_Store` con estos nodos (cada uno ya codificado, sin direcciones): bloque 0 =
+    /// raíz, 1 = DSDB, 2.. = nodos; cada bloque ocupa 2048 bytes. `root` es el id del nodo raíz.
+    fn ds_store(nodes: &[Vec<u8>], root: u32) -> Vec<u8> {
+        const SIZE: usize = 2048;
+        let blocks = 2 + nodes.len();
+        let addr = |i: usize| ((SIZE * (i + 1)) as u32) | 11;
+        let mut file = vec![0u8; 4 + SIZE * (blocks + 1)];
+        file[0..4].copy_from_slice(&1u32.to_be_bytes());
+        file[4..8].copy_from_slice(b"Bud1");
+        file[8..12].copy_from_slice(&(SIZE as u32).to_be_bytes());
+        let put = |file: &mut Vec<u8>, i: usize, data: &[u8]| {
+            let at = SIZE * (i + 1) + 4;
+            file[at..at + data.len()].copy_from_slice(data);
+        };
+        let mut root_block = (blocks as u32).to_be_bytes().to_vec();
+        root_block.extend(0u32.to_be_bytes());
+        for i in 0..blocks {
+            root_block.extend(addr(i).to_be_bytes());
+        }
+        root_block.extend(vec![0u8; 4 * (256 - blocks)]);
+        root_block.extend(1u32.to_be_bytes());
+        root_block.push(4);
+        root_block.extend(b"DSDB");
+        root_block.extend(1u32.to_be_bytes());
+        put(&mut file, 0, &root_block);
+        let mut db = root.to_be_bytes().to_vec();
+        db.extend([0u8; 16]);
+        put(&mut file, 1, &db);
+        for (i, n) in nodes.iter().enumerate() {
+            put(&mut file, i + 2, n);
+        }
+        file
+    }
+
+    fn leaf(records: &[Vec<u8>]) -> Vec<u8> {
+        let mut v = 0u32.to_be_bytes().to_vec();
+        v.extend((records.len() as u32).to_be_bytes());
+        for r in records {
+            v.extend(r);
+        }
+        v
+    }
+
+    #[test]
+    fn ds_store_reads_ptb_records() {
+        let recs = [
+            record("informe.pdf", b"ptbL", "Users/javier/Documents/"),
+            record_long("informe.pdf"),
+            record("informe.pdf", b"ptbN", "informe.pdf"),
+            record("foto 10.12.03.jpg", b"ptbL", "Users/javier/Desktop/"),
+            record("foto 10.12.03.jpg", b"ptbN", "foto.jpg"),
+        ];
+        let want = HashMap::from([
+            ("informe.pdf".to_string(), ("Users/javier/Documents/".to_string(), "informe.pdf".to_string())),
+            ("foto 10.12.03.jpg".to_string(), ("Users/javier/Desktop/".to_string(), "foto.jpg".to_string())),
+        ]);
+        // Una hoja con todo.
+        let one = ds_store(&[leaf(&recs)], 2);
+        assert_eq!(parse_ds_store(&one), want);
+        // Un nodo interno (P = hoja derecha) con un registro y su hijo izquierdo.
+        let left = leaf(&recs[..2]);
+        let right = leaf(&recs[3..]);
+        let mut inner = 4u32.to_be_bytes().to_vec();
+        inner.extend(1u32.to_be_bytes());
+        inner.extend(3u32.to_be_bytes());
+        inner.extend(&recs[2]);
+        let tree = ds_store(&[inner, left, right], 2);
+        assert_eq!(parse_ds_store(&tree), want);
+        // Bytes cortados o «Bud1» falso: vacío, sin pánico.
+        assert!(parse_ds_store(&one[..3000]).is_empty());
+        let mut fake = one.clone();
+        fake[4..8].copy_from_slice(b"Bud2");
+        assert!(parse_ds_store(&fake).is_empty());
+        assert!(parse_ds_store(&[]).is_empty());
+        for cut in [10, 100, 2100, 4100, 6200] {
+            let _ = parse_ds_store(&one[..cut.min(one.len())]);
+        }
+    }
+
+    /// Un nodo que se apunta a sí mismo con muchos registros (caso del revisor): termina enseguida
+    /// y sin resultado, sin colgarse ni comer memoria.
+    #[test]
+    fn ds_store_self_reference_finishes() {
+        let count: usize = 65536;
+        let mut b = Vec::new();
+        b.extend(1u32.to_be_bytes());
+        b.extend(b"Bud1");
+        let root = 32u32;
+        b.extend((root - 4).to_be_bytes());
+        b.resize(32, 0);
+        b.extend((count as u32).to_be_bytes());
+        b.extend(0u32.to_be_bytes());
+        let addr_pos = b.len();
+        b.resize(addr_pos + 4 * count, 0);
+        b.extend(1u32.to_be_bytes());
+        b.push(4);
+        b.extend(b"DSDB");
+        b.extend(0u32.to_be_bytes());
+        while !(b.len() - 4).is_multiple_of(32) {
+            b.push(0);
+        }
+        let db = b.len();
+        b.extend(1u32.to_be_bytes());
+        b.resize(db + 32, 0);
+        while !(b.len() - 4).is_multiple_of(32) {
+            b.push(0);
+        }
+        let node = b.len();
+        let n = 20000u32;
+        b.extend(1u32.to_be_bytes());
+        b.extend(n.to_be_bytes());
+        for _ in 0..n {
+            b.extend(1u32.to_be_bytes());
+            b.extend(1u32.to_be_bytes());
+            b.extend(0x61u16.to_be_bytes());
+            b.extend(b"ptbL");
+            b.extend(b"bool");
+            b.push(1);
+        }
+        for (i, off) in [(0, db), (1, node)] {
+            let a = (((off - 4) as u32) & !0x1f) | 5;
+            b[addr_pos + 4 * i..addr_pos + 4 * i + 4].copy_from_slice(&a.to_be_bytes());
+        }
+        let t = std::time::Instant::now();
+        assert!(parse_ds_store(&b).is_empty());
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    /// Muchos ids de bloque que apuntan a la misma hoja con un nombre enorme (caso del revisor):
+    /// cada byte se lee una vez como mucho; termina enseguida y sin resultado.
+    #[test]
+    fn ds_store_block_aliasing_finishes() {
+        fn align(b: &mut Vec<u8>) {
+            while !(b.len() - 4).is_multiple_of(32) {
+                b.push(0);
+            }
+        }
+        let (k, units) = (60000usize, 60000usize);
+        let count = 65536usize;
+        let mut b = Vec::new();
+        b.extend(1u32.to_be_bytes());
+        b.extend(b"Bud1");
+        b.extend(28u32.to_be_bytes());
+        b.resize(32, 0);
+        b.extend((count as u32).to_be_bytes());
+        b.extend(0u32.to_be_bytes());
+        let ap = b.len();
+        b.resize(ap + 4 * count, 0);
+        b.extend(1u32.to_be_bytes());
+        b.push(4);
+        b.extend(b"DSDB");
+        b.extend(0u32.to_be_bytes());
+        align(&mut b);
+        let db = b.len();
+        b.extend(1u32.to_be_bytes());
+        b.resize(db + 32, 0);
+        align(&mut b);
+        let root = b.len();
+        b.extend(2u32.to_be_bytes());
+        b.extend(((k - 1) as u32).to_be_bytes());
+        for i in 0..k - 1 {
+            b.extend(((3 + i) as u32).to_be_bytes());
+            b.extend(1u32.to_be_bytes());
+            b.extend(0x61u16.to_be_bytes());
+            b.extend(b"ptbL");
+            b.extend(b"bool");
+            b.push(1);
+        }
+        align(&mut b);
+        let leaf = b.len();
+        b.extend(0u32.to_be_bytes());
+        b.extend(1u32.to_be_bytes());
+        b.extend((units as u32).to_be_bytes());
+        for _ in 0..units {
+            b.extend(0x61u16.to_be_bytes());
+        }
+        b.extend(b"ptbL");
+        b.extend(b"bool");
+        b.push(1);
+        let mut set = |i: usize, off: usize| {
+            let a = (((off - 4) as u32) & !0x1f) | 5;
+            b[ap + 4 * i..ap + 4 * i + 4].copy_from_slice(&a.to_be_bytes());
+        };
+        set(0, db);
+        set(1, root);
+        for i in 2..k + 2 {
+            set(i, leaf);
+        }
+        let t = std::time::Instant::now();
+        assert!(parse_ds_store(&b).is_empty());
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdir-mac-trash-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// El registro propio manda sobre el `.DS_Store`; sin registro, el `.DS_Store`; y al
+    /// reescribir el registro se descartan los que ya no están en la Papelera.
+    #[test]
+    fn origin_prefers_own_log() {
+        let dir = tmp("origen");
+        let bin = dir.join("Trash");
+        std::fs::create_dir_all(&bin).unwrap();
+        let item = bin.join("a.txt");
+        std::fs::write(&item, "a").unwrap();
+        std::fs::write(bin.join(".DS_Store"), ds_store(&[leaf(&[record("a.txt", b"ptbL", "Users/x/Desktop/"), record("a.txt", b"ptbN", "a.txt")])], 2)).unwrap();
+        let log = dir.join("papelera.tsv");
+        assert_eq!(origin_in(Some(&log), &item), Some(PathBuf::from("/Users/x/Desktop/a.txt")));
+        log_trashed_in(&log, &item, Path::new("/tmp/propio/a.txt"));
+        assert_eq!(origin_in(Some(&log), &item), Some(PathBuf::from("/tmp/propio/a.txt")));
+        // Otro que ya no está en la Papelera se descarta al reescribir.
+        log_trashed_in(&log, &bin.join("ya-no.txt"), Path::new("/x"));
+        assert_eq!(read_log(&log).len(), 1);
+        forget_in(&log, &item);
+        assert_eq!(origin_in(Some(&log), &item), Some(PathBuf::from("/Users/x/Desktop/a.txt")));
+        assert_eq!(origin_in(Some(&log), &bin.join("otro.txt")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un `.DS_Store` armado (un disco ajeno) no puede mandar a devolver fuera del disco: un
+    /// `ptbN` absoluto o con «/», o un `ptbL` con «..», dejan el origen desconocido.
+    #[test]
+    fn ds_store_origin_rejects_escapes() {
+        let dir = tmp("escape");
+        let bin = dir.join("Volumes/USB/.Trashes/501");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cases = [
+            ("abs", "docs/", "/Users/x/Library/LaunchAgents/evil.plist"),
+            ("sub", "docs/", "a/b.txt"),
+            ("dots", "docs/", ".."),
+            ("up", "../../Users/x/Library/LaunchAgents/", "evil.plist"),
+            ("up2", "docs/../../..", "evil.plist"),
+            ("ok", "/docs/", "bien.txt"),
+        ];
+        let mut recs = Vec::new();
+        for (name, l, n) in cases {
+            std::fs::write(bin.join(name), "x").unwrap();
+            recs.push(record(name, b"ptbL", l));
+            recs.push(record(name, b"ptbN", n));
+        }
+        std::fs::write(bin.join(".DS_Store"), ds_store(&[leaf(&recs)], 2)).unwrap();
+        for (name, ..) in &cases[..5] {
+            assert_eq!(origin_in(None, &bin.join(name)), None, "{name}");
+        }
+        assert_eq!(safe_origin(Path::new("/Volumes/USB"), "/docs/", "bien.txt"), Some(PathBuf::from("/Volumes/USB/docs/bien.txt")));
+        assert_eq!(safe_origin(Path::new("/"), "Users/x/", "a.txt"), Some(PathBuf::from("/Users/x/a.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// El registro anota qué archivo es (disco e inodo): si en la Papelera hay otro con el mismo
+    /// nombre (se vació y se borró otro), la línea no vale. Rutas con tabulador o salto de línea
+    /// se guardan escapadas.
+    #[test]
+    fn log_checks_file_identity_and_escapes() {
+        let dir = tmp("registro");
+        let bin = dir.join("Trash");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.join("papelera.tsv");
+        let item = bin.join("a.txt");
+        std::fs::write(&item, "a").unwrap();
+        log_trashed_in(&log, &item, Path::new("/tmp/vino/a.txt"));
+        assert_eq!(origin_in(Some(&log), &item), Some(PathBuf::from("/tmp/vino/a.txt")));
+        // Otro archivo con el mismo nombre (otro inodo): la línea se ignora.
+        let keep = dir.join("guardado");
+        std::fs::rename(&item, &keep).unwrap();
+        std::fs::write(&item, "otro").unwrap();
+        assert_eq!(origin_in(Some(&log), &item), None);
+        // Tabuladores, saltos de línea y barras invertidas en las rutas.
+        let raro = bin.join("con\ttab\ny salto \\ barra");
+        std::fs::write(&raro, "r").unwrap();
+        let original = Path::new("/tmp/x\ty\nz \\ w/raro");
+        log_trashed_in(&log, &raro, original);
+        assert_eq!(origin_in(Some(&log), &raro), Some(original.to_path_buf()));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1, "una línea por entrada");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Devolver no sigue enlaces en la carpeta de destino: si una carpeta del camino (dentro del
+    /// disco) es un enlace, no se crea nada ni se escribe afuera; las que faltan se crean una por
+    /// una.
+    #[test]
+    fn restore_parent_refuses_symlinks() {
+        let dir = tmp("destino-enlace");
+        let (vol, outside) = (dir.join("vol"), dir.join("afuera"));
+        std::fs::create_dir_all(&vol).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, vol.join("docs")).unwrap();
+        assert!(prepare_parent(&vol, &vol.join("docs"), true).is_err());
+        assert!(prepare_parent(&vol, &vol.join("docs/sub/otra"), true).is_err());
+        assert!(!outside.join("sub").exists(), "no se creó nada afuera");
+        // Sin enlaces: crea lo que falta.
+        prepare_parent(&vol, &vol.join("nueva/sub"), true).unwrap();
+        assert!(vol.join("nueva/sub").is_dir());
+        // Sin crear: solo revisa.
+        assert!(prepare_parent(&vol, &vol.join("nueva/sub"), false).is_ok());
+        assert!(prepare_parent(&vol, &vol.join("falta"), false).is_err());
+        // Fuera del disco, nunca.
+        assert!(prepare_parent(&vol, &outside, true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un `.DS_Store` que no es un archivo común (enlace a `/dev/zero`, FIFO) o que es enorme no
+    /// se lee, y no se queda esperando.
+    #[test]
+    fn ds_store_must_be_small_regular_file() {
+        let dir = tmp("ds-raro");
+        let run = |bin: PathBuf| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read_ds_store(&bin));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(2)).expect("no se colgó")
+        };
+        let a = dir.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", a.join(".DS_Store")).unwrap();
+        assert_eq!(run(a.clone()), None);
+        let b = dir.join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        let fifo = std::ffi::CString::new(b.join(".DS_Store").as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: cadena C válida.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        assert_eq!(run(b.clone()), None);
+        let c = dir.join("c");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join(".DS_Store"), vec![0u8; DS_STORE_MAX as usize + 1]).unwrap();
+        assert_eq!(run(c.clone()), None);
+        std::fs::write(c.join(".DS_Store"), b"Bud1").unwrap();
+        assert_eq!(run(c.clone()), Some(b"Bud1".to_vec()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trash_dirs_and_volume_roots() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert!(is_trash_dir(&home.join(".Trash")));
+        assert!(!is_trash_dir(&home));
+        let uid = unsafe { libc::getuid() };
+        assert!(is_trash_dir(&PathBuf::from(format!("/Volumes/USB/.Trashes/{uid}"))));
+        assert!(!is_trash_dir(Path::new("/Volumes/USB/.Trashes")));
+        assert_eq!(volume_root(Path::new("/Volumes/USB/.Trashes/501")), PathBuf::from("/Volumes/USB"));
+        assert_eq!(volume_root(&home.join(".Trash")), PathBuf::from("/"));
+    }
+}

@@ -1,0 +1,3340 @@
+//! Lista de archivos, virtualizada: solo se dibuja lo que está a la vista, así que el costo por
+//! frame no depende de cuántos archivos tenga la carpeta. En detalles (filas con columnas) o en
+//! cuadrícula de íconos y miniaturas.
+
+use std::cmp::Ordering;
+use std::ffi::OsString;
+use std::time::{Duration, Instant};
+
+use crate::a11y::ItemInfo;
+use crate::folder_views::ViewSettings;
+use crate::format;
+use crate::fs::Entry;
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter};
+use crate::theme::alpha;
+use crate::thumbs;
+
+pub mod filters;
+pub mod gallery;
+pub mod groups;
+pub mod meta;
+pub mod placeholder;
+mod rename_preview;
+
+pub use filters::ListHit;
+pub use gallery::{CellState, strip_offset};
+pub use groups::{GROUPINGS, GroupKey, LocalNow, Meta, Row, group_key};
+
+pub const ROW_H: f32 = 24.0;
+pub const HEADER_H: f32 = 30.0;
+const ICON: f32 = 16.0;
+const SCROLLBAR_W: f32 = 12.0;
+const NAME_MIN: f32 = 180.0;
+const PAD: f32 = 10.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Column {
+    Name,
+    Modified,
+    Created,
+    Type,
+    Extension,
+    Size,
+    Attributes,
+    /// Dónde está cada resultado de una búsqueda (relativo a la carpeta buscada). Solo se ve
+    /// mientras hay una búsqueda.
+    Folder,
+    /// Columnas de metadatos (ver `meta`): se leen en segundo plano con `sys::Metadata`.
+    Dimensions,
+    Duration,
+    Authors,
+    Tags,
+    Artist,
+    Album,
+    /// Lo que ocupa comprimido un elemento de adentro de un archivo comprimido.
+    Packed,
+}
+
+/// Todas las columnas: (columna, título, identificador para la sesión, ancho inicial).
+pub const COLUMNS: [(Column, &str, &str, f32); 15] = [
+    (Column::Name, "Nombre", "nombre", 0.0),
+    (Column::Modified, "Fecha de modificación", "modificado", 160.0),
+    (Column::Created, "Fecha de creación", "creado", 160.0),
+    (Column::Type, "Tipo", "tipo", 160.0),
+    (Column::Extension, "Extensión", "extension", 80.0),
+    (Column::Size, "Tamaño", "tamano", 96.0),
+    (Column::Attributes, "Atributos", "atributos", 80.0),
+    (Column::Folder, "Carpeta", "carpeta", 220.0),
+    // Anchos de la pantalla X37 (Etiquetas es la última y llega al borde: 200; Artista y Álbum
+    // como Autor).
+    (Column::Dimensions, "Dimensiones", "dimensiones", 120.0),
+    (Column::Duration, "Duración", "duracion", 80.0),
+    (Column::Authors, "Autor", "autor", 160.0),
+    (Column::Tags, "Etiquetas", "etiquetas", 200.0),
+    (Column::Artist, "Artista", "artista", 160.0),
+    (Column::Album, "Álbum", "album", 160.0),
+    // Solo tiene datos dentro de un archivo comprimido.
+    (Column::Packed, "Tamaño comprimido", "comprimido", 120.0),
+];
+
+impl Column {
+    pub fn title(self) -> &'static str {
+        COLUMNS.iter().find(|c| c.0 == self).unwrap().1
+    }
+
+    pub fn id(self) -> &'static str {
+        COLUMNS.iter().find(|c| c.0 == self).unwrap().2
+    }
+
+    pub fn from_id(id: &str) -> Option<Column> {
+        COLUMNS.iter().find(|c| c.2 == id).map(|c| c.0)
+    }
+
+    pub(crate) fn default_width(self) -> f32 {
+        COLUMNS.iter().find(|c| c.0 == self).unwrap().3
+    }
+
+    /// Texto alineado a la derecha (números).
+    fn right_aligned(self) -> bool {
+        matches!(self, Column::Size | Column::Packed)
+    }
+}
+
+/// Columna a la vista con su ancho. El nombre no tiene ancho propio: ocupa lo que sobra.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ColumnSpec {
+    pub col: Column,
+    pub width: f32,
+}
+
+/// Columnas de fábrica, de izquierda a derecha.
+pub fn default_columns() -> Vec<ColumnSpec> {
+    [Column::Name, Column::Modified, Column::Type, Column::Size]
+        .into_iter()
+        .map(|col| ColumnSpec { col, width: col.default_width() })
+        .collect()
+}
+
+/// Cómo se muestran los elementos: filas con columnas, una cuadrícula de íconos/miniaturas, la
+/// Lista (columnas de nombres que se llenan de arriba abajo) o Contenido (una fila alta por elemento).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Details,
+    Icons,
+    LargeIcons,
+    Thumbnails,
+    List,
+    Content,
+    /// Imagen grande del enfocado y tira de miniaturas (ver `gallery`).
+    Gallery,
+}
+
+/// (vista, nombre, identificador para la sesión, lado del ícono en DIPs). El índice es el de
+/// `Command::View`: las vistas nuevas van al final para no cambiar los de antes.
+pub const VIEWS: [(View, &str, &str, f32); 7] = [
+    (View::Details, "Detalles", "detalles", 16.0),
+    (View::Icons, "Íconos medianos", "iconos", 48.0),
+    (View::LargeIcons, "Íconos grandes", "iconos_grandes", 96.0),
+    (View::Thumbnails, "Miniaturas", "miniaturas", 160.0),
+    (View::List, "Lista", "lista", 16.0),
+    (View::Content, "Contenido", "contenido", 32.0),
+    (View::Gallery, "Galería", "galeria", 72.0),
+];
+
+/// Orden de las vistas en el menú, con Ctrl+rueda y con el botón del pie del panel: de lo más
+/// compacto a lo más grande.
+pub const CYCLE: [View; 7] =
+    [View::Details, View::List, View::Content, View::Icons, View::LargeIcons, View::Thumbnails, View::Gallery];
+
+impl View {
+    pub fn index(self) -> usize {
+        VIEWS.iter().position(|v| v.0 == self).unwrap()
+    }
+
+    /// Posición en `CYCLE`.
+    pub fn cycle_index(self) -> usize {
+        CYCLE.iter().position(|&v| v == self).unwrap()
+    }
+
+    pub fn id(self) -> &'static str {
+        VIEWS[self.index()].2
+    }
+
+    pub fn from_id(id: &str) -> Option<View> {
+        VIEWS.iter().find(|v| v.2 == id).map(|v| v.0)
+    }
+
+    pub fn name(self) -> &'static str {
+        VIEWS[self.index()].1
+    }
+
+    fn icon(self) -> f32 {
+        VIEWS[self.index()].3
+    }
+
+    /// Cuadrícula de íconos o miniaturas (el nombre debajo del ícono).
+    pub fn is_grid(self) -> bool {
+        matches!(self, View::Icons | View::LargeIcons | View::Thumbnails)
+    }
+
+    /// Solo Detalles tiene encabezado de columnas (ordenar, filtros, anchos).
+    pub fn has_header(self) -> bool {
+        self == View::Details
+    }
+
+    /// Un elemento por línea, de lado a lado (Detalles y Contenido).
+    pub fn is_row(self) -> bool {
+        matches!(self, View::Details | View::Content)
+    }
+}
+
+/// Lista: ancho de cada columna y margen de arriba y de la izquierda (diseño
+/// `list::FileList::draw_list_cell`, pantalla X34).
+pub const LIST_COL_W: f32 = 240.0;
+pub const LIST_PAD: f32 = 4.0;
+/// Contenido: alto de cada fila (diseño `list::FileList::draw_content_row`, pantalla X35); el
+/// margen de arriba es `LIST_PAD`.
+pub const CONTENT_H: f32 = 56.0;
+/// Contenido: ancho de la columna de la derecha (fecha y tamaño) y márgenes de la fila.
+const CONTENT_RIGHT_W: f32 = 160.0;
+const CONTENT_EDGE: f32 = 12.0;
+const CONTENT_TEXT_X: f32 = 58.0;
+/// Lista: dónde arranca el nombre en la celda (después del ícono de 16).
+const LIST_TEXT_X: f32 = 32.0;
+
+/// Alto del nombre debajo de una miniatura (dos líneas) y márgenes de la cuadrícula.
+const LABEL_H: f32 = 34.0;
+const GRID_PAD: f32 = 8.0;
+
+const MIN_COL_W: f32 = 48.0;
+/// Distancia al borde de un encabezado que cuenta como "agarrar el borde" para cambiar el ancho.
+const EDGE_GRAB: f32 = 5.0;
+/// Casilla de selección (diseño `list::FileList::draw_checkbox` y pantalla X36): lado, cuánto
+/// corre al ícono y al nombre en las vistas por filas, y cuánto se agranda su zona de clic.
+const CHECK: f32 = 14.0;
+const CHECK_SHIFT: f32 = 22.0;
+const CHECK_SLOP: f32 = 4.0;
+/// Tilde blanca sobre el acento, como en el diseño (en los dos modos).
+const CHECK_MARK: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+
+/// Estado de una casilla de selección.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CheckState {
+    Empty,
+    Checked,
+    /// Solo en el encabezado: algunos de los elementos a la vista, no todos.
+    Partial,
+}
+
+/// Arrastre en el encabezado.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum HeaderDrag {
+    /// Cambiando el ancho de la columna `index` (en `columns`) desde su borde derecho.
+    Resize { index: usize, start_x: f32, start_w: f32 },
+    /// Botón apretado sobre un encabezado: clic (ordenar) o, si se mueve, reordenar.
+    Press { index: usize, start_x: f32, moved: bool },
+}
+
+/// Atributos como letras, al estilo del Explorador: R (solo lectura), H (oculto), S (sistema),
+/// A (archivo), C (comprimido), E (cifrado).
+fn attr_letters(attrs: u32) -> String {
+    [(0x1, 'R'), (0x2, 'H'), (0x4, 'S'), (0x20, 'A'), (0x800, 'C'), (0x4000, 'E')]
+        .iter()
+        .filter(|(bit, _)| attrs & bit != 0)
+        .map(|(_, c)| *c)
+        .collect()
+}
+
+/// Nombre que se muestra de un elemento: con `show_ext` apagado, los archivos sin su extensión
+/// (lo que sigue al último punto, si ese punto no es el primer carácter); las carpetas, completas.
+/// Ordenar y renombrar siguen usando el nombre completo.
+pub fn display_name(name: &str, is_dir: bool, show_ext: bool) -> &str {
+    if show_ext || is_dir {
+        return name;
+    }
+    match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    }
+}
+
+/// Nombre que se muestra de `e`: a los elementos de disco se les aplica `display_name`; los del
+/// Shell (con PIDL) ya traen el nombre como lo muestra el Shell, con o sin extensión según su
+/// propia configuración, y no se tocan.
+fn shown_name(e: &Entry, show_ext: bool) -> &str {
+    if e.pidl.is_some() {
+        return &e.display;
+    }
+    display_name(&e.display, e.is_dir, show_ext)
+}
+
+/// Extensión en minúsculas (sin punto); vacía para carpetas.
+fn extension_of(e: &Entry) -> &str {
+    if e.is_dir {
+        return "";
+    }
+    match e.sort_key.rfind('.') {
+        Some(i) if i > 0 => &e.sort_key[i + 1..],
+        _ => "",
+    }
+}
+
+/// Lo que la lista le pide al panel después de un evento.
+#[derive(PartialEq, Debug)]
+pub enum Action {
+    None,
+    Redraw,
+    /// Abrir el elemento (índice en `entries`).
+    Open(usize),
+    /// Empezar a arrastrar la selección.
+    BeginDrag,
+    /// Cambiaron las columnas (orden, ancho): la app las pasa a las demás listas.
+    ColumnsChanged,
+}
+
+/// Selección con rectángulo: se arma arrastrando sobre un hueco de la lista.
+struct Band {
+    /// Dónde se apretó: x de la ventana e y del contenido (no se mueve con el scroll).
+    from: (f32, f32),
+    /// Dónde está el mouse, igual.
+    to: (f32, f32),
+    /// Con Ctrl, lo que ya estaba seleccionado (por índice de `entries`); si no, vacío.
+    base: Vec<bool>,
+}
+
+/// La búsqueda por tipeo sigue el mismo nombre si la tecla siguiente llega antes de esto.
+const TYPEAHEAD_MS: u64 = 900;
+
+pub struct FileList {
+    pub entries: Vec<Entry>,
+    /// Índices de `entries` que se muestran (sin los ocultos), ordenados, sin agrupar.
+    order: Vec<u32>,
+    /// Índices de `entries` a la vista, en orden: `order` o, con grupos, los elementos de los
+    /// grupos desplegados, grupo por grupo. Las posiciones de la lista (foco, selección por rango,
+    /// accesibilidad) son posiciones en este vector: los encabezados no cuentan.
+    visible: Vec<u32>,
+    /// Selección por índice de `entries`.
+    selected: Vec<bool>,
+    /// Posición en `visible` del elemento con foco.
+    focus: Option<usize>,
+    /// El foco lo puso la lista (primera fila), no el usuario: durante la carga se queda arriba.
+    auto_focus: bool,
+    anchor: Option<usize>,
+    /// Scroll que se dibuja; `scroll_target` es adonde va (ver `tick`, F-8.4). Los clics y teclas
+    /// actúan sobre el destino, no sobre lo que falta recorrer.
+    scroll: f32,
+    scroll_target: f32,
+    pub sort: Column,
+    pub descending: bool,
+    pub show_hidden: bool,
+    /// Nombres de archivo con su extensión (el switch «Mostrar extensiones»; lo fija la `App`).
+    pub show_extensions: bool,
+    /// Casillas de selección (el switch «Casillas de selección»; lo fija la `App`).
+    pub checkboxes: bool,
+    hover: Option<usize>,
+    typeahead: String,
+    typeahead_at: Option<Instant>,
+    /// Área de la última vez que se dibujó (para hit-testing).
+    area: Rect,
+    /// Arrastre de la barra de desplazamiento: distancia entre el mouse y el borde del pulgar.
+    thumb_drag: Option<f32>,
+    /// Clic sobre un elemento ya seleccionado: se resuelve al soltar (si no fue un arrastre).
+    pending_select: Option<usize>,
+    /// Dónde se apretó el botón sobre un elemento, para detectar el inicio de un arrastre.
+    press: Option<(f32, f32)>,
+    /// Carpeta resaltada como destino mientras se arrastra algo encima (índice en `entries`).
+    pub drop_target: Option<usize>,
+    /// Columnas a la vista, de izquierda a derecha.
+    pub columns: Vec<ColumnSpec>,
+    /// Ancho del nombre una vez que se lo fijó (arrastre o doble clic en un borde del encabezado).
+    /// Hasta entonces el nombre ocupa lo que sobra; fijo, cada borde se mueve con su columna, como
+    /// en el Explorador, y lo que no se usa queda en blanco a la derecha.
+    name_width: Option<f32>,
+    pub view: View,
+    /// Agrupación, grupos plegados y filtros de la carpeta: se guardan con su vista
+    /// (`folder_views`); los usan las tareas de agrupar y filtrar.
+    pub group_by: Option<Column>,
+    pub collapsed: Vec<String>,
+    pub filters: Vec<(Column, Vec<String>)>,
+    /// Con grupos: encabezados y elementos (ver `groups::Row`); vacío sin agrupar.
+    rows: Vec<Row>,
+    /// Índices en `rows` de los encabezados.
+    header_rows: Vec<u32>,
+    /// Grupo de cada elemento (índice en `key_table`) según la columna `keys_for`: se calcula una
+    /// vez por elemento, no en cada rearmado.
+    entry_keys: Vec<u32>,
+    key_table: Vec<GroupKey>,
+    key_index: std::collections::HashMap<GroupKey, u32>,
+    keys_for: Option<Column>,
+    /// Día local (`LocalNow::day`) con el que se calcularon las claves de fecha: si cambia (pasó
+    /// la medianoche), se recalculan («Hoy» pasa a «Ayer»).
+    keys_day: i64,
+    /// Geometría de la lista agrupada (líneas de encabezado y de elementos).
+    layout: Option<groups::Layout>,
+    /// El foco está en el encabezado de este grupo (en vez de en un elemento).
+    header_focus: Option<String>,
+    /// Cuántas veces se rearmaron las filas (los tests miran que dibujar no las rearme).
+    pub(crate) rows_built: u64,
+    /// Desplegable de filtros abierto (ver `filters`).
+    menu: Option<filters::FilterMenu>,
+    /// Columna del encabezado bajo el mouse: muestra la flecha de su filtro.
+    header_hover: Option<Column>,
+    /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
+    pub folder: Option<std::path::PathBuf>,
+    /// Carpeta en la que se busca, mientras la lista muestra resultados de una búsqueda.
+    pub search_root: Option<std::path::PathBuf>,
+    /// Filtro por nombre de lo que ya está en la lista: la búsqueda en una carpeta virtual, que
+    /// no se recorre (ver `filters::set_name_filter`). No es parte de la vista de la carpeta.
+    name_filter: Option<NameFilter>,
+    header_drag: Option<HeaderDrag>,
+    band: Option<Band>,
+    /// Se dibuja el marcador de foco. Un clic en un hueco limpia la selección y lo oculta, para
+    /// que la fila que tenía el foco no parezca seguir seleccionada; teclas y clics sobre filas lo traen.
+    focus_visible: bool,
+    /// Apretado sobre una fila, pero pasado el nombre (otras columnas): un clic selecciona la fila
+    /// y un arrastre arma el rectángulo (solo el nombre arrastra el archivo). Punto y Ctrl.
+    press_band: Option<(f32, f32, bool)>,
+    /// Detalles: hasta dónde llega el ícono y el nombre de cada fila dibujada (x de la ventana),
+    /// desde la posición `name_ends_first`. Lo de más a la derecha, en la misma columna, es hueco.
+    name_ends: Vec<f32>,
+    name_ends_first: usize,
+    /// Filas (índices de `entries`) con botón ⏏: discos expulsables de «Este equipo» (lo pone la
+    /// `App`).
+    pub eject_rows: Vec<usize>,
+    /// Fila cuyo ⏏ tiene el mouse encima.
+    pub eject_hover: Option<usize>,
+    /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, índice).
+    eject_rects: Vec<(Rect, usize)>,
+    /// Metadatos de cada elemento (índice en `entries`), si ya llegaron; si se pidieron; y los
+    /// leídos en esta carpeta por ruta y fecha (sobreviven a las recargas). Ver `meta`.
+    meta: Vec<Option<std::sync::Arc<crate::fs::Meta>>>,
+    meta_asked: Vec<bool>,
+    meta_cache: std::collections::HashMap<(OsString, u64), std::sync::Arc<crate::fs::Meta>>,
+    /// Los elementos tienen ruta de disco de donde leer metadatos (carpetas y búsquedas; no «Este
+    /// equipo» ni las carpetas virtuales). Lo fija la pestaña.
+    pub meta_enabled: bool,
+    /// Llegaron metadatos y falta rearmar lo que se ve (`flush_meta`).
+    meta_dirty: bool,
+    /// Elementos (índices en `entries`) cuyos metadatos pidió alguien más que la lista (la columna
+    /// de vista previa): entran en el próximo `take_meta_request`.
+    meta_wanted: Vec<usize>,
+    /// Último punto del mouse sobre la lista (la rueda de la Galería solo actúa sobre la tira).
+    mouse_at: Option<(f32, f32)>,
+    /// Galería: corrimiento de la tira, el ancho con el que se calculó y si el panel estaba
+    /// activo al dibujarla (ver `gallery`).
+    strip_scroll: f32,
+    strip_w: f32,
+    strip_active: bool,
+    /// Galería: foco (posición) para el que vale `strip_scroll`; si el foco cambió por otro
+    /// camino, la tira se vuelve a centrar (`gallery::settle_strip`).
+    strip_focus: Option<usize>,
+    /// Galería: elemento (índice en `entries`) presionado en la tira con el último clic y si fue
+    /// en su casilla. El doble clic actúa sobre él aunque la tira se haya corrido entre medio.
+    gallery_press: Option<(usize, bool)>,
+    /// Galería: rueda acumulada que todavía no llegó a un paso (touchpad).
+    wheel_acc: f32,
+    /// Renombrar varios: (posición en `entries`, nombre nuevo, choque) de cada elemento que se
+    /// renombra; la columna Nombre (o la etiqueta) muestra el nombre nuevo. Lo fija la `App` con
+    /// `set_rename_preview` (queda ordenado por posición).
+    pub rename_preview: Option<Vec<(usize, String, Option<crate::rename_many::Clash>)>>,
+    /// Carpeta de red que tarda: se dibuja esto en lugar de la lista vacía (lo pone la `App`).
+    pub placeholder: Option<placeholder::Placeholder>,
+    /// Dónde quedaron los botones del aviso en el último cuadro.
+    pub placeholder_buttons: Vec<(Rect, placeholder::PlaceholderButton)>,
+    /// Botón del aviso bajo el mouse (lo pone la `App`).
+    pub placeholder_hover: Option<placeholder::PlaceholderButton>,
+}
+
+/// Carpeta de un elemento con ruta completa (resultado de búsqueda).
+fn parent_of(e: &Entry) -> String {
+    e.full.as_ref().and_then(|f| std::path::Path::new(f).parent()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Carpeta de un resultado relativa a la carpeta buscada ("fotos/2024"); vacío si está en la
+/// misma carpeta buscada.
+fn relative_folder(root: Option<&std::path::Path>, e: &Entry) -> String {
+    let Some(parent) = e.full.as_ref().and_then(|f| std::path::Path::new(f).parent()) else { return String::new() };
+    match root.and_then(|r| parent.strip_prefix(r).ok()) {
+        Some(rel) => rel.to_string_lossy().into_owned(),
+        None => parent.to_string_lossy().into_owned(),
+    }
+}
+
+/// Comparador de `name_matcher` guardado en la lista.
+type NameFilter = Box<dyn Fn(&str) -> bool + Send>;
+
+/// Comparador de nombres para lo escrito en el buscador: partes separadas por `;`, cada una un
+/// patrón con `*` y `?` o un texto que el nombre contiene (sin distinguir mayúsculas). El
+/// comparador recibe el nombre ya en minúsculas.
+pub fn name_matcher(query: &str) -> impl Fn(&str) -> bool + Send + 'static {
+    let parts: Vec<String> = query.split(';').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    move |name: &str| filter_matches(&parts, name)
+}
+
+/// ¿El nombre (en minúsculas) pasa el filtro? Cada parte separada por `;` es un patrón: con `*`
+/// o `?` se compara el nombre entero como comodín; si no, alcanza con que lo contenga.
+fn filter_matches(parts: &[String], name: &str) -> bool {
+    parts.is_empty()
+        || parts.iter().any(|p| if p.contains(['*', '?']) { wildcard(p, name) } else { name.contains(p.as_str()) })
+}
+
+pub use crate::config::wildcard;
+
+/// Selección por patrón: ¿el nombre coincide con alguna parte del patrón? Las partes van
+/// separadas por `;` (`*.jpg;*.png`), con `*` y `?`, sin distinguir mayúsculas; las vacías y los
+/// espacios alrededor no cuentan. Un patrón sin partes no coincide con nada.
+pub fn matches_pattern(name: &str, pattern: &str) -> bool {
+    let name = name.to_lowercase();
+    pattern.split(';').map(str::trim).filter(|p| !p.is_empty()).any(|p| wildcard(&p.to_lowercase(), &name))
+}
+
+impl Default for FileList {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            order: Vec::new(),
+            visible: Vec::new(),
+            selected: Vec::new(),
+            focus: None,
+            auto_focus: true,
+            anchor: None,
+            scroll: 0.0,
+            scroll_target: 0.0,
+            sort: Column::Name,
+            descending: false,
+            show_hidden: false,
+            show_extensions: true,
+            checkboxes: false,
+            hover: None,
+            typeahead: String::new(),
+            typeahead_at: None,
+            area: rect(0.0, 0.0, 0.0, 0.0),
+            thumb_drag: None,
+            pending_select: None,
+            press: None,
+            drop_target: None,
+            columns: default_columns(),
+            name_width: None,
+            view: View::Details,
+            group_by: None,
+            collapsed: Vec::new(),
+            filters: Vec::new(),
+            rows: Vec::new(),
+            header_rows: Vec::new(),
+            entry_keys: Vec::new(),
+            key_table: Vec::new(),
+            key_index: std::collections::HashMap::new(),
+            keys_for: None,
+            keys_day: 0,
+            layout: None,
+            header_focus: None,
+            rows_built: 0,
+            menu: None,
+            header_hover: None,
+            folder: None,
+            search_root: None,
+            name_filter: None,
+            header_drag: None,
+            band: None,
+            focus_visible: true,
+            press_band: None,
+            name_ends: Vec::new(),
+            name_ends_first: 0,
+            eject_rows: Vec::new(),
+            eject_hover: None,
+            eject_rects: Vec::new(),
+            meta: Vec::new(),
+            meta_asked: Vec::new(),
+            meta_cache: std::collections::HashMap::new(),
+            meta_enabled: true,
+            meta_dirty: false,
+            meta_wanted: Vec::new(),
+            mouse_at: None,
+            strip_scroll: 0.0,
+            strip_w: 0.0,
+            strip_active: true,
+            strip_focus: None,
+            gallery_press: None,
+            wheel_acc: 0.0,
+            rename_preview: None,
+            placeholder: None,
+            placeholder_buttons: Vec::new(),
+            placeholder_hover: None,
+        }
+    }
+}
+
+/// Texto de «Tamaño comprimido»: vacío en carpetas y cuando el formato no lo dice (un tar.gz se
+/// comprime entero).
+fn packed_text(e: &Entry) -> String {
+    if e.is_dir || (e.packed == 0 && e.size > 0) { String::new() } else { format::size_kb(e.packed) }
+}
+
+fn compare(a: &Entry, b: &Entry, ma: Option<&crate::fs::Meta>, mb: Option<&crate::fs::Meta>, sort: Column, desc: bool) -> Ordering {
+    // Primero el grupo (secciones de "Este equipo"), después carpetas arriba, en cualquier orden.
+    a.group.cmp(&b.group).then_with(|| b.is_dir.cmp(&a.is_dir)).then_with(|| {
+        let ord = match sort {
+            Column::Name => Ordering::Equal,
+            Column::Modified => a.modified.cmp(&b.modified),
+            Column::Created => a.created.cmp(&b.created),
+            Column::Type => format::caseless_cmp(&a.type_name, &b.type_name),
+            Column::Extension => extension_of(a).cmp(extension_of(b)),
+            Column::Size => a.size.cmp(&b.size),
+            Column::Packed => a.packed.cmp(&b.packed),
+            Column::Attributes => attr_letters(a.attrs).cmp(&attr_letters(b.attrs)),
+            Column::Folder => format::caseless_cmp(&parent_of(a), &parent_of(b)),
+            col => meta::meta_cmp(col, ma, mb),
+        }
+        .then_with(|| format::natural_cmp(&a.sort_key, &b.sort_key));
+        if desc { ord.reverse() } else { ord }
+    })
+}
+
+impl FileList {
+    /// ¿Se ve el elemento con la configuración actual (ocultos y filtro por nombre)?
+    fn shows(&self, e: &Entry) -> bool {
+        (self.show_hidden || !e.is_hidden()) && self.name_filter.as_ref().is_none_or(|f| f(&e.sort_key))
+    }
+
+    /// Vacía la lista (navegación a otra carpeta).
+    pub fn clear(&mut self) {
+        // La vista queda como estaba hasta que la pestaña aplique la de la carpeta nueva.
+        let (columns, collapsed, filters) = (std::mem::take(&mut self.columns), std::mem::take(&mut self.collapsed), std::mem::take(&mut self.filters));
+        *self = Self {
+            sort: self.sort,
+            descending: self.descending,
+            show_hidden: self.show_hidden,
+            show_extensions: self.show_extensions,
+            checkboxes: self.checkboxes,
+            columns,
+            name_width: self.name_width,
+            view: self.view,
+            group_by: self.group_by,
+            collapsed,
+            filters,
+            ..Default::default()
+        };
+    }
+
+    /// Cómo se ve la lista, para guardarlo como vista de su carpeta. El nombre lleva el ancho
+    /// fijado a mano, o 0 si ocupa lo que sobra.
+    pub fn view_settings(&self) -> ViewSettings {
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| if c.col == Column::Name { ColumnSpec { col: Column::Name, width: self.name_width.unwrap_or(0.0) } } else { *c })
+            .collect();
+        ViewSettings {
+            view: self.view,
+            sort: self.sort,
+            descending: self.descending,
+            columns,
+            group_by: self.group_by,
+            collapsed: self.collapsed.clone(),
+            filters: self.filters.clone(),
+        }
+    }
+
+    /// Aplica la vista de una carpeta, conservando el elemento con foco a la vista.
+    pub fn apply_view_settings(&mut self, v: &ViewSettings) {
+        let resort = self.sort != v.sort || self.descending != v.descending;
+        let regroup = self.group_by != v.group_by || self.collapsed != v.collapsed;
+        let refilter = self.filters != v.filters;
+        let was_horizontal = self.horizontal();
+        self.sort = v.sort;
+        self.descending = v.descending;
+        self.columns = v.columns.clone();
+        self.name_width = v.columns.iter().find(|c| c.col == Column::Name).map(|c| c.width).filter(|w| *w > 0.0);
+        self.group_by = v.group_by;
+        self.collapsed = v.collapsed.clone();
+        self.filters = v.filters.clone();
+        self.header_drag = None;
+        if self.view != v.view {
+            self.set_view(v.view);
+        }
+        // Cambió el eje del desplazamiento (la Lista se agrupó o se desagrupó): lo que estaba
+        // desplazado en un eje no vale en el otro.
+        if self.horizontal() != was_horizontal {
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
+        }
+        if (resort || refilter) && !self.entries.is_empty() {
+            let focus = self.focused_index();
+            self.rebuild(focus);
+            if let Some(f) = self.focus {
+                self.ensure_visible(f);
+            }
+        } else if regroup {
+            self.regroup_keep_focus();
+        }
+    }
+
+    /// Agrega un lote durante la carga progresiva. Solo se ordena el lote nuevo y se mezcla
+    /// con lo que ya estaba ordenado: reordenar todo con cada lote no escala a 100.000 archivos.
+    pub fn append(&mut self, batch: Vec<Entry>) {
+        let focus_entry = self.focused_index();
+        let start = self.entries.len() as u32;
+        self.selected.extend(std::iter::repeat_n(false, batch.len()));
+        self.meta.resize(start as usize, None);
+        self.meta_asked.resize(start as usize, false);
+        self.meta_for_new(&batch);
+        self.entries.extend(batch);
+
+        // Primero los filtros por columna (ver `filters`); después se ordena y se agrupa.
+        let now = self.filter_now();
+        let mut new: Vec<u32> = (start..self.entries.len() as u32)
+            .filter(|&i| {
+                let e = &self.entries[i as usize];
+                self.shows(e) && self.passes_filters(i as usize, now)
+            })
+            .collect();
+        let (entries, metas, enabled) = (&self.entries, &self.meta, self.meta_enabled);
+        let (sort, desc) = (self.sort, self.descending);
+        let cmp = |a: &u32, b: &u32| {
+            let (a, b) = (*a as usize, *b as usize);
+            compare(&entries[a], &entries[b], meta::meta_at(metas, enabled, a), meta::meta_at(metas, enabled, b), sort, desc)
+        };
+        new.sort_unstable_by(cmp);
+
+        let old = std::mem::take(&mut self.order);
+        let mut merged = Vec::with_capacity(old.len() + new.len());
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() && j < new.len() {
+            if cmp(&new[j], &old[i]) == Ordering::Less {
+                merged.push(new[j]);
+                j += 1;
+            } else {
+                merged.push(old[i]);
+                i += 1;
+            }
+        }
+        merged.extend_from_slice(&old[i..]);
+        merged.extend_from_slice(&new[j..]);
+        self.order = merged;
+        self.regroup();
+        self.refresh_filter_menu();
+
+        self.restore_focus(focus_entry);
+    }
+
+    /// Reemplaza el contenido (recarga silenciosa) conservando selección, foco y scroll por nombre.
+    pub fn replace(&mut self, entries: Vec<Entry>) {
+        let selected: std::collections::HashSet<OsString> =
+            self.selected_entries().map(|e| e.name.clone()).collect();
+        let focus_name = self.focused_index().map(|i| self.entries[i].name.clone());
+        self.selected = entries.iter().map(|e| selected.contains(&e.name)).collect();
+        self.entries = entries;
+        self.meta_from_cache();
+        // Los grupos se vuelven a calcular para los elementos nuevos.
+        self.entry_keys.clear();
+        let focus = focus_name.and_then(|n| self.entries.iter().position(|e| e.name == n));
+        self.rebuild(focus);
+        self.hover = None;
+        self.clamp_scroll();
+        self.reask_visible_meta();
+    }
+
+    pub fn set_overlays(&mut self, overlays: &[(u32, u8)]) {
+        for &(pos, overlay) in overlays {
+            if let Some(e) = self.entries.get_mut(pos as usize) {
+                e.overlay = overlay;
+            }
+        }
+    }
+
+    /// Elementos visibles en el último frame cuya superposición no se consultó todavía.
+    /// Quedan marcados como consultados.
+    pub fn take_unchecked_visible(&mut self) -> Vec<usize> {
+        if self.visible.is_empty() || self.view_len() <= 0.0 {
+            return Vec::new();
+        }
+        let (first, last) = self.visible_range();
+        let mut out = Vec::new();
+        for pos in first..last {
+            let idx = self.visible[pos] as usize;
+            let e = &mut self.entries[idx];
+            if !e.overlay_checked {
+                e.overlay_checked = true;
+                out.push(idx);
+            }
+        }
+        out
+    }
+
+    pub fn set_icons(&mut self, icons: &[(u32, i32)]) {
+        for &(pos, icon) in icons {
+            if let Some(e) = self.entries.get_mut(pos as usize) {
+                e.icon = icon;
+            }
+        }
+    }
+
+    /// Pone el foco en un elemento por nombre (p. ej. la carpeta de la que se subió).
+    /// ⏏ bajo el punto: el índice del disco.
+    pub fn eject_hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.eject_rects.iter().find(|(r, _)| contains(r, x, y)).map(|&(_, i)| i)
+    }
+
+    /// Dónde se dibujó el ⏏ de la fila `idx` (índice de `entries`) en el último cuadro.
+    pub fn eject_button(&self, idx: usize) -> Option<Rect> {
+        self.eject_rects.iter().find(|&&(_, i)| i == idx).map(|&(r, _)| r)
+    }
+
+    pub fn focus_name(&mut self, name: &OsString) -> bool {
+        let Some(idx) = self.entries.iter().position(|e| &e.name == name) else { return false };
+        self.reveal(idx);
+        let Some(pos) = self.visible.iter().position(|&v| v as usize == idx) else { return false };
+        self.select_only(pos);
+        // Al terminar de cargar una carpeta no se anima: ya está donde tiene que estar.
+        self.ensure_visible(pos);
+        self.snap_scroll();
+        true
+    }
+
+    pub fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        let focus = self.focused_index();
+        self.rebuild(focus);
+        self.clamp_scroll();
+    }
+
+    pub fn set_sort(&mut self, column: Column) {
+        if self.sort == column {
+            self.descending = !self.descending;
+        } else {
+            self.sort = column;
+            // Fechas y tamaños: lo más nuevo/grande primero, como el Explorador.
+            self.descending = matches!(column, Column::Modified | Column::Size);
+        }
+        let focus = self.focused_index();
+        self.rebuild(focus);
+        if let Some(f) = self.focus {
+            self.ensure_visible(f);
+        }
+    }
+
+    // ---------- accesibilidad (ver a11y.rs) ----------
+
+    /// Posición con foco (en los elementos a la vista).
+    pub fn focus_pos(&self) -> Option<usize> {
+        self.focus.filter(|_| self.header_focus.is_none())
+    }
+
+    /// Lo que un lector de pantalla necesita saber del elemento en la posición `pos`.
+    pub fn item_info(&self, pos: usize) -> Option<ItemInfo> {
+        let idx = *self.visible.get(pos)? as usize;
+        let e = &self.entries[idx];
+        let rect = self.item_rect(pos);
+        let rows = self.rows_area();
+        Some(ItemInfo {
+            name: e.display.clone(),
+            kind: e.type_name.to_string(),
+            size: if e.is_dir { String::new() } else { format::size_kb(e.size) },
+            date: if e.modified != 0 { format::date(e.modified) } else { String::new() },
+            is_dir: e.is_dir,
+            selected: self.selected[idx],
+            rect,
+            offscreen: rect.bottom <= rows.top || rect.top >= rows.bottom || rect.right <= rows.left || rect.left >= rows.right,
+        })
+    }
+
+    /// Selecciona solo ese elemento y lo trae a la vista (patrón de selección de UI Automation).
+    pub fn select_pos(&mut self, pos: usize) {
+        if pos < self.visible.len() {
+            self.select_only(pos);
+            self.ensure_visible(pos);
+        }
+    }
+
+    /// Agrega (o saca) el elemento de la selección sin tocar el resto.
+    pub fn set_selected_pos(&mut self, pos: usize, on: bool) {
+        if let Some(&idx) = self.visible.get(pos) {
+            self.header_focus = None;
+            self.auto_focus = false;
+            self.selected[idx as usize] = on;
+            self.focus = Some(pos);
+            self.anchor = Some(pos);
+        }
+    }
+
+    /// Posiciones seleccionadas, en orden.
+    pub fn selected_positions(&self) -> Vec<usize> {
+        self.visible.iter().enumerate().filter(|(_, idx)| self.selected[**idx as usize]).map(|(pos, _)| pos).collect()
+    }
+
+    /// Elemento (posición) bajo un punto de la ventana, en DIPs.
+    pub fn pos_at_point(&self, x: f32, y: f32) -> Option<usize> {
+        self.pos_at(x, y)
+    }
+
+    /// Índice en `entries` del elemento de esa posición (para abrirlo).
+    pub fn entry_of_pos(&self, pos: usize) -> Option<usize> {
+        self.visible.get(pos).map(|&i| i as usize)
+    }
+
+    pub fn count(&self) -> usize {
+        self.visible.len()
+    }
+
+    pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.selected.iter().enumerate().filter(|(_, s)| **s).map(|(i, _)| i)
+    }
+
+    pub fn selected_entries(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter().zip(&self.selected).filter(|(_, s)| **s).map(|(e, _)| e)
+    }
+
+    /// Elemento con foco (índice en `entries`); ninguno mientras el foco está en un encabezado de
+    /// grupo.
+    pub fn focused_index(&self) -> Option<usize> {
+        self.focus_pos().and_then(|p| self.visible.get(p)).map(|&i| i as usize)
+    }
+
+    /// Filtra ocultos y filtros por columna, ordena, agrupa y reubica el foco en `focus_entry`.
+    fn rebuild(&mut self, focus_entry: Option<usize>) {
+        let now = self.filter_now();
+        let shown: Vec<bool> = self.entries.iter().enumerate().map(|(i, e)| self.shows(e) && self.passes_filters(i, now)).collect();
+        self.order = (0..self.entries.len() as u32).filter(|&i| shown[i as usize]).collect();
+        // Lo que queda fuera se deselecciona para no operar sobre lo que no se ve.
+        for (s, &v) in self.selected.iter_mut().zip(&shown) {
+            *s &= v;
+        }
+
+        let (entries, sort, desc) = (&self.entries, self.sort, self.descending);
+        let (metas, enabled) = (&self.meta, self.meta_enabled);
+        self.order.sort_unstable_by(|&a, &b| {
+            let (a, b) = (a as usize, b as usize);
+            compare(&entries[a], &entries[b], meta::meta_at(metas, enabled, a), meta::meta_at(metas, enabled, b), sort, desc)
+        });
+        self.regroup();
+        self.refresh_filter_menu();
+
+        self.restore_focus(focus_entry);
+    }
+
+    fn restore_focus(&mut self, focus_entry: Option<usize>) {
+        self.focus = if self.auto_focus {
+            None
+        } else {
+            focus_entry.and_then(|f| self.visible.iter().position(|&v| v as usize == f))
+        };
+        // Con el foco en un encabezado, ningún elemento lo toma.
+        if self.focus.is_none() && !self.visible.is_empty() && self.header_focus.is_none() {
+            self.focus = Some(0);
+            self.auto_focus = true;
+        }
+        self.anchor = self.focus;
+        // Galería: lo que se presionó antes de rearmar ya no vale, y la tira sigue al foco.
+        self.gallery_press = None;
+        if self.view == View::Gallery {
+            self.settle_strip();
+        }
+    }
+
+    // ---------- geometría ----------
+
+    // En detalles y contenido cada "línea" es una fila; en las cuadrículas, una fila de celdas.
+    // Todo lo que ubica elementos pasa por `line_h`, `per_line` e `item_rect`. La Lista sin
+    // agrupar es la excepción: columnas que se llenan de arriba abajo y se desplazan a los
+    // costados (`horizontal`); ahí `scroll` es el desplazamiento horizontal.
+
+    fn header_h(&self) -> f32 {
+        if self.view.has_header() { HEADER_H } else { 0.0 }
+    }
+
+    fn rows_area(&self) -> Rect {
+        rect(self.area.left, self.area.top + self.header_h(), self.area.right, self.area.bottom)
+    }
+
+    /// Lista sin agrupar: columnas de arriba abajo y desplazamiento horizontal. Agrupada, la
+    /// Lista es una cuadrícula de celdas chicas que se desplaza hacia abajo (los encabezados de
+    /// grupo ocupan una fila entera, como en las demás vistas).
+    fn horizontal(&self) -> bool {
+        self.view == View::List && self.group_by.is_none()
+    }
+
+    /// Varios elementos por línea, de izquierda a derecha (cuadrículas y Lista agrupada).
+    fn flows(&self) -> bool {
+        self.view.is_grid() || self.view == View::List
+    }
+
+    /// Largo a la vista en el eje del desplazamiento: el alto, o el ancho en la Lista.
+    fn view_len(&self) -> f32 {
+        if self.horizontal() {
+            return (self.area.right - self.area.left).max(0.0);
+        }
+        (self.area.bottom - self.area.top - self.header_h()).max(0.0)
+    }
+
+    /// Alto de una línea.
+    fn line_h(&self) -> f32 {
+        match self.view {
+            v if v.is_grid() => v.icon() + LABEL_H + 14.0,
+            View::Content => CONTENT_H,
+            _ => ROW_H,
+        }
+    }
+
+    /// Ancho de una celda de la cuadrícula (en la Lista, el de una columna).
+    fn cell_w(&self) -> f32 {
+        if self.view == View::List { LIST_COL_W } else { (self.view.icon() + 40.0).max(96.0) }
+    }
+
+    /// Margen izquierdo de las celdas.
+    fn cell_pad(&self) -> f32 {
+        if self.view.is_grid() { GRID_PAD } else { LIST_PAD }
+    }
+
+    /// Elementos por línea.
+    fn per_line(&self) -> usize {
+        if !self.flows() || self.horizontal() {
+            return 1;
+        }
+        let usable = self.area.right - self.area.left - SCROLLBAR_W - self.cell_pad() * 2.0;
+        ((usable / self.cell_w()).floor() as usize).max(1)
+    }
+
+    /// Lista: filas por columna (lo que entra arriba de la barra horizontal).
+    fn rows_per_col(&self) -> usize {
+        let h = self.area.bottom - self.area.top - LIST_PAD - SCROLLBAR_W;
+        ((h / ROW_H).floor() as usize).max(1)
+    }
+
+    /// Margen de arriba del contenido (la cuadrícula no arranca pegada al borde); en la Lista,
+    /// también el de la izquierda.
+    fn top_pad(&self) -> f32 {
+        match self.view {
+            v if v.is_grid() => GRID_PAD,
+            View::List | View::Content => LIST_PAD,
+            _ => 0.0,
+        }
+    }
+
+    /// Largo del contenido en el eje del desplazamiento, más fondo libre al final (dos líneas
+    /// vacías hacia abajo; una columna en la Lista), para poder hacer clic derecho en la carpeta
+    /// o arrancar un rectángulo aunque los elementos llenen el panel.
+    fn content_len(&self) -> f32 {
+        // La Galería no se desplaza: la tira se corre sola para centrar el enfocado.
+        if self.view == View::Gallery {
+            return 0.0;
+        }
+        if self.horizontal() {
+            let cols = self.visible.len().div_ceil(self.rows_per_col());
+            return (cols + 1) as f32 * LIST_COL_W + LIST_PAD * 2.0;
+        }
+        if let Some(l) = &self.layout {
+            return l.bottom + self.top_pad() + self.line_h() * 2.0;
+        }
+        let lines = self.visible.len().div_ceil(self.per_line());
+        lines as f32 * self.line_h() + self.top_pad() * 2.0 + self.line_h() * 2.0
+    }
+
+    /// Elementos que entran en una página (Re Pág / Av Pág).
+    fn page_rows(&self) -> usize {
+        if self.horizontal() {
+            return ((self.view_len() / LIST_COL_W).floor() as usize).max(1) * self.rows_per_col();
+        }
+        ((self.view_len() / self.line_h()).floor() as usize).max(1) * self.per_line()
+    }
+
+    /// Posiciones (en `visible`) a la vista: [primera, última).
+    fn visible_range(&self) -> (usize, usize) {
+        if self.view == View::Gallery {
+            return self.strip_range();
+        }
+        if let Some(layout) = &self.layout {
+            let mut range: Option<(usize, usize)> = None;
+            for l in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_len())] {
+                if l.header.is_none() {
+                    let end = (l.first + l.count) as usize;
+                    range = Some(range.map_or((l.first as usize, end), |(f, _)| (f, end)));
+                }
+            }
+            return range.unwrap_or((0, 0));
+        }
+        let n = self.visible.len();
+        if self.horizontal() {
+            let per = self.rows_per_col();
+            let first_col = ((self.scroll - LIST_PAD).max(0.0) / LIST_COL_W).floor() as usize;
+            let cols = (self.view_len() / LIST_COL_W).ceil() as usize + 1;
+            return ((first_col * per).min(n), ((first_col + cols) * per).min(n));
+        }
+        let (lh, per) = (self.line_h(), self.per_line());
+        let first_line = ((self.scroll - self.top_pad()).max(0.0) / lh).floor() as usize;
+        let lines = (self.view_len() / lh).ceil() as usize + 1;
+        ((first_line * per).min(n), ((first_line + lines) * per).min(n))
+    }
+
+    /// Rectángulo de un elemento (fila en detalles y contenido, celda en las cuadrículas y en la
+    /// Lista).
+    fn item_rect(&self, pos: usize) -> Rect {
+        if self.view == View::Gallery {
+            return self.strip_cell_rect(pos);
+        }
+        let rows = self.rows_area();
+        if self.horizontal() {
+            let per = self.rows_per_col();
+            let x = rows.left + LIST_PAD + (pos / per) as f32 * LIST_COL_W - self.scroll;
+            let y = rows.top + LIST_PAD + (pos % per) as f32 * ROW_H;
+            return rect(x, y, x + LIST_COL_W, y + ROW_H);
+        }
+        // Con grupos, la línea y la columna salen de la geometría agrupada.
+        let placed = self.layout.as_ref().and_then(|l| {
+            let line = l.lines[*l.pos_line.get(pos)? as usize];
+            Some((line.top, pos - line.first as usize))
+        });
+        let lh = self.line_h();
+        if self.view.is_row() {
+            let top = placed.map_or(self.top_pad() + pos as f32 * lh, |(top, _)| top);
+            let y = rows.top + top - self.scroll;
+            return rect(rows.left, y, rows.right - SCROLLBAR_W, y + lh);
+        }
+        let per = self.per_line();
+        let (line, col) = (pos / per, pos % per);
+        let col = placed.map_or(col, |(_, c)| c);
+        let w = self.flow_cell_w();
+        let x = rows.left + self.cell_pad() + col as f32 * w;
+        let top = placed.map_or(self.top_pad() + line as f32 * lh, |(top, _)| top);
+        let y = rows.top + top - self.scroll;
+        rect(x, y, x + w, y + lh)
+    }
+
+    /// Ancho de cada celda cuando van varias por línea: en las cuadrículas se reparten el ancho
+    /// sobrante, para no dejar un hueco a la derecha; en la Lista, el ancho fijo del diseño.
+    fn flow_cell_w(&self) -> f32 {
+        if !self.view.is_grid() {
+            return self.cell_w();
+        }
+        let usable = self.area.right - self.area.left - SCROLLBAR_W - GRID_PAD * 2.0;
+        (usable / self.per_line() as f32).max(self.cell_w())
+    }
+
+    /// Elemento bajo el punto (posición en `visible`).
+    fn pos_at(&self, x: f32, y: f32) -> Option<usize> {
+        if self.view == View::Gallery {
+            return self.strip_pos_at(x, y);
+        }
+        let rows = self.rows_area();
+        if self.horizontal() {
+            // La barra horizontal está abajo; las columnas, corridas por el desplazamiento.
+            if y < rows.top || y >= rows.bottom - SCROLLBAR_W || x < rows.left || x >= rows.right {
+                return None;
+            }
+            let per = self.rows_per_col();
+            let col = ((x - rows.left - LIST_PAD + self.scroll) / LIST_COL_W).floor();
+            let row = ((y - rows.top - LIST_PAD) / ROW_H).floor();
+            if col < 0.0 || row < 0.0 || row as usize >= per {
+                return None;
+            }
+            let pos = col as usize * per + row as usize;
+            return (pos < self.visible.len()).then_some(pos);
+        }
+        if y < rows.top || y >= rows.bottom || x >= rows.right - SCROLLBAR_W {
+            return None;
+        }
+        let per = self.per_line();
+        let w = self.flow_cell_w();
+        let col_at = |x: f32| if self.flows() { ((x - rows.left - self.cell_pad()) / w).floor() } else { 0.0 };
+        if let Some(layout) = &self.layout {
+            // Con grupos: la línea bajo el punto; los encabezados no son elementos.
+            let line = layout.lines[layout.line_at(y - rows.top + self.scroll)?];
+            if line.header.is_some() {
+                return None;
+            }
+            let col = col_at(x);
+            return (col >= 0.0 && (col as u32) < line.count).then_some(line.first as usize + col as usize);
+        }
+        let col = col_at(x);
+        let line = ((y - rows.top - self.top_pad() + self.scroll) / self.line_h()).floor();
+        if col < 0.0 || line < 0.0 || col as usize >= per {
+            return None;
+        }
+        let pos = line as usize * per + col as usize;
+        (pos < self.visible.len()).then_some(pos)
+    }
+
+    fn clamp_scroll(&mut self) {
+        let max = (self.content_len() - self.view_len()).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, max);
+        self.scroll_target = self.scroll_target.clamp(0.0, max);
+    }
+
+    /// Lleva el scroll dibujado al destino sin animar.
+    fn snap_scroll(&mut self) {
+        self.scroll = self.scroll_target;
+    }
+
+    /// Lleva el elemento a la vista (el destino del scroll; se llega suave, ver `tick`).
+    fn ensure_visible(&mut self, pos: usize) {
+        // Galería: la tira se corre para centrarlo (teclado, rueda, búsqueda por tipeo).
+        if self.view == View::Gallery {
+            self.center_strip(pos);
+            return;
+        }
+        if self.horizontal() {
+            let left = LIST_PAD + (pos / self.rows_per_col()) as f32 * LIST_COL_W;
+            self.ensure_span(left, LIST_COL_W);
+            return;
+        }
+        let mut lh = self.line_h();
+        let mut top = self.top_pad() + (pos / self.per_line()) as f32 * lh;
+        if let Some(layout) = &self.layout
+            && let Some(&li) = layout.pos_line.get(pos)
+        {
+            let l = layout.lines[li as usize];
+            (top, lh) = (l.top, l.h);
+            // La primera línea de un grupo lleva también su encabezado a la vista.
+            if let Some(h) = (li as usize).checked_sub(1).map(|i| layout.lines[i]).filter(|h| h.header.is_some()) {
+                (top, lh) = (h.top, l.top + l.h - h.top);
+            }
+        }
+        self.ensure_span(top, lh);
+    }
+
+    /// Lleva a la vista el tramo [top, top + lh) del contenido (en la Lista, [izquierda, + ancho)).
+    fn ensure_span(&mut self, top: f32, lh: f32) {
+        if top < self.scroll_target {
+            self.scroll_target = (top - self.top_pad()).max(0.0);
+        } else if top + lh > self.scroll_target + self.view_len() {
+            self.scroll_target = top + lh - self.view_len() + self.top_pad();
+        }
+        self.clamp_scroll();
+        if !crate::anim::enabled() {
+            self.snap_scroll();
+        }
+    }
+
+    /// Avanza el scroll suave `dt` segundos. Devuelve si todavía le falta (hay que pedir otro frame).
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if self.scroll == self.scroll_target {
+            return false;
+        }
+        self.scroll = if crate::anim::enabled() { crate::anim::smooth(self.scroll, self.scroll_target, dt) } else { self.scroll_target };
+        self.scroll != self.scroll_target
+    }
+
+    /// Cambia la vista conservando el elemento con foco a la vista.
+    pub fn set_view(&mut self, view: View) {
+        self.view = view;
+        self.name_ends.clear();
+        self.header_drag = None;
+        // Solo Detalles tiene encabezado: ni flecha ni desplegable en las demás.
+        self.menu = None;
+        self.header_hover = None;
+        self.hover = None;
+        self.scroll = 0.0;
+        self.scroll_target = 0.0;
+        if view == View::Gallery {
+            // La tira no tiene encabezados de grupo: el foco va a un elemento.
+            self.header_focus = None;
+            if self.focus.is_none_or(|f| f >= self.visible.len()) {
+                self.focus = (!self.visible.is_empty()).then_some(0);
+            }
+        }
+        self.relayout();
+        if let Some(f) = self.focus {
+            self.ensure_visible(f);
+            self.snap_scroll();
+        }
+    }
+
+    /// Columnas que entran en el ancho disponible, de izquierda a derecha: (columna, izquierda,
+    /// derecha). El nombre ocupa lo que dejan las demás (al menos `NAME_MIN`); si no alcanza, se
+    /// dejan de mostrar las del final.
+    fn columns(&self) -> Vec<(Column, f32, f32)> {
+        self.layout_columns().into_iter().map(|(_, c, l, r)| (c, l, r)).collect()
+    }
+
+    /// Igual que `columns`, con el índice de cada una en `self.columns`.
+    fn layout_columns(&self) -> Vec<(usize, Column, f32, f32)> {
+        let avail = self.area.right - SCROLLBAR_W - self.area.left;
+        // Con el nombre fijo, las demás columnas entran en lo que queda; si no, él toma lo que sobra.
+        let fixed_name = self.name_width.map(|w| w.clamp(MIN_COL_W, (avail - MIN_COL_W).max(MIN_COL_W)));
+        let room = (avail - fixed_name.unwrap_or(NAME_MIN)).max(0.0);
+        // Si no entran, todas se angostan en proporción (hasta MIN_COL_W); recién si así tampoco
+        // alcanza, se dejan de mostrar las del final.
+        let widths = |n: usize| -> Vec<f32> {
+            let fixed: f32 = self.columns.iter().take(n).filter(|c| c.col != Column::Name).map(|c| c.width).sum();
+            let k = if fixed > room && fixed > 0.0 { room / fixed } else { 1.0 };
+            self.columns.iter().take(n).map(|c| if c.col == Column::Name { 0.0 } else { (c.width * k).max(MIN_COL_W) }).collect()
+        };
+        let mut shown = self.columns.len();
+        while shown > 1 && widths(shown).iter().sum::<f32>() > room && self.columns[shown - 1].col != Column::Name {
+            shown -= 1;
+        }
+        let w = widths(shown);
+        let name_w = fixed_name.unwrap_or_else(|| (avail - w.iter().sum::<f32>()).max(NAME_MIN.min(avail)));
+        let mut x = self.area.left;
+        let mut out = Vec::with_capacity(shown);
+        for (i, c) in self.columns.iter().take(shown).enumerate() {
+            let cw = if c.col == Column::Name { name_w } else { w[i] };
+            out.push((i, c.col, x, x + cw));
+            x += cw;
+        }
+        out
+    }
+
+    /// ¿El punto está en el encabezado de la lista?
+    pub fn in_header(&self, x: f32, y: f32) -> bool {
+        self.view.has_header() && y >= self.area.top && y < self.area.top + HEADER_H && x >= self.area.left && x < self.area.right
+    }
+
+    /// Borde de encabezado bajo el mouse, para cambiar un ancho: índice (en `columns`) de la
+    /// columna a cuya derecha está. Vale también para el nombre.
+    fn edge_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.in_header(x, y) {
+            return None;
+        }
+        self.layout_columns().iter().find(|&&(_, _, _, right)| (x - right).abs() <= EDGE_GRAB).map(|&(i, ..)| i)
+    }
+
+    /// Ancho de la columna `index` tal como se ve.
+    fn width_of(&self, index: usize) -> f32 {
+        if self.columns[index].col == Column::Name {
+            self.layout_columns().iter().find(|c| c.0 == index).map_or(NAME_MIN, |c| c.3 - c.2)
+        } else {
+            self.columns[index].width
+        }
+    }
+
+    /// El nombre vuelve a ocupar lo que sobra (columnas de fábrica).
+    pub fn reset_name_width(&mut self) {
+        self.name_width = None;
+    }
+
+    /// Fija el ancho del nombre con el que se ve ahora, para que los bordes dejen de depender de él.
+    fn pin_name(&mut self) {
+        if self.name_width.is_none() {
+            let name = self.columns.iter().position(|c| c.col == Column::Name);
+            self.name_width = name.map(|i| self.width_of(i));
+        }
+    }
+
+    fn set_width(&mut self, index: usize, w: f32) {
+        let w = w.clamp(MIN_COL_W, self.max_width(index));
+        if self.columns[index].col == Column::Name {
+            self.name_width = Some(w);
+        } else {
+            self.columns[index].width = w;
+        }
+    }
+
+    /// Lo más ancha que puede ser la columna `index`: hasta el borde derecho de la lista. Lo que
+    /// quede más allá deja de verse (no hay desplazamiento horizontal).
+    fn max_width(&self, index: usize) -> f32 {
+        let avail = self.area.right - SCROLLBAR_W - self.area.left;
+        let before: f32 = (0..index).map(|i| self.width_of(i)).sum();
+        (avail - before).max(MIN_COL_W)
+    }
+
+    /// Texto de una celda de una columna que no es el nombre (para medirla).
+    fn cell_text(col: Column, e: &Entry, root: Option<&std::path::Path>, show_ext: bool) -> String {
+        match col {
+            Column::Name => shown_name(e, show_ext).to_string(),
+            Column::Modified => format::date(e.modified),
+            Column::Created => format::date(e.created),
+            Column::Type => e.type_name.to_string(),
+            Column::Extension => extension_of(e).to_string(),
+            Column::Attributes => attr_letters(e.attrs),
+            Column::Folder => relative_folder(root, e),
+            // Los metadatos no son del elemento (ver `meta::meta_text`).
+            Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => String::new(),
+            Column::Size => match (e.is_dir, e.modified) {
+                (true, 0) if e.size > 0 => format::size_short(e.size),
+                (true, _) => String::new(),
+                (false, _) => format::size_kb(e.size),
+            },
+            Column::Packed => packed_text(e),
+        }
+    }
+
+    /// Doble clic en un borde del encabezado: la columna a su izquierda se ajusta a su contenido
+    /// más ancho (o a su título), como en el Explorador: el borde se mueve y las columnas de su
+    /// derecha lo siguen. `measure(texto, negrita)` da el ancho de un texto.
+    /// `None` si el punto no está sobre un borde.
+    pub fn fit_column_at(&mut self, x: f32, y: f32, measure: &dyn Fn(&str, bool) -> f32) -> Option<Action> {
+        let index = self.edge_at(x, y)?;
+        self.pin_name();
+        let col = self.columns[index].col;
+        // Solo se miden los textos más largos: medir cada fila de una carpeta enorme sería lento.
+        let root = self.search_root.as_deref();
+        let mut texts: Vec<String> = self
+            .visible
+            .iter()
+            .map(|&v| {
+                let i = v as usize;
+                if col.is_meta() { meta::meta_text(col, self.meta_of(i)) } else { Self::cell_text(col, &self.entries[i], root, self.show_extensions) }
+            })
+            .collect();
+        texts.sort_unstable_by_key(|t| std::cmp::Reverse(t.chars().count()));
+        texts.dedup();
+        let widest = texts.iter().take(40).map(|t| measure(t, false)).fold(0.0, f32::max);
+        let width = if col == Column::Name {
+            PAD * 2.0 + self.check_shift() + ICON + 8.0 + widest + 6.0
+        } else {
+            let title = measure(col.title(), true) + if col == self.sort { 22.0 } else { 0.0 };
+            PAD * 2.0 + widest.max(title) + 4.0
+        };
+        self.set_width(index, width);
+        self.header_drag = None;
+        Some(Action::ColumnsChanged)
+    }
+
+    /// El mouse está sobre un borde de encabezado (cursor de cambiar ancho).
+    pub fn wants_resize_cursor(&self, x: f32, y: f32) -> bool {
+        matches!(self.header_drag, Some(HeaderDrag::Resize { .. })) || self.edge_at(x, y).is_some()
+    }
+
+    /// Muestra u oculta una columna (el nombre no se puede ocultar). Una columna nueva va al final.
+    pub fn toggle_column(&mut self, col: Column) {
+        if col == Column::Name {
+            return;
+        }
+        match self.columns.iter().position(|c| c.col == col) {
+            Some(i) => {
+                self.columns.remove(i);
+                if self.sort == col {
+                    self.sort = Column::Name;
+                    self.descending = false;
+                    let focus = self.focused_index();
+                    self.rebuild(focus);
+                }
+            }
+            None => self.columns.push(ColumnSpec { col, width: col.default_width() }),
+        }
+    }
+
+    /// Elemento (índice en `entries`) bajo el punto, si hay uno.
+    pub fn entry_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !contains(&self.rows_area(), x, y) {
+            return None;
+        }
+        self.pos_at(x, y).map(|pos| self.visible[pos] as usize)
+    }
+
+    /// Barra de desplazamiento: (riel, pulgar), o None si todo entra. En la Lista va abajo,
+    /// horizontal, con los mismos colores y grosor que la vertical.
+    fn scrollbar(&self) -> Option<(Rect, Rect)> {
+        let (view, content) = (self.view_len(), self.content_len());
+        if content <= view || view <= 0.0 {
+            return None;
+        }
+        let rows = self.rows_area();
+        if self.horizontal() {
+            let track = rect(rows.left, rows.bottom - SCROLLBAR_W, rows.right, rows.bottom);
+            let thumb_w = (view * view / content).max(24.0).min(view);
+            let left = track.left + (view - thumb_w) * (self.scroll / (content - view));
+            return Some((track, rect(left, track.top + 3.0, left + thumb_w, track.bottom - 3.0)));
+        }
+        let track = rect(rows.right - SCROLLBAR_W, rows.top, rows.right, rows.bottom);
+        let thumb_h = (view * view / content).max(24.0).min(view);
+        let max_scroll = content - view;
+        let top = track.top + (view - thumb_h) * (self.scroll / max_scroll);
+        Some((track, rect(track.left + 3.0, top, track.right - 3.0, top + thumb_h)))
+    }
+
+    /// El punto y un rectángulo de la barra medidos en el eje del desplazamiento: (punto,
+    /// principio, fin); y en la barra vertical, x en la horizontal de la Lista.
+    fn along(&self, x: f32, y: f32, r: &Rect) -> (f32, f32, f32) {
+        if self.horizontal() { (x, r.left, r.right) } else { (y, r.top, r.bottom) }
+    }
+
+    // ---------- selección ----------
+
+    /// ¿El punto está pasado el ícono y el nombre de esa fila (en cualquier columna)?
+    fn past_name(&self, pos: usize, x: f32) -> bool {
+        if self.view != View::Details {
+            return false;
+        }
+        pos.checked_sub(self.name_ends_first).and_then(|i| self.name_ends.get(i)).is_some_and(|&end| x > end)
+    }
+
+    /// ¿El punto está en la columna del nombre pero a la derecha de donde termina el texto?
+    fn in_name_blank(&self, pos: usize, x: f32) -> bool {
+        if self.view != View::Details {
+            return false;
+        }
+        let Some(&end) = pos.checked_sub(self.name_ends_first).and_then(|i| self.name_ends.get(i)) else { return false };
+        self.layout_columns().iter().any(|&(_, col, _, right)| col == Column::Name && x > end && x < right)
+    }
+
+    /// Punto del mouse para el rectángulo: x de la ventana (sin salirse de la lista) e y del
+    /// contenido, para que siga pegado a los elementos aunque se mueva el scroll. En la Lista,
+    /// al revés: x del contenido e y de la ventana.
+    fn band_point(&self, x: f32, y: f32) -> (f32, f32) {
+        let rows = self.rows_area();
+        if self.horizontal() {
+            let x = x.clamp(rows.left, rows.right) - rows.left + self.scroll;
+            return (x, y.clamp(rows.top, rows.bottom - SCROLLBAR_W));
+        }
+        let x = x.clamp(rows.left, rows.right - SCROLLBAR_W);
+        (x, y.clamp(rows.top, rows.bottom) - rows.top + self.scroll)
+    }
+
+    /// Rectángulo de selección en coordenadas de la ventana.
+    fn band_rect(&self, b: &Band) -> Rect {
+        let rows = self.rows_area();
+        let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
+        let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
+        if self.horizontal() {
+            let dx = rows.left - self.scroll;
+            return rect(x0 + dx, y0, x1 + dx, y1);
+        }
+        rect(x0, y0 + rows.top - self.scroll, x1, y1 + rows.top - self.scroll)
+    }
+
+    /// El mouse se movió con el rectángulo armándose: scroll si se sale por arriba o por abajo
+    /// (en la Lista, por los costados), y la selección pasa a ser lo que toca el rectángulo.
+    fn move_band(&mut self, x: f32, y: f32) {
+        let rows = self.rows_area();
+        let (at, lo, hi) = if self.horizontal() { (x, rows.left, rows.right) } else { (y, rows.top, rows.bottom) };
+        let beyond = if at < lo { at - lo } else if at > hi { at - hi } else { 0.0 };
+        if beyond != 0.0 {
+            self.scroll_target += beyond.clamp(-60.0, 60.0) * 0.5;
+            self.clamp_scroll();
+            // El rectángulo sigue al scroll sin animar.
+            self.snap_scroll();
+        }
+        let at = self.band_point(x, y);
+        if let Some(b) = &mut self.band {
+            b.to = at;
+        }
+        self.apply_band();
+    }
+
+    /// Selección = lo que había (con Ctrl) más los elementos que toca el rectángulo.
+    fn apply_band(&mut self) {
+        let Some(b) = &self.band else { return };
+        let r = self.band_rect(b);
+        let mut sel = b.base.clone();
+        let n = self.visible.len();
+        let (first, last) = if self.horizontal() {
+            // Las columnas que toca el rectángulo.
+            let (x0, x1) = (b.from.0.min(b.to.0), b.from.0.max(b.to.0));
+            let per = self.rows_per_col();
+            let c0 = ((x0 - LIST_PAD) / LIST_COL_W).floor().max(0.0) as usize;
+            let c1 = ((x1 - LIST_PAD) / LIST_COL_W).floor().max(0.0) as usize;
+            ((c0 * per).min(n), ((c1 + 1) * per).min(n))
+        } else {
+            let (y0, y1) = (b.from.1.min(b.to.1), b.from.1.max(b.to.1));
+            let (lh, per, pad) = (self.line_h(), self.per_line(), self.top_pad());
+            match &self.layout {
+                // Con grupos: los elementos de las líneas que toca el rectángulo.
+                Some(layout) => {
+                    let lines = &layout.lines[layout.lines_between(y0, y1.max(y0 + 0.01))];
+                    let items = || lines.iter().filter(|l| l.header.is_none());
+                    (items().next().map_or(0, |l| l.first as usize), items().last().map_or(0, |l| (l.first + l.count) as usize))
+                }
+                None => {
+                    let first_line = ((y0 - pad) / lh).floor().max(0.0) as usize;
+                    let last_line = ((y1 - pad) / lh).floor().max(0.0) as usize;
+                    ((first_line * per).min(n), ((last_line + 1) * per).min(n))
+                }
+            }
+        };
+        let mut hit = None;
+        for pos in first..last {
+            let item = self.item_rect(pos);
+            // Detalles y Contenido: la fila ocupa todo el ancho; en las demás también cuenta la x.
+            let across = self.view.is_row() || (item.left < r.right && item.right > r.left);
+            if across && item.top < r.bottom && item.bottom > r.top {
+                sel[self.visible[pos] as usize] = true;
+                hit = Some(pos);
+            }
+        }
+        self.selected = sel;
+        if let Some(pos) = hit {
+            self.header_focus = None;
+            self.auto_focus = false;
+            self.focus_visible = true;
+            self.focus = Some(pos);
+            self.anchor = Some(pos);
+        }
+    }
+
+    fn select_only(&mut self, pos: usize) {
+        self.header_focus = None;
+        self.auto_focus = false;
+        self.focus_visible = true;
+        self.selected.iter_mut().for_each(|s| *s = false);
+        if let Some(&idx) = self.visible.get(pos) {
+            self.selected[idx as usize] = true;
+        }
+        self.focus = Some(pos);
+        self.anchor = Some(pos);
+    }
+
+    fn select_range(&mut self, to: usize, keep_others: bool) {
+        self.header_focus = None;
+        self.auto_focus = false;
+        self.focus_visible = true;
+        if !keep_others {
+            self.selected.iter_mut().for_each(|s| *s = false);
+        }
+        let from = self.anchor.unwrap_or(0);
+        let (a, b) = if from <= to { (from, to) } else { (to, from) };
+        for &idx in &self.visible[a..=b.min(self.visible.len() - 1)] {
+            self.selected[idx as usize] = true;
+        }
+        self.focus = Some(to);
+    }
+
+    fn toggle(&mut self, pos: usize) {
+        self.header_focus = None;
+        self.auto_focus = false;
+        self.focus_visible = true;
+        if let Some(&idx) = self.visible.get(pos) {
+            self.selected[idx as usize] = !self.selected[idx as usize];
+        }
+        self.focus = Some(pos);
+        self.anchor = Some(pos);
+    }
+
+    pub fn select_all(&mut self) {
+        for &idx in &self.visible {
+            self.selected[idx as usize] = true;
+        }
+    }
+
+    pub fn invert_selection(&mut self) {
+        for &idx in &self.visible {
+            self.selected[idx as usize] = !self.selected[idx as usize];
+        }
+    }
+
+    /// Suma a la selección (o quita, con `select` en falso) los visibles cuyo nombre coincide con
+    /// el patrón (ver `matches_pattern`). Devuelve cuántos cambiaron; sin partes no toca nada.
+    pub fn select_matching(&mut self, pattern: &str, select: bool) -> usize {
+        let mut changed = 0;
+        for &idx in &self.visible {
+            let idx = idx as usize;
+            if self.selected[idx] != select && matches_pattern(&self.entries[idx].name.to_string_lossy(), pattern) {
+                self.selected[idx] = select;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    // ---------- casillas de selección ----------
+
+    /// Cuánto corren el ícono y el nombre para dejarle lugar a la casilla (solo en las vistas por
+    /// filas; en las cuadrículas la casilla va sobre la esquina de la celda).
+    fn check_shift(&self) -> f32 {
+        if self.checkboxes && !self.view.is_grid() { CHECK_SHIFT } else { 0.0 }
+    }
+
+    /// Casilla de un elemento dado su rectángulo (`item_rect`) y el borde izquierdo de la columna
+    /// del nombre en Detalles: a la izquierda del ícono en las filas; arriba a la izquierda de la
+    /// celda en las cuadrículas, como en el Explorador.
+    fn checkbox_rect_in(&self, item: Rect, name_left: Option<f32>) -> Option<Rect> {
+        if !self.checkboxes {
+            return None;
+        }
+        let (x, y) = match self.view {
+            v if v.is_grid() => (item.left + 7.0, item.top + 7.0),
+            View::Gallery => (item.left + gallery::CHECK_INSET, item.top + gallery::CHECK_INSET),
+            View::List => (item.left + 8.0, item.top + (ROW_H - CHECK) / 2.0),
+            View::Content => (item.left + 14.0, item.top + (CONTENT_H - CHECK) / 2.0),
+            _ => (name_left? + PAD, item.top + (ROW_H - CHECK) / 2.0),
+        };
+        Some(rect(x, y, x + CHECK, y + CHECK))
+    }
+
+    /// Elemento cuya casilla está bajo el punto (con un margen para el clic).
+    fn checkbox_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.checkboxes || !contains(&self.rows_area(), x, y) {
+            return None;
+        }
+        let pos = self.pos_at(x, y)?;
+        let name_left = self.columns().iter().find(|c| c.0 == Column::Name).map(|c| c.1);
+        let r = self.checkbox_rect_in(self.item_rect(pos), name_left)?;
+        contains(&grow(r, CHECK_SLOP), x, y).then_some(pos)
+    }
+
+    /// Casilla del encabezado (solo en Detalles), sobre las de las filas.
+    fn header_checkbox_rect(&self) -> Option<Rect> {
+        if !self.checkboxes || self.view != View::Details {
+            return None;
+        }
+        let (_, left, _) = self.columns().into_iter().find(|c| c.0 == Column::Name)?;
+        let (x, y) = (left + PAD, self.area.top + (HEADER_H - CHECK) / 2.0);
+        Some(rect(x, y, x + CHECK, y + CHECK))
+    }
+
+    /// Estado de la casilla del encabezado según lo que está a la vista.
+    pub fn check_state(&self) -> CheckState {
+        let marked = self.visible.iter().filter(|&&i| self.selected[i as usize]).count();
+        match marked {
+            0 => CheckState::Empty,
+            n if n == self.visible.len() => CheckState::Checked,
+            _ => CheckState::Partial,
+        }
+    }
+
+    /// Clic en la casilla del encabezado: si ya está todo lo visible, quita toda la selección; si
+    /// no, selecciona todo lo visible (los grupos plegados no cuentan, como Ctrl+A).
+    pub fn toggle_all_checked(&mut self) {
+        if self.check_state() == CheckState::Checked {
+            self.selected.iter_mut().for_each(|s| *s = false);
+        } else {
+            self.select_all();
+        }
+    }
+
+    // ---------- entrada ----------
+
+    /// Teclas de navegación. Devuelve None si la tecla no es de la lista.
+    pub fn on_key(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
+        use crate::keys::Key;
+        use crate::keys::keys::*;
+        // La Galería recorre `visible` sin encabezados, también con grupos.
+        if self.view == View::Gallery {
+            return self.on_key_gallery(vk, ctrl, shift);
+        }
+        if self.layout.is_some() {
+            return self.on_key_grouped(vk, ctrl, shift);
+        }
+        let n = self.visible.len();
+        if n == 0 {
+            return None;
+        }
+        self.focus_visible = true;
+        let cur = self.focus.unwrap_or(0);
+        let page = self.page_rows();
+        // Sin selección, la primera flecha selecciona la fila con foco en vez de saltearla.
+        let step = usize::from(self.selected.iter().any(|&s| s));
+        // En la cuadrícula arriba/abajo saltan una fila de celdas y izquierda/derecha, una celda.
+        // En la Lista (columnas de arriba abajo), al revés: arriba/abajo, un elemento;
+        // izquierda/derecha, una columna.
+        let (vert, horiz) = if self.horizontal() { (1, self.rows_per_col()) } else { (self.per_line(), 1) };
+        let sideways = self.flows();
+        let target = match Key(vk) {
+            VK_UP => cur.saturating_sub(step * vert),
+            VK_DOWN if cur + step * vert < n => cur + step * vert,
+            // Abajo desde la última fila incompleta: el último elemento.
+            VK_DOWN => n - 1,
+            VK_LEFT if sideways => cur.saturating_sub(step * horiz),
+            VK_RIGHT if sideways => (cur + step * horiz).min(n - 1),
+            VK_PRIOR => cur.saturating_sub(page),
+            VK_NEXT => (cur + page).min(n - 1),
+            VK_HOME => 0,
+            VK_END => n - 1,
+            VK_SPACE if ctrl => {
+                self.toggle(cur);
+                return Some(Action::Redraw);
+            }
+            VK_RETURN => return self.focused_index().map(Action::Open),
+            _ => return None,
+        };
+        self.move_focus_to(target, ctrl, shift);
+        Some(Action::Redraw)
+    }
+
+    /// Lleva el foco a la posición con las teclas: con Shift, rango desde el ancla; con Ctrl, solo
+    /// el foco; si no, la selección pasa a ser ese elemento.
+    fn move_focus_to(&mut self, target: usize, ctrl: bool, shift: bool) {
+        if shift {
+            self.select_range(target, ctrl);
+        } else if ctrl {
+            self.header_focus = None;
+            self.focus = Some(target);
+            self.auto_focus = false;
+        } else {
+            self.select_only(target);
+        }
+        self.ensure_visible(target);
+    }
+
+    /// Teclas con grupos: ↑/↓ recorren encabezados y elementos de los grupos desplegados (los
+    /// plegados se saltean); con el foco en un encabezado, ← lo pliega, → lo despliega y Enter o
+    /// Espacio lo alternan; en Detalles, ← desde un elemento lleva al encabezado de su grupo.
+    fn on_key_grouped(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
+        use crate::keys::Key;
+        use crate::keys::keys::*;
+        let layout = self.layout.as_ref()?;
+        if layout.lines.is_empty() {
+            return None;
+        }
+        let n = self.visible.len();
+        let grid = self.flows();
+        let header = self.focused_header();
+        // Línea con foco: la del encabezado o la del elemento.
+        let header_line = header.and_then(|r| layout.lines.iter().position(|l| l.header == Some(r as u32)));
+        let cur = self.focus.filter(|&f| f < n);
+        let line_of = |pos: usize| layout.pos_line[pos] as usize;
+        let key = Key(vk);
+        // Ir a la línea `li` en la columna `col`: un encabezado toma el foco; una fila de elementos,
+        // su elemento en esa columna (o el último).
+        enum To {
+            Header(usize),
+            Pos(usize),
+        }
+        let to_line = |li: usize, col: usize| {
+            let l = layout.lines[li];
+            match l.header {
+                Some(r) => To::Header(r as usize),
+                None => To::Pos(l.first as usize + col.min(l.count as usize - 1)),
+            }
+        };
+        let step = usize::from(self.selected.iter().any(|&s| s));
+        // Re Pág / Av Pág cuentan desde el encabezado con foco (el primer elemento que le sigue)
+        // o desde el elemento con foco.
+        let page_from = match header_line {
+            Some(li) => layout.lines[li + 1..].iter().find(|l| l.header.is_none()).map_or(n.saturating_sub(1), |l| l.first as usize),
+            None => cur.unwrap_or(0),
+        };
+        let target = match (key, header, cur) {
+            (VK_LEFT, Some(r), _) => {
+                if !self.collapsed_row(r) {
+                    self.toggle_group_row(r);
+                }
+                return Some(Action::Redraw);
+            }
+            (VK_RIGHT, Some(r), _) => {
+                if self.collapsed_row(r) {
+                    self.toggle_group_row(r);
+                }
+                return Some(Action::Redraw);
+            }
+            (VK_RETURN | VK_SPACE, Some(r), _) if !ctrl => {
+                self.toggle_group_row(r);
+                return Some(Action::Redraw);
+            }
+            (VK_UP | VK_DOWN, Some(_), _) => {
+                let li = header_line?;
+                let li = if key == VK_UP { li.checked_sub(1)? } else { li + 1 };
+                if li >= layout.lines.len() {
+                    return Some(Action::None);
+                }
+                to_line(li, 0)
+            }
+            (VK_UP | VK_DOWN, None, Some(pos)) if step == 0 => To::Pos(pos),
+            (VK_UP | VK_DOWN, None, Some(pos)) => {
+                let li = line_of(pos);
+                let col = pos - layout.lines[li].first as usize;
+                match if key == VK_UP { li.checked_sub(1) } else { Some(li + 1).filter(|&l| l < layout.lines.len()) } {
+                    Some(l) => to_line(l, col),
+                    None => To::Pos(pos),
+                }
+            }
+            // Detalles y Contenido: ← desde un elemento va al encabezado de su grupo.
+            (VK_LEFT, None, Some(pos)) if !grid => {
+                let li = line_of(pos);
+                let r = layout.lines[..li].iter().rev().find_map(|l| l.header)?;
+                To::Header(r as usize)
+            }
+            (VK_LEFT, None, Some(pos)) if grid => To::Pos(pos.saturating_sub(step)),
+            (VK_RIGHT, None, Some(pos)) if grid => To::Pos((pos + step).min(n - 1)),
+            (VK_PRIOR, _, _) if n > 0 => To::Pos(page_from.saturating_sub(self.page_rows())),
+            (VK_NEXT, _, _) if n > 0 => To::Pos((page_from + self.page_rows()).min(n - 1)),
+            (VK_HOME, _, _) if n > 0 => To::Pos(0),
+            (VK_END, _, _) if n > 0 => To::Pos(n - 1),
+            // Sin elementos a la vista (todo plegado): el primer o el último encabezado.
+            (VK_HOME, _, _) => to_line(0, 0),
+            (VK_END, _, _) => to_line(layout.lines.len() - 1, 0),
+            (VK_SPACE, None, Some(pos)) if ctrl => {
+                self.toggle(pos);
+                return Some(Action::Redraw);
+            }
+            (VK_RETURN, None, _) => return self.focused_index().map(Action::Open),
+            _ => return None,
+        };
+        self.focus_visible = true;
+        match target {
+            To::Header(r) => {
+                let top = layout.lines.iter().find(|l| l.header == Some(r as u32)).map(|l| (l.top, l.h));
+                self.focus_header(r);
+                if let Some((top, h)) = top {
+                    self.ensure_span(top, h);
+                }
+            }
+            To::Pos(pos) => self.move_focus_to(pos, ctrl, shift),
+        }
+        Some(Action::Redraw)
+    }
+
+    /// ¿El encabezado (índice en `rows`) está plegado?
+    fn collapsed_row(&self, row: usize) -> bool {
+        matches!(self.rows.get(row), Some(Row::Header { collapsed: true, .. }))
+    }
+
+    /// ¿Hay una búsqueda por tipeo en curso? (se escribió algo hace menos de `TYPEAHEAD_MS`): el
+    /// Espacio es parte del nombre y no abre la vista rápida.
+    pub fn typeahead_active(&self) -> bool {
+        !self.typeahead.is_empty() && self.typeahead_at.is_some_and(|t| t.elapsed() < Duration::from_millis(TYPEAHEAD_MS))
+    }
+
+    /// ¿El foco está en el encabezado de un grupo? (el Espacio lo pliega).
+    pub fn header_focused(&self) -> bool {
+        self.focused_header().is_some()
+    }
+
+    /// Lleva el foco a esa posición sin tocar la selección y la deja a la vista (la vista rápida
+    /// recorriendo varios seleccionados).
+    pub fn focus_only(&mut self, pos: usize) {
+        if pos < self.visible.len() {
+            self.header_focus = None;
+            self.auto_focus = false;
+            self.focus_visible = true;
+            self.focus = Some(pos);
+            self.anchor = Some(pos);
+            self.ensure_visible(pos);
+        }
+    }
+
+    /// Búsqueda al teclear: salta al primer nombre que empieza con lo escrito.
+    pub fn on_char(&mut self, c: char) -> Action {
+        let now = Instant::now();
+        let fresh = self.typeahead_at.is_none_or(|t| now - t > Duration::from_millis(TYPEAHEAD_MS));
+        if fresh {
+            self.typeahead.clear();
+        }
+        self.typeahead_at = Some(now);
+        self.typeahead.extend(c.to_lowercase());
+
+        // Con una sola letra repetida ("aaa") se recorren los que empiezan con esa letra.
+        let repeated = self.typeahead.chars().count() > 1
+            && self.typeahead.chars().all(|ch| Some(ch) == self.typeahead.chars().next());
+        let prefix: String = if repeated { self.typeahead.chars().take(1).collect() } else { self.typeahead.clone() };
+        let start = match (fresh || repeated, self.focus) {
+            (true, Some(f)) => f + 1,
+            (false, Some(f)) => f,
+            _ => 0,
+        };
+        let n = self.visible.len();
+        for k in 0..n {
+            let pos = (start + k) % n;
+            if self.entries[self.visible[pos] as usize].sort_key.starts_with(&prefix) {
+                self.select_only(pos);
+                self.ensure_visible(pos);
+                return Action::Redraw;
+            }
+        }
+        Action::None
+    }
+
+    /// Clic derecho: si cae en un elemento no seleccionado, lo selecciona solo a él.
+    /// Devuelve si cayó sobre un elemento (menú de elementos) o no (menú del fondo).
+    pub fn on_right_down(&mut self, x: f32, y: f32) -> bool {
+        // Galería: la imagen grande es el elemento con foco (menú de elementos).
+        let image = self.view == View::Gallery && contains(&self.gallery_image_rect(), x, y);
+        let hit = if image { self.focused_index() } else { self.entry_at(x, y) };
+        match hit {
+            Some(idx) => {
+                if !self.selected[idx] {
+                    let pos = self.visible.iter().position(|&v| v as usize == idx).unwrap();
+                    self.select_only(pos);
+                }
+                true
+            }
+            None => {
+                self.selected.iter_mut().for_each(|s| *s = false);
+                false
+            }
+        }
+    }
+
+    /// Selecciona solo un elemento por índice y lo deja a la vista.
+    pub fn select_index(&mut self, idx: usize) {
+        self.reveal(idx);
+        if let Some(pos) = self.visible.iter().position(|&v| v as usize == idx) {
+            self.select_only(pos);
+            self.ensure_visible(pos);
+        }
+    }
+
+    /// Rectángulo del nombre del elemento (para el renombrado en línea); lo trae a la vista.
+    pub fn name_rect(&mut self, idx: usize) -> Option<Rect> {
+        let pos = self.visible.iter().position(|&v| v as usize == idx)?;
+        self.ensure_visible(pos);
+        if self.view.is_grid() {
+            // Debajo de la miniatura, una línea.
+            let cell = self.item_rect(pos);
+            let y = cell.top + 6.0 + self.view.icon() + 4.0;
+            return Some(rect(cell.left + 4.0, y, cell.right - 4.0, y + 22.0));
+        }
+        let cell = self.item_rect(pos);
+        match self.view {
+            // Galería: arriba de la celda, centrado (la tira no tiene nombres).
+            View::Gallery => {
+                let cx = (cell.left + cell.right) / 2.0;
+                let (l, r) = ((cx - 120.0).max(self.area.left + 4.0), (cx + 120.0).min(self.area.right - 4.0));
+                return Some(rect(l, cell.top - 30.0, r.max(l + 40.0), cell.top - 8.0));
+            }
+            // Donde va el nombre en la celda (`draw_list_cell`) y en la fila (`draw_content_row`).
+            View::List => return Some(rect(cell.left + self.check_shift() + LIST_TEXT_X - 4.0, cell.top + 1.0, cell.right - 4.0, cell.bottom - 1.0)),
+            View::Content => {
+                let left = cell.left + self.check_shift() + CONTENT_TEXT_X;
+                let right = (cell.right - CONTENT_EDGE - CONTENT_RIGHT_W - CONTENT_EDGE).max(left + 40.0);
+                return Some(rect(left - 4.0, cell.top + 7.0, right, cell.top + 29.0));
+            }
+            _ => {}
+        }
+        let (_, left, right) = self.columns().into_iter().find(|c| c.0 == Column::Name)?;
+        let row = self.item_rect(pos);
+        Some(rect(left + PAD + self.check_shift() + ICON + 4.0, row.top + 1.0, right - PAD, row.bottom - 1.0))
+    }
+
+    /// Posición en pantalla (DIPs) del elemento con foco, para el menú contextual por teclado.
+    pub fn focus_point(&self) -> Option<(f32, f32)> {
+        if let (Some(row), Some(layout)) = (self.focused_header(), &self.layout) {
+            let line = layout.lines.iter().find(|l| l.header == Some(row as u32))?;
+            let r = self.line_rect(line);
+            return Some((self.area.left + 40.0, r.bottom.clamp(self.area.top, self.area.bottom)));
+        }
+        let r = self.item_rect(self.focus?);
+        let x = if self.view.is_grid() { (r.left + r.right) / 2.0 } else { r.left.max(self.area.left) + 40.0 };
+        Some((x, r.bottom.clamp(self.area.top, self.area.bottom)))
+    }
+
+    pub fn on_wheel(&mut self, rows: f32) -> Action {
+        if self.view == View::Gallery {
+            return self.gallery_wheel(rows);
+        }
+        let before = self.scroll_target;
+        // En la cuadrícula, una muesca de la rueda mueve media celda por "línea" de la rueda; en
+        // la Lista la rueda vertical desplaza a los costados, una columna por muesca (3 líneas).
+        let step = if self.horizontal() {
+            LIST_COL_W / 3.0
+        } else if self.view.is_grid() || self.view == View::Content {
+            self.line_h() / 3.0
+        } else {
+            ROW_H
+        };
+        self.scroll_target -= rows * step;
+        self.clamp_scroll();
+        if !crate::anim::enabled() {
+            self.snap_scroll();
+        }
+        self.update_hover_after_scroll();
+        if self.scroll_target != before { Action::Redraw } else { Action::None }
+    }
+
+    /// Botón izquierdo. Devuelve si hay que capturar el mouse (arrastre de la barra).
+    pub fn on_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, shift: bool) -> (Action, bool) {
+        self.gallery_press = None;
+        // Casilla del encabezado: selecciona todo lo que está a la vista, o quita todo.
+        if self.header_checkbox_rect().is_some_and(|r| contains(&grow(r, CHECK_SLOP), x, y)) {
+            self.toggle_all_checked();
+            return (Action::Redraw, false);
+        }
+        if self.in_header(x, y) {
+            // Borde: cambiar el ancho. Encabezado: ordenar al soltar, o reordenar si se arrastra.
+            if let Some(index) = self.edge_at(x, y) {
+                self.pin_name();
+                self.header_drag = Some(HeaderDrag::Resize { index, start_x: x, start_w: self.width_of(index) });
+                return (Action::None, true);
+            }
+            // La flecha del filtro abre (o cierra) su desplegable.
+            if let Some(col) = self.header_filter_at(x, y) {
+                self.click_filter_menu(ListHit::HeaderFilter(col));
+                return (Action::Redraw, false);
+            }
+            if let Some(&(index, ..)) = self.layout_columns().iter().find(|(_, _, l, r)| x >= *l && x < *r) {
+                self.header_drag = Some(HeaderDrag::Press { index, start_x: x, moved: false });
+                return (Action::None, true);
+            }
+            return (Action::None, false);
+        }
+        if let Some((track, thumb)) = self.scrollbar() {
+            if contains(&track, x, y) {
+                // En la Lista la barra es horizontal: todo se mide en x.
+                let (at, start, end) = self.along(x, y, &thumb);
+                if at >= start && at < end {
+                    self.thumb_drag = Some(at - start);
+                    return (Action::Redraw, true);
+                }
+                // Clic en el riel: avanza una página hacia ese lado.
+                let unit = if self.horizontal() { LIST_COL_W } else { self.line_h() };
+                let page = (self.view_len() / unit).floor().max(1.0) * unit;
+                self.scroll_target += if at < start { -page } else { page };
+                self.clamp_scroll();
+                if !crate::anim::enabled() {
+                    self.snap_scroll();
+                }
+                return (Action::Redraw, false);
+            }
+        }
+        // Encabezado de un grupo: toma el foco y se pliega o despliega.
+        if let Some(r) = self.header_at(x, y) {
+            self.focus_header(r);
+            self.toggle_group_row(r);
+            return (Action::Redraw, false);
+        }
+        // Casilla de un elemento: lo suma o lo quita de la selección sin tocar los demás (Ctrl+clic).
+        if let Some(pos) = self.checkbox_at(x, y) {
+            self.toggle(pos);
+            if self.view == View::Gallery {
+                self.gallery_press = Some((self.visible[pos] as usize, true));
+                self.reveal_strip(pos);
+            }
+            return (Action::Redraw, false);
+        }
+        // En detalles, el hueco a la derecha del nombre cuenta como vacío: arma el rectángulo en
+        // vez de arrastrar el archivo (como en el Explorador).
+        let hit = self.pos_at(x, y).filter(|&pos| !self.in_name_blank(pos, x));
+        match hit {
+            // Galería: un clic no centra la tira (el doble clic tiene que caer en la misma celda);
+            // solo la corre si la celda no se ve entera.
+            Some(pos) if self.view == View::Gallery && (ctrl || shift) => {
+                self.gallery_press = Some((self.visible[pos] as usize, false));
+                if ctrl {
+                    self.toggle(pos);
+                } else {
+                    self.select_range(pos, false);
+                }
+                self.reveal_strip(pos);
+            }
+            Some(pos) if ctrl => self.toggle(pos),
+            Some(pos) if shift => self.select_range(pos, false),
+            Some(pos) => {
+                let idx = self.visible[pos] as usize;
+                if self.selected[idx] {
+                    self.focus = Some(pos);
+                    self.auto_focus = false;
+                    self.pending_select = Some(pos);
+                } else {
+                    self.select_only(pos);
+                }
+                if self.past_name(pos, x) {
+                    self.press_band = Some((x, y, ctrl));
+                } else {
+                    self.press = Some((x, y));
+                }
+                if self.view == View::Gallery {
+                    self.gallery_press = Some((idx, false));
+                    self.reveal_strip(pos);
+                }
+            }
+            // En la Galería no hay rectángulo de selección: la imagen grande y los huecos de la
+            // tira no hacen nada.
+            None if self.view == View::Gallery => return (Action::None, false),
+            None if contains(&self.rows_area(), x, y) => {
+                // Un hueco: empieza el rectángulo (con Ctrl suma a lo que había).
+                let base = if ctrl { self.selected.clone() } else { vec![false; self.selected.len()] };
+                if !ctrl {
+                    self.selected.iter_mut().for_each(|s| *s = false);
+                    self.focus_visible = false;
+                }
+                let at = self.band_point(x, y);
+                self.band = Some(Band { from: at, to: at, base });
+            }
+            None => return (Action::None, false),
+        }
+        (Action::Redraw, true)
+    }
+
+    pub fn on_mouse_up(&mut self) -> Action {
+        self.thumb_drag = None;
+        self.press = None;
+        self.press_band = None;
+        if self.band.take().is_some() {
+            return Action::Redraw;
+        }
+        match self.header_drag.take() {
+            Some(HeaderDrag::Press { index, moved: false, .. }) => {
+                if let Some(c) = self.columns.get(index) {
+                    self.set_sort(c.col);
+                }
+                return Action::Redraw;
+            }
+            Some(_) => return Action::ColumnsChanged,
+            None => {}
+        }
+        if let Some(pos) = self.pending_select.take() {
+            self.select_only(pos);
+            return Action::Redraw;
+        }
+        Action::None
+    }
+
+    pub fn on_double_click(&mut self, x: f32, y: f32) -> Action {
+        // Galería: el segundo clic va a la celda del primero (si la tira se corrió para mostrarla
+        // entera, el punto puede caer ahora sobre la vecina).
+        if let Some((idx, checkbox)) = self.gallery_press.take()
+            && self.view == View::Gallery
+            && contains(&self.strip_rect(), x, y)
+            && let Some(pos) = self.visible.iter().position(|&v| v as usize == idx)
+        {
+            if checkbox {
+                self.toggle(pos);
+                return Action::Redraw;
+            }
+            self.select_only(pos);
+            return Action::Open(idx);
+        }
+        if self.scrollbar().is_some_and(|(track, _)| contains(&track, x, y)) {
+            return Action::None;
+        }
+        // El segundo clic de un doble clic sobre una casilla la vuelve a alternar (no abre).
+        if self.header_checkbox_rect().is_some_and(|r| contains(&grow(r, CHECK_SLOP), x, y)) {
+            self.toggle_all_checked();
+            return Action::Redraw;
+        }
+        if let Some(pos) = self.checkbox_at(x, y) {
+            self.toggle(pos);
+            return Action::Redraw;
+        }
+        // El segundo clic de un doble clic en un encabezado también lo alterna.
+        if let Some(r) = self.header_at(x, y) {
+            self.focus_header(r);
+            self.toggle_group_row(r);
+            return Action::Redraw;
+        }
+        match self.pos_at(x, y) {
+            Some(pos) => {
+                self.select_only(pos);
+                Action::Open(self.visible[pos] as usize)
+            }
+            // Galería: doble clic en la imagen grande abre el enfocado.
+            None if self.view == View::Gallery && contains(&self.gallery_image_rect(), x, y) => {
+                self.focused_index().map_or(Action::None, Action::Open)
+            }
+            None => Action::None,
+        }
+    }
+
+    pub fn on_mouse_move(&mut self, x: f32, y: f32) -> Action {
+        self.mouse_at = Some((x, y));
+        match self.header_drag {
+            Some(HeaderDrag::Resize { index, start_x, start_w }) => {
+                self.set_width(index, start_w + (x - start_x));
+                return Action::Redraw;
+            }
+            Some(HeaderDrag::Press { index, start_x, moved }) => {
+                if !moved && (x - start_x).abs() < 6.0 {
+                    return Action::None;
+                }
+                // Reordenar en vivo: la columna va a la posición de la que está bajo el mouse.
+                let target = self.layout_columns().iter().find(|(_, _, l, r)| x >= *l && x < *r).map(|(i, ..)| *i);
+                let mut index = index;
+                if let Some(to) = target.filter(|&t| t != index) {
+                    let c = self.columns.remove(index);
+                    self.columns.insert(to, c);
+                    index = to;
+                }
+                self.header_drag = Some(HeaderDrag::Press { index, start_x, moved: true });
+                return Action::Redraw;
+            }
+            None => {}
+        }
+        if let Some((px, py, ctrl)) = self.press_band {
+            if (x - px).abs() > 4.0 || (y - py).abs() > 4.0 {
+                // Un arrastre desde otra columna: rectángulo, no arrastre de archivos.
+                self.press_band = None;
+                self.pending_select = None;
+                self.focus_visible = ctrl;
+                let base = if ctrl { self.selected.clone() } else { vec![false; self.selected.len()] };
+                let at = self.band_point(px, py);
+                self.band = Some(Band { from: at, to: at, base });
+            } else {
+                return Action::None;
+            }
+        }
+        if self.band.is_some() {
+            self.move_band(x, y);
+            return Action::Redraw;
+        }
+        // Unos píxeles de movimiento con el botón apretado sobre un elemento: arrastre.
+        if let Some((px, py)) = self.press {
+            if (x - px).abs() > 4.0 || (y - py).abs() > 4.0 {
+                self.press = None;
+                self.pending_select = None;
+                return Action::BeginDrag;
+            }
+            return Action::None;
+        }
+        if let Some(grab) = self.thumb_drag {
+            if let Some((track, thumb)) = self.scrollbar() {
+                let (at, start, end) = self.along(x, y, &thumb);
+                let (track_start, track_end) = (self.along(x, y, &track).1, self.along(x, y, &track).2);
+                let travel = (track_end - track_start - (end - start)).max(1.0);
+                let frac = ((at - grab - track_start) / travel).clamp(0.0, 1.0);
+                // Arrastrar el pulgar sigue al mouse sin demora.
+                self.scroll = frac * (self.content_len() - self.view_len());
+                self.scroll_target = self.scroll;
+                return Action::Redraw;
+            }
+        }
+        // Columna del encabezado bajo el mouse: muestra la flecha de su filtro.
+        let header = if self.in_header(x, y) { self.layout_columns().iter().find(|c| x >= c.2 && x < c.3).map(|c| c.1) } else { None };
+        let header_changed = header != self.header_hover;
+        self.header_hover = header;
+        let hover = if contains(&self.rows_area(), x, y) { self.pos_at(x, y) } else { None };
+        if hover != self.hover || header_changed {
+            self.hover = hover;
+            return Action::Redraw;
+        }
+        Action::None
+    }
+
+    pub fn on_mouse_leave(&mut self) -> Action {
+        self.mouse_at = None;
+        let header = self.header_hover.take().is_some();
+        if self.hover.take().is_some() || header { Action::Redraw } else { Action::None }
+    }
+
+    fn update_hover_after_scroll(&mut self) {
+        self.hover = None;
+    }
+
+    // ---------- dibujo ----------
+
+    pub fn draw(&mut self, p: &dyn Painter, area: Rect, active: bool) {
+        // Metadatos entregados sin rearmar todavía (la app ya lo hace al vaciar el canal).
+        self.flush_meta();
+        self.regroup_if_day_changed();
+        self.area = area;
+        // Con otro ancho entran otros elementos por línea: solo la geometría se recalcula.
+        if !self.layout_current() {
+            self.relayout();
+        }
+        self.clamp_scroll();
+        let th = p.theme();
+        let cols = self.columns();
+
+        p.fill(area, th.surface);
+        if self.view == View::Gallery {
+            self.draw_gallery(p, area, active);
+            return;
+        }
+
+        // Encabezado (solo en detalles).
+        let header = rect(area.left, area.top, area.right, area.top + HEADER_H);
+        // La columna que se está arrastrando para reordenar, resaltada.
+        let dragging = match self.header_drag {
+            Some(HeaderDrag::Press { index, moved: true, .. }) => self.columns.get(index).map(|c| c.col),
+            _ => None,
+        };
+        if self.view.has_header() {
+            p.fill(header, th.surface_alt);
+            p.fill(rect(header.left, header.bottom - 1.0, header.right, header.bottom), th.border);
+        }
+        for &(col, left, right) in cols.iter().filter(|_| self.view.has_header()) {
+            if dragging == Some(col) {
+                p.fill(rect(left, header.top, right, header.bottom - 1.0), alpha(th.accent, 0.18));
+            }
+            // Con el mouse encima (o su desplegable abierto) la columna se resalta y muestra la
+            // flecha del filtro a la derecha (diseño X33): el título y el orden le dejan lugar.
+            let button = self.shows_filter_button(col);
+            if button {
+                p.fill(rect(left, header.top, right, header.bottom - 1.0), th.hover);
+            }
+            let room = if button { filters::BUTTON_ROOM } else { PAD };
+            let format = if col.right_aligned() { FontId::UiRight } else { FontId::UiBold };
+            // Con casillas, el título del nombre deja lugar a la del encabezado (diseño X36).
+            let text_left = left + PAD + if col == Column::Name && self.checkboxes { CHECK_SHIFT + 2.0 } else { 0.0 };
+            let text_r = rect(text_left, header.top, (right - room).max(text_left), header.bottom);
+            p.text(format, col.title(), text_r, th.text_dim);
+            if col == self.sort {
+                // Chevron arriba/abajo de Segoe Fluent Icons.
+                let glyph = if self.descending { "\u{E70D}" } else { "\u{E70E}" };
+                let gx = if col.right_aligned() { left + 2.0 } else { right - 22.0 - if button { filters::BUTTON_ROOM - 4.0 } else { 0.0 } };
+                p.text(FontId::Glyphs, glyph, rect(gx, header.top, gx + 20.0, header.bottom), th.text_dim);
+            }
+            self.draw_header_filter(p, col, left, text_r.right);
+            if left > area.left {
+                p.fill(rect(left, header.top + 7.0, left + 1.0, header.bottom - 7.0), th.border);
+            }
+        }
+        if let Some(r) = self.header_checkbox_rect() {
+            draw_checkbox(p, r, self.check_state());
+        }
+
+        let rows = self.rows_area();
+        if self.visible.is_empty() && self.rows.is_empty() {
+            return;
+        }
+
+        let (first, last) = self.visible_range();
+        let header_focus = self.focused_header();
+        let item_focus = if header_focus.is_none() { self.focus } else { None };
+
+        let mut ends = Vec::with_capacity(last - first);
+        let mut ejects = Vec::new();
+        let name_left = cols.iter().find(|c| c.0 == Column::Name).map(|c| c.1);
+        let shift = self.check_shift();
+        p.clip(rows, &mut || {
+            for pos in first..last {
+                let idx = self.visible[pos] as usize;
+                let e = &self.entries[idx];
+                let item = self.item_rect(pos);
+                let y = item.top;
+                // Banda de selección/foco/resaltado de cada vista (según el diseño de cada una).
+                let row = match self.view {
+                    v if v.is_grid() => rect(item.left + 3.0, item.top + 3.0, item.right - 3.0, item.bottom - 3.0),
+                    View::List => rect(item.left + 2.0, item.top + 1.0, item.right - 2.0, item.bottom - 1.0),
+                    _ => rect(item.left + 4.0, item.top + 1.0, item.right, item.bottom - 1.0),
+                };
+
+                let renamed = self.rename_of(idx);
+                if self.drop_target == Some(idx) {
+                    p.round_fill(row, 4.0, th.selection);
+                    p.round_stroke(row, 4.0, th.accent);
+                } else if renamed.is_some_and(|(_, c)| c.is_some()) {
+                    // Choque de Renombrar varios: la fila en rojo en lugar de la selección.
+                    p.round_fill(row, 4.0, alpha(th.danger, 0.18));
+                } else if self.selected[idx] {
+                    let c = if active { th.selection } else { alpha(th.text_dim, 0.18) };
+                    p.round_fill(row, 4.0, c);
+                } else if active && self.focus_visible && item_focus == Some(pos) {
+                    // Foco sin selección: fondo tenue del acento, además del borde.
+                    p.round_fill(row, 4.0, th.focus_fill);
+                } else if self.hover == Some(pos) {
+                    p.round_fill(row, 4.0, th.hover);
+                }
+                if active && self.focus_visible && item_focus == Some(pos) {
+                    p.round_stroke(row, 4.0, alpha(th.accent, 0.8));
+                }
+                // Casilla: con el switch prendido, en todos los elementos (vacía o marcada). En la
+                // cuadrícula va después de la celda para que una miniatura ancha no la tape.
+                let checkbox = if let Some(r) = self.checkbox_rect_in(item, name_left) {
+                    Some((r, if self.selected[idx] { CheckState::Checked } else { CheckState::Empty }))
+                } else {
+                    None
+                };
+                if !self.view.is_grid()
+                    && let Some((r, st)) = checkbox
+                {
+                    draw_checkbox(p, r, st);
+                }
+
+                // Color por tipo de `config.toml`; si ninguna regla coincide, los ocultos van tenues.
+                let color = crate::config::color_for(p.file_colors(), &e.sort_key, e.is_dir, e.attrs)
+                    .unwrap_or(if e.is_hidden() { th.text_dim } else { th.text });
+                // Renombrar varios en las vistas sin columna Nombre: la etiqueta con el nombre nuevo.
+                let relabeled;
+                let (e, color) = match renamed.filter(|_| self.view != View::Details) {
+                    Some((new, clash)) => {
+                        relabeled = self.relabeled(e, new);
+                        (&relabeled, if clash.is_some() { th.danger } else { color })
+                    }
+                    None => (e, color),
+                };
+                match self.view {
+                    v if v.is_grid() => {
+                        self.draw_cell(p, e, row, color);
+                        if let Some((r, st)) = checkbox {
+                            draw_checkbox(p, r, st);
+                        }
+                        if self.eject_rows.contains(&idx) {
+                            let b = rect(row.right - 26.0, row.top + 2.0, row.right - 2.0, row.top + 26.0);
+                            draw_eject(p, b, self.eject_hover == Some(idx));
+                            ejects.push((b, idx));
+                        }
+                        continue;
+                    }
+                    View::List => {
+                        self.draw_list_cell(p, e, item, color);
+                        continue;
+                    }
+                    View::Content => {
+                        self.draw_content_row(p, e, item, color);
+                        continue;
+                    }
+                    _ => {}
+                }
+                for &(col, left, right) in &cols {
+                    let cell = rect(left + PAD, y, right - PAD, y + ROW_H);
+                    match col {
+                        Column::Name => {
+                            let iy = y + (ROW_H - ICON) / 2.0;
+                            p.shell_icon(e.icon, e.overlay, cell.left + shift, iy, ICON);
+                            let text = rect(cell.left + shift + ICON + 8.0, y, cell.right, y + ROW_H);
+                            let name = shown_name(e, self.show_extensions);
+                            match renamed {
+                                Some((new, clash)) => ends.push(self.draw_rename_name(p, e, text, color, new, clash)),
+                                None => {
+                                    p.text(FontId::Ui, name, text, color);
+                                    ends.push(text.left + p.measure(FontId::Ui, name) + 6.0);
+                                }
+                            }
+                            // ⏏ al final de la columna Nombre (discos expulsables).
+                            if self.eject_rows.contains(&idx) {
+                                let b = rect(cell.right - 24.0, y + 3.0, cell.right, y + ROW_H - 3.0);
+                                draw_eject(p, b, self.eject_hover == Some(idx));
+                                ejects.push((b, idx));
+                            }
+                        }
+                        Column::Modified => p.text(FontId::Ui, &format::date(e.modified), cell, th.text_secondary),
+                        Column::Created => p.text(FontId::Ui, &format::date(e.created), cell, th.text_secondary),
+                        Column::Type => p.text(FontId::Ui, &e.type_name, cell, th.text_secondary),
+                        Column::Extension => p.text(FontId::Ui, extension_of(e), cell, th.text_secondary),
+                        Column::Attributes => p.text(FontId::Ui, &attr_letters(e.attrs), cell, th.text_secondary),
+                        Column::Folder => p.text(FontId::Ui, &relative_folder(self.search_root.as_deref(), e), cell, th.text_secondary),
+                        Column::Dimensions | Column::Duration | Column::Authors | Column::Tags | Column::Artist | Column::Album => {
+                            let text = meta::meta_text(col, self.meta_of(idx));
+                            if !text.is_empty() {
+                                p.text(FontId::Ui, &text, cell, th.text_secondary);
+                            }
+                        }
+                        Column::Size => {
+                            let s = match (e.is_dir, e.modified) {
+                                // Unidades (sin fecha): capacidad total.
+                                (true, 0) if e.size > 0 => format::size_short(e.size),
+                                (true, _) => String::new(),
+                                (false, _) => format::size_kb(e.size),
+                            };
+                            p.text(FontId::UiRight, &s, cell, th.text_secondary);
+                        }
+                        Column::Packed => p.text(FontId::UiRight, &packed_text(e), cell, th.text_secondary),
+                    }
+                }
+            }
+
+            // Encabezados de los grupos a la vista.
+            if let Some(layout) = &self.layout {
+                for line in &layout.lines[layout.lines_between(self.scroll, self.scroll + self.view_len())] {
+                    let Some(r) = line.header else { continue };
+                    let Some(Row::Header { key, count, collapsed }) = self.rows.get(r as usize) else { continue };
+                    let focused = active && self.focus_visible && header_focus == Some(r as usize);
+                    self.draw_group_header(p, self.line_rect(line), key, *count, *collapsed, focused);
+                }
+            }
+
+            if let Some(b) = &self.band {
+                let r = self.band_rect(b);
+                if r.right - r.left > 1.0 || r.bottom - r.top > 1.0 {
+                    p.fill(r, alpha(th.accent, 0.16));
+                    p.round_stroke(r, 0.0, alpha(th.accent, 0.8));
+                }
+            }
+        });
+
+        self.name_ends = ends;
+        self.name_ends_first = first;
+        self.eject_rects = ejects;
+
+        if let Some((_, thumb)) = self.scrollbar() {
+            let c = if self.thumb_drag.is_some() { alpha(th.scrollbar, th.scrollbar.a * 1.6) } else { th.scrollbar };
+            p.round_fill(thumb, 3.0, c);
+        }
+    }
+
+    /// Celda de la cuadrícula: miniatura (o ícono grande) arriba y el nombre en hasta dos líneas.
+    fn draw_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color) {
+        let size = self.view.icon();
+        let cx = (cell.left + cell.right) / 2.0;
+        let image = rect(cx - size / 2.0, cell.top + 6.0, cx + size / 2.0, cell.top + 6.0 + size);
+        let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(size)), image));
+        if !drawn {
+            // Mientras llega la miniatura: el ícono chico, centrado.
+            let small = 32.0_f32.min(size);
+            let (ix, iy) = (cx - small / 2.0, (image.top + image.bottom) / 2.0 - small / 2.0);
+            p.shell_icon(e.icon, e.overlay, ix, iy, small);
+        }
+        let label = rect(cell.left + 4.0, image.bottom + 4.0, cell.right - 4.0, cell.bottom - 2.0);
+        p.text(FontId::Label, shown_name(e, self.show_extensions), label, color);
+    }
+
+    /// De dónde sale la miniatura de un elemento (por PIDL o por ruta).
+    pub(crate) fn thumb_source(&self, e: &Entry) -> Option<thumbs::Source> {
+        match (&e.pidl, &e.full, &self.folder) {
+            (Some(pidl), _, _) => Some(thumbs::Source::Pidl(pidl.clone())),
+            (_, Some(full), _) => Some(thumbs::Source::Path(full.into())),
+            (_, _, Some(folder)) => Some(thumbs::Source::Path(folder.join(&e.name))),
+            _ => None,
+        }
+    }
+
+    /// Celda de la Lista (diseño `list::FileList::draw_list_cell`): ícono de 16 y el nombre.
+    fn draw_list_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color) {
+        let left = cell.left + self.check_shift();
+        p.shell_icon(e.icon, e.overlay, left + 8.0, cell.top + (ROW_H - ICON) / 2.0, ICON);
+        let text = rect(left + LIST_TEXT_X, cell.top, cell.right - 8.0, cell.bottom);
+        p.text(FontId::Ui, shown_name(e, self.show_extensions), text, color);
+    }
+
+    /// Fila de Contenido (diseño `list::FileList::draw_content_row`): ícono de 32 o miniatura,
+    /// el nombre y debajo el tipo; a la derecha la fecha de modificación y debajo el tamaño; una
+    /// línea separa cada fila de la siguiente.
+    fn draw_content_row(&self, p: &dyn Painter, e: &Entry, row: Rect, color: Color) {
+        let th = p.theme();
+        p.fill(rect(row.left + CONTENT_EDGE, row.bottom - 1.0, row.right - CONTENT_EDGE, row.bottom), th.border);
+        const SIZE: f32 = 32.0;
+        let shift = self.check_shift();
+        let (ix, iy) = (row.left + shift + 14.0, row.top + (CONTENT_H - SIZE) / 2.0);
+        let image = rect(ix, iy, ix + SIZE, iy + SIZE);
+        let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(SIZE)), image));
+        if !drawn {
+            p.shell_icon(e.icon, e.overlay, ix, iy, SIZE);
+        }
+        // Dos líneas de texto de 13: arriba centrada en y+18, abajo en y+38.
+        let (top, bottom) = ((row.top + 9.0, row.top + 27.0), (row.top + 29.0, row.top + 47.0));
+        let right = row.right - CONTENT_EDGE;
+        let data_left = right - CONTENT_RIGHT_W;
+        let text_left = row.left + shift + CONTENT_TEXT_X;
+        let text_right = (data_left - CONTENT_EDGE).max(text_left + 40.0);
+        p.text(FontId::Ui, shown_name(e, self.show_extensions), rect(text_left, top.0, text_right, top.1), color);
+        p.text(FontId::Ui, &e.type_name, rect(text_left, bottom.0, text_right, bottom.1), th.text_dim);
+        let root = self.search_root.as_deref();
+        let date = Self::cell_text(Column::Modified, e, root, true);
+        let size = Self::cell_text(Column::Size, e, root, true);
+        p.text(FontId::UiRight, &date, rect(data_left, top.0, right, top.1), th.text_secondary);
+        p.text(FontId::UiRight, &size, rect(data_left, bottom.0, right, bottom.1), th.text_dim);
+    }
+}
+
+/// Rectángulo agrandado `d` de cada lado.
+fn grow(r: Rect, d: f32) -> Rect {
+    rect(r.left - d, r.top - d, r.right + d, r.bottom + d)
+}
+
+/// Casilla de selección (diseño `list::FileList::draw_checkbox`): vacía con borde tenue, marcada
+/// con el acento y una tilde blanca, o parcial con un guion.
+/// Símbolo del botón de expulsar.
+pub const EJECT_GLYPH: &str = "⏏";
+
+/// Botón ⏏ (con fondo si el mouse está encima).
+pub fn draw_eject(p: &dyn Painter, r: Rect, hover: bool) {
+    let th = p.theme();
+    if hover {
+        p.round_fill(r, 4.0, alpha(th.text, 0.12));
+    }
+    p.text(FontId::UiCenter, EJECT_GLYPH, r, if hover { th.text } else { th.text_dim });
+}
+
+fn draw_checkbox(p: &dyn Painter, r: Rect, state: CheckState) {
+    let th = p.theme();
+    match state {
+        CheckState::Empty => {
+            p.round_fill(r, 3.0, th.surface);
+            // En oscuro `text_dim` casi no se distingue de la superficie ni del fondo de la fila.
+            let edge = if th.dark { th.text_secondary } else { th.text_dim };
+            p.round_stroke_w(grow(r, -0.6), 2.5, edge, 1.2);
+        }
+        CheckState::Checked => {
+            p.round_fill(r, 3.0, th.accent);
+            let (x, y) = (r.left + 3.0, r.top + 3.5);
+            p.rounded_path(&[(x, y + 3.733, 0.0), (x + 2.8, y + 7.0, 0.0), (x + 8.0, y, 0.0)], false, None, Some((CHECK_MARK, 1.6)));
+        }
+        CheckState::Partial => {
+            p.round_fill(r, 3.0, th.accent);
+            let (l, t) = (r.left + 3.5, r.top + 6.25);
+            let dash = [(l, t, 0.75), (l + 7.0, t, 0.75), (l + 7.0, t + 1.5, 0.75), (l, t + 1.5, 0.75)];
+            p.rounded_path(&dash, true, Some(CHECK_MARK), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    fn list(width: f32) -> FileList {
+        let mut l = FileList::default();
+        l.area = rect(0.0, 0.0, width, 400.0);
+        l
+    }
+
+    #[test]
+    fn name_takes_the_rest_and_columns_drop_when_narrow() {
+        let l = list(800.0);
+        let cols = l.columns();
+        assert_eq!(cols.iter().map(|c| c.0).collect::<Vec<_>>(), [Column::Name, Column::Modified, Column::Type, Column::Size]);
+        let name_w = cols[0].2 - cols[0].1;
+        assert_eq!(name_w, 800.0 - SCROLLBAR_W - 160.0 - 160.0 - 96.0);
+        // Angosta: primero se angostan todas; las del final dejan de verse si ni así entran.
+        let narrow = list(NAME_MIN + SCROLLBAR_W + 170.0);
+        assert_eq!(narrow.columns().iter().map(|c| c.0).collect::<Vec<_>>(), [Column::Name, Column::Modified, Column::Type]);
+    }
+
+    #[test]
+    fn header_drag_resizes_and_reorders() {
+        let mut l = list(800.0);
+        let cols = l.columns();
+        // Borde entre Nombre y Modificado: achicar el nombre; Modificado y las que siguen se corren
+        // con el borde y a la derecha queda lugar en blanco.
+        let edge = cols[0].2;
+        assert_eq!(l.edge_at(edge, 10.0), Some(0));
+        l.on_mouse_down(edge, 10.0, false, false);
+        l.on_mouse_move(edge - 40.0, 10.0);
+        assert_eq!(l.on_mouse_up(), Action::ColumnsChanged);
+        assert_eq!(l.name_width, Some(cols[0].2 - cols[0].1 - 40.0));
+        assert_eq!(l.columns[1].width, 160.0);
+        let moved = l.columns();
+        assert_eq!(moved[1].1, edge - 40.0);
+        // Ensanchar Modificado desde su borde derecho: su borde izquierdo no se mueve.
+        let (left, right) = (moved[1].1, moved[1].2);
+        l.on_mouse_down(right, 10.0, false, false);
+        l.on_mouse_move(right + 20.0, 10.0);
+        l.on_mouse_up();
+        assert_eq!((l.columns()[1].1, l.columns[1].width), (left, 180.0));
+        // Arrastrar "Tamaño" sobre "Tipo": cambia el orden.
+        let cols = l.columns();
+        let (size_mid, type_mid) = ((cols[3].1 + cols[3].2) / 2.0, (cols[2].1 + cols[2].2) / 2.0);
+        l.on_mouse_down(size_mid, 10.0, false, false);
+        l.on_mouse_move(type_mid, 10.0);
+        assert_eq!(l.on_mouse_up(), Action::ColumnsChanged);
+        assert_eq!(l.columns.iter().map(|c| c.col).collect::<Vec<_>>(), [Column::Name, Column::Modified, Column::Size, Column::Type]);
+        // Clic sin mover: ordena.
+        let cols = l.columns();
+        l.on_mouse_down((cols[2].1 + cols[2].2) / 2.0, 10.0, false, false);
+        assert_eq!(l.on_mouse_up(), Action::Redraw);
+        assert_eq!(l.sort, Column::Size);
+    }
+
+    /// «Tamaño comprimido»: el valor de la entrada, vacío en carpetas y cuando no se sabe; ordena
+    /// por lo que ocupa comprimido.
+    #[test]
+    fn packed_column_text_and_sort() {
+        crate::sys::testing::install_fakes();
+        let mk = |name: &str, size: u64, packed: u64, is_dir: bool| Entry { size, packed, is_dir, ..entry(name) };
+        assert_eq!(FileList::cell_text(Column::Packed, &mk("a", 5000, 2048, false), None, true), format::size_kb(2048));
+        assert_eq!(FileList::cell_text(Column::Packed, &mk("d", 0, 0, true), None, true), "");
+        assert_eq!(FileList::cell_text(Column::Packed, &mk("t", 5000, 0, false), None, true), "");
+        assert!(Column::Packed.right_aligned());
+        assert_eq!(Column::from_id("comprimido"), Some(Column::Packed));
+        let mut l = FileList::default();
+        l.append(vec![mk("a", 10, 300, false), mk("b", 99, 100, false), mk("c", 1, 200, false)]);
+        l.set_sort(Column::Packed);
+        if l.descending {
+            l.set_sort(Column::Packed);
+        }
+        let order: Vec<String> = (0..l.count()).map(|p| l.entries[l.entry_of_pos(p).unwrap()].display.clone()).collect();
+        assert_eq!(order, ["b", "c", "a"]);
+    }
+
+    fn entry(name: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            full: None,
+            group: 0,
+            pidl: None,
+            display: name.into(),
+            sort_key: name.to_lowercase(),
+            is_dir: false,
+            size: 0,
+            modified: 0,
+            created: 0,
+            attrs: 0,
+            type_name: std::sync::Arc::from("Archivo"),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+            packed: 0,
+        }
+    }
+
+    #[test]
+    fn grid_geometry_and_keys() {
+        use crate::keys::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
+        let mut l = list(800.0);
+        l.append((0..25).map(|i| entry(&format!("f{i:02}"))).collect());
+        l.set_view(View::LargeIcons);
+        let per = l.per_line();
+        assert!(per > 1, "en 800 DIPs entra más de una celda por fila");
+        assert!(!l.in_header(10.0, 10.0), "la cuadrícula no tiene encabezado");
+        // El centro de cada celda a la vista devuelve esa celda.
+        let (first, last) = l.visible_range();
+        for pos in first..last {
+            let r = l.item_rect(pos);
+            if r.bottom <= l.rows_area().bottom {
+                assert_eq!(l.pos_at((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0), Some(pos));
+            }
+        }
+        // Flechas: derecha +1, abajo +una fila, izquierda/arriba vuelven.
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus, Some(1));
+        l.on_key(VK_DOWN.0, false, false);
+        assert_eq!(l.focus, Some(1 + per));
+        l.on_key(VK_UP.0, false, false);
+        l.on_key(VK_LEFT.0, false, false);
+        assert_eq!(l.focus, Some(0));
+        // Abajo desde la última fila incompleta va al último elemento.
+        l.select_index(l.visible[24] as usize);
+        l.on_key(VK_DOWN.0, false, false);
+        assert_eq!(l.focus, Some(24));
+        // En detalles, izquierda/derecha no son de la lista.
+        l.set_view(View::Details);
+        assert_eq!(l.on_key(VK_RIGHT.0, false, false), None);
+    }
+
+    /// Seleccionar por patrón suma los visibles que coinciden; deseleccionar los quita; un patrón
+    /// vacío no toca la selección.
+    #[test]
+    fn select_matching_adds_and_removes() {
+        let mut l = list(800.0);
+        l.append(vec![entry("a.jpg"), entry("b.png"), entry("c.txt")]);
+        let names = |l: &FileList| l.selected_entries().map(|e| e.name.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(l.select_matching("*.jpg;*.png", true), 2);
+        assert_eq!(names(&l), ["a.jpg", "b.png"]);
+        assert_eq!(l.select_matching("*.png", false), 1);
+        assert_eq!(names(&l), ["a.jpg"]);
+        // Volver a seleccionar lo ya seleccionado no cuenta como cambio.
+        assert_eq!(l.select_matching("*.JPG", true), 0);
+        assert_eq!(l.select_matching("", true), 0);
+        assert_eq!(l.select_matching(" ; ", false), 0);
+        assert_eq!(names(&l), ["a.jpg"]);
+    }
+
+    /// Apretar sobre un archivo y mover unos píxeles pide empezar a arrastrar (y la app tiene que
+    /// atenderlo: su `on_mouse_move` lo descartaba y el arrastre nunca arrancaba).
+    #[test]
+    fn press_and_move_begins_a_drag() {
+        let mut l = list(800.0);
+        l.append(vec![entry("a.txt"), entry("b.txt")]);
+        let row = l.item_rect(0);
+        let (x, y) = (row.left + 60.0, (row.top + row.bottom) / 2.0);
+        let (action, capture) = l.on_mouse_down(x, y, false, false);
+        assert_eq!((action, capture), (Action::Redraw, true));
+        // Un temblor de 2 px no es un arrastre.
+        assert_eq!(l.on_mouse_move(x + 2.0, y), Action::None);
+        assert_eq!(l.on_mouse_move(x + 12.0, y + 3.0), Action::BeginDrag);
+        // Una vez iniciado, no se repite (un Redraw por el resaltado bajo el mouse no es un arrastre).
+        assert_ne!(l.on_mouse_move(x + 40.0, y), Action::BeginDrag);
+        // Apretar en un lugar vacío (debajo de los elementos) no arrastra nada.
+        let mut empty = list(800.0);
+        empty.append(vec![entry("a.txt")]);
+        let below = empty.rows_area().bottom - 10.0;
+        empty.on_mouse_down(x, below, false, false);
+        // (arma un rectángulo de selección, no un arrastre de archivos)
+        assert_ne!(empty.on_mouse_move(x + 30.0, below), Action::BeginDrag);
+    }
+
+    /// En detalles, el hueco a la derecha del nombre arma el rectángulo; el nombre arrastra el archivo.
+    #[test]
+    fn blank_right_of_the_name_starts_a_band_not_a_drag() {
+        let mut l = list(800.0);
+        l.append((0..6).map(|i| entry(&format!("f{i}"))).collect());
+        let name_right = l.layout_columns().iter().find(|c| c.1 == Column::Name).unwrap().3;
+        // Como si se hubiera dibujado: los nombres terminan 100 px después del borde izquierdo.
+        l.name_ends = vec![l.area.left + 100.0; 6];
+        l.name_ends_first = 0;
+        let row = l.item_rect(2);
+        let y = (row.top + row.bottom) / 2.0;
+        // Sobre el nombre: arrastra el archivo.
+        l.on_mouse_down(l.area.left + 60.0, y, false, false);
+        assert_eq!(l.on_mouse_move(l.area.left + 80.0, y + 8.0), Action::BeginDrag);
+        l.on_mouse_up();
+        // En el hueco de la misma columna: rectángulo (no BeginDrag) y selecciona filas.
+        let x = (l.area.left + 100.0 + name_right) / 2.0;
+        l.on_mouse_down(x, y, false, false);
+        assert_ne!(l.on_mouse_move(x + 10.0, y + ROW_H * 2.0), Action::BeginDrag);
+        assert_eq!(l.selected_positions(), vec![2, 3, 4]);
+        l.on_mouse_up();
+        // Pasado el nombre, en otra columna: un clic selecciona la fila; un arrastre, rectángulo.
+        let date_x = l.layout_columns().iter().find(|c| c.1 == Column::Modified).map(|c| c.2 + 10.0).unwrap();
+        let y0 = (l.item_rect(0).top + l.item_rect(0).bottom) / 2.0;
+        l.on_mouse_down(date_x, y0, false, false);
+        assert_eq!(l.selected_positions(), vec![0]);
+        assert_ne!(l.on_mouse_move(date_x + 2.0, y0), Action::BeginDrag);
+        assert_ne!(l.on_mouse_move(date_x + 8.0, y0 + ROW_H * 2.0), Action::BeginDrag);
+        assert_eq!(l.selected_positions(), vec![0, 1, 2]);
+        l.on_mouse_up();
+        // Con todo seleccionado, un clic en un hueco deselecciona todo y no deja foco a la vista.
+        l.select_all();
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert!(l.selected_positions().is_empty());
+        assert!(!l.focus_visible, "no debe parecer seleccionada la fila que tenía el foco");
+        l.on_key(crate::keys::keys::VK_DOWN.0, false, false);
+        assert!(l.focus_visible);
+    }
+
+    /// Arrastrar sobre el hueco debajo de los elementos selecciona los que toca el rectángulo.
+    #[test]
+    fn rubber_band_selects_rows_it_touches() {
+        let mut l = list(800.0);
+        l.append((0..10).map(|i| entry(&format!("f{i}"))).collect());
+        let (r1, r4) = (l.item_rect(1), l.item_rect(4));
+        let rows = l.rows_area();
+        // Del hueco de abajo hacia arriba, hasta la mitad de la fila 4.
+        let (x, below) = (rows.left + 100.0, rows.bottom - 4.0);
+        assert!(l.pos_at(x, below).is_none(), "el hueco tiene que estar libre");
+        l.on_mouse_down(x, below, false, false);
+        l.on_mouse_move(x, (r4.top + r4.bottom) / 2.0);
+        // Con 10 filas y la ventana de pruebas, se tocan las filas 4 a la última visible.
+        let touched: Vec<usize> = l.selected_positions();
+        assert!(touched.contains(&4) && !touched.contains(&3), "{touched:?}");
+        assert_eq!(l.on_mouse_up(), Action::Redraw);
+        // Sin Ctrl un clic nuevo en el hueco borra la selección; con Ctrl la conserva y suma.
+        l.on_mouse_down(x, below, true, false);
+        l.on_mouse_move(x, (r1.top + r1.bottom) / 2.0);
+        let with_ctrl = l.selected_positions();
+        assert!(with_ctrl.contains(&1) && with_ctrl.contains(&4), "{with_ctrl:?}");
+        l.on_mouse_up();
+        l.on_mouse_down(x, below, false, false);
+        l.on_mouse_up();
+        assert!(l.selected_positions().is_empty());
+    }
+
+    #[test]
+    fn smooth_scroll_targets_first_draws_later() {
+        let mut l = list(800.0);
+        l.append((0..200).map(|i| entry(&format!("f{i:03}"))).collect());
+        assert_eq!(l.on_wheel(-3.0), Action::Redraw);
+        // La lógica ya está en el destino (3 filas), lo dibujado todavía no llegó.
+        assert_eq!(l.scroll_target, 3.0 * ROW_H);
+        assert!(l.scroll < l.scroll_target);
+        let mut frames = 0;
+        while l.tick(1.0 / 60.0) {
+            assert!(l.scroll <= l.scroll_target, "sin pasarse");
+            frames += 1;
+            assert!(frames < 60);
+        }
+        assert_eq!(l.scroll, l.scroll_target);
+        // Llevar un elemento lejano a la vista también es un destino, no un salto.
+        l.select_index(l.visible[150] as usize);
+        assert!(l.scroll_target > l.scroll);
+        // Cambiar de vista o de filtro sí es instantáneo.
+        l.set_view(View::Icons);
+        assert_eq!(l.scroll, l.scroll_target);
+    }
+
+    #[test]
+    fn toggle_columns() {
+        let mut l = list(800.0);
+        l.toggle_column(Column::Attributes);
+        assert_eq!(l.columns.last().map(|c| c.col), Some(Column::Attributes));
+        l.set_sort(Column::Type);
+        l.toggle_column(Column::Type);
+        assert!(!l.columns.iter().any(|c| c.col == Column::Type));
+        assert_eq!(l.sort, Column::Name, "ocultar la columna de orden vuelve a ordenar por nombre");
+        l.toggle_column(Column::Name);
+        assert!(l.columns.iter().any(|c| c.col == Column::Name));
+        assert_eq!(attr_letters(0x1 | 0x2 | 0x20), "RHA");
+    }
+
+    /// Sin extensiones se oculta lo que sigue al último punto de los archivos; los nombres que
+    /// empiezan con punto y las carpetas se muestran completos.
+    #[test]
+    fn display_name_hides_extension() {
+        assert_eq!(display_name("foto.jpg", false, false), "foto");
+        assert_eq!(display_name("a.tar.gz", false, false), "a.tar");
+        assert_eq!(display_name(".gitignore", false, false), ".gitignore");
+        assert_eq!(display_name("archivo.", false, false), "archivo");
+        assert_eq!(display_name("sin", false, false), "sin");
+        assert_eq!(display_name("x.d", true, false), "x.d");
+        for (name, is_dir) in [("foto.jpg", false), ("a.tar.gz", false), (".gitignore", false), ("archivo.", false), ("sin", false), ("x.d", true)] {
+            assert_eq!(display_name(name, is_dir, true), name);
+        }
+    }
+
+    /// Los elementos del Shell (con PIDL) se muestran como los da el Shell aunque las extensiones
+    /// estén ocultas: el Shell ya las quitó según su configuración y no se recorta otra vez.
+    #[test]
+    fn shell_items_keep_their_display_name() {
+        let mut disk = entry("informe.final.pdf");
+        disk.display = "informe.final.pdf".into();
+        assert_eq!(shown_name(&disk, false), "informe.final");
+        let mut shell = entry("informe.final.pdf");
+        shell.display = "informe.final".into();
+        shell.pidl = Some(std::sync::Arc::from(&[1u8, 2, 3][..]));
+        assert_eq!(shown_name(&shell, false), "informe.final");
+        assert_eq!(shown_name(&shell, true), "informe.final");
+        assert_eq!(FileList::cell_text(Column::Name, &shell, None, false), "informe.final");
+    }
+
+    /// La columna Tamaño va alineada a la derecha: su texto usa `FontId::UiRight`.
+    #[test]
+    fn list_size_column_is_right_aligned() {
+        use crate::sys::testing::RecordingPainter;
+        crate::sys::testing::install_fakes();
+        let mut l = list(800.0);
+        let mut e = entry("datos.bin");
+        e.size = 2048;
+        l.append(vec![e]);
+        l.set_view(View::Details);
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        l.draw(&p, rect(0.0, 0.0, 800.0, 400.0), true);
+        let size = format::size_kb(2048);
+        let texts = p.texts();
+        let found: Vec<_> = texts.iter().filter(|(_, s, _)| *s == size).collect();
+        assert_eq!(found.len(), 1, "{texts:?}");
+        assert_eq!(found[0].0, FontId::UiRight);
+    }
+
+    /// Lista con 30 elementos y alto para 10 filas (más la barra horizontal de abajo).
+    fn list_view(width: f32) -> FileList {
+        let mut l = FileList::default();
+        l.area = rect(0.0, 0.0, width, LIST_PAD + 10.0 * ROW_H + SCROLLBAR_W + 5.0);
+        l.append((0..30).map(|i| entry(&format!("f{i:02}"))).collect());
+        l.set_view(View::List);
+        l
+    }
+
+    /// Vista Lista: las columnas se llenan de arriba abajo; con 10 filas, 30 elementos son 3
+    /// columnas y el elemento 11 queda arriba de la segunda.
+    #[test]
+    fn list_view_fills_columns_top_to_bottom() {
+        let l = list_view(1000.0);
+        assert!(!l.in_header(10.0, 10.0), "la Lista no tiene encabezado");
+        assert_eq!(l.rows_per_col(), 10);
+        let (r0, r9, r10) = (l.item_rect(0), l.item_rect(9), l.item_rect(10));
+        assert_eq!((r0.left, r0.top), (l.area.left + LIST_PAD, l.area.top + LIST_PAD));
+        assert_eq!((r0.right - r0.left, r0.bottom - r0.top), (LIST_COL_W, ROW_H));
+        assert_eq!((r9.left, r9.top), (r0.left, r0.top + 9.0 * ROW_H));
+        assert_eq!((r10.left, r10.top), (r0.left + LIST_COL_W, r0.top), "el 11 está arriba de la 2.ª columna");
+        assert_eq!(l.item_rect(29).left, r0.left + 2.0 * LIST_COL_W, "3 columnas");
+        // El centro de cada celda la devuelve; debajo de la última fila no hay nada.
+        for pos in [0, 9, 10, 25, 29] {
+            let r = l.item_rect(pos);
+            assert_eq!(l.pos_at((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0), Some(pos));
+        }
+        assert_eq!(l.pos_at(r0.left + 10.0, r9.bottom + 2.0), None);
+        assert_eq!(l.pos_at(r0.left + 3.0 * LIST_COL_W + 10.0, r0.top + 5.0), None, "pasada la última columna");
+    }
+
+    /// Teclado en Lista: ←/→ cambian de columna, ↑/↓ de fila.
+    #[test]
+    fn list_view_keyboard() {
+        use crate::keys::keys::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
+        let mut l = list_view(1000.0);
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus, Some(10), "→ desde el 1 va al 11");
+        l.on_key(VK_LEFT.0, false, false);
+        assert_eq!(l.focus, Some(0));
+        l.on_key(VK_DOWN.0, false, false);
+        assert_eq!(l.focus, Some(1), "↓ va al 2");
+        l.on_key(VK_UP.0, false, false);
+        assert_eq!(l.focus, Some(0));
+        // → desde la última columna incompleta: el último elemento.
+        l.select_index(l.visible[25] as usize);
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus, Some(29));
+        // Shift+→ selecciona el rango (una columna entera).
+        l.select_index(l.visible[0] as usize);
+        l.on_key(VK_RIGHT.0, false, true);
+        assert_eq!(l.selected_positions(), (0..=10).collect::<Vec<_>>());
+    }
+
+    /// En Lista la rueda vertical desplaza en horizontal (una columna por muesca), y la barra de
+    /// desplazamiento va abajo.
+    #[test]
+    fn list_view_wheel_scrolls_horizontally() {
+        let mut l = list_view(400.0);
+        let r0 = l.item_rect(0);
+        assert_eq!(l.on_wheel(-3.0), Action::Redraw);
+        assert_eq!(l.scroll_target, LIST_COL_W);
+        while l.tick(1.0 / 60.0) {}
+        let moved = l.item_rect(0);
+        assert_eq!((moved.left, moved.top), (r0.left - LIST_COL_W, r0.top), "se mueve a los costados, no hacia arriba");
+        // No se pasa del final: la última columna queda contra el borde derecho.
+        l.on_wheel(-100.0);
+        // 3 columnas más una libre al final (ver `content_len`).
+        let content = 4.0 * LIST_COL_W + LIST_PAD * 2.0;
+        assert_eq!(l.scroll_target, content - 400.0);
+        let (track, thumb) = l.scrollbar().expect("hay barra: no entran las 3 columnas");
+        assert_eq!((track.top, track.bottom), (l.area.bottom - SCROLLBAR_W, l.area.bottom));
+        assert_eq!((track.left, track.right), (l.area.left, l.area.right));
+        assert!(thumb.right - thumb.left < track.right - track.left);
+        // Llevar un elemento a la vista también es horizontal.
+        l.select_index(l.visible[0] as usize);
+        assert_eq!(l.scroll_target, 0.0);
+        // Arrastrar el pulgar hasta el final.
+        while l.tick(1.0 / 60.0) {}
+        let (_, thumb) = l.scrollbar().unwrap();
+        let y = (thumb.top + thumb.bottom) / 2.0;
+        assert_eq!(l.on_mouse_down(thumb.left + 2.0, y, false, false).1, true);
+        l.on_mouse_move(l.area.right + 50.0, y);
+        l.on_mouse_up();
+        assert_eq!(l.scroll, content - 400.0);
+    }
+
+    /// Lista: al final siempre queda fondo libre (una columna), para hacer clic derecho en la
+    /// carpeta o arrancar un rectángulo aunque los elementos llenen el panel.
+    #[test]
+    fn list_view_has_background_at_end() {
+        let mut l = list_view(400.0);
+        l.on_wheel(-100.0);
+        while l.tick(1.0 / 60.0) {}
+        let last = l.item_rect(29);
+        assert!(l.area.right - last.right >= LIST_COL_W - 1.0, "una columna libre después de la última: {last:?}");
+        let (x, y) = (last.right + LIST_COL_W / 2.0, (last.top + last.bottom) / 2.0);
+        assert_eq!(l.pos_at(x, y), None);
+        assert!(!l.on_right_down(x, y), "clic derecho en el fondo: menú de la carpeta");
+        // Un rectángulo desde el fondo selecciona lo que toca.
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_move(last.left + 10.0, y + 1.0);
+        assert_eq!(l.selected_positions(), vec![29]);
+        l.on_mouse_up();
+    }
+
+    /// Cambiar el eje del desplazamiento (agrupar o desagrupar la Lista con la vista de la
+    /// carpeta) arranca desde el principio: el desplazamiento horizontal no sirve como vertical.
+    #[test]
+    fn scroll_resets_when_axis_changes() {
+        let mut l = list_view(400.0);
+        l.on_wheel(-3.0);
+        assert!(l.scroll_target > 0.0);
+        let mut v = l.view_settings();
+        v.group_by = Some(Column::Type);
+        l.apply_view_settings(&v);
+        assert_eq!((l.scroll, l.scroll_target), (0.0, 0.0), "agrupada: hacia abajo, desde arriba");
+        l.on_wheel(-3.0);
+        while l.tick(1.0 / 60.0) {}
+        assert!(l.scroll > 0.0);
+        v.group_by = None;
+        l.apply_view_settings(&v);
+        assert_eq!((l.scroll, l.scroll_target), (0.0, 0.0), "sin agrupar: a los costados, desde la izquierda");
+    }
+
+    /// Vista Contenido: fila alta con el nombre y el tipo a la izquierda, la fecha y el tamaño a
+    /// la derecha, en las posiciones del diseño (`draw_content_row`).
+    #[test]
+    fn content_view_row_texts() {
+        use crate::sys::testing::RecordingPainter;
+        crate::sys::testing::install_fakes();
+        let mut l = list(800.0);
+        let mut e = entry("informe.pdf");
+        e.size = 2048;
+        e.modified = 134_000_000_000_000_000;
+        e.type_name = std::sync::Arc::from("Documento PDF");
+        l.append(vec![e]);
+        l.set_view(View::Content);
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        l.draw(&p, rect(0.0, 0.0, 800.0, 400.0), true);
+        let item = l.item_rect(0);
+        assert_eq!((item.top, item.bottom - item.top), (l.area.top + 4.0, CONTENT_H));
+        let texts = p.texts();
+        let find = |s: &str| texts.iter().find(|t| t.1 == s).cloned().unwrap_or_else(|| panic!("falta «{s}»: {texts:?}"));
+        let name = find("informe.pdf");
+        let kind = find("Documento PDF");
+        let date = find(&format::date(134_000_000_000_000_000));
+        let size = find(&format::size_kb(2048));
+        assert_eq!((name.0, name.2.left), (FontId::Ui, item.left + 58.0));
+        assert_eq!((kind.0, kind.2.left), (FontId::Ui, item.left + 58.0));
+        assert!(kind.2.top >= name.2.bottom - 1.0, "el tipo debajo del nombre");
+        assert_eq!((date.0, date.2.right, date.2.top), (FontId::UiRight, item.right - 12.0, name.2.top));
+        assert_eq!((size.0, size.2.right, size.2.top), (FontId::UiRight, item.right - 12.0, kind.2.top));
+        assert!(!texts.iter().any(|t| t.1 == "Nombre"), "sin encabezado de columnas");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{filter_matches, matches_pattern, wildcard};
+
+    #[test]
+    fn wildcards() {
+        assert!(wildcard("*.pdf", "informe.pdf"));
+        assert!(!wildcard("*.pdf", "informe.pdf.bak"));
+        assert!(wildcard("img?.png", "img2.png"));
+        assert!(!wildcard("img?.png", "img10.png"));
+        assert!(wildcard("*2026*", "foto 2026-10.jpg"));
+        assert!(wildcard("*", ""));
+        assert!(wildcard("a*b*c", "aXbYbZc"));
+        assert!(!wildcard("a*b*c", "aXbYbZ"));
+    }
+
+    #[test]
+    fn filter_parts() {
+        let parts = |s: &str| s.split(';').map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty()).collect::<Vec<_>>();
+        assert!(filter_matches(&parts(""), "lo que sea"));
+        assert!(filter_matches(&parts("Inform"), "informe final.docx"));
+        assert!(filter_matches(&parts("*.jpg; *.png"), "foto.png"));
+        assert!(!filter_matches(&parts("*.jpg;*.png"), "foto.gif"));
+        assert!(filter_matches(&parts("año"), "resumen del año.txt"));
+    }
+
+    /// Selección por patrón: varias partes con `;`, sin distinguir mayúsculas, con espacios
+    /// alrededor y partes vacías ignoradas; sin partes no coincide nada.
+    #[test]
+    fn pattern_matches_several_and_ignores_case() {
+        assert!(matches_pattern("FOTO.JPG", "*.jpg;*.png"));
+        assert!(!matches_pattern("a.txt", "*.jpg;*.png"));
+        assert!(matches_pattern("nombre con espacios.jpg", " *.jpg ; "));
+        assert!(matches_pattern("sin", "*"));
+        for name in ["a.txt", "sin", "", "FOTO.JPG"] {
+            assert!(!matches_pattern(name, ""), "{name:?} con patrón vacío");
+            assert!(!matches_pattern(name, ";"), "{name:?} con «;»");
+        }
+    }
+}
+
+#[cfg(test)]
+mod checkbox_tests {
+    use super::*;
+    use crate::sys::testing::{RecordingPainter, install_fakes};
+
+    fn entry(name: &str, size: u64) -> Entry {
+        Entry {
+            name: name.into(),
+            full: None,
+            group: 0,
+            pidl: None,
+            display: name.into(),
+            sort_key: name.to_lowercase(),
+            is_dir: false,
+            size,
+            modified: 0,
+            created: 0,
+            attrs: 0,
+            type_name: std::sync::Arc::from("Archivo"),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+            packed: 0,
+        }
+    }
+
+    const AREA: Rect = Rect { left: 0.0, top: 0.0, right: 800.0, bottom: 600.0 };
+
+    fn painter() -> RecordingPainter {
+        RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)))
+    }
+
+    /// Cinco archivos «a»…«e» en Detalles, dibujados una vez (la lista conoce su área).
+    fn five(checkboxes: bool) -> FileList {
+        install_fakes();
+        let mut l = FileList { checkboxes, ..Default::default() };
+        l.append(["a", "b", "c", "d", "e"].iter().map(|n| entry(n, 0)).collect());
+        l.draw(&painter(), AREA, true);
+        l
+    }
+
+    fn selected(l: &FileList) -> Vec<String> {
+        l.selected_entries().map(|e| e.display.clone()).collect()
+    }
+
+    /// Centro de la casilla del elemento en la posición `pos`.
+    fn check_point(l: &FileList, pos: usize) -> (f32, f32) {
+        let name_left = l.columns().iter().find(|c| c.0 == Column::Name).map(|c| c.1);
+        let r = l.checkbox_rect_in(l.item_rect(pos), name_left).expect("hay casilla");
+        ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
+    }
+
+    fn click(l: &mut FileList, (x, y): (f32, f32)) {
+        l.on_mouse_move(x, y);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+    }
+
+    /// Clic en la casilla de un elemento: lo suma a la selección sin tocar los demás (como
+    /// Ctrl+clic), en Detalles, Lista, Contenido y las cuadrículas; otro clic lo quita.
+    #[test]
+    fn checkbox_click_toggles_only_that_item() {
+        for view in [View::Details, View::List, View::Content, View::Icons, View::Thumbnails] {
+            let mut l = five(true);
+            l.set_view(view);
+            l.draw(&painter(), AREA, true);
+            l.select_index(0);
+            l.on_mouse_down(check_point(&l, 1).0, check_point(&l, 1).1, true, false);
+            l.on_mouse_up();
+            assert_eq!(selected(&l), ["a", "b"], "{view:?}");
+            let at = check_point(&l, 2);
+            l.on_mouse_move(at.0, at.1);
+            l.on_mouse_down(at.0, at.1, false, false);
+            // Ni arrastre ni selección pendiente: moverse y soltar no deja solo a «c».
+            assert_ne!(l.on_mouse_move(at.0 + 20.0, at.1 + 20.0), Action::BeginDrag, "{view:?}");
+            l.on_mouse_up();
+            assert_eq!(selected(&l), ["a", "b", "c"], "{view:?}");
+            click(&mut l, at);
+            assert_eq!(selected(&l), ["a", "b"], "{view:?}");
+            // El doble clic sobre la casilla la alterna, no abre el archivo.
+            l.on_mouse_down(at.0, at.1, false, false);
+            l.on_mouse_up();
+            assert_ne!(l.on_double_click(at.0, at.1), Action::Open(2), "{view:?}");
+        }
+    }
+
+    /// La casilla del encabezado selecciona solo lo que está a la vista (no los grupos plegados);
+    /// el segundo clic quita toda la selección.
+    #[test]
+    fn header_checkbox_selects_all_visible_and_clears() {
+        install_fakes();
+        let mut l = FileList { checkboxes: true, ..Default::default() };
+        let sizes = [0, 0, 0, 1024, 1024];
+        l.append(sizes.iter().enumerate().map(|(i, &s)| entry(&((b'a' + i as u8) as char).to_string(), s)).collect());
+        l.set_group(Some(Column::Size));
+        l.toggle_group("Diminuto (0–16 KB)");
+        l.draw(&painter(), AREA, true);
+        let r = l.header_checkbox_rect().expect("casilla en el encabezado de Detalles");
+        let at = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        click(&mut l, at);
+        assert_eq!(selected(&l), ["a", "b", "c"]);
+        assert_eq!(l.check_state(), CheckState::Checked);
+        click(&mut l, at);
+        assert!(selected(&l).is_empty());
+        assert_eq!(l.check_state(), CheckState::Empty);
+        // Solo en Detalles.
+        l.set_view(View::List);
+        assert!(l.header_checkbox_rect().is_none());
+    }
+
+    /// Con 1 de 5 seleccionados la casilla del encabezado se dibuja parcial (el guion) y la del
+    /// elemento, marcada (la tilde).
+    #[test]
+    fn header_checkbox_partial_state() {
+        let mut l = five(true);
+        l.select_index(2);
+        assert_eq!(l.check_state(), CheckState::Partial);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        let paths = p.paths();
+        let header = l.header_checkbox_rect().unwrap();
+        let dash = paths.iter().find(|(pts, closed, fill)| *closed && *fill == Some(CHECK_MARK) && pts.iter().all(|&(x, y)| contains(&header, x, y)));
+        let dash = dash.expect("guion de la casilla parcial");
+        assert_eq!(dash.0.len(), 4);
+        assert_eq!(dash.0[1].0 - dash.0[0].0, 7.0, "guion de 7 DIPs como en el diseño");
+        let row = l.checkbox_rect_in(l.item_rect(2), Some(0.0)).unwrap();
+        assert!(paths.iter().any(|(pts, closed, _)| !*closed && pts.len() == 3 && pts.iter().all(|&(x, y)| contains(&row, x, y))), "tilde en la fila");
+        // Todos seleccionados: la del encabezado pasa a marcada (sin guion).
+        l.select_all();
+        let p = painter();
+        l.draw(&p, AREA, true);
+        assert!(!p.paths().iter().any(|(_, closed, _)| *closed));
+        assert_eq!(l.check_state(), CheckState::Checked);
+    }
+
+    /// Con el switch prendido cada fila visible tiene su casilla, sin selección ni mouse encima.
+    #[test]
+    fn checkboxes_visible_on_all_rows_when_on() {
+        let mut l = five(true);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        // Una casilla vacía es un borde cuadrado de lado CHECK_BOX (menos el recorte del trazo).
+        let boxes = p.strokes().iter().filter(|(r, _)| (r.right - r.left - (CHECK - 1.2)).abs() < 0.01).count();
+        // Las 5 filas y la casilla del encabezado.
+        assert_eq!(boxes, 6, "una casilla por fila");
+    }
+
+    /// En oscuro el borde de la casilla vacía usa `text_secondary` (con `text_dim` casi no se ve);
+    /// en claro sigue con `text_dim`.
+    #[test]
+    fn empty_checkbox_edge_by_theme() {
+        let mut l = five(true);
+        for dark in [true, false] {
+            let th = crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(dark));
+            let p = RecordingPainter::new(th);
+            l.draw(&p, AREA, true);
+            let edges: Vec<Color> =
+                p.strokes().iter().filter(|(r, _)| (r.right - r.left - (CHECK - 1.2)).abs() < 0.01).map(|s| s.1).collect();
+            assert_eq!(edges.len(), 6);
+            let want = if dark { th.text_secondary } else { th.text_dim };
+            assert!(edges.iter().all(|c| *c == want), "oscuro={dark}: {edges:?}");
+        }
+    }
+
+    /// Con el switch apagado no hay casillas: nada se dibuja, el nombre queda donde siempre y un
+    /// clic donde iría la casilla es un clic común (selecciona solo ese elemento).
+    #[test]
+    fn checkboxes_hidden_when_off() {
+        let mut l = five(false);
+        l.select_index(0);
+        l.on_mouse_move(PAD + 7.0, HEADER_H + ROW_H * 1.5);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        assert!(p.paths().is_empty(), "sin casillas");
+        assert!(l.header_checkbox_rect().is_none());
+        let name = p.texts().into_iter().find(|t| t.1 == "a").unwrap();
+        assert_eq!(name.2.left, PAD + ICON + 8.0);
+        assert_eq!(p.texts().into_iter().find(|t| t.1 == "Nombre").unwrap().2.left, PAD);
+        click(&mut l, (PAD + 7.0, HEADER_H + ROW_H * 1.5));
+        assert_eq!(selected(&l), ["b"]);
+        // Prendido: el ícono y el nombre se corren para dejarle lugar (diseño X36).
+        let mut l = five(true);
+        let p = painter();
+        l.draw(&p, AREA, true);
+        let name = p.texts().into_iter().find(|t| t.1 == "a").unwrap();
+        assert_eq!(name.2.left, PAD + CHECK_SHIFT + ICON + 8.0);
+        assert_eq!(p.texts().into_iter().find(|t| t.1 == "Nombre").unwrap().2.left, PAD + CHECK_SHIFT + 2.0);
+        // Sin mouse ni selección, las filas no muestran casilla; la del encabezado sí (vacía).
+        assert!(p.paths().is_empty());
+    }
+}

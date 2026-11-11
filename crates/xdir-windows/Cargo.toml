@@ -1,0 +1,27 @@
+[package]
+name = "xdir-windows"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "xdir-windows"
+path = "src/main.rs"
+
+[dependencies]
+xdir-core = { path = "../xdir-core" }
+xdir-archive = { path = "../xdir-archive" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dwm", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Com", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Controls", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_IO", "Win32_UI_Input_KeyboardAndMouse", "Win32_Globalization", "Win32_System_Time", "Win32_System_Environment", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Diagnostics_Debug", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_Memory", "Win32_System_DataExchange", "Win32_System_Com_StructuredStorage", "Win32_Storage_EnhancedStorage", "Win32_UI_Shell_PropertiesSystem", "Win32_Graphics_DirectComposition", "Win32_UI_Controls_Dialogs", "Win32_UI_Accessibility", "Win32_System_Variant", "Win32_NetworkManagement_WNet", "Win32_Devices_DeviceAndDriverInstallation", "Win32_System_Ioctl", "Win32_System_EventLog"] }
+windows-core = "0.62.2"
+windows-numerics = "0.3.1"
+
+[features]
+# Árbol de carpetas lateral (F-3.5), experimental: incluido por defecto pero oculto hasta que se
+# enciende (switch de la rueda dentada o Ctrl+Shift+E). Para quitarlo del programa:
+# scripts\build.cmd build --release --no-default-features
+default = ["arbol"]
+arbol = ["xdir-core/arbol"]
+# Gancho de pruebas: deja manejar la ventana por WM_COPYDATA desde otro proceso (capturas y
+# pruebas automáticas sin mouse real). Nunca se compila en la versión normal.
+pruebas = ["xdir-core/pruebas"]

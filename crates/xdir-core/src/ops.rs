@@ -1,0 +1,71 @@
+//! Tipos de las operaciones de archivos (borrar, renombrar, carpeta nueva, archivo de texto nuevo,
+//! accesos directos y deshacer). Copiar, mover, duplicar, «Carpeta nueva con la selección» y
+//! devolver de la Papelera son del motor de copia (`transfer`). Cada operación corre en su propio
+//! hilo (la implementa cada sistema detrás de `sys::FileOps`) y al terminar avisa a la ventana con
+//! `WM_APP_OP_DONE`.
+
+use std::path::PathBuf;
+
+use crate::WM_APP;
+
+/// Terminó una operación; el resultado está en el canal.
+pub const WM_APP_OP_DONE: u32 = WM_APP + 4;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Op {
+    Delete { paths: Vec<PathBuf>, recycle: bool },
+    Rename { path: PathBuf, new_name: String },
+    NewFolder { parent: PathBuf },
+    /// Archivo de texto vacío «Nuevo documento de texto.txt» (« (2)», « (3)»… si ya existe).
+    NewFile { parent: PathBuf },
+    /// Un acceso directo (alias, enlace) junto a cada uno (`names::shortcut_name`).
+    Shortcuts { targets: Vec<PathBuf> },
+    Undo(Undo),
+}
+
+/// Cómo deshacer una operación ya hecha.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Undo {
+    /// Volver a llamar `path` como `old_name`.
+    Rename { path: PathBuf, old_name: String },
+    /// Copias, carpetas o archivos nuevos: se mandan a la papelera.
+    Created(Vec<PathBuf>),
+    /// Lo mismo, con la identidad de cada uno al crearlo (disco, número de archivo: `ItemStat::
+    /// file_id`). Deshacer manda a la Papelera solo lo que en esa ruta sigue siendo lo mismo (si
+    /// apareció otra cosa en su lugar, no se toca). Lo arma el motor de copia y lo deshace él.
+    CreatedIds(Vec<(PathBuf, (u64, u64))>),
+    /// (dónde quedó, dónde estaba).
+    Moved(Vec<(PathBuf, PathBuf)>),
+    /// (nombre del elemento dentro de la papelera, dónde estaba).
+    Recycled(Vec<(String, PathBuf)>),
+    /// Varios pasos de una sola operación; se deshacen en orden inverso.
+    Batch(Vec<Undo>),
+    /// Carpeta creada por la operación: va a la Papelera solo si quedó vacía (si no, se deja).
+    CreatedFolder(PathBuf),
+    /// Renombrar varios: (cómo se llama ahora, nombre anterior). Se deshace en el núcleo, con
+    /// `rename_many::rename_all` (el mismo cruce seguro), nunca por `FileOps`.
+    Renames(Vec<(PathBuf, String)>),
+}
+
+impl Undo {
+    /// Lo mismo sin las identidades de lo creado (`CreatedIds` → `Created`): para comparar.
+    pub fn without_ids(self) -> Undo {
+        match self {
+            Undo::CreatedIds(v) => Undo::Created(v.into_iter().map(|(p, _)| p).collect()),
+            Undo::Batch(v) => Undo::Batch(v.into_iter().map(Undo::without_ids).collect()),
+            other => other,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpResult {
+    pub undo: Option<Undo>,
+    /// Elemento a enfocar al terminar (renombrado o carpeta nueva).
+    pub focus: Option<PathBuf>,
+    /// Carpeta o archivo nuevo: se abre el renombrado en línea sobre él.
+    pub rename_after: bool,
+    pub error: Option<String>,
+    /// Elementos que quedan seleccionados al recargar (las copias de Duplicar…).
+    pub select: Vec<PathBuf>,
+}

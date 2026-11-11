@@ -1,0 +1,911 @@
+//! Vista Galería (diseño X42, `list::FileList::draw_gallery` y `list::FileList::draw_strip_cell`):
+//! arriba la imagen grande del elemento con foco y abajo una tira horizontal de miniaturas con el
+//! enfocado centrado. La tira muestra `visible` en orden, sin encabezados de grupo.
+
+use super::{Action, CheckState, FileList, draw_checkbox, grow, shown_name};
+use crate::fs::Entry;
+use crate::geom::{Rect, contains, rect};
+use crate::paint::{FontId, Painter, ellipsize};
+use crate::theme::alpha;
+use crate::thumbs;
+
+/// Alto de la tira de miniaturas (con la línea `border` arriba).
+pub const STRIP_H: f32 = 132.0;
+/// Ancho de cada celda de la tira.
+pub const CELL: f32 = 88.0;
+/// Alto de cada celda: la miniatura (con el mismo margen que a los lados) y abajo el nombre.
+pub const CELL_H: f32 = 108.0;
+/// Distancia entre el borde izquierdo de una celda y el de la siguiente.
+pub const CELL_STEP: f32 = 96.0;
+/// Lado de la miniatura dentro de la celda.
+pub const STRIP_THUMB: f32 = 72.0;
+/// Margen de la imagen grande y de los extremos de la tira.
+pub const GALLERY_PAD: f32 = 16.0;
+/// Línea del nombre del enfocado, abajo del área de la imagen grande.
+pub const CAPTION_H: f32 = 28.0;
+/// Alto de la línea del nombre en la celda, debajo de la miniatura, y margen a los lados.
+const CELL_NAME_H: f32 = 18.0;
+const CELL_NAME_PAD: f32 = 2.0;
+/// Separación entre el nombre y el tipo debajo de la imagen grande.
+const CAPTION_GAP: f32 = 8.0;
+
+/// Margen de arriba de las celdas dentro de la tira.
+const CELL_TOP: f32 = (STRIP_H - CELL_H) / 2.0;
+/// Margen de la miniatura dentro de la celda (arriba y a los lados).
+const THUMB_INSET: f32 = (CELL - STRIP_THUMB) / 2.0;
+/// Casilla de selección: desde la esquina de arriba a la izquierda de la celda.
+pub(super) const CHECK_INSET: f32 = 12.0;
+/// Ícono de las carpetas y de lo que no tiene imagen: en la tira y en grande.
+const STRIP_ICON: f32 = 48.0;
+const BIG_ICON: f32 = 96.0;
+/// Rueda: filas (`on_wheel`) por paso; una muesca del mouse son 3.
+const WHEEL_STEP: f32 = 3.0;
+
+/// Corrimiento de la tira (cuánto se mueve a la izquierda la celda 0 respecto de su lugar a
+/// `GALLERY_PAD` del borde) para que el enfocado quede centrado; en los extremos la tira no se
+/// corre más allá de su principio o su fin. Si todo entra, el conjunto va centrado (negativo).
+pub fn strip_offset(count: usize, focus: usize, width: f32) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    let center = GALLERY_PAD + focus.min(count - 1) as f32 * CELL_STEP + CELL / 2.0;
+    strip_clamp(center - width / 2.0, count, width)
+}
+
+/// Lleva un corrimiento a lo posible: entre el principio y el fin de la tira, o el conjunto
+/// centrado si todo entra.
+fn strip_clamp(offset: f32, count: usize, width: f32) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    let content = GALLERY_PAD * 2.0 + count as f32 * CELL_STEP - (CELL_STEP - CELL);
+    if content <= width {
+        return -(width - content) / 2.0;
+    }
+    offset.clamp(0.0, content - width)
+}
+
+/// Estado de una celda de la tira (diseño `list::FileList::draw_strip_cell`). `Focus` (foco sin
+/// selección, después de Ctrl+flecha) no está en el diseño: fondo tenue y borde del acento, como
+/// en la lista.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CellState {
+    Normal,
+    Hover,
+    Selected,
+    SelectedFocus,
+    Focus,
+}
+
+impl FileList {
+    /// La tira, abajo de todo el área.
+    pub(super) fn strip_rect(&self) -> Rect {
+        let a = self.area;
+        rect(a.left, (a.bottom - STRIP_H).max(a.top), a.right, a.bottom)
+    }
+
+    /// Dónde va la imagen grande: arriba de la tira, con su margen.
+    pub(super) fn gallery_image_rect(&self) -> Rect {
+        let (a, s) = (self.area, self.strip_rect());
+        rect(a.left + GALLERY_PAD, a.top + GALLERY_PAD, (a.right - GALLERY_PAD).max(a.left + GALLERY_PAD), (s.top - GALLERY_PAD).max(a.top + GALLERY_PAD))
+    }
+
+    /// Corrimiento guardado de la tira: lo centran el teclado y la rueda (`center_strip`, desde
+    /// `ensure_visible`); un clic no lo mueve salvo para mostrar entera la celda (`reveal_strip`),
+    /// así el doble clic cae en la misma celda que el primero.
+    fn strip_shift(&self) -> f32 {
+        self.strip_scroll
+    }
+
+    fn strip_width(&self) -> f32 {
+        let s = self.strip_rect();
+        s.right - s.left
+    }
+
+    /// Centra la celda `pos` (lo que se pueda).
+    pub(super) fn center_strip(&mut self, pos: usize) {
+        let w = self.strip_width();
+        self.strip_scroll = strip_offset(self.visible.len(), pos, w);
+        self.strip_w = w;
+        self.strip_focus = Some(pos);
+    }
+
+    /// Corre la tira lo justo para que la celda `pos` se vea entera (después de un clic).
+    pub(super) fn reveal_strip(&mut self, pos: usize) {
+        let (s, r) = (self.strip_rect(), self.strip_cell_rect(pos));
+        let (lo, hi) = (s.left + GALLERY_PAD, s.right - GALLERY_PAD);
+        if r.left < lo {
+            self.strip_scroll -= lo - r.left;
+        } else if r.right > hi {
+            self.strip_scroll += r.right - hi;
+        }
+        self.strip_scroll = strip_clamp(self.strip_scroll, self.visible.len(), self.strip_width());
+        // El corrimiento sigue valiendo para el foco que dejó el clic.
+        self.strip_focus = self.focus;
+    }
+
+    /// Después de recargar, filtrar u ocultar, y antes de dibujar: si cambió el ancho o el foco
+    /// cambió por otro camino que un clic en la tira (`strip_focus` es el foco para el que se
+    /// calculó el corrimiento), se vuelve a centrar el enfocado; si no, el corrimiento se lleva a
+    /// lo posible y, si así la celda con foco no se ve entera, también se centra.
+    pub(super) fn settle_strip(&mut self) {
+        let w = self.strip_width();
+        let focus = self.focus.unwrap_or(0);
+        if w != self.strip_w || self.strip_focus != self.focus {
+            self.center_strip(focus);
+            return;
+        }
+        self.strip_scroll = strip_clamp(self.strip_scroll, self.visible.len(), w);
+        if focus < self.visible.len() {
+            let (s, r) = (self.strip_rect(), self.strip_cell_rect(focus));
+            if r.left < s.left || r.right > s.right {
+                self.center_strip(focus);
+            }
+        }
+    }
+
+    /// Celda de la posición `pos` en la tira.
+    pub(super) fn strip_cell_rect(&self, pos: usize) -> Rect {
+        let s = self.strip_rect();
+        let x = s.left + GALLERY_PAD + pos as f32 * CELL_STEP - self.strip_shift();
+        let y = s.top + CELL_TOP;
+        rect(x, y, x + CELL, y + CELL_H)
+    }
+
+    /// Celdas a la vista: [primera, última).
+    pub(super) fn strip_range(&self) -> (usize, usize) {
+        let n = self.visible.len();
+        let s = self.strip_rect();
+        let origin = s.left + GALLERY_PAD - self.strip_shift();
+        // La celda i se ve si origin + i·paso + CELL > izquierda y origin + i·paso < derecha.
+        let first = (((s.left - origin - CELL) / CELL_STEP).floor() + 1.0).max(0.0) as usize;
+        let last = ((s.right - origin) / CELL_STEP).ceil().max(0.0) as usize;
+        (first.min(n), last.min(n))
+    }
+
+    /// Celda bajo el punto (posición en `visible`); el espacio entre celdas no cuenta.
+    pub(super) fn strip_pos_at(&self, x: f32, y: f32) -> Option<usize> {
+        let s = self.strip_rect();
+        if !contains(&s, x, y) {
+            return None;
+        }
+        let origin = s.left + GALLERY_PAD - self.strip_shift();
+        let i = ((x - origin) / CELL_STEP).floor();
+        if i < 0.0 || i as usize >= self.visible.len() {
+            return None;
+        }
+        let pos = i as usize;
+        contains(&self.strip_cell_rect(pos), x, y).then_some(pos)
+    }
+
+    /// Teclas en la Galería: ←/↑ el anterior, →/↓ el siguiente, Inicio/Fin, Re Pág/Av Pág (lo que
+    /// entra en la tira), Enter abre y Ctrl+Espacio alterna; Shift y Ctrl como en la lista.
+    pub(super) fn on_key_gallery(&mut self, vk: u16, ctrl: bool, shift: bool) -> Option<Action> {
+        use crate::keys::Key;
+        use crate::keys::keys::*;
+        let n = self.visible.len();
+        if n == 0 {
+            return None;
+        }
+        self.header_focus = None;
+        self.focus_visible = true;
+        let cur = self.focus.unwrap_or(0).min(n - 1);
+        // Sin selección, la primera flecha selecciona el enfocado en vez de saltearlo.
+        let step = usize::from(self.selected.iter().any(|&s| s));
+        let s = self.strip_rect();
+        let page = (((s.right - s.left) / CELL_STEP).floor() as usize).max(1);
+        let target = match Key(vk) {
+            VK_LEFT | VK_UP => cur.saturating_sub(step),
+            VK_RIGHT | VK_DOWN => (cur + step).min(n - 1),
+            VK_PRIOR => cur.saturating_sub(page),
+            VK_NEXT => (cur + page).min(n - 1),
+            VK_HOME => 0,
+            VK_END => n - 1,
+            VK_SPACE if ctrl => {
+                self.toggle(cur);
+                return Some(Action::Redraw);
+            }
+            VK_RETURN => return self.focused_index().map(Action::Open),
+            _ => return None,
+        };
+        self.move_focus_to(target, ctrl, shift);
+        // La tira se corrió: lo que está bajo el mouse es otra celda.
+        self.hover = self.mouse_at.and_then(|(x, y)| self.strip_pos_at(x, y));
+        Some(Action::Redraw)
+    }
+
+    /// Rueda en la Galería: sobre la tira, el anterior (hacia arriba) o el siguiente.
+    pub(super) fn gallery_wheel(&mut self, rows: f32) -> Action {
+        let on_strip = self.mouse_at.is_some_and(|(x, y)| contains(&self.strip_rect(), x, y));
+        if !on_strip || self.visible.is_empty() {
+            self.wheel_acc = 0.0;
+            return Action::None;
+        }
+        if self.wheel_acc * rows < 0.0 {
+            self.wheel_acc = 0.0;
+        }
+        self.wheel_acc += rows;
+        let steps = (self.wheel_acc / WHEEL_STEP).trunc();
+        if steps == 0.0 {
+            return Action::None;
+        }
+        self.wheel_acc -= steps * WHEEL_STEP;
+        let n = self.visible.len() as i64;
+        let cur = self.focus.unwrap_or(0) as i64;
+        let target = (cur - steps as i64).clamp(0, n - 1) as usize;
+        if target == cur as usize && self.selected.iter().any(|&s| s) {
+            return Action::None;
+        }
+        self.focus_visible = true;
+        self.move_focus_to(target, false, false);
+        // Las celdas se corrieron: lo que está bajo el mouse es otra.
+        self.hover = self.mouse_at.and_then(|(x, y)| self.strip_pos_at(x, y));
+        Action::Redraw
+    }
+
+    /// Galería (diseño X42): la imagen grande del enfocado arriba (carpetas y lo que no tiene
+    /// imagen, el ícono de 96) con su nombre, tipo y tamaño debajo, y la tira de miniaturas con
+    /// sus nombres abajo.
+    pub fn draw_gallery(&mut self, p: &dyn Painter, area: Rect, active: bool) {
+        self.area = area;
+        self.strip_active = active;
+        self.settle_strip();
+        let th = p.theme();
+        let strip = self.strip_rect();
+
+        let img = self.gallery_image_rect();
+        if let Some(idx) = self.focused_index()
+            && img.right - img.left >= 1.0
+            && img.bottom - img.top >= 1.0
+        {
+            let e = &self.entries[idx];
+            // La línea del nombre abajo; la imagen, en lo que queda.
+            let caption = rect(img.left, (img.bottom - CAPTION_H + 6.0).max(img.top), img.right, img.bottom);
+            let pic = rect(img.left, img.top, img.right, (img.bottom - CAPTION_H).max(img.top));
+            let (w, h) = (pic.right - pic.left, pic.bottom - pic.top);
+            if h >= 1.0 {
+                let drawn = !e.is_dir
+                    && self.thumb_source(e).is_some_and(|src| p.big_image(&(src, thumbs::big_side(p.thumb_px(w.max(h)))), pic));
+                if !drawn {
+                    let size = BIG_ICON.min(w).min(h);
+                    let (cx, cy) = ((pic.left + pic.right) / 2.0, (pic.top + pic.bottom) / 2.0);
+                    p.shell_icon(e.icon, e.overlay, cx - size / 2.0, cy - size / 2.0, size);
+                }
+            }
+            self.draw_caption(p, e, caption);
+        }
+
+        p.fill(strip, th.surface);
+        p.fill(rect(strip.left, strip.top, strip.right, strip.top + 1.0), th.border);
+        let (first, last) = self.strip_range();
+        let focus = self.focus_pos();
+        p.clip(strip, &mut || {
+            for pos in first..last {
+                let selected = self.selected[self.visible[pos] as usize];
+                let focused = active && self.focus_visible && focus == Some(pos);
+                let state = match (selected, focused) {
+                    (true, true) => CellState::SelectedFocus,
+                    (true, false) => CellState::Selected,
+                    (false, true) => CellState::Focus,
+                    _ if self.hover == Some(pos) => CellState::Hover,
+                    _ => CellState::Normal,
+                };
+                self.draw_strip_cell(p, self.strip_cell_rect(pos), pos, state);
+            }
+        });
+    }
+
+    /// Debajo de la imagen grande, en una línea centrada: el nombre y al lado, chico y tenue, el
+    /// tipo y el tamaño («Imagen JPEG · 3,8 MB»; las carpetas, solo el tipo). Si no entra, se
+    /// corta primero el nombre (hasta la mitad del ancho) y después el tipo.
+    fn draw_caption(&self, p: &dyn Painter, e: &Entry, r: Rect) {
+        let th = p.theme();
+        let width = r.right - r.left;
+        let size = match (e.is_dir, e.modified) {
+            (false, _) => crate::format::size_short(e.size),
+            (true, 0) if e.size > 0 => crate::format::size_short(e.size),
+            _ => String::new(),
+        };
+        let meta = match (e.type_name.is_empty(), size.is_empty()) {
+            (_, true) => e.type_name.to_string(),
+            (true, false) => size,
+            (false, false) => format!("{} · {size}", e.type_name),
+        };
+        let meta_w = if meta.is_empty() { 0.0 } else { p.measure(FontId::Small, &meta) + CAPTION_GAP };
+        let name = ellipsize(p, FontId::Ui, shown_name(e, self.show_extensions), (width - meta_w).max(width / 2.0));
+        let name_w = p.measure(FontId::Ui, &name);
+        let meta = ellipsize(p, FontId::Small, &meta, width - name_w - CAPTION_GAP);
+        let meta_w = if meta.is_empty() { 0.0 } else { p.measure(FontId::Small, &meta) + CAPTION_GAP };
+        // Un poco de aire a la derecha de cada texto: lo medido y lo dibujado pueden diferir en
+        // una fracción y el texto se recorta a su rectángulo.
+        let left = r.left + ((width - name_w - meta_w) / 2.0).max(0.0);
+        let name_r = rect(left, r.top, (left + name_w + 1.0).min(r.right), r.bottom);
+        p.text(FontId::Ui, &name, name_r, th.text);
+        if !meta.is_empty() {
+            let x = name_r.right - 1.0 + CAPTION_GAP;
+            p.text(FontId::Small, &meta, rect(x, r.top, r.right.min(x + meta_w - CAPTION_GAP + 1.0), r.bottom), th.text_dim);
+        }
+    }
+
+    /// Celda de la tira (diseño `list::FileList::draw_strip_cell`): fondo de 88 con radio 6 según
+    /// el estado, la miniatura de 72 (o el ícono de 48), el nombre debajo en una línea y, con
+    /// casillas, la casilla arriba a la izquierda si está seleccionada o bajo el mouse.
+    pub fn draw_strip_cell(&self, p: &dyn Painter, r: Rect, pos: usize, state: CellState) {
+        let th = p.theme();
+        let Some(&idx) = self.visible.get(pos) else { return };
+        let idx = idx as usize;
+        let e = &self.entries[idx];
+        let ring = |p: &dyn Painter| p.round_stroke_w(grow(r, -0.75), 5.25, th.accent, 1.5);
+        // En el panel inactivo, la selección en gris como en la lista.
+        let selection = if self.strip_active { th.selection } else { alpha(th.text_dim, 0.18) };
+        if self.drop_target == Some(idx) {
+            p.round_fill(r, 6.0, th.selection);
+            ring(p);
+        } else {
+            match state {
+                CellState::Normal => {}
+                CellState::Hover => p.round_fill(r, 6.0, th.hover),
+                CellState::Selected => p.round_fill(r, 6.0, selection),
+                CellState::SelectedFocus => {
+                    p.round_fill(r, 6.0, selection);
+                    ring(p);
+                }
+                CellState::Focus => {
+                    p.round_fill(r, 6.0, th.focus_fill);
+                    p.round_stroke_w(grow(r, -0.75), 5.25, alpha(th.accent, 0.8), 1.5);
+                }
+            }
+        }
+        let thumb = rect(r.left + THUMB_INSET, r.top + THUMB_INSET, r.right - THUMB_INSET, r.top + THUMB_INSET + STRIP_THUMB);
+        let drawn = !e.is_dir && self.thumb_source(e).is_some_and(|src| p.thumbnail(&(src, p.thumb_px(STRIP_THUMB)), thumb));
+        if !drawn {
+            let (cx, cy) = ((thumb.left + thumb.right) / 2.0, (thumb.top + thumb.bottom) / 2.0);
+            p.shell_icon(e.icon, e.overlay, cx - STRIP_ICON / 2.0, cy - STRIP_ICON / 2.0, STRIP_ICON);
+        }
+        // El nombre, centrado y cortado al ancho de la celda.
+        let color = if matches!(state, CellState::Selected | CellState::SelectedFocus | CellState::Focus) { th.text } else { th.text_dim };
+        let max = CELL - 2.0 * CELL_NAME_PAD;
+        let name = ellipsize(p, FontId::Small, shown_name(e, self.show_extensions), max - 1.0);
+        let w = (p.measure(FontId::Small, &name) + 1.0).min(max);
+        let (left, top) = (r.left + (CELL - w) / 2.0, thumb.bottom + 2.0);
+        p.text(FontId::Small, &name, rect(left, top, left + w, top + CELL_NAME_H), color);
+        let selected = self.selected[idx];
+        if let Some(cb) = self.checkbox_rect_in(r, None)
+            && (selected || self.hover == Some(pos))
+        {
+            draw_checkbox(p, cb, if selected { CheckState::Checked } else { CheckState::Empty });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::Entry;
+    use crate::geom::rect;
+    use crate::keys::keys::{VK_DOWN, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP};
+    use crate::list::{Action, Column, FileList, View};
+    use crate::paint::{FontId, Painter};
+    use crate::sys::testing::{RecordingPainter, install_fakes};
+    use crate::theme::{DEFAULT_ACCENT, Theme};
+    use crate::thumbs;
+
+    fn entry(name: &str, kind: &str, dir: bool) -> Entry {
+        Entry {
+            name: name.into(),
+            full: None,
+            group: 0,
+            pidl: None,
+            display: name.into(),
+            sort_key: name.to_lowercase(),
+            is_dir: dir,
+            size: 0,
+            modified: 0,
+            created: 0,
+            attrs: 0,
+            type_name: std::sync::Arc::from(kind),
+            icon: 0,
+            overlay: 0,
+            overlay_checked: true,
+            packed: 0,
+        }
+    }
+
+    /// Lista vacía de 960×600 en la carpeta «/fotos».
+    fn blank() -> FileList {
+        FileList { area: rect(0.0, 0.0, 960.0, 600.0), folder: Some("/fotos".into()), ..FileList::default() }
+    }
+
+    /// Galería de 960×600 con `n` fotos (f00.jpg…).
+    fn gallery(n: usize) -> FileList {
+        let mut l = blank();
+        l.append((0..n).map(|i| entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false)).collect());
+        l.set_view(View::Gallery);
+        l
+    }
+
+    fn names(l: &FileList, positions: impl Iterator<Item = usize>) -> Vec<String> {
+        positions.map(|p| l.entries[l.visible[p] as usize].display.clone()).collect()
+    }
+
+    fn center(r: crate::geom::Rect) -> (f32, f32) {
+        ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
+    }
+
+    fn painter() -> RecordingPainter {
+        install_fakes();
+        RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(true)))
+    }
+
+    #[test]
+    fn gallery_view_index_and_cycle() {
+        assert_eq!(View::Gallery.index(), 6);
+        assert_eq!(View::Gallery.id(), "galeria");
+        assert_eq!(View::Gallery.name(), "Galería");
+        assert_eq!(View::from_id("galeria"), Some(View::Gallery));
+        assert_eq!(crate::list::VIEWS[6], (View::Gallery, "Galería", "galeria", 72.0));
+        assert_eq!(
+            crate::list::CYCLE,
+            [View::Details, View::List, View::Content, View::Icons, View::LargeIcons, View::Thumbnails, View::Gallery]
+        );
+        assert!(!View::Gallery.is_grid());
+        assert!(!View::Gallery.has_header());
+    }
+
+    /// 30 elementos en 960: el enfocado queda centrado; en los extremos, la tira se queda pegada
+    /// al borde; si todo entra, el conjunto va centrado.
+    #[test]
+    fn strip_offset_centers_focus() {
+        let left = |count: usize, focus: usize, pos: usize| GALLERY_PAD + pos as f32 * CELL_STEP - strip_offset(count, focus, 960.0);
+        // Foco 15: su centro en el medio.
+        assert_eq!(left(30, 15, 15) + CELL / 2.0, 480.0);
+        // Foco 0: sin corrimiento.
+        assert_eq!(strip_offset(30, 0, 960.0), 0.0);
+        // Foco 29: la última celda pegada al borde derecho (con el margen).
+        assert_eq!(left(30, 29, 29) + CELL, 960.0 - GALLERY_PAD);
+        // 5 elementos: mismo margen a los dos lados, sea cual sea el foco.
+        for focus in 0..5 {
+            let (first, last) = (left(5, focus, 0), left(5, focus, 4) + CELL);
+            assert_eq!(first, 960.0 - last, "foco {focus}");
+        }
+    }
+
+    #[test]
+    fn gallery_keys_move_one() {
+        let mut l = gallery(10);
+        l.select_index(l.visible[3] as usize);
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus_pos(), Some(4));
+        l.on_key(VK_DOWN.0, false, false);
+        assert_eq!(l.focus_pos(), Some(5));
+        l.on_key(VK_LEFT.0, false, false);
+        assert_eq!(l.focus_pos(), Some(4));
+        l.on_key(VK_UP.0, false, false);
+        assert_eq!(l.focus_pos(), Some(3));
+        assert_eq!(l.selected_positions(), [3]);
+        // Shift+→ extiende la selección.
+        l.on_key(VK_RIGHT.0, false, true);
+        l.on_key(VK_RIGHT.0, false, true);
+        assert_eq!(l.selected_positions(), [3, 4, 5]);
+        // Enter abre el enfocado.
+        assert_eq!(l.on_key(VK_RETURN.0, false, false), Some(Action::Open(l.visible[5] as usize)));
+    }
+
+    /// Agrupada por tipo con un grupo plegado: la tira tiene solo los visibles, en orden, sin
+    /// lugar para encabezados; → no se detiene en los encabezados.
+    #[test]
+    fn gallery_skips_group_headers() {
+        let mut l = blank();
+        l.append(vec![
+            entry("a.jpg", "Imagen JPEG", false),
+            entry("b.png", "Imagen PNG", false),
+            entry("c.jpg", "Imagen JPEG", false),
+            entry("d.txt", "Documento de texto", false),
+            entry("e.png", "Imagen PNG", false),
+        ]);
+        l.set_group(Some(Column::Type));
+        l.toggle_group("Imagen PNG");
+        l.set_view(View::Gallery);
+        let shown = names(&l, 0..l.count());
+        assert_eq!(shown.len(), 3);
+        assert!(!shown.iter().any(|n| n.ends_with(".png")), "{shown:?}");
+        // Celdas seguidas, sin huecos de encabezados.
+        for pos in 1..l.count() {
+            assert_eq!(l.item_rect(pos).left - l.item_rect(pos - 1).left, CELL_STEP);
+        }
+        l.select_index(l.visible[0] as usize);
+        let mut seen = vec![shown[0].clone()];
+        for _ in 1..l.count() {
+            l.on_key(VK_RIGHT.0, false, false);
+            let pos = l.focus_pos().expect("el foco nunca queda en un encabezado");
+            seen.extend(names(&l, std::iter::once(pos)));
+        }
+        assert_eq!(seen, shown);
+        // Pasado el último, se queda en el último.
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.focus_pos(), Some(l.count() - 1));
+    }
+
+    #[test]
+    fn gallery_filter_applies() {
+        let mut l = blank();
+        l.append(vec![entry("a.jpg", "Imagen JPEG", false), entry("b.png", "Imagen PNG", false), entry("c.jpg", "Imagen JPEG", false)]);
+        l.set_view(View::Gallery);
+        l.set_filter(Column::Type, vec!["Imagen JPEG".into()]);
+        assert_eq!(names(&l, 0..l.count()), ["a.jpg", "c.jpg"]);
+        // Las dos celdas a la vista, y la del PNG no existe.
+        let (first, last) = l.visible_range();
+        assert_eq!((first, last), (0, 2));
+    }
+
+    #[test]
+    fn gallery_click_focuses_ctrl_adds() {
+        let mut l = gallery(10);
+        let (x, y) = center(l.item_rect(3));
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.focus_pos(), Some(3));
+        assert_eq!(l.selected_positions(), [3]);
+        // La tira se movió para centrar la 3: se busca la 5 donde está ahora.
+        let (x, y) = center(l.item_rect(5));
+        l.on_mouse_down(x, y, true, false);
+        l.on_mouse_up();
+        assert_eq!(l.selected_positions(), [3, 5]);
+        assert_eq!(l.focus_pos(), Some(5));
+        // Un clic en la imagen grande no cambia la selección.
+        l.on_mouse_down(480.0, 100.0, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.selected_positions(), [3, 5]);
+    }
+
+    #[test]
+    fn gallery_double_click_opens_folder() {
+        let mut l = blank();
+        l.append(vec![entry("Carpeta", "Carpeta de archivos", true), entry("a.jpg", "Imagen JPEG", false)]);
+        l.set_view(View::Gallery);
+        let pos = (0..l.count()).find(|&p| l.entries[l.visible[p] as usize].is_dir).unwrap();
+        let (x, y) = center(l.item_rect(pos));
+        assert_eq!(l.on_double_click(x, y), Action::Open(l.visible[pos] as usize));
+    }
+
+    /// Con casillas: un clic en la casilla de una celda la suma a la selección.
+    #[test]
+    fn gallery_checkbox_in_strip() {
+        let mut l = gallery(10);
+        l.checkboxes = true;
+        l.select_index(l.visible[2] as usize);
+        let cell = l.item_rect(4);
+        let (x, y) = (cell.left + 12.0 + 7.0, cell.top + 12.0 + 7.0);
+        l.on_mouse_move(x, y);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.selected_positions(), [2, 4]);
+        // Dibujada: la de la celda bajo el mouse y las de las seleccionadas.
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let marks = p.paths().len();
+        assert_eq!(marks, 2, "una tilde por cada seleccionada");
+    }
+
+    #[test]
+    fn gallery_draws_big_image_of_focus() {
+        let mut l = gallery(10);
+        l.select_index(l.visible[2] as usize);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let draws = p.big_draws();
+        assert_eq!(draws.len(), 1);
+        let (key, r) = &draws[0];
+        assert_eq!(key.0, thumbs::Source::Path("/fotos/f02.jpg".into()));
+        // Arriba de la tira, con 16 de margen y la línea del nombre abajo.
+        assert_eq!(*r, rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0 - CAPTION_H));
+        assert_eq!(key.1, thumbs::big_side(p.thumb_px(928.0)));
+    }
+
+    /// Texto dibujado con `font` y exactamente `s`.
+    fn text_of(p: &RecordingPainter, font: FontId, s: &str) -> Option<crate::geom::Rect> {
+        p.texts().into_iter().find(|t| t.0 == font && t.1 == s).map(|t| t.2)
+    }
+
+    fn inside(inner: crate::geom::Rect, outer: crate::geom::Rect) -> bool {
+        inner.left >= outer.left && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom
+    }
+
+    /// Debajo de la imagen grande, dentro del área de la imagen: el nombre del enfocado y al lado,
+    /// chico, el tipo y el tamaño.
+    #[test]
+    fn gallery_caption_under_big_image() {
+        let mut l = blank();
+        let mut e = entry("f02.jpg", "Imagen JPEG", false);
+        e.size = 4_000_000;
+        l.append(vec![entry("f01.jpg", "Imagen JPEG", false), e]);
+        l.set_view(View::Gallery);
+        l.select_index(1);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let area = rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0);
+        let picture = p.big_draws()[0].1;
+        let name = text_of(&p, FontId::Ui, "f02.jpg").expect("nombre del enfocado");
+        let meta = text_of(&p, FontId::Small, &format!("Imagen JPEG · {}", crate::format::size_short(4_000_000))).expect("tipo y tamaño");
+        for r in [name, meta] {
+            assert!(inside(r, area), "{r:?} fuera de {area:?}");
+            assert!(r.top >= picture.bottom, "{r:?} pisa la imagen {picture:?}");
+        }
+        // En una línea, el tipo a la derecha del nombre y el conjunto centrado.
+        assert_eq!((name.top, name.bottom), (meta.top, meta.bottom));
+        assert!(meta.left >= name.right);
+        let mid = (name.left + meta.right) / 2.0;
+        assert!((mid - 480.0).abs() <= 2.0, "centro {mid}");
+        // Una carpeta: solo el tipo.
+        let mut l = blank();
+        l.append(vec![entry("Fotos", "Carpeta de archivos", true)]);
+        l.set_view(View::Gallery);
+        l.select_index(0);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        assert!(text_of(&p, FontId::Ui, "Fotos").is_some(), "{:?}", p.texts());
+        assert!(text_of(&p, FontId::Small, "Carpeta de archivos").is_some(), "{:?}", p.texts());
+    }
+
+    /// En la tira, cada celda con su nombre, dentro de la celda y debajo de la miniatura.
+    #[test]
+    fn gallery_strip_cells_draw_names() {
+        let mut l = gallery(10);
+        l.select_index(l.visible[2] as usize);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let (first, last) = l.visible_range();
+        assert!(last > first);
+        for pos in first..last {
+            let name = &names(&l, std::iter::once(pos))[0];
+            let cell = l.item_rect(pos);
+            let r = p.texts().into_iter().find(|t| t.0 == FontId::Small && &t.1 == name && t.2.top >= l.strip_rect().top);
+            let r = r.unwrap_or_else(|| panic!("sin nombre en la celda {pos}: {:?}", p.texts())).2;
+            assert!(inside(r, cell), "{r:?} fuera de {cell:?}");
+            assert!(r.top >= cell.top + (CELL - STRIP_THUMB) / 2.0 + STRIP_THUMB, "{r:?} pisa la miniatura");
+        }
+    }
+
+    /// Un nombre largo se corta con «…» al ancho de la celda.
+    #[test]
+    fn gallery_long_names_ellipsized() {
+        let long = "un nombre de archivo larguísimo que no entra.jpg";
+        let mut l = blank();
+        l.append(vec![entry(long, "Imagen JPEG", false), entry("b.jpg", "Imagen JPEG", false)]);
+        l.set_view(View::Gallery);
+        let pos = (0..l.count()).find(|&p| l.entries[l.visible[p] as usize].name == long).unwrap();
+        l.select_index(l.visible[1 - pos] as usize);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let cell = l.item_rect(pos);
+        let strip_top = l.strip_rect().top;
+        let (_, s, r) = p.texts().into_iter().find(|t| t.2.top >= strip_top && t.1.starts_with("un nombre")).expect("nombre en la tira");
+        assert!(s.ends_with('…'), "{s}");
+        assert!(p.measure(FontId::Small, &s) <= cell.right - cell.left, "{s}");
+        assert!(inside(r, cell), "{r:?} fuera de {cell:?}");
+        // Enfocado, el nombre de abajo de la imagen también se corta si no entra.
+        let mut l = blank();
+        let huge: String = "x".repeat(400);
+        l.append(vec![entry(&huge, "Imagen JPEG", false)]);
+        l.set_view(View::Gallery);
+        l.select_index(0);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        let area = rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0);
+        let (_, s, r) = p.texts().into_iter().find(|t| t.0 == FontId::Ui).expect("nombre");
+        assert!(s.ends_with('…'), "{s}");
+        assert!(inside(r, area), "{r:?}");
+        assert!(p.measure(FontId::Ui, &s) <= area.right - area.left);
+    }
+
+    /// Una carpeta: el ícono de 96 centrado en vez de la imagen grande; en la tira, el de 48.
+    #[test]
+    fn gallery_folder_uses_icon() {
+        let mut l = blank();
+        l.append(vec![entry("Carpeta", "Carpeta de archivos", true)]);
+        l.set_view(View::Gallery);
+        l.select_index(0);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        assert!(p.big_draws().is_empty());
+        let icons = p.icons();
+        let image = rect(16.0, 16.0, 944.0, 600.0 - STRIP_H - 16.0 - CAPTION_H);
+        let (cx, cy) = center(image);
+        assert!(icons.contains(&(cx - 48.0, cy - 48.0, 96.0)), "{icons:?}");
+        let cell = l.item_rect(0);
+        let (sx, sy) = ((cell.left + cell.right) / 2.0, cell.top + (CELL - STRIP_THUMB) / 2.0 + STRIP_THUMB / 2.0);
+        assert!(icons.contains(&(sx - 24.0, sy - 24.0, 48.0)), "{icons:?}");
+        // Un archivo cuya imagen grande no llega: también el ícono de 96.
+        let mut l = gallery(1);
+        l.select_index(0);
+        let p = painter();
+        l.draw(&p, l.area, true);
+        assert_eq!(p.big_draws().len(), 1);
+        assert!(p.icons().iter().any(|i| i.2 == 96.0));
+    }
+
+    /// Un clic no centra la tira: el doble clic en la celda 8 de 30 (con el foco en la 0) abre
+    /// la 8, no la que quedó bajo el mouse después de recentrar.
+    #[test]
+    fn gallery_click_does_not_recenter() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[0] as usize);
+        let before = l.item_rect(8);
+        let (x, y) = center(before);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.item_rect(8), before, "la tira no se movió");
+        assert_eq!(l.on_double_click(x, y), Action::Open(l.visible[8] as usize));
+        // Una celda que no se ve entera: la tira se corre lo justo para mostrarla.
+        let edge = (0..30).find(|&p| l.item_rect(p).right > 960.0 - GALLERY_PAD).unwrap();
+        let (x, y) = center(l.item_rect(edge));
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.item_rect(edge).right, 960.0 - GALLERY_PAD);
+        // El teclado sí centra.
+        l.on_key(VK_RIGHT.0, false, false);
+        let r = l.item_rect(edge + 1);
+        assert_eq!((r.left + r.right) / 2.0, 480.0);
+    }
+
+    /// Una celda que no se ve entera en el borde: el primer clic corre la tira y el punto queda
+    /// sobre la vecina; el doble clic abre igual la celda presionada.
+    #[test]
+    fn gallery_double_click_opens_pressed_cell() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[0] as usize);
+        let cell = l.item_rect(9);
+        assert!(cell.right > 960.0 - GALLERY_PAD && cell.left < 960.0, "la 9 se ve a medias");
+        let (x, y) = (958.0, (cell.top + cell.bottom) / 2.0);
+        assert_eq!(l.pos_at_point(x, y), Some(9));
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.pos_at_point(x, y), Some(10), "la tira se corrió y el punto cae en la vecina");
+        assert_eq!(l.on_double_click(x, y), Action::Open(l.visible[9] as usize));
+        assert_eq!(l.selected_positions(), [9]);
+    }
+
+    /// Lo mismo con la casilla: el segundo clic vuelve a alternar la celda presionada.
+    #[test]
+    fn gallery_double_click_checkbox_pressed_cell() {
+        let mut l = gallery(30);
+        l.checkboxes = true;
+        l.select_index(l.visible[0] as usize);
+        let cell = l.item_rect(9);
+        // La casilla de la 9 está a 12 de su borde; después de correr la tira, ese punto es otra
+        // cosa (no la misma casilla).
+        let (x, y) = (cell.left + 12.0 + 7.0, cell.top + 12.0 + 7.0);
+        l.on_mouse_move(x, y);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.selected_positions(), [0, 9]);
+        assert_eq!(l.on_double_click(x, y), Action::Redraw);
+        assert_eq!(l.selected_positions(), [0], "se alternó la 9 y no otra");
+    }
+
+    /// ¿La celda enfocada se ve entera en la tira?
+    fn focus_on_screen(l: &FileList) -> bool {
+        let r = l.item_rect(l.focus_pos().unwrap());
+        r.left >= 0.0 && r.right <= 960.0
+    }
+
+    /// Recarga con menos elementos (el enfocado desaparece): el foco pasa al primero y la tira
+    /// lo muestra, sin quedar corrida para el foco viejo.
+    #[test]
+    fn gallery_reload_recenters_on_focus() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[25] as usize);
+        l.replace((0..20).map(|i| entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false)).collect());
+        assert_eq!(l.focus_pos(), Some(0));
+        assert!(focus_on_screen(&l), "{:?}", l.item_rect(0));
+        // Igual después de dibujar.
+        let p = painter();
+        l.draw(&p, l.area, true);
+        assert!(focus_on_screen(&l));
+        assert_eq!(p.big_requests()[0].0, thumbs::Source::Path("/fotos/f00.jpg".into()));
+    }
+
+    /// Se borra el enfocado (recarga con todos menos él): la celda con foco se ve.
+    #[test]
+    fn gallery_delete_focused_keeps_focus_visible() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[25] as usize);
+        l.replace((0..30).filter(|&i| i != 25).map(|i| entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false)).collect());
+        assert!(focus_on_screen(&l), "{:?}", l.item_rect(l.focus_pos().unwrap()));
+    }
+
+    /// Ocultar los ocultos cambia la posición del enfocado: la tira se vuelve a centrar en él.
+    #[test]
+    fn gallery_toggle_hidden_recenters() {
+        let mut l = blank();
+        l.show_hidden = true;
+        l.append(
+            (0..40)
+                .map(|i| {
+                    let mut e = entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false);
+                    e.attrs = if i < 25 { 0x2 } else { 0 };
+                    e
+                })
+                .collect(),
+        );
+        l.set_view(View::Gallery);
+        l.select_index(32);
+        l.toggle_hidden();
+        assert_eq!(l.focus_pos(), Some(7));
+        let r = l.item_rect(7);
+        assert_eq!((r.left + r.right) / 2.0, 480.0);
+    }
+
+    /// Una recarga entre los dos clics de un doble clic no abre otro elemento por el clic viejo.
+    #[test]
+    fn gallery_reload_forgets_press() {
+        let mut l = gallery(10);
+        let (x, y) = center(l.item_rect(3));
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert!(l.gallery_press.is_some());
+        l.replace((0..10).map(|i| entry(&format!("f{i:02}.jpg"), "Imagen JPEG", false)).collect());
+        assert!(l.gallery_press.is_none());
+    }
+
+    /// Con casillas, un clic en la casilla de una celda alejada alterna esa celda y no otra, y un
+    /// segundo clic (doble clic) la vuelve a alternar.
+    #[test]
+    fn gallery_checkbox_click_keeps_cell() {
+        let mut l = gallery(30);
+        l.checkboxes = true;
+        l.select_index(l.visible[0] as usize);
+        let cell = l.item_rect(8);
+        let (x, y) = (cell.left + 12.0 + 7.0, cell.top + 12.0 + 7.0);
+        l.on_mouse_move(x, y);
+        l.on_mouse_down(x, y, false, false);
+        l.on_mouse_up();
+        assert_eq!(l.selected_positions(), [0, 8]);
+        assert_eq!(l.on_double_click(x, y), Action::Redraw);
+        assert_eq!(l.selected_positions(), [0]);
+    }
+
+    /// Clic derecho en la imagen grande: el menú del elemento con foco (queda seleccionado); en
+    /// un hueco de la tira, el del fondo.
+    #[test]
+    fn gallery_right_click_on_image_is_focused_item() {
+        let mut l = gallery(10);
+        l.select_index(l.visible[2] as usize);
+        l.on_key(VK_RIGHT.0, true, false);
+        assert!(l.on_right_down(480.0, 200.0));
+        assert_eq!(l.selected_positions(), [3]);
+        let r = l.item_rect(3);
+        assert!(!l.on_right_down(r.right + 4.0, (r.top + r.bottom) / 2.0));
+        assert!(l.selected_positions().is_empty());
+    }
+
+    /// Después de mover con las flechas la tira se recentra: el hover pasa a la celda que quedó
+    /// bajo el mouse (la nueva enfocada), no se queda en la anterior.
+    #[test]
+    fn gallery_hover_follows_recenter() {
+        let mut l = gallery(30);
+        l.select_index(l.visible[10] as usize);
+        let (x, y) = center(l.item_rect(10));
+        l.on_mouse_move(x, y);
+        assert_eq!(l.hover, Some(10));
+        l.on_key(VK_RIGHT.0, false, false);
+        assert_eq!(l.pos_at_point(x, y), Some(11));
+        assert_eq!(l.hover, Some(11));
+    }
+
+    /// La rueda sobre la tira pasa al anterior o al siguiente; sobre la imagen no hace nada.
+    #[test]
+    fn gallery_wheel_on_strip() {
+        let mut l = gallery(10);
+        l.select_index(l.visible[4] as usize);
+        let (x, y) = center(l.item_rect(4));
+        l.on_mouse_move(x, y);
+        l.on_wheel(-3.0);
+        assert_eq!(l.focus_pos(), Some(5));
+        l.on_wheel(3.0);
+        assert_eq!(l.focus_pos(), Some(4));
+        l.on_mouse_move(480.0, 100.0);
+        l.on_wheel(-3.0);
+        assert_eq!(l.focus_pos(), Some(4));
+    }
+}

@@ -1,0 +1,1623 @@
+//! Árbol de carpetas lateral (F-3.5, experimental). Solo se compila con la feature `arbol`:
+//! `scripts\build.cmd build --release --features arbol`.
+//!
+//! Panel a la izquierda de la ventana que navega el panel activo. Arranca con la carpeta del
+//! usuario y las unidades; las subcarpetas se leen al expandir un nodo, en un hilo aparte (una
+//! unidad de red lenta no congela la ventana), y el resultado vuelve con `WM_APP_TREE`.
+//!
+//! La barra se puede fijar (expandida, al lado de los paneles) o soltar: suelta queda una franja
+//! angosta con solo los íconos y, al asomar el mouse, se expande encima de los paneles. La sección
+//! "Acceso rápido" se lee del propio Shell (`sys::file_system().quick_access()`) y se vuelve a leer en un hilo
+//! cuando cambia (`WM_APP_QUICK`).
+
+use crate::sys::Handle;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
+
+use crate::WM_APP;
+
+use crate::anim;
+use crate::fs::{Location, QuickItem};
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter};
+use crate::theme::{Theme, alpha};
+use crate::ui::{self, XtreeBadge};
+
+/// Terminó de leerse una carpeta del árbol.
+pub const WM_APP_TREE: u32 = WM_APP + 20;
+/// Terminó de leerse el Acceso rápido de Windows (o el watcher avisó que cambió).
+pub const WM_APP_QUICK: u32 = WM_APP + 21;
+
+/// Ancho inicial del panel; se puede cambiar arrastrando su borde derecho.
+pub const WIDTH: f32 = 240.0;
+pub const MIN_W: f32 = 160.0;
+pub const MAX_W: f32 = 560.0;
+/// Ancho de la franja colapsada (solo íconos).
+pub const COLLAPSED_W: f32 = 48.0;
+/// Grosor de las barras de desplazamiento y lugar que ocupan al pie / al costado.
+const BAR: f32 = 6.0;
+const BAR_ROOM: f32 = 12.0;
+const ROW_H: f32 = 32.0;
+const INDENT: f32 = 18.0;
+/// Margen a los costados de las filas.
+const SIDE: f32 = 8.0;
+/// Franja de arriba: título y botón de colapsar; las filas arrancan debajo.
+const TOP_PAD: f32 = 32.0;
+/// Duración de la animación del ancho al fijar, soltar y expandir.
+const SLIDE_SECS: f32 = 0.32;
+/// Máximo de carpetas del Acceso rápido que se muestran.
+const QUICK_MAX: usize = 20;
+
+/// Qué es una fila, para su ícono y lo que abre.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Folder,
+    /// Carpeta del usuario, fijada arriba como en el Explorador.
+    Pinned,
+    /// OneDrive.
+    Cloud,
+    /// "Inicio": lleva a "Este equipo"; sin subcarpetas en el árbol.
+    Home,
+    /// "xtree": abre o cierra la vista de xtree, con el indicador de su escaneo; no navega.
+    Xtree,
+    Drive,
+    /// "Este equipo": no es una ruta.
+    Computer,
+    /// "Acceso rápido": agrupa las carpetas ancladas y frecuentes de Windows; no es una ruta.
+    QuickAccess,
+    /// "Red" y "Linux": carpetas virtuales del Shell (el nombre de análisis va en `path`).
+    Network,
+    Linux,
+    /// Hijos de «Red»: un favorito de red (la dirección va en `path`), una conexión (con su ruta
+    /// local, se expande como carpeta) y una máquina de la red local (el nombre).
+    NetFavorite,
+    NetConnected,
+    NetHost,
+    /// Línea que separa grupos.
+    Separator,
+}
+
+fn rgb(r: f32, g: f32, b: f32) -> Color {
+    Color { r, g, b, a: 1.0 }
+}
+
+/// Ícono y color de una carpeta del usuario fijada (la posición es la de `fs::user_folder`).
+const PINNED: [(&str, &str, (f32, f32, f32)); 6] = [
+    ("Escritorio", "\u{E70A}", (0.30, 0.65, 0.95)),
+    ("Descargas", "\u{E896}", (0.25, 0.78, 0.55)),
+    ("Documentos", "\u{E8A5}", (0.62, 0.70, 0.80)),
+    ("Imágenes", "\u{E91B}", (0.35, 0.60, 0.95)),
+    ("Música", "\u{E8D6}", (0.95, 0.45, 0.35)),
+    ("Vídeos", "\u{E714}", (0.70, 0.45, 0.90)),
+];
+
+/// Chincheta: carpeta anclada al Acceso rápido.
+const PIN_GLYPH: &str = "\u{E840}";
+
+/// Valor animado (0..100) con curva suave: va de donde está al destino nuevo en `SLIDE_SECS`.
+#[derive(Clone, Copy)]
+struct Slide {
+    value: f32,
+    from: f32,
+    to: f32,
+    t: f32,
+}
+
+impl Slide {
+    fn at(v: f32) -> Self {
+        Self { value: v, from: v, to: v, t: SLIDE_SECS }
+    }
+
+    /// Salta al valor sin animar.
+    fn jump(&mut self, v: f32) {
+        *self = Self::at(v);
+    }
+
+    /// Avanza `dt` segundos hacia `target`. Devuelve si sigue en curso.
+    fn tick(&mut self, target: f32, dt: f32) -> bool {
+        if !anim::slide_enabled() {
+            self.jump(target);
+            return false;
+        }
+        // Un destino nuevo (también a mitad de camino) arranca de donde está ahora.
+        if target != self.to {
+            (self.from, self.to, self.t) = (self.value, target, 0.0);
+        }
+        self.t = (self.t + dt).min(SLIDE_SECS);
+        let k = self.t / SLIDE_SECS;
+        // Arranca y frena despacio (ease in-out cúbico): sin tirón al empezar ni al llegar.
+        let eased = if k < 0.5 { 4.0 * k * k * k } else { 1.0 - (-2.0 * k + 2.0).powi(3) / 2.0 };
+        self.value = anim::lerp(self.from, self.to, eased);
+        self.t < SLIDE_SECS
+    }
+}
+
+/// Barra de desplazamiento del panel.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Bar {
+    /// Horizontal, para llegar a los nombres largos y a las carpetas muy anidadas.
+    H,
+    V,
+}
+
+struct Node {
+    /// Ancho del nombre (0: todavía sin medir).
+    text_w: f32,
+    kind: Kind,
+    path: PathBuf,
+    name: String,
+    /// Posición en `PINNED` si es una carpeta fijada.
+    pin: usize,
+    /// Está anclada al Acceso rápido de Windows (con su chincheta).
+    pinned: bool,
+    depth: usize,
+    /// None: sin leer todavía. Some(vacío): no tiene subcarpetas.
+    children: Option<Vec<usize>>,
+    expanded: bool,
+    loading: bool,
+}
+
+impl Node {
+    fn new(kind: Kind, path: PathBuf, name: String, depth: usize) -> Self {
+        Self { text_w: 0.0, kind, path, name, pin: 0, pinned: false, depth, children: None, expanded: false, loading: false }
+    }
+
+    /// Lo que abre en el panel activo (None si no es navegable).
+    fn location(&self) -> Option<Location> {
+        match self.kind {
+            Kind::Separator | Kind::QuickAccess | Kind::Xtree | Kind::NetFavorite | Kind::NetHost => None,
+            Kind::Computer | Kind::Home => Some(Location::Computer),
+            // «Red» abre la Red del Shell donde existe (Windows); si no, solo se despliega.
+            Kind::Network if self.path.as_os_str().is_empty() => None,
+            Kind::Network | Kind::Linux => {
+                Some(Location::Shell { parsing: self.path.to_string_lossy().into_owned(), name: self.name.clone(), parent: None })
+            }
+            _ => Some(Location::Path(self.path.clone())),
+        }
+    }
+}
+
+/// Qué tocó un clic.
+#[derive(Debug, PartialEq)]
+pub enum TreeHit {
+    /// Expandir o contraer el nodo.
+    Toggle(usize),
+    /// Abrir la carpeta en el panel activo.
+    Open(Location),
+    /// La chincheta: fijar la barra o dejar que quede en franja.
+    Pin,
+    /// La chincheta de una carpeta anclada: la desancla del Acceso rápido (como en el Explorador).
+    Unpin(PathBuf),
+    /// La entrada «xtree»: abrir o cerrar la vista de xtree (como el botón de la barra de estado).
+    Xtree,
+    /// Un favorito de red (la dirección): conectar si hace falta y abrir.
+    ConnectFavorite(String),
+    /// Una máquina de la red local: conectar a `smb://máquina`.
+    ConnectHost(String),
+    Nothing,
+}
+
+/// Una fila de «Red», para su menú del clic derecho.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetRow {
+    Root,
+    Favorite(String),
+    /// (ruta local, dirección).
+    Connected(PathBuf, String),
+    Host(String),
+}
+
+pub struct Tree {
+    pub visible: bool,
+    /// Fija al lado de los paneles; si no, queda la franja de íconos y se expande encima al asomar el mouse.
+    pub pinned: bool,
+    /// Sin fijar: el mouse está encima y se muestra expandida.
+    open: bool,
+    /// Avance de la animación: 0 franja de íconos, 100 expandida.
+    expand: Slide,
+    /// Lugar que se le reserva a los paneles (fija: el ancho; suelta: la franja). Se anima aparte
+    /// para que los paneles se acomoden con suavidad aunque la barra siga expandida encima.
+    lay: Slide,
+    toggle_hot: bool,
+    /// Fila cuya chincheta tiene el mouse encima.
+    pin_hover: Option<usize>,
+    nodes: Vec<Node>,
+    roots: Vec<usize>,
+    scroll: f32,
+    /// Desplazamiento horizontal.
+    hscroll: f32,
+    /// Ancho del panel expandido (cambiable).
+    pub width: f32,
+    /// Lo que ocupa el contenido y lo que se ve, del último cuadro.
+    content_w: f32,
+    view_w: f32,
+    view_h: f32,
+    htrack: Rect,
+    hthumb: Rect,
+    vtrack: Rect,
+    vthumb: Rect,
+    hover: Option<usize>,
+    area: Rect,
+    /// Carpetas del usuario que ya están arriba (no se repiten en el Acceso rápido).
+    known: Vec<PathBuf>,
+    /// Rutas ancladas al Acceso rápido de Windows, de la última lectura.
+    pinned_paths: Vec<PathBuf>,
+    quick_loading: bool,
+    quick_dirty: bool,
+    tx: Sender<(usize, Vec<(String, PathBuf)>)>,
+    rx: Receiver<(usize, Vec<(String, PathBuf)>)>,
+    qtx: Sender<Vec<QuickItem>>,
+    qrx: Receiver<Vec<QuickItem>>,
+    /// Carpeta que se está revelando: se sigue bajando a medida que llegan las lecturas.
+    reveal: Option<Reveal>,
+    /// Nodo que el próximo cuadro deja a la vista (desplazando lo justo).
+    scroll_to: Option<usize>,
+    /// Discos que se pueden expulsar (llevan ⏏); lo pone la `App`.
+    pub ejectable: std::collections::HashSet<PathBuf>,
+    /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, nodo).
+    eject_rects: Vec<(Rect, usize)>,
+    /// Unidades de red cuyo nombre falta pedir en otro hilo (`drive_label` iría al servidor).
+    pending_labels: Vec<PathBuf>,
+    /// Hijos de «Red» que pone la `App` (favoritos, conexiones, separador, máquinas).
+    net_items: Vec<usize>,
+    /// Hijos de la Red del Shell (Windows), leídos al expandir.
+    net_shell: Option<Vec<usize>>,
+    /// Dirección de cada conexión (por nodo), para el menú.
+    net_addresses: Vec<(usize, String)>,
+    /// Separador entre lo de xdir y la Red del Shell.
+    net_sep_shell: Option<usize>,
+    /// Nodos de «Red» que se pueden reusar.
+    net_free: Vec<usize>,
+}
+
+/// Revelación pendiente (`Tree::reveal`).
+struct Reveal {
+    hwnd: Handle,
+    path: PathBuf,
+    show_hidden: bool,
+}
+
+impl Tree {
+    pub fn new() -> Self {
+        let (tx, rx) = channel();
+        let (qtx, qrx) = channel();
+        let mut t = Self {
+            visible: false,
+            pinned: true,
+            open: false,
+            expand: Slide::at(100.0),
+            lay: Slide::at(100.0),
+            toggle_hot: false,
+            pin_hover: None,
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            scroll: 0.0,
+            hscroll: 0.0,
+            width: WIDTH,
+            content_w: 0.0,
+            view_w: WIDTH,
+            view_h: 0.0,
+            htrack: rect(0.0, 0.0, 0.0, 0.0),
+            hthumb: rect(0.0, 0.0, 0.0, 0.0),
+            vtrack: rect(0.0, 0.0, 0.0, 0.0),
+            vthumb: rect(0.0, 0.0, 0.0, 0.0),
+            hover: None,
+            area: rect(0.0, 0.0, 0.0, 0.0),
+            known: Vec::new(),
+            pinned_paths: Vec::new(),
+            quick_loading: false,
+            quick_dirty: false,
+            tx,
+            rx,
+            qtx,
+            qrx,
+            reveal: None,
+            scroll_to: None,
+            ejectable: std::collections::HashSet::new(),
+            pending_labels: Vec::new(),
+            net_items: Vec::new(),
+            net_shell: None,
+            net_addresses: Vec::new(),
+            net_sep_shell: None,
+            net_free: Vec::new(),
+            eject_rects: Vec::new(),
+        };
+        // Inicio (lleva a "Este equipo") y OneDrive.
+        t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
+        let home = t.roots[t.roots.len() - 1];
+        t.nodes[home].children = Some(Vec::new());
+        // xtree, debajo de Inicio: sin subcarpetas.
+        t.add_root(Kind::Xtree, PathBuf::new(), "xtree".to_string(), 0);
+        let xtree = t.roots[t.roots.len() - 1];
+        t.nodes[xtree].children = Some(Vec::new());
+        if let Some(cloud) = std::env::var_os("OneDrive").map(PathBuf::from).filter(|p| p.is_dir()) {
+            t.add_root(Kind::Cloud, cloud, "OneDrive".to_string(), 0);
+        }
+        t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
+        // Carpetas del usuario, como en el Explorador.
+        for (i, (name, ..)) in PINNED.iter().enumerate() {
+            if let Some(path) = crate::sys::file_system().user_folder(i) {
+                t.known.push(path.clone());
+                t.add_root(Kind::Pinned, path, (*name).to_string(), i);
+            }
+        }
+        // Acceso rápido de Windows: ya abierto; sus carpetas llegan de `request_quick` (en otro hilo).
+        t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
+        t.add_root(Kind::QuickAccess, PathBuf::new(), "Acceso rápido".to_string(), 0);
+        let quick = t.roots[t.roots.len() - 1];
+        t.nodes[quick].expanded = true;
+        t.nodes[quick].children = Some(Vec::new());
+        t.add_root(Kind::Separator, PathBuf::new(), String::new(), 0);
+        // "Este equipo", ya abierto, con sus unidades.
+        t.add_root(Kind::Computer, PathBuf::new(), "Este equipo".to_string(), 0);
+        let computer = t.roots[t.roots.len() - 1];
+        t.nodes[computer].expanded = true;
+        t.refresh_drives();
+        // «Red» en los tres sistemas (favoritos, conexiones y la red local); en Windows también
+        // la Red del Shell, leída al expandir. Y, si hay WSL, Linux.
+        t.add_root(Kind::Network, PathBuf::from(crate::sys::file_system().network_place()), "Red".to_string(), 0);
+        let red = t.roots[t.roots.len() - 1];
+        t.nodes[red].children = Some(Vec::new());
+        if crate::sys::file_system().shell_place_exists(crate::sys::file_system().linux_place()) {
+            t.add_root(Kind::Linux, PathBuf::from(crate::sys::file_system().linux_place()), "Linux".to_string(), 0);
+        }
+        t
+    }
+
+    // ---------- Acceso rápido ----------
+
+    /// Vuelve a leer el Acceso rápido de Windows en otro hilo (si ya hay una lectura en curso,
+    /// se repite al terminar).
+    pub fn request_quick(&mut self, hwnd: Handle) {
+        if self.quick_loading {
+            self.quick_dirty = true;
+            return;
+        }
+        self.quick_loading = true;
+        let tx = self.qtx.clone();
+        std::thread::spawn(move || {
+            let items = crate::sys::file_system().quick_access();
+            if tx.send(items).is_ok() {
+                hwnd.post(WM_APP_QUICK, 1, 0);
+            }
+        });
+    }
+
+    /// Aplica la lectura terminada del Acceso rápido. Devuelve si hay que pedir otra (cambió
+    /// algo mientras se leía).
+    pub fn on_quick_loaded(&mut self) -> bool {
+        self.quick_loading = false;
+        let mut last = None;
+        while let Ok(items) = self.qrx.try_recv() {
+            last = Some(items);
+        }
+        if let Some(items) = last {
+            self.apply_quick(items);
+        }
+        std::mem::take(&mut self.quick_dirty)
+    }
+
+    /// Rearma las carpetas del grupo "Acceso rápido" (sin repetir las del usuario que ya están
+    /// arriba) y recuerda cuáles están ancladas, para ponerles la chincheta.
+    fn apply_quick(&mut self, items: Vec<QuickItem>) {
+        self.pinned_paths = items.iter().filter(|i| i.pinned).map(|i| i.path.clone()).collect();
+        let Some(&quick) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::QuickAccess) else { return };
+        let old = self.nodes[quick].children.clone().unwrap_or_default();
+        let mut ids = Vec::new();
+        let shown = items.into_iter().filter(|i| !self.known.iter().any(|k| crate::sys::file_system().same_path(k, &i.path))).take(QUICK_MAX);
+        for (n, item) in shown.enumerate() {
+            let mut node = Node::new(Kind::Folder, item.path, item.name, 1);
+            node.pinned = item.pinned;
+            // Se reusa el hueco del nodo anterior en esa posición, para no crecer con cada lectura.
+            if let Some(&id) = old.get(n) {
+                self.nodes[id] = node;
+                ids.push(id);
+            } else {
+                self.nodes.push(node);
+                ids.push(self.nodes.len() - 1);
+            }
+        }
+        self.nodes[quick].children = Some(ids);
+    }
+
+    /// ¿Está desplegado el grupo "Acceso rápido"?
+    pub fn quick_open(&self) -> bool {
+        self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::QuickAccess).is_none_or(|&r| self.nodes[r].expanded)
+    }
+
+    /// Despliega o pliega el grupo "Acceso rápido" (al restaurar la sesión).
+    pub fn set_quick_open(&mut self, open: bool) {
+        if let Some(&r) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::QuickAccess) {
+            self.nodes[r].expanded = open;
+        }
+    }
+
+    /// ¿Está esa carpeta anclada al Acceso rápido de Windows (según la última lectura)?
+    pub fn is_pinned(&self, path: &Path) -> bool {
+        self.pinned_paths.iter().any(|p| crate::sys::file_system().same_path(p, path))
+    }
+
+    // ---------- unidades ----------
+
+    // ---------- Red ----------
+
+    /// Para las pruebas: el centro de la fila con ese nombre, si está a la vista.
+    #[cfg(test)]
+    pub fn row_point(&self, name: &str) -> Option<(f32, f32)> {
+        let i = self.rows().iter().position(|&id| self.nodes[id].name == name)?;
+        let y = self.area.top + TOP_PAD + i as f32 * ROW_H - self.scroll + ROW_H / 2.0;
+        Some(((self.area.left + self.area.right) / 2.0, y))
+    }
+
+    /// Para las pruebas: despliega o pliega «Red».
+    #[cfg(test)]
+    pub fn expand_network(&mut self, hwnd: Handle, on: bool) {
+        if let Some(r) = self.network_node()
+            && self.nodes[r].expanded != on
+        {
+            self.toggle(hwnd, r, false);
+        }
+    }
+
+    /// Despliega «Red» (gancho de pruebas).
+    #[cfg(feature = "pruebas")]
+    pub fn expand_network_now(&mut self, hwnd: Handle, show_hidden: bool) {
+        if let Some(r) = self.network_node()
+            && !self.nodes[r].expanded
+        {
+            self.toggle(hwnd, r, show_hidden);
+        }
+    }
+
+    fn network_node(&self) -> Option<usize> {
+        self.roots.iter().copied().find(|&r| self.nodes[r].kind == Kind::Network)
+    }
+
+    /// Los hijos de «Red»: favoritos (nombre, dirección), conectados (título, ruta local,
+    /// dirección) y las máquinas de la red local. Las conexiones que siguen conservan lo expandido.
+    pub fn set_network(&mut self, favorites: Vec<(String, String)>, connected: Vec<(String, PathBuf, String)>, hosts: Vec<String>) {
+        let Some(red) = self.network_node() else { return };
+        let old = std::mem::take(&mut self.net_items);
+        let reuse = |t: &mut Tree, kind: Kind, path: PathBuf, name: String| -> usize {
+            if let Some(&id) = old.iter().find(|&&id| t.nodes[id].kind == kind && t.nodes[id].path == path && (kind != Kind::NetHost || t.nodes[id].name == name)) {
+                if t.nodes[id].name != name {
+                    t.nodes[id].name = name;
+                    t.nodes[id].text_w = 0.0;
+                }
+                return id;
+            }
+            t.new_net_node(kind, path, name)
+        };
+        let mut items = Vec::new();
+        for (name, address) in favorites {
+            let id = reuse(self, Kind::NetFavorite, PathBuf::from(&address), name);
+            self.nodes[id].children = Some(Vec::new());
+            items.push(id);
+        }
+        self.net_addresses.clear();
+        for (title, local, address) in connected {
+            let id = reuse(self, Kind::NetConnected, local, title);
+            self.net_addresses.push((id, address));
+            items.push(id);
+        }
+        if !hosts.is_empty() {
+            let sep = old
+                .iter()
+                .copied()
+                .find(|&id| self.nodes[id].kind == Kind::Separator)
+                .unwrap_or_else(|| self.new_net_node(Kind::Separator, PathBuf::new(), String::new()));
+            items.push(sep);
+            for h in hosts {
+                let id = reuse(self, Kind::NetHost, PathBuf::new(), h);
+                self.nodes[id].children = Some(Vec::new());
+                items.push(id);
+            }
+        }
+        // Lo que ya no está se recicla (con sus subcarpetas leídas), así el árbol no crece sin fin.
+        let mut gone: Vec<usize> = old.into_iter().filter(|id| !items.contains(id)).collect();
+        while let Some(id) = gone.pop() {
+            if let Some(c) = self.nodes[id].children.take() {
+                gone.extend(c);
+            }
+            // Nada queda apuntando a un nodo que se va a reusar (el mouse, la chincheta, lo que se
+            // deja a la vista y los ⏏ del último cuadro).
+            if self.hover == Some(id) {
+                self.hover = None;
+            }
+            if self.pin_hover == Some(id) {
+                self.pin_hover = None;
+            }
+            if self.scroll_to == Some(id) {
+                self.scroll_to = None;
+            }
+            self.eject_rects.retain(|(_, e)| *e != id);
+            // Uno que todavía se está leyendo no se recicla: su lectura vuelve con este número.
+            if !self.nodes[id].loading {
+                self.net_free.push(id);
+            }
+        }
+        self.net_items = items;
+        self.rebuild_network_children();
+        let _ = red;
+    }
+
+    /// Un nodo de «Red»: uno reciclado si hay, si no uno nuevo.
+    fn new_net_node(&mut self, kind: Kind, path: PathBuf, name: String) -> usize {
+        let node = Node::new(kind, path, name, 1);
+        match self.net_free.pop() {
+            Some(id) => {
+                self.nodes[id] = node;
+                id
+            }
+            None => {
+                self.nodes.push(node);
+                self.nodes.len() - 1
+            }
+        }
+    }
+
+    /// Para las pruebas: cuántos nodos tiene el árbol.
+    #[cfg(test)]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn rebuild_network_children(&mut self) {
+        let Some(red) = self.network_node() else { return };
+        let mut c = self.net_items.clone();
+        if let Some(shell) = self.net_shell.as_ref().filter(|s| !s.is_empty()) {
+            if !c.is_empty() && self.nodes[*c.last().unwrap_or(&0)].kind != Kind::Separator {
+                if self.net_sep_shell.is_none() {
+                    self.nodes.push(Node::new(Kind::Separator, PathBuf::new(), String::new(), 1));
+                    self.net_sep_shell = Some(self.nodes.len() - 1);
+                }
+                c.extend(self.net_sep_shell);
+            }
+            c.extend(shell.iter().copied());
+        }
+        self.nodes[red].children = Some(c);
+    }
+
+    /// Las filas de «Red» (para pruebas y para el menú): (tipo, nombre).
+    pub fn network_rows(&self) -> Vec<(NetRow, String)> {
+        let Some(red) = self.network_node() else { return Vec::new() };
+        let mut out = vec![(NetRow::Root, self.nodes[red].name.clone())];
+        for &id in self.nodes[red].children.as_deref().unwrap_or(&[]) {
+            let name = if self.nodes[id].kind == Kind::Separator { "—".to_string() } else { self.nodes[id].name.clone() };
+            // Lo de la Red del Shell (Windows) no tiene menú propio: va como la raíz.
+            out.push((self.net_row(id).unwrap_or(NetRow::Root), name));
+        }
+        out
+    }
+
+    fn net_row(&self, id: usize) -> Option<NetRow> {
+        let n = &self.nodes[id];
+        Some(match n.kind {
+            Kind::Network => NetRow::Root,
+            Kind::NetFavorite => NetRow::Favorite(n.path.to_string_lossy().into_owned()),
+            Kind::NetConnected => NetRow::Connected(n.path.clone(), self.net_addresses.iter().find(|(i, _)| *i == id).map(|(_, a)| a.clone()).unwrap_or_default()),
+            Kind::NetHost => NetRow::Host(n.name.clone()),
+            _ => return None,
+        })
+    }
+
+    /// La fila de «Red» bajo el punto (para el menú del clic derecho).
+    pub fn net_at(&self, x: f32, y: f32) -> Option<NetRow> {
+        if !(contains(&self.area, x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        self.net_row(self.node_at(y)?)
+    }
+
+    /// ¿«Red» está desplegada? (para buscar máquinas solo mientras se ve).
+    pub fn network_expanded(&self) -> bool {
+        self.network_node().is_some_and(|r| self.nodes[r].expanded)
+    }
+
+    /// Las unidades de red cuyo nombre hay que pedir en otro hilo (las saca de la lista).
+    pub fn take_pending_labels(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.pending_labels)
+    }
+
+    /// El nombre de una unidad, pedido en otro hilo.
+    pub fn set_drive_name(&mut self, path: &Path, name: String) {
+        for n in self.nodes.iter_mut().filter(|n| n.kind == Kind::Drive && n.path == path) {
+            n.name = name.clone();
+            n.text_w = 0.0;
+        }
+    }
+
+    /// Vuelve a leer las unidades de "Este equipo" (se enchufó o quitó una): las que siguen
+    /// conservan su estado, las nuevas se agregan en su lugar.
+    pub fn refresh_drives(&mut self) {
+        let Some(&computer) = self.roots.iter().find(|&&r| self.nodes[r].kind == Kind::Computer) else { return };
+        let old = self.nodes[computer].children.clone().unwrap_or_default();
+        let mut ids = Vec::new();
+        for path in crate::sys::file_system().drives() {
+            let fs = crate::sys::file_system();
+            // Una unidad de red se muestra con su identificador hasta que llega el nombre.
+            let name = if crate::sys::network().is_remote(&path) {
+                self.pending_labels.push(path.clone());
+                fs.drive_name(&path)
+            } else {
+                fs.drive_label(&fs.drive_name(&path))
+            };
+            if let Some(&id) = old.iter().find(|&&id| self.nodes[id].path == path) {
+                self.nodes[id].name = name;
+                self.nodes[id].text_w = 0.0;
+                ids.push(id);
+            } else {
+                self.nodes.push(Node::new(Kind::Drive, path, name, 1));
+                ids.push(self.nodes.len() - 1);
+            }
+        }
+        self.nodes[computer].children = Some(ids);
+    }
+
+    fn add_root(&mut self, kind: Kind, path: PathBuf, name: String, pin: usize) {
+        let mut node = Node::new(kind, path, name, 0);
+        node.pin = pin;
+        self.nodes.push(node);
+        self.roots.push(self.nodes.len() - 1);
+    }
+
+    /// Nodos a la vista, en orden (los hijos de los expandidos, recursivamente; son los mismos con
+    /// la barra fija o en franja, así nada se corre cuando se expande). Sin el Acceso rápido si está vacío ni separadores repetidos.
+    fn rows(&self) -> Vec<usize> {
+        fn walk(t: &Tree, ids: &[usize], out: &mut Vec<usize>) {
+            for &id in ids {
+                let n = &t.nodes[id];
+                out.push(id);
+                if n.expanded {
+                    if let Some(c) = &n.children {
+                        walk(t, c, out);
+                    }
+                }
+            }
+        }
+        let mut raw = Vec::new();
+        walk(self, &self.roots, &mut raw);
+        let mut out: Vec<usize> = Vec::with_capacity(raw.len());
+        for id in raw {
+            let n = &self.nodes[id];
+            // Sin carpetas en el Acceso rápido no hay grupo que mostrar.
+            if n.kind == Kind::QuickAccess && n.children.as_ref().is_some_and(|c| c.is_empty()) {
+                continue;
+            }
+            if n.kind == Kind::Separator && out.last().is_none_or(|&l| self.nodes[l].kind == Kind::Separator) {
+                continue;
+            }
+            out.push(id);
+        }
+        while out.last().is_some_and(|&l| self.nodes[l].kind == Kind::Separator) {
+            out.pop();
+        }
+        out
+    }
+
+    // ---------- fijar / franja ----------
+
+    /// Ancho que ocupa ahora (entre la franja y el ancho completo, según la animación).
+    pub fn width_now(&self) -> f32 {
+        COLLAPSED_W + (self.width - COLLAPSED_W) * (self.expand.value / 100.0).clamp(0.0, 1.0)
+    }
+
+    /// Ancho que se le reserva a la izquierda de los paneles: fija, el que tiene ahora; suelta,
+    /// solo la franja (al expandirse se superpone).
+    pub fn layout_width(&self) -> f32 {
+        COLLAPSED_W + (self.width - COLLAPSED_W) * (self.lay.value / 100.0).clamp(0.0, 1.0)
+    }
+
+    /// Fija o suelta; sin `animate` salta al final (al arrancar). Al soltarla sigue expandida
+    /// hasta que el mouse se vaya.
+    pub fn set_pinned(&mut self, pinned: bool, animate: bool) {
+        self.pinned = pinned;
+        self.open = !pinned && animate;
+        self.hover = None;
+        if !animate {
+            let v = if pinned { 100.0 } else { 0.0 };
+            self.expand.jump(v);
+            self.lay.jump(v);
+        }
+    }
+
+    /// Avanza la animación del ancho. Devuelve si sigue en curso.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let shown = if self.pinned || self.open { 100.0 } else { 0.0 };
+        let reserved = if self.pinned { 100.0 } else { 0.0 };
+        let a = self.expand.tick(shown, dt);
+        let b = self.lay.tick(reserved, dt);
+        a || b
+    }
+
+    /// Expandida del todo (con el ancho a mano y las barras de desplazamiento).
+    fn settled(&self) -> bool {
+        self.expand.value >= 99.9
+    }
+
+    /// ¿Se ve (y responde) la chincheta de arriba? No en la franja de íconos.
+    fn pin_btn_shown(&self) -> bool {
+        self.expand.value >= 50.0
+    }
+
+    fn toggle_rect(&self) -> Rect {
+        let e = (self.expand.value / 100.0).clamp(0.0, 1.0);
+        let left = anim::lerp(self.area.left + (COLLAPSED_W - 24.0) / 2.0, self.area.right - 30.0, e);
+        rect(left, self.area.top + 4.0, left + 24.0, self.area.top + 28.0)
+    }
+
+    // ---------- lectura de subcarpetas ----------
+
+    /// Expande o contrae; la primera vez lee las subcarpetas en otro hilo.
+    pub fn toggle(&mut self, hwnd: Handle, id: usize, show_hidden: bool) {
+        let n = &mut self.nodes[id];
+        if n.kind == Kind::Separator {
+            return;
+        }
+        n.expanded = !n.expanded;
+        if n.expanded {
+            self.load_children(hwnd, id, show_hidden);
+        }
+    }
+
+    /// Lee las subcarpetas de un nodo en otro hilo, si todavía no se leyeron.
+    fn load_children(&mut self, hwnd: Handle, id: usize, show_hidden: bool) {
+        let n = &mut self.nodes[id];
+        if n.kind == Kind::Network {
+            // Solo la Red del Shell (Windows) se lee; lo demás lo pone `set_network`.
+            if n.path.as_os_str().is_empty() || self.net_shell.is_some() || n.loading {
+                return;
+            }
+        } else if n.children.is_some() || n.loading {
+            return;
+        }
+        n.loading = true;
+        let (tx, path, virt) = (self.tx.clone(), n.path.clone(), matches!(n.kind, Kind::Network | Kind::Linux));
+        std::thread::spawn(move || {
+            let dirs = if virt { crate::sys::file_system().shell_subfolders(&path.to_string_lossy()) } else { subfolders(&path, show_hidden) };
+            if tx.send((id, dirs)).is_ok() {
+                hwnd.post(WM_APP_TREE, 0, 0);
+            }
+        });
+    }
+
+    /// Aplica las lecturas terminadas.
+    pub fn on_loaded(&mut self) {
+        while let Ok((id, dirs)) = self.rx.try_recv() {
+            let depth = self.nodes[id].depth + 1;
+            let mut ids = Vec::with_capacity(dirs.len());
+            for (name, path) in dirs {
+                self.nodes.push(Node::new(Kind::Folder, path, name, depth));
+                ids.push(self.nodes.len() - 1);
+            }
+            if self.nodes[id].kind == Kind::Network {
+                self.nodes[id].loading = false;
+                self.net_shell = Some(ids);
+                self.rebuild_network_children();
+                continue;
+            }
+            let n = &mut self.nodes[id];
+            n.children = Some(ids);
+            n.loading = false;
+        }
+        self.advance_reveal();
+    }
+
+    // ---------- seguir al panel ----------
+
+    /// Despliega las carpetas padre de `path` y la deja a la vista. Solo si está bajo una raíz
+    /// del árbol (una unidad o una carpeta del usuario); si no (red, comprimido, "Este equipo"),
+    /// no hace nada. Las carpetas que falta leer se leen en otro hilo y se sigue en `on_loaded`;
+    /// recién al encontrar la rama completa se despliega (una carpeta que ya no existe no
+    /// despliega nada). Una revelación nueva reemplaza a la pendiente.
+    pub fn reveal(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
+        self.reveal = None;
+        // Ya hay una fila con esa carpeta (una del usuario, una del Acceso rápido, la que se acaba
+        // de tocar): si alguna está dentro del área visible no se mueve nada; si no, se desplaza
+        // hasta la primera, sin desplegar otra rama.
+        let fs = crate::sys::file_system();
+        let shown: Vec<(usize, usize)> = self
+            .rows()
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, id)| {
+                matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path)
+            })
+            .collect();
+        if let Some(&(_, id)) = shown.first() {
+            if !shown.iter().any(|&(i, _)| self.row_in_view(i)) {
+                self.scroll_to = Some(id);
+            }
+            return;
+        }
+        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden });
+        self.advance_reveal();
+    }
+
+    /// ¿La fila `i` (posición en `rows`) se ve entera con el desplazamiento y el alto del último
+    /// cuadro?
+    fn row_in_view(&self, i: usize) -> bool {
+        let top = i as f32 * ROW_H;
+        let rows_h = self.view_h - TOP_PAD;
+        top >= self.scroll && top + ROW_H <= self.scroll + rows_h
+    }
+
+    /// Carpeta que se está revelando (esperando lecturas), si hay una.
+    pub fn revealing(&self) -> Option<&Path> {
+        self.reveal.as_ref().map(|r| r.path.as_path())
+    }
+
+    /// Baja por el árbol hacia la carpeta pendiente con lo que ya está leído: pide la lectura que
+    /// falte (y espera) o, si llegó, despliega la rama y la deja a la vista.
+    fn advance_reveal(&mut self) {
+        let Some(r) = self.reveal.take() else { return };
+        let fs = crate::sys::file_system();
+        // Raíces con ruta de disco: las carpetas del usuario, OneDrive y las unidades (dentro de
+        // "Este equipo"). Gana la más profunda que contiene la ruta (Documentos antes que C:\).
+        let computer = self.roots.iter().copied().find(|&id| self.nodes[id].kind == Kind::Computer);
+        let drives = computer.and_then(|c| self.nodes[c].children.clone()).unwrap_or_default();
+        let candidates = self.roots.iter().copied().filter(|&id| matches!(self.nodes[id].kind, Kind::Pinned | Kind::Cloud)).chain(drives);
+        let Some(root) = candidates
+            .filter(|&id| !self.nodes[id].path.as_os_str().is_empty() && is_under(&self.nodes[id].path, &r.path))
+            .max_by_key(|&id| self.nodes[id].path.components().count())
+        else {
+            return;
+        };
+        // Los que hay que desplegar para que se vea la carpeta.
+        let mut chain = Vec::new();
+        if self.nodes[root].kind == Kind::Drive {
+            chain.extend(computer);
+        }
+        let mut id = root;
+        loop {
+            if fs.same_path(&self.nodes[id].path, &r.path) {
+                for a in chain {
+                    self.nodes[a].expanded = true;
+                }
+                self.scroll_to = Some(id);
+                return;
+            }
+            let next = match &self.nodes[id].children {
+                Some(children) => children.iter().copied().find(|&c| is_under(&self.nodes[c].path, &r.path)),
+                None => {
+                    // Falta leer esta carpeta: se pide y se sigue cuando llegue.
+                    self.load_children(r.hwnd, id, r.show_hidden);
+                    self.reveal = Some(r);
+                    return;
+                }
+            };
+            // Sin la subcarpeta (se borró, está oculta o no es una carpeta): no se despliega nada.
+            let Some(next) = next else { return };
+            chain.push(id);
+            id = next;
+        }
+    }
+
+    // ---------- mouse ----------
+
+    /// Nodo de la fila bajo `y` (las filas arrancan `TOP_PAD` debajo del borde).
+    fn node_at(&self, y: f32) -> Option<usize> {
+        let row = ((y - self.area.top - TOP_PAD + self.scroll) / ROW_H).floor();
+        if row < 0.0 {
+            return None;
+        }
+        self.rows().get(row as usize).copied()
+    }
+
+    /// ⏏ de un disco bajo el punto: el nodo.
+    pub fn eject_hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.eject_rects.iter().find(|(r, _)| contains(r, x, y)).map(|&(_, id)| id)
+    }
+
+    /// Dónde se dibujó el ⏏ del disco `root` en el último cuadro.
+    pub fn eject_button(&self, root: &Path) -> Option<Rect> {
+        self.eject_rects.iter().find(|&&(_, id)| self.nodes[id].path == root).map(|&(r, _)| r)
+    }
+
+    /// Ruta de un nodo.
+    pub fn path_of(&self, id: usize) -> PathBuf {
+        self.nodes[id].path.clone()
+    }
+
+    pub fn hit(&self, x: f32, y: f32) -> TreeHit {
+        if !contains(&self.area, x, y) {
+            return TreeHit::Nothing;
+        }
+        if self.pin_btn_shown() && contains(&self.toggle_rect(), x, y) {
+            return TreeHit::Pin;
+        }
+        let Some(id) = self.node_at(y) else { return TreeHit::Nothing };
+        let n = &self.nodes[id];
+        if self.settled() && self.shows_pin(n) && self.on_row_pin(x) {
+            return TreeHit::Unpin(n.path.clone());
+        }
+        let chevron_right = self.area.left + SIDE + 2.0 + n.depth as f32 * INDENT + 18.0 - self.hscroll;
+        match n.kind {
+            Kind::Separator => TreeHit::Nothing,
+            Kind::Xtree => TreeHit::Xtree,
+            _ if self.settled() && x < chevron_right => TreeHit::Toggle(id),
+            // El grupo no es una carpeta: al tocarlo se abre o cierra.
+            Kind::QuickAccess => TreeHit::Toggle(id),
+            Kind::NetFavorite => TreeHit::ConnectFavorite(n.path.to_string_lossy().into_owned()),
+            Kind::NetHost => TreeHit::ConnectHost(n.name.clone()),
+            // «Red» sin la Red del Shell: solo se despliega.
+            Kind::Network if n.path.as_os_str().is_empty() => TreeHit::Toggle(id),
+            _ => n.location().map_or(TreeHit::Nothing, TreeHit::Open),
+        }
+    }
+
+    /// ¿El punto está sobre la entrada «xtree»? (para su cartel).
+    pub fn xtree_at(&self, x: f32, y: f32) -> bool {
+        self.contains(x, y)
+            && y >= self.area.top + TOP_PAD
+            && !(self.pin_btn_shown() && contains(&self.toggle_rect(), x, y))
+            && self.node_at(y).is_some_and(|id| self.nodes[id].kind == Kind::Xtree)
+    }
+
+    /// Ruta de disco del elemento bajo el mouse, para su menú contextual.
+    pub fn path_at(&self, x: f32, y: f32) -> Option<PathBuf> {
+        if !(contains(&self.area, x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        let id = self.node_at(y)?;
+        let n = &self.nodes[id];
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive).then(|| n.path.clone())
+    }
+
+    /// Se ve ahora.
+    pub fn shown(&self) -> bool {
+        self.visible
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        self.visible && contains(&self.area, x, y)
+    }
+
+    /// ¿El punto está sobre la chincheta de arriba (fijar o soltar el árbol)?
+    pub fn on_pin_button(&self, x: f32, y: f32) -> bool {
+        self.contains(x, y) && self.pin_btn_shown() && contains(&self.toggle_rect(), x, y)
+    }
+
+    /// `keep_open`: hay un arrastre en curso (no se abre ni se cierra la franja).
+    pub fn on_mouse_move(&mut self, x: f32, y: f32, keep_open: bool) -> bool {
+        let inside = self.visible && contains(&self.area, x, y);
+        let hover = if inside && y >= self.area.top + TOP_PAD { self.node_at(y) } else { None };
+        let toggle_hot = inside && self.pin_btn_shown() && contains(&self.toggle_rect(), x, y);
+        // Sin fijar, asomar el mouse sobre la franja la expande; al salir vuelve a la franja.
+        let open = if !self.pinned && self.visible && !keep_open { inside } else { self.open };
+        let pin_hover = hover.filter(|&id| self.settled() && self.shows_pin(&self.nodes[id]) && self.on_row_pin(x));
+        let changed = hover != self.hover || toggle_hot != self.toggle_hot || open != self.open || pin_hover != self.pin_hover;
+        self.pin_hover = pin_hover;
+        self.hover = hover;
+        self.toggle_hot = toggle_hot;
+        self.open = open;
+        changed
+    }
+
+    /// El mouse salió de la ventana.
+    pub fn on_mouse_leave(&mut self) {
+        self.hover = None;
+        self.toggle_hot = false;
+        self.pin_hover = None;
+        self.open = false;
+    }
+
+    pub fn on_wheel(&mut self, rows: f32) {
+        self.scroll = (self.scroll - rows * ROW_H).clamp(0.0, self.max_scroll());
+    }
+
+    /// Rueda con Mayús o rueda horizontal: mueve el contenido a los costados.
+    pub fn on_wheel_h(&mut self, rows: f32) {
+        self.hscroll = (self.hscroll - rows * ROW_H).clamp(0.0, self.max_hscroll());
+    }
+
+    fn max_scroll(&self) -> f32 {
+        (self.rows().len() as f32 * ROW_H + TOP_PAD - self.view_h).max(0.0)
+    }
+
+    fn max_hscroll(&self) -> f32 {
+        if self.settled() { (self.content_w - self.view_w).max(0.0) } else { 0.0 }
+    }
+
+    /// El borde derecho, donde se agarra para cambiar el ancho (solo expandida).
+    pub fn edge_at(&self, x: f32, y: f32) -> bool {
+        self.visible
+            && self.settled()
+            && y >= self.area.top
+            && y <= self.area.bottom
+            && x >= self.area.right - 3.0
+            && x <= self.area.right + crate::ui::GAP + 1.0
+    }
+
+    pub fn set_width(&mut self, w: f32) {
+        self.width = w.clamp(MIN_W, MAX_W);
+    }
+
+    /// Barra de desplazamiento bajo el mouse y a qué distancia del inicio de su pulgar se agarró.
+    pub fn bar_at(&self, x: f32, y: f32) -> Option<(Bar, f32)> {
+        let grow = |t: Rect| rect(t.left - 4.0, t.top - 4.0, t.right + 3.0, t.bottom + 3.0);
+        if self.shown() && self.htrack.right > self.htrack.left && contains(&grow(self.htrack), x, y) {
+            let t = self.hthumb;
+            let grab = if x >= t.left && x <= t.right { x - t.left } else { (t.right - t.left) / 2.0 };
+            return Some((Bar::H, grab));
+        }
+        if self.shown() && self.vtrack.bottom > self.vtrack.top && contains(&grow(self.vtrack), x, y) {
+            let t = self.vthumb;
+            let grab = if y >= t.top && y <= t.bottom { y - t.top } else { (t.bottom - t.top) / 2.0 };
+            return Some((Bar::V, grab));
+        }
+        None
+    }
+
+    /// Arrastrando el pulgar de una barra: el mouse está en (x, y).
+    pub fn drag_bar(&mut self, bar: Bar, grab: f32, x: f32, y: f32) {
+        match bar {
+            Bar::H => {
+                let span = (self.htrack.right - self.htrack.left) - (self.hthumb.right - self.hthumb.left);
+                if span > 0.0 {
+                    let frac = ((x - grab - self.htrack.left) / span).clamp(0.0, 1.0);
+                    self.hscroll = frac * self.max_hscroll();
+                }
+            }
+            Bar::V => {
+                let span = (self.vtrack.bottom - self.vtrack.top) - (self.vthumb.bottom - self.vthumb.top);
+                if span > 0.0 {
+                    let frac = ((y - grab - self.vtrack.top) / span).clamp(0.0, 1.0);
+                    self.scroll = frac * self.max_scroll();
+                }
+            }
+        }
+    }
+
+    // ---------- dibujo ----------
+
+    /// Ícono y color de un nodo.
+    fn icon(&self, n: &Node, th: &Theme) -> (&'static str, Color) {
+        match n.kind {
+            Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
+            Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
+            // El ícono del mapa, como el botón «xtree» de la barra de estado.
+            Kind::Xtree => ("\u{E9D9}", th.accent),
+            Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
+            // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
+            Kind::QuickAccess => ("\u{EC50}", rgb(0.93, 0.50, 0.55)),
+            Kind::Drive => ("\u{EDA2}", th.text_dim),
+            Kind::Network => ("\u{E839}", rgb(0.30, 0.65, 0.95)),
+            Kind::NetFavorite => ("\u{E735}", th.accent),
+            Kind::NetConnected => ("\u{E968}", th.text_dim),
+            Kind::NetHost => ("\u{E7F4}", th.text_dim),
+            Kind::Linux => ("\u{E968}", th.text_dim),
+            Kind::Pinned => {
+                let (_, glyph, (r, g, b)) = PINNED[n.pin];
+                (glyph, rgb(r, g, b))
+            }
+            _ => ("\u{E8B7}", rgb(1.0, 0.79, 0.28)),
+        }
+    }
+
+    /// ¿Está `x` sobre el lugar de la chincheta de una fila?
+    fn on_row_pin(&self, x: f32) -> bool {
+        let right = self.area.left + self.view_w - SIDE;
+        x >= right - 28.0 && x <= right - 2.0
+    }
+
+    /// ¿Lleva la chincheta? (anclada en el Acceso rápido de Windows, esté arriba o abajo).
+    fn shows_pin(&self, n: &Node) -> bool {
+        n.pinned || (n.kind == Kind::Pinned && self.is_pinned(&n.path))
+    }
+
+    /// ¿La fila de `n` es la carpeta del panel activo (`current`)? Solo las carpetas de disco.
+    fn is_current(&self, n: &Node, current: Option<&Path>) -> bool {
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive)
+            && current.is_some_and(|c| crate::sys::file_system().same_path(c, &n.path))
+    }
+
+    /// `current`: carpeta del panel activo, resaltada si está a la vista. `xtree`: indicador del
+    /// escaneo de xtree, a la derecha de su entrada.
+    pub fn draw(&mut self, p: &dyn Painter, area: Rect, current: Option<&Path>, xtree: XtreeBadge) {
+        self.area = area;
+        let th = p.theme();
+        let e = (self.expand.value / 100.0).clamp(0.0, 1.0);
+        p.round_fill(area, 8.0, th.surface);
+        let rows = self.rows();
+        // Lo que ocupa cada fila de ancho (se mide una sola vez por nodo).
+        let mut content_w = 0.0f32;
+        for &id in &rows {
+            let n = &mut self.nodes[id];
+            if n.kind == Kind::Separator {
+                continue;
+            }
+            if n.text_w == 0.0 {
+                n.text_w = p.measure(FontId::Ui, &n.name);
+            }
+            content_w = content_w.max(SIDE + 2.0 + n.depth as f32 * INDENT + 48.0 + n.text_w + SIDE + 8.0);
+        }
+        // Qué barras hacen falta (una puede hacer necesaria la otra). Colapsada o a mitad de la
+        // animación no hay barra horizontal.
+        let total_h = rows.len() as f32 * ROW_H + TOP_PAD;
+        let (full_w, full_h) = (area.right - area.left, area.bottom - area.top);
+        let mut view_w = full_w;
+        let mut view_h = full_h;
+        let mut need_v = total_h > view_h;
+        if need_v {
+            view_w -= BAR_ROOM;
+        }
+        let allow_h = self.settled();
+        let need_h = allow_h && content_w > view_w;
+        if need_h {
+            view_h -= BAR_ROOM;
+            if !need_v && total_h > view_h {
+                need_v = true;
+                view_w -= BAR_ROOM;
+            }
+        }
+        // En la franja no hay barras: se desplaza con la rueda.
+        if !allow_h {
+            need_v = false;
+            view_w = full_w;
+        }
+        self.content_w = content_w;
+        self.view_w = view_w;
+        self.view_h = view_h;
+        // La carpeta revelada: se desplaza lo justo para que su fila (y el comienzo de su nombre)
+        // quede a la vista.
+        if let Some(i) = self.scroll_to.take().and_then(|id| rows.iter().position(|&r| r == id)) {
+            let top = i as f32 * ROW_H;
+            let rows_h = view_h - TOP_PAD;
+            if top < self.scroll {
+                self.scroll = top;
+            } else if top + ROW_H > self.scroll + rows_h {
+                self.scroll = top + ROW_H - rows_h;
+            }
+            let x = SIDE + 2.0 + self.nodes[rows[i]].depth as f32 * INDENT;
+            if x < self.hscroll {
+                self.hscroll = (x - SIDE).max(0.0);
+            } else if x + 120.0 > self.hscroll + view_w {
+                self.hscroll = x + 120.0 - view_w;
+            }
+        }
+        self.scroll = self.scroll.clamp(0.0, (total_h - view_h).max(0.0));
+        self.hscroll = self.hscroll.clamp(0.0, if allow_h { (content_w - view_w).max(0.0) } else { 0.0 });
+        let hs = self.hscroll;
+        let body = rect(area.left + 1.0, area.top + TOP_PAD - 2.0, area.left + view_w - 1.0, area.top + view_h);
+        let centered_x = area.left + (COLLAPSED_W - 22.0) / 2.0;
+        let mut ejects = Vec::new();
+        p.clip(body, &mut || {
+            for (i, &id) in rows.iter().enumerate() {
+                let y = area.top + TOP_PAD + i as f32 * ROW_H - self.scroll;
+                if y + ROW_H < area.top || y > area.top + view_h {
+                    continue;
+                }
+                let n = &self.nodes[id];
+                if n.kind == Kind::Separator {
+                    let mid = (y + ROW_H / 2.0).round();
+                    p.round_fill(rect(area.left + SIDE + 4.0, mid, area.left + view_w - SIDE - 4.0, mid + 1.0), 0.5, alpha(th.text, 0.14));
+                    continue;
+                }
+                let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
+                let is_current = self.is_current(n, current);
+                if is_current {
+                    p.round_fill(row, 5.0, alpha(th.text, 0.11));
+                } else if self.hover == Some(id) {
+                    p.round_fill(row, 5.0, alpha(th.text, 0.06));
+                }
+                let x = area.left + SIDE + 2.0 + n.depth as f32 * INDENT - hs;
+                // El ícono se desliza de su lugar en la lista al centro de la franja.
+                let icon_x = anim::lerp(centered_x, x + 20.0, e);
+                // Chevron: derecha (contraído), abajo (expandido); nada si no tiene subcarpetas.
+                let has_children = n.children.as_ref().is_none_or(|c| !c.is_empty());
+                if has_children && e > 0.05 {
+                    let glyph = if n.loading { "\u{E712}" } else if n.expanded { "\u{E70D}" } else { "\u{E76C}" };
+                    p.text(FontId::GlyphsSmall, glyph, rect(x, y, x + 16.0, y + ROW_H), alpha(th.text_dim, e * e));
+                }
+                let (icon, color) = self.icon(n, th);
+                p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
+                if e > 0.05 {
+                    p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
+                    // ⏏ a la derecha de los discos expulsables.
+                    if n.kind == Kind::Drive && self.ejectable.contains(&n.path) && self.settled() {
+                        let slot = rect(row.right - 26.0, y + 3.0, row.right - 4.0, y + ROW_H - 3.0);
+                        crate::list::draw_eject(p, slot, self.hover == Some(id));
+                        ejects.push((slot, id));
+                    }
+                    // Una conexión de red: ⏏ al pasar el mouse y en la carpeta del panel.
+                    let in_it = current.is_some_and(|c| c.starts_with(&n.path));
+                    if n.kind == Kind::NetConnected && (self.hover == Some(id) || in_it) && self.settled() {
+                        let slot = rect(row.right - 26.0, y + 3.0, row.right - 4.0, y + ROW_H - 3.0);
+                        crate::list::draw_eject(p, slot, self.hover == Some(id));
+                        ejects.push((slot, id));
+                    }
+                    if self.shows_pin(n) {
+                        let slot = rect(row.right - 26.0, y + 5.0, row.right - 4.0, y + ROW_H - 5.0);
+                        let hot = self.pin_hover == Some(id);
+                        if hot {
+                            p.round_fill(slot, 5.0, alpha(th.text, 0.12));
+                        }
+                        let c = if hot { th.text } else { th.text_dim };
+                        p.text(FontId::GlyphsSmall, PIN_GLYPH, slot, alpha(c, e * e));
+                    }
+                    // Indicador del escaneo a la derecha (en el lugar de la chincheta) y, con
+                    // avance, el porcentaje a su izquierda.
+                    if n.kind == Kind::Xtree && xtree != XtreeBadge::Idle {
+                        let top = y + (ROW_H - ui::BADGE) / 2.0;
+                        let badge = rect(row.right - 22.0, top, row.right - 22.0 + ui::BADGE, top + ui::BADGE);
+                        ui::draw_xtree_badge(p, badge, xtree);
+                        // En un árbol angosto el porcentaje no pisa el nombre: si no entra, queda
+                        // solo el anillo.
+                        if let XtreeBadge::Progress(pct) = xtree {
+                            let text = format!("{pct} %");
+                            let left = (row.right - 90.0).max(icon_x + 28.0 + n.text_w + 6.0);
+                            if row.right - 34.0 - left >= p.measure(FontId::Ui, &text) {
+                                p.text(FontId::UiRight, &text, rect(left, y, row.right - 34.0, y + ROW_H), alpha(th.text_dim, e * e));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.eject_rects = ejects;
+
+        // Título y chincheta (acento si está fija).
+        if e > 0.05 {
+            static USER_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let user = USER_NAME.get_or_init(|| std::env::var("USERNAME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "Inicio".to_string()));
+            p.text(FontId::UiBold, user, rect(area.left + SIDE + 4.0, area.top + 4.0, area.right - 34.0, area.top + 28.0), alpha(th.text_dim, e * e));
+        }
+        // En la franja de íconos no hay chincheta: aparece al expandirse.
+        if e > 0.05 {
+            let btn = self.toggle_rect();
+            if self.toggle_hot {
+                p.round_fill(btn, 5.0, alpha(th.hover, e * e));
+            }
+            let (glyph, color) = if self.pinned { (PIN_GLYPH, th.accent) } else { ("\u{E718}", if self.toggle_hot { th.text } else { th.text_dim }) };
+            p.text(FontId::GlyphsSmall, glyph, btn, alpha(color, e * e));
+        }
+
+        // Contorno gris, como el de los paneles que no están activos.
+        p.round_stroke(area, 8.0, th.border);
+
+        // Barras de desplazamiento.
+        self.htrack = rect(0.0, 0.0, 0.0, 0.0);
+        self.hthumb = rect(0.0, 0.0, 0.0, 0.0);
+        self.vtrack = rect(0.0, 0.0, 0.0, 0.0);
+        self.vthumb = rect(0.0, 0.0, 0.0, 0.0);
+        let thumb = alpha(th.text, 0.30);
+        if need_h {
+            let track = rect(area.left + 6.0, area.bottom - BAR - 4.0, area.left + view_w - 6.0, area.bottom - 4.0);
+            let len = ((track.right - track.left) * view_w / content_w).clamp(28.0, track.right - track.left);
+            let span = (track.right - track.left) - len;
+            let left = track.left + span * (self.hscroll / (content_w - view_w).max(1.0));
+            self.htrack = track;
+            self.hthumb = rect(left, track.top, left + len, track.bottom);
+            p.round_fill(track, BAR / 2.0, alpha(th.text, 0.06));
+            p.round_fill(self.hthumb, BAR / 2.0, thumb);
+        }
+        if need_v {
+            let track = rect(area.right - BAR - 4.0, area.top + 6.0, area.right - 4.0, area.top + view_h - 6.0);
+            let h = track.bottom - track.top;
+            let len = (h * view_h / total_h).clamp(28.0, h);
+            let top = track.top + (h - len) * (self.scroll / (total_h - view_h).max(1.0));
+            self.vtrack = track;
+            self.vthumb = rect(track.left, top, track.right, top + len);
+            p.round_fill(track, BAR / 2.0, alpha(th.text, 0.06));
+            p.round_fill(self.vthumb, BAR / 2.0, thumb);
+        }
+    }
+}
+
+/// ¿Está `path` dentro de `base` (o es la misma)? Tramo por tramo, comparando cada uno como el
+/// sistema (sin distinguir mayúsculas en Windows), sin tocar el disco.
+fn is_under(base: &Path, path: &Path) -> bool {
+    let fs = crate::sys::file_system();
+    let mut tail = path.components();
+    base.components().all(|b| tail.next().is_some_and(|c| c == b || fs.same_path(Path::new(b.as_os_str()), Path::new(c.as_os_str()))))
+}
+
+/// Subcarpetas ordenadas por nombre (sin las ocultas, salvo que se muestren).
+fn subfolders(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
+    let Ok(reader) = std::fs::read_dir(path) else { return Vec::new() };
+    let mut out: Vec<(String, PathBuf)> = reader
+        .flatten()
+        .filter(|e| e.metadata().is_ok_and(|m| m.is_dir() && (show_hidden || !crate::sys::file_system().is_hidden(&m, &e.file_name()))))
+        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+        .collect();
+    out.sort_by(|a, b| crate::format::natural_cmp(&a.0.to_lowercase(), &b.0.to_lowercase()));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// m4: al reciclar un nodo de «Red» no queda nada apuntándolo.
+    #[test]
+    fn recycled_net_nodes_leave_no_references() {
+        crate::sys::testing::install_fakes();
+        let mut t = Tree::new();
+        t.set_network(Vec::new(), vec![("x (nas)".into(), PathBuf::from("/net-r2m4/x"), "smb://nas/x".into())], vec!["MAQ".into()]);
+        let ids: Vec<usize> = t.net_items.clone();
+        let conn = ids.iter().copied().find(|&i| t.nodes[i].kind == Kind::NetConnected).unwrap();
+        t.hover = Some(conn);
+        t.pin_hover = Some(conn);
+        t.scroll_to = Some(conn);
+        t.eject_rects = vec![(Rect::default(), conn)];
+        t.set_network(Vec::new(), Vec::new(), Vec::new());
+        assert_eq!((t.hover, t.pin_hover, t.scroll_to), (None, None, None));
+        assert!(t.eject_rects.is_empty());
+    }
+    use super::*;
+    use crate::sys::testing::{FakeFileSystem, install_fakes};
+
+    #[test]
+    fn tree_lists_fake_drives() {
+        install_fakes();
+        FakeFileSystem::set_drives(&[(Path::new("/unidad-a"), "Disco A"), (Path::new("/unidad-b"), "Disco B")]);
+        let t = Tree::new();
+        FakeFileSystem::set_drives(&[]);
+        // "Este equipo" arranca abierto: sus hijos son las unidades del falso, con sus nombres.
+        let drives: Vec<(&str, &Path)> = t
+            .rows()
+            .into_iter()
+            .map(|id| &t.nodes[id])
+            .filter(|n| n.kind == Kind::Drive)
+            .map(|n| (n.name.as_str(), n.path.as_path()))
+            .collect();
+        assert_eq!(drives, [("Disco A", Path::new("/unidad-a")), ("Disco B", Path::new("/unidad-b"))]);
+    }
+
+    /// Carpeta temporal propia de una prueba, como la nombra el sistema de archivos instalado.
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdir-tree-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::sys::file_system().true_case(&dir)
+    }
+
+    /// Árbol con `root` como única unidad.
+    fn tree_with_drive(root: &Path) -> Tree {
+        FakeFileSystem::set_drives(&[(root, "Disco")]);
+        let t = Tree::new();
+        FakeFileSystem::set_drives(&[]);
+        t
+    }
+
+    /// Aplica las lecturas del árbol hasta que no quede una revelación pendiente.
+    fn finish_reveal(t: &mut Tree) {
+        let start = std::time::Instant::now();
+        while t.revealing().is_some() {
+            assert!(start.elapsed().as_secs() < 10, "la revelación no terminó");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            t.on_loaded();
+        }
+    }
+
+    fn node_by_path<'a>(t: &'a Tree, path: &Path) -> Option<&'a Node> {
+        t.nodes.iter().find(|n| n.kind == Kind::Folder && n.path == path)
+    }
+
+    fn expanded_flags(t: &Tree) -> Vec<bool> {
+        t.nodes.iter().map(|n| n.expanded).collect()
+    }
+
+    /// Revelar una carpeta anidada bajo una unidad despliega sus carpetas padre (leyéndolas) y,
+    /// al dibujar, la fila queda dentro del área visible aunque el área sea chica.
+    #[test]
+    fn tree_reveal_expands_ancestors() {
+        install_fakes();
+        let root = temp_root("revelar");
+        let target = root.join("alfa").join("beta").join("gama");
+        std::fs::create_dir_all(&target).unwrap();
+        for i in 0..8 {
+            std::fs::create_dir_all(root.join("alfa").join(format!("aa{i}"))).unwrap();
+        }
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        let alfa = node_by_path(&t, &root.join("alfa")).expect("se leyó alfa");
+        let beta = node_by_path(&t, &root.join("alfa").join("beta")).expect("se leyó beta");
+        assert!(alfa.expanded && beta.expanded);
+        let drive = t.nodes.iter().find(|n| n.kind == Kind::Drive).unwrap();
+        assert!(drive.expanded, "la unidad también se despliega");
+        assert!(node_by_path(&t, &target).is_some_and(|n| !n.expanded), "la carpeta misma no se despliega");
+
+        // Un área de pocas filas: hay que desplazarse para ver «gama».
+        let area = rect(0.0, 0.0, 240.0, 200.0);
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert!(t.scroll > 0.0, "se desplazó");
+        let texts = p.texts();
+        let (_, _, r) = texts.iter().find(|(_, s, _)| s == "gama").expect("se dibujó gama");
+        assert!(r.top >= area.top + TOP_PAD - 0.01 && r.bottom <= area.bottom + 0.01, "{r:?}");
+
+        // Ya a la vista: no se vuelve a leer ni a desplegar nada.
+        let flags = expanded_flags(&t);
+        t.reveal(Handle(0), &root.join("alfa"), false);
+        assert!(t.revealing().is_none());
+        assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Si la carpeta tiene dos filas (la de la unidad y una anclada) y una ya está a la vista, el
+    /// árbol no se desplaza hasta la otra ni despliega nada.
+    #[test]
+    fn tree_reveal_keeps_scroll_when_a_row_is_visible() {
+        install_fakes();
+        let root = temp_root("revelar-visible");
+        for i in 0..30 {
+            std::fs::create_dir_all(root.join(format!("c{i:02}"))).unwrap();
+        }
+        let target = root.join("c29");
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        let area = rect(0.0, 0.0, 240.0, 200.0);
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        let scroll = t.scroll;
+        assert!(scroll > 0.0, "se desplazó hasta c29");
+
+        // Una fila anclada con la misma carpeta, arriba de todo (fuera de la vista).
+        t.nodes.push(Node::new(Kind::Pinned, target.clone(), "c29".into(), 0));
+        t.roots.insert(0, t.nodes.len() - 1);
+        // La fila de la unidad sigue a la vista (la anclada corrió todo una fila).
+        let rows = t.rows();
+        let c29_row = rows.iter().position(|&id| t.nodes[id].kind == Kind::Folder && t.nodes[id].path == target).unwrap();
+        t.scroll_to = Some(rows[c29_row]);
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        let scroll = t.scroll;
+        assert!(scroll > 0.0 && t.row_in_view(c29_row));
+        let pinned_row = rows.iter().position(|&id| t.nodes[id].kind == Kind::Pinned && t.nodes[id].path == target).unwrap();
+        assert!(!t.row_in_view(pinned_row), "la anclada no se ve");
+
+        let flags = expanded_flags(&t);
+        t.reveal(Handle(0), &target, false);
+        assert!(t.revealing().is_none());
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert_eq!(t.scroll, scroll, "no saltó a la fila anclada");
+        assert_eq!(expanded_flags(&t), flags);
+
+        // Si ninguna se ve (desplazado a la mitad), se desplaza hasta la primera (la anclada).
+        t.scroll = (scroll / 2.0).floor();
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert!(!t.row_in_view(pinned_row) && !t.row_in_view(c29_row));
+        t.reveal(Handle(0), &target, false);
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert_eq!(t.scroll, 0.0);
+        assert!(t.row_in_view(pinned_row));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Una ruta que no está bajo ninguna raíz (otra carpeta, una ubicación del Shell) no cambia
+    /// nada; una que no existe bajo una unidad tampoco despliega nada.
+    #[test]
+    fn tree_reveal_ignores_paths_outside_roots() {
+        install_fakes();
+        let root = temp_root("fuera");
+        std::fs::create_dir_all(root.join("uno")).unwrap();
+        let mut t = tree_with_drive(&root);
+        let before = expanded_flags(&t);
+        t.reveal(Handle(0), &root.with_file_name("xdir-tree-otra-raiz").join("x"), false);
+        assert!(t.revealing().is_none());
+        t.reveal(Handle(0), Path::new("::{red}"), false);
+        assert!(t.revealing().is_none());
+        assert_eq!(expanded_flags(&t), before);
+
+        t.reveal(Handle(0), &root.join("uno").join("no-existe"), false);
+        finish_reveal(&mut t);
+        assert_eq!(expanded_flags(&t)[..before.len()], before[..], "sin la rama completa no se despliega nada");
+        assert!(node_by_path(&t, &root.join("uno")).is_some_and(|n| !n.expanded));
+
+        // Una revelación nueva reemplaza a la pendiente.
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &root.join("uno").join("no-existe"), false);
+        t.reveal(Handle(0), &root.join("uno"), false);
+        assert_eq!(t.revealing(), Some(root.join("uno").as_path()));
+        finish_reveal(&mut t);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- entrada «xtree» ----------
+
+    fn xtree_row(t: &Tree) -> usize {
+        t.rows().iter().position(|&id| t.nodes[id].kind == Kind::Xtree).expect("entrada xtree")
+    }
+
+    /// Árbol dibujado en un área de 240×700 con el indicador `badge`.
+    fn drawn(badge: XtreeBadge) -> (Tree, crate::sys::testing::RecordingPainter, Rect) {
+        install_fakes();
+        let mut t = Tree::new();
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        let area = rect(0.0, 0.0, WIDTH, 700.0);
+        t.draw(&p, area, None, badge);
+        (t, p, area)
+    }
+
+    /// Centro vertical de la fila `i`.
+    fn row_y(area: Rect, i: usize) -> f32 {
+        area.top + TOP_PAD + i as f32 * ROW_H + ROW_H / 2.0
+    }
+
+    #[test]
+    fn tree_has_xtree_entry_below_home() {
+        install_fakes();
+        let t = Tree::new();
+        let kinds: Vec<Kind> = t.rows().iter().map(|&id| t.nodes[id].kind).collect();
+        assert!(kinds[0] == Kind::Home && kinds[1] == Kind::Xtree);
+        let sep = kinds.iter().position(|&k| k == Kind::Separator).unwrap();
+        assert!(kinds[2..sep].iter().all(|&k| k == Kind::Cloud), "entre xtree y el separador solo OneDrive");
+        assert_eq!(kinds.iter().filter(|&&k| k == Kind::Xtree).count(), 1);
+        let n = &t.nodes[t.rows()[1]];
+        assert_eq!(n.name, "xtree");
+        assert_eq!(n.location(), None, "no navega");
+        assert!(n.children.as_ref().is_some_and(|c| c.is_empty()), "sin subcarpetas");
+    }
+
+    #[test]
+    fn tree_xtree_entry_draws_badge() {
+        let (t, p, area) = drawn(XtreeBadge::Progress(37));
+        let y = row_y(area, xtree_row(&t));
+        let in_row = |r: &Rect| r.top <= y && r.bottom >= y;
+        let texts = p.texts();
+        assert!(texts.iter().any(|(_, s, r)| s == "xtree" && in_row(r)), "{texts:?}");
+        assert!(texts.iter().any(|(_, s, r)| s == "37 %" && in_row(r)), "{texts:?}");
+        assert!(texts.iter().any(|(_, s, r)| s == "\u{E9D9}" && in_row(r)), "ícono del mapa");
+        // El anillo, a la derecha de la fila.
+        assert!(p.paths().iter().any(|(pts, closed, _)| *closed && pts.iter().all(|&(px, py)| px > area.right - 40.0 && (py - y).abs() <= 8.0)));
+        // Sin escaneo: solo el ícono y el nombre.
+        let (t, p, area) = drawn(XtreeBadge::Idle);
+        let y = row_y(area, xtree_row(&t));
+        assert!(!p.texts().iter().any(|(_, s, _)| s.ends_with(" %")));
+        assert!(!p.paths().iter().any(|(pts, _, _)| pts.iter().all(|&(_, py)| (py - y).abs() <= 8.0)));
+    }
+
+    /// Un clic en cualquier parte de la fila (también donde iría el chevron) es la entrada xtree.
+    #[test]
+    fn tree_xtree_entry_hit() {
+        let (t, _, area) = drawn(XtreeBadge::Idle);
+        let y = row_y(area, xtree_row(&t));
+        for x in [area.left + SIDE + 4.0, area.left + 60.0, area.right - 20.0] {
+            assert!(matches!(t.hit(x, y), TreeHit::Xtree), "x = {x}");
+            assert!(t.xtree_at(x, y));
+        }
+        assert!(!t.xtree_at(area.left + 60.0, row_y(area, 0)));
+        assert_eq!(t.path_at(area.left + 60.0, y), None);
+    }
+
+    /// Que el árbol siga al panel nunca resalta ni revela la entrada xtree (no es una carpeta).
+    #[test]
+    fn tree_xtree_entry_not_selectable_by_follow() {
+        install_fakes();
+        let mut t = Tree::new();
+        let id = t.rows()[1];
+        assert!(!t.is_current(&t.nodes[id], Some(Path::new(""))));
+        assert!(!t.is_current(&t.nodes[id], Some(Path::new("/"))));
+        t.reveal(Handle::default(), Path::new(""), false);
+        finish_reveal(&mut t);
+        assert_ne!(t.scroll_to, Some(id));
+    }
+
+    /// En un árbol angosto (ancho mínimo) el porcentaje no pisa el nombre: o entra a su derecha o
+    /// no se dibuja (queda el anillo).
+    #[test]
+    fn tree_xtree_percent_does_not_overlap_name() {
+        for w in [MIN_W, 165.0, 170.0, WIDTH] {
+            install_fakes();
+            let mut t = Tree::new();
+            t.visible = true;
+            t.width = w;
+            let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+            let area = rect(0.0, 0.0, w, 700.0);
+            t.draw(&p, area, None, XtreeBadge::Progress(37));
+            let y = row_y(area, xtree_row(&t));
+            let in_row = |r: &Rect| r.top <= y && r.bottom >= y;
+            let texts = p.texts();
+            let name = texts.iter().find(|(_, s, r)| s == "xtree" && in_row(r)).expect("nombre");
+            let name_end = name.2.left + p.measure(FontId::Ui, "xtree");
+            if let Some((_, s, r)) = texts.iter().find(|(_, s, r)| s == "37 %" && in_row(r)) {
+                // Alineado a la derecha: el texto ocupa el final de su cuadro.
+                assert!(r.right - p.measure(FontId::Ui, s) >= name_end, "ancho {w}: {r:?} pisa el nombre (termina en {name_end})");
+            }
+            assert!(p.paths().iter().any(|(pts, closed, _)| *closed && pts.iter().all(|&(_, py)| (py - y).abs() <= 8.0)), "ancho {w}: sin anillo");
+        }
+    }
+}

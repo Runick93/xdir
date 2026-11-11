@@ -1,15 +1,12 @@
 ; Instalador de xdir (Inno Setup 6).
-; Uso: ISCC.exe /DAppVersion=0.1.6 /DSourceExe=..\target\release\xdir.exe /DXtreeExe=..\target\release\xtree.exe /DOutputDir=..\dist installer\xdir.iss
+; Uso: ISCC.exe /DAppVersion=0.1.6 /DSourceExe=..\target\release\xdir-windows.exe /DOutputDir=..\dist installer\xdir.iss
 ; Lo invoca scripts\package.ps1; las rutas relativas son respecto de este archivo.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
 #ifndef SourceExe
-  #define SourceExe "..\target\release\xdir.exe"
-#endif
-#ifndef XtreeExe
-  #define XtreeExe "..\target\release\xtree.exe"
+  #define SourceExe "..\target\release\xdir-windows.exe"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\dist"
@@ -52,8 +49,12 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#XtreeExe}"; DestDir: "{app}"; Flags: ignoreversion
+; El exe compilado se llama xdir-windows.exe; se instala con el nombre de siempre.
+Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "xdir.exe"; Flags: ignoreversion
+
+[InstallDelete]
+; xtree ahora es parte de xdir: se borra el programa aparte que dejaron las versiones anteriores.
+Type: files; Name: "{app}\xtree.exe"
 
 [Icons]
 Name: "{autoprograms}\xdir"; Filename: "{app}\xdir.exe"
@@ -72,7 +73,7 @@ Filename: "{app}\xdir.exe"; Description: "{cm:LaunchProgram,xdir}"; Flags: nowai
 const
   WM_CLOSE = $0010;
 
-// Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en src/main.rs) para que
+// Cierra las ventanas de xdir abiertas (clase "xdir.main", ver CLASS_NAME en crates/xdir-windows/src/app/win.rs) para que
 // el desinstalador pueda borrar el exe. WM_CLOSE deja que la app guarde la sesión; si a los 5 s
 // sigue abierta, se la termina.
 procedure CloseXdir();
@@ -87,8 +88,16 @@ begin
   end;
   if FindWindowByClassName('xdir.main') <> 0 then
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM xdir.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  // xtree (mapa de uso de disco) también vive en la carpeta de instalación.
+end;
+
+// Antes de instalar: un xtree.exe de una versión anterior que siga abierto no se podría borrar
+// (ver [InstallDelete]); se lo termina. Si no está corriendo, taskkill no hace nada.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM xtree.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Result := '';
 end;
 
 function InitializeUninstall(): Boolean;

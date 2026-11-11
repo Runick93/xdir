@@ -1,0 +1,134 @@
+//! Diálogo "Acerca de": logo, versión, Novedades y el enlace para reportar un problema. Es un panel dibujado
+//! como el resto de la interfaz (sin ventana de Windows aparte); un clic fuera o Esc lo cierra.
+
+use crate::geom::{Color, Rect, contains, rect};
+use crate::paint::{FontId, Painter, Pixels};
+use crate::theme::alpha;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const ISSUES_URL: &str = "https://github.com/Runick93/xdir/issues/new/choose";
+
+/// Logo de Runick: `assets/runick-logo.bgra` (ancho y alto como u32 little-endian y luego BGRA
+/// premultiplicado), generado a partir de `assets/runick-logo.png`.
+static LOGO: &[u8] = include_bytes!("../../../assets/runick-logo.bgra");
+
+pub fn logo_pixels() -> Option<Pixels> {
+    let width = u32::from_le_bytes(LOGO.get(0..4)?.try_into().ok()?);
+    let height = u32::from_le_bytes(LOGO.get(4..8)?.try_into().ok()?);
+    let data = LOGO.get(8..)?.to_vec();
+    (data.len() == (width * height * 4) as usize).then_some(Pixels { width, height, data })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AboutHit {
+    /// «Novedades»: abre la pestaña y cierra el diálogo.
+    Changelog,
+    Report,
+    /// Dentro del diálogo pero sobre nada.
+    Panel,
+}
+
+const WIDTH: f32 = 400.0;
+const HEIGHT: f32 = 272.0;
+const BANNER_H: f32 = 108.0;
+const BTN_H: f32 = 34.0;
+/// El logo es de letras blancas: va sobre una franja oscura aunque el tema sea claro.
+const BANNER: Color = Color { r: 0.055, g: 0.059, b: 0.078, a: 1.0 };
+
+fn panel(w: f32, h: f32) -> Rect {
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    rect(cx - WIDTH / 2.0, cy - HEIGHT / 2.0, cx + WIDTH / 2.0, cy + HEIGHT / 2.0)
+}
+
+fn report_button(w: f32, h: f32) -> Rect {
+    let p = panel(w, h);
+    rect(p.left + 16.0, p.bottom - 16.0 - BTN_H, p.right - 16.0, p.bottom - 16.0)
+}
+
+/// «Novedades», arriba del de reportar (4 entre los dos).
+fn changelog_button(w: f32, h: f32) -> Rect {
+    let r = report_button(w, h);
+    rect(r.left, r.top - 4.0 - BTN_H, r.right, r.top - 4.0)
+}
+
+pub fn at(w: f32, h: f32, x: f32, y: f32) -> Option<AboutHit> {
+    if !contains(&panel(w, h), x, y) {
+        return None;
+    }
+    Some(if contains(&report_button(w, h), x, y) {
+        AboutHit::Report
+    } else if contains(&changelog_button(w, h), x, y) {
+        AboutHit::Changelog
+    } else {
+        AboutHit::Panel
+    })
+}
+
+pub fn draw(p: &dyn Painter, w: f32, h: f32, hover: Option<AboutHit>) {
+    let th = p.theme();
+    // Velo sobre la ventana, para que el diálogo se lea como modal.
+    p.fill(rect(0.0, 0.0, w, h), Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
+    let pn = panel(w, h);
+    p.round_fill(rect(pn.left - 2.0, pn.top, pn.right + 2.0, pn.bottom + 4.0), 14.0, alpha(th.background, 0.5));
+    p.round_fill(pn, 12.0, th.surface_alt);
+    // Franja del logo: el panel entero en oscuro, recortado a la parte de arriba.
+    p.clip(rect(pn.left, pn.top, pn.right, pn.top + BANNER_H), &mut || p.round_fill(pn, 12.0, BANNER));
+    p.logo(rect(pn.left + 28.0, pn.top + 14.0, pn.right - 28.0, pn.top + BANNER_H - 14.0));
+    p.round_stroke(pn, 12.0, th.border);
+
+    let line = |top: f32, bottom: f32| rect(pn.left + 20.0, top, pn.right - 20.0, bottom);
+    p.text(FontId::UiBold, &format!("xdir {VERSION}"), line(pn.top + BANNER_H + 8.0, pn.top + BANNER_H + 34.0), th.text);
+    p.text(
+        FontId::Ui,
+        "Explorador de archivos multipanel para Windows.",
+        line(pn.top + BANNER_H + 34.0, pn.top + BANNER_H + 58.0),
+        th.text_dim,
+    );
+
+    let r = changelog_button(w, h);
+    if hover == Some(AboutHit::Changelog) {
+        p.round_fill(r, 6.0, th.hover);
+    }
+    p.text(FontId::Glyphs, crate::pane::CHANGELOG_GLYPH, rect(r.left + 6.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
+    p.text(FontId::Ui, "Novedades", rect(r.left + 38.0, r.top, r.right - 8.0, r.bottom), th.text);
+
+    let r = report_button(w, h);
+    if hover == Some(AboutHit::Report) {
+        p.round_fill(r, 6.0, th.hover);
+    }
+    p.text(FontId::Glyphs, "\u{E783}", rect(r.left + 6.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
+    p.text(FontId::Ui, "Reportar un problema o sugerir algo", rect(r.left + 38.0, r.top, r.right - 8.0, r.bottom), th.text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sys::testing::RecordingPainter;
+
+    /// El nombre «xdir» con la versión va en la fuente de interfaz en seminegrita (como hoy).
+    #[test]
+    fn about_title_uses_bold_font() {
+        crate::sys::testing::install_fakes();
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        draw(&p, 800.0, 600.0, None);
+        let title = format!("xdir {VERSION}");
+        let texts = p.texts();
+        let found: Vec<_> = texts.iter().filter(|(_, s, _)| *s == title).collect();
+        assert_eq!(found.len(), 1, "{texts:?}");
+        assert_eq!(found[0].0, FontId::UiBold);
+    }
+
+    /// «Novedades» va arriba de «Reportar…» y cada uno responde a su clic.
+    #[test]
+    fn about_has_changelog_button_above_report() {
+        let (w, h) = (800.0, 600.0);
+        let (c, r) = (changelog_button(w, h), report_button(w, h));
+        assert!(c.bottom < r.top && c.top > panel(w, h).top + BANNER_H + 50.0, "{c:?} {r:?}");
+        assert_eq!(at(w, h, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0), Some(AboutHit::Changelog));
+        assert_eq!(at(w, h, (r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0), Some(AboutHit::Report));
+        crate::sys::testing::install_fakes();
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        draw(&p, w, h, Some(AboutHit::Changelog));
+        assert!(p.texts().iter().any(|(_, s, _)| s == "Novedades"));
+    }
+}

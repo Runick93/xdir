@@ -229,7 +229,7 @@ impl App {
                 // Su versión es la cantidad de elementos: si cambia, se vuelve a contar.
                 Location::Path(p) => return (Some(Wanted { target: PreviewTarget::Folder(p.clone()), stamp: (list.entries.len() as u64, 0) }), None),
                 Location::Computer => list.focused_index(),
-                Location::Shell { .. } | Location::Settings | Location::Archive { .. } => None,
+                Location::Shell { .. } | Location::Settings | Location::Changelog | Location::Archive { .. } => None,
             },
         };
         let Some(idx) = idx.filter(|&i| i < list.entries.len()) else { return (None, None) };

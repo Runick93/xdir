@@ -712,10 +712,12 @@ fn fake_list(path: &Path, cancelled: impl Fn() -> bool, send: impl Fn(LoadMsg)) 
 
 impl FileSystem for FakeFileSystem {
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
-        // La pestaña Configuración nunca se carga: si llega, queda anotada como "xdir:configuracion".
+        // La pestaña Configuración y la de Novedades nunca se cargan: si llegan, quedan anotadas como
+        // "xdir:configuracion" y "xdir:novedades".
         let counted = match &location {
             Location::Path(p) => Some(p.clone()),
             Location::Settings => Some(PathBuf::from("xdir:configuracion")),
+            Location::Changelog => Some(PathBuf::from("xdir:novedades")),
             _ => None,
         };
         if let Some(p) = counted {
@@ -740,7 +742,7 @@ impl FileSystem for FakeFileSystem {
                     }
                 }
                 // "Este equipo" del falso: vacío (sin unidades ni carpetas del usuario).
-                Location::Computer | Location::Settings => send(LoadMsg::Listed(Ok(()))),
+                Location::Computer | Location::Settings | Location::Changelog => send(LoadMsg::Listed(Ok(()))),
                 // Lo lista el núcleo (`archive_nav`), nunca el sistema.
                 Location::Archive { .. } => send(LoadMsg::Listed(Err("Esta ubicación no existe".into()))),
                 Location::Shell { parsing, .. } => {

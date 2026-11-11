@@ -14,6 +14,8 @@ use crate::theme::{Accent, DEFAULT_ACCENT};
 const COMPUTER: &str = "Este equipo";
 /// La pestaña Configuración; con su página: `xdir:configuracion#atajos`.
 const SETTINGS: &str = "xdir:configuracion";
+/// La pestaña Novedades.
+const CHANGELOG: &str = "xdir:novedades";
 /// Carpetas virtuales: "shell:<nombre de análisis>|<nombre visible>".
 const SHELL_PREFIX: &str = "shell:";
 /// Dentro de un archivo comprimido (ver `location_str`).
@@ -112,6 +114,7 @@ pub fn location_str(l: &Location) -> String {
     match l {
         Location::Computer => COMPUTER.to_string(),
         Location::Settings => SETTINGS.to_string(),
+        Location::Changelog => CHANGELOG.to_string(),
         Location::Path(p) => p.to_string_lossy().into_owned(),
         Location::Shell { parsing, name, .. } => format!("{SHELL_PREFIX}{parsing}|{name}"),
         // «comprimido:<archivo>//<anidado>//…//<carpeta interior>» (`//` no aparece en ninguna
@@ -141,6 +144,9 @@ pub fn location_from(s: &str) -> Location {
     }
     if settings_anchor(s).is_some() {
         return Location::Settings;
+    }
+    if s == CHANGELOG {
+        return Location::Changelog;
     }
     if let Some((parsing, name)) = s.strip_prefix(SHELL_PREFIX).and_then(|r| r.rsplit_once('|')) {
         return Location::Shell { parsing: parsing.to_string(), name: name.to_string(), parent: None };
@@ -203,6 +209,10 @@ pub struct Session {
     pub settings_page: Option<String>,
     /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`).
     pub xtree_last: Option<PathBuf>,
+    /// La versión más nueva de xdir que se abrió con esta sesión (`version_vista`), para avisar
+    /// una vez que se actualizó. Una sesión nueva (primera instalación) ya tiene la de ahora; una
+    /// leída de un archivo sin la clave (de antes de Novedades) queda en `None`.
+    pub seen_version: Option<String>,
     pub panes: Vec<PaneState>,
     /// Columnas de las listas, de izquierda a derecha. Desde `carpetas.toml` (memoria por
     /// carpeta) solo se leen para la migración (`legacy_view`); se siguen escribiendo con las de
@@ -240,6 +250,7 @@ impl Default for Session {
             info_sections: crate::info::DEFAULT_OPEN,
             settings_page: None,
             xtree_last: None,
+            seen_version: Some(crate::about::VERSION.to_string()),
             panes: Vec::new(),
             columns: default_columns(),
             views: Vec::new(),
@@ -300,6 +311,9 @@ fn write(s: &Session) -> String {
     out += &format!("vista_previa = {}\n", s.preview_on);
     out += &format!("vista_previa_ancho = {}\n", s.preview_width.round());
     out += &format!("informacion_secciones = {}\n", s.info_sections);
+    if let Some(v) = &s.seen_version {
+        out += &format!("version_vista = {}\n", quote(v));
+    }
     if let Some(p) = &s.xtree_last {
         out += &format!("xtree_ultimo = {}\n", quote(&p.to_string_lossy()));
     }
@@ -342,7 +356,8 @@ fn write(s: &Session) -> String {
 }
 
 fn parse(text: &str) -> Session {
-    let mut s = Session::default();
+    // Sin `version_vista` en el archivo, la sesión es de una versión de antes de Novedades.
+    let mut s = Session { seen_version: None, ..Session::default() };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -410,6 +425,7 @@ fn parse(text: &str) -> Session {
             ("informacion_secciones", None) => s.info_sections = int().filter(|n| (0..128).contains(n)).map_or(crate::info::DEFAULT_OPEN, |n| n as u32),
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("xtree_ultimo", None) => s.xtree_last = parse_list(&format!("[{value}]")).into_iter().next().filter(|p| !p.is_empty()).map(PathBuf::from),
+            ("version_vista", None) => s.seen_version = Some(value.trim_matches('"').trim().to_string()).filter(|v| !v.is_empty()),
             ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
             ("barra_grupos", None) => s.group_bar = boolean().unwrap_or(false),
@@ -617,6 +633,7 @@ mod tests {
             info_sections: 0b101,
             settings_page: Some("atajos".into()),
             xtree_last: Some(r#"C:\datos "x""#.into()),
+            seen_version: Some("0.1.24".into()),
             panes: vec![
                 PaneState {
                     tabs: vec![
@@ -630,7 +647,7 @@ mod tests {
                     ],
                     active: 1,
                 },
-                PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into()), Location::Settings], active: 0 },
+                PaneState { tabs: vec![Location::Path(r"D:\a, b\c".into()), Location::Settings, Location::Changelog], active: 0 },
             ],
             columns: vec![
                 ColumnSpec { col: Column::Size, width: 90.0 },
@@ -649,6 +666,18 @@ mod tests {
         assert_eq!(parse("columnas = [\"tamano:90\"]\n").columns, default_columns());
         // Las sesiones de antes (sin la clave) muestran las extensiones.
         assert!(parse("layout = 2\n").show_extensions);
+    }
+
+    /// La pestaña Novedades va como `xdir:novedades`; la versión vista, como `version_vista`. Una
+    /// sesión nueva ya tiene la versión de ahora; una leída sin la clave, ninguna.
+    #[test]
+    fn changelog_tab_and_seen_version() {
+        assert_eq!(location_str(&Location::Changelog), "xdir:novedades");
+        assert_eq!(location_from("xdir:novedades"), Location::Changelog);
+        assert_eq!(Session::default().seen_version.as_deref(), Some(crate::about::VERSION));
+        assert_eq!(parse("layout = 2\n").seen_version, None);
+        assert_eq!(parse("version_vista = \"0.1.23\"\n").seen_version.as_deref(), Some("0.1.23"));
+        assert!(write(&Session::default()).contains(&format!("version_vista = \"{}\"", crate::about::VERSION)));
     }
 
     /// Las vistas Lista y Contenido se guardan con sus ids («lista», «contenido») y vuelven igual,

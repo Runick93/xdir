@@ -92,6 +92,8 @@ pub enum Command {
     /// La pestaña Configuración en la página Atajos de teclado.
     SettingsKeys,
     About,
+    /// La pestaña Novedades (una sola: abrirla de nuevo la enfoca).
+    Changelog,
     /// Vista N (índice de `list::VIEWS`).
     View(u8),
     /// Ordenar por la columna N (índice de `list::COLUMNS`); repetirlo invierte el orden.
@@ -239,6 +241,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::ShowTransfers, "mostrar_operaciones", "Mostrar operaciones", &[]),
     spec(Command::Xtree, "xtree", "Mapa de uso de disco (xtree)", &[]),
     spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
+    spec(Command::Changelog, "novedades", "Novedades de xdir", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),
     spec(Command::View(1), "vista_iconos", "Vista: íconos medianos", &["Ctrl+Shift+2"]),
     spec(Command::View(2), "vista_iconos_grandes", "Vista: íconos grandes", &["Ctrl+Shift+3"]),
@@ -366,7 +369,8 @@ pub fn group(c: Command) -> Group {
         | Command::OpenConfig
         | Command::Settings
         | Command::SettingsKeys
-        | Command::About => Group::Other,
+        | Command::About
+        | Command::Changelog => Group::Other,
     }
 }
 
@@ -655,7 +659,7 @@ mod tests {
     fn every_command_has_group() {
         assert_eq!(group(Command::Duplicate), Group::Files);
         assert_eq!(group(Command::Eject), Group::Files);
-        for c in [Command::Settings, Command::SettingsKeys, Command::OpenConfig, Command::About] {
+        for c in [Command::Settings, Command::SettingsKeys, Command::OpenConfig, Command::About, Command::Changelog] {
             assert_eq!(group(c), Group::Other);
         }
         assert_eq!(Group::ALL.iter().map(|g| g.title()).collect::<Vec<_>>()[6], "Red");
@@ -677,6 +681,7 @@ mod tests {
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{positions:?}");
         assert!(t.contains("| Duplicar | Ctrl+D | `duplicar` |"));
         assert!(t.contains("| Configuración | Ctrl+, | `configuracion` |"));
+        assert!(t.contains("| Novedades de xdir |  | `novedades` |"), "{t}");
         assert!(t.contains("### Red\n"));
         assert!(t.contains("| Conectar a un servidor… | Ctrl+K | `conectar_servidor` |"), "{t}");
     }

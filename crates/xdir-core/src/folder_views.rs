@@ -78,6 +78,7 @@ pub fn folder_key(loc: &Location, search_root: Option<&Path>) -> String {
         Location::Computer => COMPUTER_KEY.to_string(),
         // Nunca se guarda vista para ella (ver `Tab::sync_view`).
         Location::Settings => "configuracion".to_string(),
+        Location::Changelog => "novedades".to_string(),
         Location::Shell { parsing, .. } => format!("{SHELL_PREFIX}{parsing}"),
         Location::Path(p) => path_key(p),
         // Todas las carpetas de adentro de los archivos comprimidos comparten una vista.

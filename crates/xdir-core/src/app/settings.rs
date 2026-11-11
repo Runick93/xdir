@@ -234,7 +234,7 @@ impl App {
     pub(super) fn settings_from_tab(&self) -> Option<&Tab> {
         let (pane, index) = self.settings_tab()?;
         let id = self.panes[pane].tabs[index].settings.as_ref()?.from_tab?;
-        self.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == id && !t.is_settings())
+        self.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == id && !t.is_page())
     }
 
     /// Dónde se dibujó una parte de una fila en el último cuadro.

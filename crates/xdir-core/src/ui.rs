@@ -421,16 +421,47 @@ pub struct StatusButtons {
     /// Solo quedan trabajos que terminaron con errores: el aviso en vez del porcentaje.
     pub transfers_failed: bool,
     pub transfers_hot: bool,
+    /// Lo que ocupa a la izquierda el aviso de actualización (`draw_update_notice`): el texto de
+    /// estado empieza después.
+    pub lead: f32,
+}
+
+/// Separador entre el aviso y el resto de la barra de estado (el de `aviso   ·   estado`).
+const NOTICE_SEP: &str = "   ·   ";
+
+/// El aviso de actualización a la izquierda de la barra de estado: «xdir se actualizó a X   ·
+/// Ver novedades   ·   » con el enlace en el acento (bajo el mouse, fondo `hover` y subrayado).
+/// Devuelve dónde quedó el enlace (para el clic) y cuánto ocupa todo.
+pub fn draw_update_notice(p: &dyn Painter, h: f32, version: &str, hot: bool) -> (Rect, f32) {
+    let th = p.theme();
+    let (top, bottom) = (h - STATUSBAR_H, h);
+    let x0 = GAP * 2.0;
+    let text = format!("xdir se actualizó a {version}");
+    let tw = p.measure(FontId::Ui, &text);
+    p.text(FontId::Ui, &text, rect(x0, top, x0 + tw + 8.0, bottom), th.text_dim);
+    let sep = p.measure(FontId::Ui, NOTICE_SEP);
+    let lx = x0 + tw + sep;
+    let label = "Ver novedades";
+    let lw = p.measure(FontId::Ui, label);
+    let link = rect(lx - 4.0, top + 4.0, lx + lw + 4.0, bottom - 4.0);
+    if hot {
+        p.round_fill(link, 4.0, th.hover);
+        p.fill(rect(lx, bottom - 8.0, lx + lw, bottom - 7.0), th.accent);
+    }
+    p.text(FontId::Ui, NOTICE_SEP, rect(x0 + tw, top, lx + 2.0, bottom), th.text_dim);
+    p.text(FontId::Ui, label, rect(lx, top, lx + lw + 8.0, bottom), th.accent);
+    p.text(FontId::Ui, NOTICE_SEP, rect(lx + lw, top, lx + lw + sep + 2.0, bottom), th.text_dim);
+    (link, tw + sep + lw + sep)
 }
 
 pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) {
-    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on, transfers, transfers_failed, transfers_hot } = b;
+    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on, transfers, transfers_failed, transfers_hot, lead } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
     let xtree = xtree_rect(w, h, badge);
     let text_end = if transfers.is_some() { transfers_rect(w, h, badge).left } else { xtree.left };
-    let text_r = rect(GAP * 2.0, h - STATUSBAR_H, text_end - GAP, h);
+    let text_r = rect(GAP * 2.0 + lead, h - STATUSBAR_H, (text_end - GAP).max(GAP * 2.0 + lead), h);
     p.text(FontId::Ui, text, text_r, th.text_dim);
 
     if let Some(f) = transfers {
@@ -527,10 +558,12 @@ pub enum PickerHit {
     GroupBar,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
     Tree,
-    /// Abre el diálogo "Acerca de".
-    About,
+    /// «Novedades»: cierra la rueda y abre la pestaña Novedades.
+    Changelog,
     /// «Más opciones…»: cierra la rueda y abre la pestaña Configuración.
     MoreOptions,
+    /// Abre el diálogo "Acerca de".
+    About,
     /// Dentro del panel pero sobre nada.
     Panel,
 }
@@ -595,9 +628,9 @@ const PICKER_LAYOUTS: [PickerLayout; 3] = [
 impl PickerLayout {
     fn height(&self) -> f32 {
         let rows = (PRESETS.len() / PICKER_COLS) as f32;
-        // Colores, dos botones, un separador, las filas de switches, otro separador, "Acerca de" y
-        // "Más opciones…".
-        self.title + self.cell * rows + self.gap + self.btn * 2.0 + self.sep + self.btn * switch_rows() as f32 + self.sep + self.btn * 2.0 + self.pad
+        // Colores, dos botones, un separador, las filas de switches, otro separador, «Novedades»,
+        // «Más opciones…» y «Acerca de».
+        self.title + self.cell * rows + self.gap + self.btn * 2.0 + self.sep + self.btn * switch_rows() as f32 + self.sep + self.btn * 3.0 + self.pad
     }
 }
 
@@ -640,8 +673,11 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
         out.push((kind, rect(l, top, r, top + lay.btn)));
     }
     let top = y + lay.btn * switch_rows() as f32 + lay.sep;
-    out.push((PickerHit::About, rect(l, top, r, top + lay.btn)));
-    out.push((PickerHit::MoreOptions, rect(l, top + lay.btn, r, top + lay.btn * 2.0)));
+    // De arriba abajo: Novedades, Más opciones… y Acerca de xdir.
+    for (i, kind) in [PickerHit::Changelog, PickerHit::MoreOptions, PickerHit::About].into_iter().enumerate() {
+        let t = top + lay.btn * i as f32;
+        out.push((kind, rect(l, t, r, t + lay.btn)));
+    }
     out
 }
 
@@ -743,12 +779,20 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                 let (kx, kr) = if on { (track.right - half, half - 4.0) } else { (track.left + half, half - 5.0) };
                 p.circle(kx, cy, kr, if on { th.background } else { th.text_dim });
             }
+            PickerHit::Changelog => {
+                if hot {
+                    p.round_fill(r, 6.0, th.hover);
+                }
+                // Separador sobre las tres filas del final.
+                let sy = r.top - lay.sep / 2.0;
+                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
+                p.text(FontId::Glyphs, crate::pane::CHANGELOG_GLYPH, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
+                p.text(FontId::Ui, "Novedades", rect(r.left + 34.0, r.top, r.right - 10.0, r.bottom), th.text);
+            }
             PickerHit::About => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
-                let sy = r.top - lay.sep / 2.0;
-                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 p.text(FontId::Glyphs, "\u{E946}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
                 p.text(FontId::Ui, "Acerca de xdir", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
                 p.text(FontId::UiRight, crate::about::VERSION, rect(r.right - 70.0, r.top, r.right - 10.0, r.bottom), th.text_dim);
@@ -985,10 +1029,33 @@ mod picker_tests {
         let (w, h) = (900.0, 360.0);
         let kinds = switch_kinds();
         let items = picker_items(w, h);
-        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::About, PickerHit::Preset(0)] {
+        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::Changelog, PickerHit::About, PickerHit::Preset(0)] {
             let (_, r) = items.iter().find(|(k, _)| *k == want).unwrap();
             let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
             assert_eq!(picker_at(w, h, x, y), Some(want));
         }
+    }
+    /// El final de la rueda, de arriba abajo: Novedades, Más opciones… y Acerca de xdir (pedido
+    /// del usuario), las tres del mismo alto y una debajo de la otra.
+    #[test]
+    fn el_final_es_novedades_mas_opciones_y_acerca_de() {
+        for h in [360.0, 700.0] {
+            let items = picker_items(900.0, h);
+            let tail: Vec<PickerHit> = items[items.len() - 3..].iter().map(|(k, _)| *k).collect();
+            assert_eq!(tail, vec![PickerHit::Changelog, PickerHit::MoreOptions, PickerHit::About]);
+            let rs: Vec<Rect> = items[items.len() - 3..].iter().map(|(_, r)| *r).collect();
+            assert!(rs.windows(2).all(|w| (w[0].bottom - w[1].top).abs() < 0.01), "{rs:?}");
+        }
+    }
+
+    /// La fila de Novedades dice «Novedades».
+    #[test]
+    fn la_rueda_dibuja_novedades() {
+        crate::sys::testing::install_fakes();
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        draw_picker(&p, 900.0, 700.0, crate::theme::DEFAULT_ACCENT, Some(PickerHit::Changelog), PickerSwitches::default());
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, s, _)| s).collect();
+        let at = |t: &str| texts.iter().position(|s| s == t).unwrap_or_else(|| panic!("{t}: {texts:?}"));
+        assert!(at("Novedades") < at("Más opciones…") && at("Más opciones…") < at("Acerca de xdir"));
     }
 }

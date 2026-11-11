@@ -31,6 +31,8 @@ const THIS_PC_ICON_W: f32 = 22.0;
 const ARCHIVE_ICON_W: f32 = 17.0;
 /// Ícono de archivo comprimido (Segoe MDL2 «ZipFolder»; en macOS, `doc.zipper`).
 pub const ARCHIVE_GLYPH: &str = "\u{F012}";
+/// Megáfono de la pestaña Novedades (Segoe E789; en macOS «megaphone»).
+pub const CHANGELOG_GLYPH: &str = "\u{E789}";
 
 /// Contorno de una pestaña sin base: (abajo izquierda, arriba izquierda, arriba derecha,
 /// abajo derecha). `left_slant`: inclinación del lado izquierdo.
@@ -573,7 +575,7 @@ impl Pane {
                 Button::Back => tab.can_back(),
                 Button::Forward => tab.can_forward(),
                 Button::Up => tab.can_up(),
-                Button::Refresh => !tab.is_settings(),
+                Button::Refresh => !tab.is_page(),
             };
             if enabled && hover == PaneHit::Button(b) {
                 let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
@@ -633,6 +635,8 @@ impl Pane {
             let crumbs_area = rect(addr.left, addr.top, addr.right - star_w - TERM_W - 4.0, addr.bottom);
             if self.tabs[self.active].is_settings() {
                 self.draw_settings_crumbs(p, crumbs_area, hover);
+            } else if self.tabs[self.active].is_changelog() {
+                self.draw_changelog_crumbs(p, crumbs_area, hover);
             } else {
                 self.draw_crumbs(p, crumbs_area, hover);
             }
@@ -655,7 +659,7 @@ impl Pane {
             };
             p.text(FontId::UiCenter, ">_", term, color);
             self.terminal = if enabled { term } else { rect(0.0, 0.0, 0.0, 0.0) };
-            if let Some((f, _)) = favs.filter(|_| !self.tabs[self.active].is_settings()) {
+            if let Some((f, _)) = favs.filter(|_| !self.tabs[self.active].is_page()) {
                 // Estrella llena si la carpeta ya es favorita.
                 let star = rect(addr.right - STAR_W, addr.top + 3.0, addr.right - 3.0, addr.bottom - 3.0);
                 if hover == PaneHit::Star {
@@ -682,8 +686,9 @@ impl Pane {
 
         // Lista, un poco adentro del borde para no tapar las esquinas redondeadas.
         self.list = rect(area.left + 1.0, top, area.right - 1.0, area.bottom - FOOTER_H);
-        // La configuración ocupa el lugar de la lista: la dibuja la `App` (`settings::draw`).
-        if self.tabs[self.active].is_settings() {
+        // La configuración y las novedades ocupan el lugar de la lista: las dibuja la `App`
+        // (`settings::draw`, `changelog_draw::draw`).
+        if self.tabs[self.active].is_page() {
             self.view_button = rect(0.0, 0.0, 0.0, 0.0);
             self.new_folder_button = rect(0.0, 0.0, 0.0, 0.0);
             p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
@@ -845,9 +850,10 @@ impl Pane {
             let text_right = if show_close { close.left - 2.0 } else { r.right - TAB_SLANT - 6.0 };
             let color = if active { th.text } else { th.text_dim };
             let mut text = rect(r.left + left_slant + 12.0, r.top, text_right, r.bottom);
-            if tab.is_settings() {
-                // La pestaña Configuración lleva el engranaje adelante.
-                p.text(FontId::GlyphsSmall, "\u{E713}", rect(text.left - 4.0, r.top, text.left + 16.0, r.bottom), color);
+            if tab.is_page() {
+                // La pestaña Configuración lleva el engranaje adelante; la de Novedades, el megáfono.
+                let glyph = if tab.is_settings() { "\u{E713}" } else { CHANGELOG_GLYPH };
+                p.text(FontId::GlyphsSmall, glyph, rect(text.left - 4.0, r.top, text.left + 16.0, r.bottom), color);
                 text.left += 18.0;
             }
             p.text(FontId::Ui, &tab.location.title(), text, color);
@@ -1085,6 +1091,23 @@ impl Pane {
         let r = rect(x, addr.top + 4.0, (x + w).min(addr.right - 4.0), addr.bottom - 4.0);
         p.text(FontId::UiCenter, &page, r, th.text);
         self.crumbs.push((r, Location::Settings));
+    }
+
+    /// Barra de dirección de la pestaña Novedades: el megáfono y «Novedades», un solo tramo (es donde
+    /// se está).
+    fn draw_changelog_crumbs(&mut self, p: &dyn Painter, addr: Rect, hover: PaneHit) {
+        let th = p.theme();
+        self.crumbs.clear();
+        self.chevrons.clear();
+        let x = addr.left + 6.0;
+        let w = p.measure(FontId::Ui, crate::fs::CHANGELOG_TITLE) + 16.0 + THIS_PC_ICON_W;
+        let r = rect(x, addr.top + 4.0, (x + w).min(addr.right - 4.0), addr.bottom - 4.0);
+        if hover == PaneHit::Crumb(0) {
+            p.round_fill(r, 4.0, alpha(th.text, 0.16));
+        }
+        p.text(FontId::GlyphsSmall, CHANGELOG_GLYPH, rect(r.left + 4.0, r.top, r.left + 4.0 + THIS_PC_ICON_W, r.bottom), th.text_dim);
+        p.text(FontId::UiCenter, crate::fs::CHANGELOG_TITLE, rect(r.left + THIS_PC_ICON_W, r.top, r.right, r.bottom), th.text);
+        self.crumbs.push((r, Location::Changelog));
     }
 
     /// Flecha entre tramos: abre el menú de subcarpetas de `of`. Abierta, apunta hacia abajo.

@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+## 0.2.0 — 2026-11-11
+
 ### Nuevo
 - **xdir para macOS**: la app ahora también anda en la Mac (Apple Silicon e Intel), con los atajos de ⌘ y las costumbres del Finder.
 - **xtree dentro de xdir**: el mapa de uso de disco se abre en la misma ventana, también en macOS.

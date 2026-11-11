@@ -773,11 +773,11 @@ dependencies = [
 
 [[package]]
 name = "xdir-core"
-version = "0.1.23"
+version = "0.2.0"
 
 [[package]]
 name = "xdir-linux"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "libc",
  "notify",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "xdir-mac"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "block2",
  "dispatch2",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "xdir-windows"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "windows",
  "windows-core",

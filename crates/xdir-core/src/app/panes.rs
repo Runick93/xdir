@@ -354,13 +354,15 @@ impl App {
     pub(super) fn restore_panes(&mut self, s: &Session, start_path: Option<PathBuf>) {
         let fallback = default_session();
         let mut seen_settings = false;
+        let mut seen_changelog = false;
         for i in 0..PANES {
             let state = s.panes.get(i).or(fallback.panes.get(i)).cloned().unwrap_or_default();
             let locations = if state.tabs.is_empty() { vec![Location::Computer] } else { state.tabs };
             // Sin mirar el disco: si un archivo comprimido ya no está, lo resuelve su carga
             // (`after_archive_load`).
             let mut tabs: Vec<Tab> = locations.into_iter().map(|l| self.make_tab(l)).collect();
-            // Hay una sola configuración: si la sesión trae más de una, quedan carpetas.
+            // Hay una sola configuración y una sola de novedades: si la sesión trae más de una,
+            // quedan carpetas.
             for tab in &mut tabs {
                 if let Some(v) = &mut tab.settings {
                     if seen_settings {
@@ -369,6 +371,13 @@ impl App {
                         v.set_page(s.settings_page.as_deref().map_or(crate::settings::PageId::default(), Self::page_from_id));
                     }
                     seen_settings = true;
+                }
+                // Lo mismo con Novedades.
+                if tab.is_changelog() {
+                    if seen_changelog {
+                        *tab = Tab::new(tab.id, Location::Computer, self.show_hidden);
+                    }
+                    seen_changelog = true;
                 }
             }
             self.panes.push(Pane::new(tabs, state.active));
@@ -413,6 +422,7 @@ impl App {
                 .iter()
                 .map(|p| PaneState { tabs: p.tabs.iter().map(|t| t.location.clone()).collect(), active: p.active })
                 .collect(),
+            seen_version: Some(self.seen_version.clone()),
             ..Default::default()
         };
         if let Some((window, maximized)) = self.host.placement() {

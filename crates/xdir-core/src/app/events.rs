@@ -423,6 +423,10 @@ impl App {
                 self.settings_wheel(i, delta * lines);
                 return;
             }
+            Hit::Changelog(i) => {
+                self.changelog_wheel(i, delta * lines);
+                return;
+            }
             Hit::Pane(i, _) => i,
             _ => self.active,
         };

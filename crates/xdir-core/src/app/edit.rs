@@ -62,7 +62,7 @@ impl App {
             self.begin_filter(pane);
             return;
         }
-        if matches!(self.panes[pane].tab().location, Location::Settings) {
+        if matches!(self.panes[pane].tab().location, Location::Settings | Location::Changelog) {
             return;
         }
         let text = self.panes[pane].tab().location.address_text();
@@ -202,6 +202,10 @@ impl App {
     /// Pone el foco en la caja de búsqueda del panel (o se lo devuelve si ya está abierta).
     pub(super) fn begin_filter(&mut self, pane: usize) {
         self.end_recording();
+        // Las novedades no tienen buscador (la caja está apagada).
+        if self.panes[pane].tab().is_changelog() {
+            return;
+        }
         if let Some((edit, p)) = self.filter_edit {
             if p == pane {
                 self.host.text_focus(edit);

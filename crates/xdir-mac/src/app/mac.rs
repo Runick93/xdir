@@ -224,8 +224,9 @@ fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     };
     let bar = NSMenu::new(mtm);
     let about = item("Acerca de xdir", Some(sel!(showAbout:)), "");
+    let changelog = item("Novedades", Some(sel!(showChangelog:)), "");
     let settings = item("Configuración…", Some(sel!(openSettings:)), ",");
-    let delegate_items = [&about, &settings];
+    let delegate_items = [&about, &changelog, &settings];
     for i in delegate_items {
         // Los atiende el delegado de la aplicación.
         unsafe { i.setTarget(None) };
@@ -234,6 +235,7 @@ fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
         "xdir",
         vec![
             about,
+            changelog,
             NSMenuItem::separatorItem(mtm),
             settings,
             NSMenuItem::separatorItem(mtm),
@@ -325,6 +327,11 @@ define_class!(
         #[unsafe(method(showAbout:))]
         fn show_about(&self, _sender: Option<&AnyObject>) {
             with_app(|app| app.run_command(Command::About));
+        }
+
+        #[unsafe(method(showChangelog:))]
+        fn show_changelog(&self, _sender: Option<&AnyObject>) {
+            with_app(|app| app.run_command(Command::Changelog));
         }
 
         #[unsafe(method(openSettings:))]

@@ -5,6 +5,7 @@
 mod actions;
 mod appearance;
 mod archive_nav;
+mod changelog;
 mod edit;
 mod events;
 mod favs;
@@ -48,6 +49,8 @@ mod rename_many_tests;
 mod network_tests;
 #[cfg(test)]
 mod settings_tests;
+#[cfg(test)]
+mod changelog_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -178,6 +181,10 @@ enum Hit {
     Picker(ui::PickerHit),
     /// La pestaña Configuración de un panel: una parte de su vista.
     Settings(usize, crate::settings::SettingsHit),
+    /// La pestaña Novedades de un panel (su contenido).
+    Changelog(usize),
+    /// «Ver novedades» del aviso de actualización en la barra de estado.
+    UpdateNotice,
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
@@ -343,6 +350,13 @@ pub struct App {
     /// El aviso «Vista: …» que está en `notice`: el panel, la carpeta (`Tab::view_key`) y la vista
     /// que anunció. Se borra cuando la lista activa deja de ser esa (`sync_folder_views`).
     view_notice: Option<(usize, String, list::View)>,
+    /// La versión nueva, mientras la barra de estado muestra «xdir se actualizó a … · Ver
+    /// novedades» (la primera vez que se abre una versión más nueva que la última vista).
+    update_notice: Option<String>,
+    /// Dónde quedó «Ver novedades» en el último cuadro (para el clic).
+    update_link: Option<geom::Rect>,
+    /// La versión más nueva que se abrió con esta sesión (se guarda en `version_vista`).
+    seen_version: String,
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
     transparent: bool,
     favorites: Favorites,
@@ -602,6 +616,10 @@ impl App {
             new_watch: None,
             notice: config_errors,
             view_notice: None,
+            // Se marca como vista enseguida: el aviso sale una sola vez.
+            update_notice: crate::changelog::should_notify(session.seen_version.as_deref(), about::VERSION).then(|| about::VERSION.to_string()),
+            update_link: None,
+            seen_version: crate::changelog::newest(session.seen_version.as_deref().unwrap_or(about::VERSION), about::VERSION).to_string(),
             transparent: false,
             favorites,
             history,

@@ -1,4 +1,4 @@
-//! Diálogo "Acerca de": logo, versión y enlaces para reportar un problema. Es un panel dibujado
+//! Diálogo "Acerca de": logo, versión, Novedades y el enlace para reportar un problema. Es un panel dibujado
 //! como el resto de la interfaz (sin ventana de Windows aparte); un clic fuera o Esc lo cierra.
 
 use crate::geom::{Color, Rect, contains, rect};
@@ -21,13 +21,15 @@ pub fn logo_pixels() -> Option<Pixels> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AboutHit {
+    /// «Novedades»: abre la pestaña y cierra el diálogo.
+    Changelog,
     Report,
     /// Dentro del diálogo pero sobre nada.
     Panel,
 }
 
 const WIDTH: f32 = 400.0;
-const HEIGHT: f32 = 234.0;
+const HEIGHT: f32 = 272.0;
 const BANNER_H: f32 = 108.0;
 const BTN_H: f32 = 34.0;
 /// El logo es de letras blancas: va sobre una franja oscura aunque el tema sea claro.
@@ -43,12 +45,20 @@ fn report_button(w: f32, h: f32) -> Rect {
     rect(p.left + 16.0, p.bottom - 16.0 - BTN_H, p.right - 16.0, p.bottom - 16.0)
 }
 
+/// «Novedades», arriba del de reportar (4 entre los dos).
+fn changelog_button(w: f32, h: f32) -> Rect {
+    let r = report_button(w, h);
+    rect(r.left, r.top - 4.0 - BTN_H, r.right, r.top - 4.0)
+}
+
 pub fn at(w: f32, h: f32, x: f32, y: f32) -> Option<AboutHit> {
     if !contains(&panel(w, h), x, y) {
         return None;
     }
     Some(if contains(&report_button(w, h), x, y) {
         AboutHit::Report
+    } else if contains(&changelog_button(w, h), x, y) {
+        AboutHit::Changelog
     } else {
         AboutHit::Panel
     })
@@ -75,6 +85,13 @@ pub fn draw(p: &dyn Painter, w: f32, h: f32, hover: Option<AboutHit>) {
         th.text_dim,
     );
 
+    let r = changelog_button(w, h);
+    if hover == Some(AboutHit::Changelog) {
+        p.round_fill(r, 6.0, th.hover);
+    }
+    p.text(FontId::Glyphs, crate::pane::CHANGELOG_GLYPH, rect(r.left + 6.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
+    p.text(FontId::Ui, "Novedades", rect(r.left + 38.0, r.top, r.right - 8.0, r.bottom), th.text);
+
     let r = report_button(w, h);
     if hover == Some(AboutHit::Report) {
         p.round_fill(r, 6.0, th.hover);
@@ -99,5 +116,19 @@ mod tests {
         let found: Vec<_> = texts.iter().filter(|(_, s, _)| *s == title).collect();
         assert_eq!(found.len(), 1, "{texts:?}");
         assert_eq!(found[0].0, FontId::UiBold);
+    }
+
+    /// «Novedades» va arriba de «Reportar…» y cada uno responde a su clic.
+    #[test]
+    fn about_has_changelog_button_above_report() {
+        let (w, h) = (800.0, 600.0);
+        let (c, r) = (changelog_button(w, h), report_button(w, h));
+        assert!(c.bottom < r.top && c.top > panel(w, h).top + BANNER_H + 50.0, "{c:?} {r:?}");
+        assert_eq!(at(w, h, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0), Some(AboutHit::Changelog));
+        assert_eq!(at(w, h, (r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0), Some(AboutHit::Report));
+        crate::sys::testing::install_fakes();
+        let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
+        draw(&p, w, h, Some(AboutHit::Changelog));
+        assert!(p.texts().iter().any(|(_, s, _)| s == "Novedades"));
     }
 }

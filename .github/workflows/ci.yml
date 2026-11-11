@@ -84,6 +84,9 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
+      - name: Script del CHANGELOG
+        run: sh scripts/changelog-test.sh
+
   estilo:
     runs-on: ubuntu-latest
     timeout-minutes: 10

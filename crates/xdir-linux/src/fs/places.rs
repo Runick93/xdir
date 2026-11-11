@@ -186,7 +186,7 @@ pub fn subfolders(loc: &Location) -> Vec<(String, Location)> {
             out.truncate(MAX);
             out
         }
-        Location::Shell { .. } | Location::Settings | Location::Archive { .. } => Vec::new(),
+        Location::Shell { .. } | Location::Settings | Location::Changelog | Location::Archive { .. } => Vec::new(),
     }
 }
 

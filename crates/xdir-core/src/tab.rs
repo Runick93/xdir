@@ -63,6 +63,8 @@ pub struct Tab {
     pub load_notice: Option<String>,
     /// La pestaña Configuración: su página, búsqueda y grabación (`None` en las demás).
     pub settings: Option<crate::settings::SettingsView>,
+    /// La pestaña Novedades: su desplazamiento (`None` en las demás).
+    pub changelog: Option<crate::changelog_draw::ChangelogView>,
     /// Vista de la carpeta que tiene la lista: su clave y cómo era al aplicarla o al guardarla
     /// por última vez (`None`: falta aplicar la de la ubicación actual, ver `sync_view`).
     view_applied: Option<(String, ViewSettings)>,
@@ -179,7 +181,7 @@ impl Tab {
             self.start(hwnd, tx);
             return;
         }
-        if self.is_settings() {
+        if self.is_page() {
             return;
         }
         if let Location::Path(p) = &self.location {
@@ -202,6 +204,7 @@ impl Tab {
         let mut list = FileList::default();
         list.show_hidden = show_hidden;
         let settings = matches!(location, Location::Settings).then(crate::settings::SettingsView::default);
+        let changelog = matches!(location, Location::Changelog).then(crate::changelog_draw::ChangelogView::default);
         Self {
             id,
             location,
@@ -223,6 +226,7 @@ impl Tab {
             search: None,
             load_notice: None,
             settings,
+            changelog,
             view_applied: None,
             left_view: None,
             load_started: None,
@@ -233,6 +237,17 @@ impl Tab {
     /// ¿Es la pestaña Configuración?
     pub fn is_settings(&self) -> bool {
         matches!(self.location, Location::Settings)
+    }
+
+    /// ¿Es la pestaña Novedades?
+    pub fn is_changelog(&self) -> bool {
+        matches!(self.location, Location::Changelog)
+    }
+
+    /// ¿Es una página de xdir (Configuración o Novedades) y no una carpeta? No tiene lista: no se
+    /// carga, no se vigila ni guarda vista, y la dibuja la `App` en el lugar de la lista.
+    pub fn is_page(&self) -> bool {
+        matches!(self.location, Location::Settings | Location::Changelog)
     }
 
     /// Clave de la vista de lo que muestra la pestaña: la carpeta, la ubicación especial o, con
@@ -274,8 +289,8 @@ impl Tab {
     /// antes de cada cuadro y antes de entregar cada lote de la carga, así la lista ya está con
     /// su vista cuando llegan los elementos. Devuelve si cambió algo de `views`.
     pub fn sync_view(&mut self, views: &mut FolderViews) -> bool {
-        // La configuración no tiene lista: ni se aplica ni se guarda vista.
-        if self.is_settings() {
+        // La configuración y las novedades no tienen lista: ni se aplica ni se guarda vista.
+        if self.is_page() {
             return false;
         }
         let mut changed = false;
@@ -360,7 +375,12 @@ impl Tab {
             (_, Location::Settings) => Some(self.settings.take().unwrap_or_default()),
             _ => None,
         };
-        if self.nav_id != 0 && !matches!(from, Location::Settings) {
+        self.changelog = match &self.location {
+            Location::Changelog => Some(self.changelog.take().unwrap_or_default()),
+            _ => None,
+        };
+        // Las páginas tampoco quedan en Atrás: hay una sola de cada una.
+        if self.nav_id != 0 && !matches!(from, Location::Settings | Location::Changelog) {
             self.back.push(from);
         }
         self.forward.clear();
@@ -436,7 +456,7 @@ impl Tab {
 
     /// Vuelve a leer la carpeta. `silent`: sin vaciar la lista mientras tanto.
     pub fn reload(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, silent: bool) {
-        if self.is_settings() {
+        if self.is_page() {
             return;
         }
         // Con una búsqueda a la vista: recargar es repetirla; las recargas silenciosas (cambios
@@ -486,6 +506,10 @@ impl Tab {
     /// (Papelera...) no se recorre nada: se filtra por nombre lo que muestra. Con el texto vacío,
     /// termina la búsqueda y vuelve a la carpeta.
     pub fn search(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>, query: &str) {
+        // Las novedades no tienen buscador.
+        if self.is_changelog() {
+            return;
+        }
         if let Some(v) = &mut self.settings {
             v.query = query.trim().to_string();
             v.scroll = 0.0;
@@ -498,7 +522,7 @@ impl Tab {
         let (roots, root) = match &self.location {
             Location::Path(p) => (vec![p.clone()], Some(p.clone())),
             Location::Computer => (sys::file_system().drives(), None),
-            Location::Settings => return,
+            Location::Settings | Location::Changelog => return,
             // Las carpetas virtuales y las de un archivo comprimido no se recorren: se filtra lo
             // que muestran.
             Location::Shell { .. } | Location::Archive { .. } => {
@@ -529,6 +553,9 @@ impl Tab {
 
     /// Termina la búsqueda (si había) y vuelve a mostrar la carpeta.
     pub fn end_search(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
+        if self.is_changelog() {
+            return;
+        }
         if let Some(v) = &mut self.settings {
             v.query.clear();
             v.scroll = 0.0;
@@ -559,8 +586,8 @@ impl Tab {
     }
 
     fn start(&mut self, hwnd: Handle, tx: &Sender<LoadEvent>) {
-        // La configuración no se lee ni se vigila: está lista enseguida.
-        if self.is_settings() {
+        // La configuración y las novedades no se leen ni se vigilan: están listas enseguida.
+        if self.is_page() {
             self.nav_id += 1;
             self.loading = false;
             self.error = None;
@@ -883,6 +910,9 @@ impl Tab {
         if self.is_settings() {
             return "Configuración   ·   los cambios se guardan solos".to_string();
         }
+        if self.is_changelog() {
+            return format!("{}   ·   versión instalada: {}", crate::fs::CHANGELOG_TITLE, crate::about::VERSION);
+        }
         if let Some(s) = &self.search {
             let found = self.list.total();
             let found = if found == 1 { "1 encontrado".to_string() } else { format!("{found} encontrados") };
@@ -964,7 +994,7 @@ fn child_name(parent: &Location, descendant: &Location) -> Option<OsString> {
     }
     let Location::Path(d) = descendant else { return None };
     match parent {
-        Location::Shell { .. } | Location::Settings | Location::Archive { .. } => None,
+        Location::Shell { .. } | Location::Settings | Location::Changelog | Location::Archive { .. } => None,
         Location::Computer => d.components().next().map(|c| {
             // La unidad se lista como "C:\".
             let mut s = c.as_os_str().to_os_string();

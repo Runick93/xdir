@@ -73,6 +73,13 @@ impl App {
         if self.transfers_progress().is_some() && contains(&self.transfers_button_rect(), x, y) {
             return Hit::Transfers;
         }
+        // «Ver novedades» del aviso de actualización (donde quedó en el último cuadro).
+        if self.update_notice.is_some()
+            && let Some(r) = self.update_link
+            && contains(&r, x, y)
+        {
+            return Hit::UpdateNotice;
+        }
         // La vista de xtree tapa los paneles, la franja de grupos y el árbol.
         if self.xtree_open {
             if let Some(l) = ui::layout_at(w, h, x, y) {
@@ -121,6 +128,8 @@ impl App {
                 PaneHit::List if self.panes[i].tab().is_settings() => {
                     return Hit::Settings(i, self.settings_hit(i, x, y).unwrap_or(crate::settings::SettingsHit::Body));
                 }
+                // Las novedades también.
+                PaneHit::List if self.panes[i].tab().is_changelog() => return Hit::Changelog(i),
                 h => return Hit::Pane(i, h),
             }
         }
@@ -137,6 +146,7 @@ impl App {
         if self.about_open {
             match hit {
                 Hit::About(about::AboutHit::Report) => self.host.open_url(about::ISSUES_URL),
+                Hit::About(about::AboutHit::Changelog) => self.open_changelog(None),
                 Hit::About(about::AboutHit::Panel) => {}
                 _ => self.about_open = false,
             }
@@ -298,6 +308,12 @@ impl App {
             Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
+            Hit::Picker(ui::PickerHit::Changelog) => self.run_command(Command::Changelog),
+            Hit::UpdateNotice => self.open_update_notice(),
+            Hit::Changelog(i) => {
+                self.set_active(i);
+                self.redraw();
+            }
             Hit::Picker(ui::PickerHit::MoreOptions) => self.run_command(Command::Settings),
             Hit::Settings(i, h) => {
                 self.set_active(i);
@@ -362,6 +378,8 @@ impl App {
                             self.clear_filter(i);
                         }
                     }
+                    // Novedades tiene un solo tramo: es donde se está.
+                    PaneHit::Crumb(_) if self.panes[i].tab().is_changelog() => {}
                     PaneHit::Crumb(k) => {
                         if let Some(loc) = self.panes[i].crumb(k) {
                             self.panes[i].tab_mut().navigate(hwnd, &tx, loc);
@@ -650,10 +668,10 @@ impl App {
 }
 
 /// Dónde abre una pestaña nueva desde la pestaña `from`: la misma ubicación, salvo la
-/// configuración (hay una sola): «Este equipo».
+/// configuración y las novedades (hay una sola de cada una): «Este equipo».
 pub(super) fn new_tab_location(from: &Location) -> Location {
     match from {
-        Location::Settings => Location::Computer,
+        Location::Settings | Location::Changelog => Location::Computer,
         other => other.clone(),
     }
 }

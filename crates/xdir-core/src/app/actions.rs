@@ -53,6 +53,8 @@ impl App {
             }
             _ => match self.config.keymap.lookup(vk, ctrl, shift, alt, meta) {
                 Some(c) => self.run_command(c),
+                // Las flechas, RePág/AvPág, Inicio y Fin desplazan las novedades.
+                None if !ctrl && !alt && !meta && self.changelog_key(vk).is_some() => {}
                 None => match self.tab_mut().list.on_key(vk.0, ctrl, shift) {
                     Some(action) => {
                         self.apply(active, action);
@@ -81,8 +83,8 @@ impl App {
         }
         let (hwnd, tx) = (self.hwnd, self.tx.clone());
         let active = self.active;
-        // Con la configuración a la vista, lo que necesita una carpeta no hace nada.
-        if self.panes[active].tab().is_settings() && needs_folder(c) {
+        // Con la configuración o las novedades a la vista, lo que necesita una carpeta no hace nada.
+        if self.panes[active].tab().is_page() && needs_folder(c) {
             self.redraw();
             return;
         }
@@ -101,6 +103,7 @@ impl App {
                 match self.panes[active].pop_closed() {
                     // Hay una sola configuración: si ya está abierta, se enfoca.
                     Some(Location::Settings) => self.open_settings(None),
+                    Some(Location::Changelog) => self.open_changelog(None),
                     Some(loc) => self.new_tab(active, loc, true),
                     None => {}
                 }
@@ -283,6 +286,7 @@ impl App {
             Command::TogglePreview => self.toggle_preview(),
             Command::QuickLook => self.toggle_quick_look(),
             Command::Settings => self.open_settings(None),
+            Command::Changelog => self.open_changelog(None),
             Command::SettingsKeys => self.open_settings(Some(crate::settings::PageId::Builtin(crate::settings::Section::Keys))),
             Command::OpenConfig => {
                 if let Some(path) = config::file_path() {

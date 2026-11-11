@@ -37,6 +37,11 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        // El aviso de actualización va delante (con su enlace); otro aviso lo tapa mientras está.
+        let update_notice = self.update_notice.clone().filter(|_| self.notice.is_none());
+        if update_notice.is_none() {
+            self.update_link = None;
+        }
         let xtree_badge = self.xtree_badge();
         let transfers = self.transfers_progress();
         let transfers_failed = self.transfers_failed();
@@ -194,16 +199,21 @@ impl App {
                 let tab = self.panes[i].tab();
                 let query = tab.search_query().to_string();
                 let is_settings = tab.is_settings();
+                let is_changelog = tab.is_changelog();
                 let search = SearchView {
                     text: &query,
                     editing: filter_pane == Some(i),
                     running: tab.search.as_ref().filter(|s| !s.done).map(|s| s.progress),
-                    enabled: true,
+                    // Las novedades no tienen buscador.
+                    enabled: !is_changelog,
                     placeholder: if is_settings { "Buscar en la configuración" } else { "Buscar" },
                 };
                 self.panes[i].draw(p, r, i == active, ph, pressed, edit_pane == Some(i), favs, term_menu == Some(i), max_button(i), search);
                 if is_settings {
                     self.draw_settings(p, i);
+                }
+                if is_changelog {
+                    self.draw_changelog(p, i);
                 }
                 if let Some((_, at)) = tab_drop.filter(|(j, _)| *j == i) {
                     self.panes[i].draw_tab_drop(p, at);
@@ -262,7 +272,14 @@ impl App {
                 transfers,
                 transfers_failed,
                 transfers_hot: hover == Hit::Transfers,
+                lead: 0.0,
             };
+            let mut buttons = buttons;
+            if let Some(v) = &update_notice {
+                let (link, lead) = ui::draw_update_notice(p, h, v, hover == Hit::UpdateNotice);
+                self.update_link = Some(link);
+                buttons.lead = lead;
+            }
             ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado
             // (entra en el área de su lista; en un panel muy bajo puede pasarse).

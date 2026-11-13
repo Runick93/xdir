@@ -196,11 +196,14 @@ impl App {
                 if !search.is_empty() {
                     rows.push((search, "Buscar por nombre en todo lo analizado".to_string()));
                 }
+                let elevate = self.config.keymap.label(Command::XtreeElevate);
+                if !elevate.is_empty() {
+                    rows.push((elevate, "Analizar de nuevo con permisos de administrador".to_string()));
+                }
                 rows.extend(
                     [
                         ("F5", "Volver a analizar"),
                         ("⌫", "Subir a la carpeta de arriba"),
-                        ("A", "Analizar de nuevo con permisos de administrador"),
                         ("Esc", "Cerrar xtree"),
                     ]
                     .iter()

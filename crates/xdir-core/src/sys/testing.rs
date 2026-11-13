@@ -329,7 +329,7 @@ impl DiskScan for FakeDiskScan {
     }
 
     fn permission_hint(&self) -> &'static str {
-        "{n} carpetas sin permiso (tecla A)"
+        "{n} carpetas sin permiso ({teclas})"
     }
 
     fn elevating_text(&self) -> &'static str {

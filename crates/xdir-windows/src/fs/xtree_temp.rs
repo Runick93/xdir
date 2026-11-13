@@ -1,4 +1,4 @@
-//! Nombre del archivo temporal con el que el ayudante elevado de xtree (Windows, tecla A) le
+//! Nombre del archivo temporal con el que el ayudante elevado de xtree (Windows, `xtree_permisos`) le
 //! devuelve el árbol a xdir. Es lógica pura: se compila en Windows y en las pruebas de cualquier
 //! sistema.
 

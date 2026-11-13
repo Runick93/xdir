@@ -656,7 +656,8 @@ fn xtree_keys_show_colors_shortcut() {
     let mut a = app();
     let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };
     let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
-    assert_eq!(&keys[..3], ["Letras", "Ctrl+T", "Ctrl+F"]);
+    assert_eq!(&keys[..4], ["Letras", "Ctrl+T", "Ctrl+F", "Ctrl+Shift+A"]);
+    assert!(!keys.contains(&"A"), "la A sola ya no hace nada");
     assert!(!keys.contains(&"T"));
     a.config.keymap.set(Command::XtreeColors, &[commands::parse_combo("Ctrl+Shift+C").unwrap()]);
     let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };

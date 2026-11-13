@@ -111,6 +111,9 @@ pub enum Command {
     /// Dentro de xtree: colorear el mapa por carpeta o por tipo de archivo (solo vale con la vista
     /// abierta: `xtree_only`).
     XtreeColors,
+    /// Dentro de xtree: analizar de nuevo con permisos (administrador en Windows; en macOS, el
+    /// ajuste de Acceso total al disco), si faltaron.
+    XtreeElevate,
     /// La vista de la carpeta actual pasa a ser la por defecto y se borran las de las demás.
     ApplyViewToAll,
     /// La carpeta actual vuelve a la vista por defecto.
@@ -244,6 +247,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::ShowTransfers, "mostrar_operaciones", "Mostrar operaciones", &[]),
     spec(Command::Xtree, "xtree", "Mapa de uso de disco (xtree)", &[]),
     spec(Command::XtreeColors, "xtree_colores", "xtree: colorear por carpeta o por tipo de archivo", &["Ctrl+T"]),
+    spec(Command::XtreeElevate, "xtree_permisos", "xtree: analizar de nuevo con permisos", &["Ctrl+Shift+A"]),
     spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
     spec(Command::Changelog, "novedades", "Novedades de xdir", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),
@@ -370,7 +374,7 @@ pub fn group(c: Command) -> Group {
         | Command::ToggleDarkMode => Group::Views,
         Command::TogglePreview | Command::QuickLook => Group::Preview,
         Command::ConnectServer | Command::MapNetworkDrive | Command::DisconnectNetworkDrive => Group::Network,
-        Command::Xtree | Command::XtreeColors => Group::Xtree,
+        Command::Xtree | Command::XtreeColors | Command::XtreeElevate => Group::Xtree,
         Command::Palette
         | Command::PowerShell
         | Command::Cmd
@@ -385,7 +389,7 @@ pub fn group(c: Command) -> Group {
 /// ¿El comando es de la vista de xtree? Sus atajos solo valen con la vista abierta y no chocan
 /// con los de la ventana (Ctrl+T cambia los colores en xtree y abre una pestaña en los paneles).
 pub fn xtree_only(c: Command) -> bool {
-    matches!(c, Command::XtreeColors)
+    matches!(c, Command::XtreeColors | Command::XtreeElevate)
 }
 
 /// Tabla de atajos para la wiki: por grupo, en el orden de `ALL`, solo lo que existe en `env`.
@@ -933,6 +937,22 @@ mod tests {
         assert_eq!(km.set(Command::Duplicate, &[k]), vec![Command::ConnectServer]);
         assert_eq!(km.lookup_xtree(Key(b'K' as u16), true, false, false, false), Some(Command::XtreeColors));
         assert!(markdown_table(env()).contains("### xtree\n"));
+    }
+
+    /// «xtree_permisos» (Ctrl+Shift+A): analizar con permisos, solo dentro de xtree (la A sola es
+    /// del salto por letra).
+    #[test]
+    fn xtree_elevate_command_is_scoped() {
+        install_fakes();
+        let s = ALL.iter().find(|s| s.id == "xtree_permisos").unwrap();
+        assert_eq!((s.command, s.default_keys), (Command::XtreeElevate, &["Ctrl+Shift+A"][..]));
+        assert!(xtree_only(Command::XtreeElevate));
+        assert_eq!(group(Command::XtreeElevate), Group::Xtree);
+        let km = Keymap::default();
+        let a = Key(b'A' as u16);
+        assert_eq!(km.lookup_xtree(a, true, true, false, false), Some(Command::XtreeElevate));
+        assert_eq!(km.lookup_xtree(a, false, false, false, false), None);
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Shift+A").unwrap()), "⇧⌘A");
     }
 
     #[test]

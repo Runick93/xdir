@@ -2807,6 +2807,21 @@ fn xtree_letters_go_to_view() {
     assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
 }
 
+/// #57: la A sola es una letra (salto por letra); analizar con permisos es `xtree_permisos`
+/// (Ctrl+Shift+A / ⇧⌘A) dentro de xtree.
+#[test]
+fn xtree_elevate_is_ctrl_shift_a() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    assert!(!a.on_key(Key(b'A' as u16)), "la A sola no es un atajo");
+    a.on_char('a');
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("alfa"));
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL, VK_SHIFT]);
+    let used = a.on_key(Key(b'A' as u16));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert!(used, "Ctrl+Shift+A es de xtree");
+    assert!(a.xtree_open);
+}
+
 /// #57: dentro de xtree, Ctrl+T (⌘T) cambia los colores (no abre una pestaña); el botón tiene su
 /// cartel con el atajo en uso; la T sola ya no los cambia.
 #[test]

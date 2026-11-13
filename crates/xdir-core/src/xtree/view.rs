@@ -53,7 +53,6 @@ const BOX_H: f32 = 30.0;
 const SEARCH_HEAD: f32 = 70.0;
 const RES_H: f32 = 44.0;
 
-const VK_A: Key = Key(0x41);
 const VK_F5: Key = Key(0x74);
 
 /// Colores fijos (no dependen del tema): carpeta dorada y tilde de «Análisis completado».
@@ -284,9 +283,10 @@ pub struct Xtree {
     hover_back: bool,
     /// El mouse está sobre «Colores».
     hover_colors: bool,
-    /// Atajo en uso de los colores, para la ayuda de la barra de datos (lo pone la `App`; vacío si
-    /// no hay).
+    /// Atajos en uso de los colores y de analizar con permisos, para la ayuda y el aviso de la
+    /// barra de datos (los pone la `App`; vacíos si no hay).
     keys_colors: String,
+    keys_elevate: String,
     scroll: f32,
     /// Colorear por tipo de archivo en vez de por posición (botón «Colores» o `xtree_colores`).
     by_type: bool,
@@ -302,7 +302,7 @@ pub struct Xtree {
     scan_elapsed: Option<Duration>,
     /// El escaneo se cortó antes de terminar (`cancel`).
     scan_stopped: bool,
-    /// Reescaneo con permisos (tecla A) después de un análisis terminado: cronómetro del análisis
+    /// Reescaneo con permisos (`xtree_permisos`) después de un análisis terminado: cronómetro del análisis
     /// anterior (inicio, duración, ya visto), para volver a él si el escaneo elevado no trae árbol.
     before_elevate: Option<(Option<Instant>, Option<Duration>, bool)>,
     /// Mayor porcentaje mostrado en este escaneo: no retrocede.
@@ -312,7 +312,7 @@ pub struct Xtree {
     drives: Vec<DriveEntry>,
     menu_open: bool,
     menu_hover: Option<usize>,
-    /// Hay un escaneo con permisos elevados en curso (tecla A).
+    /// Hay un escaneo con permisos elevados en curso (`xtree_permisos`).
     elevating: Arc<AtomicBool>,
     /// El resultado del último escaneo ya se vio en la vista: el indicador vuelve a `Idle`.
     seen: bool,
@@ -402,6 +402,7 @@ impl Xtree {
             hover_back: false,
             hover_colors: false,
             keys_colors: String::new(),
+            keys_elevate: String::new(),
             scroll: 0.0,
             by_type: false,
             vol: None,
@@ -515,9 +516,10 @@ impl Xtree {
         if self.by_type { "Colorear por carpeta" } else { "Colorear por tipo de archivo" }
     }
 
-    /// El atajo en uso de los colores (para la ayuda de la barra de datos).
-    pub fn set_key_labels(&mut self, colors: String) {
+    /// Los atajos en uso de los colores y de analizar con permisos (para la barra de datos).
+    pub fn set_key_labels(&mut self, colors: String, elevate: String) {
         self.keys_colors = colors;
+        self.keys_elevate = elevate;
     }
 
     pub fn root(&self) -> &Path {
@@ -681,13 +683,15 @@ impl Xtree {
         self.whole = !crate::sys::network().is_remote(&self.root) && disk_scan().whole_volume(&self.root);
     }
 
-    /// Aviso de la barra de datos: escaneo elevado en curso o permisos que faltan (tecla A).
+    /// Aviso de la barra de datos: escaneo elevado en curso o permisos que faltan (`xtree_permisos`).
     fn data_hint(&self) -> String {
         let progress = self.progress();
         if self.elevating.load(Ordering::Relaxed) {
             disk_scan().elevating_text().to_string()
         } else if disk_scan().permission_issue(progress) {
-            disk_scan().permission_hint().replace("{n}", &fmt_count(progress.denied.load(Ordering::Relaxed)))
+            let hint = disk_scan().permission_hint().replace("{n}", &fmt_count(progress.denied.load(Ordering::Relaxed)));
+            // El atajo en uso de `xtree_permisos`; sin atajo, sin el paréntesis.
+            if self.keys_elevate.is_empty() { hint.replace(" ({teclas})", "") } else { hint.replace("{teclas}", &self.keys_elevate) }
         } else {
             String::new()
         }
@@ -788,9 +792,9 @@ impl Xtree {
         true
     }
 
-    /// Tecla A: vuelve a analizar con permisos (administrador en Windows; en macOS abre el ajuste
-    /// de Acceso total al disco). Solo si faltaron permisos.
-    fn elevate(&mut self) -> Action {
+    /// `xtree_permisos` (Ctrl+Shift+A): vuelve a analizar con permisos (administrador en Windows;
+    /// en macOS abre el ajuste de Acceso total al disco). Solo si faltaron permisos.
+    pub fn elevate_scan(&mut self) -> Action {
         let hwnd = self.hwnd;
         self.elevate_with(move |root, progress, cancel| disk_scan().elevate(hwnd, root, progress, cancel))
     }
@@ -825,7 +829,7 @@ impl Xtree {
             let tree = run(&root, &progress, &cancel);
             let delivered = tree.is_some_and(|arena| scan::deliver(&result, &cancel, arena, true));
             if delivered {
-                // Ya no faltan permisos: se apagan el aviso y la tecla A.
+                // Ya no faltan permisos: se apagan el aviso y `xtree_permisos`.
                 progress.need_admin.store(false, Ordering::Relaxed);
                 progress.denied.store(0, Ordering::Relaxed);
             }
@@ -1298,8 +1302,9 @@ impl Xtree {
         if self.go_up() { Action::Redraw } else { Action::None }
     }
 
-    /// Teclas de la vista: Retroceso, Esc, F5 y A (los colores van por `xtree_colores`, que
-    /// resuelve la `App` con el `Keymap`).
+    /// Teclas de la vista: Retroceso, Esc y F5 (y las de la búsqueda abierta). Ninguna letra sola:
+    /// son del salto por letra; los colores y los permisos van por `xtree_colores` y
+    /// `xtree_permisos`, que resuelve la `App` con el `Keymap`.
     pub fn on_key(&mut self, k: Key) -> Action {
         match k {
             VK_BACK => self.on_right_click(),
@@ -1326,7 +1331,6 @@ impl Xtree {
                 self.rescan();
                 Action::Redraw
             }
-            VK_A => self.elevate(),
             _ => Action::None,
         }
     }
@@ -1776,7 +1780,7 @@ impl Xtree {
             let fillc = if frac > 0.9 { rgb(RED) } else { th.accent };
             p.round_fill(rect(track.left, track.top, track.left + (track.right - track.left) * frac, track.bottom), 2.0, fillc);
         }
-        // Aviso de permisos: administrador en Windows, Acceso total al disco en macOS (tecla A).
+        // Aviso de permisos: administrador en Windows, Acceso total al disco en macOS (`xtree_permisos`).
         let hint = self.data_hint();
         // Con el aviso, las columnas se achican para que entre el texto.
         let widths: [f32; 5] = if hint.is_empty() { [250.0, 120.0, 190.0, 180.0, 190.0] } else { [220.0, 110.0, 170.0, 150.0, 170.0] };
@@ -1927,7 +1931,7 @@ mod tests {
         assert_eq!(x.on_click(area, cx, cy, false), Action::Redraw);
         assert!(!x.by_type(), "también escaneando");
         x.scanning = false;
-        x.set_key_labels("Ctrl+T".into());
+        x.set_key_labels("Ctrl+T".into(), String::new());
         let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
         x.paint(&p, area);
         let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
@@ -2230,7 +2234,7 @@ mod tests {
         x.prepare(area);
     }
 
-    /// Espera a que termine el hilo de la tecla A.
+    /// Espera a que termine el hilo de `xtree_permisos`.
     fn wait_elevated(x: &Xtree) {
         let t0 = std::time::Instant::now();
         while x.elevating.load(Ordering::Relaxed) {
@@ -2242,6 +2246,31 @@ mod tests {
     fn lacking_permissions(x: &Xtree) {
         x.scan.progress.need_admin.store(true, Ordering::Relaxed);
         x.scan.progress.denied.store(1, Ordering::Relaxed);
+    }
+
+    /// #57: ninguna letra sola hace algo en la tabla más que el salto por letra (la A ya no pide
+    /// permisos: eso es `xtree_permisos`, Ctrl+Shift+A); el aviso de permisos dice el atajo en uso.
+    #[test]
+    fn bare_letters_do_not_act() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(vec![node("raiz", NO_PARENT, 5, true, vec![])]);
+        lacking_permissions(&x);
+        for c in b'A'..=b'Z' {
+            assert_eq!(x.on_key(Key(c as u16)), Action::None, "{}", c as char);
+        }
+        assert!(!x.elevating.load(Ordering::Relaxed), "la A no pide permisos");
+        x.set_key_labels(String::new(), "Ctrl+Shift+A".into());
+        assert_eq!(x.data_hint(), "1 carpetas sin permiso (Ctrl+Shift+A)");
+        x.set_key_labels(String::new(), String::new());
+        assert_eq!(x.data_hint(), "1 carpetas sin permiso", "sin atajo, sin paréntesis");
+        // Por el comando, sí.
+        assert_eq!(x.elevate_scan(), Action::Redraw);
+        assert!(x.elevating.load(Ordering::Relaxed) || disk_scan().permission_issue(&x.scan.progress));
+        let t0 = Instant::now();
+        while x.elevating.load(Ordering::Relaxed) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "el hilo elevado no terminó");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Tecla A: el árbol elevado le gana al del escaneo normal aunque este termine después.
@@ -2258,7 +2287,7 @@ mod tests {
         assert!(!scan::deliver(&x.scan.result, &x.scan.cancel, normal, false));
         assert!(x.take_result());
         assert_eq!(x.arena[0].size, 99);
-        // Ya no faltan permisos: sin aviso y la tecla A no vuelve a lanzar nada.
+        // Ya no faltan permisos: sin aviso y `xtree_permisos` no vuelve a lanzar nada.
         assert!(!disk_scan().permission_issue(&x.scan.progress));
         assert_eq!(x.data_hint(), "");
         assert_eq!(x.elevate_with(|_, _, _| panic!("no debe relanzar")), Action::None);
@@ -2278,7 +2307,7 @@ mod tests {
         tx.send(()).unwrap();
         wait_elevated(&x);
         assert!(disk_scan().permission_issue(&x.scan.progress));
-        assert!(x.data_hint().contains("(tecla A)"));
+        assert!(x.data_hint().contains("carpetas sin permiso"));
         assert!(!x.status_text().contains(disk_scan().elevating_text()));
         // El aviso del hilo elevado (sin árbol) repinta aunque el escaneo normal ya haya terminado.
         assert!(x.on_message(x.scan.id, 0));
@@ -2518,7 +2547,7 @@ mod tests {
         crate::sys::testing::FakeDiskScan::set_volume(None, false);
     }
 
-    /// Reescaneo con permisos (tecla A) después de terminar: giro, no porcentaje.
+    /// Reescaneo con permisos (`xtree_permisos`) después de terminar: giro, no porcentaje.
     #[test]
     fn badge_spins_while_elevating() {
         crate::sys::testing::install_fakes();

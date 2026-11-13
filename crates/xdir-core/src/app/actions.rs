@@ -292,6 +292,12 @@ impl App {
                     x.toggle_colors();
                 }
             }
+            Command::XtreeElevate => {
+                if let Some(x) = self.xtree.as_mut().filter(|_| from_xtree) {
+                    let action = x.elevate_scan();
+                    self.xtree_action(action);
+                }
+            }
             // Con xtree abierto la columna no se ve: el botón o el atajo cierran xtree y la muestran.
             Command::TogglePreview if from_xtree => self.show_preview(),
             Command::TogglePreview => self.toggle_preview(),
@@ -581,6 +587,7 @@ fn keeps_xtree(c: Command) -> bool {
             | Command::SaveGroup
             | Command::Xtree
             | Command::XtreeColors
+            | Command::XtreeElevate
             | Command::ToggleDarkMode
             | Command::About
             | Command::OpenConfig

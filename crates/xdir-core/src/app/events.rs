@@ -177,6 +177,14 @@ impl App {
         if self.rename_text_changed(id) || self.map_text_changed(id) {
             return;
         }
+        // «Comparar con…» de la suma de verificación: se compara mientras se escribe o se pega.
+        if let Some((b, info::EditKind::Expected)) = self.info.edit
+            && b.0 as isize == id
+        {
+            let text = self.host.text_get(b);
+            self.set_expected(&text);
+            return;
+        }
         if let Some((edit, pane)) = self.filter_edit {
             if edit.0 as isize == id {
                 let text = self.host.text_get(edit);

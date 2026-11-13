@@ -135,8 +135,9 @@ pub struct ItemInfo {
     pub volume: Option<VolumeData>,
 }
 
-/// Las secciones del panel, en el orden en que se dibujan. Cada una es un bit de
-/// `informacion_secciones` en la sesión (abierta = 1).
+/// Las secciones del panel. Cada una es un bit de `informacion_secciones` en la sesión (abierta =
+/// 1): una nueva va al final, para no mover los bits que ya estaban guardados (el orden en que se
+/// dibujan lo arma la `App`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Section {
     Tags,
@@ -146,10 +147,13 @@ pub enum Section {
     Comments,
     OpenWith,
     Perms,
+    /// Suma de verificación (SHA-256 / MD5) de un archivo, plegada de fábrica.
+    Checksum,
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [Section::Tags, Section::General, Section::More, Section::Name, Section::Comments, Section::OpenWith, Section::Perms];
+    pub const ALL: [Section; 8] =
+        [Section::Tags, Section::General, Section::More, Section::Name, Section::Comments, Section::OpenWith, Section::Perms, Section::Checksum];
 
     pub fn bit(self) -> u32 {
         1 << (self as u32)
@@ -164,11 +168,13 @@ impl Section {
             Section::Comments => "Comentarios",
             Section::OpenWith => "Abrir con",
             Section::Perms => "Compartir y permisos",
+            Section::Checksum => "Suma de verificación",
         }
     }
 }
 
-/// Secciones abiertas la primera vez (como en el diseño: Nombre y Comentarios plegadas).
+/// Secciones abiertas la primera vez (como en el diseño: Nombre, Comentarios y Suma de verificación
+/// plegadas).
 pub const DEFAULT_OPEN: u32 = (1 << Section::Tags as u32)
     | (1 << Section::General as u32)
     | (1 << Section::More as u32)

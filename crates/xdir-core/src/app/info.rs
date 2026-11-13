@@ -31,6 +31,8 @@ pub(super) enum EditKind {
     Name,
     Comment,
     Tag,
+    /// «Comparar con…» de la suma de verificación.
+    Expected,
 }
 
 /// Avance de la suma de una carpeta (`count` = None: xtree da el tamaño, no la cantidad).
@@ -82,6 +84,8 @@ pub(super) struct InfoState {
     pub(super) size_cancel: Arc<AtomicBool>,
     /// El hilo de la suma y su carpeta (expulsar espera a que suelte el disco).
     pub(super) size_worker: Option<(PathBuf, std::thread::JoinHandle<()>)>,
+    /// La suma de verificación del archivo que se muestra.
+    pub(super) sum: super::checksum::Checksum,
 }
 
 impl InfoState {
@@ -110,6 +114,7 @@ impl InfoState {
             size_generation: 0,
             size_cancel: Arc::new(AtomicBool::new(false)),
             size_worker: None,
+            sum: Default::default(),
         }
     }
 
@@ -228,6 +233,7 @@ impl App {
         st.pending = false;
         st.focused = false;
         st.layout = idraw::Layout::default();
+        st.sum.reset(None);
         self.sync_preview();
         self.redraw();
     }
@@ -248,6 +254,7 @@ impl App {
             st.bump_size();
             st.errors.clear();
             st.pending = false;
+            st.sum.reset(None);
             self.redraw();
         }
         self.info.size_worker.take_if(|(p, _)| p.starts_with(root)).map(|(_, h)| h)
@@ -295,6 +302,12 @@ impl App {
         if !self.info_open() || !self.preview_visible() {
             return;
         }
+        self.sync_info_subject();
+        // Después del sujeto: la suma es del archivo que se muestra ahora.
+        self.sync_checksum();
+    }
+
+    fn sync_info_subject(&mut self) {
         let (paths, stamps) = self.info_wanted();
         if paths == self.info.subject && stamps == self.info.stamps {
             return;
@@ -446,7 +459,7 @@ impl App {
 
     /// Lo que se ve de un elemento antes de que llegue la respuesta (o lo que falta en ella): de la
     /// lista, sin leer nada.
-    fn info_items(&self) -> Option<Vec<ItemInfo>> {
+    pub(super) fn info_items(&self) -> Option<Vec<ItemInfo>> {
         let tab = self.panes[self.active].tab();
         let list = &tab.list;
         let entry_of = |p: &Path| index_of(tab, p);
@@ -489,6 +502,9 @@ impl App {
         let tab = self.panes[self.active].tab();
         let list = &tab.list;
         let more_button = sys::info().has_more_in_system() && !st.subject.is_empty();
+        if let Some(p) = self.archive_info_panel() {
+            return p;
+        }
         let Some(items) = self.info_items() else {
             let n = st.subject.len();
             let name = if n == 0 { tab.location.title() } else { format!("{n} elementos") };
@@ -641,6 +657,10 @@ impl App {
             section(Section::General, Body::General { capacity: None, rows, flags }),
             section(Section::More, Body::Rows { rows: more, note }),
         ];
+        // Un archivo: su suma de verificación.
+        if !item.is_dir {
+            sections.push(section(Section::Checksum, Body::Checksum(self.checksum_view(item.cloud_only))));
+        }
         // La carpeta abierta (sin selección) no se renombra desde acá.
         if !self.info_is_location() {
             sections.push(section(Section::Name, Body::Name { name: file_name, hide_ext: item.hidden_ext }));
@@ -660,6 +680,39 @@ impl App {
             sections.push(section(Section::Perms, body));
         }
         Panel { title, header: Header { key, icon, image, name, lines }, sections, more_button, eject_button: false }
+    }
+
+    /// Dentro de un archivo comprimido, el único elemento elegido: lo que dice la lista (no hay de
+    /// dónde leer más) y, si es un archivo, su suma de verificación. `None` fuera de uno.
+    fn archive_info_panel(&self) -> Option<Panel> {
+        let env = sys::env();
+        let st = &self.info;
+        let tab = self.panes[self.active].tab();
+        if !tab.location.is_archive() {
+            return None;
+        }
+        let mut sel = tab.list.selected_indices();
+        let (Some(i), None) = (sel.next(), sel.next()) else { return None };
+        let e = &tab.list.entries[i];
+        let kind = e.type_name.to_string();
+        let mut lines = vec![(kind.clone(), false)];
+        let mut rows = vec![Row::new("Tipo", kind)];
+        if !e.is_dir {
+            lines.push((env.format_size_short(e.size), false));
+            rows.push(Row::new("Tamaño", size_with_bytes(env, e.size)));
+        }
+        if e.modified != 0 {
+            lines.push((format!("Modificado: {}", env.format_date(e.modified)), false));
+            rows.push(Row::new("Modificado", env.format_date(e.modified)));
+        }
+        rows.push(Row::new("Ubicación", tab.location.address_text()));
+        let section = |s: Section, body: Body| SectionView { section: s, open: st.is_open(s), error: st.error(s), body };
+        let mut sections = vec![section(Section::General, Body::General { capacity: None, rows, flags: Vec::new() })];
+        if self.info.sum.target.is_some() {
+            sections.push(section(Section::Checksum, Body::Checksum(self.checksum_view(false))));
+        }
+        let header = Header { key: None, icon: e.icon, image: false, name: e.display.clone(), lines };
+        Some(Panel { title: TITLE.to_string(), header, sections, more_button: false, eject_button: false })
     }
 
     fn perms_body(&self, item: &ItemInfo) -> Option<Body> {
@@ -861,6 +914,11 @@ impl App {
                     self.eject(root.clone());
                 }
             }
+            InfoHit::HashAlgo(_) | InfoHit::HashRun | InfoHit::HashCopy => self.checksum_click(h),
+            InfoHit::Expected => {
+                let text = self.info.sum.expected.clone();
+                self.begin_info_edit(EditKind::Expected, InfoHit::Expected, &text);
+            }
             InfoHit::Body => {}
         }
         self.redraw();
@@ -915,6 +973,7 @@ impl App {
                     self.apply_info(InfoChange::Tags { paths, add: vec![tag], remove: Vec::new() });
                 }
             }
+            EditKind::Expected => self.set_expected(&text),
         }
         self.redraw();
     }

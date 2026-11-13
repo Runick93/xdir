@@ -422,7 +422,7 @@ fn parse(text: &str) -> Session {
             ("vista_previa_ancho", None) => {
                 s.preview_width = float().filter(|w| w.is_finite()).unwrap_or(crate::ui::PREVIEW_W).clamp(crate::ui::PREVIEW_MIN_W, crate::ui::PREVIEW_MAX_W);
             }
-            ("informacion_secciones", None) => s.info_sections = int().filter(|n| (0..128).contains(n)).map_or(crate::info::DEFAULT_OPEN, |n| n as u32),
+            ("informacion_secciones", None) => s.info_sections = int().filter(|n| (0..256).contains(n)).map_or(crate::info::DEFAULT_OPEN, |n| n as u32),
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("xtree_ultimo", None) => s.xtree_last = parse_list(&format!("[{value}]")).into_iter().next().filter(|p| !p.is_empty()).map(PathBuf::from),
             ("version_vista", None) => s.seen_version = Some(value.trim_matches('"').trim().to_string()).filter(|v| !v.is_empty()),
@@ -729,6 +729,9 @@ mod tests {
         assert_eq!(parse(&text).info_sections, 0b0100_0011);
         assert_eq!(parse("").info_sections, crate::info::DEFAULT_OPEN);
         assert_eq!(Session::default().info_sections, crate::info::DEFAULT_OPEN);
+        // La suma de verificación (bit 7) abierta también vuelve.
+        let s = Session { info_sections: crate::info::DEFAULT_OPEN | crate::info::Section::Checksum.bit(), ..Session::default() };
+        assert_eq!(parse(&write(&s)).info_sections, s.info_sections);
     }
 
     #[test]

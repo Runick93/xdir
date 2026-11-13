@@ -6,6 +6,7 @@ mod actions;
 mod appearance;
 mod archive_nav;
 mod changelog;
+mod checksum;
 mod compare;
 mod edit;
 mod events;

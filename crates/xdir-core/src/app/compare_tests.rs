@@ -347,3 +347,153 @@ fn panel_sums_copy_and_retry() {
     click(&mut a, CompareHit::Retry);
     assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
 }
+
+// ---------- Suma de verificación en el panel de información ----------
+
+use crate::info::Section;
+use crate::info::draw::InfoHit;
+use crate::sys::HashAlgo;
+
+fn open_info(a: &mut App) {
+    a.run_command(Command::Properties);
+    a.paint();
+    a.flush_info();
+    a.on_app_message(crate::info::WM_APP_INFO, 0, 0);
+    a.paint();
+}
+
+fn info_click(a: &mut App, h: InfoHit) {
+    a.paint();
+    let r = a.info.layout.hits.iter().find(|(x, _)| *x == h).unwrap_or_else(|| panic!("{h:?} no está: {:?}", a.info.layout.hits)).1;
+    a.on_left_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+    a.on_left_up((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+}
+
+fn wait_sum(a: &mut App) {
+    let t0 = Instant::now();
+    while a.info.sum.job.is_some() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    a.paint();
+}
+
+/// La suma que da el falso para ese contenido (la misma cuenta que el panel).
+fn sum_of(path: &std::path::Path, algo: HashAlgo) -> String {
+    let p = crate::compare::Progress::default();
+    crate::compare::hash_source(&crate::compare::Source::Disk(path.to_path_buf()), algo, &std::sync::atomic::AtomicBool::new(false), &p).unwrap()
+}
+
+fn mono_text(host: &FakeHost) -> String {
+    host.drawn_texts().into_iter().filter(|t| t.0 == crate::paint::FontId::Mono).map(|t| t.1).collect()
+}
+
+/// Plegada de fábrica; abierta, calcula SHA-256 y MD5 en otro hilo, se ve en letra de ancho fijo y
+/// se copia.
+#[test]
+fn info_checksum_calculates_and_copies() {
+    use crate::sys::testing::{FakeShell, ShellCall};
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("info-suma", &[("a.txt", b"hola")]);
+    go(&mut a, 0, Location::Path(d.clone()));
+    select(&mut a, 0, &["a.txt"]);
+    a.info.sections &= !Section::Checksum.bit();
+    open_info(&mut a);
+    assert!(a.info.layout.hits.iter().any(|(h, _)| *h == InfoHit::Toggle(Section::Checksum)));
+    assert!(!a.info.layout.hits.iter().any(|(h, _)| *h == InfoHit::HashRun), "plegada");
+    info_click(&mut a, InfoHit::Toggle(Section::Checksum));
+    info_click(&mut a, InfoHit::HashRun);
+    assert!(a.info.sum.job.is_some());
+    wait_sum(&mut a);
+    let sha = sum_of(&d.join("a.txt"), HashAlgo::Sha256);
+    assert_eq!(mono_text(&host), sha);
+    FakeShell::take_calls();
+    info_click(&mut a, InfoHit::HashCopy);
+    assert!(FakeShell::take_calls().contains(&ShellCall::CopyText(sha)));
+    info_click(&mut a, InfoHit::HashAlgo(HashAlgo::Md5));
+    info_click(&mut a, InfoHit::HashRun);
+    wait_sum(&mut a);
+    assert_eq!(mono_text(&host), sum_of(&d.join("a.txt"), HashAlgo::Md5));
+}
+
+/// «Comparar con…»: sin espacios ni mayúsculas, con el nombre al lado; el largo elige el
+/// algoritmo y lo calcula; lo que no es una suma lo dice. También mientras se escribe en la caja.
+#[test]
+fn info_checksum_compare_with() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("info-comparar", &[("a.txt", b"hola")]);
+    go(&mut a, 0, Location::Path(d.clone()));
+    select(&mut a, 0, &["a.txt"]);
+    a.info.sections |= Section::Checksum.bit();
+    open_info(&mut a);
+    let (sha, md5) = (sum_of(&d.join("a.txt"), HashAlgo::Sha256), sum_of(&d.join("a.txt"), HashAlgo::Md5));
+    a.set_expected(&format!("{}  a.txt", sha.to_uppercase()));
+    assert_eq!(a.info.sum.algo, HashAlgo::Sha256);
+    wait_sum(&mut a);
+    let texts = |h: &FakeHost| h.drawn_texts().into_iter().map(|t| t.1).collect::<Vec<_>>();
+    assert!(texts(&host).iter().any(|t| t == "Coincide"), "{:?}", texts(&host));
+    // Una MD5: cambia el algoritmo y la calcula.
+    a.set_expected(&md5.replace('a', "b"));
+    assert_eq!(a.info.sum.algo, HashAlgo::Md5);
+    wait_sum(&mut a);
+    assert!(texts(&host).iter().any(|t| t == "No coincide"));
+    a.set_expected("hola");
+    a.paint();
+    assert!(texts(&host).iter().any(|t| t == crate::info::draw::INVALID_SUM_TEXT));
+    // En la caja: se compara mientras se escribe.
+    info_click(&mut a, InfoHit::Expected);
+    let (b, _) = a.info.edit.expect("caja abierta");
+    crate::host::WindowHost::text_set(&*host, b, &md5);
+    a.on_text_changed(b.0 as isize);
+    assert_eq!(a.info.sum.expected, md5);
+    a.paint();
+    assert!(texts(&host).iter().any(|t| t == "Coincide"));
+}
+
+/// Cambiar de archivo o cerrar el panel corta la suma en curso y la olvida.
+#[test]
+fn info_checksum_cancels_on_change_and_close() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("info-cortar", &[("a.bin", b"12345678"), ("b.bin", b"x")]);
+    FakeNetwork::set_remote(&d);
+    FakeNetwork::hang(&d.to_string_lossy(), Duration::from_secs(2));
+    go(&mut a, 0, Location::Path(d.clone()));
+    select(&mut a, 0, &["a.bin"]);
+    a.info.sections |= Section::Checksum.bit();
+    open_info(&mut a);
+    a.start_checksum(HashAlgo::Sha256);
+    let flag = a.info.sum.job.as_ref().unwrap().1.cancel.clone();
+    select(&mut a, 0, &["b.bin"]);
+    a.paint();
+    assert!(flag.load(std::sync::atomic::Ordering::Relaxed), "se cortó al cambiar de archivo");
+    assert!(a.info.sum.job.is_none() && a.info.sum.results.is_empty());
+    a.flush_info();
+    a.on_app_message(crate::info::WM_APP_INFO, 0, 0);
+    a.paint();
+    a.start_checksum(HashAlgo::Md5);
+    let flag = a.info.sum.job.as_ref().unwrap().1.cancel.clone();
+    a.run_command(Command::Properties);
+    assert!(!a.info_open());
+    assert!(flag.load(std::sync::atomic::Ordering::Relaxed), "se cortó al cerrar");
+}
+
+/// Dentro de un comprimido: el panel muestra el elemento y su suma (extraído a la temporal).
+#[test]
+fn info_checksum_inside_an_archive() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("info-zip", &[("fotos.zip", b"zip"), ("a.txt", b"hola")]);
+    let zip = d.join("fotos.zip");
+    FakeArchives::shared().add_archive(&zip, &[("docs/a.txt", b"hola")], 40);
+    go(&mut a, 0, Location::Archive { file: zip, nested: Vec::new(), inner: "docs".into() });
+    select(&mut a, 0, &["a.txt"]);
+    a.info.sections |= Section::Checksum.bit();
+    open_info(&mut a);
+    assert!(host.drawn_texts().iter().any(|t| t.1 == "Suma de verificación"));
+    info_click(&mut a, InfoHit::HashRun);
+    wait_sum(&mut a);
+    assert_eq!(mono_text(&host), sum_of(&d.join("a.txt"), HashAlgo::Sha256));
+}

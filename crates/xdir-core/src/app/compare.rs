@@ -253,6 +253,9 @@ impl App {
 
     /// Llegó una suma: del panel de comparar (de uno de los dos) o del de información.
     fn on_hashed(&mut self, id: u64, result: Result<String, Failure>) {
+        if self.on_checksum(id, &result) {
+            return;
+        }
         if let Some(st) = &mut self.compare
             && let Some(h) = st.hashes.iter_mut().find(|h| h.job.as_ref().is_some_and(|j| j.id == id))
         {

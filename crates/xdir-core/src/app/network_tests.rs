@@ -483,6 +483,28 @@ fn remote_navigation_no_ui_io() {
     assert!(matches!(a.compare.as_ref().unwrap().hashes[0].result, Some(Ok(_))));
     a.paint();
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+    // La suma de verificación del panel de información, con «Comparar con…». (El `FakeInfo`
+    // responde en este hilo: lo que lee al abrir el panel es del falso y no cuenta.)
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        let name = list.entries[list.entry_of_pos(p).unwrap()].name.clone();
+        list.set_selected_pos(p, name == "a.txt");
+    }
+    a.run_command(Command::Properties);
+    a.paint();
+    a.flush_info();
+    a.on_app_message(crate::info::WM_APP_INFO, 0, 0);
+    a.paint();
+    let seen = FakeNetwork::ui_io_calls().len();
+    a.set_expected("d41d8cd98f00b204e9800998ecf8427e");
+    while a.info.sum.job.is_some() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma del panel no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert!(a.info.sum.results.iter().any(|(_, r)| r.is_ok()), "{:?}", a.info.sum.results);
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls()[seen..], Vec::<String>::new());
 }
 
 #[test]

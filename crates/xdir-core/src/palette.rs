@@ -72,10 +72,12 @@ pub struct Palette {
     pub hover: Option<usize>,
 }
 
-/// Minúsculas sin tildes, para que "pestana" encuentre "Pestaña".
+/// Minúsculas sin tildes, para que "pestana" encuentre "Pestaña". También con los acentos
+/// descompuestos (NFD, como guarda nombres la Mac a veces): las marcas que combinan se quitan.
 pub fn fold(s: &str) -> String {
     s.to_lowercase()
         .chars()
+        .filter(|c| !('\u{300}'..='\u{36f}').contains(c))
         .map(|c| match c {
             'á' | 'à' | 'ä' | 'â' => 'a',
             'é' | 'è' | 'ë' | 'ê' => 'e',
@@ -188,7 +190,8 @@ pub fn search(mode: PaletteMode, query: &str, src: &Sources, expand: impl Fn(&st
             .iter()
             .enumerate()
             // Abrir la paleta desde la paleta no hace nada; "ir a carpeta" solo sin buscar.
-            .filter(|(_, s)| commands::available(s.command) && s.command != Command::Palette && (s.command != Command::JumpTo || folded.is_empty()))
+            // Los de xtree (sus atajos) solo valen con la vista abierta: no van en la paleta.
+            .filter(|(_, s)| commands::available(s.command) && !commands::xtree_only(s.command) && s.command != Command::Palette && (s.command != Command::JumpTo || folded.is_empty()))
             .filter_map(|(i, s)| {
                 let name = fold(s.title());
                 if !folded.iter().all(|w| name.contains(w.as_str())) {
@@ -413,6 +416,14 @@ mod tests {
     #[cfg(windows)]
     fn names(items: &[Item]) -> Vec<String> {
         items.iter().map(|i| i.title.clone()).collect()
+    }
+
+    /// M2: los nombres con los acentos descompuestos (NFD, comunes en la Mac) también se pliegan.
+    #[test]
+    fn folds_decomposed_accents() {
+        assert_eq!(fold("A\u{301}rbol"), "arbol");
+        assert_eq!(fold("Pestan\u{303}a"), "pestana");
+        assert_eq!(fold("cami\u{301}on"), fold("camión"));
     }
 
     #[test]

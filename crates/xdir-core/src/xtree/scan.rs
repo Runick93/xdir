@@ -291,7 +291,7 @@ pub fn start(hwnd: Handle, id: usize, root: PathBuf) -> Scan {
 }
 
 /// Deja un árbol terminado en `result` para la vista. Un resultado que llega después de cancelar
-/// se descarta (devuelve `false`). Con `last` (escaneo elevado, tecla A) además cancela el escaneo:
+/// se descarta (devuelve `false`). Con `last` (escaneo elevado, `xtree_permisos`) además cancela el escaneo:
 /// el recorrido normal que siga corriendo se corta y su árbol ya no reemplaza a este.
 /// Todo pasa con `result` bloqueado: la comprobación y la escritura no se pueden intercalar.
 pub fn deliver(result: &Mutex<Option<Vec<Node>>>, cancel: &AtomicBool, arena: Vec<Node>, last: bool) -> bool {

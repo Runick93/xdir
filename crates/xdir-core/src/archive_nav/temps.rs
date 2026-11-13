@@ -182,6 +182,12 @@ impl Temps {
         self.done.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
+    /// Para las pruebas: se olvida de lo que extrajo (los archivos quedan).
+    #[cfg(test)]
+    pub fn forget_done(&self) {
+        self.done.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
     /// La carpeta de lo extraído del archivo `file` con la cadena `nested` (sin tocar el disco).
     pub fn dir_for(&self, file: &Path, nested: &[String]) -> PathBuf {
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -274,9 +280,10 @@ impl Temps {
         };
         let dir = root;
         if prims.stat(&dir).is_err() {
-            // La de la ejecución ya está en el disco real; en el falso de las pruebas se crea acá.
-            // Otra extracción a la vez (otro archivo, otro candado) puede crear la misma carpeta de
-            // arriba entre `stat` y `create_dir`: si ya es una carpeta, sigue.
+            // Las de arriba: en la app ya existen (las creó `run_dir`) y esto no crea nada; en el
+            // disco falso de las pruebas se crean acá, y otra extracción a la vez (otro archivo,
+            // otro candado) puede crear la misma entre `stat` y `create_dir`: si ya es una
+            // carpeta (sin seguir enlaces), sigue.
             for up in dir.ancestors().skip(1).collect::<Vec<_>>().into_iter().rev() {
                 if prims.stat(up).is_err()
                     && let Err(e) = prims.create_dir(up)
@@ -287,6 +294,8 @@ impl Temps {
             }
             prims.create_private_dir(&dir)?;
         }
+        // Lo que ya estaba en el lugar (un gemelo de antes) no se borra si esta se corta.
+        let existed = prims.stat(&dst).is_ok();
         let mut failed = None;
         let mut too_big = false;
         let res = self.archives().extract_some(
@@ -300,14 +309,18 @@ impl Temps {
             &mut |_, e| failed = Some(e),
         );
         if too_big {
-            self.remove_tree(&dst);
+            if !existed {
+                self.remove_tree(&dst);
+            }
             return Err(CopyError::new(ErrKind::Other(TOO_BIG.into()), &dst));
         }
         // Cortada o fallida (también justo después de escribir el archivo): no queda nada. Si
         // quedara, la próxima vez estaría en su lugar sin estar anotada y se la tomaría por un
         // gemelo (otra carpeta, otra ruta).
         if let Err(e) = res {
-            self.remove_tree(&dst);
+            if !existed {
+                self.remove_tree(&dst);
+            }
             return Err(e);
         }
         // Una entrada que no se pudo escribir (ya había algo, ruta no permitida…) es un error, nunca

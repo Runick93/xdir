@@ -186,6 +186,10 @@ enum Hit {
     XtreeView,
     /// «← xdir» de la barra superior de xtree (vuelve a los paneles).
     XtreeBack,
+    /// «Colores: carpeta / tipo» de la barra superior de xtree.
+    XtreeColors,
+    /// La lupa de la barra superior de xtree (abre y cierra la búsqueda).
+    XtreeSearch,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
@@ -402,6 +406,10 @@ pub struct App {
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, TextBox)>,
+    /// La caja de la búsqueda de xtree (#57), mientras la búsqueda está abierta y se ve.
+    xtree_search_box: Option<TextBox>,
+    /// Ver `Init::clean_temps_on_close`.
+    pub(super) clean_temps_on_close: bool,
     /// Árbol de carpetas lateral (experimental).
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
@@ -542,6 +550,9 @@ pub struct Init {
     pub start_path: Option<PathBuf>,
     pub started: Instant,
     pub marks: Vec<(&'static str, f64)>,
+    /// Al cerrar, borrar la carpeta temporal de los comprimidos (`temps::clean_at_exit`). Las
+    /// pruebas la apagan: esa carpeta es una para todo el proceso y la usan otras en paralelo.
+    pub clean_temps_on_close: bool,
 }
 
 impl Init {
@@ -560,7 +571,7 @@ impl Init {
         if probe.is_none() {
             crate::archive_nav::temps::clean_at_start();
         }
-        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, probe, start_path, started, marks }
+        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, probe, start_path, started, marks, clean_temps_on_close: true }
     }
 
     /// Datos vacíos y sesión por defecto: nada del disco.
@@ -579,6 +590,7 @@ impl Init {
             start_path: None,
             started: Instant::now(),
             marks: Vec::new(),
+            clean_temps_on_close: false,
         }
     }
 }
@@ -587,7 +599,7 @@ impl App {
     /// Arma la aplicación (sin ventana: la plataforma la fija después con `App::attach`, que se la
     /// pasa al host) y abre sus paneles.
     pub fn new(init: Init, host: Rc<dyn WindowHost>) -> App {
-        let Init { session, history, config, favorites, groups, mut folder_views, probe, start_path, started, marks } = init;
+        let Init { session, history, config, favorites, groups, mut folder_views, probe, start_path, started, marks, clean_temps_on_close } = init;
         // Primera vez con memoria por carpeta: la vista y las columnas de la sesión pasan a ser
         // la vista por defecto.
         if folder_views.is_fresh() {
@@ -661,6 +673,8 @@ impl App {
             tree_followed: None,
             groups_menu_closed: None,
             palette: None,
+            xtree_search_box: None,
+            clean_temps_on_close,
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(),
             show_favorites: session.show_favorites,

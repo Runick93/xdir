@@ -46,7 +46,7 @@ impl App {
             VK_ESCAPE if self.info_open() && self.info.focused => self.close_info(),
             VK_ESCAPE if self.compare.as_ref().is_some_and(|c| c.focused) => self.close_compare(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
-            _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
+            _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift, alt, meta),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
             // Lo último: si nada más tomó el Escape, corta la apertura desde un archivo comprimido.
             VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {
@@ -288,6 +288,18 @@ impl App {
                 }
             }
             Command::Xtree => self.toggle_xtree(),
+            // Solo con la vista abierta (sus atajos no valen en los paneles).
+            Command::XtreeColors => {
+                if let Some(x) = self.xtree.as_mut().filter(|_| from_xtree) {
+                    x.toggle_colors();
+                }
+            }
+            Command::XtreeElevate => {
+                if let Some(x) = self.xtree.as_mut().filter(|_| from_xtree) {
+                    let action = x.elevate_scan();
+                    self.xtree_action(action);
+                }
+            }
             // Con xtree abierto la columna no se ve: el botón o el atajo cierran xtree y la muestran.
             Command::TogglePreview if from_xtree => self.show_preview(),
             Command::TogglePreview => self.toggle_preview(),
@@ -315,9 +327,10 @@ impl App {
     }
 
 
-    /// Tecla con la vista de xtree abierta: primero la vista (T, F5, Retroceso, Esc, A); después
-    /// solo los atajos de la ventana que no tocan los paneles tapados.
-    fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool) -> bool {
+    /// Tecla con la vista de xtree abierta: primero la vista (F5, Retroceso, Esc, A), después sus
+    /// atajos (`xtree_colores`) y, por último, solo los atajos de la ventana que no tocan los
+    /// paneles tapados.
+    pub(super) fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
         if !ctrl {
             let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_key(vk));
             if action != xtree_view::Action::None {
@@ -325,8 +338,17 @@ impl App {
                 return true;
             }
         }
-        match self.config.keymap.lookup(vk, ctrl, shift, false, key_down(VK_LWIN)) {
-            Some(c @ (Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)) => {
+        if let Some(c) = self.config.keymap.lookup_xtree(vk, ctrl, shift, alt, meta) {
+            self.run_command(c);
+            return true;
+        }
+        match self.config.keymap.lookup(vk, ctrl, shift, false, meta) {
+            // «Buscar» (Ctrl+F / ⌘F) dentro de xtree busca en lo analizado.
+            Some(Command::Filter) => {
+                self.open_xtree_search();
+                true
+            }
+            Some(c) if crate::commands::live_in_xtree(c) => {
                 self.run_command(c);
                 true
             }
@@ -367,6 +389,8 @@ impl App {
             if let Some(x) = &mut self.xtree {
                 x.mark_seen();
             }
+            // La búsqueda que quedó abierta vuelve con su caja.
+            self.sync_xtree_search();
         }
         self.hover = Hit::None;
         self.redraw();
@@ -395,10 +419,56 @@ impl App {
             x.close_menu();
         }
         self.hover = Hit::None;
+        self.sync_xtree_search();
+    }
+
+    /// La caja de la búsqueda de xtree sigue a la vista: está mientras la búsqueda está abierta y
+    /// xtree se ve (con lo escrito y el foco), y se va cuando se cierra cualquiera de las dos. Es la
+    /// caja de la paleta (`TextKind::Palette`): flechas, Enter y Esc llegan con `WM_APP_PALETTE_KEY`.
+    pub(super) fn sync_xtree_search(&mut self) {
+        let want = self.xtree_open && self.xtree.as_ref().is_some_and(|x| x.search_open());
+        match (want, self.xtree_search_box) {
+            (true, None) => {
+                let r = crate::xtree::view::search_box_rect(self.xtree_area());
+                let y = (r.top + r.bottom) / 2.0 - 10.0;
+                let query = self.xtree.as_ref().and_then(|x| x.search_query()).unwrap_or_default().to_string();
+                if let Some(b) = self.host.text_create(TextKind::Palette, geom::rect(r.left, y, r.right, y + 20.0), &query, &self.theme) {
+                    self.host.text_select(b, 0, -1);
+                    self.host.text_focus(b);
+                    self.xtree_search_box = Some(b);
+                }
+            }
+            (false, Some(b)) => {
+                self.xtree_search_box = None;
+                self.host.text_destroy(b);
+                self.host.focus_main_if_lost();
+            }
+            _ => {}
+        }
+    }
+
+    /// Abre la búsqueda de xtree (la lupa o el atajo de «Buscar»); si ya está abierta, le da el foco
+    /// a su caja.
+    pub(super) fn open_xtree_search(&mut self) {
+        let Some(x) = self.xtree.as_mut().filter(|_| self.xtree_open) else { return };
+        x.open_search();
+        self.sync_xtree_search();
+        if let Some(b) = self.xtree_search_box {
+            self.host.text_focus(b);
+        }
+        self.redraw();
+    }
+
+    /// Una tecla de la caja de búsqueda de xtree (o 0: perdió el foco; la búsqueda sigue abierta).
+    pub(super) fn on_xtree_search_key(&mut self, vk: Key) {
+        let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.search_key(vk));
+        self.xtree_action(action);
     }
 
     /// Lo que pide la vista de xtree después de un evento.
     pub(super) fn xtree_action(&mut self, action: xtree_view::Action) {
+        // La búsqueda pudo abrirse o cerrarse (la lupa, el ✕, Enter, Esc): su caja la sigue.
+        self.sync_xtree_search();
         match action {
             xtree_view::Action::None => return,
             xtree_view::Action::Redraw => {}
@@ -519,6 +589,8 @@ fn keeps_xtree(c: Command) -> bool {
             | Command::JumpTo
             | Command::SaveGroup
             | Command::Xtree
+            | Command::XtreeColors
+            | Command::XtreeElevate
             | Command::ToggleDarkMode
             | Command::About
             | Command::OpenConfig

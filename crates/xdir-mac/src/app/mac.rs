@@ -767,7 +767,7 @@ mod key_tests {
 /// Solo con `--features pruebas`: la app se maneja con comandos de texto escritos (uno por línea)
 /// en el archivo de `XDIR_PRUEBAS`, igual que el gancho `WM_COPYDATA` de Windows. Además de los de
 /// `test_hook`: `captura <archivo.png>` guarda la vista, `clic <x> <y>`, `doble <x> <y>`,
-/// `derecho <x> <y>`, `tecla <vk>`, `escribir <texto>`, `enter`, `escape`, `tab`, `backtab` y `salir`.
+/// `derecho <x> <y>`, `tecla <vk>`, `escribir <texto>`, `enter`, `escape`, `tab`, `backtab`, `tamano <ancho> <alto>` y `salir`.
 #[cfg(feature = "pruebas")]
 mod pruebas {
     use super::*;
@@ -806,6 +806,12 @@ mod pruebas {
             ("pantalla", _) => capture_screen(Path::new(rest)),
             ("estado_copia", _) => {
                 let _ = std::fs::write(rest, crate::auxwin::debug_state());
+            }
+            // `tamano <ancho> <alto>`: el tamaño del área de la ventana (DIPs).
+            ("tamano", [w, h]) => {
+                if let Some(win) = window() {
+                    win.setContentSize(NSSize::new(*w as f64, *h as f64));
+                }
             }
             // La principal al frente (como al hacerle clic).
             ("frente", _) => {

@@ -92,7 +92,7 @@ pub struct Config {
     /// `[opciones] arbol_sigue_panel`: el árbol de carpetas despliega y muestra la carpeta del
     /// panel activo cuando cambia (por defecto, sí).
     pub tree_follows_pane: bool,
-    /// `[opciones] xtree_por_tipo`: xtree arranca coloreando por tipo de archivo (tecla T).
+    /// `[opciones] xtree_por_tipo`: xtree arranca coloreando por tipo de archivo (botón «Colores» o `xtree_colores`).
     pub xtree_by_type: bool,
     /// `[opciones] xtree_abrir`: qué analiza xtree al abrirse.
     pub xtree_open: XtreeOpen,
@@ -460,7 +460,7 @@ pub fn template() -> String {
             # El árbol de carpetas despliega y muestra la carpeta del panel activo cuando cambia;\n\
             # false lo apaga.\n\
             # arbol_sigue_panel = true\n\
-            # xtree arranca coloreando el mapa por tipo de archivo (como la tecla T).\n\
+            # xtree arranca coloreando el mapa por tipo de archivo (como el botón Colores o Ctrl+T).\n\
             # xtree_por_tipo = false\n\
             # Qué analiza xtree al abrirse: \"sistema\" (el disco del sistema), \"panel\" (la\n\
             # carpeta del panel activo) o \"ultimo\" (la última analizada).\n\

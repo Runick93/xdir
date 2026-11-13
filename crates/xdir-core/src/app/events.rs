@@ -93,6 +93,11 @@ impl App {
                 }
                 self.redraw();
             }
+            crate::xtree::search::WM_APP_XTREE_FOUND => {
+                if self.xtree.as_mut().is_some_and(|x| x.on_found()) && self.xtree_open {
+                    self.redraw();
+                }
+            }
             crate::xtree::scan::WM_APP_XTREE => {
                 // Con la vista cerrada también se repinta si cambió el indicador de la barra de
                 // estado (o su cartel está a la vista): sigue el escaneo con estos avisos (cada
@@ -195,6 +200,13 @@ impl App {
         if self.palette.as_ref().is_some_and(|(_, e)| e.0 as isize == id) {
             self.refresh_palette();
         }
+        if let Some(b) = self.xtree_search_box.filter(|b| b.0 as isize == id) {
+            let text = self.host.text_get(b);
+            if let Some(x) = &mut self.xtree {
+                x.set_query(&text);
+            }
+            self.redraw();
+        }
         if let Some((edit, _)) = self.edit {
             if edit.0 as isize == id {
                 let text = self.host.text_get(edit);
@@ -212,6 +224,11 @@ impl App {
         self.end_edit(false);
         self.end_filter(true);
         self.close_palette();
+        // La caja de la búsqueda de xtree va a su nuevo lugar (con lo escrito).
+        if let Some(b) = self.xtree_search_box.take() {
+            self.host.text_destroy(b);
+            self.sync_xtree_search();
+        }
         // El panel de Renombrar varios sigue: sus cajas van a su nuevo lugar.
         self.sync_rename_boxes();
     }
@@ -372,11 +389,32 @@ impl App {
         if std::mem::take(&mut self.swallow_space) && c == ' ' {
             return;
         }
-        if !c.is_control() && !key_down(VK_CONTROL) && !self.xtree_open {
-            let action = self.tab_mut().list.on_char(c);
-            self.apply(self.active, action);
-            self.quick_look_follow_list();
+        if c.is_control() || key_down(VK_CONTROL) {
+            return;
         }
+        // Con la búsqueda de xtree abierta y su caja sin el foco (un clic en el mapa), lo escrito
+        // va a la caja: vuelve el foco y se agrega al final.
+        if let Some(b) = self.xtree_search_box.filter(|_| self.xtree_open) {
+            let text = self.host.text_get(b) + &c.to_string();
+            self.host.text_set(b, &text);
+            let end = text.encode_utf16().count();
+            self.host.text_focus(b);
+            self.host.text_select(b, end, end as isize);
+            if let Some(x) = &mut self.xtree {
+                x.set_query(&text);
+            }
+            self.redraw();
+            return;
+        }
+        // Con xtree abierto, las letras van a su tabla (salto por letra, #57).
+        if self.xtree_open {
+            let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_char(c));
+            self.xtree_action(action);
+            return;
+        }
+        let action = self.tab_mut().list.on_char(c);
+        self.apply(self.active, action);
+        self.quick_look_follow_list();
     }
 
     /// El mouse salió de la ventana.
@@ -524,10 +562,11 @@ impl App {
             self.folder_views.save_if_dirty();
             let _ = session::save(&self.session());
             let _ = self.history.save();
-            // En las pruebas la carpeta temporal es una para todo el proceso: cerrar una `App` de
-            // prueba no la borra (borraría lo que otras pruebas, en paralelo, están extrayendo).
-            #[cfg(not(test))]
-            crate::archive_nav::temps::clean_at_exit();
+            // Las pruebas lo apagan (`Init::clean_temps_on_close`): la carpeta es una para todo el
+            // proceso y otras pruebas, en paralelo, están extrayendo ahí.
+            if self.clean_temps_on_close {
+                crate::archive_nav::temps::clean_at_exit();
+            }
         }
     }
 }

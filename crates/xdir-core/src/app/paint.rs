@@ -185,7 +185,10 @@ impl App {
             }
             let xtree_shown = xtree_open && self.xtree.is_some();
             let rects = if xtree_shown { &[][..] } else { &rects[..] };
+            let colors_keys = self.config.keymap.label(Command::XtreeColors);
+            let elevate_keys = self.config.keymap.label(Command::XtreeElevate);
             if let Some(v) = self.xtree.as_mut().filter(|_| xtree_open) {
+                v.set_key_labels(colors_keys, elevate_keys);
                 v.paint(p, ui::xtree_area(w, h));
             } else if groups_h > 0.0 {
                 let names: Vec<(&str, bool)> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();

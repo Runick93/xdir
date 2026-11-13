@@ -7,13 +7,18 @@
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
 - **Comparar contenido** (paleta o menú del archivo): con dos archivos elegidos, uno en cada panel o dos en el mismo, dice si son iguales byte a byte o en qué posición empiezan a ser distintos, con avance y Cancelar, también dentro de un comprimido o en una carpeta de red. El panel de información suma la sección **Suma de verificación** (SHA-256 o MD5, con «Copiar» y «Comparar con…» para pegar la suma publicada).
+- Arrastrá archivos a una carpeta del árbol (desde un panel, el Finder o el Explorador) para moverlos o copiarlos ahí, como en una carpeta de la lista. Si te quedás un momento sobre una carpeta plegada, se despliega.
+- **Buscar en xtree**: `Ctrl+F` / `⌘F` o la lupa buscan por nombre en todo lo analizado (también mientras analiza), y escribir las primeras letras va a esa carpeta del nivel. El botón «Colores» cambia el color del mapa.
 - **Historial de crecimiento en xtree**: cada análisis guarda una foto de los tamaños, y la tarjeta de la carpeta muestra cuánto creció en 7, 30 o 90 días, un gráfico y las 5 subcarpetas que más crecieron (clic para entrar). En la tabla, una ▲ marca las carpetas que crecieron mucho. Se apaga o se borra en Configuración ▸ xtree; los discos de red no guardan historial.
 
 ### Cambios
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
 - Los botones del pie del panel (carpeta nueva y vista) son más grandes.
+- En xtree, los colores del mapa pasan de la `T` a `Ctrl+T` / `⌘T` (se cambia en Atajos de teclado): la `T` ahora salta a la carpeta que empieza con T.
+- En xtree, analizar de nuevo con permisos pasa de la `A` a `Ctrl+Shift+A` / `⇧⌘A`: ninguna letra sola hace otra cosa que ir a la carpeta que empieza así.
 
 ### Arreglos
+- La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.
 
 ## 0.2.0 — 2026-11-11
@@ -63,7 +68,6 @@
 - xtree ya no es un programa aparte.
 
 ### Arreglos
-- La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.
 - En la Mac, el tipo de archivo siempre empieza con mayúscula.
 - **Seguridad**

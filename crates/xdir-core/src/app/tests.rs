@@ -2776,6 +2776,160 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     a.on_closing();
 }
 
+/// xtree abierto con un árbol terminado: la raíz `raiz` con estos hijos (nombre, tamaño).
+fn app_with_xtree(kids: &[(&str, u64)]) -> App {
+    app_with_xtree_host(kids, FakeHost::new())
+}
+
+fn app_with_xtree_host(kids: &[(&str, u64)], host: Rc<FakeHost>) -> App {
+    use crate::xtree::tree::{NO_PARENT, Node};
+    let mut a = app_with_host(Init::blank(), host);
+    let total = kids.iter().map(|k| k.1).sum();
+    let mut arena = vec![Node { name: "raiz".into(), parent: NO_PARENT, size: total, is_dir: true, small: false, children: (1..=kids.len() as u32).collect() }];
+    arena.extend(kids.iter().map(|&(n, size)| Node { name: n.into(), parent: 0, size, is_dir: true, small: false, children: vec![] }));
+    let mut x = Xtree::idle(PathBuf::from("raiz"));
+    x.set_arena(arena);
+    a.xtree = Some(x);
+    a.xtree_open = true;
+    a
+}
+
+/// #57: con xtree abierto, las letras van a su tabla (salto por letra), no a la lista del panel.
+#[test]
+fn xtree_letters_go_to_view() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    a.on_char('b');
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
+    // Con Ctrl no es una letra escrita.
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_char('a');
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
+}
+
+/// M7: con la búsqueda de xtree abierta y su caja sin el foco (un clic en el mapa), lo que se
+/// escribe va a la caja; Ctrl+P (⌘P) desde la caja abre la paleta, no se pierde.
+#[test]
+fn xtree_search_typing_goes_to_box_and_palette_key_passes() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_xtree_host(&[("alfa", 6), ("beta", 4)], host.clone());
+    a.open_xtree_search();
+    let b = a.xtree_search_box.unwrap();
+    host.focus_main();
+    assert!(!host.text_has_focus(b));
+    a.on_char('b');
+    a.on_char('e');
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some("be"));
+    assert!(host.text_has_focus(b), "la caja vuelve a tener el foco");
+    assert_eq!(a.xtree.as_ref().unwrap().search_query(), Some("be"));
+    assert_eq!(a.xtree.as_ref().unwrap().search_found().unwrap().hits[0].name, "beta");
+    // Ctrl+P en la caja: la paleta (de carpetas).
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, 0x50, 1));
+    assert!(a.palette.is_some(), "abrió la paleta");
+}
+
+/// #57: la A sola es una letra (salto por letra); analizar con permisos es `xtree_permisos`
+/// (Ctrl+Shift+A / ⇧⌘A) dentro de xtree.
+#[test]
+fn xtree_elevate_is_ctrl_shift_a() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    assert!(!a.on_key(Key(b'A' as u16)), "la A sola no es un atajo");
+    a.on_char('a');
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("alfa"));
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL, VK_SHIFT]);
+    let used = a.on_key(Key(b'A' as u16));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert!(used, "Ctrl+Shift+A es de xtree");
+    assert!(a.xtree_open);
+}
+
+/// #57: dentro de xtree, Ctrl+T (⌘T) cambia los colores (no abre una pestaña); el botón tiene su
+/// cartel con el atajo en uso; la T sola ya no los cambia.
+#[test]
+fn xtree_colors_shortcut_and_tooltip() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    let tabs = a.panes[a.active].tabs.len();
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    assert!(a.on_key(Key(b'T' as u16)));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert!(a.xtree_open && a.xtree.as_ref().unwrap().by_type());
+    assert_eq!(a.panes[a.active].tabs.len(), tabs, "no abrió una pestaña");
+    assert!(!a.on_key(Key(b'T' as u16)), "la T sola no es un atajo");
+    assert!(a.xtree.as_ref().unwrap().by_type());
+    assert_eq!(a.tooltip_text(Hit::XtreeColors).as_deref(), Some("Colorear por carpeta (Ctrl+T)"));
+    a.config.keymap.set(Command::XtreeColors, &[]);
+    assert_eq!(a.tooltip_text(Hit::XtreeColors).as_deref(), Some("Colorear por carpeta"));
+    // El clic en el botón (donde quedó en el cuadro).
+    a.paint();
+    let (x, y) = point_of(&a, Hit::XtreeColors);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(!a.xtree.as_ref().unwrap().by_type());
+    // Fuera de xtree Ctrl+T sigue abriendo una pestaña.
+    a.close_xtree();
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_key(Key(b'T' as u16));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert_eq!(a.panes[a.active].tabs.len(), tabs + 1);
+}
+
+/// #57: Ctrl+F (los atajos de «Buscar») dentro de xtree abre la búsqueda con su caja (la de la
+/// paleta); lo escrito busca, Enter entra y saca la caja; la lupa abre y Esc cierra; cerrar xtree
+/// saca la caja y al volver aparece con lo escrito.
+#[test]
+fn xtree_search_box_flow() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_xtree_host(&[("alfa", 6), ("beta", 4)], host.clone());
+    a.paint();
+    assert_eq!(a.tooltip_text(Hit::XtreeSearch).as_deref(), Some("Buscar en xtree (Ctrl+F)"));
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    assert!(a.on_key(Key(b'F' as u16)));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    let x = |a: &App| a.xtree.as_ref().unwrap().search_open();
+    assert!(x(&a) && a.xtree_open);
+    let b = a.xtree_search_box.expect("la caja");
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some(""));
+    assert!(host.text_has_focus(b));
+    host.text_set(b, "BET");
+    a.on_text_changed(b.0 as isize);
+    let names: Vec<String> = a.xtree.as_ref().unwrap().search_found().unwrap().hits.iter().map(|h| h.name.clone()).collect();
+    assert_eq!(names, ["beta"]);
+    // Perder el foco no cierra nada.
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, 0, 0));
+    assert!(x(&a) && a.xtree_search_box.is_some());
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+    assert!(!x(&a));
+    assert_eq!(host.text_of(TextKind::Palette), None, "Enter saca la caja");
+    assert!(a.xtree_open, "sigue en xtree");
+    // La lupa la abre; Esc en la caja la cierra; otro Esc cierra xtree.
+    a.paint();
+    let (lx, ly) = point_of(&a, Hit::XtreeSearch);
+    a.on_left_down(lx, ly, false);
+    a.on_left_up(lx, ly);
+    assert!(x(&a) && a.xtree_search_box.is_some());
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_ESCAPE.0 as usize, 0));
+    assert!(!x(&a) && a.xtree_search_box.is_none());
+    assert!(a.on_key(VK_ESCAPE));
+    assert!(!a.xtree_open);
+    // Cerrar xtree con la búsqueda abierta saca la caja; al volver vuelve con lo escrito.
+    a.toggle_xtree();
+    a.open_xtree_search();
+    let b = a.xtree_search_box.unwrap();
+    host.text_set(b, "alf");
+    a.on_text_changed(b.0 as isize);
+    a.toggle_xtree();
+    assert_eq!(host.text_of(TextKind::Palette), None);
+    // (La vista de prueba no analizó nada: `toggle_xtree` la armaría de nuevo; se reabre como una
+    // que ya analizó.)
+    a.xtree_open = true;
+    a.sync_xtree_search();
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some("alf"));
+    // Un aviso de búsqueda (de un hilo) sin nada pendiente no hace nada.
+    assert!(a.on_app_message(crate::xtree::search::WM_APP_XTREE_FOUND, 0, 0));
+}
+
 // ---------- entrada «xtree» del árbol ----------
 
 /// App con el árbol a la vista, el panel activo en una carpeta temporal y un cuadro dibujado.

@@ -280,9 +280,10 @@ impl Temps {
         };
         let dir = root;
         if prims.stat(&dir).is_err() {
-            // La de la ejecución ya está en el disco real; en el falso de las pruebas se crea acá.
-            // Otra extracción a la vez (otro archivo, otro candado) puede crear la misma carpeta de
-            // arriba entre `stat` y `create_dir`: si ya es una carpeta, sigue.
+            // Las de arriba: en la app ya existen (las creó `run_dir`) y esto no crea nada; en el
+            // disco falso de las pruebas se crean acá, y otra extracción a la vez (otro archivo,
+            // otro candado) puede crear la misma entre `stat` y `create_dir`: si ya es una
+            // carpeta (sin seguir enlaces), sigue.
             for up in dir.ancestors().skip(1).collect::<Vec<_>>().into_iter().rev() {
                 if prims.stat(up).is_err()
                     && let Err(e) = prims.create_dir(up)

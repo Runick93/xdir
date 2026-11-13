@@ -81,14 +81,27 @@ pub fn files(mac: bool) -> Vec<(&'static str, &'static str)> {
 }
 
 /// Activa el modo portable: copia a `to` (la carpeta del ejecutable) los archivos de
-/// configuración de `from` que existan (sin pisar los que ya estén en `to`) y crea
+/// configuración de `from` que existan, también la carpeta del historial de xtree (sin pisar lo que
+/// ya esté en `to`), y crea
 /// `xdir.portable`. Bloqueante: para un hilo de trabajo.
 pub fn portable_files(from: &Path, to: &Path) -> Result<(), String> {
     let fail = |e: std::io::Error| format!("No se pudo escribir en {}: {e}", to.display());
     for (name, _) in files(true) {
         let (src, dst) = (from.join(name), to.join(name));
-        if src.is_file() && !dst.exists() && src != dst {
+        if src == dst || dst.exists() {
+            continue;
+        }
+        if src.is_file() {
             std::fs::copy(&src, &dst).map_err(fail)?;
+        } else if src.is_dir() {
+            // Una carpeta (el historial de xtree): sus archivos, sin los temporales a medio escribir.
+            std::fs::create_dir_all(&dst).map_err(fail)?;
+            for e in std::fs::read_dir(&src).map_err(fail)?.flatten() {
+                let p = e.path();
+                if p.is_file() && p.extension().is_none_or(|x| x != "tmp") {
+                    std::fs::copy(&p, dst.join(e.file_name())).map_err(fail)?;
+                }
+            }
         }
     }
     std::fs::write(to.join(PORTABLE_MARKER), "").map_err(fail)
@@ -567,6 +580,27 @@ mod tests {
         // Una carpeta que no se puede escribir: el error dice dónde.
         let err = portable_files(&from, &base.join("no-existe")).unwrap_err();
         assert!(err.starts_with("No se pudo escribir en "), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Activar el modo portable también copia la carpeta del historial de xtree (sus archivos,
+    /// sin temporales), salvo que ya haya una en el destino.
+    #[test]
+    fn portable_copies_xtree_history() {
+        let base = std::env::temp_dir().join(format!("xdir-portable-historial-{}", std::process::id()));
+        let (from, exe) = (base.join("usuario"), base.join("exe"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(from.join("xtree-historial")).unwrap();
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::write(from.join("xtree-historial").join("a-1.bin"), "uno").unwrap();
+        std::fs::write(from.join("xtree-historial").join("a-1.bin.9.0.tmp"), "medio").unwrap();
+        portable_files(&from, &exe).unwrap();
+        assert_eq!(std::fs::read_to_string(exe.join("xtree-historial").join("a-1.bin")).unwrap(), "uno");
+        assert!(!exe.join("xtree-historial").join("a-1.bin.9.0.tmp").exists());
+        // Ya había historial junto a xdir: gana ese.
+        std::fs::write(from.join("xtree-historial").join("b-2.bin"), "dos").unwrap();
+        portable_files(&from, &exe).unwrap();
+        assert!(!exe.join("xtree-historial").join("b-2.bin").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

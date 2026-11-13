@@ -493,7 +493,7 @@ impl App {
                 exe.display()
             );
             // Lo que ya esté ahí (de otra vez) no se pisa: gana sobre lo de ahora.
-            let old: Vec<&str> = session::files(true).into_iter().map(|(n, _)| n).filter(|n| exe.join(n).is_file() && exe != from).collect();
+            let old: Vec<&str> = session::files(true).into_iter().map(|(n, _)| n).filter(|n| exe.join(n).exists() && exe != from).collect();
             if !old.is_empty() {
                 question += &format!(" Ya hay archivos de configuración en esa carpeta ({}): se usan esos y no se copian los de ahora.", old.join(", "));
             }

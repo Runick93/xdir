@@ -275,6 +275,9 @@ struct Reveal {
     hwnd: Handle,
     path: PathBuf,
     show_hidden: bool,
+    /// Una fila con esa carpeta fuera de su ubicación real (Acceso rápido, anclada): si la rama
+    /// real no se puede desplegar (pasa por una carpeta oculta), se marca esa.
+    fallback: Option<usize>,
 }
 
 impl Tree {
@@ -820,17 +823,18 @@ impl Tree {
         let fs = crate::sys::file_system();
         let computer = self.roots.iter().copied().find(|&id| self.nodes[id].kind == Kind::Computer);
         let real_top = self.real_root(path).map(|r| if self.nodes[r].kind == Kind::Drive { computer } else { Some(r) });
-        let mut shown = Vec::new();
+        let (mut shown, mut fallback) = (Vec::new(), None);
         let mut top = None;
         for (i, id) in self.rows().into_iter().enumerate() {
             if self.roots.contains(&id) {
                 top = Some(id);
             }
-            if matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive)
-                && fs.same_path(&self.nodes[id].path, path)
-                && real_top.is_none_or(|t| t == top)
-            {
-                shown.push((i, id));
+            if matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path) {
+                if real_top.is_none_or(|t| t == top) {
+                    shown.push((i, id));
+                } else {
+                    fallback = fallback.or(Some(id));
+                }
             }
         }
         if let Some(&(_, id)) = shown.first() {
@@ -839,7 +843,7 @@ impl Tree {
             }
             return;
         }
-        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden });
+        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden, fallback });
         self.advance_reveal();
     }
 
@@ -900,8 +904,14 @@ impl Tree {
                     return;
                 }
             };
-            // Sin la subcarpeta (se borró, está oculta o no es una carpeta): no se despliega nada.
-            let Some(next) = next else { return };
+            // Sin la subcarpeta (se borró, está oculta o no es una carpeta): no se despliega nada;
+            // si había otra fila con la carpeta (Acceso rápido, anclada), se marca esa.
+            let Some(next) = next else {
+                if r.fallback.is_some() {
+                    self.scroll_to = r.fallback;
+                }
+                return;
+            };
             chain.push(id);
             id = next;
         }
@@ -1578,6 +1588,24 @@ mod tests {
         t.reveal(Handle(0), &outside, false);
         assert!(t.revealing().is_none());
         assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Si la ubicación real pasa por una carpeta oculta (y los ocultos no se muestran), el árbol no
+    /// puede desplegarla: queda marcada la fila del Acceso rápido o la anclada (como antes).
+    #[test]
+    fn tree_reveal_falls_back_to_quick_row_under_hidden_folder() {
+        install_fakes();
+        let root = temp_root("revelar-oculta");
+        let target = root.join(".oculta").join("beta");
+        std::fs::create_dir_all(&target).unwrap();
+        let mut t = tree_with_drive(&root);
+        t.apply_quick(vec![crate::fs::QuickItem { name: "beta".into(), path: target.clone(), pinned: true }]);
+        let quick = t.rows().into_iter().find(|&id| t.nodes[id].path == target).expect("fila del Acceso rápido");
+        t.scroll_to = None;
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        assert_eq!(t.scroll_to, Some(quick));
         let _ = std::fs::remove_dir_all(&root);
     }
 

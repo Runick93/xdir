@@ -309,12 +309,35 @@ fn save_started_before_clear_is_dropped() {
     let dir = tmp("borrar-en-camino");
     let root = tmp("raiz-borrar-en-camino");
     let mut x = view(&root, &dir, 500);
-    let stale = history::generation(&dir);
-    history::clear(&dir).unwrap();
+    let stale = x.hist.clears.load(std::sync::atomic::Ordering::SeqCst);
+    history::clear(&dir, &x.hist.clears).unwrap();
     x.scanning = true;
     *x.scan.result.lock().unwrap() = Some(tree("r", 1, 1, 1));
     x.take_result_with_generation(stale);
     wait_history(&mut x);
     assert!(x.hist.loaded.as_ref().unwrap().is_empty());
     assert!(!dir.exists(), "no se vuelve a crear");
+}
+
+/// El hilo de la ventana nunca espera al candado que tienen los hilos del historial mientras
+/// guardan, leen o borran: terminar un análisis con otro guardado en curso no la traba.
+#[test]
+fn ui_thread_never_waits_for_history_lock() {
+    let dir = tmp("candado");
+    let root = tmp("raiz-candado");
+    let mut x = view(&root, &dir, 500);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _g = history::hold_io_lock_for_tests();
+        tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+    });
+    rx.recv().unwrap();
+    let t0 = Instant::now();
+    finish_with(&mut x, tree("r", 1, 1, 1));
+    x.prepare(rect(0.0, 0.0, 1400.0, 790.0));
+    assert!(t0.elapsed() < Duration::from_millis(500), "la ventana esperó {:?}", t0.elapsed());
+    holder.join().unwrap();
+    wait_history(&mut x);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -13,6 +13,7 @@ impl App {
         let (on, days) = (self.config.xtree_history, self.xtree_days);
         if let Some(x) = &mut self.xtree {
             x.set_history(on, days, dir);
+            x.set_history_clears(self.xtree_history_clears.clone());
         }
     }
 
@@ -39,7 +40,8 @@ impl App {
             return;
         }
         let Some(dir) = crate::session::config_dir().map(|d| d.join(crate::xtree::history::DIR_NAME)) else { return };
-        self.spawn_task(move || TaskDone::XtreeHistoryCleared(crate::xtree::history::clear(&dir)));
+        let clears = self.xtree_history_clears.clone();
+        self.spawn_task(move || TaskDone::XtreeHistoryCleared(crate::xtree::history::clear(&dir, &clears)));
     }
 
     /// Terminó «Borrar historial»: la vista deja de mostrar el que tenía.

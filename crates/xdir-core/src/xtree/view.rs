@@ -536,6 +536,12 @@ impl Xtree {
         self.hist.on
     }
 
+    /// Contador de «Borrar historial» de la App: con él, una foto en camino después de borrar no
+    /// se guarda.
+    pub fn set_history_clears(&mut self, clears: super::history::Clears) {
+        self.hist.clears = clears;
+    }
+
     /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
     pub fn history_days(&self) -> u16 {
         self.hist.days

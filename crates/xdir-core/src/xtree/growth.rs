@@ -35,6 +35,8 @@ pub struct HistState {
     slot: Arc<Mutex<Option<Delivered>>>,
     /// Hay un hilo guardando o leyendo.
     pub pending: bool,
+    /// Contador de «Borrar historial» (el de la App); el hilo no guarda si cambió.
+    pub clears: history::Clears,
     /// Parte de la franja bajo el mouse.
     pub hover: Option<StripHit>,
     /// Las que más crecieron de la última carpeta pedida: (clave, lista).
@@ -46,7 +48,7 @@ type GrowersKey = (usize, usize, u32, u16, i32, usize);
 
 impl Default for HistState {
     fn default() -> Self {
-        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), pending: false, hover: None, growers_cache: None }
+        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), pending: false, clears: Default::default(), hover: None, growers_cache: None }
     }
 }
 
@@ -75,10 +77,11 @@ impl HistState {
         }
         let sizes = if self.on { history::select(arena) } else { Vec::new() };
         let (root, today, slot) = (root.to_path_buf(), self.today(), self.slot.clone());
-        let generation = generation.unwrap_or_else(|| history::generation(&dir));
+        let clears = self.clears.clone();
+        let generation = generation.unwrap_or_else(|| clears.load(std::sync::atomic::Ordering::SeqCst));
         self.pending = true;
         let _ = std::thread::Builder::new().spawn(move || {
-            let done = history::if_current(&dir, generation, || {
+            let done = history::if_current(&clears, generation, || {
                 if !sizes.is_empty() {
                     let _ = history::save_snapshot(&dir, &root, today, &sizes);
                 }

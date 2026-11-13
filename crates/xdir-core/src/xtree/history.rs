@@ -325,36 +325,37 @@ pub fn key(root: &Path) -> String {
     format!("{name}-{hash:016x}")
 }
 
-/// Generación de borrado de la carpeta del historial `dir` (sube con cada «Borrar historial»). Sin
-/// E/S: se puede pedir en el hilo de la ventana.
-pub fn generation(dir: &Path) -> u64 {
-    generations().get(dir).copied().unwrap_or(0)
+/// Contador de «Borrar historial»: lo tiene la App y se lo pasa a la vista. El hilo de la ventana
+/// solo lo lee (atómico, sin candado); sube al borrar.
+pub type Clears = std::sync::Arc<std::sync::atomic::AtomicU64>;
+
+/// Candado de E/S del historial: lo toman solo los hilos de trabajo mientras guardan, leen o
+/// borran (nunca el hilo de la ventana), así un guardado y un borrado no se intercalan.
+fn io_lock() -> std::sync::MutexGuard<'static, ()> {
+    static IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    IO.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Generación de borrado de cada carpeta del historial. El candado se toma también mientras se
-/// guarda o se borra: un guardado y un borrado de la misma carpeta nunca se intercalan.
-fn generations() -> std::sync::MutexGuard<'static, HashMap<PathBuf, u64>> {
-    static GENS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, u64>>> = std::sync::OnceLock::new();
-    GENS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+/// El candado de E/S tomado (pruebas).
+#[cfg(test)]
+pub fn hold_io_lock_for_tests() -> impl Drop {
+    io_lock()
 }
 
-/// Corre `f` (guardar o leer el historial de `dir`) solo si nadie borró el historial desde la
-/// generación `generation`; mientras corre, borrar espera. `None` si se borró.
-pub fn if_current<T>(dir: &Path, generation: u64, f: impl FnOnce() -> T) -> Option<T> {
-    let gens = generations();
-    if gens.get(dir).copied().unwrap_or(0) != generation {
-        return None;
-    }
-    let out = f();
-    drop(gens);
-    Some(out)
+/// Corre `f` (guardar o leer el historial) con el candado de E/S, solo si nadie borró el historial
+/// desde que el contador `clears` valía `seen`. `None` si se borró. Bloqueante: en un hilo de
+/// trabajo.
+pub fn if_current<T>(clears: &std::sync::atomic::AtomicU64, seen: u64, f: impl FnOnce() -> T) -> Option<T> {
+    let _io = io_lock();
+    (clears.load(std::sync::atomic::Ordering::SeqCst) == seen).then(f)
 }
 
-/// Borra la carpeta del historial `dir` entera (bloqueante: en un hilo de trabajo). Que no
-/// exista no es un error.
-pub fn clear(dir: &Path) -> Result<(), String> {
-    let mut gens = generations();
-    *gens.entry(dir.to_path_buf()).or_insert(0) += 1;
+/// Borra la carpeta del historial `dir` entera (bloqueante: en un hilo de trabajo). Primero sube
+/// `clears` (lo que estaba por guardarse ya no se guarda) y después espera a lo que esté en curso.
+/// Que no exista no es un error.
+pub fn clear(dir: &Path, clears: &std::sync::atomic::AtomicU64) -> Result<(), String> {
+    clears.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _io = io_lock();
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -831,15 +832,12 @@ mod tests {
     fn clear_cancels_pending_save() {
         let dir = tmp_dir("generacion");
         let root = base("generacion").join("r");
-        let g = generation(&dir);
-        assert_eq!(if_current(&dir, g, || save_snapshot(&dir, &root, 100, &[("".into(), 1)]).is_ok()), Some(true));
+        let clears = Clears::default();
+        let g = clears.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(if_current(&clears, g, || save_snapshot(&dir, &root, 100, &[("".into(), 1)]).is_ok()), Some(true));
         assert!(dir.exists());
-        clear(&dir).unwrap();
-        assert!(generation(&dir) > g);
-        assert_eq!(if_current(&dir, g, || save_snapshot(&dir, &root, 101, &[("".into(), 1)]).is_ok()), None);
+        clear(&dir, &clears).unwrap();
+        assert_eq!(if_current(&clears, g, || save_snapshot(&dir, &root, 101, &[("".into(), 1)]).is_ok()), None);
         assert!(!dir.exists(), "no se vuelve a crear");
-        // Otra carpeta de historial no se entera.
-        let other = tmp_dir("generacion-otra");
-        assert_eq!(generation(&other), 0);
     }
 }

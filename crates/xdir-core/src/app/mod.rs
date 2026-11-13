@@ -482,6 +482,9 @@ pub struct App {
     xtree_days: u16,
     /// Resultado de «Borrar historial» de xtree, para la fila de la configuración.
     xtree_history_msg: Option<String>,
+    /// Contador de «Borrar historial» de xtree (lo comparte con la vista: una foto en camino
+    /// después de borrar no se guarda).
+    xtree_history_clears: crate::xtree::history::Clears,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -713,6 +716,7 @@ impl App {
             xtree_last: session.xtree_last.clone(),
             xtree_days: session.xtree_days,
             xtree_history_msg: None,
+            xtree_history_clears: Default::default(),
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

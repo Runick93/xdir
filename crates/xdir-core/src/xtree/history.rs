@@ -861,6 +861,11 @@ pub fn save_photo_case(dir: &Path, root: &Path, today: i32, photo: &Photo, fold:
     let mut h = read_own(dir, root, fold).unwrap_or_else(|| History { root: root.to_string_lossy().into_owned(), ..Default::default() });
     h.add_photo(today, photo);
     h.consolidate(today);
+    // Ni con una sola foto entra en los topes (rutas enormes): no se escribe (queda el archivo
+    // anterior) y este análisis no deja nada.
+    if !h.fits() {
+        return Ok(());
+    }
     let file = file_for_case(dir, root, fold);
     if let Some(name) = file.file_name() {
         clean_stale(dir, &name.to_string_lossy());
@@ -1524,6 +1529,22 @@ mod tests {
         assert!(load_for(&dir, &root).is_empty());
         assert!(!has_history(&root));
         assert!(has_history(&base("raiz-corta")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Una sola foto que ya no entra en el tope de bytes no se escribe: queda el archivo anterior y
+    /// ese análisis no deja nada.
+    #[test]
+    fn oversized_single_photo_is_not_written() {
+        let dir = tmp_dir("foto-enorme");
+        let root = base("foto-enorme").join("r");
+        save_snapshot(&dir, &root, 100, &[("".into(), 1)]).unwrap();
+        let before = std::fs::read(file_for(&dir, &root)).unwrap();
+        let pad = "x".repeat(MAX_PATH - 10);
+        let mut sizes: Vec<(String, u64)> = vec![("".into(), 2)];
+        sizes.extend((0..MAX_ENTRIES - 1).map(|i| (format!("{pad}{i:05}"), 1)));
+        save_photo(&dir, &root, 500, &Photo { sizes, capped: false, denied: vec![] }).unwrap();
+        assert!(std::fs::read(file_for(&dir, &root)).unwrap() == before, "el anterior queda");
+        assert_eq!(load_for(&dir, &root).days, [100]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

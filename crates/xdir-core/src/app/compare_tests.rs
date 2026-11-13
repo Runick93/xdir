@@ -590,3 +590,23 @@ fn typing_does_not_switch_algorithm_midway() {
     a.on_text_changed(b.0 as isize);
     assert_eq!(a.info.sum.algo, HashAlgo::Md5);
 }
+
+/// Si no se puede crear el hilo, la suma (o la comparación) responde con el error que le toca y
+/// no queda «calculando» para siempre.
+#[test]
+fn spawn_failure_answers_the_right_job() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("sin-hilo", &[("a.bin", b"x"), ("b.bin", b"x")]);
+    go(&mut a, 0, Location::Path(d));
+    select(&mut a, 0, &["a.bin", "b.bin"]);
+    a.jobs.fail_spawn = true;
+    a.run_command(Command::CompareContents);
+    let before = crate::sys::testing::FakeWaker::count(super::compare::WM_APP_COMPARE);
+    a.compare_hash(0);
+    assert!(crate::sys::testing::FakeWaker::count(super::compare::WM_APP_COMPARE) > before, "avisa a la ventana");
+    a.on_compare_message(0);
+    let st = a.compare.as_ref().unwrap();
+    assert!(matches!(&st.status, Status::Failed(m) if m.contains("hilo")), "{:?}", st.status);
+    assert!(st.hashes[0].job.is_none());
+    assert!(matches!(&st.hashes[0].result, Some(Err(m)) if m.contains("hilo")), "{:?}", st.hashes[0].result);
+}

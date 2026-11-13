@@ -113,6 +113,9 @@ impl CompareState {
     }
 }
 
+/// Manda la respuesta de un trabajo (una sola vez).
+type ReplyFn<T> = Box<dyn FnOnce(Result<T, Failure>) + Send>;
+
 /// Los trabajos de la `App` (comparar y sumas): el canal y el próximo número.
 pub(super) struct Jobs {
     pub tx: Sender<JobReply>,
@@ -121,12 +124,22 @@ pub(super) struct Jobs {
     /// Sin avance en este tiempo, un trabajo de la red se abandona (`net::ITEM_LIMIT`; las pruebas
     /// lo achican).
     pub limit: Duration,
+    /// Pruebas: como si no se pudiera crear el hilo.
+    #[cfg(test)]
+    pub fail_spawn: bool,
 }
 
 impl Jobs {
     pub(super) fn new() -> Jobs {
         let (tx, rx) = channel();
-        Jobs { tx, rx, next: 0, limit: crate::net::ITEM_LIMIT }
+        Jobs {
+            tx,
+            rx,
+            next: 0,
+            limit: crate::net::ITEM_LIMIT,
+            #[cfg(test)]
+            fail_spawn: false,
+        }
     }
 }
 
@@ -234,17 +247,34 @@ impl App {
         let is_remote = remote.is_some();
         let worker = Arc::new(Mutex::new(None));
         let (c, p, w) = (cancel.clone(), progress.clone(), worker.clone());
-        let spawned = std::thread::Builder::new().name("xdir-comparar-vigia".into()).spawn(move || {
+        // La respuesta (con la clase de trabajo que corresponde): la manda el hilo o, si no se pudo
+        // crear, este mismo, con el error.
+        let reply: Arc<Mutex<Option<ReplyFn<T>>>> = Arc::new(Mutex::new(Some(Box::new(move |result| {
+            if tx.send(wrap(id, result)).is_ok() {
+                hwnd.post(WM_APP_COMPARE, 0, 0);
+            }
+        }))));
+        let take = |r: &Mutex<Option<ReplyFn<T>>>| r.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let r = reply.clone();
+        let run = move || {
             let pw = p.clone();
             let tick = || hwnd.post(WM_APP_COMPARE, 1, 0);
             let result = compare::run_watched(remote, limit, &c, &p, TICK, &tick, &w, move |stop| work(stop, &pw));
             // Cancelado: nadie lo espera.
-            if !c.load(Ordering::Relaxed) && tx.send(wrap(id, result)).is_ok() {
-                hwnd.post(WM_APP_COMPARE, 0, 0);
+            if !c.load(Ordering::Relaxed)
+                && let Some(send) = r.lock().unwrap_or_else(|e| e.into_inner()).take()
+            {
+                send(result);
             }
-        });
-        if spawned.is_err() {
-            let _ = self.jobs.tx.send(JobReply::Compared { id, result: Err(Failure::Failed("No se pudo crear un hilo".into())) });
+        };
+        #[cfg(test)]
+        let spawned = if self.jobs.fail_spawn { Err(std::io::Error::other("sin hilos")) } else { std::thread::Builder::new().name("xdir-comparar-vigia".into()).spawn(run) };
+        #[cfg(not(test))]
+        let spawned = std::thread::Builder::new().name("xdir-comparar-vigia".into()).spawn(run);
+        if spawned.is_err()
+            && let Some(send) = take(&reply)
+        {
+            send(Err(Failure::Failed("No se pudo crear un hilo".into())));
         }
         Job { id, cancel, progress, remote: is_remote, worker }
     }

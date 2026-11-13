@@ -36,6 +36,9 @@ pub fn select(arena: &[Node]) -> Vec<(String, u64)> {
                 continue;
             }
             let p = if path.is_empty() { k.name.to_string() } else { format!("{path}/{}", k.name) };
+            if p.len() > MAX_PATH {
+                continue;
+            }
             out.push((p.clone(), k.size));
             stack.push((c, d, p));
         }
@@ -53,10 +56,14 @@ pub const VERSION: u16 = 1;
 const MAGIC: &[u8; 4] = b"XDHT";
 /// Tope del archivo: uno más grande no se lee.
 pub const MAX_FILE: usize = 32 * 1024 * 1024;
-/// Tope del largo de una ruta (bytes UTF-8).
-const MAX_PATH: usize = 32 * 1024;
-/// Tope de fotos por archivo (con la consolidación hay unas 83).
-const MAX_SNAPS: usize = 1000;
+/// Tope del largo de una ruta relativa (bytes UTF-8): una más larga no entra en la foto.
+pub const MAX_PATH: usize = 4096;
+/// Tope de rutas distintas por archivo.
+pub const MAX_PATHS: usize = 100_000;
+/// Tope de fotos por archivo (con la consolidación hay unas 84).
+pub const MAX_SNAPS: usize = 200;
+/// Tope de pares (ruta, tamaño) sumando todas las fotos de un archivo.
+pub const MAX_PAIRS: usize = 1_000_000;
 
 /// Una foto: el día (días desde 1970-01-01 en hora local) y el tamaño de cada carpeta, por índice
 /// en la tabla de rutas del historial.
@@ -193,7 +200,7 @@ pub fn decode(bytes: &[u8]) -> Option<History> {
     let root = r.str()?;
     // Cada ruta ocupa al menos el byte de su largo. La reserva inicial es chica: si la cantidad
     // miente, el archivo se termina antes de crecer.
-    let n_paths = r.count(1, MAX_SNAPS * MAX_ENTRIES)?;
+    let n_paths = r.count(1, MAX_PATHS)?;
     let mut paths = Vec::with_capacity(n_paths.min(4096));
     for _ in 0..n_paths {
         paths.push(r.str()?);
@@ -201,16 +208,26 @@ pub fn decode(bytes: &[u8]) -> Option<History> {
     // Cada foto ocupa al menos el día y la cantidad de pares.
     let n_snaps = r.count(5, MAX_SNAPS)?;
     let mut snaps: Vec<Snapshot> = Vec::with_capacity(n_snaps);
-    for _ in 0..n_snaps {
+    let mut pairs = 0usize;
+    // Índices ya vistos en la foto: uno repetido es un archivo roto.
+    let mut seen = vec![u32::MAX; paths.len()];
+    for k in 0..n_snaps {
         let day = i32::from_le_bytes(r.take(4)?.try_into().ok()?);
         if snaps.last().is_some_and(|s| s.day >= day) {
             return None;
         }
         // Cada par ocupa al menos dos bytes.
         let n = r.count(2, MAX_ENTRIES)?;
+        pairs += n;
+        if pairs > MAX_PAIRS {
+            return None;
+        }
         let mut sizes = Vec::with_capacity(n);
         for _ in 0..n {
             let i = u32::try_from(r.uint()?).ok().filter(|&i| (i as usize) < paths.len())?;
+            if std::mem::replace(&mut seen[i as usize], k as u32) == k as u32 {
+                return None;
+            }
             sizes.push((i, r.uint()?));
         }
         snaps.push(Snapshot { day, sizes });
@@ -224,8 +241,13 @@ pub fn read_file(path: &Path) -> Option<History> {
     use std::io::Read;
     #[cfg(test)]
     crate::sys::testing::FakeNetwork::note_disk_io("historial leer", path);
+    let file = std::fs::File::open(path).ok()?;
+    // Uno más grande que el tope ni se lee.
+    if file.metadata().ok()?.len() > MAX_FILE as u64 {
+        return None;
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path).ok()?.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes).ok()?;
+    file.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes).ok()?;
     decode(&bytes)
 }
 
@@ -294,6 +316,24 @@ impl History {
             .collect();
         let mut it = keep.into_iter();
         self.snaps.retain(|_| it.next().unwrap_or(true));
+        // Los topes del archivo: si no entra, se van las fotos más viejas.
+        while self.snaps.len() > 1 && !self.fits() {
+            self.snaps.remove(0);
+        }
+    }
+
+    /// ¿Entra en los topes de `decode` (fotos, pares y rutas usadas)?
+    fn fits(&self) -> bool {
+        let pairs: usize = self.snaps.iter().map(|s| s.sizes.len()).sum();
+        let mut used = vec![false; self.paths.len()];
+        for s in &self.snaps {
+            for &(i, _) in &s.sizes {
+                if let Some(u) = used.get_mut(i as usize) {
+                    *u = true;
+                }
+            }
+        }
+        self.snaps.len() <= MAX_SNAPS && pairs <= MAX_PAIRS && used.iter().filter(|&&u| u).count() <= MAX_PATHS
     }
 }
 
@@ -398,15 +438,20 @@ impl Loaded {
         (depth <= self.levels[snap]).then_some(0)
     }
 
-    /// Une una foto (`levels`: niveles cubiertos) si su día no está todavía.
-    fn merge(&mut self, day: i32, levels: i32, pairs: impl Iterator<Item = (String, u64)>) {
+    /// Índice de la ruta `rel` (la agrega si no estaba).
+    fn intern(&mut self, rel: &str) -> u32 {
+        if let Some(&i) = self.index.get(rel) {
+            return i;
+        }
+        let n = self.index.len() as u32;
+        self.index.insert(rel.to_string(), n);
+        n
+    }
+
+    /// Une una foto (`levels`: niveles cubiertos; pares por índice de `intern`) si su día no está
+    /// todavía.
+    fn merge(&mut self, day: i32, levels: i32, mut sizes: Vec<(u32, u64)>) {
         let Err(at) = self.days.binary_search(&day) else { return };
-        let mut sizes: Vec<(u32, u64)> = pairs
-            .map(|(p, v)| {
-                let n = self.index.len() as u32;
-                (*self.index.entry(p).or_insert(n), v)
-            })
-            .collect();
         sizes.sort_unstable_by_key(|p| p.0);
         self.days.insert(at, day);
         self.levels.insert(at, levels);
@@ -436,22 +481,29 @@ pub fn load_for(dir: &Path, root: &Path) -> Loaded {
         let Some(h) = read_own(dir, top) else { continue };
         let depth = if prefix.is_empty() { 0 } else { prefix.split('/').count() as i32 };
         let under = format!("{prefix}/");
+        // Cada ruta del archivo se recorta y se busca una sola vez: índice del archivo → índice
+        // en `out` (o nada si queda fuera de la subcarpeta).
+        let map: Vec<Option<u32>> = h
+            .paths
+            .iter()
+            .map(|p| {
+                let rel = if prefix.is_empty() {
+                    p.as_str()
+                } else if *p == prefix {
+                    ""
+                } else {
+                    p.strip_prefix(under.as_str())?
+                };
+                Some(out.intern(rel))
+            })
+            .collect();
+        let Some(top_id) = h.paths.iter().position(|p| *p == prefix).and_then(|i| map[i]) else { continue };
         for snap in &h.snaps {
-            let path = |i: u32| h.paths.get(i as usize).map(String::as_str);
             // La foto sirve si tiene a la subcarpeta.
-            if !snap.sizes.iter().any(|&(i, _)| path(i) == Some(prefix.as_str())) {
+            let pairs: Vec<(u32, u64)> = snap.sizes.iter().filter_map(|&(i, v)| map.get(i as usize).copied().flatten().map(|j| (j, v))).collect();
+            if !pairs.iter().any(|&(j, _)| j == top_id) {
                 continue;
             }
-            let pairs = snap.sizes.iter().filter_map(|&(i, v)| {
-                let p = path(i)?;
-                if prefix.is_empty() {
-                    Some((p.to_string(), v))
-                } else if p == prefix {
-                    Some((String::new(), v))
-                } else {
-                    p.strip_prefix(under.as_str()).map(|r| (r.to_string(), v))
-                }
-            });
             out.merge(snap.day, LEVELS as i32 - depth, pairs);
         }
     }
@@ -839,5 +891,58 @@ mod tests {
         clear(&dir, &clears).unwrap();
         assert_eq!(if_current(&clears, g, || save_snapshot(&dir, &root, 101, &[("".into(), 1)]).is_ok()), None);
         assert!(!dir.exists(), "no se vuelve a crear");
+    }
+
+    /// Topes duros: rutas por archivo, largo de una ruta, pares por archivo e índices repetidos en
+    /// una foto se rechazan enseguida (un archivo armado a mano no cuesta memoria ni tiempo).
+    #[test]
+    fn decode_hard_caps() {
+        let head = |n_paths: usize| {
+            let mut b = MAGIC.to_vec();
+            b.extend(VERSION.to_le_bytes());
+            b.push(0);
+            put_uint(&mut b, n_paths as u64);
+            b
+        };
+        // Una ruta de más que el tope (todas vacías, cabe en el archivo).
+        let mut b = head(MAX_PATHS + 1);
+        b.extend(std::iter::repeat_n(0u8, MAX_PATHS + 1));
+        b.push(0);
+        assert_eq!(decode(&b), None, "demasiadas rutas");
+        let mut ok = head(MAX_PATHS);
+        ok.extend(std::iter::repeat_n(0u8, MAX_PATHS));
+        ok.push(0);
+        assert!(decode(&ok).is_some(), "justo el tope");
+        // Una ruta más larga que el tope.
+        let mut b = head(1);
+        put_str(&mut b, &"x".repeat(MAX_PATH + 1));
+        b.push(0);
+        assert_eq!(decode(&b), None, "ruta larga");
+        // El mismo índice dos veces en una foto.
+        let h = History { root: "r".into(), paths: vec!["".into(), "a".into()], snaps: vec![Snapshot { day: 1, sizes: vec![(1, 5), (1, 6)] }] };
+        assert_eq!(decode(&encode_raw(&h)), None, "índice repetido");
+        // Más pares en total que el tope.
+        let paths: Vec<String> = (0..MAX_ENTRIES).map(|i| i.to_string()).collect();
+        let sizes: Vec<(u32, u64)> = (0..MAX_ENTRIES as u32).map(|i| (i, 1)).collect();
+        let n = MAX_PAIRS / MAX_ENTRIES + 1;
+        let snaps = (0..n).map(|d| Snapshot { day: d as i32, sizes: sizes.clone() }).collect();
+        let h = History { root: "r".into(), paths, snaps };
+        assert_eq!(decode(&encode_raw(&h)), None, "demasiados pares");
+    }
+
+    /// Lo que se escribe siempre entra en los topes: si hay demasiadas rutas distintas, se
+    /// descartan las fotos más viejas.
+    #[test]
+    fn save_fits_caps() {
+        let mut h = History::default();
+        let per = MAX_ENTRIES;
+        let snaps = MAX_PATHS / per + 3;
+        for d in 0..snaps {
+            let sizes: Vec<(String, u64)> = (0..per).map(|i| (format!("d{d}/{i}"), 1)).collect();
+            h.add(d as i32, &sizes);
+        }
+        h.consolidate(snaps as i32);
+        assert!(decode(&encode(&h)).is_some());
+        assert_eq!(h.snaps.last().unwrap().day, snaps as i32 - 1, "quedan las nuevas");
     }
 }

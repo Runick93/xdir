@@ -312,6 +312,18 @@ impl App {
 
     pub fn on_drag(&mut self, ev: &mut DragEvent) {
         let (x, y) = ev.point;
+        // El árbol: desplegar la carpeta que queda bajo el puntero, desplazar en los bordes y,
+        // suelto, abrirse mientras se arrastra encima (los eventos llegan también sin mover el
+        // mouse: Windows y macOS los repiten mientras dura el arrastre).
+        #[cfg(feature = "arbol")]
+        if matches!(ev.kind, DragKind::Leave | DragKind::Drop) {
+            self.tree.drag_end(ev.kind == DragKind::Leave);
+        } else {
+            let over = !self.xtree_open && self.tree.contains(x, y) && matches!(self.hit(x, y), Hit::None | Hit::TreePin | Hit::TreeXtree);
+            if self.tree.drag_over(self.hwnd, over.then_some((x, y)), Instant::now(), self.show_hidden) {
+                self.redraw();
+            }
+        }
         if self.on_drag_favbar(ev, x, y) {
             self.set_drop_targets(None);
             return;

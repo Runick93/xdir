@@ -458,6 +458,27 @@ fn remote_navigation_no_ui_io() {
     let mut sug = crate::typed::Suggest::new(crate::geom::Rect::default(), "");
     sug.set_query(&format!("{}{}s", root.display(), std::path::MAIN_SEPARATOR));
     assert!(sug.items.iter().all(|i| !i.ends_with("sub")), "{:?}", sug.items);
+    // #56: arrastrar sobre una conexión de red del árbol (resaltar, desplegar al quedarse encima y
+    // soltar) no le pregunta nada al servidor desde este hilo.
+    #[cfg(feature = "arbol")]
+    {
+        use crate::drop::{DragEvent, DragKind, Effect};
+        a.tree.visible = true;
+        a.tree.set_network(Vec::new(), vec![("n5 (nas)".into(), root.clone(), "smb://nas/n5".into())], Vec::new());
+        a.tree.expand_network(a.hwnd, true);
+        a.paint();
+        let point = a.tree.row_point("n5 (nas)").expect("la conexión en el árbol");
+        let paths = vec![root.join("sub").join("x.txt")];
+        let drag = |a: &mut App, kind| {
+            let mut ev = DragEvent { kind, point, ctrl: false, shift: false, paths: Some(&paths), allowed: Effect::ALL, effect: Effect::NONE };
+            a.on_drag(&mut ev);
+            ev.effect
+        };
+        assert_ne!(drag(&mut a, DragKind::Enter), Effect::NONE);
+        a.tree.age_drag_hover(crate::tree::DRAG_EXPAND);
+        drag(&mut a, DragKind::Over);
+        drag(&mut a, DragKind::Leave);
+    }
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
 }
 

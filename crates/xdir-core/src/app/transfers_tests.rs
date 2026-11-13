@@ -641,6 +641,35 @@ fn drop_on_tree_rejects_computer_network_and_self() {
     assert!(f.exists(&p("/app-tdrop2/d/x.txt")));
 }
 
+/// #56: arrastrando, quedarse sobre un disco plegado del árbol lo despliega (`DRAG_EXPAND`) y
+/// sus subcarpetas aparecen cuando llega la lectura.
+#[cfg(feature = "arbol")]
+#[test]
+fn drag_hover_expands_tree_folder() {
+    let dir = std::env::temp_dir().join(format!("xdir-tdrop3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("subcarpeta")).unwrap();
+    let mut a = app_with_tree_drives(&[(dir.as_path(), "Disco3")]);
+    let at = a.tree.row_point("Disco3").unwrap();
+    let paths = vec![p("/app-tdrop3/x.txt")];
+    drag(&mut a, DragKind::Enter, at, &paths, false);
+    assert!(a.tree.row_point("subcarpeta").is_none());
+    a.tree.age_drag_hover(crate::tree::DRAG_EXPAND);
+    drag(&mut a, DragKind::Over, at, &paths, false);
+    let t0 = std::time::Instant::now();
+    loop {
+        a.on_app_message(crate::tree::WM_APP_TREE, 0, 0);
+        a.paint();
+        if a.tree.row_point("subcarpeta").is_some() {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10), "no se desplegó");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drag(&mut a, DragKind::Leave, (0.0, 0.0), &paths, false);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn undo_move_uses_engine() {
     let f = fake();

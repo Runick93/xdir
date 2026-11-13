@@ -286,6 +286,10 @@ fn table_marker_and_tooltip() {
     assert_eq!(x.mark_tip(a).as_deref(), Some("+5,0 GB en 7 días"));
     assert_eq!(x.mark_at_point(AREA, l.left + 60.0, my), None, "sobre el nombre no");
     assert_eq!(x.mark_at_point(AREA, mx, my + 2.0 * ROW_H), None, "el archivo no tiene ▲");
+    // Con la búsqueda abierta la tabla no se ve: ni ▲ bajo el mouse ni cartel que quede.
+    x.open_search();
+    assert_eq!(x.mark_at_point(AREA, mx, my), None);
+    assert_eq!(x.mark_tip(a), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

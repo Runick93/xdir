@@ -1259,6 +1259,10 @@ impl Xtree {
 
     /// Texto del cartel de la ▲ de la carpeta `id`: «+3,4 GB en 7 días».
     pub fn mark_tip(&self, id: u32) -> Option<String> {
+        // Con la tabla tapada (búsqueda) o cambiando, el cartel que quedaba se va.
+        if self.scanning || self.search.is_some() {
+            return None;
+        }
         growth::row_mark(&self.hist, &self.arena, id, self.hist.today())
     }
 

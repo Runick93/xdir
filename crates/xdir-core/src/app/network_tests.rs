@@ -393,6 +393,7 @@ fn pump_pane(a: &mut App, pane: usize) {
 #[test]
 fn remote_navigation_no_ui_io() {
     let root = remote_dir("n5-nav");
+    std::fs::write(root.join("b.txt"), "x").unwrap();
     let mut init = Init::blank();
     init.session.panes = vec![crate::session::PaneState { tabs: vec![Location::Path(root.join("sub"))], active: 0 }];
     FakeNetwork::mark_ui_thread();
@@ -458,6 +459,29 @@ fn remote_navigation_no_ui_io() {
     let mut sug = crate::typed::Suggest::new(crate::geom::Rect::default(), "");
     sug.set_query(&format!("{}{}s", root.display(), std::path::MAIN_SEPARATOR));
     assert!(sug.items.iter().all(|i| !i.ends_with("sub")), "{:?}", sug.items);
+    // #59: comparar dos archivos de red y la suma de uno, en el panel de comparar: se abren y se
+    // leen en otro hilo (nada del disco en este).
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        let name = list.entries[list.entry_of_pos(p).unwrap()].name.clone();
+        list.set_selected_pos(p, name == "a.txt" || name == "b.txt");
+    }
+    a.run_command(Command::CompareContents);
+    a.paint();
+    let t0 = Instant::now();
+    while a.compare.as_ref().is_some_and(|c| c.job.is_some() || c.status == super::compare::Status::Running) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la comparación no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    a.compare_hash(0);
+    while a.compare.as_ref().is_some_and(|c| c.hashes[0].job.is_some()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert!(matches!(a.compare.as_ref().unwrap().hashes[0].result, Some(Ok(_))));
+    a.paint();
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
 }
 

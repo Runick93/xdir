@@ -141,6 +141,8 @@ pub enum Tone {
     Secondary,
     Accent,
     Danger,
+    /// Verde de «Iguales» / «Coincide».
+    Ok,
     Border,
     Background,
     SurfaceAlt,
@@ -565,7 +567,8 @@ pub fn draw(p: &dyn Painter, l: &Layout, hover: Option<InfoHit>) {
     }
 }
 
-fn paint(p: &dyn Painter, prim: &Prim) {
+/// Pinta una primitiva (también la usa el panel de comparar, `compare::draw`).
+pub(crate) fn paint(p: &dyn Painter, prim: &Prim) {
     let th = p.theme();
     let color = |t: Tone| match t {
         Tone::Text => th.text,
@@ -573,6 +576,7 @@ fn paint(p: &dyn Painter, prim: &Prim) {
         Tone::Secondary => th.text_secondary,
         Tone::Accent => th.accent,
         Tone::Danger => th.danger,
+        Tone::Ok => th.ok,
         Tone::Border => th.border,
         Tone::Background => th.background,
         Tone::SurfaceAlt => th.surface_alt,

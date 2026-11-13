@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use crate::archive_nav::temps;
 use crate::sys::{self, CopyError, ErrKind, Flow, HashAlgo};
 
+pub mod draw;
+
 #[cfg(test)]
 mod tests;
 

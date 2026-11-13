@@ -44,6 +44,7 @@ impl App {
             }
             VK_ESCAPE if self.rename_many.is_some() => self.close_rename_many(),
             VK_ESCAPE if self.info_open() && self.info.focused => self.close_info(),
+            VK_ESCAPE if self.compare.as_ref().is_some_and(|c| c.focused) => self.close_compare(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),

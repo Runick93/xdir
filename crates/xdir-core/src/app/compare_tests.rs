@@ -252,3 +252,98 @@ fn item_menu_offers_compare() {
     select(&mut a, 0, &["a.txt", "b.txt"]);
     assert!(labels(&a).iter().any(|l| l == "Comparar contenido"));
 }
+
+// ---------- El panel ----------
+
+fn texts(host: &FakeHost) -> Vec<String> {
+    host.drawn_texts().into_iter().map(|t| t.1).collect()
+}
+
+/// Clic en el centro de lo que el panel dibujó para `h`.
+fn click(a: &mut App, h: crate::compare::draw::CompareHit) {
+    a.paint();
+    let r = a.compare.as_ref().unwrap().layout.hits.iter().find(|(x, _)| *x == h).unwrap_or_else(|| panic!("{h:?} no está")).1;
+    a.on_left_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+    a.on_left_up((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+}
+
+/// Espera a que la suma del lado `i` termine.
+fn wait_hash(a: &mut App, i: usize) {
+    let t0 = Instant::now();
+    while a.compare.as_ref().unwrap().hashes[i].job.is_some() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+}
+
+/// El panel ocupa el lugar de la vista previa (uno a la vez con información y Renombrar varios),
+/// muestra el resultado y se cierra con ✕ o Esc.
+#[test]
+fn panel_in_the_right_column() {
+    use super::preview::RightPanel;
+    use crate::compare::draw::CompareHit;
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("panel", &[("a.txt", b"hola"), ("b.txt", b"hola")]);
+    go(&mut a, 0, Location::Path(d));
+    select(&mut a, 0, &["a.txt", "b.txt"]);
+    a.run_command(Command::CompareContents);
+    assert_eq!(a.preview.owner, RightPanel::Compare);
+    wait_done(&mut a);
+    a.paint();
+    let t = texts(&host);
+    assert!(t.iter().any(|s| s == "Comparar contenido") && t.iter().any(|s| s == "Iguales"), "{t:?}");
+    assert!(t.iter().any(|s| s == "El contenido es idéntico, byte a byte"), "{t:?}");
+    // Información lo reemplaza; comparar de nuevo reemplaza a información.
+    a.run_command(Command::Properties);
+    assert_eq!(a.preview.owner, RightPanel::Info);
+    assert!(a.compare.is_none());
+    a.run_command(Command::CompareContents);
+    assert_eq!(a.preview.owner, RightPanel::Compare);
+    assert!(!a.info_open());
+    // ✕ cierra y vuelve la columna como estaba (apagada).
+    wait_done(&mut a);
+    click(&mut a, CompareHit::Close);
+    assert!(a.compare.is_none());
+    assert_eq!(a.preview.owner, RightPanel::Preview);
+    // Esc con el foco en el panel también.
+    a.run_command(Command::CompareContents);
+    wait_done(&mut a);
+    a.paint();
+    let r = a.compare.as_ref().unwrap().layout.panel;
+    a.on_left_down(r.left + 5.0, r.bottom - 5.0, false);
+    a.on_left_up(r.left + 5.0, r.bottom - 5.0);
+    assert!(a.compare.as_ref().unwrap().focused);
+    a.on_key(crate::keys::keys::VK_ESCAPE);
+    assert!(a.compare.is_none());
+}
+
+/// «Calcular SHA-256» de cada uno, «Copiar» y si coinciden; «Comparar de nuevo» después de cancelar.
+#[test]
+fn panel_sums_copy_and_retry() {
+    use crate::compare::draw::CompareHit;
+    use crate::sys::testing::{FakeShell, ShellCall};
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("sumas", &[("a.txt", b"hola"), ("b.txt", b"hola")]);
+    go(&mut a, 0, Location::Path(d));
+    select(&mut a, 0, &["a.txt", "b.txt"]);
+    a.run_command(Command::CompareContents);
+    wait_done(&mut a);
+    click(&mut a, CompareHit::Hash(0));
+    click(&mut a, CompareHit::Hash(1));
+    wait_hash(&mut a, 0);
+    wait_hash(&mut a, 1);
+    a.paint();
+    assert!(texts(&host).iter().any(|s| s == "Las dos sumas coinciden"));
+    let sum = a.compare.as_ref().unwrap().hashes[0].result.clone().unwrap().unwrap();
+    assert_eq!(sum.len(), 64);
+    FakeShell::take_calls();
+    click(&mut a, CompareHit::Copy(0));
+    assert!(FakeShell::take_calls().contains(&ShellCall::CopyText(sum)));
+    // Cancelado y de nuevo.
+    a.compare.as_mut().unwrap().status = Status::Cancelled;
+    click(&mut a, CompareHit::Retry);
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
+}

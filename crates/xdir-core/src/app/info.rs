@@ -165,7 +165,7 @@ fn content_text(n: u64, skipped: u64) -> String {
 }
 
 /// «3,8 MB (3.963.904 bytes)».
-fn size_with_bytes(env: &dyn sys::SystemEnv, bytes: u64) -> String {
+pub(super) fn size_with_bytes(env: &dyn sys::SystemEnv, bytes: u64) -> String {
     format!("{} ({} bytes)", env.format_size_short(bytes), crate::format::thousands(bytes))
 }
 
@@ -198,6 +198,7 @@ impl App {
         let shown = self.preview_visible();
         self.preview.owner = RightPanel::Info;
         self.close_rename_many();
+        self.close_compare();
         if !shown {
             self.begin_layout_anim();
         }

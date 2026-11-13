@@ -197,6 +197,8 @@ enum Hit {
     SizeLink,
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
+    /// El panel de comparar: un botón, o el panel sin nada debajo.
+    Compare(crate::compare::draw::CompareHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
     /// «Conectar a un servidor» abierto: un control, o el panel sin nada debajo.

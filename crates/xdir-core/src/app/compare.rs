@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
+use super::preview::RightPanel;
 use super::*;
+use crate::compare::draw::{self as cdraw, CompareHit, HashView, ResultView, SideView, View};
 use crate::compare::{self, Failure, Progress, Source, Verdict};
 use crate::fs::{ATTR_ARCHIVE_BAD, ATTR_LINK};
 use crate::sys::HashAlgo;
@@ -81,6 +83,8 @@ pub(super) struct CompareState {
     pub hashes: [SideHash; 2],
     /// El último clic fue en el panel: Esc lo cierra.
     pub focused: bool,
+    /// Cómo quedó armado el panel en el último cuadro (dibujo y clics).
+    pub layout: cdraw::Layout,
 }
 
 impl CompareState {
@@ -169,6 +173,11 @@ impl App {
                 return;
             }
         };
+        self.start_compare(sides);
+    }
+
+    /// Compara `sides` (de nuevo, con «Comparar de nuevo») y abre el panel.
+    fn start_compare(&mut self, sides: [Side; 2]) {
         if let Some(old) = &mut self.compare {
             old.stop_all();
         }
@@ -179,7 +188,7 @@ impl App {
         } else {
             Status::Running
         };
-        let mut st = CompareState { sides, status, job: None, hashes: Default::default(), focused: false };
+        let mut st = CompareState { sides, status, job: None, hashes: Default::default(), focused: false, layout: cdraw::Layout::default() };
         if st.status == Status::Running {
             let (a, b) = (st.sides[0].source.clone(), st.sides[1].source.clone());
             let remote = a.remote_host().or_else(|| b.remote_host());
@@ -284,16 +293,133 @@ impl App {
         self.redraw();
     }
 
-    /// Abre el panel de comparar en el lugar de la columna (lo implementa el panel).
+    /// Abre el panel en el lugar de la columna (hay uno solo a la vez: información y Renombrar
+    /// varios se cierran).
     fn open_compare_panel(&mut self) {
+        if self.preview.owner == RightPanel::Compare {
+            self.redraw();
+            return;
+        }
+        let shown = self.preview_visible();
+        self.preview.owner = RightPanel::Compare;
+        self.close_info();
+        self.close_rename_many();
+        if !shown {
+            self.begin_layout_anim();
+        }
         self.redraw();
     }
 
-    /// Cierra el panel: corta lo que estaba en curso.
+    /// ¿Está abierto el panel de comparar?
+    pub(super) fn compare_open(&self) -> bool {
+        self.compare.is_some() && self.preview.owner == RightPanel::Compare && self.preview_visible()
+    }
+
+    /// Cierra el panel: corta lo que estaba en curso y vuelve la vista previa si estaba prendida.
     pub(super) fn close_compare(&mut self) {
-        if let Some(mut st) = self.compare.take() {
-            st.stop_all();
+        let Some(mut st) = self.compare.take() else { return };
+        st.stop_all();
+        if self.preview.owner == RightPanel::Compare {
+            if !self.preview.on {
+                self.begin_layout_anim();
+            }
+            self.preview.owner = RightPanel::Preview;
+            self.sync_preview();
         }
         self.redraw();
+    }
+
+    /// Lo que muestra el panel ahora (sin leer nada: del estado y del avance compartido).
+    pub(super) fn compare_view(&self) -> Option<View> {
+        let st = self.compare.as_ref()?;
+        let env = sys::env();
+        let side = |s: &Side| SideView { name: s.name.clone(), folder: s.folder.clone(), size: super::info::size_with_bytes(env, s.size), icon: s.icon };
+        let result = match (&st.status, &st.job) {
+            (Status::Running, Some(j)) => {
+                let p = &j.progress;
+                let extracting = p.extracting.load(Ordering::Relaxed);
+                let (done, total) = (p.done.load(Ordering::Relaxed), p.total.load(Ordering::Relaxed));
+                let label = if extracting { "Extrayendo del comprimido…" } else { "Comparando…" };
+                let detail = if total == 0 { String::new() } else { format!("{} de {}", env.format_size_short(done), env.format_size_short(total)) };
+                ResultView::Running { label: label.into(), fraction: p.fraction(), detail }
+            }
+            (Status::Running, None) => ResultView::Running { label: "Comparando…".into(), fraction: 0.0, detail: String::new() },
+            (Status::Done(v), _) => {
+                let (same, detail) = match v {
+                    Verdict::Same => (true, "El contenido es idéntico, byte a byte".to_string()),
+                    Verdict::SameFile => (true, "Es el mismo archivo".to_string()),
+                    Verdict::SizeDiffers { a, b } => {
+                        (false, format!("Tamaños distintos: {} y {} bytes", crate::format::thousands(*a), crate::format::thousands(*b)))
+                    }
+                    Verdict::DiffersAt(at) => (false, format!("Primer byte distinto en la posición {}", compare::offset_text(*at))),
+                };
+                ResultView::Verdict { same, detail }
+            }
+            (Status::Failed(m), _) => ResultView::Failed(m.clone()),
+            (Status::Cancelled, _) => ResultView::Cancelled,
+        };
+        let hash = |h: &SideHash| match (&h.job, &h.result) {
+            (Some(j), _) => HashView::Running(j.progress.fraction()),
+            (None, Some(Ok(s))) => HashView::Done(s.clone()),
+            (None, Some(Err(m))) => HashView::Failed(m.clone()),
+            (None, None) => HashView::Idle,
+        };
+        Some(View { sides: [side(&st.sides[0]), side(&st.sides[1])], result, hashes: [hash(&st.hashes[0]), hash(&st.hashes[1])] })
+    }
+
+    /// Arma el panel para este cuadro en `r` (lo dibuja `paint` y lo usan los clics).
+    pub(super) fn layout_compare(&mut self, r: geom::Rect) {
+        let Some(view) = self.compare_view() else { return };
+        let host = self.host.clone();
+        let l = cdraw::layout(r, &view, &|s| host.text_width(s, false));
+        if let Some(st) = &mut self.compare {
+            st.layout = l;
+        }
+    }
+
+    /// Qué hay del panel en `(x, y)`.
+    pub(super) fn compare_hit(&self, x: f32, y: f32) -> Option<CompareHit> {
+        if !self.compare_open() {
+            return None;
+        }
+        cdraw::hit(&self.compare.as_ref()?.layout, x, y)
+    }
+
+    /// Un clic en el panel.
+    pub(super) fn compare_click(&mut self, h: CompareHit) {
+        match h {
+            CompareHit::Close => self.close_compare(),
+            CompareHit::Cancel => self.cancel_compare(),
+            CompareHit::Retry => {
+                if let Some(sides) = self.compare.as_ref().map(|s| s.sides.clone()) {
+                    self.start_compare(sides);
+                }
+            }
+            CompareHit::Hash(i) => self.compare_hash(i),
+            CompareHit::Copy(i) => {
+                if let Some(Some(Ok(hex))) = self.compare.as_ref().map(|s| s.hashes[i].result.clone()) {
+                    let _ = sys::shell().copy_text(self.hwnd, &hex);
+                    self.notice = Some("Se copió la suma SHA-256".into());
+                }
+            }
+            CompareHit::Body => {}
+        }
+        self.redraw();
+    }
+}
+
+impl App {
+    /// Pruebas (`comparar <qué> [n]`): un clic en el panel de comparar sin buscar coordenadas.
+    #[cfg(feature = "pruebas")]
+    pub(super) fn compare_test(&mut self, what: &str, n: usize) {
+        let h = match what {
+            "suma" => CompareHit::Hash(n.min(1)),
+            "copiar" => CompareHit::Copy(n.min(1)),
+            "cancelar" => CompareHit::Cancel,
+            "de_nuevo" => CompareHit::Retry,
+            "cerrar" => CompareHit::Close,
+            _ => return,
+        };
+        self.compare_click(h);
     }
 }

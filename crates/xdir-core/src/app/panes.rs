@@ -529,6 +529,9 @@ impl App {
             "notice" => self.notice = Some(format!("{a} {b}").trim().to_string()),
             "close" => self.close_palette(),
             "info" => self.info_test(a, nb),
+            // `comparar <qué> [n]`: un clic en el panel de comparar (`suma`, `copiar`, `cancelar`,
+            // `de_nuevo`, `cerrar`).
+            "comparar" => self.compare_test(a, nb),
             // Configuración: `config_pagina <id>` va a esa página; `config_parte <id> <parte>` es
             // un clic en esa parte de una fila (como la vio el último cuadro).
             "config_pagina" => {

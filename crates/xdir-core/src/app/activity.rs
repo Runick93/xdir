@@ -16,6 +16,8 @@ use super::*;
 pub(super) const WM_APP_ACTIVITY: u32 = WM_APP + 36;
 /// Lo que dura menos que esto no se muestra (sin parpadeo).
 pub(super) const SHOW_AFTER: Duration = Duration::from_millis(300);
+/// Lo que llegó a verse queda al menos esto (aunque termine antes): sin destellos de un cuadro.
+pub(super) const MIN_SHOWN: Duration = Duration::from_millis(400);
 /// Cada cuánto se redibuja mientras haya algo en curso (el indicador avanza 10 pasos por segundo).
 pub(super) const FRAME: Duration = Duration::from_millis(100);
 
@@ -54,11 +56,15 @@ pub(super) struct Activity {
     pub delay: Duration,
     /// Sale del estado de la `App` (`set_derived`), no de `begin`.
     derived: bool,
+    /// Cuándo se vio por primera vez en el indicador (`observe`).
+    seen_at: Option<Instant>,
+    /// Ya terminó; sigue a la vista hasta cumplir `MIN_SHOWN` desde `seen_at`.
+    ended: bool,
 }
 
 impl Activity {
     fn shown(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.since) >= self.delay
+        self.seen_at.is_some() || now.saturating_duration_since(self.since) >= self.delay
     }
 }
 
@@ -81,12 +87,36 @@ impl Activities {
 
     /// Terminó (bien, mal o cancelado).
     pub fn end(&mut self, key: &ActivityKey) {
-        self.items.retain(|a| &a.key != key);
+        Self::finish(&mut self.items, |a| &a.key == key);
+    }
+
+    /// Termina los que cumplen `done`: lo que no llegó a verse sale ya; lo que se vio queda
+    /// marcado hasta cumplir `MIN_SHOWN` (lo saca `observe`).
+    fn finish(items: &mut Vec<Activity>, done: impl Fn(&Activity) -> bool) {
+        items.retain_mut(|a| {
+            if !done(a) {
+                return true;
+            }
+            a.ended = true;
+            a.seen_at.is_some()
+        });
+    }
+
+    /// Después de cada cuadro: anota lo que se empezó a ver y saca lo terminado que ya se vio el
+    /// mínimo.
+    pub fn observe(&mut self, now: Instant) {
+        for a in &mut self.items {
+            if a.seen_at.is_none() && a.shown(now) {
+                a.seen_at = Some(now);
+            }
+        }
+        self.items.retain(|a| !a.ended || a.seen_at.is_some_and(|s| now.saturating_duration_since(s) < MIN_SHOWN));
     }
 
     fn put(&mut self, key: ActivityKey, text: String, since: Option<Instant>, delay: Duration, derived: bool, now: Instant) {
         match self.items.iter_mut().find(|a| a.key == key) {
             Some(a) => {
+                a.ended = false;
                 a.text = text;
                 a.delay = delay;
                 a.derived = derived;
@@ -94,14 +124,14 @@ impl Activities {
                     a.since = s;
                 }
             }
-            None => self.items.push(Activity { key, text, since: since.unwrap_or(now), delay, derived }),
+            None => self.items.push(Activity { key, text, since: since.unwrap_or(now), delay, derived, seen_at: None, ended: false }),
         }
     }
 
     /// Lo que sale del estado en este cuadro: reemplaza lo derivado del cuadro anterior (lo que
     /// ya no está, terminó); lo de `begin` queda.
     pub fn set_derived(&mut self, list: Vec<Derived>, now: Instant) {
-        self.items.retain(|a| !a.derived || list.iter().any(|(k, ..)| *k == a.key));
+        Self::finish(&mut self.items, |a| a.derived && !list.iter().any(|(k, ..)| *k == a.key));
         for (key, text, since, delay) in list {
             self.put(key, text, since, delay, true, now);
         }
@@ -109,7 +139,7 @@ impl Activities {
 
     #[cfg(test)]
     pub fn contains(&self, key: &ActivityKey) -> bool {
-        self.items.iter().any(|a| &a.key == key)
+        self.items.iter().any(|a| &a.key == key && !a.ended)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -299,6 +329,32 @@ mod tests {
         assert!(a.contains(&ActivityKey::Connect(7)));
         assert!(!a.contains(&ActivityKey::SelSize));
         assert_eq!(sel_size_text(1), "Calculando el tamaño de 1 carpeta");
+    }
+
+    /// Ronda 1: lo que se llegó a ver queda al menos `MIN_SHOWN`; lo que no se vio sale enseguida.
+    #[test]
+    fn shown_stays_a_minimum() {
+        let t0 = Instant::now();
+        let mut a = Activities::default();
+        a.begin(ActivityKey::Connect(1), "Conectando", t0);
+        a.observe(t0 + ms(310));
+        a.end(&ActivityKey::Connect(1));
+        assert!(!a.contains(&ActivityKey::Connect(1)));
+        a.observe(t0 + ms(320));
+        assert_eq!(a.shown(t0 + ms(320)).len(), 1, "sigue a la vista");
+        assert_eq!(a.next_tick(t0 + ms(320)), Some(FRAME));
+        a.observe(t0 + ms(710));
+        assert!(a.is_empty());
+        // Lo derivado, igual.
+        a.set_derived(vec![(ActivityKey::SelSize, "x".into(), Some(t0), SHOW_AFTER)], t0);
+        a.observe(t0 + ms(300));
+        a.set_derived(Vec::new(), t0 + ms(301));
+        a.observe(t0 + ms(301));
+        assert_eq!(a.shown(t0 + ms(301)).len(), 1);
+        // Termina antes de verse: sale ya.
+        a.begin(ActivityKey::Extract, "x", t0 + ms(400));
+        a.end(&ActivityKey::Extract);
+        assert!(!a.items.iter().any(|x| x.key == ActivityKey::Extract));
     }
 
     #[test]

@@ -73,6 +73,10 @@ fn indicator_after_threshold_with_tooltip() {
     }
     a.paint();
     assert!(!a.activity.contains(&ActivityKey::SelSize));
+    // Ronda 1: se vio desde los 0,3 s; queda hasta cumplir el mínimo (sin destellos).
+    assert!(a.activity_rect.is_some());
+    crate::clock::set(Some(t0 + ms(700)));
+    a.paint();
     assert_eq!(a.activity_rect, None);
     assert_eq!(a.tooltip_text(Hit::Activity), None);
 }

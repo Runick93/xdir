@@ -44,6 +44,8 @@ impl App {
         // Lo que corre en segundo plano: el indicador (y su cartel) desde su umbral.
         let clock = self.now();
         self.sync_activity(clock);
+        // Lo que se ve desde este cuadro queda al menos `MIN_SHOWN` (sin destellos).
+        self.activity.observe(clock);
         let activity = !self.activity.shown(clock).is_empty();
         let activity_clickable = self.transfers_progress().is_some();
         // Expulsando o desconectando algo: delante de todo, mientras dure.

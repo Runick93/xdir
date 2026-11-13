@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "xdir-archive"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "tar",
@@ -846,11 +846,11 @@ dependencies = [
 
 [[package]]
 name = "xdir-core"
-version = "0.1.23"
+version = "0.2.0"
 
 [[package]]
 name = "xdir-hash"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "md-5",
  "sha2",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "xdir-linux"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "libc",
  "notify",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "xdir-mac"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "block2",
  "dispatch2",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "xdir-windows"
-version = "0.1.23"
+version = "0.2.0"
 dependencies = [
  "windows",
  "windows-core",

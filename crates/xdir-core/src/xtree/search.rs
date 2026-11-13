@@ -64,6 +64,8 @@ fn collect(arena: &[Node], query: &str, from: usize, to: usize, out: &mut Vec<u3
 /// Ordena lo encontrado (carpetas primero, después de mayor a menor, y por nombre) y arma los
 /// primeros `MAX_RESULTS` con su ruta.
 fn finish(arena: &[Node], query: &str, mut ids: Vec<u32>) -> Found {
+    // Solo ids de este árbol (nunca se indexa fuera).
+    ids.retain(|&id| (id as usize) < arena.len());
     let key = |&id: &u32| {
         let n = &arena[id as usize];
         (!n.is_dir, std::cmp::Reverse(n.size), id)
@@ -94,11 +96,23 @@ pub fn search(arena: &[Node], query: &str, stop: &dyn Fn() -> bool) -> Option<Fo
 /// Busca `query` en el árbol que el escáner todavía está llenando: por tandas de `CHUNK` nodos,
 /// soltando el bloqueo entre una y otra (los nodos solo se agregan al final).
 pub fn search_live(tree: &RwLock<Vec<Node>>, query: &str, stop: &dyn Fn() -> bool) -> Option<Found> {
+    search_live_with(tree, query, stop, &mut || {})
+}
+
+/// `search_live` con algo que corre entre una tanda y la siguiente (con el bloqueo suelto): las
+/// pruebas cambian ahí el árbol, como el escáner.
+fn search_live_with(tree: &RwLock<Vec<Node>>, query: &str, stop: &dyn Fn() -> bool, between: &mut dyn FnMut()) -> Option<Found> {
     let q = crate::palette::fold(query.trim());
     let mut ids = Vec::new();
     let mut from = 0;
     loop {
         let arena = tree.read().ok()?;
+        // El escáner solo agrega nodos al final; si el árbol se achicó, terminó (lo vació al
+        // entregar el terminado) o es otro: lo juntado ya no vale. La búsqueda se repite sobre el
+        // árbol terminado (`Xtree::refresh_search`).
+        if arena.len() < from {
+            return None;
+        }
         let to = (from + CHUNK).min(arena.len());
         if !collect(&arena, &q, from, to, &mut ids, stop) {
             return None;
@@ -107,6 +121,8 @@ pub fn search_live(tree: &RwLock<Vec<Node>>, query: &str, stop: &dyn Fn() -> boo
             return Some(finish(&arena, query, ids));
         }
         from = to;
+        drop(arena);
+        between();
     }
 }
 
@@ -179,6 +195,33 @@ mod tests {
         assert_eq!(search(&a, "n", &|| true), None);
         let live = RwLock::new(a);
         assert_eq!(search_live(&live, "n", &|| true), None);
+    }
+
+    /// C1: el escáner termina (vacía el árbol en vivo) entre dos tandas: la búsqueda se descarta
+    /// (`None`) en lugar de leer nodos que ya no están.
+    #[test]
+    fn search_live_tree_taken_between_chunks() {
+        let mut a = vec![node("raiz", NO_PARENT, 0, true)];
+        a.extend((0..(CHUNK * 2)).map(|i| node(if i < 10 { "objetivo" } else { "otro" }, 0, 1, false)));
+        let live = RwLock::new(a);
+        let mut first = true;
+        let r = search_live_with(&live, "objetivo", &|| false, &mut || {
+            if std::mem::take(&mut first) {
+                let _ = std::mem::take(&mut *live.write().unwrap());
+            }
+        });
+        assert_eq!(r, None);
+        // Y si el árbol cambió por otro más chico (otro escaneo), también.
+        let mut b = vec![node("raiz", NO_PARENT, 0, true)];
+        b.extend((0..(CHUNK + 5)).map(|_| node("objetivo", 0, 1, false)));
+        let live = RwLock::new(b);
+        let mut first = true;
+        let r = search_live_with(&live, "objetivo", &|| false, &mut || {
+            if std::mem::take(&mut first) {
+                *live.write().unwrap() = vec![node("raiz", NO_PARENT, 0, true), node("x", 0, 1, false)];
+            }
+        });
+        assert_eq!(r, None);
     }
 
     #[test]

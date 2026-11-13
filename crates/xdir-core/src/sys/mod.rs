@@ -26,7 +26,7 @@ mod copy;
 mod archives;
 mod hashes;
 
-pub use hashes::{HashAlgo, Hashes, Reader, io_error};
+pub use hashes::{HashAlgo, Hashes, Opened, Reader, io_error};
 pub use archives::{Archives, Pick, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
     CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,

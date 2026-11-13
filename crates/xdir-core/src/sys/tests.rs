@@ -114,7 +114,7 @@ fn fake_shell_records_per_thread_and_answers() {
 // ---------- Sumas de verificación (`Hashes`) ----------
 
 fn fake_sum(path: &std::path::Path, algo: HashAlgo) -> String {
-    let mut r = hashes().open(path).expect("se abre");
+    let mut r = hashes().open(path).expect("se abre").reader;
     hashes().hash(&mut r, algo, &mut |_| Flow::Continue).unwrap().expect("sin corte")
 }
 
@@ -132,6 +132,8 @@ fn fake_hashes_read_fake_and_real_disk() {
     std::fs::write(&real, b"hola").unwrap();
     let other = base.join("c.bin");
     std::fs::write(&other, b"chau").unwrap();
+    assert_eq!(hashes().open(&fake).unwrap().size, 4);
+    assert_eq!(hashes().open(&real).unwrap().size, 4);
     for algo in HashAlgo::ALL {
         let a = fake_sum(&fake, algo);
         assert_eq!(a.len(), algo.hex_len());
@@ -165,7 +167,7 @@ fn fake_hashes_hang_and_note_ui_io() {
     FakeNetwork::set_remote(&base);
     FakeNetwork::hang(&base.to_string_lossy(), std::time::Duration::from_millis(150));
     let t0 = std::time::Instant::now();
-    let mut r = hashes().open(&f).unwrap();
+    let mut r = hashes().open(&f).unwrap().reader;
     let mut buf = [0u8; 4];
     let _ = r.read(&mut buf).unwrap();
     assert!(t0.elapsed() >= std::time::Duration::from_millis(150));

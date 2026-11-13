@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{FakeCopyPrims, FakeNetwork};
-use crate::sys::{CopyError, Flow, HashAlgo, Hashes, Reader, io_error};
+use crate::sys::{CopyError, Flow, HashAlgo, Hashes, Opened, io_error};
 
 pub struct FakeHashes;
 
@@ -28,16 +28,18 @@ impl<R: Read> Read for Slow<R> {
 }
 
 impl Hashes for FakeHashes {
-    fn open(&self, path: &Path) -> Result<Reader, CopyError> {
+    fn open(&self, path: &Path) -> Result<Opened, CopyError> {
         FakeNetwork::note_io("open", path);
         let hang = FakeNetwork::hang_for(&path.to_string_lossy());
         let disk = FakeCopyPrims::shared();
         if disk.exists(path) {
             let data = disk.read_content(path)?;
-            return Ok(Box::new(Slow { inner: Cursor::new(data), hang }));
+            let size = data.len() as u64;
+            return Ok(Opened { reader: Box::new(Slow { inner: Cursor::new(data), hang }), size });
         }
         let f = std::fs::File::open(path).map_err(|e| io_error(&e, path))?;
-        Ok(Box::new(Slow { inner: f, hang }))
+        let size = f.metadata().map_err(|e| io_error(&e, path))?.len();
+        Ok(Opened { reader: Box::new(Slow { inner: f, hang }), size })
     }
 
     fn hash(&self, r: &mut dyn Read, algo: HashAlgo, progress: &mut dyn FnMut(u64) -> Flow) -> io::Result<Option<String>> {

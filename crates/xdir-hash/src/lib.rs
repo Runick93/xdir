@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::ops::ControlFlow;
 use std::path::Path;
 
-use xdir_core::sys::{CopyError, ErrKind, Flow, Hashes, Reader};
+use xdir_core::sys::{CopyError, ErrKind, Flow, Hashes, Opened};
 
 #[cfg(test)]
 mod tests;
@@ -101,18 +101,18 @@ pub fn hex(bytes: &[u8]) -> String {
 pub struct SystemHashes;
 
 impl Hashes for SystemHashes {
-    fn open(&self, path: &Path) -> Result<Reader, CopyError> {
-        match std::fs::File::open(path) {
-            Ok(f) => Ok(Box::new(f)),
-            Err(e) => {
-                let mut err = xdir_core::sys::io_error(&e, path);
-                // Windows: violación de uso compartido o de bloqueo (otro programa lo tiene).
-                if cfg!(windows) && matches!(e.raw_os_error(), Some(32) | Some(33)) {
-                    err.kind = ErrKind::InUse;
-                }
-                Err(err)
+    fn open(&self, path: &Path) -> Result<Opened, CopyError> {
+        let error = |e: io::Error| {
+            let mut err = xdir_core::sys::io_error(&e, path);
+            // Windows: violación de uso compartido o de bloqueo (otro programa lo tiene).
+            if cfg!(windows) && matches!(e.raw_os_error(), Some(32) | Some(33)) {
+                err.kind = ErrKind::InUse;
             }
-        }
+            err
+        };
+        let f = std::fs::File::open(path).map_err(error)?;
+        let size = f.metadata().map_err(error)?.len();
+        Ok(Opened { reader: Box::new(f), size })
     }
 
     fn hash(&self, r: &mut dyn Read, algo: Algo, progress: &mut dyn FnMut(u64) -> Flow) -> io::Result<Option<String>> {

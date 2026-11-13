@@ -42,10 +42,16 @@ impl HashAlgo {
 /// Un lector de un archivo abierto con `Hashes::open`.
 pub type Reader = Box<dyn Read + Send>;
 
+/// Un archivo abierto: el lector y su tamaño al abrirlo.
+pub struct Opened {
+    pub reader: Reader,
+    pub size: u64,
+}
+
 pub trait Hashes: Send + Sync {
-    /// Abre `path` para leerlo por bloques (lo sigue si es un enlace). Bloqueante: solo en hilos de
-    /// trabajo.
-    fn open(&self, path: &Path) -> Result<Reader, CopyError>;
+    /// Abre `path` para leerlo por bloques (lo sigue si es un enlace), con su tamaño. Bloqueante:
+    /// solo en hilos de trabajo.
+    fn open(&self, path: &Path) -> Result<Opened, CopyError>;
     /// La suma de todo lo que da `r`, en hexadecimal en minúscula. `progress` recibe lo leído en
     /// total después de cada bloque; `Flow::Stop` corta y devuelve `Ok(None)`.
     fn hash(&self, r: &mut dyn Read, algo: HashAlgo, progress: &mut dyn FnMut(u64) -> Flow) -> io::Result<Option<String>>;

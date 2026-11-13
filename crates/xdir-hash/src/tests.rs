@@ -117,10 +117,12 @@ fn system_service_opens_and_hashes() {
     let f = dir.join("abc.txt");
     std::fs::write(&f, b"abc").unwrap();
     let s = SystemHashes;
-    let mut r = s.open(&f).unwrap();
+    let opened = s.open(&f).unwrap();
+    assert_eq!(opened.size, 3);
+    let mut r = opened.reader;
     let got = s.hash(&mut r, Algo::Sha256, &mut |_| Flow::Continue).unwrap();
     assert_eq!(got.as_deref(), Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
-    let mut r = s.open(&f).unwrap();
+    let mut r = s.open(&f).unwrap().reader;
     assert_eq!(s.hash(&mut r, Algo::Md5, &mut |_| Flow::Stop).unwrap(), None);
     assert!(matches!(s.open(&dir.join("no-esta")), Err(e) if e.kind == ErrKind::NotFound));
     let _ = std::fs::remove_dir_all(&dir);

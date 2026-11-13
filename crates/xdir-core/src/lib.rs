@@ -13,6 +13,7 @@ pub mod archive_nav;
 pub mod changelog;
 pub mod changelog_draw;
 pub mod commands;
+pub mod compare;
 pub mod config;
 pub mod console;
 pub mod drop;

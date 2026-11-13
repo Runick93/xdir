@@ -122,6 +122,11 @@ impl SelSize {
         self.cache.get(path).map(|&(b, ..)| b)
     }
 
+    /// Cuántas carpetas elegidas se suman (para el cartel del indicador de actividad).
+    pub(super) fn folders(&self) -> usize {
+        self.key.as_ref().map_or(0, |k| k.folders.len())
+    }
+
     /// Lo que va en la barra de estado.
     pub(super) fn total(&self) -> SelTotal {
         match &self.key {

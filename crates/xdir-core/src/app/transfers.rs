@@ -97,16 +97,22 @@ struct CopyWindow {
 pub type AfterJobs = Box<dyn FnOnce(&mut App)>;
 
 /// Un disco que se está expulsando (desde que se pide hasta que termina): no empiezan trabajos
-/// que lo usen.
+/// que lo usen. `verb` y `since`: para la barra de estado y el indicador de actividad.
 #[derive(Clone)]
 struct Ejecting {
     root: PathBuf,
     volume: Option<OsString>,
     label: String,
+    verb: Verb,
+    since: Instant,
+    /// Lectores (comparar, sumas, tamaño de carpeta) que todavía no soltaron los archivos: los
+    /// baja el hilo que expulsa a medida que terminan.
+    readers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Un «Expulsar» que espera a que terminen (y limpien) los trabajos sobre el disco.
 struct PendingEject {
+    root: PathBuf,
     jobs: Vec<JobId>,
     then: AfterJobs,
 }
@@ -253,6 +259,34 @@ pub enum Verb {
     Disconnect,
 }
 
+/// Lo que dice la barra de estado mientras se expulsa o desconecta: «Expulsando "Pendrive"…», o
+/// con `waiting` operaciones canceladas que todavía limpian, «Esperando a que terminen 2
+/// operaciones para expulsar "Pendrive"…».
+pub fn ejecting_text(verb: Verb, label: &str, waiting: usize) -> String {
+    let what = match verb {
+        Verb::Eject => "expulsar",
+        Verb::Disconnect => "desconectar",
+    };
+    match waiting {
+        0 => match verb {
+            Verb::Eject => format!("Expulsando \"{label}\"…"),
+            Verb::Disconnect => format!("Desconectando \"{label}\"…"),
+        },
+        1 => format!("Esperando a que termine 1 operación para {what} \"{label}\"…"),
+        n => format!("Esperando a que terminen {n} operaciones para {what} \"{label}\"…"),
+    }
+}
+
+/// Lo que dice la barra mientras los lectores de xdir (comparar, sumas, tamaño de carpeta) sueltan
+/// los archivos del disco antes de expulsarlo o desconectarlo.
+pub fn readers_text(verb: Verb, label: &str) -> String {
+    let what = match verb {
+        Verb::Eject => "expulsar",
+        Verb::Disconnect => "desconectar",
+    };
+    format!("Esperando a que terminen las lecturas en curso para {what} \"{label}\"…")
+}
+
 /// «Hay 1 operación sobre "fotos". ¿Cancelarla y desconectar?»
 pub fn disconnect_question(jobs: usize, label: &str) -> String {
     if jobs == 1 {
@@ -281,6 +315,9 @@ pub fn omitted_text(n: usize) -> String {
 fn skipped_text(n: usize) -> String {
     if n == 1 { "Se omitió 1 elemento que ya existía".into() } else { format!("Se omitieron {n} elementos que ya existían") }
 }
+
+/// Entre dos textos de la barra de estado.
+const NOTICE_JOIN: &str = "   ·   ";
 
 /// Los clics en un conflicto recién aparecido no cuentan durante este tiempo.
 const CONFLICT_GUARD: std::time::Duration = std::time::Duration::from_millis(400);
@@ -964,6 +1001,54 @@ impl App {
         self.transfers.root_ids = ids.into_iter().collect();
     }
 
+    /// ¿Se está expulsando (o desconectando) `root`? Su ⏏ gira y no se puede volver a tocar.
+    pub(super) fn is_ejecting(&self, root: &Path) -> bool {
+        self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|e| crate::sys::same_path_folded(&e.root, root))
+    }
+
+    /// Las raíces que se están expulsando o desconectando.
+    pub(super) fn ejecting_roots(&self) -> Vec<PathBuf> {
+        self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|e| e.root.clone()).collect()
+    }
+
+    /// Lo que se está expulsando o desconectando, en el orden en que se pidió: (raíz, texto de la
+    /// barra de estado, desde cuándo).
+    pub(super) fn ejecting_now(&self) -> Vec<(PathBuf, String, Instant)> {
+        let list = self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        list.into_iter()
+            .map(|e| {
+                let waiting = self
+                    .transfers
+                    .pending_eject
+                    .iter()
+                    .filter(|p| p.root == e.root)
+                    .flat_map(|p| p.jobs.iter())
+                    .filter(|id| self.transfers.jobs.iter().any(|j| j.id == **id && j.state != JobState::Done))
+                    .count();
+                let text = match e.readers.load(Ordering::Relaxed) {
+                    n if n > 0 && waiting == 0 => readers_text(e.verb, &e.label),
+                    _ => ejecting_text(e.verb, &e.label, waiting),
+                };
+                (e.root, text, e.since)
+            })
+            .collect()
+    }
+
+    /// Los lectores (`n`) que el hilo de expulsar `root` espera que suelten los archivos: el contador
+    /// que va bajando (lo lee la barra de estado).
+    pub(super) fn ejecting_readers(&self, root: &Path, n: usize) -> Arc<std::sync::atomic::AtomicUsize> {
+        let list = self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner());
+        let left = list.iter().find(|e| e.root == root).map_or_else(Arc::default, |e| e.readers.clone());
+        left.store(n, Ordering::Relaxed);
+        left
+    }
+
+    /// La barra de estado mientras se expulsa o desconecta algo (`None`: nada).
+    pub(super) fn eject_status(&self) -> Option<String> {
+        let texts: Vec<String> = self.ejecting_now().into_iter().map(|(_, t, _)| t).collect();
+        (!texts.is_empty()).then(|| texts.join(NOTICE_JOIN))
+    }
+
     /// Terminó de expulsar `root` (bien o mal): ya pueden empezar copias sobre él.
     pub(super) fn eject_done(&mut self, root: &Path) {
         self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| e.root != root);
@@ -976,7 +1061,7 @@ impl App {
     /// expulsa (dijo que no).
     pub fn eject_after_jobs(&mut self, root: &Path, label: &str, verb: Verb, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
-        let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string() };
+        let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string(), verb, since: crate::clock::now(), readers: Arc::default() };
         if ids.is_empty() {
             // Hasta que termine de expulsar (`eject_done`) no empiezan copias sobre el disco.
             self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push(ejecting);
@@ -997,7 +1082,7 @@ impl App {
             }
         }
         self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push(ejecting);
-        self.transfers.pending_eject.push(PendingEject { jobs: ids, then });
+        self.transfers.pending_eject.push(PendingEject { root: root.to_path_buf(), jobs: ids, then });
         true
     }
 }

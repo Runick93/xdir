@@ -239,8 +239,12 @@ fn cancel_discards_late_result() {
     let (mut a, _h) = open_with("smb://nas-n4late/x");
     let tabs = a.panes[a.active].tabs.len();
     a.connect_dialog_click(Some(DialogHit::Connect), false);
+    let g = a.net.dialog.as_ref().and_then(|d| d.busy).expect("intento en curso");
+    assert!(a.activity.contains(&super::activity::ActivityKey::Connect(g)));
     a.connect_dialog_click(Some(DialogHit::Cancel), false);
     assert!(a.net.dialog.as_ref().is_some_and(|d| d.busy.is_none()), "Cancelar con un intento en curso lo descarta y el panel queda");
+    // Ajustes 2 (ronda 1): cancelada, sale del indicador de actividad enseguida.
+    assert!(!a.activity.contains(&super::activity::ActivityKey::Connect(g)));
     wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
     assert!(a.net.dialog.is_some());
     assert_eq!(a.panes[a.active].tabs.len(), tabs);
@@ -555,6 +559,13 @@ fn remote_navigation_no_ui_io() {
     assert!(a.info.sum.results.iter().any(|(_, r)| r.is_ok()), "{:?}", a.info.sum.results);
     a.paint();
     assert_eq!(FakeNetwork::ui_io_calls()[seen..], Vec::<String>::new());
+    // Ajustes 2: desconectar y dibujar mientras tanto (⏏ girando, «Desconectando…», indicador).
+    a.net.connections = vec![conn("smb://nas-n5nav/fotos", &root.to_string_lossy())];
+    a.eject(root.clone());
+    crate::clock::set(Some(Instant::now() + Duration::from_secs(1)));
+    a.paint();
+    assert!(a.activity_rect.is_some());
+    assert_eq!(FakeNetwork::ui_io_calls()[seen..], Vec::<String>::new());
 }
 
 #[test]
@@ -596,6 +607,151 @@ fn slow_state_thresholds() {
     // Con un lote ya no es lenta.
     wait_until(&mut a, |a| !a.panes[0].tab().loading);
     assert_eq!(a.panes[0].tab().slow_state(t0 + Duration::from_secs(21)), Slow::No);
+}
+
+/// Ajustes 2: cualquier carpeta que tarda más de 0,5 s en leerse muestra «Cargando…» (la de X70);
+/// antes, nada. Con elementos ya llegados, el cuadro va encima de la lista.
+#[test]
+fn local_slow_load_shows_loading_after_half_second() {
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    let local = tmp_dir("a2-cargando");
+    std::fs::write(local.join("ya-llego.txt"), "x").unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local.clone()));
+    let texts = |h: &FakeHost| h.drawn_texts().into_iter().map(|t| t.1).collect::<Vec<_>>();
+    // La carga sigue (sus mensajes no se entregaron): el inicio se fija para no depender del reloj.
+    let now = Instant::now();
+    a.panes[0].tab_mut().set_loading_since(Some(now - Duration::from_millis(300)));
+    assert!(!a.panes[0].tab().shows_loading(now));
+    a.paint();
+    assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
+    a.panes[0].tab_mut().set_loading_since(Some(now - Duration::from_millis(600)));
+    assert!(a.panes[0].tab().shows_loading(now));
+    a.paint();
+    assert!(texts(&host).iter().any(|t| t == "Cargando…"), "{:?}", texts(&host));
+    // Lo que ya llegó se ve debajo del cuadro.
+    a.panes[0].tab_mut().list.append(vec![super::tests::file_entry("ya-llego.txt")]);
+    a.paint();
+    let t = texts(&host);
+    assert!(t.iter().any(|t| t == "Cargando…") && t.iter().any(|t| t == "ya-llego.txt"), "{t:?}");
+    // Ronda 1: la tarjeta frena los clics (no elige la fila tapada) y, sin encabezado (Íconos),
+    // va a 50 del borde de arriba de la lista.
+    let card = a.panes[0].loading_card.expect("la tarjeta");
+    let list = a.panes[0].list;
+    assert_eq!(card.top, list.top + crate::list::HEADER_H + 50.0);
+    let (x, y) = ((card.left + card.right) / 2.0, (card.top + card.bottom) / 2.0);
+    assert_eq!(a.panes[0].hit(x, y), crate::pane::PaneHit::None);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(a.panes[0].tab().list.selected_indices().count(), 0);
+    a.set_view(0, crate::list::View::Icons);
+    a.paint();
+    let card = a.panes[0].loading_card.expect("la tarjeta en Íconos");
+    assert_eq!(card.top, a.panes[0].list.top + 50.0);
+    pump_pane(&mut a, 0);
+    a.paint();
+    assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
+    assert_eq!(a.panes[0].loading_card, None);
+    assert!(!a.panes[0].tab().shows_loading(Instant::now() + Duration::from_secs(5)));
+}
+
+/// Ajustes 2: la conexión en curso está en el indicador de actividad hasta que vuelve.
+#[test]
+fn connecting_in_activity_until_it_returns() {
+    FakeNetwork::hang("nas-a2act", Duration::from_millis(100));
+    let mut a = net_app();
+    let g = a.spawn_connect(0, None, Address::parse("smb://nas-a2act/fotos").unwrap(), Default::default());
+    let key = super::activity::ActivityKey::Connect(g);
+    assert!(a.activity.contains(&key));
+    let now = Instant::now() + Duration::from_secs(1);
+    assert_eq!(a.activity.tip(now).as_deref(), Some("Conectando con \"nas-a2act\""));
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
+    assert!(!a.activity.contains(&key));
+}
+
+/// Ronda 1: una carpeta de red que «no responde» no es «Cargando»: el cartel dice que no responde
+/// y, ya quieto el aviso, no hay temporizador de 100 ms.
+#[test]
+fn not_responding_is_still_in_activity() {
+    let root = remote_dir("a2-no-responde");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(3));
+    let mut a = net_app();
+    // Los otros paneles terminan de leer (si no, también estarían en curso).
+    a.sync_visibility();
+    let t = Instant::now();
+    while a.panes.iter().any(|p| p.tab().loading) {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        if let Ok(ev) = a.rx.recv_timeout(Duration::from_millis(20)) {
+            a.on_load_event(ev);
+        }
+    }
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let t0 = Instant::now();
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    a.panes[0].tab_mut().set_loading_since(Some(t0));
+    let host = crate::tab::remote_host(&root);
+    // Conectando: gira.
+    crate::clock::set(Some(t0 + Duration::from_secs(2)));
+    a.paint();
+    assert_eq!(a.activity.next_tick(t0 + Duration::from_secs(2)), Some(super::activity::FRAME));
+    assert!(!a.activity.all_still(t0 + Duration::from_secs(2)));
+    // No responde: el cartel lo dice y nada se redibuja solo.
+    let now = t0 + Duration::from_secs(21);
+    crate::clock::set(Some(now));
+    a.paint();
+    assert_eq!(a.tooltip_text(super::Hit::Activity), Some(format!("\"{host}\" no responde")));
+    assert_eq!(a.activity.next_tick(now), None);
+    // Ronda 2: en lugar del giro congelado, el aviso quieto (como el de xtree).
+    assert!(a.activity.all_still(now));
+}
+
+/// Ronda 1: el redibujo de los 0,5 s de una lectura que ya terminó no repinta nada.
+#[test]
+fn net_tick_after_fast_load_does_not_repaint() {
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    a.sync_visibility();
+    let local = tmp_dir("a2-rapida");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local));
+    let t = Instant::now();
+    while a.panes.iter().any(|p| p.tab().loading) {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        if let Ok(ev) = a.rx.recv_timeout(Duration::from_millis(20)) {
+            a.on_load_event(ev);
+        }
+    }
+    let before = host.invalidations();
+    a.on_net_tick();
+    assert_eq!(host.invalidations(), before, "nada que mostrar: sin repintado");
+}
+
+/// Ronda 2: si el trabajo de conectar falla por dentro, vuelve el error (y sale del indicador).
+#[test]
+fn connect_task_panic_returns_error() {
+    let mut a = net_app();
+    a.net.panic_connect = true;
+    let g = a.spawn_connect(0, None, Address::parse("smb://nas-a2panico/fotos").unwrap(), Default::default());
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { result: Err(_), .. }));
+    assert!(!a.activity.contains(&super::activity::ActivityKey::Connect(g)));
+}
+
+/// En red el aviso de espera no cambia: «Conectando con…» en lugar de «Cargando…».
+#[test]
+fn remote_wait_box_instead_of_loading() {
+    let root = remote_dir("a2-red-espera");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(2));
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let t0 = Instant::now() - Duration::from_millis(700);
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    a.panes[0].tab_mut().set_loading_since(Some(t0));
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|t| t.starts_with("Conectando con")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "Cargando…"), "{texts:?}");
 }
 
 #[test]
@@ -1176,6 +1332,29 @@ mod red_page {
         click(&mut a, PageHit::Eject(0));
         wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
         assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+    }
+
+    /// Ajustes 2: el ⏏ de la conexión gira mientras se desconecta (sin el símbolo), la barra dice
+    /// «Desconectando…» y otro clic no hace nada.
+    #[test]
+    fn red_page_eject_spins_while_disconnecting() {
+        let mut a = page_app(FakeHost::new());
+        let root = PathBuf::from("/net-n8gira/fotos");
+        a.net.connections = vec![conn("smb://nas-n8gira/fotos", "/net-n8gira/fotos")];
+        let texts = draw(&mut a);
+        assert!(texts.iter().any(|t| t == crate::list::EJECT_GLYPH));
+        click(&mut a, PageHit::Eject(0));
+        assert_eq!(a.eject_status().as_deref(), Some("Desconectando \"fotos\"…"));
+        let texts = draw(&mut a);
+        assert!(!texts.iter().any(|t| t == crate::list::EJECT_GLYPH), "{texts:?}");
+        click(&mut a, PageHit::Eject(0));
+        wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
+        // Después llegan otras (la lista de conexiones), pero ninguna otra desconexión.
+        while let Ok(t) = a.task_rx.recv_timeout(Duration::from_millis(200)) {
+            assert!(!matches!(t, TaskDone::Disconnected { .. }), "un solo pedido");
+        }
+        assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+        assert_eq!(a.eject_status(), None);
     }
 
     #[test]

@@ -61,6 +61,7 @@ impl App {
             WM_APP_FIELD_TAB => self.on_field_tab(wparam == 1),
             tasks::WM_APP_TASK => self.on_tasks(),
             crate::net::WM_APP_NET_TICK => self.on_net_tick(),
+            activity::WM_APP_ACTIVITY => self.on_activity_tick(),
             crate::net::WM_APP_NET => self.on_net_hosts(),
             WM_APP_SUGGEST_KEY => self.on_suggest_key(Key(wparam as u16)),
             WM_APP_PALETTE_KEY => self.on_palette_key(Key(wparam as u16), lparam == 1),

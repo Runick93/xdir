@@ -264,6 +264,8 @@ pub struct Tree {
     scroll_to: Option<usize>,
     /// Discos que se pueden expulsar (llevan ⏏); lo pone la `App`.
     pub ejectable: std::collections::HashSet<PathBuf>,
+    /// Discos y conexiones que se están expulsando o desconectando: su ⏏ gira (y se ve siempre).
+    pub ejecting: std::collections::HashSet<PathBuf>,
     /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, nodo).
     eject_rects: Vec<(Rect, usize)>,
     /// Unidades de red cuyo nombre falta pedir en otro hilo (`drive_label` iría al servidor).
@@ -333,6 +335,7 @@ impl Tree {
             reveal: None,
             scroll_to: None,
             ejectable: std::collections::HashSet::new(),
+            ejecting: std::collections::HashSet::new(),
             pending_labels: Vec::new(),
             net_items: Vec::new(),
             net_shell: None,
@@ -1365,16 +1368,26 @@ impl Tree {
                 if e > 0.05 {
                     p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
                     // ⏏ a la derecha de los discos expulsables.
+                    // Sin distinguir mayúsculas, como `App::is_ejecting` y las filas de la lista.
+                    let busy = self.ejecting.iter().any(|r| crate::sys::same_path_folded(r, &n.path));
+                    let eject = |slot: Rect| {
+                        if busy {
+                            crate::list::draw_eject_busy(p, slot);
+                        } else {
+                            crate::list::draw_eject(p, slot, self.hover == Some(id));
+                        }
+                    };
                     if n.kind == Kind::Drive && self.ejectable.contains(&n.path) && self.settled() {
                         let slot = rect(row.right - 26.0, y + 3.0, row.right - 4.0, y + ROW_H - 3.0);
-                        crate::list::draw_eject(p, slot, self.hover == Some(id));
+                        eject(slot);
                         ejects.push((slot, id));
                     }
-                    // Una conexión de red: ⏏ al pasar el mouse y en la carpeta del panel.
+                    // Una conexión de red: ⏏ al pasar el mouse y en la carpeta del panel (y
+                    // siempre mientras se desconecta).
                     let in_it = current.is_some_and(|c| c.starts_with(&n.path));
-                    if n.kind == Kind::NetConnected && (self.hover == Some(id) || in_it) && self.settled() {
+                    if n.kind == Kind::NetConnected && (self.hover == Some(id) || in_it || busy) && self.settled() {
                         let slot = rect(row.right - 26.0, y + 3.0, row.right - 4.0, y + ROW_H - 3.0);
-                        crate::list::draw_eject(p, slot, self.hover == Some(id));
+                        eject(slot);
                         ejects.push((slot, id));
                     }
                     if self.shows_pin(n) {

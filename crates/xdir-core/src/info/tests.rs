@@ -156,6 +156,7 @@ fn panel(sections: Vec<SectionView>) -> Panel {
         sections,
         more_button: true,
         eject_button: false,
+        ejecting: false,
     }
 }
 
@@ -248,6 +249,7 @@ fn checksum_layout(v: draw::ChecksumView) -> draw::Layout {
         sections: vec![SectionView { section: Section::Checksum, open: true, error: None, body: Body::Checksum(v) }],
         more_button: false,
         eject_button: false,
+        ejecting: false,
     };
     draw::layout(rect(1000.0, 40.0, 1320.0, 2000.0), &panel, 0.0, &|s| s.len() as f32 * 7.0)
 }

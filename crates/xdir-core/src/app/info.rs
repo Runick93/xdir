@@ -511,7 +511,7 @@ impl App {
             let title = TITLE.to_string();
             let line = if n == 0 { "Sin información para este lugar" } else { "Cargando…" };
             let icon = sys::file_system().folder_icon().unwrap_or(0);
-            return Panel { title, header: Header { key: None, icon, image: false, name, lines: vec![(line.to_string(), false)] }, sections: Vec::new(), more_button, eject_button: false };
+            return Panel { title, header: Header { key: None, icon, image: false, name, lines: vec![(line.to_string(), false)] }, sections: Vec::new(), more_button, eject_button: false, ejecting: false };
         };
         let section = |s: Section, body: Body| SectionView { section: s, open: st.is_open(s), error: st.error(s), body };
         if items.len() > 1 {
@@ -536,6 +536,7 @@ impl App {
                 ],
                 more_button,
                 eject_button: false,
+                ejecting: false,
             };
         }
         let item = &items[0];
@@ -574,7 +575,9 @@ impl App {
             }
             // ⏏ si el disco se puede expulsar (como en la fila de «Este equipo»).
             let eject_button = self.ejectable.contains(&item.path);
-            return Panel { title, header: Header { key: None, icon, image: false, name, lines }, sections, more_button, eject_button };
+            // Expulsándose: el botón gira y no se puede tocar (como el ⏏ de las filas).
+            let ejecting = eject_button && self.is_ejecting(&item.path);
+            return Panel { title, header: Header { key: None, icon, image: false, name, lines }, sections, more_button, eject_button, ejecting };
         }
         // Encabezado.
         let mut lines = vec![(kind.clone(), false)];
@@ -679,7 +682,9 @@ impl App {
         if let Some(body) = self.perms_body(item) {
             sections.push(section(Section::Perms, body));
         }
-        Panel { title, header: Header { key, icon, image, name, lines }, sections, more_button, eject_button: false }
+        // Un disco que se está expulsando (sus datos de disco ya se soltaron): el botón girando.
+        let ejecting = self.is_ejecting(&item.path);
+        Panel { title, header: Header { key, icon, image, name, lines }, sections, more_button, eject_button: ejecting, ejecting }
     }
 
     /// Dentro de un archivo comprimido, el único elemento elegido: lo que dice la lista (no hay de
@@ -712,7 +717,7 @@ impl App {
             sections.push(section(Section::Checksum, Body::Checksum(self.checksum_view(false))));
         }
         let header = Header { key: None, icon: e.icon, image: false, name: e.display.clone(), lines };
-        Some(Panel { title: TITLE.to_string(), header, sections, more_button: false, eject_button: false })
+        Some(Panel { title: TITLE.to_string(), header, sections, more_button: false, eject_button: false, ejecting: false })
     }
 
     fn perms_body(&self, item: &ItemInfo) -> Option<Body> {

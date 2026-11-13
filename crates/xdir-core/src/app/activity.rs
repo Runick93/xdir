@@ -35,6 +35,8 @@ pub(super) enum ActivityKey {
     Search(usize),
     /// La lectura de una carpeta (id de la pestaña); se ve desde `tab::LOADING_DELAY`.
     Load(usize),
+    /// Una carpeta de red que «no responde» (id de la pestaña): quieta, no pide redibujos.
+    Stalled(usize),
     /// El análisis de xtree con la vista cerrada.
     XtreeScan,
     /// Extraer a la temporal un archivo de adentro de un comprimido para abrirlo.
@@ -138,13 +140,14 @@ impl Activities {
     /// nada (el «Cargando…» lo anuncia `update_placeholders`): una lectura rápida no prende el
     /// temporizador. Sin nada en curso, ninguno.
     pub fn next_tick(&self, now: Instant) -> Option<Duration> {
-        let spinning = |a: &Activity| a.shown(now) || matches!(a.key, ActivityKey::Eject(_));
+        let still = |a: &Activity| matches!(a.key, ActivityKey::Stalled(_));
+        let spinning = |a: &Activity| !still(a) && (a.shown(now) || matches!(a.key, ActivityKey::Eject(_)));
         if self.items.iter().any(spinning) {
             return Some(FRAME);
         }
         self.items
             .iter()
-            .filter(|a| !matches!(a.key, ActivityKey::Load(_)))
+            .filter(|a| !matches!(a.key, ActivityKey::Load(_) | ActivityKey::Stalled(_)))
             .map(|a| (a.since + a.delay).saturating_duration_since(now))
             .min()
     }
@@ -170,11 +173,21 @@ impl App {
         if self.sel_size.total() == crate::tab::SelTotal::Computing {
             list.push((ActivityKey::SelSize, sel_size_text(self.sel_size.folders()), None, SHOW_AFTER));
         }
-        for tab in self.panes.iter().flat_map(|p| p.tabs.iter()) {
-            if let Some(s) = tab.search.as_ref().filter(|s| !s.done && !s.in_place) {
-                list.push((ActivityKey::Search(tab.id), format!("Buscando \"{}\"", s.query), Some(s.started), SHOW_AFTER));
-            } else if let Some(t0) = tab.loading_since().filter(|_| tab.is_visible()) {
-                list.push((ActivityKey::Load(tab.id), format!("Cargando \"{}\"", tab.location.title()), Some(t0), crate::tab::LOADING_DELAY));
+        for (pi, p) in self.panes.iter().enumerate() {
+            for (ti, tab) in p.tabs.iter().enumerate() {
+                if let Some(s) = tab.search.as_ref().filter(|s| !s.done && !s.in_place) {
+                    list.push((ActivityKey::Search(tab.id), format!("Buscando \"{}\"", s.query), Some(s.started), SHOW_AFTER));
+                    continue;
+                }
+                // Lecturas: solo las de las pestañas a la vista (la activa de cada panel visible).
+                let Some(t0) = tab.loading_since().filter(|_| ti == p.active && tab.is_visible() && pi < self.layout.panes()) else { continue };
+                match (&tab.location, tab.slow_state(now)) {
+                    // Ya dice «no responde»: quieto (sin girar ni redibujar), con su texto.
+                    (Location::Path(path), crate::tab::Slow::NotResponding { .. }) => {
+                        list.push((ActivityKey::Stalled(tab.id), format!("\"{}\" no responde", self.remote_host_of(path)), Some(t0), SHOW_AFTER));
+                    }
+                    _ => list.push((ActivityKey::Load(tab.id), format!("Cargando \"{}\"", tab.location.title()), Some(t0), crate::tab::LOADING_DELAY)),
+                }
             }
         }
         // Comparar contenido y las sumas (del panel de comparar y del de información).

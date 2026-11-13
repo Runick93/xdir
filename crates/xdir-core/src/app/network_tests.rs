@@ -629,6 +629,39 @@ fn connecting_in_activity_until_it_returns() {
     assert!(!a.activity.contains(&key));
 }
 
+/// Ronda 1: una carpeta de red que «no responde» no es «Cargando»: el cartel dice que no responde
+/// y, ya quieto el aviso, no hay temporizador de 100 ms.
+#[test]
+fn not_responding_is_still_in_activity() {
+    let root = remote_dir("a2-no-responde");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(3));
+    let mut a = net_app();
+    // Los otros paneles terminan de leer (si no, también estarían en curso).
+    a.sync_visibility();
+    let t = Instant::now();
+    while a.panes.iter().any(|p| p.tab().loading) {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        if let Ok(ev) = a.rx.recv_timeout(Duration::from_millis(20)) {
+            a.on_load_event(ev);
+        }
+    }
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let t0 = Instant::now();
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    a.panes[0].tab_mut().set_loading_since(Some(t0));
+    let host = crate::tab::remote_host(&root);
+    // Conectando: gira.
+    crate::clock::set(Some(t0 + Duration::from_secs(2)));
+    a.paint();
+    assert_eq!(a.activity.next_tick(t0 + Duration::from_secs(2)), Some(super::activity::FRAME));
+    // No responde: el cartel lo dice y nada se redibuja solo.
+    let now = t0 + Duration::from_secs(21);
+    crate::clock::set(Some(now));
+    a.paint();
+    assert_eq!(a.tooltip_text(super::Hit::Activity), Some(format!("\"{host}\" no responde")));
+    assert_eq!(a.activity.next_tick(now), None);
+}
+
 /// En red el aviso de espera no cambia: «Conectando con…» en lugar de «Cargando…».
 #[test]
 fn remote_wait_box_instead_of_loading() {

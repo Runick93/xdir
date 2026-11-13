@@ -294,3 +294,21 @@ fn incomplete_results_not_cached() {
     assert_eq!(a.sel_size.cached(&dir.join("b")), Some(50));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// La lista de carpetas elegidas (con sus rutas) no se arma en cada cuadro: solo cuando cambia
+/// la selección, la carpeta o la pestaña.
+#[test]
+fn key_built_only_when_selection_changes() {
+    let dir = fixture("firma");
+    let mut a = app_in(&dir);
+    select(&mut a, &["a", "b"]);
+    wait_status(&mut a, &size(150));
+    let n = a.sel_size.key_builds;
+    for _ in 0..5 {
+        a.paint();
+    }
+    assert_eq!(a.sel_size.key_builds, n, "se armó de nuevo sin cambios");
+    select(&mut a, &["a"]);
+    assert_eq!(a.sel_size.key_builds, n + 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

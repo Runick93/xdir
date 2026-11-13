@@ -46,6 +46,9 @@ pub(super) struct Reply {
 
 pub(super) struct SelSize {
     key: Option<Key>,
+    /// Firma barata de lo elegido en el último cuadro (`selection_sig`): mientras no cambie, la
+    /// clave (con sus rutas) no se vuelve a armar.
+    sig: Option<u64>,
     generation: u64,
     cancel: Arc<AtomicBool>,
     /// Lo sumado de las carpetas de esta selección y si alguna quedó a medias.
@@ -60,6 +63,9 @@ pub(super) struct SelSize {
     cache: HashMap<PathBuf, (u64, bool, u64)>,
     tx: Sender<Reply>,
     rx: Receiver<Reply>,
+    /// Cuántas veces se armó la clave (pruebas).
+    #[cfg(test)]
+    pub(super) key_builds: usize,
     /// Límite sin avance para una carpeta de red (`net::ITEM_LIMIT`; las pruebas lo achican).
     pub(super) remote_limit: Duration,
 }
@@ -69,6 +75,7 @@ impl SelSize {
         let (tx, rx) = channel();
         SelSize {
             key: None,
+            sig: None,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             sum: 0,
@@ -78,6 +85,8 @@ impl SelSize {
             cache: HashMap::new(),
             tx,
             rx,
+            #[cfg(test)]
+            key_builds: 0,
             remote_limit: crate::net::ITEM_LIMIT,
         }
     }
@@ -141,6 +150,7 @@ impl SelSize {
         if self.key.as_ref().is_some_and(|k| k.folders.iter().any(|(f, _)| related(f))) {
             self.cancel();
             self.key = None;
+            self.sig = None;
         }
     }
 }
@@ -265,18 +275,41 @@ impl App {
 
     /// Las carpetas elegidas en la pestaña activa, si ahí se suman: carpetas del disco (no la
     /// Papelera, «Este equipo», los comprimidos ni las carpetas virtuales).
-    fn selected_folders(&self) -> Option<Key> {
+    fn selected_folders(&mut self) -> Option<Key> {
         let tab = self.panes[self.active].tab();
         if !matches!(tab.location, Location::Path(_)) || sys::file_system().is_trash(&tab.location) {
             return None;
+        }
+        #[cfg(test)]
+        {
+            self.sel_size.key_builds += 1;
         }
         let folders: Vec<(PathBuf, u64)> =
             tab.list.selected_indices().filter(|&i| tab.list.entries[i].is_dir).map(|i| (tab.entry_path(i), tab.list.entries[i].modified)).collect();
         (!folders.is_empty()).then(|| Key { pane: self.active, tab: tab.id, location: tab.location.clone(), folders })
     }
 
+    /// Firma de lo elegido: panel, pestaña, navegación, cantidad de elementos y cada carpeta
+    /// elegida (índice, nombre y fecha). Sin armar rutas: se calcula en cada cuadro.
+    fn selection_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let tab = self.panes[self.active].tab();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.active, tab.id, tab.nav_id(), tab.list.entries.len()).hash(&mut h);
+        for i in tab.list.selected_indices().filter(|&i| tab.list.entries[i].is_dir) {
+            let e = &tab.list.entries[i];
+            (i, &e.name, e.modified).hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// Antes de cada cuadro: si lo elegido cambió, corta el cálculo anterior y arranca el nuevo.
     pub(super) fn sync_sel_size(&mut self) {
+        let sig = self.selection_sig();
+        if self.sel_size.sig == Some(sig) {
+            return;
+        }
+        self.sel_size.sig = Some(sig);
         let key = self.selected_folders();
         if key == self.sel_size.key {
             return;

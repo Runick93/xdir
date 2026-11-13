@@ -950,6 +950,8 @@ fn xtree_dir(name: &str) -> PathBuf {
 /// App con el panel activo en una carpeta temporal.
 fn app_in(name: &str) -> (App, PathBuf) {
     let mut a = app();
+    // Estas pruebas miran el escaneo: xtree analiza al abrirse (como antes de la opción).
+    a.config.xtree_scan_on_open = true;
     let dir = xtree_dir(name);
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir.clone()));
@@ -1088,6 +1090,7 @@ fn view_default_root_comes_from_disk_scan() {
     use crate::sys::testing::FakeDiskScan;
     let mut a = app();
     assert!(!matches!(a.panes[a.active].tab().location, Location::Path(_)), "la App en blanco arranca en «Este equipo»");
+    a.config.xtree_scan_on_open = true;
     a.run_command(Command::Xtree);
     assert!(a.xtree_open);
     let root = FakeDiskScan::root();
@@ -2689,6 +2692,7 @@ fn scan_notices_repaint_status_with_view_closed() {
     let host = FakeHost::new();
     let mut a = app_with_host(Init::blank(), host.clone());
     let dir = xtree_dir("repinta");
+    a.config.xtree_scan_on_open = true;
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
     click_xtree_button(&mut a);
@@ -2717,6 +2721,7 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     let mut a = app_with_host(Init::blank(), host.clone());
     crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
     let dir = xtree_dir("sin-cambio");
+    a.config.xtree_scan_on_open = true;
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
     click_xtree_button(&mut a);

@@ -179,8 +179,7 @@ fn pct(v: u64, of: u64) -> String {
     format!("{:.1} %", v as f64 / of.max(1) as f64 * 100.0).replace('.', ",")
 }
 
-/// Escaneo vacío y ya cancelado: para una vista sin análisis (pruebas).
-#[cfg(test)]
+/// Escaneo vacío (ningún hilo): el de una vista que todavía no analizó nada.
 fn idle_scan() -> Scan {
     Scan {
         id: 0,
@@ -254,6 +253,21 @@ impl Xtree {
         x.scanning = true;
         x.start_clock();
         x
+    }
+
+    /// Abre la vista sobre `root` sin analizar (`[opciones] xtree_analizar_al_abrir` apagado): el
+    /// desplegable muestra la raíz y el análisis empieza con «Analizar». Solo se piden los datos
+    /// del disco (los de red, en otro hilo).
+    pub fn unscanned(hwnd: Handle, root: PathBuf, by_type: bool) -> Xtree {
+        let mut x = Xtree::with_scan(hwnd, root, idle_scan());
+        x.by_type = by_type;
+        x.read_volume();
+        x
+    }
+
+    /// ¿Empezó algún análisis en esta vista? (una abierta sin analizar, todavía no).
+    pub fn scanned(&self) -> bool {
+        self.scan_started.is_some()
     }
 
     fn with_scan(hwnd: Handle, root: PathBuf, scan: Scan) -> Xtree {
@@ -443,7 +457,9 @@ impl Xtree {
     /// «Análisis completado en 1:23» o «Detenido a los 0:37».
     fn state_text(&self) -> String {
         let t = fmt_elapsed(self.elapsed());
-        if self.scan_stopped {
+        if !self.scanned() && !self.elevating.load(Ordering::Relaxed) {
+            "Sin analizar".to_string()
+        } else if self.scan_stopped {
             format!("Detenido a los {t}")
         } else if self.elevated_pending() || (self.scanning && self.elevating.load(Ordering::Relaxed)) {
             // El ayudante elevado no informa bytes leídos: solo el cronómetro (como el indicador,
@@ -985,7 +1001,10 @@ impl Xtree {
         let done = !self.scanning && !arena.is_empty();
 
         // ----- barra superior: disco y total a la izquierda, estado del análisis a la derecha -----
-        let top_text = if done {
+        let unscanned = !self.scanned() && arena.is_empty();
+        let top_text = if unscanned {
+            self.root.display().to_string()
+        } else if done {
             format!("{}  \u{B7}  {} analizados", self.name_of(arena, 0), fmt_size(arena[0].size))
         } else {
             format!(
@@ -1019,11 +1038,16 @@ impl Xtree {
         // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
         // es de escaneo.
         let done_state = done && !self.elevated_pending();
-        p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
-        if done_state {
-            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
+        if unscanned {
+            // Sin análisis: sin punto de estado, el texto apagado.
+            p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text_dim);
+        } else {
+            p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
+            if done_state {
+                p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
+            }
+            p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
         }
-        p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
 
         if arena.is_empty() {
             p.round_fill(ui.map, 8.0, th.surface);
@@ -1037,6 +1061,7 @@ impl Xtree {
                     format!("Leyendo la tabla de archivos (MFT)\u{2026} {pct} %")
                 }
                 2 => "Armando el árbol de carpetas\u{2026}".to_string(),
+                _ if unscanned => "Elegí un disco o una carpeta y tocá Analizar".to_string(),
                 _ if self.scan_stopped => self.state_text(),
                 _ if self.scanning => "Escaneando el disco\u{2026}".to_string(),
                 _ => "No hay nada que mostrar".to_string(),
@@ -1217,7 +1242,7 @@ impl Xtree {
             let cur = &arena[self.current as usize];
             let count = cur.children.iter().filter(|&&c| arena.get(c as usize).is_some_and(|n| n.size > 0)).count();
             cols.push(("Carpeta actual", format!("{} \u{B7} {} elementos", fmt_size(cur.size), count)));
-        } else {
+        } else if !unscanned {
             cols.push(("Analizado", fmt_size(progress.bytes.load(Ordering::Relaxed))));
         }
         if let Some((total, free)) = self.volume() {
@@ -1345,6 +1370,27 @@ mod tests {
         x.scanning = false;
         x.paint(&p, area);
         assert!(p.texts().iter().any(|(_, t, _)| t == "\u{2190} xdir"));
+    }
+
+    /// Vista abierta sin analizar: no escanea, el indicador queda quieto, el desplegable muestra la
+    /// raíz y el mapa dice qué hacer.
+    #[test]
+    fn unscanned_view_shows_hint() {
+        crate::sys::testing::install_fakes();
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let root = std::env::temp_dir().join("xdir-xtree-sin-analizar");
+        let mut x = Xtree::unscanned(Handle::default(), root.clone(), true);
+        assert!(!x.scanned() && !x.scanning && x.by_type());
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+        assert_eq!(x.status_text(), format!("xtree \u{B7} {}", root.display()));
+        assert_eq!(x.pick_label(), root.display().to_string());
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        assert!(texts.iter().any(|t| t == "Elegí un disco o una carpeta y tocá Analizar"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Sin analizar"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.starts_with("Escaneando")), "{texts:?}");
+        poke(&mut x, area);
     }
 
     #[test]

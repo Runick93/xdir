@@ -335,8 +335,13 @@ impl App {
         } else {
             if self.xtree.is_none() {
                 let root = self.xtree_root();
-                self.xtree_last = Some(root.clone());
-                self.xtree = Some(Xtree::new(self.hwnd, root, self.config.xtree_by_type));
+                // De fábrica no se analiza solo: la vista vacía con la raíz en el desplegable.
+                self.xtree = Some(if self.config.xtree_scan_on_open {
+                    self.xtree_last = Some(root.clone());
+                    Xtree::new(self.hwnd, root, self.config.xtree_by_type)
+                } else {
+                    Xtree::unscanned(self.hwnd, root, self.config.xtree_by_type)
+                });
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.close_quick_look();

@@ -153,6 +153,13 @@ impl Activities {
         v
     }
 
+    /// ¿Todo lo que se ve está quieto (solo carpetas que «no responden»)? El indicador muestra el
+    /// aviso en lugar de un giro congelado.
+    pub fn all_still(&self, now: Instant) -> bool {
+        let shown = self.shown(now);
+        !shown.is_empty() && shown.iter().all(|a| matches!(a.key, ActivityKey::Stalled(_)))
+    }
+
     /// El cartel del indicador: «Expulsando "Pendrive" · Calculando el tamaño de 3 carpetas».
     pub fn tip(&self, now: Instant) -> Option<String> {
         // Lo repetido (dos paneles leyendo «Este equipo») va una vez.

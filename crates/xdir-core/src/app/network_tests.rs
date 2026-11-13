@@ -695,12 +695,15 @@ fn not_responding_is_still_in_activity() {
     crate::clock::set(Some(t0 + Duration::from_secs(2)));
     a.paint();
     assert_eq!(a.activity.next_tick(t0 + Duration::from_secs(2)), Some(super::activity::FRAME));
+    assert!(!a.activity.all_still(t0 + Duration::from_secs(2)));
     // No responde: el cartel lo dice y nada se redibuja solo.
     let now = t0 + Duration::from_secs(21);
     crate::clock::set(Some(now));
     a.paint();
     assert_eq!(a.tooltip_text(super::Hit::Activity), Some(format!("\"{host}\" no responde")));
     assert_eq!(a.activity.next_tick(now), None);
+    // Ronda 2: en lugar del giro congelado, el aviso quieto (como el de xtree).
+    assert!(a.activity.all_still(now));
 }
 
 /// Ronda 1: el redibujo de los 0,5 s de una lectura que ya terminó no repinta nada.

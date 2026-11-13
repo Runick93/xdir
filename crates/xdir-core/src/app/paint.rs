@@ -48,6 +48,7 @@ impl App {
         self.activity.observe(clock);
         let activity = !self.activity.shown(clock).is_empty();
         let activity_clickable = self.transfers_progress().is_some();
+        let activity_still = self.activity.all_still(clock);
         // Expulsando o desconectando algo: delante de todo, mientras dure.
         if let Some(e) = self.eject_status() {
             status = format!("{e}   ·   {status}");
@@ -315,6 +316,7 @@ impl App {
                 activity,
                 activity_hot: hover == Hit::Activity,
                 activity_clickable,
+                activity_still,
             };
             self.activity_rect = activity.then(|| ui::activity_rect(w, h, xtree_badge, transfers.is_some()));
             let mut buttons = buttons;

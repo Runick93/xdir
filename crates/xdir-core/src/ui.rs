@@ -442,6 +442,8 @@ pub struct StatusButtons {
     pub activity: bool,
     pub activity_hot: bool,
     pub activity_clickable: bool,
+    /// Solo hay carpetas que «no responden»: el aviso quieto en lugar del giro.
+    pub activity_still: bool,
 }
 
 /// Separador entre el aviso y el resto de la barra de estado (el de `aviso   ·   estado`).
@@ -491,6 +493,7 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
         activity,
         activity_hot,
         activity_clickable,
+        activity_still,
     } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
@@ -528,7 +531,13 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
         if activity_hot && activity_clickable {
             p.round_fill(activity_r, 4.0, th.hover);
         }
-        crate::pane::spinner(p, (activity_r.left + activity_r.right) / 2.0, (activity_r.top + activity_r.bottom) / 2.0, th.accent);
+        let (cx, cy) = ((activity_r.left + activity_r.right) / 2.0, (activity_r.top + activity_r.bottom) / 2.0);
+        if activity_still {
+            // Quieto: el aviso de xtree (en advertencia), no un giro congelado.
+            draw_xtree_badge(p, rect(cx - BADGE / 2.0, cy - BADGE / 2.0, cx + BADGE / 2.0, cy + BADGE / 2.0), XtreeBadge::DoneWithIssues);
+        } else {
+            crate::pane::spinner(p, cx, cy, th.accent);
+        }
     }
 
     if let Some(f) = transfers {

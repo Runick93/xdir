@@ -39,8 +39,8 @@ pub struct HistState {
     pub clears: history::Clears,
     /// Parte de la franja bajo el mouse.
     pub hover: Option<StripHit>,
-    /// Nodos del análisis de ahora con algo sin leer (las sin leer y las de arriba).
-    partial_now: std::collections::HashSet<u32>,
+    /// Rutas (relativas a la raíz) de las carpetas que no se pudieron leer en el análisis de ahora.
+    denied_paths: Vec<String>,
     /// Hubo más sin leer que las anotadas: todo es aproximado.
     partial_all: bool,
     /// Las carpetas sin leer del análisis de ahora (nodos), para la foto.
@@ -54,7 +54,7 @@ type GrowersKey = (usize, usize, u32, u16, i32, usize);
 
 impl Default for HistState {
     fn default() -> Self {
-        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), pending: false, clears: Default::default(), hover: None, partial_now: Default::default(), partial_all: false, denied_now: Default::default(), growers_cache: None }
+        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), pending: false, clears: Default::default(), hover: None, denied_paths: Default::default(), partial_all: false, denied_now: Default::default(), growers_cache: None }
     }
 }
 
@@ -156,24 +156,31 @@ impl HistState {
     /// El análisis de ahora tuvo carpetas sin leer: estas (y las de arriba) son «al menos». Con
     /// `overflow` (más de las que se anotan), todo.
     pub fn set_partial_now(&mut self, arena: &[Node], denied: &[u32], overflow: bool) {
-        let mut set = std::collections::HashSet::new();
-        for &d in denied {
-            let mut cur = d;
-            while (cur as usize) < arena.len() && set.insert(cur) {
-                cur = arena[cur as usize].parent;
-            }
-        }
-        self.partial_now = set;
+        // Con la misma regla que la foto (`select_photo_with`): así se comparan iguales.
+        self.denied_paths = denied
+            .iter()
+            .take(history::MAX_DENIED)
+            .map(|&d| rel_path(arena, d))
+            .filter(|p| !p.is_empty() && p.len() <= history::MAX_PATH && !p.contains(char::REPLACEMENT_CHARACTER))
+            .collect();
         self.partial_all = overflow;
         self.denied_now = Arc::new(denied.to_vec());
         self.growers_cache = None;
     }
 
+    /// ¿El cambio de `rel` contra la foto `snap` es aproximado? Sí si lo que no se pudo leer debajo
+    /// de `rel` cambió entre esa foto y ahora (o hubo demasiadas sin leer para anotarlas).
+    fn approx(&self, l: &Loaded, snap: usize, rel: &str) -> bool {
+        self.partial_all || !l.same_denied_under(snap, rel, &self.denied_paths)
+    }
+
     /// El cambio del nodo `id` del árbol en el período, aproximado si tiene algo sin leer ahora.
     pub fn change_of(&self, arena: &[Node], id: u32, today: i32) -> Option<Change> {
         let n = arena.get(id as usize)?;
-        let mut c = change(self.loaded.as_deref()?, &rel_path(arena, id), n.size, today, self.days)?;
-        c.approx |= self.partial_all || self.partial_now.contains(&id);
+        let l = self.loaded.as_deref()?;
+        let rel = rel_path(arena, id);
+        let mut c = change(l, &rel, n.size, today, self.days)?;
+        c.approx = self.approx(l, c.snap, &rel);
         Some(c)
     }
 
@@ -183,8 +190,8 @@ impl HistState {
         let Some(l) = self.loaded.clone() else { return &[] };
         let key = (arena.as_ptr() as usize, arena.len(), id, self.days, today, Arc::as_ptr(&l) as usize);
         if self.growers_cache.as_ref().is_none_or(|(k, _)| *k != key) {
-            let partial = |k: u32| self.partial_all || self.partial_now.contains(&k);
-            let list = growers_with(&l, arena, id, today, self.days, GROWERS, &partial);
+            let approx = |rel: &str, c: &Change| self.approx(&l, c.snap, rel);
+            let list = growers_with(&l, arena, id, today, self.days, GROWERS, &approx);
             self.growers_cache = Some((key, list));
         }
         self.growers_cache.as_ref().map_or(&[], |(_, g)| g.as_slice())
@@ -244,7 +251,7 @@ pub fn change(l: &Loaded, rel: &str, now: u64, today: i32, period: u16) -> Optio
                 Some(v) => (v, false),
                 None => (0, true),
             };
-            best = Some(Change { snap: i, base_day: day, base, now, new, approx: l.partial(i, rel) });
+            best = Some(Change { snap: i, base_day: day, base, now, new, approx: false });
         }
     }
     best
@@ -302,12 +309,11 @@ pub fn points(l: &Loaded, rel: &str, c: &Change, today: i32) -> Vec<(i32, u64)> 
 /// Las subcarpetas de `id` que más crecieron en el período, de más a menos (hasta `n`; solo las
 /// que crecieron): nodo y cambio.
 pub fn growers(l: &Loaded, arena: &[Node], id: u32, today: i32, period: u16, n: usize) -> Vec<(u32, Change)> {
-    growers_with(l, arena, id, today, period, n, &|_| false)
+    growers_with(l, arena, id, today, period, n, &|_, _| false)
 }
 
-/// `growers` sabiendo qué nodos del análisis de ahora tienen algo sin leer (`now_partial`): las
-/// aproximadas no entran.
-pub fn growers_with(l: &Loaded, arena: &[Node], id: u32, today: i32, period: u16, n: usize, now_partial: &dyn Fn(u32) -> bool) -> Vec<(u32, Change)> {
+/// `growers` sabiendo qué cambios son aproximados (`approx(ruta, cambio)`): esos no entran.
+pub fn growers_with(l: &Loaded, arena: &[Node], id: u32, today: i32, period: u16, n: usize, approx: &dyn Fn(&str, &Change) -> bool) -> Vec<(u32, Change)> {
     let Some(parent) = arena.get(id as usize) else { return Vec::new() };
     let base = rel_path(arena, id);
     let mut out: Vec<(u32, Change)> = parent
@@ -317,7 +323,7 @@ pub fn growers_with(l: &Loaded, arena: &[Node], id: u32, today: i32, period: u16
             let node = arena.get(k as usize).filter(|c| c.is_dir && !c.small)?;
             let rel = if base.is_empty() { node.name.to_string() } else { format!("{base}/{}", node.name) };
             let c = change(l, &rel, node.size, today, period)?;
-            (c.delta() > 0 && !c.approx && !now_partial(k)).then_some((k, c))
+            (c.delta() > 0 && !approx(&rel, &c)).then_some((k, c))
         })
         .collect();
     out.sort_by_key(|g| std::cmp::Reverse(g.1.delta()));
@@ -704,30 +710,65 @@ mod tests {
         assert_eq!(row_mark(&h, &t, 1, 100).as_deref(), Some("+4,0 GB en 7 días"));
         assert_eq!(row_mark(&h, &t, 2, 100), None);
     }
-    /// Con carpetas sin leer en la foto de comparación o en el análisis de ahora, el cambio es
-    /// aproximado: «≈», sin ▲ y fuera de «Más crecieron».
+    /// Historial con una sola foto del día 93 con esos tamaños y esas carpetas sin leer.
+    fn loaded_denied(name: &str, sizes: &[(&str, u64)], denied: &[&str]) -> Loaded {
+        crate::sys::testing::install_fakes();
+        let dir = std::env::temp_dir().join(format!("xdir-crecimiento-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("raiz");
+        let photo = history::Photo { sizes: sizes.iter().map(|(p, s)| (p.to_string(), *s)).collect(), capped: false, denied: denied.iter().map(|d| d.to_string()).collect() };
+        history::save_photo(&dir, &root, 93, &photo).unwrap();
+        let l = history::load_for(&dir, &root);
+        let _ = std::fs::remove_dir_all(&dir);
+        l
+    }
+
+    /// Una carpeta es aproximada solo si cambió lo que no se pudo leer debajo de ella entre la foto
+    /// de comparación y ahora (sin permiso antes, con permiso ahora: el caso de macOS sin Acceso
+    /// total al disco la primera vez): «≈», sin ▲ y fuera de «Más crecieron».
     #[test]
-    fn partial_changes_are_approximate() {
+    fn denied_then_allowed_is_approximate() {
         let c = Change { snap: 0, base_day: 93, base: GB, now: 5 * GB, new: false, approx: true };
         assert_eq!(change_text(&c, 100), "\u{2248} +4,0 GB en 7 días");
         assert!(!grew_a_lot(&c));
         let t = vec![
             node("/r", NO_PARENT, 30 * GB, true, vec![1, 2]),
-            node("a", 0, 20 * GB, true, vec![]),
+            node("a", 0, 20 * GB, true, vec![3]),
             node("b", 0, 10 * GB, true, vec![]),
+            node("x", 1, 19 * GB, true, vec![]),
         ];
-        let l = loaded("aprox", &[(93, &[("", 3 * GB), ("a", GB), ("b", GB)])]);
+        let l = loaded_denied("aprox", &[("", 3 * GB), ("a", GB), ("b", GB)], &["a/x"]);
         let mut h = HistState { loaded: Some(Arc::new(l)), ..Default::default() };
+        h.set_partial_now(&t, &[], false);
         let names = |h: &mut HistState| -> Vec<String> { h.top_growers(&t, 0, 100).iter().map(|(k, _)| t[*k as usize].name.to_string()).collect() };
-        assert_eq!(names(&mut h), ["a", "b"]);
-        // «a» tuvo carpetas sin leer en este análisis: aproximada, fuera de la lista y sin ▲.
-        h.set_partial_now(&t, &[1], false);
-        assert_eq!(names(&mut h), ["b"]);
+        assert_eq!(names(&mut h), ["b"], "«a» tenía «x» sin leer y ahora no");
         assert_eq!(row_mark(&h, &t, 1, 100), None);
         assert!(row_mark(&h, &t, 2, 100).is_some());
         assert!(matches!(card_state(&h, &t, 0, 100), CardState::Data(c) if c.approx), "la raíz también");
         // Demasiadas sin leer para anotarlas: todo es aproximado.
         h.set_partial_now(&t, &[], true);
         assert!(names(&mut h).is_empty());
+    }
+
+    /// Windows sin administrador sobre C:\: una carpeta que nunca se puede leer
+    /// («Users/otro») no vuelve aproximadas a sus madres: «Users» creció 20 GB (lo de «yo») y lleva
+    /// ▲ y sale en «Más crecieron».
+    #[test]
+    fn always_denied_folder_does_not_hide_growth() {
+        let t = vec![
+            node("C:", NO_PARENT, 30 * GB, true, vec![1, 2]),
+            node("Users", 0, 25 * GB, true, vec![3, 4]),
+            node("Windows", 0, 5 * GB, true, vec![]),
+            node("otro", 1, 0, true, vec![]),
+            node("yo", 1, 25 * GB, true, vec![]),
+        ];
+        let l = loaded_denied("siempre", &[("", 10 * GB), ("Users", 5 * GB), ("Users/otro", 0), ("Users/yo", 5 * GB), ("Windows", 5 * GB)], &["Users/otro"]);
+        let mut h = HistState { loaded: Some(Arc::new(l)), ..Default::default() };
+        h.set_partial_now(&t, &[3], false);
+        let names: Vec<String> = h.top_growers(&t, 0, 100).iter().map(|(k, _)| t[*k as usize].name.to_string()).collect();
+        assert_eq!(names, ["Users"]);
+        assert_eq!(row_mark(&h, &t, 1, 100).as_deref(), Some("+20,0 GB en 7 días"));
+        assert!(matches!(card_state(&h, &t, 0, 100), CardState::Data(c) if !c.approx));
+        assert!(matches!(card_state(&h, &t, 3, 100), CardState::Data(c) if !c.approx), "sin leer las dos veces: 0 y 0");
     }
 }

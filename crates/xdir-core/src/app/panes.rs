@@ -566,6 +566,14 @@ impl App {
             }
             "copiar" | "mover" | "ventana" | "comprimir" | "extraer_aqui" | "extraer_en" => self.transfer_test(verb, &format!("{a} {b}")),
             // `xtree_hist <periodo|crecio|marca> <n>`: la franja de historial y la ▲ de xtree.
+            "xtree_hist" if a == "marca" => {
+                // El mouse sobre el tamaño de la fila `n` de la tabla: el cartel de la ▲ aparece
+                // con la espera de siempre.
+                let area = self.xtree_area();
+                if let Some((x, y)) = self.xtree.as_ref().map(|v| v.size_cell_center(area, nb)) {
+                    self.on_mouse_move(x, y);
+                }
+            }
             "xtree_hist" => {
                 let area = self.xtree_area();
                 if let Some(action) = self.xtree.as_mut().map(|x| x.history_test(area, a, nb)) {

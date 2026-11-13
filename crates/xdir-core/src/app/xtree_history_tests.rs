@@ -107,3 +107,35 @@ fn clear_history_asks_and_deletes() {
     super::super::network_tests::wait_until(&mut a, |a| a.xtree_history_msg.is_some());
     assert_eq!(a.xtree_history_msg.as_deref(), Some("Historial borrado"));
 }
+
+/// El cartel de la ▲ es el de xdir: `hit` da la fila con ▲ bajo el mouse, el cartel tiene el
+/// cambio, y el clic sigue yendo a la vista (elige la fila).
+#[test]
+fn marker_tooltip_uses_app_tooltips() {
+    let mut a = app();
+    let dir = crate::session::config_dir().unwrap().join(crate::xtree::history::DIR_NAME);
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = crate::sys::testing::FakeDiskScan::root();
+    crate::xtree::history::save_snapshot(&dir, &root, 400, &[("".into(), 1), ("grande".into(), 1)]).unwrap();
+    // Sin analizar al abrir: el árbol lo pone la prueba.
+    a.run_command(Command::Xtree);
+    let x = a.xtree.as_mut().unwrap();
+    x.set_today(Some(407));
+    let mut big = vec![crate::xtree::tree::Node { name: root.to_string_lossy().into(), parent: crate::xtree::tree::NO_PARENT, size: 3 << 30, is_dir: true, small: false, children: vec![1] }];
+    big.push(crate::xtree::tree::Node { name: "grande".into(), parent: 0, size: 3 << 30, is_dir: true, small: false, children: vec![] });
+    x.finish_for_tests(big);
+    let t0 = std::time::Instant::now();
+    while a.xtree.as_ref().unwrap().history_loaded().is_none_or(|l| l.days.len() < 2) {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "el historial no llegó");
+        a.paint();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let area = a.xtree_area();
+    let (mx, my) = a.xtree.as_ref().unwrap().size_cell_center(area, 0);
+    let Hit::XtreeMark(n) = a.hit(mx, my) else { panic!("{:?}", a.hit(mx, my)) };
+    assert_eq!(a.tooltip_text(Hit::XtreeMark(n)).as_deref(), Some("+3,0 GB en 7 días"));
+    a.on_left_down(mx, my, false);
+    a.on_left_up(mx, my);
+    assert_eq!(a.xtree.as_ref().unwrap().selected_for_tests(), Some(n));
+    a.on_closing();
+}

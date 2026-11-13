@@ -277,19 +277,15 @@ fn table_marker_and_tooltip() {
     let tris: Vec<_> = p.paths().into_iter().filter(|(pts, closed, fill)| *closed && pts.len() == 3 && fill.is_some()).collect();
     // «a» (+5 GB) sí; «b» (+1 GB, 50 %) también; el archivo no.
     assert_eq!(tris.len(), 2, "{tris:?}");
-    // Mouse sobre el tamaño de la primera fila («a»).
+    // El cartel es el de xdir (`App::tooltip_text`): la vista dice qué fila tiene ▲ bajo el mouse
+    // (sobre su tamaño) y el texto.
     let l = x.ui(AREA).list;
     let (mx, my) = (l.right - 150.0, l.top + TABLE_H + ROW_H / 2.0);
-    x.on_mouse_move(AREA, mx, my);
-    assert_eq!(texts(&mut x).iter().filter(|s| *s == "+5,0 GB en 7 días").count(), 1, "el cartel espera");
-    // Pasó la espera del cartel.
-    x.hist.tip_since_for_tests(Duration::from_secs(1));
-    let t = texts(&mut x);
-    assert_eq!(t.iter().filter(|s| *s == "+5,0 GB en 7 días").count(), 2, "cambio en la franja y en el cartel: {t:?}");
-    // Un clic lo saca.
-    let _ = x.on_click(AREA, mx, my, false);
-    let t = texts(&mut x);
-    assert_eq!(t.iter().filter(|s| *s == "+5,0 GB en 7 días").count(), 1);
+    let a = x.mark_at_point(AREA, mx, my).expect("▲ de «a»");
+    assert_eq!(&*x.arena[a as usize].name, "a");
+    assert_eq!(x.mark_tip(a).as_deref(), Some("+5,0 GB en 7 días"));
+    assert_eq!(x.mark_at_point(AREA, l.left + 60.0, my), None, "sobre el nombre no");
+    assert_eq!(x.mark_at_point(AREA, mx, my + 2.0 * ROW_H), None, "el archivo no tiene ▲");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

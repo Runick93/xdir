@@ -184,6 +184,9 @@ enum Hit {
     Info(crate::info::draw::InfoHit),
     /// La vista de xtree abierta, sobre el área de los paneles.
     XtreeView,
+    /// La ▲ de una carpeta que creció mucho, en la tabla de xtree (su cartel tiene el cambio); el
+    /// resto se maneja como `XtreeView`.
+    XtreeMark(u32),
     /// «← xdir» de la barra superior de xtree (vuelve a los paneles).
     XtreeBack,
     /// «Colores: carpeta / tipo» de la barra superior de xtree.

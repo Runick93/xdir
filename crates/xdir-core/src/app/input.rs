@@ -101,7 +101,13 @@ impl App {
             if contains(&crate::xtree::view::search_btn_rect(ui::xtree_area(w, h)), x, y) {
                 return Hit::XtreeSearch;
             }
-            return if contains(&ui::xtree_area(w, h), x, y) { Hit::XtreeView } else { Hit::None };
+            if !contains(&ui::xtree_area(w, h), x, y) {
+                return Hit::None;
+            }
+            if let Some(n) = self.xtree.as_ref().and_then(|v| v.mark_at_point(ui::xtree_area(w, h), x, y)) {
+                return Hit::XtreeMark(n);
+            }
+            return Hit::XtreeView;
         }
         if self.preview_edge_at(x, y) {
             return Hit::PreviewEdge;
@@ -315,7 +321,7 @@ impl App {
                     self.open_xtree_search();
                 }
             }
-            Hit::XtreeView => {
+            Hit::XtreeView | Hit::XtreeMark(_) => {
                 let area = self.xtree_area();
                 let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_click(area, x, y, double));
                 self.xtree_action(action);

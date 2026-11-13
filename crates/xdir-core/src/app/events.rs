@@ -281,7 +281,7 @@ impl App {
         }
         // Clic derecho en la vista de xtree: sube a la carpeta superior (no hay menú).
         if self.xtree_open {
-            if self.hit(x, y) == Hit::XtreeView {
+            if matches!(self.hit(x, y), Hit::XtreeView | Hit::XtreeMark(_)) {
                 let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_right_click());
                 self.xtree_action(action);
             }
@@ -438,7 +438,7 @@ impl App {
         self.dismiss_tooltip();
         // Con xtree abierto la rueda mueve su tabla; los paneles tapados no se mueven.
         if self.xtree_open {
-            if self.hit(x, y) == Hit::XtreeView {
+            if matches!(self.hit(x, y), Hit::XtreeView | Hit::XtreeMark(_)) {
                 let area = self.xtree_area();
                 if self.xtree.as_mut().is_some_and(|v| v.on_wheel(area, delta * lines)) {
                     self.redraw();

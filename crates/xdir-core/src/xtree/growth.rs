@@ -37,8 +37,6 @@ pub struct HistState {
     pub pending: bool,
     /// Parte de la franja bajo el mouse.
     pub hover: Option<StripHit>,
-    /// Cartel de la ▲ bajo el mouse: nodo, punto del mouse y desde cuándo está quieto ahí.
-    pub tip: Option<(u32, f32, f32, std::time::Instant)>,
     /// Las que más crecieron de la última carpeta pedida: (clave, lista).
     growers_cache: Option<(GrowersKey, Vec<(u32, Change)>)>,
 }
@@ -48,7 +46,7 @@ type GrowersKey = (usize, usize, u32, u16, i32, usize);
 
 impl Default for HistState {
     fn default() -> Self {
-        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), pending: false, hover: None, tip: None, growers_cache: None }
+        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), pending: false, hover: None, growers_cache: None }
     }
 }
 
@@ -111,41 +109,6 @@ impl HistState {
         self.pending = false;
         self.hover = None;
         self.growers_cache = None;
-    }
-
-    /// El mouse está sobre el tamaño de la fila del nodo `target` (con ▲) en `(x, y)`, o sobre
-    /// ninguna (`None`). Al llegar a una fila nueva, después de la espera del cartel avisa a la
-    /// ventana (`WM_APP_XTREE` con `id`) para que aparezca. Devuelve si hay que repintar.
-    pub fn hover_mark(&mut self, target: Option<u32>, x: f32, y: f32, hwnd: Handle, id: usize) -> bool {
-        let shown = self.tip_visible();
-        match target {
-            None => {
-                self.tip = None;
-                shown
-            }
-            Some(n) if self.tip.is_some_and(|t| t.0 == n) => false,
-            Some(n) => {
-                self.tip = Some((n, x, y, std::time::Instant::now()));
-                let _ = std::thread::Builder::new().spawn(move || {
-                    std::thread::sleep(TIP_DELAY);
-                    hwnd.post(WM_APP_XTREE, id, 0);
-                });
-                shown
-            }
-        }
-    }
-
-    /// ¿Ya pasó la espera del cartel?
-    pub fn tip_visible(&self) -> bool {
-        self.tip.is_some_and(|t| t.3.elapsed() >= TIP_DELAY)
-    }
-
-    /// Hace como si el mouse estuviera quieto sobre la ▲ desde hace `d` (pruebas).
-    #[cfg(test)]
-    pub fn tip_since_for_tests(&mut self, d: std::time::Duration) {
-        if let Some(t) = &mut self.tip {
-            t.3 = std::time::Instant::now() - d;
-        }
     }
 
     /// ¿La raíz `root` tiene franja de historial? (hay carpeta del historial y no es de red).
@@ -336,8 +299,6 @@ pub const CARD_BASE_H: f32 = 76.0;
 pub const STRIP_H: f32 = 128.0;
 /// Con menos mapa que esto, la franja no se muestra.
 pub const MIN_MAP_H: f32 = 180.0;
-/// Espera del cartel de la ▲ (la de los carteles de xdir).
-pub const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 /// Subcarpetas en «Más crecieron».
 pub const GROWERS: usize = 5;
 const LEFT_W: f32 = 236.0;
@@ -525,24 +486,6 @@ pub fn draw_mark(p: &dyn Painter, right: f32, size_w: f32, top: f32, bottom: f32
     let x1 = right - size_w - 6.0;
     let (x0, cy) = (x1 - 9.0, (top + bottom) / 2.0);
     p.rounded_path(&[(x0, cy + 4.0, 0.0), ((x0 + x1) / 2.0, cy - 4.0, 0.0), (x1, cy + 4.0, 0.0)], true, Some(th.warning), None);
-}
-
-/// Cartel de ayuda con `text` y el mouse en `(x, y)`, dentro de `bounds`: como los de xdir
-/// (debajo del cursor, o arriba si no entra).
-pub fn draw_tip(p: &dyn Painter, bounds: Rect, x: f32, y: f32, text: &str) {
-    let th = p.theme();
-    let (pad, line) = (6.0, 14.0);
-    let w = p.measure(FontId::Small, text) + pad * 2.0;
-    let h = line + pad * 2.0;
-    let left = x.min(bounds.right - 4.0 - w).max(bounds.left + 4.0);
-    let mut top = y + 20.0;
-    if top + h > bounds.bottom - 4.0 {
-        top = y - h - 4.0;
-    }
-    let r = rect(left, top, left + w, top + h);
-    p.round_fill(r, 4.0, th.surface_alt);
-    p.round_stroke(r, 4.0, th.border);
-    p.text(FontId::Small, text, rect(r.left + pad, r.top + pad, r.right - pad, r.bottom - pad), th.text);
 }
 
 #[cfg(test)]

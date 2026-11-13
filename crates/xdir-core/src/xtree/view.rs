@@ -553,8 +553,7 @@ impl Xtree {
     }
 
     /// Gancho de pruebas del historial (#58): `periodo <i>` toca el período `i`, `crecio <i>` la
-    /// fila `i` de «Más crecieron» y `marca <i>` deja el mouse sobre el tamaño de la fila `i` de
-    /// la tabla (para el cartel de la ▲).
+    /// fila `i` de «Más crecieron».
     #[cfg(feature = "pruebas")]
     pub fn history_test(&mut self, area: Rect, what: &str, i: usize) -> Action {
         self.prepare(area);
@@ -563,11 +562,6 @@ impl Xtree {
         let at = match what {
             "periodo" => s.periods.get(i).map(|r| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)),
             "crecio" => Some((s.right.left + 40.0, s.right.top + 20.0 + (i as f32 + 0.5) * 19.0)),
-            "marca" => {
-                let y = ui.list.top + TABLE_H + (i as f32 + 0.5) * ROW_H - self.scroll;
-                self.on_mouse_move(area, ui.list.right - 150.0, y);
-                return Action::Redraw;
-            }
             _ => None,
         };
         let Some((x, y)) = at else { return Action::None };
@@ -586,7 +580,6 @@ impl Xtree {
 
     /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).
     pub fn close_menu(&mut self) {
-        self.hist.tip = None;
         self.menu_open = false;
         self.menu_hover = None;
         self.hover_back = false;
@@ -1255,6 +1248,41 @@ impl Xtree {
         growth::row_mark(&self.hist, &self.arena, id, self.hist.today()).map(|_| id)
     }
 
+    /// La carpeta con ▲ cuyo tamaño está en `(x, y)`: el cartel de ayuda de xdir lo pide
+    /// (`Hit::XtreeMark`).
+    pub fn mark_at_point(&self, area: Rect, x: f32, y: f32) -> Option<u32> {
+        if self.scanning || self.menu_open {
+            return None;
+        }
+        self.mark_at(area, self.row_at(area, x, y), x)
+    }
+
+    /// Texto del cartel de la ▲ de la carpeta `id`: «+3,4 GB en 7 días».
+    pub fn mark_tip(&self, id: u32) -> Option<String> {
+        growth::row_mark(&self.hist, &self.arena, id, self.hist.today())
+    }
+
+    /// Termina un análisis con `arena` sin escáner (pruebas de `App`).
+    #[cfg(test)]
+    pub fn finish_for_tests(&mut self, arena: Vec<Node>) {
+        *self.scan.result.lock().unwrap() = Some(arena);
+        self.scanning = true;
+        self.take_result();
+    }
+
+    /// Centro de la celda del tamaño de la fila `row` de la tabla (pruebas).
+    #[cfg(any(test, feature = "pruebas"))]
+    pub fn size_cell_center(&self, area: Rect, row: usize) -> (f32, f32) {
+        let l = self.ui(area).list;
+        (l.right - 150.0, l.top + TABLE_H + (row as f32 + 0.5) * ROW_H - self.scroll)
+    }
+
+    /// La fila o el bloque elegido (pruebas de `App`).
+    #[cfg(test)]
+    pub fn selected_for_tests(&self) -> Option<u32> {
+        self.selected
+    }
+
     /// Fila del menú de discos bajo el cursor.
     fn menu_row_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
         let n = self.drives.len() + 1;
@@ -1321,9 +1349,7 @@ impl Xtree {
         }
         let (row, cell, btn) = (self.row_at(area, x, y), self.cell_at(x, y), self.button_at(area, x, y));
         let strip = self.strip_hit_at(area, x, y).map(|h| h.0);
-        let mark = self.mark_at(area, row, x);
-        let tip_changed = self.hist.hover_mark(mark, x, y, self.hwnd, self.scan.id);
-        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn || strip != self.hist.hover || tip_changed;
+        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn || strip != self.hist.hover;
         self.hist.hover = strip;
         self.hover_row = row;
         self.hover = cell;
@@ -1333,7 +1359,6 @@ impl Xtree {
 
     /// Rueda sobre la tabla: `lines` filas (positivo: hacia arriba).
     pub fn on_wheel(&mut self, area: Rect, lines: f32) -> bool {
-        self.hist.tip = None;
         // Con la búsqueda abierta se mueven los resultados.
         if let Some(st) = &mut self.search {
             let r = search_results_rect(area);
@@ -1355,8 +1380,6 @@ impl Xtree {
 
     /// Clic (o doble clic) con el botón izquierdo.
     pub fn on_click(&mut self, area: Rect, x: f32, y: f32, double: bool) -> Action {
-        // Un clic saca el cartel de la ▲ (como los de xdir).
-        self.hist.tip = None;
         if double {
             return self.on_double_click(area, x, y);
         }
@@ -1521,7 +1544,6 @@ impl Xtree {
     /// son del salto por letra; los colores y los permisos van por `xtree_colores` y
     /// `xtree_permisos`, que resuelve la `App` con el `Keymap`.
     pub fn on_key(&mut self, k: Key) -> Action {
-        self.hist.tip = None;
         match k {
             VK_BACK => self.on_right_click(),
             VK_ESCAPE if self.menu_open => {
@@ -2046,15 +2068,6 @@ impl Xtree {
         // ----- búsqueda: en el lugar de la tabla -----
         if let Some(st) = &self.search {
             self.paint_search(p, area, st);
-        }
-
-        // ----- cartel de la ▲ de la tabla (#58) -----
-        if done
-            && self.hist.tip_visible()
-            && let Some((id, mx, my, _)) = self.hist.tip
-            && let Some(text) = growth::row_mark(&self.hist, arena, id, self.hist.today())
-        {
-            growth::draw_tip(p, area, mx, my, &text);
         }
 
         // ----- lista de discos: va al final para quedar por encima de todo -----

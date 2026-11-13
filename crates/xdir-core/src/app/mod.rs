@@ -23,6 +23,7 @@ mod quick_look;
 mod panes;
 mod preview;
 mod rename_many;
+mod activity;
 mod sel_size;
 mod tasks;
 mod tooltip;
@@ -54,6 +55,8 @@ mod settings_tests;
 mod changelog_tests;
 #[cfg(test)]
 mod sel_size_tests;
+#[cfg(test)]
+mod activity_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -173,6 +176,8 @@ enum Hit {
     PreviewToggle,
     /// Indicador de las operaciones de copia en la barra de estado (abre la ventana de copia).
     Transfers,
+    /// Indicador de lo que corre en segundo plano (su cartel dice qué; con copias, abre su ventana).
+    Activity,
     /// Borde izquierdo de la columna de vista previa (cambiar su ancho).
     PreviewEdge,
     /// El panel de información (en el lugar de la columna).
@@ -366,6 +371,13 @@ pub struct App {
     sel_size: sel_size::SelSize,
     /// Dónde quedó «calcular tamaño» en la barra de estado en el último cuadro.
     size_link: Option<geom::Rect>,
+    /// Lo que corre en segundo plano (el indicador de la barra de estado).
+    activity: activity::Activities,
+    /// Dónde quedó el indicador de actividad en el último cuadro (`None`: no se ve).
+    activity_rect: Option<geom::Rect>,
+    /// Reloj fijo para las pruebas (`App::now`).
+    #[cfg(test)]
+    clock: Option<Instant>,
     /// La versión más nueva que se abrió con esta sesión (se guarda en `version_vista`).
     seen_version: String,
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
@@ -632,6 +644,10 @@ impl App {
             update_link: None,
             sel_size: sel_size::SelSize::new(),
             size_link: None,
+            activity: activity::Activities::default(),
+            activity_rect: None,
+            #[cfg(test)]
+            clock: None,
             seen_version: crate::changelog::newest(session.seen_version.as_deref().unwrap_or(about::VERSION), about::VERSION).to_string(),
             transparent: false,
             favorites,

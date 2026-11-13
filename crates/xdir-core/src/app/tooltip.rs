@@ -119,6 +119,8 @@ impl App {
             // El botón «xtree» dice qué hace; el cartel lleva el estado del escaneo, si lo hay.
             Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
             Hit::XtreeBack => return Some("Volver a xdir (Esc)".to_string()),
+            // El indicador de actividad: la lista de lo que está en curso.
+            Hit::Activity => return self.activity.tip(self.now()),
             // La entrada del árbol no dice qué es por sí sola cuando está en franja: sin escaneo,
             // «xtree».
             Hit::TreeXtree => return Some(self.xtree.as_ref().and_then(|x| x.badge_tip()).unwrap_or_else(|| "xtree".to_string())),

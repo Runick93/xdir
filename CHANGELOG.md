@@ -7,6 +7,7 @@
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
 - Expulsar un disco o desconectar una conexión da señal mientras dura: la barra de estado dice «Expulsando "Pendrive"…» (o cuántas operaciones faltan que terminen) y su ⏏ gira en el árbol, en «Este equipo» y en Configuración ▸ Red; un segundo clic no hace nada. Al terminar, «Se expulsó "Pendrive"».
+- Indicador de actividad en la barra de estado: un círculo girando mientras haya algo en segundo plano (conexiones, expulsar, tamaño de lo elegido, búsquedas, carpetas que tardan, xtree, extracciones). Al pasar el mouse dice qué está en curso; con copias, un clic abre su ventana. No aparece por lo que dura menos de 0,3 s.
 
 ### Cambios
 - Cualquier carpeta que tarda más de medio segundo en leerse (local, de red o comprimida) muestra «Cargando…» con el indicador girando, encima de lo que ya llegó. En red sigue el aviso «Conectando…» / «no responde».

@@ -41,6 +41,11 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        // Lo que corre en segundo plano: el indicador (y su cartel) desde su umbral.
+        let clock = self.now();
+        self.sync_activity(clock);
+        let activity = !self.activity.shown(clock).is_empty();
+        let activity_clickable = self.transfers_progress().is_some();
         // Expulsando o desconectando algo: delante de todo, mientras dure.
         if let Some(e) = self.eject_status() {
             status = format!("{e}   ·   {status}");
@@ -291,7 +296,11 @@ impl App {
                 lead: 0.0,
                 size_link,
                 size_link_hot: hover == Hit::SizeLink,
+                activity,
+                activity_hot: hover == Hit::Activity,
+                activity_clickable,
             };
+            self.activity_rect = activity.then(|| ui::activity_rect(w, h, xtree_badge, transfers.is_some()));
             let mut buttons = buttons;
             if let Some(v) = &update_notice {
                 let (link, lead) = ui::draw_update_notice(p, h, v, hover == Hit::UpdateNotice);
@@ -365,11 +374,8 @@ impl App {
         // Pestañas deslizándose hacia su lugar, o una búsqueda en curso (su indicador gira): otro cuadro.
         let searching = self.shown_panes().into_iter().any(|i| {
             let tab = self.panes[i].tab();
-            // También mientras una carpeta muestra «Cargando…» (su indicador gira).
-            tab.search.as_ref().is_some_and(|s| !s.done) || tab.loading_shown
+            tab.search.as_ref().is_some_and(|s| !s.done)
         });
-        // Un ⏏ girando (expulsando o desconectando).
-        let searching = searching || !ejecting.is_empty();
         if self.panes.iter().any(|p| p.tab_busy) || searching {
             animating = true;
             self.last_frame = Some(now);
@@ -377,6 +383,9 @@ impl App {
         if animating {
             self.redraw();
         }
+        // El indicador de actividad, el ⏏ que gira y «Cargando…»: un cuadro cada 100 ms mientras
+        // haya algo en curso (sin nada, ningún temporizador).
+        self.schedule_activity_tick();
         self.notify_a11y_focus();
         // Superposiciones y metadatos de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());

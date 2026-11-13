@@ -248,6 +248,10 @@ fn eject_waiting_for_jobs_text() {
     host.set_answer(Some(true));
     assert!(a.eject_after_jobs(Path::new("/app-ejtx"), "USB (E:)", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
     assert_eq!(a.eject_status().as_deref(), Some("Esperando a que termine 1 operación para expulsar \"USB (E:)\"…"));
+    // En el indicador de actividad, sin los puntos suspensivos.
+    let now = Instant::now() + Duration::from_secs(1);
+    a.sync_activity(now);
+    assert_eq!(a.activity.tip(now).as_deref(), Some("Esperando a que termine 1 operación para expulsar \"USB (E:)\""));
     wait(&mut a, idle);
     assert_eq!(a.eject_status().as_deref(), Some("Expulsando \"USB (E:)\"…"));
     a.eject_done(Path::new("/app-ejtx"));
@@ -365,6 +369,33 @@ fn window_appears_after_one_second() {
     wait(&mut a, idle);
     // Sin trabajos se oculta sola.
     assert!(!host.aux_visible());
+}
+
+/// Ajustes 2: el clic en el indicador de actividad abre la ventana de copia solo si hay copias.
+#[test]
+fn activity_click_opens_copy_window_with_copies() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let t0 = Instant::now();
+    a.activity.begin(super::activity::ActivityKey::Connect(1), "Conectando con \"nas\"", t0);
+    a.clock = Some(t0 + Duration::from_millis(400));
+    a.paint();
+    let r = a.activity_rect.expect("el indicador");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(host.aux_shows().is_empty(), "sin copias, nada");
+    let id = a.start_transfer(slow_copy(&f, "/app-act", 20));
+    a.paint();
+    // Con el indicador de copias a la vista, el de actividad se corre a su izquierda.
+    let r = a.activity_rect.expect("el indicador");
+    assert!(r.right <= a.transfers_button_rect().left);
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(host.aux_shows().len(), 1);
+    a.cancel_job(id);
+    wait(&mut a, idle);
 }
 
 #[test]

@@ -110,7 +110,10 @@ impl App {
             TaskDone::NetPlaces(places) => self.on_net_places(places),
             TaskDone::NetConnections(result) => self.on_net_connections(result),
             TaskDone::NetVolumeIds(ids) => self.remember_net_volume_ids(ids),
-            TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
+            TaskDone::Connected { pane, tab, generation, addr, result } => {
+                self.activity.end(&super::activity::ActivityKey::Connect(generation));
+                self.on_connected(pane, tab, generation, addr, result)
+            }
             TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
             TaskDone::Subfolders { pane, chevron, loc, items } => self.on_subfolders(pane, chevron, loc, items),
             TaskDone::LateConnected { generation, addr, path } => self.on_late_connected(generation, addr, path),

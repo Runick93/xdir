@@ -458,6 +458,12 @@ fn remote_navigation_no_ui_io() {
     let mut sug = crate::typed::Suggest::new(crate::geom::Rect::default(), "");
     sug.set_query(&format!("{}{}s", root.display(), std::path::MAIN_SEPARATOR));
     assert!(sug.items.iter().all(|i| !i.ends_with("sub")), "{:?}", sug.items);
+    // Ajustes 2: desconectar y dibujar mientras tanto (⏏ girando, «Desconectando…», indicador).
+    a.net.connections = vec![conn("smb://nas-n5nav/fotos", &root.to_string_lossy())];
+    a.eject(root.clone());
+    a.clock = Some(Instant::now() + Duration::from_secs(1));
+    a.paint();
+    assert!(a.activity_rect.is_some());
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
 }
 
@@ -532,6 +538,20 @@ fn local_slow_load_shows_loading_after_half_second() {
     a.paint();
     assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
     assert!(!a.panes[0].tab().shows_loading(Instant::now() + Duration::from_secs(5)));
+}
+
+/// Ajustes 2: la conexión en curso está en el indicador de actividad hasta que vuelve.
+#[test]
+fn connecting_in_activity_until_it_returns() {
+    FakeNetwork::hang("nas-a2act", Duration::from_millis(100));
+    let mut a = net_app();
+    let g = a.spawn_connect(0, None, Address::parse("smb://nas-a2act/fotos").unwrap(), Default::default());
+    let key = super::activity::ActivityKey::Connect(g);
+    assert!(a.activity.contains(&key));
+    let now = Instant::now() + Duration::from_secs(1);
+    assert_eq!(a.activity.tip(now).as_deref(), Some("Conectando con \"nas-a2act\""));
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
+    assert!(!a.activity.contains(&key));
 }
 
 /// En red el aviso de espera no cambia: «Conectando con…» en lugar de «Cargando…».

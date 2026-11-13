@@ -170,6 +170,9 @@ impl App {
     /// `spawn_connect` con una generación ya dada (el reintento del conflicto 1219 usa la misma).
     fn spawn_connect_as(&mut self, pane: usize, tab: Option<usize>, generation: u64, addr: Address, opts: ConnectOptions) {
         let (owner, limit, late_tx) = (self.hwnd, self.net.connect_limit.unwrap_or(CONNECT_LIMIT), self.task_tx.clone());
+        // Hasta que vuelva (`TaskDone::Connected`), en el indicador de actividad.
+        let now = self.now();
+        self.activity.begin(super::activity::ActivityKey::Connect(generation), format!("Conectando con \"{}\"", addr.host), now);
         self.spawn_task(move || {
             // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
             // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda

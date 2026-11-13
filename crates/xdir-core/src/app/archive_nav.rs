@@ -137,6 +137,8 @@ impl App {
         let name = e.name.to_string_lossy().into_owned();
         let (file, nested) = (file.clone(), nested.clone());
         self.notice = Some(format!("Abriendo «{name}»…   Esc cancela"));
+        let now = self.now();
+        self.activity.begin(super::activity::ActivityKey::Extract, format!("Extrayendo \"{name}\""), now);
         // Una apertura nueva corta la anterior.
         let stop = Arc::new(AtomicBool::new(false));
         if let Some(old) = self.archive.opening.replace(stop.clone()) {
@@ -166,6 +168,7 @@ impl App {
             return;
         }
         self.archive.opening = None;
+        self.activity.end(&super::activity::ActivityKey::Extract);
         // Cancelada con Escape.
         if token.load(Ordering::Relaxed) || matches!(&result, Err(m) if m == CANCELLED) {
             return;

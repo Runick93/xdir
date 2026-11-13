@@ -805,25 +805,34 @@ impl Tree {
 
     // ---------- seguir al panel ----------
 
-    /// Despliega las carpetas padre de `path` y la deja a la vista. Solo si está bajo una raíz
-    /// del árbol (una unidad o una carpeta del usuario); si no (red, comprimido, "Este equipo"),
-    /// no hace nada. Las carpetas que falta leer se leen en otro hilo y se sigue en `on_loaded`;
+    /// Despliega las carpetas padre de `path` en su ubicación real y la deja a la vista. Solo si
+    /// está bajo una raíz del árbol (una unidad o, si no, una carpeta del usuario); si no (red,
+    /// comprimido, "Este equipo"), no hace nada. Las carpetas que falta leer se leen en otro hilo y se sigue en `on_loaded`;
     /// recién al encontrar la rama completa se despliega (una carpeta que ya no existe no
     /// despliega nada). Una revelación nueva reemplaza a la pendiente.
     pub fn reveal(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
         self.reveal = None;
-        // Ya hay una fila con esa carpeta (una del usuario, una del Acceso rápido, la que se acaba
-        // de tocar): si alguna está dentro del área visible no se mueve nada; si no, se desplaza
-        // hasta la primera, sin desplegar otra rama.
+        // Ya hay una fila con esa carpeta en su ubicación real: si alguna está dentro del área
+        // visible no se mueve nada; si no, se desplaza hasta la primera, sin desplegar otra rama.
+        // Las filas del Acceso rápido y de las carpetas del usuario fijadas arriba (los favoritos
+        // en la Mac) no cuentan si la carpeta está bajo una unidad: ahí se despliega. Si no está
+        // bajo ninguna raíz, cualquier fila sirve (como antes).
         let fs = crate::sys::file_system();
-        let shown: Vec<(usize, usize)> = self
-            .rows()
-            .into_iter()
-            .enumerate()
-            .filter(|&(_, id)| {
-                matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path)
-            })
-            .collect();
+        let computer = self.roots.iter().copied().find(|&id| self.nodes[id].kind == Kind::Computer);
+        let real_top = self.real_root(path).map(|r| if self.nodes[r].kind == Kind::Drive { computer } else { Some(r) });
+        let mut shown = Vec::new();
+        let mut top = None;
+        for (i, id) in self.rows().into_iter().enumerate() {
+            if self.roots.contains(&id) {
+                top = Some(id);
+            }
+            if matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive)
+                && fs.same_path(&self.nodes[id].path, path)
+                && real_top.is_none_or(|t| t == top)
+            {
+                shown.push((i, id));
+            }
+        }
         if let Some(&(_, id)) = shown.first() {
             if !shown.iter().any(|&(i, _)| self.row_in_view(i)) {
                 self.scroll_to = Some(id);
@@ -847,22 +856,27 @@ impl Tree {
         self.reveal.as_ref().map(|r| r.path.as_path())
     }
 
+    /// La raíz del árbol bajo la que está la ubicación real de `path`: la unidad (dentro de
+    /// "Este equipo") que la contiene; si ninguna, la carpeta del usuario u OneDrive. Gana la más
+    /// profunda (un disco montado dentro de otro, Documentos antes que el perfil).
+    fn real_root(&self, path: &Path) -> Option<usize> {
+        let computer = self.roots.iter().copied().find(|&id| self.nodes[id].kind == Kind::Computer);
+        let drives = computer.and_then(|c| self.nodes[c].children.clone()).unwrap_or_default();
+        let deepest = |ids: &mut dyn Iterator<Item = usize>| {
+            ids.filter(|&id| !self.nodes[id].path.as_os_str().is_empty() && is_under(&self.nodes[id].path, path))
+                .max_by_key(|&id| self.nodes[id].path.components().count())
+        };
+        deepest(&mut drives.into_iter())
+            .or_else(|| deepest(&mut self.roots.iter().copied().filter(|&id| matches!(self.nodes[id].kind, Kind::Pinned | Kind::Cloud))))
+    }
+
     /// Baja por el árbol hacia la carpeta pendiente con lo que ya está leído: pide la lectura que
     /// falte (y espera) o, si llegó, despliega la rama y la deja a la vista.
     fn advance_reveal(&mut self) {
         let Some(r) = self.reveal.take() else { return };
         let fs = crate::sys::file_system();
-        // Raíces con ruta de disco: las carpetas del usuario, OneDrive y las unidades (dentro de
-        // "Este equipo"). Gana la más profunda que contiene la ruta (Documentos antes que C:\).
         let computer = self.roots.iter().copied().find(|&id| self.nodes[id].kind == Kind::Computer);
-        let drives = computer.and_then(|c| self.nodes[c].children.clone()).unwrap_or_default();
-        let candidates = self.roots.iter().copied().filter(|&id| matches!(self.nodes[id].kind, Kind::Pinned | Kind::Cloud)).chain(drives);
-        let Some(root) = candidates
-            .filter(|&id| !self.nodes[id].path.as_os_str().is_empty() && is_under(&self.nodes[id].path, &r.path))
-            .max_by_key(|&id| self.nodes[id].path.components().count())
-        else {
-            return;
-        };
+        let Some(root) = self.real_root(&r.path) else { return };
         // Los que hay que desplegar para que se vea la carpeta.
         let mut chain = Vec::new();
         if self.nodes[root].kind == Kind::Drive {
@@ -1436,8 +1450,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Si la carpeta tiene dos filas (la de la unidad y una anclada) y una ya está a la vista, el
-    /// árbol no se desplaza hasta la otra ni despliega nada.
+    /// Si la carpeta tiene dos filas (la de la unidad y una anclada) y la de la unidad ya está a la
+    /// vista, el árbol no se desplaza ni despliega nada; si no se ve, va a la de la unidad.
     #[test]
     fn tree_reveal_keeps_scroll_when_a_row_is_visible() {
         install_fakes();
@@ -1475,14 +1489,14 @@ mod tests {
         assert_eq!(t.scroll, scroll, "no saltó a la fila anclada");
         assert_eq!(expanded_flags(&t), flags);
 
-        // Si ninguna se ve (desplazado a la mitad), se desplaza hasta la primera (la anclada).
+        // Si ninguna se ve (desplazado a la mitad), se desplaza hasta la de la unidad: la anclada
+        // (como los favoritos) no es la ubicación real.
         t.scroll = (scroll / 2.0).floor();
         t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         assert!(!t.row_in_view(pinned_row) && !t.row_in_view(c29_row));
         t.reveal(Handle(0), &target, false);
         t.draw(&p, area, Some(&target), XtreeBadge::Idle);
-        assert_eq!(t.scroll, 0.0);
-        assert!(t.row_in_view(pinned_row));
+        assert!(t.row_in_view(c29_row) && !t.row_in_view(pinned_row));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1512,6 +1526,58 @@ mod tests {
         t.reveal(Handle(0), &root.join("uno"), false);
         assert_eq!(t.revealing(), Some(root.join("uno").as_path()));
         finish_reveal(&mut t);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Una carpeta que también está en el Acceso rápido (o en los favoritos de la Mac): su fila del
+    /// grupo no cuenta como «ya está»; el árbol despliega la ubicación real bajo su disco y la marca.
+    /// Si la carpeta no está bajo ninguna raíz, queda la fila del grupo (como antes).
+    #[test]
+    fn tree_reveal_expands_real_location_despite_quick_access_row() {
+        install_fakes();
+        let root = temp_root("revelar-acceso");
+        let target = root.join("alfa").join("beta");
+        std::fs::create_dir_all(&target).unwrap();
+        let outside = root.with_file_name(format!("xdir-tree-fuera-acceso-{}", std::process::id()));
+        let mut t = tree_with_drive(&root);
+        t.apply_quick(vec![
+            crate::fs::QuickItem { name: "beta".into(), path: target.clone(), pinned: true },
+            crate::fs::QuickItem { name: "fuera".into(), path: outside.clone(), pinned: true },
+        ]);
+        assert!(t.rows().iter().any(|&id| t.nodes[id].path == target), "la fila del Acceso rápido se ve");
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        let alfa = node_by_path(&t, &root.join("alfa")).expect("se leyó alfa");
+        assert!(alfa.expanded, "se despliega la ubicación real");
+        assert!(t.nodes.iter().find(|n| n.kind == Kind::Drive).unwrap().expanded);
+        let real = t.nodes.iter().position(|n| n.kind == Kind::Folder && n.path == target && n.depth > 1).expect("fila real de beta");
+        assert_eq!(t.scroll_to, Some(real), "se marca la fila real, no la del grupo");
+
+        // Lo mismo con una carpeta del usuario fijada arriba (los favoritos de la Mac): su fila no
+        // cuenta; se despliega bajo la unidad.
+        let mut t = tree_with_drive(&root);
+        t.nodes.push(Node::new(Kind::Pinned, target.clone(), "beta".into(), 0));
+        t.roots.insert(0, t.nodes.len() - 1);
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        assert!(node_by_path(&t, &root.join("alfa")).is_some_and(|n| n.expanded));
+        let real = t.nodes.iter().position(|n| n.kind == Kind::Folder && n.path == target).expect("fila real de beta");
+        assert_eq!(t.scroll_to, Some(real));
+        // Una carpeta de adentro de la del usuario también se busca bajo la unidad.
+        let mut t = tree_with_drive(&root);
+        t.nodes.push(Node::new(Kind::Pinned, root.join("alfa"), "alfa".into(), 0));
+        t.roots.insert(0, t.nodes.len() - 1);
+        t.apply_quick(vec![crate::fs::QuickItem { name: "fuera".into(), path: outside.clone(), pinned: true }]);
+        t.reveal(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        assert!(t.nodes.iter().find(|n| n.kind == Kind::Drive).unwrap().expanded, "bajo la unidad, no bajo la anclada");
+
+        // Fuera de toda raíz: solo la fila del grupo (no se despliega nada).
+        let flags = expanded_flags(&t);
+        t.scroll_to = None;
+        t.reveal(Handle(0), &outside, false);
+        assert!(t.revealing().is_none());
+        assert_eq!(expanded_flags(&t), flags);
         let _ = std::fs::remove_dir_all(&root);
     }
 

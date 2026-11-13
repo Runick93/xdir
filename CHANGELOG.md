@@ -53,6 +53,7 @@
 ### Arreglos
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.
 - En la Mac, el tipo de archivo siempre empieza con mayúscula.
+- Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.
 - **Seguridad**
   - Extraer un comprimido nunca escribe fuera de la carpeta elegida ni deja enlaces que apunten afuera, y lo extraído conserva la marca de «descargado de internet».
   - Devolver desde la Papelera nunca escribe fuera del disco ni sigue enlaces, y una Papelera con datos armados a propósito no traba xdir.

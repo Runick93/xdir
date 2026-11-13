@@ -210,7 +210,9 @@ fn walk(path: &Path, remote: bool, stop: &AtomicBool, beat: &Beat) -> (u64, bool
         out
     };
     let mut last = 0;
-    let skipped = crate::info::size::folder_size(path, &skip, stop, &mut |b, _, _| {
+    // En la red el avance cuenta con cada elemento: un servidor lento pero vivo no se corta.
+    let every = if remote { 1 } else { crate::info::size::STEP };
+    let skipped = crate::info::size::folder_size_every(path, &skip, stop, every, &mut |b, _, _| {
         last = b;
         beat.bytes.store(b, Ordering::Relaxed);
         beat.beats.fetch_add(1, Ordering::Relaxed);

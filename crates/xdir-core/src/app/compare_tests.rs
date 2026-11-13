@@ -558,3 +558,35 @@ fn link_size_is_not_trusted() {
     a.run_command(Command::CompareContents);
     assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
 }
+
+/// Escribir la suma a mano no cambia de algoritmo ni corta la suma en curso a mitad de camino (a
+/// los 32 caracteres parecería una MD5): se decide al pegar, con Enter o al salir de la caja.
+#[test]
+fn typing_does_not_switch_algorithm_midway() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("tipeando", &[("a.bin", &[5u8; 64])]);
+    FakeNetwork::hang(&d.to_string_lossy(), Duration::from_millis(200));
+    go(&mut a, 0, Location::Path(d.clone()));
+    select(&mut a, 0, &["a.bin"]);
+    a.info.sections |= Section::Checksum.bit();
+    open_info(&mut a);
+    a.start_checksum(HashAlgo::Sha256);
+    let flag = a.info.sum.job.as_ref().unwrap().1.cancel.clone();
+    info_click(&mut a, InfoHit::Expected);
+    let (b, _) = a.info.edit.expect("caja abierta");
+    let sha = "ab".repeat(32);
+    for n in 1..=40 {
+        crate::host::WindowHost::text_set(&*host, b, &sha[..n]);
+        a.on_text_changed(b.0 as isize);
+    }
+    assert_eq!(a.info.sum.algo, HashAlgo::Sha256);
+    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed), "la SHA-256 sigue");
+    assert_eq!(a.info.sum.expected, sha[..40]);
+    // Pegar una MD5 entera (de golpe) sí decide.
+    crate::host::WindowHost::text_set(&*host, b, "");
+    a.on_text_changed(b.0 as isize);
+    crate::host::WindowHost::text_set(&*host, b, &"cd".repeat(16));
+    a.on_text_changed(b.0 as isize);
+    assert_eq!(a.info.sum.algo, HashAlgo::Md5);
+}

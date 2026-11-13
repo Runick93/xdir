@@ -194,8 +194,23 @@ impl App {
         self.redraw();
     }
 
-    /// Lo pegado en «Comparar con…»: si es una suma, se elige su algoritmo y, si todavía no está
-    /// calculada, se calcula.
+    /// Mientras se escribe en «Comparar con…»: se guarda y se compara con lo ya calculado, pero el
+    /// algoritmo no cambia ni se corta la suma en curso (a mitad de una SHA-256 escrita a mano
+    /// parecería una MD5). Lo que llega de golpe (pegar) se decide enseguida, como Enter.
+    pub(super) fn typed_expected(&mut self, text: &str) {
+        /// Caracteres que llegan juntos y cuentan como pegar.
+        const PASTE: usize = 8;
+        let pasted = text.chars().count() >= self.info.sum.expected.chars().count() + PASTE;
+        if pasted {
+            self.set_expected(text);
+        } else {
+            self.info.sum.expected = text.to_string();
+            self.redraw();
+        }
+    }
+
+    /// Lo pegado (o confirmado con Enter, o al salir de la caja) en «Comparar con…»: si es una
+    /// suma, se elige su algoritmo y, si todavía no está calculada, se calcula.
     pub(super) fn set_expected(&mut self, text: &str) {
         self.info.sum.expected = text.to_string();
         if let Some(algo) = self.info.sum.picked().map(|p| p.algo) {

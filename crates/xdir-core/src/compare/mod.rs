@@ -319,9 +319,15 @@ pub fn run_watched<T: Send + 'static>(
 
 /// La suma publicada que se pegó en «Comparar con…»: el algoritmo (por el largo: 64 = SHA-256,
 /// 32 = MD5) y la suma en minúscula. Sin importar espacios ni mayúsculas; acepta `suma  nombre`
-/// (`sha256sum`, también con la suma en grupos), `nombre: suma`, `SHA256 (nombre) = suma` (BSD) y
-/// la suma sola en una línea de varias (certutil).
+/// (`sha256sum`, también con la suma en grupos y nombres con `=`), `nombre: suma`,
+/// `SHA256 (nombre) = suma` (BSD), `sha256:suma`, la fila de la tabla de `Get-FileHash` y la suma
+/// sola en una línea de varias (certutil).
 pub fn parse_expected(text: &str) -> Option<(HashAlgo, String)> {
+    text.lines().find_map(parse_line)
+}
+
+/// La suma de una línea (ver `parse_expected`).
+fn parse_line(line: &str) -> Option<(HashAlgo, String)> {
     let hex = |s: &str| -> Option<(HashAlgo, String)> {
         let algo = HashAlgo::from_hex_len(s.len())?;
         s.chars().all(|c| c.is_ascii_hexdigit()).then(|| (algo, s.to_ascii_lowercase()))
@@ -329,14 +335,18 @@ pub fn parse_expected(text: &str) -> Option<(HashAlgo, String)> {
     fn is_hex(t: &&&str) -> bool {
         t.chars().all(|c| c.is_ascii_hexdigit())
     }
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).find_map(|line| {
-        let line = line.rsplit_once('=').map_or(line, |(_, after)| after.trim());
-        // `\` delante (sha256sum con nombres raros); el nombre (con `*` en modo binario) no cuenta.
-        let tokens: Vec<&str> = line.split_whitespace().map(|t| t.trim_start_matches('\\')).collect();
-        let leading: String = tokens.iter().take_while(is_hex).copied().collect();
-        let trailing: String = tokens.iter().rev().take_while(is_hex).copied().collect::<Vec<_>>().into_iter().rev().collect();
-        hex(&tokens.concat()).or_else(|| hex(&leading)).or_else(|| hex(&trailing)).or_else(|| tokens.first().and_then(|t| hex(t)))
-    })
+    // `\` delante (sha256sum con nombres raros); el nombre (con `*` en modo binario) no cuenta.
+    let tokens: Vec<&str> = line.split_whitespace().map(|t| t.trim_start_matches('\\')).collect();
+    let leading: String = tokens.iter().take_while(is_hex).copied().collect();
+    let trailing: String = tokens.iter().rev().take_while(is_hex).copied().collect::<Vec<_>>().into_iter().rev().collect();
+    // Una palabra sola con la suma, sin lo de antes de `:` o `=` («sha256:…», «(x)=…») ni signos.
+    let single = || {
+        tokens.iter().find_map(|t| {
+            let t = t.rsplit([':', '=']).next().unwrap_or(t);
+            hex(t.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        })
+    };
+    hex(&tokens.concat()).or_else(|| hex(&leading)).or_else(single).or_else(|| hex(&trailing))
 }
 
 /// La suma partida en líneas que entren en `width` (con la letra de ancho fijo): de 64, 32 o 16

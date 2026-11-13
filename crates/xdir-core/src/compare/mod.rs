@@ -302,7 +302,7 @@ pub fn parse_expected(text: &str) -> Option<(HashAlgo, String)> {
     }
     text.lines().map(str::trim).filter(|l| !l.is_empty()).find_map(|line| {
         let line = line.rsplit_once('=').map_or(line, |(_, after)| after.trim());
-        // `\` delante (sha256sum con nombres raros) y `*` pegado al nombre (modo binario).
+        // `\` delante (sha256sum con nombres raros); el nombre (con `*` en modo binario) no cuenta.
         let tokens: Vec<&str> = line.split_whitespace().map(|t| t.trim_start_matches('\\')).collect();
         let leading: String = tokens.iter().take_while(is_hex).copied().collect();
         let trailing: String = tokens.iter().rev().take_while(is_hex).copied().collect::<Vec<_>>().into_iter().rev().collect();

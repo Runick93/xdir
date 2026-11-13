@@ -127,9 +127,10 @@ fn side_of(tab: &Tab, i: usize) -> Option<Side> {
         Location::Archive { file, nested, .. } => Source::Archive { file: file.clone(), nested: nested.clone(), rel: tab.archive_rel(i)? },
         _ => return None,
     };
+    // Los dos últimos tramos («…/Fotos/Viaje»), como «Ubicación» en el panel de información.
     let folder = match &source {
-        Source::Disk(p) => p.parent().map(|d| d.display().to_string()).unwrap_or_default(),
-        Source::Archive { .. } => tab.location.address_text(),
+        Source::Disk(p) => p.parent().map(super::info::short_location).unwrap_or_default(),
+        Source::Archive { .. } => super::info::short_location(std::path::Path::new(&tab.location.address_text())),
     };
     Some(Side { source, name: e.display.clone(), folder, size: e.size, icon: e.icon })
 }
@@ -354,7 +355,7 @@ impl App {
                     Verdict::SizeDiffers { a, b } => {
                         (false, format!("Tamaños distintos: {} y {} bytes", crate::format::thousands(*a), crate::format::thousands(*b)))
                     }
-                    Verdict::DiffersAt(at) => (false, format!("Primer byte distinto en la posición {}", compare::offset_text(*at))),
+                    Verdict::DiffersAt(at) => (false, format!("Primer byte distinto: {}", compare::offset_text(*at))),
                 };
                 ResultView::Verdict { same, detail }
             }

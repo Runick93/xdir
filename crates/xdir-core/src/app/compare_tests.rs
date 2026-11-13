@@ -95,11 +95,13 @@ fn two_in_the_active_pane() {
     assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
     let st = a.compare.as_ref().unwrap();
     assert_eq!([st.sides[0].name.as_str(), st.sides[1].name.as_str()], ["a.txt", "b.txt"]);
-    assert_eq!(st.sides[0].folder, d.display().to_string());
+    assert_eq!(st.sides[0].folder, super::info::short_location(&d));
+    assert!(st.sides[0].folder.ends_with(&d.file_name().unwrap().to_string_lossy().into_owned()));
     // Distintos: la posición del primer byte distinto.
     select(&mut a, 0, &["a.txt", "c.txt"]);
     a.run_command(Command::CompareContents);
     assert_eq!(wait_done(&mut a), Status::Done(Verdict::DiffersAt(5)));
+    assert!(matches!(a.compare_view().unwrap().result, crate::compare::draw::ResultView::Verdict { same: false, detail } if detail == "Primer byte distinto: 5 (0x5)"));
 }
 
 /// Uno elegido en cada panel (con dos a la vista); con más paneles, no.

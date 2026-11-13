@@ -150,7 +150,7 @@ fn index_of(tab: &Tab, p: &Path) -> Option<usize> {
 }
 
 /// «…/Imágenes/Viaje»: los dos últimos tramos de una carpeta (la ruta entera si es corta).
-fn short_location(dir: &Path) -> String {
+pub(super) fn short_location(dir: &Path) -> String {
     let parts: Vec<String> = dir.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
     if parts.len() <= 3 {
         return dir.display().to_string();
@@ -705,7 +705,7 @@ impl App {
             lines.push((format!("Modificado: {}", env.format_date(e.modified)), false));
             rows.push(Row::new("Modificado", env.format_date(e.modified)));
         }
-        rows.push(Row::new("Ubicación", tab.location.address_text()));
+        rows.push(Row::new("Ubicación", short_location(Path::new(&tab.location.address_text()))));
         let section = |s: Section, body: Body| SectionView { section: s, open: st.is_open(s), error: st.error(s), body };
         let mut sections = vec![section(Section::General, Body::General { capacity: None, rows, flags: Vec::new() })];
         if self.info.sum.target.is_some() {

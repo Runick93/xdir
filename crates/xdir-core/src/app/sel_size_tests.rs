@@ -78,10 +78,9 @@ fn watcher_fires(a: &mut App) {
     a.paint();
 }
 
-/// Tamaño como lo escribe la barra de estado: siempre en castellano (no con el formato del
-/// sistema, que en la Mac en inglés dice «Zero KB»).
+/// Tamaño como lo escribe la barra de estado: con el formato de la columna Tamaño.
 fn size(b: u64) -> String {
-    crate::format::size_short_text(b)
+    crate::format::size_short(b)
 }
 
 /// Con carpetas elegidas la barra dice «calculando…» y después el total de archivos y carpetas.

@@ -406,6 +406,10 @@ impl Xtree {
     /// Se borró el historial: la tarjeta deja de mostrar el que había.
     pub fn clear_history(&mut self) {
         self.hist.reset();
+        // Con un análisis a la vista, la tarjeta pasa a «sin historial» (no a «cargando»).
+        if !self.arena.is_empty() {
+            self.hist.loaded = Some(Default::default());
+        }
     }
 
     /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).

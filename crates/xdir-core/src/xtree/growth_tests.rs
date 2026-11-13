@@ -292,3 +292,12 @@ fn table_marker_and_tooltip() {
     assert_eq!(t.iter().filter(|s| *s == "+5,0 GB en 7 días").count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Después de «Borrar historial», la tarjeta dice que no hay historial (no queda «cargando»).
+#[test]
+fn cleared_history_shows_empty() {
+    let (mut x, dir) = with_history("borrado");
+    x.clear_history();
+    assert!(texts(&mut x).iter().any(|s| s == "Sin historial todavía: se arma cada vez que analizás"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

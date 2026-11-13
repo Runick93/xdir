@@ -47,6 +47,7 @@ jobs:
             # Solo la primera línea "version" (la de [workspace.package]); Cargo.lock también la lleva y el build usa --locked.
             sed -i "0,/^version *= *\"$current\"/s//version = \"$new\"/" Cargo.toml
             sed -i "/^name = \"xdir-windows\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
+            sed -i "/^name = \"xdir-archive\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
             sed -i "/^name = \"xdir-core\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
             sed -i "/^name = \"xdir-mac\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock
             sed -i "/^name = \"xdir-linux\"$/{n;s/^version = \"$current\"/version = \"$new\"/}" Cargo.lock

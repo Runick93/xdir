@@ -46,7 +46,9 @@ pub fn select_photo(arena: &[Node]) -> Photo {
         let Some(n) = arena.get(id as usize) else { continue };
         for &c in &n.children {
             let Some(k) = arena.get(c as usize) else { continue };
-            if !k.is_dir || k.small || k.size == 0 {
+            // Un nombre que no era UTF-8 (Linux) llega con el carácter de reemplazo y puede quedar
+            // igual a otro: ni él ni lo de adentro entran (nunca se mezclan dos carpetas).
+            if !k.is_dir || k.small || k.size == 0 || k.name.contains(char::REPLACEMENT_CHARACTER) {
                 continue;
             }
             let d = depth + 1;
@@ -522,6 +524,10 @@ impl Loaded {
     /// recortó) de un tamaño guardado (`Some(Some(v))`); `None` si no se sabe.
     pub fn lookup(&self, snap: usize, rel: &str) -> Option<Option<u64>> {
         let pairs = self.sizes.get(snap)?;
+        // Nombres que no eran UTF-8 no se guardan: no se sabe.
+        if rel.contains(char::REPLACEMENT_CHARACTER) {
+            return None;
+        }
         let folded;
         let rel = if self.fold {
             folded = rel.to_lowercase();
@@ -1182,6 +1188,29 @@ mod tests {
         assert!(write_file(&blocked, &History::default()).is_err());
         let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("bloqueado.bin.")).collect();
         assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Nombres que no eran UTF-8 (en Linux) llegan con el carácter de reemplazo y dos distintos
+    /// pueden quedar iguales: no entran en la foto (ni lo de adentro) y no se buscan, así nunca se
+    /// mezclan.
+    #[test]
+    fn non_utf8_names_are_skipped() {
+        let t = vec![
+            node("/r", NO_PARENT, 30 * MB, true, vec![1, 2, 3]),
+            node("a\u{FFFD}", 0, 10 * MB, true, vec![4]),
+            node("a\u{FFFD}", 0, 10 * MB, true, vec![]),
+            node("b", 0, 10 * MB, true, vec![]),
+            node("hija", 1, 10 * MB, true, vec![]),
+        ];
+        let got: Vec<String> = select(&t).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(got, ["", "b"]);
+        let dir = tmp_dir("no-utf8");
+        let root = base("no-utf8").join("r");
+        save_snapshot(&dir, &root, 100, &select(&t)).unwrap();
+        let l = load_for(&dir, &root);
+        assert_eq!(l.value(0, "b"), Some(10 * MB));
+        assert_eq!(l.lookup(0, "a\u{FFFD}"), None, "no se sabe, no «no estaba»");
+        assert_eq!(l.lookup(0, "a\u{FFFD}/hija"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

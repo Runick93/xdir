@@ -403,6 +403,29 @@ impl Xtree {
         self.hist.loaded.as_deref()
     }
 
+    /// Gancho de pruebas del historial (#58): `periodo <i>` toca el período `i`, `crecio <i>` la
+    /// fila `i` de «Más crecieron» y `marca <i>` deja el mouse sobre el tamaño de la fila `i` de
+    /// la tabla (para el cartel de la ▲).
+    #[cfg(feature = "pruebas")]
+    pub fn history_test(&mut self, area: Rect, what: &str, i: usize) -> Action {
+        self.prepare(area);
+        let ui = self.ui(area);
+        let s = growth::strip(ui.card);
+        let at = match what {
+            "periodo" => s.periods.get(i).map(|r| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)),
+            "crecio" => Some((s.right.left + 40.0, s.right.top + 20.0 + (i as f32 + 0.5) * 19.0)),
+            "marca" => {
+                let y = ui.list.top + TABLE_H + (i as f32 + 0.5) * ROW_H - self.scroll;
+                self.on_mouse_move(area, ui.list.right - 150.0, y);
+                return Action::Redraw;
+            }
+            _ => None,
+        };
+        let Some((x, y)) = at else { return Action::None };
+        self.on_mouse_move(area, x, y);
+        self.on_click(area, x, y, false)
+    }
+
     /// Se borró el historial: la tarjeta deja de mostrar el que había.
     pub fn clear_history(&mut self) {
         self.hist.reset();

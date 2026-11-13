@@ -264,3 +264,31 @@ fn card_while_scanning() {
     assert_eq!(x.history_days(), 7);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------- ▲ en la tabla ----------
+
+/// La ▲ va junto al tamaño de las carpetas que crecieron mucho; con el mouse quieto encima del
+/// tamaño aparece el cartel con el cambio.
+#[test]
+fn table_marker_and_tooltip() {
+    let (mut x, dir) = with_history("flecha");
+    let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+    x.paint(&p, AREA);
+    let tris: Vec<_> = p.paths().into_iter().filter(|(pts, closed, fill)| *closed && pts.len() == 3 && fill.is_some()).collect();
+    // «a» (+5 GB) sí; «b» (+1 GB, 50 %) también; el archivo no.
+    assert_eq!(tris.len(), 2, "{tris:?}");
+    // Mouse sobre el tamaño de la primera fila («a»).
+    let l = x.ui(AREA).list;
+    let (mx, my) = (l.right - 150.0, l.top + TABLE_H + ROW_H / 2.0);
+    x.on_mouse_move(AREA, mx, my);
+    assert_eq!(texts(&mut x).iter().filter(|s| *s == "+5,0 GB en 7 días").count(), 1, "el cartel espera");
+    // Pasó la espera del cartel.
+    x.hist.tip_since_for_tests(Duration::from_secs(1));
+    let t = texts(&mut x);
+    assert_eq!(t.iter().filter(|s| *s == "+5,0 GB en 7 días").count(), 2, "cambio en la franja y en el cartel: {t:?}");
+    // Un clic lo saca.
+    let _ = x.on_click(AREA, mx, my, false);
+    let t = texts(&mut x);
+    assert_eq!(t.iter().filter(|s| *s == "+5,0 GB en 7 días").count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

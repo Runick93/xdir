@@ -404,6 +404,7 @@ impl Xtree {
 
     /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).
     pub fn close_menu(&mut self) {
+        self.hist.tip = None;
         self.menu_open = false;
         self.menu_hover = None;
         self.hover_back = false;
@@ -847,6 +848,16 @@ impl Xtree {
         Some((hit, node))
     }
 
+    /// La carpeta de la fila `row` si el mouse (en `x`) está sobre su tamaño y lleva la ▲.
+    fn mark_at(&self, area: Rect, row: Option<usize>, x: f32) -> Option<u32> {
+        let l = self.ui(area).list;
+        let id = self.rows().get(row?).copied().flatten()?;
+        if !(l.right - 214.0..=l.right - 124.0).contains(&x) {
+            return None;
+        }
+        growth::row_mark(&self.hist, &self.arena, id, self.hist.today()).map(|_| id)
+    }
+
     /// Fila del menú de discos bajo el cursor.
     fn menu_row_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
         let n = self.drives.len() + 1;
@@ -904,7 +915,9 @@ impl Xtree {
         }
         let (row, cell, btn) = (self.row_at(area, x, y), self.cell_at(x, y), self.button_at(area, x, y));
         let strip = self.strip_hit_at(area, x, y).map(|h| h.0);
-        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn || strip != self.hist.hover;
+        let mark = self.mark_at(area, row, x);
+        let tip_changed = self.hist.hover_mark(mark, x, y, self.hwnd, self.scan.id);
+        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn || strip != self.hist.hover || tip_changed;
         self.hist.hover = strip;
         self.hover_row = row;
         self.hover = cell;
@@ -914,6 +927,7 @@ impl Xtree {
 
     /// Rueda sobre la tabla: `lines` filas (positivo: hacia arriba).
     pub fn on_wheel(&mut self, area: Rect, lines: f32) -> bool {
+        self.hist.tip = None;
         let ui = layout_ui(area, self.legend_h());
         let visible = ui.list.bottom - ui.list.top - TABLE_H;
         let max = (self.rows().len() as f32 * ROW_H - visible).max(0.0);
@@ -925,6 +939,8 @@ impl Xtree {
 
     /// Clic (o doble clic) con el botón izquierdo.
     pub fn on_click(&mut self, area: Rect, x: f32, y: f32, double: bool) -> Action {
+        // Un clic saca el cartel de la ▲ (como los de xdir).
+        self.hist.tip = None;
         if double {
             return self.on_double_click(area, x, y);
         }
@@ -1030,6 +1046,7 @@ impl Xtree {
 
     /// Teclas de la vista: Retroceso, Esc, T, F5 y A.
     pub fn on_key(&mut self, k: Key) -> Action {
+        self.hist.tip = None;
         match k {
             VK_BACK => self.on_right_click(),
             VK_ESCAPE if self.menu_open => {
@@ -1204,6 +1221,7 @@ impl Xtree {
                 .or_else(|| self.hover_row.and_then(|i| rows.get(i).copied().flatten()));
 
             // ----- tabla -----
+            let today = self.hist.today();
             let l = ui.list;
             p.round_fill(l, 8.0, th.surface);
             p.round_stroke_w(l, 8.0, th.border, 1.0);
@@ -1235,7 +1253,12 @@ impl Xtree {
                             let ic = if n.is_dir { rgb(FOLDER_ICON) } else { file_icon };
                             icon(l.left + 12.0, top + (ROW_H - 16.0) / 2.0, n.is_dir, ic);
                             p.text(FontId::Ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
-                            p.text(FontId::UiRight, &fmt_size(n.size), rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
+                            let size = fmt_size(n.size);
+                            p.text(FontId::UiRight, &size, rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
+                            // Creció mucho en el período: ▲ junto al tamaño.
+                            if done && growth::row_mark(&self.hist, arena, *id, today).is_some() {
+                                growth::draw_mark(p, l.right - 124.0, p.measure(FontId::Ui, &size), top, top + ROW_H);
+                            }
                             let pc = format!("{:.1} %", frac * 100.0).replace('.', ",");
                             p.text(FontId::UiRight, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
                             let track = rect(l.right - 62.0, top + ROW_H / 2.0 - 4.0, l.right - 12.0, top + ROW_H / 2.0 + 4.0);
@@ -1406,6 +1429,15 @@ impl Xtree {
         } else if done {
             let help = if self.by_type { "T: color por carpeta" } else { "T: color por tipo de archivo" };
             p.text(FontId::UiRight, help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
+        }
+
+        // ----- cartel de la ▲ de la tabla (#58) -----
+        if done
+            && self.hist.tip_visible()
+            && let Some((id, mx, my, _)) = self.hist.tip
+            && let Some(text) = growth::row_mark(&self.hist, arena, id, self.hist.today())
+        {
+            growth::draw_tip(p, area, mx, my, &text);
         }
 
         // ----- lista de discos: va al final para quedar por encima de todo -----

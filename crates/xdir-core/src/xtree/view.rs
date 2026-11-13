@@ -881,6 +881,16 @@ impl Xtree {
         true
     }
 
+    /// `take_result` con el historial guardado con una generación de borrado vieja (pruebas).
+    #[cfg(test)]
+    pub fn take_result_with_generation(&mut self, generation: u64) {
+        let Some(arena) = self.scan.result.lock().unwrap().take() else { return };
+        self.arena = Arc::new(arena);
+        self.scanning = false;
+        self.go(0);
+        self.hist.after_scan_at(self.hwnd, self.scan.id, &self.root, &self.arena, Some(generation));
+    }
+
     /// Aviso del escáner (`WM_APP_XTREE`). Devuelve si hay que repintar.
     pub fn on_message(&mut self, wparam: usize, lparam: isize) -> bool {
         if wparam != self.scan.id {

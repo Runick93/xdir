@@ -301,3 +301,20 @@ fn cleared_history_shows_empty() {
     assert!(texts(&mut x).iter().any(|s| s == "Sin historial todavía: se arma cada vez que analizás"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Una foto que salió antes de «Borrar historial» no vuelve a crear la carpeta: el hilo ve que la
+/// generación cambió y entrega un historial vacío.
+#[test]
+fn save_started_before_clear_is_dropped() {
+    let dir = tmp("borrar-en-camino");
+    let root = tmp("raiz-borrar-en-camino");
+    let mut x = view(&root, &dir, 500);
+    let stale = history::generation(&dir);
+    history::clear(&dir).unwrap();
+    x.scanning = true;
+    *x.scan.result.lock().unwrap() = Some(tree("r", 1, 1, 1));
+    x.take_result_with_generation(stale);
+    wait_history(&mut x);
+    assert!(x.hist.loaded.as_ref().unwrap().is_empty());
+    assert!(!dir.exists(), "no se vuelve a crear");
+}

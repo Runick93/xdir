@@ -589,6 +589,19 @@ fn typing_does_not_switch_algorithm_midway() {
     crate::host::WindowHost::text_set(&*host, b, &"cd".repeat(16));
     a.on_text_changed(b.0 as isize);
     assert_eq!(a.info.sum.algo, HashAlgo::Md5);
+    // Pegar encima de lo que había (una SHA-256 entera reemplazada por una MD5, más corta) también
+    // decide: solo un carácter de más o de menos es escribir.
+    crate::host::WindowHost::text_set(&*host, b, &"ef".repeat(32));
+    a.on_text_changed(b.0 as isize);
+    assert_eq!(a.info.sum.algo, HashAlgo::Sha256);
+    crate::host::WindowHost::text_set(&*host, b, &"12".repeat(16));
+    a.on_text_changed(b.0 as isize);
+    assert_eq!(a.info.sum.algo, HashAlgo::Md5);
+    // Borrar de a uno no decide nada.
+    let md5 = "12".repeat(16);
+    crate::host::WindowHost::text_set(&*host, b, &md5[..31]);
+    a.on_text_changed(b.0 as isize);
+    assert_eq!(a.info.sum.algo, HashAlgo::Md5);
 }
 
 /// Si no se puede crear el hilo, la suma (o la comparación) responde con el error que le toca y

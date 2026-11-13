@@ -92,6 +92,17 @@ impl Checksum {
     }
 }
 
+/// ¿`new` es `old` con un carácter de más o de menos (escribir o borrar de a uno)?
+fn one_char_edit(old: &str, new: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let (short, long) = if a.len() < b.len() { (&a, &b) } else { (&b, &a) };
+    if long.len() != short.len() + 1 {
+        return false;
+    }
+    let i = short.iter().zip(long.iter()).take_while(|(x, y)| x == y).count();
+    short[i..] == long[i + 1..]
+}
+
 impl App {
     /// El archivo del que se calcularía la suma: el único elemento que muestra el panel, si es un
     /// archivo (del disco o de adentro de un comprimido).
@@ -196,16 +207,14 @@ impl App {
 
     /// Mientras se escribe en «Comparar con…»: se guarda y se compara con lo ya calculado, pero el
     /// algoritmo no cambia ni se corta la suma en curso (a mitad de una SHA-256 escrita a mano
-    /// parecería una MD5). Lo que llega de golpe (pegar) se decide enseguida, como Enter.
+    /// parecería una MD5). Cualquier otro cambio (pegar, también encima de lo que había) se decide
+    /// enseguida, como Enter.
     pub(super) fn typed_expected(&mut self, text: &str) {
-        /// Caracteres que llegan juntos y cuentan como pegar.
-        const PASTE: usize = 8;
-        let pasted = text.chars().count() >= self.info.sum.expected.chars().count() + PASTE;
-        if pasted {
-            self.set_expected(text);
-        } else {
+        if one_char_edit(&self.info.sum.expected, text) {
             self.info.sum.expected = text.to_string();
             self.redraw();
+        } else {
+            self.set_expected(text);
         }
     }
 

@@ -352,6 +352,7 @@ impl App {
                 } else {
                     Xtree::unscanned(self.hwnd, root, self.config.xtree_by_type)
                 });
+                self.setup_xtree_history();
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.close_quick_look();

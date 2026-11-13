@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::growth::HistState;
 use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on};
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
 use super::tree::{NO_PARENT, Node, node_path, rows_of};
@@ -240,6 +241,8 @@ pub struct Xtree {
     seen: bool,
     /// Avisos del escaneo recibidos: fase del arco del indicador que gira.
     ticks: u8,
+    /// Historial de tamaños de la raíz (#58).
+    hist: HistState,
 }
 
 impl Xtree {
@@ -318,6 +321,7 @@ impl Xtree {
             elevating: Arc::new(AtomicBool::new(false)),
             seen: false,
             ticks: 0,
+            hist: HistState::default(),
         }
     }
 
@@ -359,6 +363,37 @@ impl Xtree {
             };
         }
         Some(node.size)
+    }
+
+    /// Historial de tamaños: `on` guarda una foto con cada análisis completo (`[opciones]
+    /// xtree_historial`), `days` es el período de la tarjeta y `dir` la carpeta del historial.
+    pub fn set_history(&mut self, on: bool, days: u16, dir: Option<PathBuf>) {
+        self.hist.on = on;
+        if super::growth::PERIODS.contains(&days) {
+            self.hist.days = days;
+        }
+        self.hist.dir = dir;
+    }
+
+    /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
+    pub fn history_days(&self) -> u16 {
+        self.hist.days
+    }
+
+    /// Fija el día de hoy (días desde 1970): pruebas y gancho de pruebas. `None` vuelve al reloj.
+    pub fn set_today(&mut self, day: Option<i32>) {
+        self.hist.today_fix = day;
+    }
+
+    /// El historial que llegó del hilo (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_loaded(&self) -> Option<&super::history::Loaded> {
+        self.hist.loaded.as_deref()
+    }
+
+    /// Se borró el historial: la tarjeta deja de mostrar el que había.
+    pub fn clear_history(&mut self) {
+        self.hist.reset();
     }
 
     /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).
@@ -607,6 +642,7 @@ impl Xtree {
         self.selected = None;
         self.scroll = 0.0;
         self.scanning = true;
+        self.hist.reset();
         self.start_clock();
     }
 
@@ -626,6 +662,7 @@ impl Xtree {
         // Resultado nuevo: el indicador lo muestra hasta que se abra la vista.
         self.seen = false;
         self.go(0);
+        self.hist.after_scan(self.hwnd, self.scan.id, &self.root, &self.arena);
         true
     }
 
@@ -967,6 +1004,7 @@ impl Xtree {
         if self.scanning {
             self.take_result();
         }
+        self.hist.take(&self.root);
         let ui = layout_ui(area, self.legend_h());
         let live = self.scan.live.clone();
         let guard = if self.scanning { Some(live.read().unwrap()) } else { None };
@@ -1879,3 +1917,7 @@ mod tests {
         crate::sys::testing::FakeDiskScan::set_volume(None, false);
     }
 }
+
+#[cfg(test)]
+#[path = "growth_tests.rs"]
+mod growth_tests;

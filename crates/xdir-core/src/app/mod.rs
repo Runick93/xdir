@@ -29,6 +29,7 @@ mod sel_size;
 mod tasks;
 mod tooltip;
 mod transfers;
+mod xtree_history;
 
 #[cfg(test)]
 mod tests;

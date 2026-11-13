@@ -222,6 +222,8 @@ pub fn decode(bytes: &[u8]) -> Option<History> {
 /// `MAX_FILE` o no se entiende.
 pub fn read_file(path: &Path) -> Option<History> {
     use std::io::Read;
+    #[cfg(test)]
+    crate::sys::testing::FakeNetwork::note_disk_io("historial leer", path);
     let mut bytes = Vec::new();
     std::fs::File::open(path).ok()?.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes).ok()?;
     decode(&bytes)
@@ -230,6 +232,8 @@ pub fn read_file(path: &Path) -> Option<History> {
 /// Escribe un historial de forma atómica: un temporal propio de esta escritura en la misma carpeta
 /// y renombrar (bloqueante: en un hilo de trabajo).
 pub fn write_file(path: &Path, h: &History) -> std::io::Result<()> {
+    #[cfg(test)]
+    crate::sys::testing::FakeNetwork::note_disk_io("historial escribir", path);
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = path.parent().ok_or(std::io::ErrorKind::NotFound)?;
     std::fs::create_dir_all(dir)?;

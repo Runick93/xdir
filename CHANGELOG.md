@@ -48,6 +48,7 @@
 - El buscador también filtra en la Papelera y en otras carpetas virtuales.
 - xtree ya no es un programa aparte.
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
+- Los botones del pie del panel (carpeta nueva y vista) son más grandes.
 
 ### Arreglos
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.

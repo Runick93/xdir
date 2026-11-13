@@ -1177,6 +1177,34 @@ fn context_menu_own_entries_reach_shell() {
     assert_eq!(&labels[3..10], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
 }
 
+/// Pie del panel: 30 de alto, «Carpeta nueva» y «Cambiar la vista» de 36×26, pegados y a 8 del
+/// borde derecho, con el ícono en Glyphs; la lista termina donde empieza el pie.
+#[test]
+fn footer_buttons_are_36_by_26() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("pie-del-panel");
+    a.new_tab(0, Location::Path(dir), true);
+    a.paint();
+    let (nb, vb) = a.panes[0].footer_buttons();
+    assert_eq!((vb.right - vb.left, vb.bottom - vb.top), (36.0, 26.0));
+    assert_eq!((nb.right - nb.left, nb.bottom - nb.top), (36.0, 26.0));
+    assert_eq!(nb.right, vb.left);
+    let list = a.panes[0].list;
+    assert_eq!(vb.top, list.bottom + 2.0, "la lista termina donde empieza el pie");
+    assert_eq!(vb.bottom, list.bottom + 28.0, "pie de 30, 2 libres abajo");
+    for (glyph, r) in [("\u{E8F4}", nb), ("\u{E8A9}", vb)] {
+        let texts = host.drawn_texts();
+        let (font, _, at) = texts.iter().rev().find(|(_, t, at)| t == glyph && *at == r).unwrap_or_else(|| panic!("no se dibujó {glyph:?}"));
+        assert_eq!((*font, *at), (crate::paint::FontId::Glyphs, r));
+    }
+    // Las zonas de clic siguen a los botones.
+    let (cx, cy) = center(&nb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::NewFolderButton));
+    let (cx, cy) = center(&vb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::ViewButton));
+}
+
 /// Etiquetas de las entradas propias del menú del fondo del panel activo (los submenús por su nombre).
 fn background_labels(a: &App) -> (Vec<String>, Vec<Command>) {
     let mut cmds = Vec::new();

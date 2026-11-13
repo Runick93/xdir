@@ -379,6 +379,8 @@ pub struct App {
     size_link: Option<geom::Rect>,
     /// Lo que corre en segundo plano (el indicador de la barra de estado).
     activity: activity::Activities,
+    /// Cuánto se espera al sistema al expulsar (las pruebas lo achican).
+    eject_limit: std::time::Duration,
     /// Dónde quedó el indicador de actividad en el último cuadro (`None`: no se ve).
     activity_rect: Option<geom::Rect>,
     /// La versión más nueva que se abrió con esta sesión (se guarda en `version_vista`).
@@ -655,6 +657,7 @@ impl App {
             sel_size: sel_size::SelSize::new(),
             size_link: None,
             activity: activity::Activities::default(),
+            eject_limit: tasks::EJECT_LIMIT,
             activity_rect: None,
             seen_version: crate::changelog::newest(session.seen_version.as_deref().unwrap_or(about::VERSION), about::VERSION).to_string(),
             transparent: false,

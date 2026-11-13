@@ -144,11 +144,16 @@ impl App {
         if let Some(old) = self.archive.opening.replace(stop.clone()) {
             old.store(true, Ordering::Relaxed);
         }
-        self.spawn_task(move || {
-            let cancel = || stop.load(Ordering::Relaxed);
-            let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
-            TaskDone::ArchiveOpened { name, with, token: stop.clone(), result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
-        });
+        let (n0, t0) = (name.clone(), stop.clone());
+        self.spawn_task_or(
+            move || {
+                let cancel = || stop.load(Ordering::Relaxed);
+                let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
+                TaskDone::ArchiveOpened { name, with, token: stop.clone(), result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
+            },
+            // El hilo falló (un comprimido roto): el aviso, y deja de estar «Extrayendo».
+            move || TaskDone::ArchiveOpened { name: n0, with, token: t0, result: Err("no se pudo leer el archivo comprimido".into()) },
+        );
     }
 
     /// Escape con una apertura desde un archivo comprimido en curso: se corta. `false` si no había.

@@ -1222,14 +1222,22 @@ impl App {
         let label = self.connection_label(&root);
         let limit = self.jobs.limit;
         let left = self.ejecting_readers(&root, reading.len());
-        self.spawn_task(move || {
-            // Los lectores de esa conexión sueltan los archivos (como mucho el límite).
-            super::compare::wait_bounded(reading, limit, &left);
-            let r = root.clone();
-            let host = label.clone();
-            let result = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&r, force));
-            TaskDone::Disconnected { root, label, force, result }
-        });
+        let (r0, l0) = (root.clone(), label.clone());
+        self.spawn_task_or(
+            move || {
+                // Los lectores de esa conexión sueltan los archivos (como mucho el límite).
+                super::compare::wait_bounded(reading, limit, &left);
+                let r = root.clone();
+                let host = label.clone();
+                let result = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&r, force));
+                TaskDone::Disconnected { root, label, force, result }
+            },
+            // El hilo falló: como si el servidor no contestara (se puede reintentar).
+            move || {
+                let host = l0.clone();
+                TaskDone::Disconnected { root: r0, label: l0, force, result: Err(NetError::Timeout { host }) }
+            },
+        );
     }
 
     /// Terminó de desconectar: el aviso, o la pregunta de reintentar (y, si el sistema puede y

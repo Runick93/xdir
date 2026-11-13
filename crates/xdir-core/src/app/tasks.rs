@@ -8,6 +8,26 @@ use super::*;
 /// Terminó un trabajo de `spawn_task`; el resultado está en el canal.
 pub const WM_APP_TASK: u32 = crate::WM_APP + 26;
 
+/// Cuánto se espera al sistema al expulsar un disco (`App::eject_limit`).
+pub(super) const EJECT_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// El motivo cuando el sistema no contesta a tiempo (o el hilo de expulsar falla).
+const NO_ANSWER: &str = "el sistema no respondió";
+
+fn no_answer() -> crate::shell::EjectError {
+    crate::shell::EjectError { busy_by: None, busy: false, message: NO_ANSWER.into() }
+}
+
+/// Expulsa `root` esperando como mucho `limit` (y sin caerse si el sistema entra en pánico): si
+/// no contesta, el error `NO_ANSWER` (el pedido sigue solo en su hilo).
+fn eject_within(root: &std::path::Path, limit: std::time::Duration) -> Result<(), crate::shell::EjectError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let r = root.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(sys::shell().eject(&r));
+    });
+    rx.recv_timeout(limit).unwrap_or_else(|_| Err(no_answer()))
+}
+
 /// Lo que devuelve un trabajo suelto.
 pub(super) enum TaskDone {
     /// Terminó de escribir `config.toml` (la pestaña Configuración): lo que quedó, o el error.
@@ -59,7 +79,23 @@ impl App {
     pub(super) fn spawn_task(&self, f: impl FnOnce() -> TaskDone + Send + 'static) {
         let (tx, hwnd) = (self.task_tx.clone(), self.hwnd);
         std::thread::spawn(move || {
-            if tx.send(f()).is_ok() {
+            // Si entra en pánico no vuelve nada (como antes); los que dejan estado puesto usan
+            // `spawn_task_or`.
+            if let Ok(t) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                && tx.send(t).is_ok()
+            {
+                hwnd.post(WM_APP_TASK, 0, 0);
+            }
+        });
+    }
+
+    /// Como `spawn_task`, pero si `f` entra en pánico vuelve `fallback()` (el resultado de error):
+    /// expulsar, desconectar o extraer nunca quedan «en curso» para siempre.
+    pub(super) fn spawn_task_or(&self, f: impl FnOnce() -> TaskDone + Send + 'static, fallback: impl FnOnce() -> TaskDone + Send + 'static) {
+        let (tx, hwnd) = (self.task_tx.clone(), self.hwnd);
+        std::thread::spawn(move || {
+            let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| fallback());
+            if tx.send(t).is_ok() {
                 hwnd.post(WM_APP_TASK, 0, 0);
             }
         });
@@ -125,6 +161,8 @@ impl App {
     /// Terminó de expulsar: el aviso, o la pregunta de reintentar si alguien lo está usando.
     fn on_ejected(&mut self, root: PathBuf, label: String, result: Result<(), crate::shell::EjectError>) {
         match result {
+            // El sistema no contestó (o el hilo falló): un aviso; el ⏏ ya se puede volver a tocar.
+            Err(e) if e.message == NO_ANSWER => self.notice = Some(format!("No se pudo expulsar \"{label}\": {NO_ANSWER}")),
             Ok(()) => {
                 self.notice = Some(format!("Se expulsó \"{label}\": ya lo podés quitar"));
                 self.ejectable.remove(&root);
@@ -232,15 +270,19 @@ impl App {
         let reading = self.release_volume(&root);
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
-        let limit = self.jobs.limit;
+        let (limit, eject_limit) = (self.jobs.limit, self.eject_limit);
         let left = self.ejecting_readers(&root, reading.len());
-        self.spawn_task(move || {
-            // Como mucho el límite: un lector trabado no deja el disco sin expulsar (si sigue
-            // abierto, el sistema lo dice al expulsar).
-            super::compare::wait_bounded(reading, limit, &left);
-            let result = sys::shell().eject(&root);
-            TaskDone::Ejected { root, label, result }
-        });
+        let (r, l) = (root.clone(), label.clone());
+        self.spawn_task_or(
+            move || {
+                // Como mucho el límite: un lector trabado no deja el disco sin expulsar (si sigue
+                // abierto, el sistema lo dice al expulsar).
+                super::compare::wait_bounded(reading, limit, &left);
+                let result = eject_within(&root, eject_limit);
+                TaskDone::Ejected { root, label, result }
+            },
+            move || TaskDone::Ejected { root: r, label: l, result: Err(no_answer()) },
+        );
     }
 
     /// «Mostrar el original» del elemento seleccionado (si es un enlace).
@@ -277,5 +319,20 @@ impl App {
         if !targets.is_empty() {
             sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Shortcuts { targets });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ronda 1: un trabajo que entra en pánico manda su resultado de error (no deja el estado puesto).
+    #[test]
+    fn panicking_task_sends_fallback() {
+        crate::sys::testing::install_fakes();
+        let a = App::new(Init::blank(), crate::sys::testing::FakeHost::new());
+        a.spawn_task_or(|| panic!("prueba"), || TaskDone::FreeLetters(vec!['Z']));
+        let t = a.task_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("llega el de error");
+        assert!(matches!(t, TaskDone::FreeLetters(l) if l == ['Z']));
     }
 }

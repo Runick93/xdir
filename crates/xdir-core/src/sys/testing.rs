@@ -406,6 +406,9 @@ static EJECTABLE: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 type EjectResult = Result<(), crate::shell::EjectError>;
 static EJECT_RESULTS: Mutex<BTreeMap<PathBuf, EjectResult>> = Mutex::new(BTreeMap::new());
 static EJECTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// Expulsar estos discos tarda (`set_eject_delay`) o entra en pánico (`set_eject_panic`).
+static EJECT_DELAYS: Mutex<BTreeMap<PathBuf, std::time::Duration>> = Mutex::new(BTreeMap::new());
+static EJECT_PANICS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 /// Carpetas solo en la nube para todos los hilos (`FakeFileSystem::set_cloud_only_everywhere`).
 static CLOUD_ALL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 /// Disco de cada ruta para `volume_id` (todos los hilos; sin dato, `None`).
@@ -424,6 +427,25 @@ impl FakeShell {
     /// Lo que devuelve `eject(root)` (por defecto, éxito).
     pub fn set_eject_result(root: &Path, result: Result<(), crate::shell::EjectError>) {
         EJECT_RESULTS.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), result);
+    }
+
+    /// Expulsar `root` tarda `delay` (`None`: enseguida).
+    pub fn set_eject_delay(root: &Path, delay: Option<std::time::Duration>) {
+        let mut m = EJECT_DELAYS.lock().unwrap_or_else(|e| e.into_inner());
+        match delay {
+            Some(d) => m.insert(root.to_path_buf(), d),
+            None => m.remove(root),
+        };
+    }
+
+    /// Expulsar `root` entra en pánico (`false`: ya no).
+    pub fn set_eject_panic(root: &Path, on: bool) {
+        let mut s = EJECT_PANICS.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            s.insert(root.to_path_buf());
+        } else {
+            s.remove(root);
+        }
     }
 
     /// Todos los discos que se pidió expulsar (de todo el proceso).
@@ -488,6 +510,13 @@ impl Shell for FakeShell {
 
     fn eject(&self, root: &Path) -> Result<(), crate::shell::EjectError> {
         EJECTS.lock().unwrap_or_else(|e| e.into_inner()).push(root.to_path_buf());
+        if EJECT_PANICS.lock().unwrap_or_else(|e| e.into_inner()).contains(root) {
+            panic!("expulsar {} (prueba)", root.display());
+        }
+        let delay = EJECT_DELAYS.lock().unwrap_or_else(|e| e.into_inner()).get(root).copied();
+        if let Some(d) = delay {
+            std::thread::sleep(d);
+        }
         EJECT_RESULTS.lock().unwrap_or_else(|e| e.into_inner()).get(root).cloned().unwrap_or(Ok(()))
     }
 

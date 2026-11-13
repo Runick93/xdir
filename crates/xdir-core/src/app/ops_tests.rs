@@ -620,6 +620,36 @@ fn eject_shows_progress_spins_and_ignores_second_click() {
     assert_eq!(glyphs(&host), 1);
 }
 
+/// Ronda 1: si el sistema no contesta en el límite, o el hilo de expulsar entra en pánico, el aviso
+/// dice que no respondió, el ⏏ vuelve a ser botón y se puede reintentar.
+#[test]
+fn eject_timeout_or_panic_frees_the_button() {
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "sin-respuesta");
+    FakeShell::set_eject_result(&e, Ok(()));
+    a.eject_limit = Duration::from_millis(100);
+    let questions = host.questions().len();
+    for panic in [false, true] {
+        if panic {
+            FakeShell::set_eject_panic(&e, true);
+        } else {
+            FakeShell::set_eject_delay(&e, Some(Duration::from_secs(2)));
+        }
+        a.eject(e.clone());
+        assert!(a.is_ejecting(&e));
+        wait_task(&mut a);
+        assert_eq!(a.notice.as_deref(), Some("No se pudo expulsar \"USB (E:)\": el sistema no respondió"), "pánico: {panic}");
+        assert!(!a.is_ejecting(&e), "el ⏏ vuelve a ser botón");
+        assert_eq!(host.questions().len(), questions, "un aviso, sin pregunta");
+        FakeShell::set_eject_panic(&e, false);
+        FakeShell::set_eject_delay(&e, None);
+    }
+    // Reintentar anda.
+    a.eject(e.clone());
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
+}
+
 /// Ocupado: se pregunta si reintentar, nombrando el programa; Sí vuelve a intentar.
 #[test]
 fn eject_busy_offers_retry() {

@@ -72,6 +72,7 @@ pub fn files(mac: bool) -> Vec<(&'static str, &'static str)> {
         ("grupos.toml", "Los grupos de paneles guardados"),
         ("historial.txt", "Las carpetas visitadas, para el salto rápido"),
         ("red.toml", "Servidores favoritos y recientes"),
+        ("xtree-historial", "Carpeta con el historial de tamaños de xtree, un archivo por carpeta analizada"),
     ];
     if mac {
         out.push(("rutas.txt", "Las rutas escritas en la barra de dirección"));

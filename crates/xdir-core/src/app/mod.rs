@@ -469,6 +469,8 @@ pub struct App {
     xtree_last: Option<PathBuf>,
     /// Período del historial en la tarjeta de xtree (de la sesión; la vista abierta manda).
     xtree_days: u16,
+    /// Resultado de «Borrar historial» de xtree, para la fila de la configuración.
+    xtree_history_msg: Option<String>,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -693,6 +695,7 @@ impl App {
             portable_marker: session::portable_active(),
             xtree_last: session.xtree_last.clone(),
             xtree_days: session.xtree_days,
+            xtree_history_msg: None,
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

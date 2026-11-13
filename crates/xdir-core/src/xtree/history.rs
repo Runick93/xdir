@@ -325,6 +325,16 @@ pub fn key(root: &Path) -> String {
     format!("{name}-{hash:016x}")
 }
 
+/// Borra la carpeta del historial `dir` entera (bloqueante: en un hilo de trabajo). Que no
+/// exista no es un error.
+pub fn clear(dir: &Path) -> Result<(), String> {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("No se pudo borrar {}: {e}", dir.display())),
+    }
+}
+
 /// Archivo del historial de `root` en la carpeta del historial `dir`.
 pub fn file_for(dir: &Path, root: &Path) -> PathBuf {
     dir.join(format!("{}.bin", key(root)))

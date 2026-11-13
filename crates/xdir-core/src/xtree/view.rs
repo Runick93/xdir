@@ -381,6 +381,12 @@ impl Xtree {
         self.hist.dir.as_deref()
     }
 
+    /// ¿Guarda una foto con cada análisis? (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_on(&self) -> bool {
+        self.hist.on
+    }
+
     /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
     pub fn history_days(&self) -> u16 {
         self.hist.days

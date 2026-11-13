@@ -568,7 +568,7 @@ fn eject_click_releases_tabs_first() {
     assert_eq!(a.panes[3].tab().location, Location::Path(c.clone()));
     wait_task(&mut a);
     assert_eq!(ejects_of(&e) - before, 1);
-    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\""));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
 }
 
 #[test]
@@ -578,7 +578,7 @@ fn eject_success_notice() {
     a.panes[0].tab_mut().list.select_pos(1);
     a.run_command(Command::Eject);
     wait_task(&mut a);
-    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\""));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
 }
 
 /// Ajustes 2: mientras expulsa, la barra de estado dice «Expulsando…», el ⏏ gira (sin su
@@ -787,7 +787,7 @@ fn eject_waits_for_copy_on_the_volume() {
     wait_task(&mut a);
     assert_eq!(ejects_of(&e), 1);
     assert!(!f.exists(&e.join("destino/grande.bin")));
-    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\""));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
 }
 
 /// En «Este equipo» el menú de los discos no ofrece crear cosas (Duplicar, accesos, carpeta con la

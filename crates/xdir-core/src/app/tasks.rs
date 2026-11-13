@@ -126,7 +126,7 @@ impl App {
     fn on_ejected(&mut self, root: PathBuf, label: String, result: Result<(), crate::shell::EjectError>) {
         match result {
             Ok(()) => {
-                self.notice = Some(format!("Se expulsó \"{label}\""));
+                self.notice = Some(format!("Se expulsó \"{label}\": ya lo podés quitar"));
                 self.ejectable.remove(&root);
             }
             Err(e) => {

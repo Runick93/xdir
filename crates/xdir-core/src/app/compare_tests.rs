@@ -540,7 +540,7 @@ fn eject_stops_compare_and_checksum_and_waits() {
             a.on_task_done(t);
         }
         assert_eq!(FakeHashes::open_readers(&root), 0, "se expulsó con archivos abiertos");
-        assert_eq!(a.notice.as_deref(), Some("Se expulsó \"PENDRIVE\""));
+        assert_eq!(a.notice.as_deref(), Some("Se expulsó \"PENDRIVE\": ya lo podés quitar"));
         FakeFileSystem::set_drives(&[]);
     }
 }

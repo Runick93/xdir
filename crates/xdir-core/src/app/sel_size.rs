@@ -170,14 +170,20 @@ fn watched<T: Send + 'static>(
 /// Lo que pesa `path` (bytes, entera). Una carpeta solo en la nube no se lee (no se baja nada).
 /// Una de red se lee vigilada: sin avance en `limit`, se corta y queda a medias.
 fn folder_bytes(path: &Path, remote: bool, limit: Duration, cancel: &Arc<AtomicBool>) -> (u64, bool) {
-    let cloud = |p: &Path| sys::file_system().cloud_only(p);
     if !remote {
-        if cloud(path) {
+        if sys::file_system().cloud_only(path) {
             return (0, false);
         }
+        // Una subcarpeta que no se recorre (solo en la nube) deja el total a medias.
+        let skipped_cloud = std::cell::Cell::new(false);
+        let cloud = |p: &Path| {
+            let c = sys::file_system().cloud_only(p);
+            skipped_cloud.set(skipped_cloud.get() | c);
+            c
+        };
         let mut last = 0;
         let skipped = crate::info::size::folder_size(path, &cloud, cancel, &mut |b, _, _| last = b);
-        return (last, skipped == 0 && !cancel.load(Ordering::Relaxed));
+        return (last, skipped == 0 && !skipped_cloud.get() && !cancel.load(Ordering::Relaxed));
     }
     let p = path.to_path_buf();
     let bytes_seen = Arc::new(AtomicU64::new(0));
@@ -188,9 +194,14 @@ fn folder_bytes(path: &Path, remote: bool, limit: Duration, cancel: &Arc<AtomicB
             return (0, false);
         }
         beats.fetch_add(1, Ordering::Relaxed);
+        let skipped_cloud = AtomicBool::new(false);
         let cloud = |q: &Path| {
             beats.fetch_add(1, Ordering::Relaxed);
-            sys::file_system().cloud_only(q)
+            let c = sys::file_system().cloud_only(q);
+            if c {
+                skipped_cloud.store(true, Ordering::Relaxed);
+            }
+            c
         };
         let mut last = 0;
         let skipped = crate::info::size::folder_size(&p, &cloud, &stop, &mut |b, _, _| {
@@ -198,7 +209,7 @@ fn folder_bytes(path: &Path, remote: bool, limit: Duration, cancel: &Arc<AtomicB
             seen.store(b, Ordering::Relaxed);
             beats.fetch_add(1, Ordering::Relaxed);
         });
-        (last, skipped == 0 && !stop.load(Ordering::Relaxed))
+        (last, skipped == 0 && !skipped_cloud.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed))
     });
     out.unwrap_or_else(|| (bytes_seen.load(Ordering::Relaxed), false))
 }

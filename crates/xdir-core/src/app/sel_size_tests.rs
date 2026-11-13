@@ -183,3 +183,14 @@ fn unreadable_folder_says_at_least() {
     wait_status(&mut a, &format!("2 elementos seleccionados · al menos {}", size(50)));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Una subcarpeta solo en la nube tampoco se lee: el total de su carpeta dice «al menos».
+#[test]
+fn nested_cloud_only_folder_counts_as_partial() {
+    let dir = fixture("nube-anidada");
+    FakeFileSystem::set_cloud_only_everywhere(&dir.join("b").join("sub"));
+    let mut a = app_in(&dir);
+    select(&mut a, &["b"]);
+    wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(0)));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1082,6 +1082,29 @@ mod red_page {
         assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
     }
 
+    /// Ajustes 2: el ⏏ de la conexión gira mientras se desconecta (sin el símbolo), la barra dice
+    /// «Desconectando…» y otro clic no hace nada.
+    #[test]
+    fn red_page_eject_spins_while_disconnecting() {
+        let mut a = page_app(FakeHost::new());
+        let root = PathBuf::from("/net-n8gira/fotos");
+        a.net.connections = vec![conn("smb://nas-n8gira/fotos", "/net-n8gira/fotos")];
+        let texts = draw(&mut a);
+        assert!(texts.iter().any(|t| t == crate::list::EJECT_GLYPH));
+        click(&mut a, PageHit::Eject(0));
+        assert_eq!(a.eject_status().as_deref(), Some("Desconectando \"fotos\"…"));
+        let texts = draw(&mut a);
+        assert!(!texts.iter().any(|t| t == crate::list::EJECT_GLYPH), "{texts:?}");
+        click(&mut a, PageHit::Eject(0));
+        wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
+        // Después llegan otras (la lista de conexiones), pero ninguna otra desconexión.
+        while let Ok(t) = a.task_rx.recv_timeout(Duration::from_millis(200)) {
+            assert!(!matches!(t, TaskDone::Disconnected { .. }), "un solo pedido");
+        }
+        assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+        assert_eq!(a.eject_status(), None);
+    }
+
     #[test]
     fn red_page_password_text() {
         assert_eq!(password_text(KeyStyle::Mac, true), "xdir no guarda contraseñas: las guarda el sistema (Llavero)");

@@ -1158,7 +1158,8 @@ fn draw_list_loading(p: &dyn Painter, list: Rect) {
 }
 
 /// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
-fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
+/// Ocupa unos 14×14 DIPs alrededor de `(cx, cy)`.
+pub fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();

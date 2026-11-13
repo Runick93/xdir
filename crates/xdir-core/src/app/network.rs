@@ -211,6 +211,10 @@ impl App {
         // hilo); al terminar la última, `on_disconnected` reintenta la conexión.
         self.net.conflict_retry = Some(ConflictRetry { pane, tab, generation, addr: addr.clone(), pending: others.clone() });
         for local in others {
+            // Ya se está desconectando: su `on_disconnected` llega igual.
+            if self.is_ejecting(&local) {
+                continue;
+            }
             if !self.disconnect(local) {
                 // Dijo que no a cancelar las copias: no se reintenta.
                 self.net.conflict_retry = None;
@@ -1193,6 +1197,9 @@ impl App {
     /// suelta lo de xdir (pestañas, xtree, vista previa) y desconecta en otro hilo.
     /// `false` si no se desconecta (dijo que no a cancelar las copias).
     pub(super) fn disconnect(&mut self, root: PathBuf) -> bool {
+        if self.is_ejecting(&root) {
+            return false;
+        }
         let label = self.connection_label(&root);
         let at = root.clone();
         self.eject_after_jobs(&at, &label, super::transfers::Verb::Disconnect, Box::new(move |app: &mut App| app.disconnect_now(root, false)))

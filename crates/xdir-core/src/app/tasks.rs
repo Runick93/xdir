@@ -123,7 +123,7 @@ impl App {
     fn on_ejected(&mut self, root: PathBuf, label: String, result: Result<(), crate::shell::EjectError>) {
         match result {
             Ok(()) => {
-                self.notice = Some(format!("Se puede quitar \"{label}\" con seguridad"));
+                self.notice = Some(format!("Se expulsó \"{label}\""));
                 self.ejectable.remove(&root);
             }
             Err(e) => {
@@ -203,6 +203,10 @@ impl App {
     /// cancelan y espera a que limpien lo a medio copiar (`eject_after_jobs`); después suelta lo
     /// de xdir y expulsa en otro hilo.
     pub(super) fn eject(&mut self, root: PathBuf) {
+        // Ya se está expulsando (su ⏏ gira): un segundo pedido no hace nada.
+        if self.is_ejecting(&root) {
+            return;
+        }
         // Una conexión de red se desconecta (mismo flujo: trabajos, soltar, en otro hilo).
         if let Some(c) = self.network_root(&root) {
             let local = c.local.clone();

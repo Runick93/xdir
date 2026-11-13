@@ -402,6 +402,9 @@ pub struct FileList {
     /// Filas (índices de `entries`) con botón ⏏: discos expulsables de «Este equipo» (lo pone la
     /// `App`).
     pub eject_rows: Vec<usize>,
+    /// De esas, las que se están expulsando o desconectando: su ⏏ gira (la `App` no repite el
+    /// pedido).
+    pub eject_busy: Vec<usize>,
     /// Fila cuyo ⏏ tiene el mouse encima.
     pub eject_hover: Option<usize>,
     /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, índice).
@@ -542,6 +545,7 @@ impl Default for FileList {
             name_ends: Vec::new(),
             name_ends_first: 0,
             eject_rows: Vec::new(),
+            eject_busy: Vec::new(),
             eject_hover: None,
             eject_rects: Vec::new(),
             meta: Vec::new(),
@@ -774,6 +778,15 @@ impl FileList {
     /// ⏏ bajo el punto: el índice del disco.
     pub fn eject_hit(&self, x: f32, y: f32) -> Option<usize> {
         self.eject_rects.iter().find(|(r, _)| contains(r, x, y)).map(|&(_, i)| i)
+    }
+
+    /// El ⏏ de la fila `idx`: girando si se está expulsando (`eject_busy`).
+    fn draw_eject_at(&self, p: &dyn Painter, r: Rect, idx: usize) {
+        if self.eject_busy.contains(&idx) {
+            draw_eject_busy(p, r);
+        } else {
+            draw_eject(p, r, self.eject_hover == Some(idx));
+        }
     }
 
     /// Dónde se dibujó el ⏏ de la fila `idx` (índice de `entries`) en el último cuadro.
@@ -2421,7 +2434,7 @@ impl FileList {
                         }
                         if self.eject_rows.contains(&idx) {
                             let b = rect(row.right - 26.0, row.top + 2.0, row.right - 2.0, row.top + 26.0);
-                            draw_eject(p, b, self.eject_hover == Some(idx));
+                            self.draw_eject_at(p, b, idx);
                             ejects.push((b, idx));
                         }
                         continue;
@@ -2454,7 +2467,7 @@ impl FileList {
                             // ⏏ al final de la columna Nombre (discos expulsables).
                             if self.eject_rows.contains(&idx) {
                                 let b = rect(cell.right - 24.0, y + 3.0, cell.right, y + ROW_H - 3.0);
-                                draw_eject(p, b, self.eject_hover == Some(idx));
+                                self.draw_eject_at(p, b, idx);
                                 ejects.push((b, idx));
                             }
                         }
@@ -2594,6 +2607,13 @@ pub fn draw_eject(p: &dyn Painter, r: Rect, hover: bool) {
         p.round_fill(r, 4.0, alpha(th.text, 0.12));
     }
     p.text(FontId::UiCenter, EJECT_GLYPH, r, if hover { th.text } else { th.text_dim });
+}
+
+/// ⏏ de un disco que se está expulsando (o una conexión que se desconecta): el indicador girando
+/// en su lugar, sin fondo bajo el mouse (no se puede tocar).
+pub fn draw_eject_busy(p: &dyn Painter, r: Rect) {
+    let th = p.theme();
+    crate::pane::spinner(p, (r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, th.text_dim);
 }
 
 fn draw_checkbox(p: &dyn Painter, r: Rect, state: CheckState) {

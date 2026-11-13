@@ -6,6 +6,7 @@
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
+- Expulsar un disco o desconectar una conexión da señal mientras dura: la barra de estado dice «Expulsando "Pendrive"…» (o cuántas operaciones faltan que terminen) y su ⏏ gira en el árbol, en «Este equipo» y en Configuración ▸ Red; un segundo clic no hace nada. Al terminar, «Se expulsó "Pendrive"».
 
 ### Cambios
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.

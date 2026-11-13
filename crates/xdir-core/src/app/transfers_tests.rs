@@ -232,6 +232,31 @@ fn eject_waits_for_cancelled_jobs() {
     assert!(!f.exists(&p("/app-usb/d/grande.bin")));
 }
 
+/// Ajustes 2: mientras espera a que limpien las operaciones canceladas, la barra lo dice; después,
+/// «Expulsando…» hasta que termina.
+#[test]
+fn eject_waiting_for_jobs_text() {
+    let f = fake();
+    f.set_volume(&p("/app-ejtx"), volume("app-ejtx"));
+    f.add_file(&p("/app-ejtx/s/grande.bin"), vec![1; 64 * 1024 * 20]);
+    f.add_dir(&p("/app-ejtx/d"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    f.set_slow(&p("/app-ejtx/s/grande.bin"), Some(Duration::from_millis(20)));
+    a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejtx/s/grande.bin")], dest: p("/app-ejtx/d") });
+    assert_eq!(a.eject_status(), None);
+    host.set_answer(Some(true));
+    assert!(a.eject_after_jobs(Path::new("/app-ejtx"), "USB (E:)", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
+    assert_eq!(a.eject_status().as_deref(), Some("Esperando a que termine 1 operación para expulsar \"USB (E:)\"…"));
+    wait(&mut a, idle);
+    assert_eq!(a.eject_status().as_deref(), Some("Expulsando \"USB (E:)\"…"));
+    a.eject_done(Path::new("/app-ejtx"));
+    assert_eq!(a.eject_status(), None);
+    assert_eq!(super::transfers::ejecting_text(super::transfers::Verb::Eject, "USB", 2), "Esperando a que terminen 2 operaciones para expulsar \"USB\"…");
+    assert_eq!(super::transfers::ejecting_text(super::transfers::Verb::Disconnect, "fotos", 0), "Desconectando \"fotos\"…");
+    assert_eq!(super::transfers::ejecting_text(super::transfers::Verb::Disconnect, "fotos", 1), "Esperando a que termine 1 operación para desconectar \"fotos\"…");
+}
+
 #[test]
 fn second_eject_does_not_drop_the_first() {
     let f = fake();

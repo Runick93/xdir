@@ -78,8 +78,10 @@ fn watcher_fires(a: &mut App) {
     a.paint();
 }
 
+/// Tamaño como lo escribe la barra de estado: siempre en castellano (no con el formato del
+/// sistema, que en la Mac en inglés dice «Zero KB»).
 fn size(b: u64) -> String {
-    crate::format::size_short(b)
+    crate::format::size_short_text(b)
 }
 
 /// Con carpetas elegidas la barra dice «calculando…» y después el total de archivos y carpetas.
@@ -207,7 +209,7 @@ fn nested_cloud_only_folder_counts_as_partial() {
     FakeFileSystem::set_cloud_only_everywhere(&dir.join("b").join("sub"));
     let mut a = app_in(&dir);
     select(&mut a, &["b"]);
-    wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(0)));
+    wait_status(&mut a, "1 elemento seleccionado · no se pudo calcular");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -261,7 +263,7 @@ fn walk_stays_on_its_volume_and_off_network_mounts() {
     FakeFileSystem::set_mount_point(&dir.join("f2").join("datos"));
     let mut a = app_in(&dir);
     select(&mut a, &["b"]);
-    wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(0)));
+    wait_status(&mut a, "1 elemento seleccionado · no se pudo calcular");
     select(&mut a, &["a"]);
     wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(100)));
     select(&mut a, &["f2"]);

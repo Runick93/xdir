@@ -966,15 +966,7 @@ impl Tab {
         }
         if count > 0 {
             s.push_str("   ·   ");
-            let size = match sel {
-                SelTotal::Files => (files > 0).then(|| crate::format::size_short(bytes)),
-                SelTotal::Computing => Some("calculando\u{2026}".to_string()),
-                SelTotal::Done { bytes: folders, partial } => {
-                    Some(format!("{}{}", if partial { "al menos " } else { "" }, crate::format::size_short(bytes + folders)))
-                }
-                SelTotal::NeedsClick => Some(SIZE_LINK.to_string()),
-            };
-            s.push_str(&selection_text(count, size.as_deref()));
+            s.push_str(&selection_text(count, selection_size_text(bytes, files, sel).as_deref()));
         }
         if filtered && !(count > 0 && sel == SelTotal::NeedsClick) {
             s.push_str(" (filtrado)");
@@ -997,6 +989,20 @@ fn selection_text(count: usize, tail: Option<&str>) -> String {
         s.push_str(t);
     }
     s
+}
+
+/// El tamaño de lo elegido para la barra de estado: `file_bytes` de `files` archivos y lo que
+/// diga `sel` de las carpetas. Siempre en castellano (`format::size_short_text`, no el formato del
+/// sistema). Si todo lo que se contó quedó afuera (total 0 y a medias), «no se pudo calcular».
+fn selection_size_text(file_bytes: u64, files: usize, sel: SelTotal) -> Option<String> {
+    let size = crate::format::size_short_text;
+    match sel {
+        SelTotal::Files => (files > 0).then(|| size(file_bytes)),
+        SelTotal::Computing => Some("calculando\u{2026}".to_string()),
+        SelTotal::Done { bytes: 0, partial: true } if file_bytes == 0 => Some("no se pudo calcular".to_string()),
+        SelTotal::Done { bytes, partial } => Some(format!("{}{}", if partial { "al menos " } else { "" }, size(file_bytes + bytes))),
+        SelTotal::NeedsClick => Some(SIZE_LINK.to_string()),
+    }
 }
 
 /// El enlace del final de la barra de estado cuando lo elegido tiene carpetas de red: el tamaño
@@ -1069,6 +1075,22 @@ mod tests {
         install_fakes();
         assert_eq!(selection_summary(1, Some(2048)), format!("1 elemento seleccionado · {}", crate::format::size_short(2048)));
         assert_eq!(selection_summary(3, None), "3 elementos seleccionados");
+    }
+
+    /// El tamaño de lo elegido en la barra va siempre en castellano (no con el formato del sistema,
+    /// que en una Mac en inglés dice «Zero KB»); si todo lo que se contó quedó afuera, «no se pudo
+    /// calcular» en lugar de «al menos 0 bytes».
+    #[test]
+    fn selection_size_texts_are_spanish() {
+        let t = |file_bytes, files, sel| selection_size_text(file_bytes, files, sel);
+        assert_eq!(t(0, 0, SelTotal::Done { bytes: 0, partial: true }).as_deref(), Some("no se pudo calcular"));
+        assert_eq!(t(0, 0, SelTotal::Done { bytes: 0, partial: false }).as_deref(), Some("0 bytes"));
+        assert_eq!(t(10, 1, SelTotal::Done { bytes: 0, partial: true }).as_deref(), Some("al menos 10 bytes"));
+        assert_eq!(t(0, 0, SelTotal::Done { bytes: 2048, partial: false }).as_deref(), Some("2,00 KB"));
+        assert_eq!(t(2048, 1, SelTotal::Files).as_deref(), Some("2,00 KB"));
+        assert_eq!(t(0, 0, SelTotal::Files), None);
+        assert_eq!(t(0, 0, SelTotal::Computing).as_deref(), Some("calculando\u{2026}"));
+        assert_eq!(t(0, 0, SelTotal::NeedsClick).as_deref(), Some(SIZE_LINK));
     }
 
     /// Una pestaña que se muestra en una carpeta la lee con el `FileSystem` instalado y recibe

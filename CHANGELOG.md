@@ -40,7 +40,7 @@
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
 - Arrastrá archivos a una carpeta del árbol (desde un panel, el Finder o el Explorador) para moverlos o copiarlos ahí, como en una carpeta de la lista. Si te quedás un momento sobre una carpeta plegada, se despliega.
-- **Buscar en xtree**: escribí las primeras letras para ir a esa carpeta del nivel, y el botón «Colores» cambia el color del mapa.
+- **Buscar en xtree**: `Ctrl+F` / `⌘F` o la lupa buscan por nombre en todo lo analizado (también mientras analiza), y escribir las primeras letras va a esa carpeta del nivel. El botón «Colores» cambia el color del mapa.
 
 ### Cambios
 - Favoritos pasa a `Ctrl+Shift+D` / `⇧⌘D`: `Ctrl+D` ahora duplica.

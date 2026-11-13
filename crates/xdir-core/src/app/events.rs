@@ -92,6 +92,11 @@ impl App {
                 }
                 self.redraw();
             }
+            crate::xtree::search::WM_APP_XTREE_FOUND => {
+                if self.xtree.as_mut().is_some_and(|x| x.on_found()) && self.xtree_open {
+                    self.redraw();
+                }
+            }
             crate::xtree::scan::WM_APP_XTREE => {
                 // Con la vista cerrada también se repinta si cambió el indicador de la barra de
                 // estado (o su cartel está a la vista): sigue el escaneo con estos avisos (cada
@@ -185,6 +190,13 @@ impl App {
         if self.palette.as_ref().is_some_and(|(_, e)| e.0 as isize == id) {
             self.refresh_palette();
         }
+        if let Some(b) = self.xtree_search_box.filter(|b| b.0 as isize == id) {
+            let text = self.host.text_get(b);
+            if let Some(x) = &mut self.xtree {
+                x.set_query(&text);
+            }
+            self.redraw();
+        }
         if let Some((edit, _)) = self.edit {
             if edit.0 as isize == id {
                 let text = self.host.text_get(edit);
@@ -202,6 +214,11 @@ impl App {
         self.end_edit(false);
         self.end_filter(true);
         self.close_palette();
+        // La caja de la búsqueda de xtree va a su nuevo lugar (con lo escrito).
+        if let Some(b) = self.xtree_search_box.take() {
+            self.host.text_destroy(b);
+            self.sync_xtree_search();
+        }
         // El panel de Renombrar varios sigue: sus cajas van a su nuevo lugar.
         self.sync_rename_boxes();
     }

@@ -192,6 +192,10 @@ impl App {
                 if !colors.is_empty() {
                     rows.push((colors, "Colorear el mapa por tipo de archivo o por carpeta".to_string()));
                 }
+                let search = self.config.keymap.label(Command::Filter);
+                if !search.is_empty() {
+                    rows.push((search, "Buscar por nombre en todo lo analizado".to_string()));
+                }
                 rows.extend(
                     [
                         ("F5", "Volver a analizar"),

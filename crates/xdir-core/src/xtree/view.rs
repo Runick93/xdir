@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 
 use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on};
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
+use super::search::{self, Found, WM_APP_XTREE_FOUND};
 use super::tree::{NO_PARENT, Node, node_path, rows_of};
 use super::treemap::{Cell, header_h, layout};
-use crate::keys::keys::{VK_BACK, VK_ESCAPE};
+use crate::keys::keys::{VK_BACK, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_UP};
 use crate::geom::{Color, Rect, contains, rect};
 use crate::keys::Key;
 use crate::sys::Handle;
@@ -44,6 +45,13 @@ const STATE_W: f32 = 220.0;
 const BACK_W: f32 = 76.0;
 /// Botón «Colores: carpeta / tipo», que termina 40 antes del estado.
 const COLORS_W: f32 = 150.0;
+/// Lupa de la barra superior, 6 a la izquierda de «Colores».
+const SEARCH_W: f32 = 32.0;
+/// Búsqueda (en el lugar de la tabla): alto de la caja, dónde empiezan los resultados y alto de
+/// cada uno.
+const BOX_H: f32 = 30.0;
+const SEARCH_HEAD: f32 = 70.0;
+const RES_H: f32 = 44.0;
 
 const VK_A: Key = Key(0x41);
 const VK_F5: Key = Key(0x74);
@@ -113,6 +121,8 @@ pub struct Ui {
     pub scan_btn: Rect,
     /// «Colores: carpeta / tipo», a la izquierda del estado del análisis.
     pub colors_btn: Rect,
+    /// La lupa (abre la búsqueda), a la izquierda de «Colores».
+    pub search_btn: Rect,
 }
 
 /// Distribución de la vista en `area`. `legend_h` es 0 cuando no hay leyenda (color por carpeta):
@@ -136,7 +146,59 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
     let back = back_rect(area);
     let combo = rect(back.right + 8.0, t + 6.0, back.right + 8.0 + 250.0, t + TOP_H - 6.0);
     let scan_btn = rect(combo.right + 8.0, t + 6.0, combo.right + 108.0, t + TOP_H - 6.0);
-    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area) }
+    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area), search_btn: search_btn_rect(area) }
+}
+
+/// La lupa de la barra superior de la vista en `area`.
+pub fn search_btn_rect(area: Rect) -> Rect {
+    let c = colors_rect(area);
+    rect(c.left - 6.0 - SEARCH_W, c.top, c.left - 6.0, c.bottom)
+}
+
+/// Recuadro de la caja de búsqueda: arriba de la columna de la tabla.
+fn search_frame(area: Rect) -> Rect {
+    let l = layout_ui(area, 0.0).list;
+    rect(l.left + 8.0, l.top + 8.0, l.right - 8.0, l.top + 8.0 + BOX_H)
+}
+
+/// Dónde va la caja de texto del sistema (la pone la `App`): dentro del recuadro, entre la lupa
+/// y el ✕.
+pub fn search_box_rect(area: Rect) -> Rect {
+    let f = search_frame(area);
+    rect(f.left + 28.0, f.top + 5.0, f.right - 30.0, f.bottom - 5.0)
+}
+
+/// El ✕ que cierra la búsqueda.
+fn search_close_rect(area: Rect) -> Rect {
+    let f = search_frame(area);
+    rect(f.right - 26.0, f.top + 4.0, f.right - 4.0, f.bottom - 4.0)
+}
+
+/// Lo que ocupan los resultados (debajo de la caja y de la cantidad).
+fn search_results_rect(area: Rect) -> Rect {
+    let l = layout_ui(area, 0.0).list;
+    rect(l.left, l.top + SEARCH_HEAD, l.right, l.bottom - 2.0)
+}
+
+/// Fila del resultado `i` con los resultados desplazados `scroll`.
+pub fn search_row_rect(area: Rect, i: usize, scroll: f32) -> Rect {
+    let r = search_results_rect(area);
+    let top = r.top + i as f32 * RES_H - scroll;
+    rect(r.left + 3.0, top, r.right - 3.0, top + RES_H)
+}
+
+/// La búsqueda abierta (#57): lo escrito, lo encontrado y la fila elegida.
+#[derive(Default)]
+struct SearchState {
+    query: String,
+    found: Option<Found>,
+    /// Hay una búsqueda en otro hilo.
+    pending: bool,
+    selected: usize,
+    hover: Option<usize>,
+    scroll: f32,
+    /// El próximo cuadro deja a la vista el elegido.
+    reveal: bool,
 }
 
 /// Botón «Colores: carpeta / tipo» de la vista en `area`: en la barra superior, 40 antes del estado
@@ -208,8 +270,8 @@ pub struct Xtree {
     scan: Scan,
     /// El escaneo sigue en curso: se dibuja el árbol en vivo (`scan.live`).
     scanning: bool,
-    /// Árbol terminado (vacío mientras se escanea).
-    arena: Vec<Node>,
+    /// Árbol terminado (vacío mientras se escanea). Compartido con el hilo de búsqueda.
+    arena: Arc<Vec<Node>>,
     current: u32,
     selected: Option<u32>,
     cells: Vec<Cell>,
@@ -258,6 +320,16 @@ pub struct Xtree {
     ticks: u8,
     /// Búsqueda al teclear en la tabla (#57): lo escrito y cuándo.
     typeahead: crate::typeahead::TypeAhead,
+    /// La búsqueda por nombre, si está abierta (#57).
+    search: Option<SearchState>,
+    /// Generación de la búsqueda: una que cambió corta la del hilo.
+    search_gen: Arc<AtomicUsize>,
+    /// Lo que deja el hilo de búsqueda (generación y resultados); se toma con `on_found`.
+    search_slot: Arc<std::sync::Mutex<Option<(usize, Found)>>>,
+    /// Desde cuántos nodos se busca en otro hilo (`search::THREAD_FROM`; las pruebas lo bajan).
+    search_thread_from: usize,
+    /// El mouse está sobre la lupa.
+    hover_search: bool,
     /// El próximo cuadro deja a la vista la fila elegida (desplazando lo justo).
     scroll_to_selected: bool,
 }
@@ -319,7 +391,7 @@ impl Xtree {
             root,
             scan,
             scanning: false,
-            arena: Vec::new(),
+            arena: Arc::default(),
             current: 0,
             selected: None,
             cells: Vec::new(),
@@ -348,6 +420,11 @@ impl Xtree {
             ticks: 0,
             typeahead: Default::default(),
             scroll_to_selected: false,
+            search: None,
+            search_gen: Arc::new(AtomicUsize::new(0)),
+            search_slot: Default::default(),
+            search_thread_from: search::THREAD_FROM,
+            hover_search: false,
         }
     }
 
@@ -368,7 +445,7 @@ impl Xtree {
     /// Reemplaza el árbol por uno terminado (pruebas).
     #[cfg(test)]
     pub fn set_arena(&mut self, arena: Vec<Node>) {
-        self.arena = arena;
+        self.arena = Arc::new(arena);
         self.scanning = false;
         self.go(0);
     }
@@ -397,6 +474,7 @@ impl Xtree {
         self.menu_hover = None;
         self.hover_back = false;
         self.hover_colors = false;
+        self.hover_search = false;
     }
 
     /// Abre el menú de discos sin pasar por el clic. Lo usan las pruebas de `App` (app/tests.rs).
@@ -644,7 +722,7 @@ impl Xtree {
         self.cancel();
         let id = NEXT_SCAN.fetch_add(1, Ordering::Relaxed);
         self.scan = scan::start(self.hwnd, id, self.root.clone());
-        self.arena.clear();
+        self.arena = Arc::default();
         self.cells.clear();
         self.cells_for = None;
         self.current = 0;
@@ -655,12 +733,13 @@ impl Xtree {
         self.scroll = 0.0;
         self.scanning = true;
         self.start_clock();
+        self.refresh_search();
     }
 
     /// Toma el árbol terminado, si ya llegó. Devuelve si cambió algo.
     fn take_result(&mut self) -> bool {
         let Some(arena) = self.scan.result.lock().unwrap().take() else { return false };
-        self.arena = arena;
+        self.arena = Arc::new(arena);
         // El espacio libre cambió mientras se escaneaba.
         self.read_volume();
         // Primer árbol de este escaneo: queda fijo el tiempo total. Un árbol elevado que llega
@@ -673,6 +752,8 @@ impl Xtree {
         // Resultado nuevo: el indicador lo muestra hasta que se abra la vista.
         self.seen = false;
         self.go(0);
+        // Los nodos son otros: la búsqueda abierta se repite sobre el árbol terminado.
+        self.refresh_search();
         true
     }
 
@@ -755,6 +836,169 @@ impl Xtree {
         Action::Redraw
     }
 
+    // ---------- búsqueda (#57) ----------
+
+    /// ¿Está abierta la búsqueda (en el lugar de la tabla)?
+    pub fn search_open(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Lo escrito en la búsqueda abierta.
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.query.as_str())
+    }
+
+    /// Lo encontrado para lo escrito (todavía nada si se está buscando en otro hilo).
+    pub fn search_found(&self) -> Option<&Found> {
+        self.search.as_ref().and_then(|s| s.found.as_ref())
+    }
+
+    /// ¿Hay una búsqueda en otro hilo?
+    pub fn search_pending(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.pending)
+    }
+
+    /// Abre la búsqueda (la caja de texto la pone la `App`).
+    pub fn open_search(&mut self) {
+        self.menu_open = false;
+        self.menu_hover = None;
+        if self.search.is_none() {
+            self.search = Some(SearchState::default());
+        }
+    }
+
+    /// Cierra la búsqueda; si había una en otro hilo, se corta.
+    pub fn close_search(&mut self) {
+        self.search = None;
+        self.search_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Lo escrito en la caja: busca en todo lo analizado. Con un árbol chico, en el momento; con
+    /// uno grande (o el árbol en vivo, mientras se analiza), en otro hilo, que avisa con
+    /// `WM_APP_XTREE_FOUND` y se corta si se escribe otra cosa.
+    pub fn set_query(&mut self, query: &str) {
+        let Some(st) = &mut self.search else { return };
+        st.query = query.to_string();
+        st.selected = 0;
+        st.scroll = 0.0;
+        st.hover = None;
+        let generation = self.search_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        if query.trim().is_empty() {
+            st.found = None;
+            st.pending = false;
+            return;
+        }
+        if !self.scanning && self.arena.len() < self.search_thread_from {
+            st.found = search::search(&self.arena, query, &|| false);
+            st.pending = false;
+            return;
+        }
+        st.pending = true;
+        let (gen_now, slot, hwnd, query) = (self.search_gen.clone(), self.search_slot.clone(), self.hwnd, query.to_string());
+        let (live, arena) = if self.scanning { (Some(self.scan.live.clone()), None) } else { (None, Some(self.arena.clone())) };
+        let _ = std::thread::Builder::new().name("xdir-xtree-buscar".into()).spawn(move || {
+            let stop = || gen_now.load(Ordering::Relaxed) != generation;
+            let found = match (live, arena) {
+                (Some(live), _) => search::search_live(&live, &query, &stop),
+                (_, Some(arena)) => search::search(&arena, &query, &stop),
+                _ => None,
+            };
+            let Some(found) = found.filter(|_| !stop()) else { return };
+            if let Ok(mut s) = slot.lock() {
+                // Una búsqueda vieja que termina tarde no pisa a una más nueva.
+                if s.as_ref().is_none_or(|(g, _)| *g < generation) {
+                    *s = Some((generation, found));
+                }
+            }
+            hwnd.post(WM_APP_XTREE_FOUND, 0, 0);
+        });
+    }
+
+    /// Vuelve a buscar lo escrito (cambió el árbol: llegó el terminado o se analiza de nuevo).
+    fn refresh_search(&mut self) {
+        if let Some(q) = self.search_query().map(str::to_string) {
+            self.set_query(&q);
+        }
+    }
+
+    /// Llegó lo de una búsqueda en otro hilo (`WM_APP_XTREE_FOUND`). Devuelve si hay que repintar
+    /// (era la búsqueda de lo que está escrito ahora).
+    pub fn on_found(&mut self) -> bool {
+        let Some((generation, found)) = self.search_slot.lock().ok().and_then(|mut s| s.take()) else { return false };
+        let current = self.search_gen.load(Ordering::Relaxed);
+        match &mut self.search {
+            Some(st) if generation == current && found.query == st.query => {
+                st.found = Some(found);
+                st.pending = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Una tecla de la caja de búsqueda: flechas y Re Pág / Av Pág eligen, Enter entra, Esc cierra.
+    pub fn search_key(&mut self, k: Key) -> Action {
+        let Some(st) = &mut self.search else { return Action::None };
+        let n = st.found.as_ref().map_or(0, |f| f.hits.len());
+        let step: i64 = match k {
+            VK_UP => -1,
+            VK_DOWN => 1,
+            VK_PRIOR => -10,
+            VK_NEXT => 10,
+            VK_RETURN => {
+                let i = st.selected;
+                return self.open_result(i);
+            }
+            VK_ESCAPE => {
+                self.close_search();
+                return Action::Redraw;
+            }
+            _ => return Action::None,
+        };
+        if n == 0 {
+            return Action::None;
+        }
+        let to = (st.selected as i64 + step).clamp(0, n as i64 - 1) as usize;
+        if to == st.selected {
+            return Action::None;
+        }
+        st.selected = to;
+        st.reveal = true;
+        Action::Redraw
+    }
+
+    /// Entra en el resultado `i`: en la carpeta o, si es un archivo, en la suya con el archivo
+    /// marcado. Cierra la búsqueda.
+    fn open_result(&mut self, i: usize) -> Action {
+        let Some(hit) = self.search_found().and_then(|f| f.hits.get(i)).cloned() else { return Action::None };
+        // El nodo tiene que seguir siendo el mismo (mientras se analiza, el árbol en vivo).
+        let live = self.scan.live.clone();
+        let guard = if self.scanning { live.read().ok() } else { None };
+        let arena: &[Node] = guard.as_deref().map_or(self.arena.as_slice(), |g| g.as_slice());
+        let Some(parent) = arena.get(hit.node as usize).filter(|n| *n.name == *hit.name).map(|n| n.parent) else { return Action::None };
+        drop(guard);
+        self.close_search();
+        if hit.is_dir {
+            self.go(hit.node);
+        } else {
+            self.go(parent);
+            self.selected = Some(hit.node);
+            self.scroll_to_selected = true;
+        }
+        Action::Redraw
+    }
+
+    /// Resultado bajo el punto (con la búsqueda abierta).
+    fn result_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
+        let st = self.search.as_ref()?;
+        let n = st.found.as_ref().map_or(0, |f| f.hits.len());
+        if !contains(&search_results_rect(area), x, y) {
+            return None;
+        }
+        let i = ((y - search_results_rect(area).top + st.scroll) / RES_H) as usize;
+        (i < n).then_some(i)
+    }
+
     // ---------- navegación ----------
 
     fn go(&mut self, node: u32) {
@@ -793,6 +1037,10 @@ impl Xtree {
     // ---------- hit-tests ----------
 
     fn row_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
+        // Con la búsqueda abierta la tabla no se ve.
+        if self.search.is_some() {
+            return None;
+        }
         let ui = layout_ui(area, self.legend_h());
         let top = ui.list.top + TABLE_H;
         if !contains(&ui.list, x, y) || y < top {
@@ -861,9 +1109,16 @@ impl Xtree {
         }
         let back = contains(&back_rect(area), x, y);
         let colors = contains(&colors_rect(area), x, y);
-        let back_changed = back != self.hover_back || colors != self.hover_colors;
+        let lens = contains(&search_btn_rect(area), x, y);
+        let result = self.result_at(area, x, y);
+        let mut back_changed = back != self.hover_back || colors != self.hover_colors || lens != self.hover_search;
         self.hover_back = back;
         self.hover_colors = colors;
+        self.hover_search = lens;
+        if let Some(st) = &mut self.search {
+            back_changed |= st.hover != result;
+            st.hover = result;
+        }
         if self.scanning {
             return back_changed; // mientras se escanea el mapa es solo de lectura
         }
@@ -877,6 +1132,16 @@ impl Xtree {
 
     /// Rueda sobre la tabla: `lines` filas (positivo: hacia arriba).
     pub fn on_wheel(&mut self, area: Rect, lines: f32) -> bool {
+        // Con la búsqueda abierta se mueven los resultados.
+        if let Some(st) = &mut self.search {
+            let r = search_results_rect(area);
+            let n = st.found.as_ref().map_or(0, |f| f.hits.len() + usize::from(f.total > f.hits.len()));
+            let max = (n as f32 * RES_H - (r.bottom - r.top)).max(0.0);
+            let scroll = (st.scroll - lines * RES_H).clamp(0.0, max);
+            let changed = scroll != st.scroll;
+            st.scroll = scroll;
+            return changed;
+        }
         let ui = layout_ui(area, self.legend_h());
         let visible = ui.list.bottom - ui.list.top - TABLE_H;
         let max = (self.rows().len() as f32 * ROW_H - visible).max(0.0);
@@ -917,6 +1182,25 @@ impl Xtree {
         if contains(&ui.colors_btn, x, y) {
             self.toggle_colors();
             return Action::Redraw;
+        }
+        if contains(&ui.search_btn, x, y) {
+            if self.search.is_some() {
+                self.close_search();
+            } else {
+                self.open_search();
+            }
+            return Action::Redraw;
+        }
+        // La búsqueda abierta (también mientras se analiza): el ✕ la cierra y un resultado entra.
+        if self.search.is_some() && contains(&ui.list, x, y) {
+            if contains(&search_close_rect(area), x, y) {
+                self.close_search();
+                return Action::Redraw;
+            }
+            return match self.result_at(area, x, y) {
+                Some(i) => self.open_result(i),
+                None => Action::None,
+            };
         }
         if self.arena.is_empty() || self.scanning {
             return Action::None;
@@ -961,7 +1245,7 @@ impl Xtree {
     }
 
     fn on_double_click(&mut self, area: Rect, x: f32, y: f32) -> Action {
-        if self.scanning || self.menu_open {
+        if self.scanning || self.menu_open || (self.search.is_some() && contains(&layout_ui(area, self.legend_h()).list, x, y)) {
             return Action::None;
         }
         let node = if let Some(i) = self.row_at(area, x, y) {
@@ -987,7 +1271,7 @@ impl Xtree {
 
     /// `on_char` a la hora `now` (las pruebas pasan los tiempos).
     pub fn on_char_at(&mut self, c: char, now: Instant) -> Action {
-        if c.is_control() || self.scanning || self.menu_open || self.arena.is_empty() {
+        if c.is_control() || self.scanning || self.menu_open || self.search.is_some() || self.arena.is_empty() {
             return Action::None;
         }
         let rows = self.rows();
@@ -1022,6 +1306,11 @@ impl Xtree {
             VK_ESCAPE if self.menu_open => {
                 self.menu_open = false;
                 self.menu_hover = None;
+                Action::Redraw
+            }
+            // Esc cierra la búsqueda; el siguiente, xtree.
+            VK_ESCAPE if self.search.is_some() => {
+                self.close_search();
                 Action::Redraw
             }
             VK_ESCAPE => Action::Close,
@@ -1078,6 +1367,91 @@ impl Xtree {
             }
         }
         self.scroll = self.scroll.clamp(0.0, (rows.len() as f32 * ROW_H - visible).max(0.0));
+        // Los resultados de la búsqueda: el elegido a la vista y el desplazamiento dentro del total.
+        if let Some(st) = &mut self.search {
+            let r = search_results_rect(area);
+            let h = (r.bottom - r.top).max(0.0);
+            if std::mem::take(&mut st.reveal) {
+                let top = st.selected as f32 * RES_H;
+                if top < st.scroll {
+                    st.scroll = top;
+                } else if top + RES_H > st.scroll + h {
+                    st.scroll = top + RES_H - h;
+                }
+            }
+            let n = st.found.as_ref().map_or(0, |f| f.hits.len() + usize::from(f.total > f.hits.len()));
+            st.scroll = st.scroll.clamp(0.0, (n as f32 * RES_H - h).max(0.0));
+        }
+    }
+
+    /// La búsqueda abierta, sobre la columna de la tabla: el recuadro de la caja (el texto lo
+    /// escribe la caja del sistema), la cantidad, los resultados y «y N más».
+    fn paint_search(&self, p: &dyn Painter, area: Rect, st: &SearchState) {
+        let th = p.theme();
+        let l = layout_ui(area, self.legend_h()).list;
+        p.round_fill(l, 8.0, th.surface);
+        p.round_stroke_w(l, 8.0, th.border, 1.0);
+        let f = search_frame(area);
+        p.round_fill(f, 6.0, th.background);
+        p.round_stroke_w(f, 6.0, th.accent, 1.0);
+        p.text(FontId::GlyphsSmall, "\u{E721}", rect(f.left + 4.0, f.top, f.left + 26.0, f.bottom), th.text_dim);
+        let x = search_close_rect(area);
+        p.text(FontId::GlyphsSmall, "\u{E711}", rect(x.left, x.top + 4.0, x.right, x.bottom - 4.0), th.text_dim);
+        let head = rect(l.left + 12.0, f.bottom + 6.0, l.right - 12.0, l.top + SEARCH_HEAD - 4.0);
+        // Sin nada analizado no hay dónde buscar.
+        if !self.scanning && self.arena.is_empty() {
+            p.text(FontId::Small, "Analizá un disco o una carpeta para buscar", head, th.text_dim);
+            return;
+        }
+        let Some(found) = &st.found else {
+            let msg = if st.pending { "Buscando\u{2026}" } else { "Escribí parte de un nombre" };
+            p.text(FontId::Small, msg, head, th.text_dim);
+            return;
+        };
+        if found.total == 0 {
+            p.text(FontId::UiCenter, &format!("Nada coincide con «{}»", found.query.trim()), rect(l.left + 8.0, l.top + SEARCH_HEAD, l.right - 8.0, l.top + SEARCH_HEAD + 60.0), th.text_dim);
+            return;
+        }
+        let mut count = if found.total == 1 { "1 resultado".to_string() } else { format!("{} resultados", fmt_count(found.total as u64)) };
+        if st.pending {
+            count.push_str(" \u{B7} buscando\u{2026}");
+        }
+        p.text(FontId::Small, &count, head, th.text_dim);
+        let file_icon = if th.dark { hex(0xD9E0ED) } else { hex(0x9AA5B3) };
+        let rows = search_results_rect(area);
+        p.clip(rows, &mut || {
+            for (i, hit) in found.hits.iter().enumerate() {
+                let r = search_row_rect(area, i, st.scroll);
+                if r.bottom < rows.top || r.top > rows.bottom {
+                    continue;
+                }
+                let band = rect(r.left, r.top + 1.0, r.right, r.bottom - 1.0);
+                if i == st.selected {
+                    p.round_fill(band, 5.0, th.selection);
+                    p.round_stroke_w(band, 5.0, th.accent, 1.0);
+                } else if st.hover == Some(i) {
+                    p.round_fill(band, 5.0, th.hover);
+                }
+                let (ix, iy) = (r.left + 9.0, r.top + 7.0);
+                if hit.is_dir {
+                    p.round_fill(rect(ix, iy + 3.0, ix + 7.0, iy + 7.0), 1.5, rgb(FOLDER_ICON));
+                    p.round_fill(rect(ix, iy + 5.0, ix + 16.0, iy + 15.0), 2.0, rgb(FOLDER_ICON));
+                } else {
+                    p.round_fill(rect(ix + 2.0, iy, ix + 14.0, iy + 16.0), 2.0, file_icon);
+                }
+                let text_l = r.left + 33.0;
+                p.text(FontId::Ui, &hit.name, rect(text_l, r.top + 3.0, r.right - 100.0, r.top + 23.0), th.text);
+                p.text(FontId::UiRight, &fmt_size(hit.size), rect(r.right - 100.0, r.top + 3.0, r.right - 9.0, r.top + 23.0), th.text);
+                // La carpeta que lo contiene, relativa a lo analizado (en la raíz: la raíz).
+                let rel = if hit.rel.as_os_str().is_empty() { self.root.display().to_string() } else { hit.rel.display().to_string() };
+                p.text(FontId::Small, &rel, rect(text_l, r.top + 22.0, r.right - 9.0, r.top + 40.0), th.text_dim);
+            }
+            if found.total > found.hits.len() {
+                let r = search_row_rect(area, found.hits.len(), st.scroll);
+                let more = format!("y {} más", fmt_count((found.total - found.hits.len()) as u64));
+                p.text(FontId::UiCenter, &more, rect(r.left, r.top, r.right, r.top + 32.0), th.text_dim);
+            }
+        });
     }
 
     pub fn paint(&mut self, p: &dyn Painter, area: Rect) {
@@ -1128,7 +1502,7 @@ impl Xtree {
                 fmt_size(progress.bytes.load(Ordering::Relaxed))
             )
         };
-        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, ui.colors_btn.left - 12.0, t0 + TOP_H), th.text);
+        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, ui.search_btn.left - 12.0, t0 + TOP_H), th.text);
         // Barra de avance (volumen entero) sobre el borde inferior de la barra superior.
         if self.scanning && !self.scan_stopped
             && let Some(pc) = self.percent()
@@ -1153,13 +1527,18 @@ impl Xtree {
         p.round_fill(cbtn, 6.0, if self.hover_colors { th.hover } else { th.surface_alt });
         p.round_stroke_w(cbtn, 6.0, th.border, 1.0);
         let sy = (cbtn.top + cbtn.bottom) / 2.0 - 6.0;
-        for i in 0..4 {
-            let c = if self.by_type { rgb(CATS[i].1) } else { position_color(i as f32 * 0.25, 1, false) };
+        for (i, cat) in CATS.iter().take(4).enumerate() {
+            let c = if self.by_type { rgb(cat.1) } else { position_color(i as f32 * 0.25, 1, false) };
             let (sx, dy) = (cbtn.left + 10.0 + (i % 2) as f32 * 7.0, (i / 2) as f32 * 7.0);
             p.round_fill(rect(sx, sy + dy, sx + 5.0, sy + dy + 5.0), 1.0, c);
         }
         let label = if self.by_type { "Colores: tipo" } else { "Colores: carpeta" };
         p.text(FontId::Ui, label, rect(cbtn.left + 30.0, cbtn.top, cbtn.right - 6.0, cbtn.bottom), th.text);
+        // La lupa: borde de acento con la búsqueda abierta.
+        let sbtn = ui.search_btn;
+        p.round_fill(sbtn, 6.0, if self.hover_search { th.hover } else { th.surface_alt });
+        p.round_stroke_w(sbtn, 6.0, if self.search.is_some() { th.accent } else { th.border }, 1.0);
+        p.text(FontId::GlyphsSmall, "\u{E721}", sbtn, th.text);
         let state = self.state_text();
         // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
         // es de escaneo.
@@ -1208,49 +1587,51 @@ impl Xtree {
                 .map(|c| c.top)
                 .or_else(|| self.hover_row.and_then(|i| rows.get(i).copied().flatten()));
 
-            // ----- tabla -----
-            let l = ui.list;
-            p.round_fill(l, 8.0, th.surface);
-            p.round_stroke_w(l, 8.0, th.border, 1.0);
-            let (hy0, hy1) = (l.top, l.top + TABLE_H);
-            p.text(FontId::Ui, "Nombre", rect(l.left + 36.0, hy0, l.right - 214.0, hy1), th.text_dim);
-            p.text(FontId::UiRight, "Tamaño", rect(l.right - 214.0, hy0, l.right - 124.0, hy1), th.text_dim);
-            p.text(FontId::UiRight, "%", rect(l.right - 124.0, hy0, l.right - 72.0, hy1), th.text_dim);
-            p.fill(rect(l.left + 1.0, l.top + TABLE_H - 1.0, l.right - 1.0, l.top + TABLE_H), th.border);
-            p.clip(rect(l.left, l.top + TABLE_H, l.right, l.bottom - 2.0), &mut || {
-                for (i, row) in rows.iter().enumerate() {
-                    let top = l.top + TABLE_H + i as f32 * ROW_H - self.scroll;
-                    if top + ROW_H < l.top + TABLE_H || top > l.bottom {
-                        continue;
-                    }
-                    let band = rect(l.left + 3.0, top + 1.0, l.right - 3.0, top + ROW_H - 1.0);
-                    let is_sel = row.is_some() && *row == self.selected;
-                    let is_hot = self.hover_row == Some(i) || (row.is_some() && *row == hot_top);
-                    if is_sel {
-                        p.round_fill(band, 5.0, th.selection);
-                        p.round_stroke_w(band, 5.0, th.accent, 1.0);
-                    } else if is_hot {
-                        p.round_fill(band, 5.0, th.hover);
-                    }
-                    match row {
-                        None => p.text(FontId::Ui, "\u{2191}  Subir", rect(l.left + 12.0, top, l.right - 8.0, top + ROW_H), th.text_dim),
-                        Some(id) => {
-                            let n = &arena[*id as usize];
-                            let frac = if cur.size > 0 { n.size as f32 / cur.size as f32 } else { 0.0 };
-                            let ic = if n.is_dir { rgb(FOLDER_ICON) } else { file_icon };
-                            icon(l.left + 12.0, top + (ROW_H - 16.0) / 2.0, n.is_dir, ic);
-                            p.text(FontId::Ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
-                            p.text(FontId::UiRight, &fmt_size(n.size), rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
-                            let pc = format!("{:.1} %", frac * 100.0).replace('.', ",");
-                            p.text(FontId::UiRight, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
-                            let track = rect(l.right - 62.0, top + ROW_H / 2.0 - 4.0, l.right - 12.0, top + ROW_H / 2.0 + 4.0);
-                            p.round_fill(track, 4.0, th.border);
-                            let bar_w = ((track.right - track.left) * frac).max(3.0);
-                            p.round_fill(rect(track.left, track.top, track.left + bar_w, track.bottom), 4.0, th.accent);
+            // ----- tabla (con la búsqueda abierta va la búsqueda) -----
+            if self.search.is_none() {
+                let l = ui.list;
+                p.round_fill(l, 8.0, th.surface);
+                p.round_stroke_w(l, 8.0, th.border, 1.0);
+                let (hy0, hy1) = (l.top, l.top + TABLE_H);
+                p.text(FontId::Ui, "Nombre", rect(l.left + 36.0, hy0, l.right - 214.0, hy1), th.text_dim);
+                p.text(FontId::UiRight, "Tamaño", rect(l.right - 214.0, hy0, l.right - 124.0, hy1), th.text_dim);
+                p.text(FontId::UiRight, "%", rect(l.right - 124.0, hy0, l.right - 72.0, hy1), th.text_dim);
+                p.fill(rect(l.left + 1.0, l.top + TABLE_H - 1.0, l.right - 1.0, l.top + TABLE_H), th.border);
+                p.clip(rect(l.left, l.top + TABLE_H, l.right, l.bottom - 2.0), &mut || {
+                    for (i, row) in rows.iter().enumerate() {
+                        let top = l.top + TABLE_H + i as f32 * ROW_H - self.scroll;
+                        if top + ROW_H < l.top + TABLE_H || top > l.bottom {
+                            continue;
+                        }
+                        let band = rect(l.left + 3.0, top + 1.0, l.right - 3.0, top + ROW_H - 1.0);
+                        let is_sel = row.is_some() && *row == self.selected;
+                        let is_hot = self.hover_row == Some(i) || (row.is_some() && *row == hot_top);
+                        if is_sel {
+                            p.round_fill(band, 5.0, th.selection);
+                            p.round_stroke_w(band, 5.0, th.accent, 1.0);
+                        } else if is_hot {
+                            p.round_fill(band, 5.0, th.hover);
+                        }
+                        match row {
+                            None => p.text(FontId::Ui, "\u{2191}  Subir", rect(l.left + 12.0, top, l.right - 8.0, top + ROW_H), th.text_dim),
+                            Some(id) => {
+                                let n = &arena[*id as usize];
+                                let frac = if cur.size > 0 { n.size as f32 / cur.size as f32 } else { 0.0 };
+                                let ic = if n.is_dir { rgb(FOLDER_ICON) } else { file_icon };
+                                icon(l.left + 12.0, top + (ROW_H - 16.0) / 2.0, n.is_dir, ic);
+                                p.text(FontId::Ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
+                                p.text(FontId::UiRight, &fmt_size(n.size), rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
+                                let pc = format!("{:.1} %", frac * 100.0).replace('.', ",");
+                                p.text(FontId::UiRight, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
+                                let track = rect(l.right - 62.0, top + ROW_H / 2.0 - 4.0, l.right - 12.0, top + ROW_H / 2.0 + 4.0);
+                                p.round_fill(track, 4.0, th.border);
+                                let bar_w = ((track.right - track.left) * frac).max(3.0);
+                                p.round_fill(rect(track.left, track.top, track.left + bar_w, track.bottom), 4.0, th.accent);
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
 
             // ----- mapa -----
             p.round_fill(ui.map, 8.0, th.surface);
@@ -1411,6 +1792,11 @@ impl Xtree {
             p.text(FontId::UiRight, &help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
         }
 
+        // ----- búsqueda: en el lugar de la tabla -----
+        if let Some(st) = &self.search {
+            self.paint_search(p, area, st);
+        }
+
         // ----- lista de discos: va al final para quedar por encima de todo -----
         if self.menu_open {
             let n = self.drives.len() + 1;
@@ -1437,7 +1823,7 @@ impl Xtree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::keys::{VK_BACK, VK_ESCAPE};
+    use crate::keys::keys::{VK_BACK, VK_DOWN, VK_ESCAPE, VK_RETURN};
     use crate::geom::rect;
     use crate::xtree::tree::{NO_PARENT, Node};
     use std::time::{Duration, Instant};
@@ -1551,6 +1937,163 @@ mod tests {
         assert!(texts.iter().any(|t| t == "Colores: tipo"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "Ctrl+T: color por carpeta"), "{texts:?}");
         assert_eq!(x.colors_tip(), "Colorear por carpeta");
+    }
+
+    /// raiz › Documentos (600) › Facturas (300) › factura-1.pdf (200); raiz › facturas.zip (350).
+    fn search_sample() -> Vec<Node> {
+        vec![
+            node("raiz", NO_PARENT, 1000, true, vec![1, 4]),
+            node("Documentos", 0, 600, true, vec![2]),
+            node("Facturas", 1, 300, true, vec![3]),
+            node("factura-1.pdf", 2, 200, false, vec![]),
+            node("facturas.zip", 0, 350, false, vec![]),
+        ]
+    }
+
+    fn hit_names(x: &Xtree) -> Vec<String> {
+        x.search_found().map(|f| f.hits.iter().map(|h| h.name.clone()).collect()).unwrap_or_default()
+    }
+
+    /// Espera (con tiempo límite) a que llegue la búsqueda del hilo y la aplica.
+    fn wait_found(x: &mut Xtree, query: &str) {
+        let t0 = Instant::now();
+        while x.search_found().is_none_or(|f| f.query != query) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "la búsqueda «{query}» no llegó");
+            std::thread::sleep(Duration::from_millis(2));
+            x.on_found();
+        }
+    }
+
+    /// #57: con un árbol chico la búsqueda es en el momento; flechas y Enter entran en la carpeta
+    /// (o en la del archivo, con el archivo marcado) y cierran la búsqueda; Esc la cierra y un
+    /// segundo Esc cierra xtree.
+    #[test]
+    fn xtree_search_small_tree_and_keys() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(search_sample());
+        assert!(!x.search_open());
+        x.open_search();
+        assert!(x.search_open());
+        x.set_query("FACT");
+        assert_eq!(hit_names(&x), ["Facturas", "facturas.zip", "factura-1.pdf"]);
+        assert_eq!(x.on_char_at('d', Instant::now()), Action::None, "las letras son de la caja");
+        assert_eq!(x.search_key(VK_DOWN), Action::Redraw);
+        assert_eq!(x.search_key(VK_DOWN), Action::Redraw);
+        assert_eq!(x.search_key(VK_DOWN), Action::None, "ya está en el último");
+        assert_eq!(x.search_key(VK_RETURN), Action::Redraw);
+        assert!(!x.search_open());
+        assert_eq!(x.current, 2, "la carpeta del archivo");
+        assert_eq!(selected_name(&x).as_deref(), Some("factura-1.pdf"));
+        x.open_search();
+        x.set_query("docu");
+        assert_eq!(x.search_key(VK_RETURN), Action::Redraw);
+        assert_eq!((x.current, x.selected), (1, None), "entra en la carpeta");
+        x.open_search();
+        x.set_query("");
+        assert!(x.search_found().is_none(), "sin texto no hay resultados");
+        assert_eq!(x.search_key(VK_RETURN), Action::None);
+        assert_eq!(x.on_key(VK_ESCAPE), Action::Redraw);
+        assert!(!x.search_open());
+        assert_eq!(x.on_key(VK_ESCAPE), Action::Close);
+    }
+
+    /// #57: con un árbol grande la búsqueda va en otro hilo; lo que llega de una búsqueda vieja
+    /// (cambió lo escrito) no se muestra.
+    #[test]
+    fn xtree_search_big_tree_uses_thread() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let mut arena = vec![node("raiz", NO_PARENT, 0, true, vec![])];
+        arena.extend((0..5000).map(|i| node(&format!("carpeta-{i}"), 0, i, true, vec![])));
+        arena[0].children = (1..=5000).collect();
+        x.set_arena(arena);
+        x.search_thread_from = 100;
+        x.open_search();
+        x.set_query("carpeta-49");
+        assert!(x.search_pending(), "en otro hilo");
+        x.set_query("carpeta-499");
+        wait_found(&mut x, "carpeta-499");
+        assert!(!x.search_pending());
+        assert_eq!(x.search_found().unwrap().total, 11);
+        assert_eq!(hit_names(&x)[0], "carpeta-4999");
+        // Una respuesta vieja que llega tarde no pisa la nueva.
+        for _ in 0..50 {
+            x.on_found();
+        }
+        assert_eq!(x.search_found().unwrap().query, "carpeta-499");
+    }
+
+    /// #57: mientras se analiza, busca en lo que ya se leyó (el árbol en vivo, en otro hilo); al
+    /// llegar el árbol terminado la búsqueda se repite sobre él.
+    #[test]
+    fn xtree_search_while_scanning_reads_live() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.scanning = true;
+        *x.scan.live.write().unwrap() = search_sample();
+        x.open_search();
+        x.set_query("fact");
+        wait_found(&mut x, "fact");
+        assert_eq!(hit_names(&x), ["Facturas", "facturas.zip", "factura-1.pdf"]);
+        let mut done = search_sample();
+        done.push(node("factura-2.pdf", 2, 50, false, vec![]));
+        done[2].children.push(5);
+        *x.scan.result.lock().unwrap() = Some(done);
+        assert!(x.take_result());
+        assert!(x.search_open());
+        // Árbol chico: la búsqueda nueva ya está.
+        assert_eq!(hit_names(&x).len(), 4);
+    }
+
+    /// #57: con la búsqueda abierta la columna muestra la cantidad, los resultados con su ruta
+    /// relativa y «y N más»; la lupa la abre y la cierra; un clic en un resultado entra.
+    #[test]
+    fn xtree_search_paints_and_clicks() {
+        crate::sys::testing::install_fakes();
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let mut arena = search_sample();
+        for i in 0..(super::super::search::MAX_RESULTS + 5) {
+            let n = arena.len() as u32;
+            arena[0].children.push(n);
+            arena.push(node(&format!("fact-{i}.txt"), 0, 1, false, vec![]));
+        }
+        x.set_arena(arena);
+        let ui = layout_ui(area, x.legend_h());
+        assert!(ui.search_btn.right <= ui.colors_btn.left && ui.search_btn.left > ui.scan_btn.right);
+        let (lx, ly) = ((ui.search_btn.left + ui.search_btn.right) / 2.0, (ui.search_btn.top + ui.search_btn.bottom) / 2.0);
+        assert_eq!(x.on_click(area, lx, ly, false), Action::Redraw);
+        assert!(x.search_open(), "la lupa la abre");
+        x.set_query("fact");
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        let total = super::super::search::MAX_RESULTS + 5 + 3;
+        assert!(texts.contains(&format!("{total} resultados")), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Facturas"));
+        assert!(texts.iter().any(|t| *t == PathBuf::from("Documentos").display().to_string()), "ruta relativa: {texts:?}");
+        assert!(!texts.iter().any(|t| t == "Nombre"), "sin el encabezado de la tabla");
+        // La caja (la pone la App) va dentro de la columna, arriba.
+        let b = search_box_rect(area);
+        assert!(b.left > ui.list.left && b.right < ui.list.right && b.top > ui.list.top && b.bottom < ui.list.top + 50.0);
+        // Al final de la lista, «y N más».
+        for _ in 0..40 {
+            x.on_wheel(area, -10.0);
+        }
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        assert!(p.texts().iter().any(|(_, t, _)| t == &format!("y {} más", total - super::super::search::MAX_RESULTS)));
+        // Un clic en el primer resultado (arriba de todo otra vez) entra en «Facturas».
+        for _ in 0..40 {
+            x.on_wheel(area, 10.0);
+        }
+        let r = search_row_rect(area, 0, 0.0);
+        assert_eq!(x.on_click(area, r.left + 40.0, (r.top + r.bottom) / 2.0, false), Action::Redraw);
+        assert!(!x.search_open());
+        assert_eq!(x.current, 2);
+        // La lupa con la búsqueda abierta la cierra.
+        x.on_click(area, lx, ly, false);
+        assert!(x.search_open());
+        x.on_click(area, lx, ly, false);
+        assert!(!x.search_open());
     }
 
     /// Recorre la vista entera con hit-tests y clics: nada debe entrar en pánico.

@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(t.push('p', at(t0, 200)), Step { prefix: "p".into(), next: true });
         t.clear();
         assert!(!t.active(at(t0, 200)));
-        assert_eq!(t.push('p', at(t0, 250)).next, true);
+        assert!(t.push('p', at(t0, 250)).next);
     }
 
     #[test]

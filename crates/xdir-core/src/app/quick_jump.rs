@@ -39,6 +39,11 @@ impl App {
     }
 
     pub(super) fn on_palette_key(&mut self, vk: Key, ctrl: bool) {
+        // La caja de la búsqueda de xtree es del mismo tipo: sus teclas, si la paleta no está.
+        if self.palette.is_none() && self.xtree_search_box.is_some() {
+            self.on_xtree_search_key(vk);
+            return;
+        }
         let Some((pal, edit)) = &mut self.palette else { return };
         match vk {
             VK_UP => pal.move_by(-1),

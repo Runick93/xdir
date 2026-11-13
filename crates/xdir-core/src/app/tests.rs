@@ -2778,8 +2778,12 @@ fn scan_notice_without_badge_change_does_not_repaint() {
 
 /// xtree abierto con un árbol terminado: la raíz `raiz` con estos hijos (nombre, tamaño).
 fn app_with_xtree(kids: &[(&str, u64)]) -> App {
+    app_with_xtree_host(kids, FakeHost::new())
+}
+
+fn app_with_xtree_host(kids: &[(&str, u64)], host: Rc<FakeHost>) -> App {
     use crate::xtree::tree::{NO_PARENT, Node};
-    let mut a = app();
+    let mut a = app_with_host(Init::blank(), host);
     let total = kids.iter().map(|k| k.1).sum();
     let mut arena = vec![Node { name: "raiz".into(), parent: NO_PARENT, size: total, is_dir: true, small: false, children: (1..=kids.len() as u32).collect() }];
     arena.extend(kids.iter().map(|&(n, size)| Node { name: n.into(), parent: 0, size, is_dir: true, small: false, children: vec![] }));
@@ -2831,6 +2835,62 @@ fn xtree_colors_shortcut_and_tooltip() {
     a.on_key(Key(b'T' as u16));
     crate::sys::testing::FakeEnv::hold_keys(&[]);
     assert_eq!(a.panes[a.active].tabs.len(), tabs + 1);
+}
+
+/// #57: Ctrl+F (los atajos de «Buscar») dentro de xtree abre la búsqueda con su caja (la de la
+/// paleta); lo escrito busca, Enter entra y saca la caja; la lupa abre y Esc cierra; cerrar xtree
+/// saca la caja y al volver aparece con lo escrito.
+#[test]
+fn xtree_search_box_flow() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_xtree_host(&[("alfa", 6), ("beta", 4)], host.clone());
+    a.paint();
+    assert_eq!(a.tooltip_text(Hit::XtreeSearch).as_deref(), Some("Buscar en xtree (Ctrl+F)"));
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    assert!(a.on_key(Key(b'F' as u16)));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    let x = |a: &App| a.xtree.as_ref().unwrap().search_open();
+    assert!(x(&a) && a.xtree_open);
+    let b = a.xtree_search_box.expect("la caja");
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some(""));
+    assert!(host.text_has_focus(b));
+    host.text_set(b, "BET");
+    a.on_text_changed(b.0 as isize);
+    let names: Vec<String> = a.xtree.as_ref().unwrap().search_found().unwrap().hits.iter().map(|h| h.name.clone()).collect();
+    assert_eq!(names, ["beta"]);
+    // Perder el foco no cierra nada.
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, 0, 0));
+    assert!(x(&a) && a.xtree_search_box.is_some());
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+    assert!(!x(&a));
+    assert_eq!(host.text_of(TextKind::Palette), None, "Enter saca la caja");
+    assert!(a.xtree_open, "sigue en xtree");
+    // La lupa la abre; Esc en la caja la cierra; otro Esc cierra xtree.
+    a.paint();
+    let (lx, ly) = point_of(&a, Hit::XtreeSearch);
+    a.on_left_down(lx, ly, false);
+    a.on_left_up(lx, ly);
+    assert!(x(&a) && a.xtree_search_box.is_some());
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_ESCAPE.0 as usize, 0));
+    assert!(!x(&a) && a.xtree_search_box.is_none());
+    assert!(a.on_key(VK_ESCAPE));
+    assert!(!a.xtree_open);
+    // Cerrar xtree con la búsqueda abierta saca la caja; al volver vuelve con lo escrito.
+    a.toggle_xtree();
+    a.open_xtree_search();
+    let b = a.xtree_search_box.unwrap();
+    host.text_set(b, "alf");
+    a.on_text_changed(b.0 as isize);
+    a.toggle_xtree();
+    assert_eq!(host.text_of(TextKind::Palette), None);
+    // (La vista de prueba no analizó nada: `toggle_xtree` la armaría de nuevo; se reabre como una
+    // que ya analizó.)
+    a.xtree_open = true;
+    a.sync_xtree_search();
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some("alf"));
+    // Un aviso de búsqueda (de un hilo) sin nada pendiente no hace nada.
+    assert!(a.on_app_message(crate::xtree::search::WM_APP_XTREE_FOUND, 0, 0));
 }
 
 // ---------- entrada «xtree» del árbol ----------

@@ -183,6 +183,8 @@ enum Hit {
     XtreeBack,
     /// «Colores: carpeta / tipo» de la barra superior de xtree.
     XtreeColors,
+    /// La lupa de la barra superior de xtree (abre y cierra la búsqueda).
+    XtreeSearch,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
@@ -397,6 +399,8 @@ pub struct App {
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, TextBox)>,
+    /// La caja de la búsqueda de xtree (#57), mientras la búsqueda está abierta y se ve.
+    xtree_search_box: Option<TextBox>,
     /// Árbol de carpetas lateral (experimental).
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
@@ -648,6 +652,7 @@ impl App {
             tree_followed: None,
             groups_menu_closed: None,
             palette: None,
+            xtree_search_box: None,
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(),
             show_favorites: session.show_favorites,

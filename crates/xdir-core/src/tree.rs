@@ -1242,7 +1242,8 @@ impl Tree {
                 if e > 0.05 {
                     p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(th.text, e * e));
                     // ⏏ a la derecha de los discos expulsables.
-                    let busy = self.ejecting.contains(&n.path);
+                    // Sin distinguir mayúsculas, como `App::is_ejecting` y las filas de la lista.
+                    let busy = self.ejecting.iter().any(|r| crate::sys::same_path_folded(r, &n.path));
                     let eject = |slot: Rect| {
                         if busy {
                             crate::list::draw_eject_busy(p, slot);

@@ -744,6 +744,29 @@ fn tree_eject_spins_while_ejecting() {
     assert!(a.tree.ejecting.is_empty());
 }
 
+/// Ajustes 2 (ronda 1): una raíz con otras mayúsculas también hace girar el ⏏ del árbol (como el
+/// de la lista y el freno del clic).
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_eject_spins_with_other_case() {
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "arbol-mayus");
+    a.tree.visible = true;
+    a.tree.pinned = true;
+    a.tree.refresh_drives();
+    a.tree.ejectable = a.ejectable.clone();
+    a.paint();
+    a.paint();
+    assert!(a.tree.eject_button(&e).is_some());
+    let other = PathBuf::from(e.to_string_lossy().to_uppercase());
+    assert_ne!(other, e);
+    assert!(a.eject_after_jobs(&other, "USB (E:)", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
+    a.paint();
+    let glyphs = host.drawn_texts().iter().filter(|(_, s, _)| s == crate::list::EJECT_GLYPH).count();
+    assert_eq!(glyphs, 0, "el del árbol también gira");
+    a.eject_done(&other);
+}
+
 /// Al tomar la ventana ya se pregunta qué discos se expulsan (para «Expulsar» desde una carpeta
 /// sin haber pasado por «Este equipo»).
 #[test]

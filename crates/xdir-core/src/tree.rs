@@ -268,6 +268,8 @@ pub struct Tree {
     net_sep_shell: Option<usize>,
     /// Nodos de «Red» que se pueden reusar.
     net_free: Vec<usize>,
+    /// Fila resaltada como destino de un arrastre (#56); la pone la `App` en `on_drag`.
+    pub drop_target: Option<usize>,
 }
 
 /// Revelación pendiente (`Tree::reveal`).
@@ -324,6 +326,7 @@ impl Tree {
             net_sep_shell: None,
             net_free: Vec::new(),
             eject_rects: Vec::new(),
+            drop_target: None,
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
         t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
@@ -532,6 +535,9 @@ impl Tree {
             }
             if self.scroll_to == Some(id) {
                 self.scroll_to = None;
+            }
+            if self.drop_target == Some(id) {
+                self.drop_target = None;
             }
             self.eject_rects.retain(|(_, e)| *e != id);
             // Uno que todavía se está leyendo no se recicla: su lectura vuelve con este número.
@@ -988,6 +994,26 @@ impl Tree {
         matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive).then(|| n.path.clone())
     }
 
+    /// La fila bajo el punto si acepta que le suelten archivos (#56): una carpeta, una carpeta del
+    /// usuario, OneDrive, un disco o una conexión de red ya conectada. No «Este equipo», Inicio,
+    /// xtree, el Acceso rápido (el grupo), «Red», sus favoritos y máquinas, Linux ni la Papelera.
+    /// No toca el disco (la Papelera se reconoce por la ruta).
+    pub fn drop_node_at(&self, x: f32, y: f32) -> Option<(usize, PathBuf)> {
+        if !(self.contains(x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        let id = self.node_at(y)?;
+        let n = &self.nodes[id];
+        let folder = matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::NetConnected);
+        let ok = folder && !n.path.as_os_str().is_empty() && !crate::sys::file_system().is_trash(&Location::Path(n.path.clone()));
+        ok.then(|| (id, n.path.clone()))
+    }
+
+    /// La carpeta resaltada como destino del arrastre, si hay una.
+    pub fn drop_target_path(&self) -> Option<PathBuf> {
+        self.drop_target.and_then(|id| self.nodes.get(id)).map(|n| n.path.clone())
+    }
+
     /// Se ve ahora.
     pub fn shown(&self) -> bool {
         self.visible
@@ -1220,7 +1246,11 @@ impl Tree {
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
                 let is_current = self.is_current(n, current);
-                if is_current {
+                // Destino de un arrastre: como la carpeta destino de la lista.
+                if self.drop_target == Some(id) {
+                    p.round_fill(row, 5.0, th.selection);
+                    p.round_stroke_w(row, 5.0, th.accent, 1.0);
+                } else if is_current {
                     p.round_fill(row, 5.0, alpha(th.text, 0.11));
                 } else if self.hover == Some(id) {
                     p.round_fill(row, 5.0, alpha(th.text, 0.06));
@@ -1607,6 +1637,65 @@ mod tests {
         finish_reveal(&mut t);
         assert_eq!(t.scroll_to, Some(quick));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- soltar en el árbol (#56) ----------
+
+    /// Árbol con `root` como única unidad, «Red» desplegada (un favorito, una conexión en
+    /// `root/red` y una máquina) y dibujado en 240×900.
+    fn drop_tree(root: &Path) -> (Tree, crate::sys::testing::RecordingPainter, Rect) {
+        let mut t = tree_with_drive(root);
+        t.set_network(vec![("NAS".into(), "smb://nas/x".into())], vec![("x (nas)".into(), root.join("red"), "smb://nas/x".into())], vec!["MAQ".into()]);
+        t.expand_network(Handle::default(), true);
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        let area = rect(0.0, 0.0, WIDTH, 900.0);
+        t.draw(&p, area, None, XtreeBadge::Idle);
+        (t, p, area)
+    }
+
+    /// Solo aceptan soltar las carpetas de verdad: discos, carpetas y conexiones de red; no
+    /// «Este equipo», Inicio, xtree, «Red», sus favoritos ni sus máquinas, ni la Papelera.
+    #[test]
+    fn tree_drop_node_kinds() {
+        install_fakes();
+        let root = temp_root("soltar");
+        let (t, _, _) = drop_tree(&root);
+        let at = |name: &str| {
+            let (x, y) = t.row_point(name).unwrap_or_else(|| panic!("fila {name}"));
+            t.drop_node_at(x, y).map(|(_, p)| p)
+        };
+        assert_eq!(at("Disco"), Some(root.clone()));
+        assert_eq!(at("x (nas)"), Some(root.join("red")));
+        for name in ["Inicio", "xtree", "Este equipo", "Red", "NAS", "MAQ"] {
+            assert_eq!(at(name), None, "{name}");
+        }
+        // Arriba de las filas (título y chincheta) y fuera del árbol: nada.
+        assert_eq!(t.drop_node_at(20.0, 10.0), None);
+        assert_eq!(t.drop_node_at(WIDTH + 30.0, t.row_point("Disco").unwrap().1), None);
+        // La Papelera no recibe nada.
+        FakeFileSystem::set_trash(Some(&root));
+        let (x, y) = t.row_point("Disco").unwrap();
+        assert_eq!(t.drop_node_at(x, y), None);
+        FakeFileSystem::set_trash(None);
+    }
+
+    /// La fila destino se dibuja como la de la lista: selección con borde de acento.
+    #[test]
+    fn tree_drop_target_draws_band() {
+        install_fakes();
+        let root = temp_root("soltar-banda");
+        let (mut t, _, area) = drop_tree(&root);
+        let (x, y) = t.row_point("Disco").unwrap();
+        let (id, _) = t.drop_node_at(x, y).unwrap();
+        t.drop_target = Some(id);
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, None, XtreeBadge::Idle);
+        let th = p.theme();
+        let in_row = |r: &Rect| r.top < y && r.bottom > y && r.right - r.left > 100.0;
+        assert!(p.round_fills().iter().any(|(r, c)| in_row(r) && *c == th.selection), "sin banda");
+        assert!(p.strokes().iter().any(|(r, c)| in_row(r) && *c == th.accent), "sin borde de acento");
+        assert_eq!(t.drop_target_path(), Some(root.clone()));
     }
 
     // ---------- entrada «xtree» ----------

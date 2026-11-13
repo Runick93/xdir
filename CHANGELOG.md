@@ -39,6 +39,7 @@
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
+- Arrastrá archivos a una carpeta del árbol (desde un panel, el Finder o el Explorador) para moverlos o copiarlos ahí, como en una carpeta de la lista.
 
 ### Cambios
 - Favoritos pasa a `Ctrl+Shift+D` / `⇧⌘D`: `Ctrl+D` ahora duplica.

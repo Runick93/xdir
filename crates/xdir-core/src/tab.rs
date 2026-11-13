@@ -907,6 +907,12 @@ impl Tab {
     }
 
     pub fn status(&self) -> String {
+        self.status_with(SelTotal::Files)
+    }
+
+    /// `status` con el tamaño de lo elegido que lleva la `App` (las carpetas se suman en otro
+    /// hilo, `app::sel_size`).
+    pub fn status_with(&self, sel: SelTotal) -> String {
         if self.is_settings() {
             return "Configuración   ·   los cambios se guardan solos".to_string();
         }
@@ -934,8 +940,9 @@ impl Tab {
         if let Some(e) = &self.error {
             return format!("No se pudo abrir: {e}");
         }
-        // Con selección, como el Explorador: cuántos y cuánto pesan los archivos (las carpetas no
-        // suman; si solo hay carpetas, no hay tamaño).
+        // Con selección: cuántos y cuánto pesan. Los archivos se suman acá; las carpetas, en otro
+        // hilo (`sel`): «calculando…», el total (con «al menos» si alguna no se leyó entera) o,
+        // en una carpeta de red, el enlace para calcularlo.
         let (count, bytes, files) = self
             .list
             .selected_entries()
@@ -951,12 +958,25 @@ impl Tab {
         if let Some(n) = &self.load_notice {
             s = format!("{n}   ·   {s}");
         }
+        // Solo los filtros por columna (no el filtro rápido, que ya se ve en el buscador). Con el
+        // enlace para calcular el tamaño, antes de la selección: el enlace va al final.
+        let filtered = self.list.is_filtered();
+        if filtered && count > 0 && sel == SelTotal::NeedsClick {
+            s.push_str(" (filtrado)");
+        }
         if count > 0 {
             s.push_str("   ·   ");
-            s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
+            let size = match sel {
+                SelTotal::Files => (files > 0).then(|| crate::format::size_short(bytes)),
+                SelTotal::Computing => Some("calculando\u{2026}".to_string()),
+                SelTotal::Done { bytes: folders, partial } => {
+                    Some(format!("{}{}", if partial { "al menos " } else { "" }, crate::format::size_short(bytes + folders)))
+                }
+                SelTotal::NeedsClick => Some(SIZE_LINK.to_string()),
+            };
+            s.push_str(&selection_text(count, size.as_deref()));
         }
-        // Solo los filtros por columna (no el filtro rápido, que ya se ve en el buscador).
-        if self.list.is_filtered() {
+        if filtered && !(count > 0 && sel == SelTotal::NeedsClick) {
             s.push_str(" (filtrado)");
         }
         s
@@ -966,12 +986,34 @@ impl Tab {
 /// Texto de la barra de estado con elementos seleccionados: «3 elementos seleccionados · 4,2 MB».
 /// `file_bytes` es lo que suman los archivos (`None` si solo hay carpetas: no se muestra tamaño).
 pub fn selection_summary(count: usize, file_bytes: Option<u64>) -> String {
+    selection_text(count, file_bytes.map(crate::format::size_short).as_deref())
+}
+
+/// «3 elementos seleccionados» y, si hay, « · » y lo que sigue (el tamaño, «calculando…»…).
+fn selection_text(count: usize, tail: Option<&str>) -> String {
     let mut s = if count == 1 { "1 elemento seleccionado".to_string() } else { format!("{count} elementos seleccionados") };
-    if let Some(b) = file_bytes {
+    if let Some(t) = tail {
         s.push_str(" · ");
-        s.push_str(&crate::format::size_short(b));
+        s.push_str(t);
     }
     s
+}
+
+/// El enlace del final de la barra de estado cuando lo elegido tiene carpetas de red (o solo en
+/// la nube): el tamaño se calcula al tocarlo.
+pub const SIZE_LINK: &str = "calcular tamaño";
+
+/// Lo que la barra de estado dice del tamaño de lo elegido (lo arma `app::sel_size`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelTotal {
+    /// Solo cuentan los archivos (sin carpetas elegidas, o donde no se calcula).
+    Files,
+    /// Hay carpetas sumándose en otro hilo.
+    Computing,
+    /// Lo que pesan las carpetas; `partial`: alguna no se pudo leer entera («al menos»).
+    Done { bytes: u64, partial: bool },
+    /// Carpetas de red o solo en la nube: se calcula al tocar el enlace.
+    NeedsClick,
 }
 
 /// Nombre del hijo directo de `parent` en el camino hacia `descendant`.

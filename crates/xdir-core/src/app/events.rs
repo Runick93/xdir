@@ -38,8 +38,13 @@ impl App {
                 }
             }
             crate::paint::WM_APP_ICONS => self.redraw(),
+            sel_size::WM_APP_SEL_SIZE => self.on_sel_size(),
             WM_APP_CHANGED => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
+                // Cambió algo en la carpeta: el tamaño recordado de sus subcarpetas ya no vale.
+                if let Some(Location::Path(dir)) = self.tab_by_id(wparam).map(|t| t.location.clone()) {
+                    self.sel_size.invalidate(&dir);
+                }
                 if let Some(tab) = self.tab_by_id(wparam) {
                     tab.on_changed(hwnd, &tx, lparam as u64);
                 }
@@ -497,6 +502,7 @@ impl App {
         if let Some(v) = &mut self.xtree {
             v.cancel();
         }
+        self.sel_size.cancel();
         if self.probe.is_none() {
             self.autosave_group();
             self.sync_folder_views();

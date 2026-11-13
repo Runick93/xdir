@@ -424,6 +424,9 @@ pub struct StatusButtons {
     /// Lo que ocupa a la izquierda el aviso de actualización (`draw_update_notice`): el texto de
     /// estado empieza después.
     pub lead: f32,
+    /// El texto termina en el enlace «calcular tamaño» (`tab::SIZE_LINK`), y si está bajo el mouse.
+    pub size_link: bool,
+    pub size_link_hot: bool,
 }
 
 /// Separador entre el aviso y el resto de la barra de estado (el de `aviso   ·   estado`).
@@ -454,15 +457,35 @@ pub fn draw_update_notice(p: &dyn Painter, h: f32, version: &str, hot: bool) -> 
     (link, tw + sep + lw + sep)
 }
 
-pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) {
-    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on, transfers, transfers_failed, transfers_hot, lead } = b;
+/// Dibuja la barra de estado. Devuelve dónde quedó el enlace «calcular tamaño», si lo hay y entra.
+pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) -> Option<Rect> {
+    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on, transfers, transfers_failed, transfers_hot, lead, size_link, size_link_hot } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
     let xtree = xtree_rect(w, h, badge);
     let text_end = if transfers.is_some() { transfers_rect(w, h, badge).left } else { xtree.left };
     let text_r = rect(GAP * 2.0 + lead, h - STATUSBAR_H, (text_end - GAP).max(GAP * 2.0 + lead), h);
-    p.text(FontId::Ui, text, text_r, th.text_dim);
+    let mut link_rect = None;
+    match text.strip_suffix(crate::tab::SIZE_LINK).filter(|_| size_link) {
+        // El enlace en el acento, como «Ver novedades»: bajo el mouse, fondo hover y subrayado.
+        Some(before) => {
+            p.text(FontId::Ui, before, text_r, th.text_dim);
+            let lx = text_r.left + p.measure(FontId::Ui, before);
+            let lw = p.measure(FontId::Ui, crate::tab::SIZE_LINK);
+            if lx + lw <= text_r.right {
+                let (top, bottom) = (text_r.top, text_r.bottom);
+                let link = rect(lx - 4.0, top + 4.0, lx + lw + 4.0, bottom - 4.0);
+                if size_link_hot {
+                    p.round_fill(link, 4.0, th.hover);
+                    p.fill(rect(lx, bottom - 8.0, lx + lw, bottom - 7.0), th.accent);
+                }
+                p.text(FontId::Ui, crate::tab::SIZE_LINK, rect(lx, top, lx + lw + 8.0, bottom), th.accent);
+                link_rect = Some(link);
+            }
+        }
+        None => p.text(FontId::Ui, text, text_r, th.text_dim),
+    }
 
     if let Some(f) = transfers {
         let r = transfers_rect(w, h, badge);
@@ -530,6 +553,7 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
             p.round_stroke(cell, 1.0, color);
         }
     }
+    link_rect
 }
 
 // ---------- panel de colores ----------

@@ -143,7 +143,12 @@ impl App {
             Command::Back => self.tab_mut().go_back(hwnd, &tx),
             Command::Forward => self.tab_mut().go_forward(hwnd, &tx),
             Command::Up => self.tab_mut().go_up(hwnd, &tx),
-            Command::Refresh => self.tab_mut().reload(hwnd, &tx, false),
+            Command::Refresh => {
+                if let Location::Path(dir) = self.panes[active].tab().location.clone() {
+                    self.sel_size.invalidate(&dir);
+                }
+                self.tab_mut().reload(hwnd, &tx, false)
+            }
             Command::EditAddress => self.begin_edit(active),
             Command::Filter => self.begin_filter(active),
             Command::GoComputer => self.tab_mut().navigate(hwnd, &tx, Location::Computer),

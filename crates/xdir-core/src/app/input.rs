@@ -74,6 +74,12 @@ impl App {
             return Hit::Transfers;
         }
         // «Ver novedades» del aviso de actualización (donde quedó en el último cuadro).
+        if let Some(r) = self.size_link
+            && contains(&r, x, y)
+            && !self.xtree_open
+        {
+            return Hit::SizeLink;
+        }
         if self.update_notice.is_some()
             && let Some(r) = self.update_link
             && contains(&r, x, y)
@@ -317,6 +323,7 @@ impl App {
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
             Hit::Picker(ui::PickerHit::Changelog) => self.run_command(Command::Changelog),
             Hit::UpdateNotice => self.open_update_notice(),
+            Hit::SizeLink => self.request_sel_size(),
             Hit::Changelog(i) => {
                 self.set_active(i);
                 self.redraw();

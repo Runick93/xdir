@@ -403,6 +403,8 @@ static EJECTABLE: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 type EjectResult = Result<(), crate::shell::EjectError>;
 static EJECT_RESULTS: Mutex<BTreeMap<PathBuf, EjectResult>> = Mutex::new(BTreeMap::new());
 static EJECTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// Carpetas solo en la nube para todos los hilos (`FakeFileSystem::set_cloud_only_everywhere`).
+static CLOUD_ALL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 impl FakeShell {
     /// Estos discos se pueden expulsar (se suman a los de otros tests).
@@ -627,6 +629,12 @@ impl FakeFileSystem {
                 c.remove(path);
             }
         });
+    }
+
+    /// Desde ahora `cloud_only(path)` dice que sí en todos los hilos (los hilos de trabajo también
+    /// lo ven; cada test usa rutas propias).
+    pub fn set_cloud_only_everywhere(path: &Path) {
+        CLOUD_ALL.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf());
     }
 
     /// Desde ahora (en este hilo) hay Red del Shell (`network_place` no vacío), como en Windows.
@@ -936,11 +944,11 @@ impl FileSystem for FakeFileSystem {
         Some(Box::new(FakeWatch(path.to_path_buf())))
     }
 
-    /// Solo lo marcado con `set_cloud_only` en este hilo.
+    /// Lo marcado con `set_cloud_only` en este hilo o con `set_cloud_only_everywhere`.
     fn cloud_only(&self, path: &Path) -> bool {
         FakeNetwork::note_io("cloud_only", path);
         CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
-        CLOUD.with(|c| c.borrow().contains(path))
+        CLOUD.with(|c| c.borrow().contains(path)) || CLOUD_ALL.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
     }
 
     /// Sobre el disco real (las carpetas temporales de cada test), sin pisar: falla si `to` existe

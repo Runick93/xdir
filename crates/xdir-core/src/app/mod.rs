@@ -23,6 +23,7 @@ mod quick_look;
 mod panes;
 mod preview;
 mod rename_many;
+mod sel_size;
 mod tasks;
 mod tooltip;
 mod transfers;
@@ -51,6 +52,8 @@ mod network_tests;
 mod settings_tests;
 #[cfg(test)]
 mod changelog_tests;
+#[cfg(test)]
+mod sel_size_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -187,6 +190,8 @@ enum Hit {
     Changelog(usize),
     /// «Ver novedades» del aviso de actualización en la barra de estado.
     UpdateNotice,
+    /// «calcular tamaño» de la barra de estado (carpetas de red elegidas).
+    SizeLink,
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
@@ -357,6 +362,10 @@ pub struct App {
     update_notice: Option<String>,
     /// Dónde quedó «Ver novedades» en el último cuadro (para el clic).
     update_link: Option<geom::Rect>,
+    /// Tamaño de lo elegido (carpetas incluidas) para la barra de estado.
+    sel_size: sel_size::SelSize,
+    /// Dónde quedó «calcular tamaño» en la barra de estado en el último cuadro.
+    size_link: Option<geom::Rect>,
     /// La versión más nueva que se abrió con esta sesión (se guarda en `version_vista`).
     seen_version: String,
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
@@ -621,6 +630,8 @@ impl App {
             // Se marca como vista enseguida: el aviso sale una sola vez.
             update_notice: crate::changelog::should_notify(session.seen_version.as_deref(), about::VERSION).then(|| about::VERSION.to_string()),
             update_link: None,
+            sel_size: sel_size::SelSize::new(),
+            size_link: None,
             seen_version: crate::changelog::newest(session.seen_version.as_deref().unwrap_or(about::VERSION), about::VERSION).to_string(),
             transparent: false,
             favorites,

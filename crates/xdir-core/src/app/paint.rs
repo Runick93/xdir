@@ -30,10 +30,14 @@ impl App {
         let listed = self.all_listed();
         let mark_list_frame = listed && !self.list_frame_done;
 
+        // Lo elegido cambió: se corta el cálculo del tamaño anterior y arranca el nuevo.
+        self.sync_sel_size();
         let mut status = match self.xtree.as_ref().filter(|_| self.xtree_open) {
             Some(v) => v.status_text(),
-            None => self.panes[self.active].tab().status(),
+            None => self.status_text(),
         };
+        // Carpetas de red elegidas: el texto termina en el enlace «calcular tamaño».
+        let size_link = !self.xtree_open && self.sel_size.total() == crate::tab::SelTotal::NeedsClick;
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
@@ -273,6 +277,8 @@ impl App {
                 transfers_failed,
                 transfers_hot: hover == Hit::Transfers,
                 lead: 0.0,
+                size_link,
+                size_link_hot: hover == Hit::SizeLink,
             };
             let mut buttons = buttons;
             if let Some(v) = &update_notice {
@@ -280,7 +286,7 @@ impl App {
                 self.update_link = Some(link);
                 buttons.lead = lead;
             }
-            ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
+            self.size_link = ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado
             // (entra en el área de su lista; en un panel muy bajo puede pasarse).
             for &(i, _) in rects {

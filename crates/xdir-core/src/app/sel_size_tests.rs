@@ -143,9 +143,10 @@ fn cache_reused_and_invalidated_by_watcher() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Si xtree ya analizó la carpeta, se usa su tamaño sin leer el disco.
+/// Aunque xtree ya haya analizado la carpeta, se suma lo que pesan los archivos (el tamaño lógico,
+/// lo que pesan los archivos): xtree mide lo que ocupan en el disco y no se mezclan.
 #[test]
-fn uses_xtree_size() {
+fn logical_size_even_when_xtree_analyzed() {
     use crate::xtree::tree::{NO_PARENT, Node};
     let dir = fixture("xtree");
     let mut a = app_in(&dir);
@@ -154,7 +155,7 @@ fn uses_xtree_size() {
     x.set_arena(vec![node("raiz", NO_PARENT, 7777, vec![1]), node("a", 0, 7777, vec![])]);
     a.xtree = Some(x);
     select(&mut a, &["a"]);
-    assert_eq!(a.sel_size.total(), crate::tab::SelTotal::Done { bytes: 7777, partial: false });
+    wait_status(&mut a, &format!("1 elemento seleccionado · {}", size(100)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1,7 +1,9 @@
 //! Tamaño de lo elegido en la barra de estado, carpetas incluidas.
 //!
 //! Los archivos se suman con lo que ya trae la lista; las carpetas, en un hilo propio con
-//! `info::size::folder_size` (o con el tamaño de xtree si ya analizó esa carpeta). Un cálculo por
+//! `info::size::folder_size`: el tamaño lógico (lo que pesan los archivos). El de xtree no se
+//! usa aunque ya haya analizado la carpeta: mide lo que ocupa en el disco (bloques, enlaces
+//! duros una vez), así que mezclarlos daría totales distintos para la misma carpeta. Un cálculo por
 //! selección: al cambiar lo elegido, la carpeta, la pestaña o el panel, se corta el anterior
 //! (bandera compartida) y sus respuestas se descartan por generación. El tamaño de cada carpeta
 //! se recuerda mientras no cambie (lo borra el vigilante de su carpeta o Actualizar). Las
@@ -266,7 +268,7 @@ impl App {
         }
     }
 
-    /// Suma lo que se sabe (caché, xtree) y manda al hilo lo que falta. Sin `remote`, si falta
+    /// Suma lo que se sabe (caché) y manda al hilo lo que falta. Sin `remote`, si falta
     /// alguna carpeta de red no se calcula nada: se espera el clic.
     fn start_sel_size(&mut self, remote: bool) {
         let s = &mut self.sel_size;
@@ -278,8 +280,6 @@ impl App {
             if let Some(&(b, complete, _)) = s.cache.get(f).filter(|c| c.2 == *modified) {
                 s.sum += b;
                 s.partial |= !complete;
-            } else if let Some(b) = self.xtree.as_ref().and_then(|x| x.size_of(f)) {
-                s.sum += b;
             } else {
                 todo.push(f.clone());
             }

@@ -238,3 +238,93 @@ fn layout_eject_button() {
     let l = draw::layout(r, &p, 0.0, &measure);
     assert!(l.hits.iter().any(|(h, _)| *h == InfoHit::Eject));
 }
+
+// ---------- Suma de verificación ----------
+
+fn checksum_layout(v: draw::ChecksumView) -> draw::Layout {
+    let panel = Panel {
+        title: "Información".into(),
+        header: Header { key: None, icon: 0, image: false, name: "a.zip".into(), lines: Vec::new() },
+        sections: vec![SectionView { section: Section::Checksum, open: true, error: None, body: Body::Checksum(v) }],
+        more_button: false,
+        eject_button: false,
+    };
+    draw::layout(rect(1000.0, 40.0, 1320.0, 2000.0), &panel, 0.0, &|s| s.len() as f32 * 7.0)
+}
+
+fn sum_view(state: draw::SumState) -> draw::ChecksumView {
+    draw::ChecksumView { algo: crate::sys::HashAlgo::Sha256, state, expected: String::new(), check: None, note: None }
+}
+
+fn texts_of(l: &draw::Layout) -> Vec<(String, draw::Tone)> {
+    l.content.iter().filter_map(|p| if let Prim::Text { s, tone, .. } = p { Some((s.clone(), *tone)) } else { None }).collect()
+}
+
+/// Plegada de fábrica; su bit va al final (no mueve los que ya estaban guardados).
+#[test]
+fn checksum_section_folded_by_default() {
+    assert_eq!(Section::Checksum.title(), "Suma de verificación");
+    assert_eq!(DEFAULT_OPEN & Section::Checksum.bit(), 0);
+    assert_eq!(Section::Checksum.bit(), 1 << 7);
+    assert_eq!(*Section::ALL.last().unwrap(), Section::Checksum);
+}
+
+/// Sin calcular: el selector SHA-256 / MD5, «Calcular» y la caja «Comparar con…».
+#[test]
+fn checksum_idle_controls() {
+    use crate::sys::HashAlgo;
+    let l = checksum_layout(sum_view(draw::SumState::Idle));
+    for h in [InfoHit::HashAlgo(HashAlgo::Sha256), InfoHit::HashAlgo(HashAlgo::Md5), InfoHit::HashRun, InfoHit::Expected] {
+        assert!(l.hits.iter().any(|(x, _)| *x == h), "{h:?}");
+    }
+    assert!(l.fields.iter().any(|(x, _)| *x == InfoHit::Expected), "la caja se monta encima");
+    let t: Vec<String> = texts_of(&l).into_iter().map(|t| t.0).collect();
+    for s in ["SHA-256", "MD5", "Calcular", "Comparar con…", draw::EXPECTED_HINT] {
+        assert!(t.iter().any(|x| x == s), "{s} en {t:?}");
+    }
+}
+
+/// Calculando: avance y Cancelar (el mismo botón).
+#[test]
+fn checksum_running_shows_progress() {
+    let l = checksum_layout(sum_view(draw::SumState::Running(0.5)));
+    let t: Vec<String> = texts_of(&l).into_iter().map(|t| t.0).collect();
+    assert!(t.iter().any(|x| x == "Calculando… 50 %"), "{t:?}");
+    assert!(t.iter().any(|x| x == "Cancelar"));
+    assert!(l.hits.iter().any(|(x, _)| *x == InfoHit::HashRun));
+}
+
+/// Calculada: la suma en letra de ancho fijo con «Copiar»; «Coincide» en ok, «No coincide» en
+/// danger y el aviso de una suma que no se entiende.
+#[test]
+fn checksum_done_copy_and_verdicts() {
+    let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let mut v = sum_view(draw::SumState::Done(sha.into()));
+    v.expected = sha.to_uppercase();
+    v.check = Some(draw::SumCheck::Matches);
+    let l = checksum_layout(v.clone());
+    let mono: String = l.content.iter().filter_map(|p| if let Prim::Text { font: crate::paint::FontId::Mono, s, .. } = p { Some(s.clone()) } else { None }).collect();
+    assert_eq!(mono, sha);
+    assert!(l.hits.iter().any(|(x, _)| *x == InfoHit::HashCopy));
+    assert!(texts_of(&l).contains(&("Coincide".into(), draw::Tone::Ok)));
+    v.check = Some(draw::SumCheck::Differs);
+    assert!(texts_of(&checksum_layout(v.clone())).contains(&("No coincide".into(), draw::Tone::Danger)));
+    v.check = Some(draw::SumCheck::Invalid);
+    assert!(texts_of(&checksum_layout(v)).iter().any(|t| t.0 == draw::INVALID_SUM_TEXT));
+}
+
+/// Solo en la nube: no se ofrece calcular (bajaría el archivo).
+#[test]
+fn checksum_cloud_only_has_no_button() {
+    let l = checksum_layout(sum_view(draw::SumState::CloudOnly));
+    assert!(!l.hits.iter().any(|(x, _)| *x == InfoHit::HashRun));
+    assert!(texts_of(&l).iter().any(|t| t.0 == draw::CLOUD_TEXT));
+}
+
+/// Con varias sumas pegadas, la sección dice qué línea se usó.
+#[test]
+fn checksum_says_which_line_was_used() {
+    let mut v = sum_view(draw::SumState::Idle);
+    v.note = Some("Se usó la línea 2 («a.zip»)".into());
+    assert!(texts_of(&checksum_layout(v)).iter().any(|t| t.0 == "Se usó la línea 2 («a.zip»)"));
+}

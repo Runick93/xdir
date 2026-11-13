@@ -6,6 +6,7 @@
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
+- **Comparar contenido** (paleta o menú del archivo): con dos archivos elegidos, uno en cada panel o dos en el mismo, dice si son iguales byte a byte o en qué posición empiezan a ser distintos, con avance y Cancelar, también dentro de un comprimido o en una carpeta de red. El panel de información suma la sección **Suma de verificación** (SHA-256 o MD5, con «Copiar» y «Comparar con…» para pegar la suma publicada).
 
 ### Cambios
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
@@ -61,6 +62,7 @@
 - xtree ya no es un programa aparte.
 
 ### Arreglos
+- La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.
 - En la Mac, el tipo de archivo siempre empieza con mayúscula.
 - **Seguridad**

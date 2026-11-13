@@ -9,6 +9,7 @@
 //! mouse salen de la misma cuenta. Es neutro: lo que se muestra llega armado en `Panel`.
 
 use super::{Flag, Section, Tag, Tri};
+use crate::sys::HashAlgo;
 use crate::geom::{Color, Rect, contains, rect};
 use crate::paint::{FontId, Painter};
 use crate::thumbs;
@@ -39,6 +40,11 @@ pub const ADD_TAG_TEXT: &str = "Agregar etiqueta";
 pub const MORE_TEXT: &str = "Más en el sistema…";
 pub const CHANGE_ALL_TEXT: &str = "Cambiar todos…";
 pub const EJECT_TEXT: &str = "⏏ Expulsar";
+/// Lo que dice la caja «Comparar con…» vacía.
+pub const EXPECTED_HINT: &str = "Pegá la suma publicada";
+pub const INVALID_SUM_TEXT: &str = "No es una suma SHA-256 (64 caracteres) ni MD5 (32)";
+/// Ancho de cada opción del selector de algoritmo.
+const ALGO_W: f32 = 88.0;
 
 /// Lo que muestra el panel.
 #[derive(Clone, Debug, PartialEq)]
@@ -106,6 +112,41 @@ pub enum Body {
     OpenWith { app: Option<String>, icon: i32, note: String },
     /// Filas (quién, acceso); `editable`: el acceso se toca para cambiarlo.
     Perms { rows: Vec<(String, String)>, editable: bool, note: Option<String> },
+    /// Suma de verificación de un archivo.
+    Checksum(ChecksumView),
+}
+
+/// Cómo va la suma del algoritmo elegido.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SumState {
+    Idle,
+    /// Calculando (la parte hecha).
+    Running(f32),
+    Done(String),
+    Failed(String),
+    /// Solo en la nube: calcularla lo bajaría (no se ofrece).
+    CloudOnly,
+}
+
+/// Lo que dice «Comparar con…».
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SumCheck {
+    Matches,
+    Differs,
+    /// Lo pegado no es una suma que se entienda.
+    Invalid,
+}
+
+/// La sección «Suma de verificación»: el algoritmo elegido, cómo va, lo pegado en «Comparar con…»
+/// y si coincide (`None`: no hay nada pegado o falta calcular).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChecksumView {
+    pub algo: HashAlgo,
+    pub state: SumState,
+    pub expected: String,
+    pub check: Option<SumCheck>,
+    /// Con varias sumas pegadas: qué línea se usó.
+    pub note: Option<String>,
 }
 
 /// Lo que hay bajo el mouse en el panel.
@@ -129,6 +170,14 @@ pub enum InfoHit {
     MoreInSystem,
     /// «⏏ Expulsar» del disco.
     Eject,
+    /// Una opción del selector de la suma de verificación.
+    HashAlgo(HashAlgo),
+    /// «Calcular» la suma (o Cancelar, mientras calcula).
+    HashRun,
+    /// «Copiar» la suma.
+    HashCopy,
+    /// La caja «Comparar con…».
+    Expected,
     /// El panel, sin nada que tocar.
     Body,
 }
@@ -141,6 +190,8 @@ pub enum Tone {
     Secondary,
     Accent,
     Danger,
+    /// Verde de «Iguales» / «Coincide».
+    Ok,
     Border,
     Background,
     SurfaceAlt,
@@ -250,11 +301,11 @@ pub fn hit(l: &Layout, x: f32, y: f32) -> Option<InfoHit> {
         .or(Some(InfoHit::Body))
 }
 
-fn moved(r: Rect, dy: f32) -> Rect {
+pub(crate) fn moved(r: Rect, dy: f32) -> Rect {
     rect(r.left, r.top + dy, r.right, r.bottom + dy)
 }
 
-fn shift(p: Prim, dy: f32) -> Prim {
+pub(crate) fn shift(p: Prim, dy: f32) -> Prim {
     match p {
         Prim::Text { font, s, r, tone } => Prim::Text { font, s, r: moved(r, dy), tone },
         Prim::Fill { r, radius, tone } => Prim::Fill { r: moved(r, dy), radius, tone },
@@ -448,6 +499,7 @@ impl Builder<'_> {
                 self.hits.push((InfoHit::ChangeAll, b));
                 y + 32.0
             }
+            Body::Checksum(v) => self.checksum(v, y),
             Body::Perms { rows, editable, note } => {
                 self.prims.push(Prim::Fill { r: rect(x0, y, x1, y + 24.0), radius: 0.0, tone: Tone::SurfaceAlt });
                 self.text(FontId::SmallBold, "Nombre", rect(x0 + 8.0, y + 5.0, x0 + PRIV_X - 4.0, y + 19.0), Tone::Secondary);
@@ -470,6 +522,96 @@ impl Builder<'_> {
             }
         };
         y + 8.0
+    }
+
+    /// La sección «Suma de verificación»: selector y «Calcular» (o el avance con Cancelar), la suma
+    /// con «Copiar», y la caja «Comparar con…» con lo que dice.
+    fn checksum(&mut self, v: &ChecksumView, mut y: f32) -> f32 {
+        let (x0, x1) = (self.x0, self.x1);
+        if v.state == SumState::CloudOnly {
+            self.text(FontId::Ui, CLOUD_TEXT, rect(x0, y + 3.0, x1, y + 19.0), Tone::Dim);
+            return y + 26.0;
+        }
+        // Selector (88 por opción) y, a la derecha, «Calcular» / «Cancelar».
+        let run_label = if matches!(v.state, SumState::Running(_)) { "Cancelar" } else { "Calcular" };
+        let run_w = (self.measure)(run_label) + 28.0;
+        let seg_w = (ALGO_W * HashAlgo::ALL.len() as f32).min(x1 - x0 - run_w - 8.0);
+        let all = rect(x0, y, x0 + seg_w, y + FIELD_H);
+        self.prims.push(Prim::Fill { r: all, radius: 6.0, tone: Tone::SurfaceAlt });
+        self.prims.push(Prim::Stroke { r: all, radius: 6.0, tone: Tone::Border });
+        let w = seg_w / HashAlgo::ALL.len() as f32;
+        for (i, a) in HashAlgo::ALL.into_iter().enumerate() {
+            let b = rect(x0 + w * i as f32, y, x0 + w * (i + 1) as f32, y + FIELD_H);
+            if a == v.algo {
+                self.prims.push(Prim::Fill { r: rect(b.left + 2.0, b.top + 2.0, b.right - 2.0, b.bottom - 2.0), radius: 4.0, tone: Tone::Accent });
+            }
+            let tone = if a == v.algo { Tone::Rgb(0xFFFFFF) } else { Tone::Secondary };
+            self.text(FontId::UiCenter, a.label(), rect(b.left + 2.0, y + 6.0, b.right - 2.0, y + 22.0), tone);
+            self.hits.push((InfoHit::HashAlgo(a), b));
+        }
+        let run = rect(x1 - run_w, y, x1, y + FIELD_H);
+        self.button(run, run_label);
+        self.hits.push((InfoHit::HashRun, run));
+        y += FIELD_H + 8.0;
+        match &v.state {
+            SumState::Running(f) => {
+                self.text(FontId::Small, &format!("Calculando… {} %", (f * 100.0).floor() as u32), rect(x0, y, x1, y + 16.0), Tone::Dim);
+                let bar = rect(x0, y + 20.0, x1, y + 24.0);
+                self.prims.push(Prim::Fill { r: bar, radius: 2.0, tone: Tone::SurfaceAlt });
+                let w = (x1 - x0) * f.clamp(0.0, 1.0);
+                if w > 0.5 {
+                    self.prims.push(Prim::Fill { r: rect(x0, bar.top, x0 + w.max(4.0), bar.bottom), radius: 2.0, tone: Tone::Accent });
+                }
+                y += 32.0;
+            }
+            SumState::Done(hex) => {
+                for line in crate::compare::hex_lines(hex, x1 - x0) {
+                    self.text(FontId::Mono, &line, rect(x0, y, x1, y + 16.0), Tone::Text);
+                    y += 16.0;
+                }
+                y += 4.0;
+                let w = (self.measure)("Copiar") + 28.0;
+                let b = rect(x0, y, x0 + w, y + 26.0);
+                self.button(b, "Copiar");
+                self.hits.push((InfoHit::HashCopy, b));
+                y += 34.0;
+            }
+            SumState::Failed(m) => {
+                self.text(FontId::Small, m, rect(x0, y, x1, y + 16.0), Tone::Danger);
+                y += 22.0;
+            }
+            SumState::Idle | SumState::CloudOnly => {}
+        }
+        // «Comparar con…».
+        self.text(FontId::Small, "Comparar con…", rect(x0, y, x1, y + 16.0), Tone::Secondary);
+        y += 18.0;
+        let f = rect(x0, y, x1, y + FIELD_H);
+        if v.expected.is_empty() {
+            self.field(f, EXPECTED_HINT, true);
+        } else {
+            self.field(f, &v.expected, false);
+        }
+        self.hits.push((InfoHit::Expected, f));
+        self.fields.push((InfoHit::Expected, f));
+        y += FIELD_H + 6.0;
+        match v.check {
+            Some(SumCheck::Matches) | Some(SumCheck::Differs) => {
+                let (text, tone) = if v.check == Some(SumCheck::Matches) { ("Coincide", Tone::Ok) } else { ("No coincide", Tone::Danger) };
+                self.prims.push(Prim::Dot { x: x0 + 5.0, y: y + 10.0, radius: 5.0, tone });
+                self.text(FontId::UiBold, text, rect(x0 + 16.0, y + 2.0, x1, y + 18.0), tone);
+                y += 24.0;
+            }
+            Some(SumCheck::Invalid) => {
+                self.text(FontId::Small, INVALID_SUM_TEXT, rect(x0, y + 2.0, x1, y + 18.0), Tone::Dim);
+                y += 24.0;
+            }
+            None => {}
+        }
+        if let Some(n) = &v.note {
+            self.text(FontId::Small, n, rect(x0, y, x1, y + 16.0), Tone::Dim);
+            y += 22.0;
+        }
+        y
     }
 
     /// Caja de texto dibujada (la del host se monta encima al editar).
@@ -540,7 +682,7 @@ pub fn draw(p: &dyn Painter, l: &Layout, hover: Option<InfoHit>) {
     if r.right - r.left < 120.0 {
         return;
     }
-    if let Some(h) = hover.filter(|h| matches!(h, InfoHit::Close | InfoHit::MoreInSystem | InfoHit::ChangeAll | InfoHit::TagAdd | InfoHit::OpenWithMenu))
+    if let Some(h) = hover.filter(|h| matches!(h, InfoHit::Close | InfoHit::MoreInSystem | InfoHit::ChangeAll | InfoHit::TagAdd | InfoHit::OpenWithMenu | InfoHit::HashRun | InfoHit::HashCopy))
         && let Some((_, rc)) = l.hits.iter().find(|(x, _)| *x == h)
         && (h == InfoHit::Close || rc.top >= l.view.top)
     {
@@ -565,7 +707,8 @@ pub fn draw(p: &dyn Painter, l: &Layout, hover: Option<InfoHit>) {
     }
 }
 
-fn paint(p: &dyn Painter, prim: &Prim) {
+/// Pinta una primitiva (también la usa el panel de comparar, `compare::draw`).
+pub(crate) fn paint(p: &dyn Painter, prim: &Prim) {
     let th = p.theme();
     let color = |t: Tone| match t {
         Tone::Text => th.text,
@@ -573,6 +716,7 @@ fn paint(p: &dyn Painter, prim: &Prim) {
         Tone::Secondary => th.text_secondary,
         Tone::Accent => th.accent,
         Tone::Danger => th.danger,
+        Tone::Ok => th.ok,
         Tone::Border => th.border,
         Tone::Background => th.background,
         Tone::SurfaceAlt => th.surface_alt,

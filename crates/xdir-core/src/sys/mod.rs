@@ -1,7 +1,7 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
 //! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
-//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()`, `preview()`, `info()` y `network()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()`, `preview()`, `info()`, `network()` y `hashes()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirEntry, Metadata as FsMetadata};
@@ -24,7 +24,9 @@ use crate::xtree::tree::Node;
 pub mod testing;
 mod copy;
 mod archives;
+mod hashes;
 
+pub use hashes::{HashAlgo, Hashes, Opened, Reader, io_error};
 pub use archives::{Archives, Pick, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
     CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
@@ -526,6 +528,8 @@ pub struct Services {
     pub info: Box<dyn Info>,
     /// Conexiones de red (`Network`).
     pub network: Box<dyn Network>,
+    /// Leer por bloques y sumas de verificación (la crate `xdir-hash`).
+    pub hashes: Box<dyn Hashes>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -600,4 +604,8 @@ pub fn info() -> &'static dyn Info {
 
 pub fn network() -> &'static dyn Network {
     &*services().network
+}
+
+pub fn hashes() -> &'static dyn Hashes {
+    &*services().hashes
 }

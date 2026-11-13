@@ -67,6 +67,7 @@ pub fn install() {
         archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset: crate::env::utc_offset, copy_origin: |_, _| {} }),
         info: Box::new(crate::info::LinuxInfo),
         network: Box::new(crate::net::LinuxNetwork::new()),
+        hashes: Box::new(xdir_hash::SystemHashes),
     });
 }
 

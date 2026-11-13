@@ -367,6 +367,8 @@ struct ShellState {
     error: Option<String>,
     /// Carpeta que devuelve `pick_folder`.
     picked: Option<PathBuf>,
+    /// Lo que responde `menu_has_new` (de fábrica, no: como la Mac y Linux).
+    menu_has_new: bool,
 }
 
 thread_local! {
@@ -426,6 +428,11 @@ impl FakeShell {
     /// Las llamadas hechas desde este hilo hasta ahora (y vacía el registro).
     pub fn take_calls() -> Vec<ShellCall> {
         shell_state(|s| std::mem::take(&mut s.calls))
+    }
+
+    /// El menú del fondo del sistema trae «Nuevo» (como Windows) o no.
+    pub fn set_menu_has_new(on: bool) {
+        shell_state(|s| s.menu_has_new = on);
     }
 
     /// Contenido del portapapeles de archivos de este hilo.
@@ -548,6 +555,10 @@ impl Shell for FakeShell {
 
     fn set_menu_mode(&self, dark: Option<bool>) {
         record(ShellCall::SetMenuMode(dark));
+    }
+
+    fn menu_has_new(&self) -> bool {
+        shell_state(|s| s.menu_has_new)
     }
 
     fn volume_of(&self, path: &Path) -> Option<OsString> {

@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use objc2::rc::Retained;
 use objc2::runtime::NSObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSControlStateValueOff, NSControlStateValueOn, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSView};
+use objc2_app_kit::{NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSView};
 use objc2_foundation::{MainThreadMarker, NSArray, NSObjectProtocol, NSPoint};
 
 use super::Color;
@@ -73,6 +73,41 @@ fn dot_image(c: Color) -> Option<Retained<NSImage>> {
     base.imageWithSymbolConfiguration(&sized.configurationByApplyingConfiguration(&palette))
 }
 
+/// Equivalente de teclado de un ítem de menú.
+#[derive(Debug, PartialEq, Eq)]
+struct KeyEquivalent {
+    key: String,
+    cmd: bool,
+    shift: bool,
+    alt: bool,
+    ctrl: bool,
+}
+
+/// Atajo como lo muestra xdir en la Mac («⇧⌘N», «⌥⌘N») → equivalente de teclado. Solo una letra o
+/// un número después de los modificadores; lo demás (F5, flechas) no se muestra.
+fn key_equivalent(text: &str) -> Option<KeyEquivalent> {
+    let mut k = KeyEquivalent { key: String::new(), cmd: false, shift: false, alt: false, ctrl: false };
+    let mut rest = text.trim();
+    while let Some(c) = rest.chars().next() {
+        match c {
+            '⌘' => k.cmd = true,
+            '⇧' => k.shift = true,
+            '⌥' => k.alt = true,
+            '⌃' => k.ctrl = true,
+            _ => break,
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    let mut chars = rest.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphanumeric() => {
+            k.key = c.to_ascii_lowercase().to_string();
+            Some(k)
+        }
+        _ => None,
+    }
+}
+
 fn build_menu(entries: &[Entry], target: &MenuTarget, dot: Option<(u32, Color)>, mtm: MainThreadMarker) -> Retained<NSMenu> {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
@@ -80,9 +115,24 @@ fn build_menu(entries: &[Entry], target: &MenuTarget, dot: Option<(u32, Color)>,
         match e {
             Entry::Sep => menu.addItem(&NSMenuItem::separatorItem(mtm)),
             Entry::Item { id, label, enabled, checked } => {
-                let item = unsafe {
-                    NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(label), Some(sel!(pick:)), &NSString::new())
+                // «Carpeta nueva\t⇧⌘N»: el atajo va a la derecha como equivalente de teclado.
+                let (title, key) = match label.split_once('\t') {
+                    Some((title, keys)) => (title, key_equivalent(keys)),
+                    None => (label.as_str(), None),
                 };
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(title), Some(sel!(pick:)), &NSString::new())
+                };
+                if let Some(k) = key {
+                    item.setKeyEquivalent(&NSString::from_str(&k.key));
+                    let mut mask = NSEventModifierFlags::empty();
+                    for (on, flag) in [(k.cmd, NSEventModifierFlags::Command), (k.shift, NSEventModifierFlags::Shift), (k.alt, NSEventModifierFlags::Option), (k.ctrl, NSEventModifierFlags::Control)] {
+                        if on {
+                            mask |= flag;
+                        }
+                    }
+                    item.setKeyEquivalentModifierMask(mask);
+                }
                 unsafe { item.setTarget(Some(target)) };
                 item.setTag(*id as isize);
                 item.setEnabled(*enabled);
@@ -124,4 +174,20 @@ pub fn popup_menu(entries: &[Entry], at: MenuAt, dot: Option<(u32, Color)>) -> O
     menu.popUpMenuPositioningItem_atLocation_inView(None, point, Some(&view));
     let chosen = target.ivars().get();
     (chosen > 0).then_some(chosen as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeyEquivalent, key_equivalent};
+
+    /// «⇧⌘N» y «⌥⌘N» pasan a equivalentes de teclado; F5 o un texto suelto, no.
+    #[test]
+    fn menu_key_equivalent_from_label() {
+        let k = |key: &str, cmd, shift, alt, ctrl| Some(KeyEquivalent { key: key.into(), cmd, shift, alt, ctrl });
+        assert_eq!(key_equivalent("⇧⌘N"), k("n", true, true, false, false));
+        assert_eq!(key_equivalent("⌥⌘N"), k("n", true, false, true, false));
+        assert_eq!(key_equivalent("⌃⌘1"), k("1", true, false, false, true));
+        assert_eq!(key_equivalent("⌘F5"), None);
+        assert_eq!(key_equivalent(""), None);
+    }
 }

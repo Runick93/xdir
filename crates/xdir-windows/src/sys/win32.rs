@@ -438,6 +438,11 @@ impl Shell for Win32Shell {
         sh::set_menu_mode(dark)
     }
 
+    /// El menú del fondo del Shell trae «Nuevo ▸»: xdir no agrega las suyas.
+    fn menu_has_new(&self) -> bool {
+        true
+    }
+
     fn volume_of(&self, path: &Path) -> Option<OsString> {
         sh::volume_of(path)
     }

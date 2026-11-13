@@ -1154,7 +1154,74 @@ fn context_menu_own_entries_reach_shell() {
             shell::Entry::Sep => "-",
         })
         .collect();
-    assert_eq!(&labels[..7], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+    assert_eq!(&labels[3..10], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+}
+
+/// Etiquetas de las entradas propias del menú del fondo del panel activo (los submenús por su nombre).
+fn background_labels(a: &App) -> (Vec<String>, Vec<Command>) {
+    let mut cmds = Vec::new();
+    let labels = a
+        .background_entries(a.active, &mut cmds)
+        .iter()
+        .map(|e| match e {
+            shell::Entry::Item { label, .. } | shell::Entry::Sub(label, _) => label.clone(),
+            shell::Entry::Sep => "-".to_string(),
+        })
+        .collect();
+    (labels, cmds)
+}
+
+/// Donde el menú del sistema no trae «Nuevo» (Mac y Linux), el fondo de una carpeta ofrece arriba
+/// «Carpeta nueva» y «Archivo de texto nuevo», con el atajo en uso después de un tabulador, y
+/// elegirlas corre esas acciones.
+#[test]
+fn background_menu_offers_new_entries() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    FakeShell::set_menu_has_new(false);
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-nuevo");
+    a.new_tab(0, Location::Path(dir), true);
+    let (labels, cmds) = background_labels(&a);
+    let folder = format!("Carpeta nueva\t{}", a.config.keymap.label(Command::NewFolder));
+    let file = format!("Archivo de texto nuevo\t{}", a.config.keymap.label(Command::NewTextFile));
+    assert_eq!(&labels[..3], [folder.as_str(), file.as_str(), "-"]);
+    assert_eq!(&cmds[..2], [Command::NewFolder, Command::NewTextFile]);
+    // Un atajo cambiado se ve en el menú; sin atajo, sin tabulador.
+    a.config.keymap.set(Command::NewTextFile, &[]);
+    let (labels, _) = background_labels(&a);
+    assert_eq!(labels[1], "Archivo de texto nuevo");
+}
+
+/// Donde no se puede crear nada (Papelera, «Este equipo», Configuración, Novedades, carpetas
+/// virtuales) no aparecen.
+#[test]
+fn background_menu_new_entries_only_where_creating() {
+    use crate::sys::testing::{FakeFileSystem, FakeShell};
+    let mut a = app();
+    FakeShell::set_menu_has_new(false);
+    let trash = std::env::temp_dir().join("xdir-tests").join("papelera-menu-nuevo");
+    FakeFileSystem::set_trash(Some(&trash));
+    let shell_loc = Location::Shell { parsing: "::{red}".into(), name: "Red".into(), parent: None };
+    for loc in [Location::Path(trash.clone()), Location::Computer, Location::Settings, Location::Changelog, shell_loc] {
+        a.new_tab(0, loc.clone(), true);
+        let (labels, cmds) = background_labels(&a);
+        assert!(!cmds.contains(&Command::NewFolder) && !cmds.contains(&Command::NewTextFile), "{loc:?}: {labels:?}");
+    }
+    FakeFileSystem::set_trash(None);
+}
+
+/// En Windows el menú del Shell ya trae «Nuevo ▸»: no se duplica.
+#[test]
+fn background_menu_no_new_entries_with_system_new() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    FakeShell::set_menu_has_new(true);
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-windows");
+    a.new_tab(0, Location::Path(dir), true);
+    let (labels, cmds) = background_labels(&a);
+    FakeShell::set_menu_has_new(false);
+    assert!(!cmds.contains(&Command::NewFolder) && !cmds.contains(&Command::NewTextFile), "{labels:?}");
+    assert_eq!(labels[0], "Ver");
 }
 
 // ---------- ventana (WindowHost) ----------

@@ -264,6 +264,11 @@ pub trait Shell: Send + Sync {
     fn unpin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String>;
     /// Modo de los menús nativos: `None` sigue al sistema, `Some(oscuro)` lo fuerza.
     fn set_menu_mode(&self, dark: Option<bool>);
+    /// ¿El menú del fondo de una carpeta ya trae «Nuevo» del sistema (Windows)? Si no, xdir pone
+    /// «Carpeta nueva» y «Archivo de texto nuevo».
+    fn menu_has_new(&self) -> bool {
+        false
+    }
     /// Volumen de una ruta, para decidir si arrastrar mueve o copia.
     fn volume_of(&self, path: &Path) -> Option<OsString>;
 }

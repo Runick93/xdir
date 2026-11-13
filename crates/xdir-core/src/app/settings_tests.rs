@@ -534,6 +534,30 @@ fn xtree_opens_without_scanning_by_default() {
     assert!(!a.xtree.as_ref().unwrap().scanned());
 }
 
+/// Una vista que no analizó nada no se guarda: al volver a abrir xtree en otra carpeta, el
+/// desplegable muestra la que corresponde, y si mientras tanto se prendió la opción, analiza.
+#[test]
+fn xtree_unscanned_reopen_follows_pane_and_option() {
+    let mut a = app();
+    let base = std::env::temp_dir().join(format!("xdir-xtree-reabrir-{}", std::process::id()));
+    let (d1, d2) = (base.join("uno"), base.join("dos"));
+    std::fs::create_dir_all(&d1).unwrap();
+    std::fs::create_dir_all(&d2).unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d1));
+    a.run_command(Command::Xtree);
+    a.run_command(Command::Xtree);
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d2));
+    a.run_command(Command::Xtree);
+    assert_eq!(a.xtree.as_ref().unwrap().root(), a.xtree_root());
+    a.run_command(Command::Xtree);
+    a.config.xtree_scan_on_open = true;
+    a.run_command(Command::Xtree);
+    assert!(a.xtree.as_ref().unwrap().scanned());
+    a.on_closing();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Con «Analizar al abrir xtree» encendido, como antes: arranca el análisis.
 #[test]
 fn xtree_scans_on_open_with_option() {

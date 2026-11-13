@@ -338,7 +338,9 @@ impl App {
         if self.xtree_open {
             self.close_xtree();
         } else {
-            if self.xtree.is_none() {
+            // Una vista que no analizó nada no tiene nada que conservar: se arma de nuevo con la
+            // raíz de ahora (`xtree_abrir`) y la opción de ahora.
+            if self.xtree.as_ref().is_none_or(|x| !x.scanned()) {
                 let root = self.xtree_root();
                 // De fábrica no se analiza solo: la vista vacía con la raíz en el desplegable.
                 self.xtree = Some(if self.config.xtree_scan_on_open {

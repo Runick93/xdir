@@ -1219,9 +1219,10 @@ impl App {
         let reading = self.release_volume(&root);
         let label = self.connection_label(&root);
         let limit = self.jobs.limit;
+        let left = self.ejecting_readers(&root, reading.len());
         self.spawn_task(move || {
             // Los lectores de esa conexión sueltan los archivos (como mucho el límite).
-            super::compare::wait_bounded(reading, limit);
+            super::compare::wait_bounded(reading, limit, &left);
             let r = root.clone();
             let host = label.clone();
             let result = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&r, force));

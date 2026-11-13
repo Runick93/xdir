@@ -105,6 +105,9 @@ struct Ejecting {
     label: String,
     verb: Verb,
     since: Instant,
+    /// Lectores (comparar, sumas, tamaño de carpeta) que todavía no soltaron los archivos: los
+    /// baja el hilo que expulsa a medida que terminan.
+    readers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Un «Expulsar» que espera a que terminen (y limpien) los trabajos sobre el disco.
@@ -272,6 +275,16 @@ pub fn ejecting_text(verb: Verb, label: &str, waiting: usize) -> String {
         1 => format!("Esperando a que termine 1 operación para {what} \"{label}\"…"),
         n => format!("Esperando a que terminen {n} operaciones para {what} \"{label}\"…"),
     }
+}
+
+/// Lo que dice la barra mientras los lectores de xdir (comparar, sumas, tamaño de carpeta) sueltan
+/// los archivos del disco antes de expulsarlo o desconectarlo.
+pub fn readers_text(verb: Verb, label: &str) -> String {
+    let what = match verb {
+        Verb::Eject => "expulsar",
+        Verb::Disconnect => "desconectar",
+    };
+    format!("Esperando a que terminen las lecturas en curso para {what} \"{label}\"…")
 }
 
 /// «Hay 1 operación sobre "fotos". ¿Cancelarla y desconectar?»
@@ -1012,9 +1025,22 @@ impl App {
                     .flat_map(|p| p.jobs.iter())
                     .filter(|id| self.transfers.jobs.iter().any(|j| j.id == **id && j.state != JobState::Done))
                     .count();
-                (e.root, ejecting_text(e.verb, &e.label, waiting), e.since)
+                let text = match e.readers.load(Ordering::Relaxed) {
+                    n if n > 0 && waiting == 0 => readers_text(e.verb, &e.label),
+                    _ => ejecting_text(e.verb, &e.label, waiting),
+                };
+                (e.root, text, e.since)
             })
             .collect()
+    }
+
+    /// Los lectores (`n`) que el hilo de expulsar `root` espera que suelten los archivos: el contador
+    /// que va bajando (lo lee la barra de estado).
+    pub(super) fn ejecting_readers(&self, root: &Path, n: usize) -> Arc<std::sync::atomic::AtomicUsize> {
+        let list = self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner());
+        let left = list.iter().find(|e| e.root == root).map_or_else(Arc::default, |e| e.readers.clone());
+        left.store(n, Ordering::Relaxed);
+        left
     }
 
     /// La barra de estado mientras se expulsa o desconecta algo (`None`: nada).
@@ -1035,7 +1061,7 @@ impl App {
     /// expulsa (dijo que no).
     pub fn eject_after_jobs(&mut self, root: &Path, label: &str, verb: Verb, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
-        let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string(), verb, since: Instant::now() };
+        let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string(), verb, since: Instant::now(), readers: Arc::default() };
         if ids.is_empty() {
             // Hasta que termine de expulsar (`eject_done`) no empiezan copias sobre el disco.
             self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push(ejecting);

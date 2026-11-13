@@ -533,6 +533,8 @@ fn eject_stops_compare_and_checksum_and_waits() {
         }
         a.run_command(Command::Eject);
         assert!(a.compare.is_none() && a.info.sum.job.is_none(), "se cortó al soltar el disco");
+        // Ajustes 2: mientras los lectores sueltan los archivos, la barra lo dice.
+        assert_eq!(a.eject_status().as_deref(), Some("Esperando a que terminen las lecturas en curso para expulsar \"PENDRIVE\"…"));
         while a.notice.is_none() {
             let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("expulsar termina");
             a.on_task_done(t);
@@ -541,6 +543,44 @@ fn eject_stops_compare_and_checksum_and_waits() {
         assert_eq!(a.notice.as_deref(), Some("Se expulsó \"PENDRIVE\""));
         FakeFileSystem::set_drives(&[]);
     }
+}
+
+/// Ajustes 2: la comparación y las sumas (del panel de comparar y del de información) están en el
+/// indicador de actividad mientras corren.
+#[test]
+fn compare_and_checksum_in_activity() {
+    // Lo que muestra el indicador un segundo después de verlo (los otros paneles pueden estar
+    // leyendo todavía).
+    let texts = |a: &App, now: Instant| a.activity.shown(now + Duration::from_secs(1)).iter().map(|x| x.text.clone()).collect::<Vec<_>>();
+    let mut a = app(FakeHost::new());
+    let root = fixture("actividad", &[("a.bin", b"uno"), ("b.bin", b"uno")]);
+    // Cada lectura tarda: los trabajos siguen cuando se mira.
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_millis(300));
+    go(&mut a, 0, Location::Path(root.clone()));
+    a.set_active(0);
+    select(&mut a, 0, &["a.bin", "b.bin"]);
+    a.run_command(Command::CompareContents);
+    let later = || Instant::now() + Duration::from_secs(1);
+    let now = later();
+    a.sync_activity(now);
+    assert!(texts(&a, now).iter().any(|t| t == "Comparando \"a.bin\" y \"b.bin\""), "{:?}", texts(&a, now));
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
+    a.compare_hash(1);
+    let now = later();
+    a.sync_activity(now);
+    assert!(texts(&a, now).iter().any(|t| t == "Calculando la suma SHA-256 de \"b.bin\""), "{:?}", texts(&a, now));
+    wait_hash(&mut a, 1);
+    a.close_compare();
+    select(&mut a, 0, &["a.bin"]);
+    open_info(&mut a);
+    a.start_checksum(HashAlgo::Md5);
+    let now = later();
+    a.sync_activity(now);
+    assert!(texts(&a, now).iter().any(|t| t == "Calculando la suma MD5 de \"a.bin\""), "{:?}", texts(&a, now));
+    wait_sum(&mut a);
+    let now = later();
+    a.sync_activity(now);
+    assert!(!texts(&a, now).iter().any(|t| t.starts_with("Comparando") || t.starts_with("Calculando la suma")), "{:?}", texts(&a, now));
 }
 
 /// Un enlace a un archivo (en Windows la lista muestra el tamaño del enlace, 0): no se responde

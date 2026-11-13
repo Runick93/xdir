@@ -128,8 +128,9 @@ pub(super) struct Jobs {
 
 /// Espera a que terminen los hilos `handles`, como mucho `limit` en total; los que siguen (un
 /// lector trabado en un disco que falla o en un servidor colgado) quedan sueltos y se sigue igual.
-/// Bloqueante: en hilos de trabajo.
-pub(super) fn wait_bounded(handles: Vec<std::thread::JoinHandle<()>>, limit: Duration) {
+/// Bloqueante: en hilos de trabajo. Va bajando `left` (los que faltan) a medida que cada hilo termina o se abandona: la barra de
+/// estado dice «Esperando a que terminen las lecturas…» mientras no llegue a 0.
+pub(super) fn wait_bounded(handles: Vec<std::thread::JoinHandle<()>>, limit: Duration, left: &std::sync::atomic::AtomicUsize) {
     let until = std::time::Instant::now() + limit;
     for h in handles {
         while !h.is_finished() && std::time::Instant::now() < until {
@@ -138,6 +139,9 @@ pub(super) fn wait_bounded(handles: Vec<std::thread::JoinHandle<()>>, limit: Dur
         if h.is_finished() {
             let _ = h.join();
         }
+        // Solo este hilo lo baja.
+        let n = left.load(Ordering::Relaxed);
+        left.store(n.saturating_sub(1), Ordering::Relaxed);
     }
 }
 

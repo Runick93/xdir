@@ -28,10 +28,8 @@ pub(super) enum ActivityKey {
     Eject(PathBuf),
     /// El tamaño de lo elegido.
     SelSize,
-    /// Sumas de verificación y comparaciones (las suma la rama de sumas: un id propio de cada una).
-    #[allow(dead_code)]
+    /// Sumas de verificación y comparaciones (el número de su trabajo, `compare::Job::id`).
     Hash(u64),
-    #[allow(dead_code)]
     Compare(u64),
     /// Una búsqueda en subcarpetas (id de la pestaña).
     Search(usize),
@@ -172,6 +170,22 @@ impl App {
             } else if let Some(t0) = tab.loading_since().filter(|_| tab.is_visible()) {
                 list.push((ActivityKey::Load(tab.id), format!("Cargando \"{}\"", tab.location.title()), Some(t0), crate::tab::LOADING_DELAY));
             }
+        }
+        // Comparar contenido y las sumas (del panel de comparar y del de información).
+        if let Some(st) = &self.compare {
+            if let Some(j) = &st.job {
+                list.push((ActivityKey::Compare(j.id), format!("Comparando \"{}\" y \"{}\"", st.sides[0].name, st.sides[1].name), None, SHOW_AFTER));
+            }
+            for (h, side) in st.hashes.iter().zip(&st.sides) {
+                if let Some(j) = &h.job {
+                    let text = format!("Calculando la suma {} de \"{}\"", crate::sys::HashAlgo::Sha256.label(), side.name);
+                    list.push((ActivityKey::Hash(j.id), text, None, SHOW_AFTER));
+                }
+            }
+        }
+        if let Some((algo, j)) = &self.info.sum.job {
+            let name = self.info.sum.target.as_ref().map(|t| t.name()).unwrap_or_default();
+            list.push((ActivityKey::Hash(j.id), format!("Calculando la suma {} de \"{name}\"", algo.label()), None, SHOW_AFTER));
         }
         if !self.xtree_open
             && let Some(x) = &self.xtree

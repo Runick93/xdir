@@ -458,6 +458,15 @@ fn extract_commands_inside_archive_extract_selection() {
     assert_eq!(a.take_started(), [JobSpec::ExtractEntries { archive: zip, entries: vec!["d/a.txt".into()], dest: other }]);
 }
 
+/// M4: la app de verdad borra la carpeta temporal al cerrar; las de prueba no (es una para todo
+/// el proceso y otras pruebas la usan a la vez).
+#[test]
+fn temps_cleanup_on_close_is_a_flag() {
+    assert!(!App::new(Init::blank(), FakeHost::new()).clean_temps_on_close);
+    let init = Init { clean_temps_on_close: true, ..Init::blank() };
+    assert!(App::new(init, FakeHost::new()).clean_temps_on_close);
+}
+
 /// Alt/⌥ + doble clic en un zip anidado: se extrae y se abre con el sistema (no se entra).
 #[test]
 fn alt_double_click_nested_opens_with_system() {

@@ -119,6 +119,19 @@ impl App {
             // El botón «xtree» dice qué hace; el cartel lleva el estado del escaneo, si lo hay.
             Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
             Hit::XtreeBack => return Some("Volver a xdir (Esc)".to_string()),
+            Hit::XtreeSearch => {
+                return Some(match self.config.keymap.label(Command::Filter) {
+                    keys if keys.is_empty() => "Buscar en xtree".to_string(),
+                    keys => format!("Buscar en xtree ({keys})"),
+                });
+            }
+            Hit::XtreeColors => {
+                let what = self.xtree.as_ref()?.colors_tip();
+                return Some(match self.config.keymap.label(Command::XtreeColors) {
+                    keys if keys.is_empty() => what.to_string(),
+                    keys => format!("{what} ({keys})"),
+                });
+            }
             // El indicador de actividad: la lista de lo que está en curso.
             Hit::Activity => return self.activity.tip(self.now()),
             // La entrada del árbol no dice qué es por sí sola cuando está en franja: sin escaneo,

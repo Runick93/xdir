@@ -285,9 +285,16 @@ impl App {
         }
     }
 
-    /// Carpeta destino bajo un punto: una carpeta de la lista o la carpeta del panel.
-    pub(super) fn drop_folder(&self, x: f32, y: f32) -> Option<(usize, Option<usize>, PathBuf)> {
-        let Hit::Pane(i, ph) = self.hit(x, y) else { return None };
+    /// Carpeta destino bajo un punto: una carpeta de la lista o la carpeta del panel, o una carpeta
+    /// del árbol (#56).
+    pub(super) fn drop_folder(&self, x: f32, y: f32) -> Option<(DropAt, PathBuf)> {
+        let hit = self.hit(x, y);
+        // El árbol no tiene un `Hit` propio para sus filas: lo que queda debajo es `None`.
+        #[cfg(feature = "arbol")]
+        if hit == Hit::None && self.tree.contains(x, y) {
+            return self.tree.drop_node_at(x, y).map(|(id, path)| (DropAt::Tree(id), path));
+        }
+        let Hit::Pane(i, ph) = hit else { return None };
         let tab = self.panes[i].tab();
         // Dentro de un archivo comprimido no se suelta nada (solo lectura).
         if tab.location.is_archive() {
@@ -296,16 +303,29 @@ impl App {
         if ph == PaneHit::List {
             if let Some(idx) = tab.list.entry_at(x, y) {
                 if tab.list.entries[idx].is_dir {
-                    return Some((i, Some(idx), tab.entry_path(idx)));
+                    return Some((DropAt::Pane(i, Some(idx)), tab.entry_path(idx)));
                 }
             }
         }
-        tab.location.target().map(|t| (i, None, t))
+        tab.location.target().map(|t| (DropAt::Pane(i, None), t))
     }
 
     pub fn on_drag(&mut self, ev: &mut DragEvent) {
         let (x, y) = ev.point;
+        // El árbol: desplegar la carpeta que queda bajo el puntero, desplazar en los bordes y,
+        // suelto, abrirse mientras se arrastra encima (los eventos llegan también sin mover el
+        // mouse: Windows y macOS los repiten mientras dura el arrastre).
+        #[cfg(feature = "arbol")]
+        if matches!(ev.kind, DragKind::Leave | DragKind::Drop) {
+            self.tree.drag_end(ev.kind == DragKind::Leave);
+        } else {
+            let over = !self.xtree_open && self.tree.contains(x, y) && matches!(self.hit(x, y), Hit::None | Hit::TreePin | Hit::TreeXtree);
+            if self.tree.drag_over(self.hwnd, over.then_some((x, y)), Instant::now(), self.show_hidden) {
+                self.redraw();
+            }
+        }
         if self.on_drag_favbar(ev, x, y) {
+            self.set_drop_targets(None);
             return;
         }
         let target = match ev.kind {
@@ -313,20 +333,35 @@ impl App {
             _ => self.drop_folder(x, y),
         };
         ev.effect = match (&target, ev.paths) {
-            (Some((_, _, dest)), Some(paths)) => {
+            (Some((_, dest)), Some(paths)) => {
                 let roots: Vec<PathBuf> = self.net.connections.iter().map(|c| c.local.clone()).collect();
                 drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed, &roots)
             }
             _ => Effect::NONE,
         };
 
-        // Resaltado de la carpeta destino.
+        // Resaltado de la carpeta destino (en la lista o en el árbol).
+        let shown = target.as_ref().filter(|_| ev.effect != Effect::NONE && ev.kind != DragKind::Drop).map(|(at, _)| *at);
+        self.set_drop_targets(shown);
+
+        if ev.kind == DragKind::Drop
+            && ev.effect != Effect::NONE
+            && let (Some((at, dest)), Some(paths)) = (target, ev.paths)
+        {
+            let sources = paths.to_vec();
+            self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
+            if let DropAt::Pane(pane, _) = at {
+                self.set_active(pane);
+            }
+        }
+    }
+
+    /// Deja resaltada como destino solo esa carpeta (de una lista o del árbol); repinta si cambió.
+    fn set_drop_targets(&mut self, at: Option<DropAt>) {
         let mut changed = false;
         for (i, pane) in self.panes.iter_mut().enumerate() {
-            let want = match &target {
-                Some((p, Some(idx), _)) if *p == i && ev.effect != Effect::NONE && ev.kind != DragKind::Drop => {
-                    Some(*idx)
-                }
+            let want = match at {
+                Some(DropAt::Pane(p, Some(idx))) if p == i => Some(idx),
                 _ => None,
             };
             let list = &mut pane.tab_mut().list;
@@ -335,16 +370,19 @@ impl App {
                 changed = true;
             }
         }
+        #[cfg(feature = "arbol")]
+        {
+            let want = match at {
+                Some(DropAt::Tree(id)) => Some(id),
+                _ => None,
+            };
+            if self.tree.drop_target != want {
+                self.tree.drop_target = want;
+                changed = true;
+            }
+        }
         if changed {
             self.redraw();
-        }
-
-        if ev.kind == DragKind::Drop && ev.effect != Effect::NONE {
-            if let (Some((pane, _, dest)), Some(paths)) = (target, ev.paths) {
-                let sources = paths.to_vec();
-                self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
-                self.set_active(pane);
-            }
         }
     }
 
@@ -567,6 +605,15 @@ impl App {
         }
         self.redraw();
     }
+}
+
+/// Dónde se suelta un arrastre: un panel (una carpeta de su lista, o la del panel) o una fila del
+/// árbol.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum DropAt {
+    Pane(usize, Option<usize>),
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    Tree(usize),
 }
 
 /// ¿El elemento tiene ruta del disco? Dentro de un archivo comprimido, los de nombre no permitido

@@ -56,6 +56,7 @@ pub mod toml_edit;
 /// Árbol de carpetas lateral (solo con la feature `arbol`).
 #[cfg(feature = "arbol")]
 pub mod tree;
+pub mod typeahead;
 pub mod typed;
 /// `Suggest::draw`: el desplegable de rutas.
 mod typed_draw;

@@ -623,6 +623,109 @@ fn drop_uses_engine() {
     assert!(f.exists(&p("/app-drop/d/a.txt")));
 }
 
+/// App con el árbol a la vista y `drives` como sus discos (rutas del disco falso).
+#[cfg(feature = "arbol")]
+fn app_with_tree_drives(drives: &[(&Path, &str)]) -> App {
+    crate::sys::testing::install_fakes();
+    crate::sys::testing::FakeFileSystem::set_drives(drives);
+    let (mut a, _host) = app_window();
+    crate::sys::testing::FakeFileSystem::set_drives(&[]);
+    a.tree.visible = true;
+    a.paint();
+    a
+}
+
+#[cfg(feature = "arbol")]
+fn drag(a: &mut App, kind: DragKind, point: (f32, f32), paths: &[PathBuf], ctrl: bool) -> Effect {
+    let mut ev = DragEvent { kind, point, ctrl, shift: false, paths: Some(paths), allowed: Effect::ALL, effect: Effect::NONE };
+    a.on_drag(&mut ev);
+    ev.effect
+}
+
+/// #56: soltar sobre una carpeta del árbol mueve (mismo disco) con el motor de copia, y la fila
+/// queda resaltada mientras se arrastra encima.
+#[cfg(feature = "arbol")]
+#[test]
+fn drop_on_tree_folder_moves_with_engine() {
+    let f = fake();
+    f.add_file(&p("/app-tdrop/s/a.txt"), b"a".to_vec());
+    f.add_dir(&p("/app-tdrop/d"));
+    let mut a = app_with_tree_drives(&[(Path::new("/app-tdrop/d"), "Destino")]);
+    FakeFileOps::take_ops();
+    let point = a.tree.row_point("Destino").expect("la fila del disco");
+    let paths = vec![p("/app-tdrop/s/a.txt")];
+    assert_eq!(drag(&mut a, DragKind::Enter, point, &paths, false), Effect::MOVE);
+    assert_eq!(a.tree.drop_target_path(), Some(p("/app-tdrop/d")), "la fila se resalta");
+    assert!(a.panes.iter().all(|p| p.tab().list.drop_target.is_none()));
+    // Ctrl (⌥ en la Mac) copia.
+    assert_eq!(drag(&mut a, DragKind::Over, point, &paths, true), Effect::COPY);
+    assert_eq!(drag(&mut a, DragKind::Drop, point, &paths, false), Effect::MOVE);
+    assert_eq!(a.tree.drop_target, None, "al soltar se apaga el resaltado");
+    wait(&mut a, idle);
+    assert!(FakeFileOps::take_ops().is_empty(), "soltar no pasa por FileOps");
+    assert!(f.exists(&p("/app-tdrop/d/a.txt")) && !f.exists(&p("/app-tdrop/s/a.txt")));
+}
+
+/// #56: lo que no es una carpeta (Este equipo, «Red»), soltar una carpeta en sí misma o un archivo
+/// en su propia carpeta y la Papelera no aceptan nada ni se resaltan; salir apaga el resaltado.
+#[cfg(feature = "arbol")]
+#[test]
+fn drop_on_tree_rejects_computer_network_and_self() {
+    let f = fake();
+    f.add_file(&p("/app-tdrop2/d/x.txt"), b"x".to_vec());
+    f.add_dir(&p("/app-tdrop2/t"));
+    let mut a = app_with_tree_drives(&[(Path::new("/app-tdrop2/d"), "Destino"), (Path::new("/app-tdrop2/t"), "Papelera")]);
+    let row = |a: &App, name: &str| a.tree.row_point(name).unwrap_or_else(|| panic!("fila {name}"));
+    let file = vec![p("/app-tdrop2/d/x.txt")];
+    for name in ["Este equipo", "Red", "Inicio", "xtree"] {
+        let at = row(&a, name);
+        assert_eq!(drag(&mut a, DragKind::Over, at, &file, false), Effect::NONE, "{name}");
+        assert_eq!(a.tree.drop_target, None, "{name}");
+    }
+    let at = row(&a, "Destino");
+    assert_eq!(drag(&mut a, DragKind::Over, at, &file, false), Effect::NONE, "a su misma carpeta");
+    assert_eq!(drag(&mut a, DragKind::Over, at, &[p("/app-tdrop2/d")], false), Effect::NONE, "en sí misma");
+    assert_eq!(a.tree.drop_target, None);
+    crate::sys::testing::FakeFileSystem::set_trash(Some(Path::new("/app-tdrop2/t")));
+    let trash = row(&a, "Papelera");
+    assert_eq!(drag(&mut a, DragKind::Over, trash, &file, false), Effect::NONE, "la Papelera");
+    crate::sys::testing::FakeFileSystem::set_trash(None);
+    assert_eq!(drag(&mut a, DragKind::Over, trash, &file, false), Effect::MOVE);
+    assert!(a.tree.drop_target.is_some());
+    assert_eq!(drag(&mut a, DragKind::Leave, (0.0, 0.0), &file, false), Effect::NONE);
+    assert_eq!(a.tree.drop_target, None, "al salir se apaga");
+    assert!(f.exists(&p("/app-tdrop2/d/x.txt")));
+}
+
+/// #56: arrastrando, quedarse sobre un disco plegado del árbol lo despliega (`DRAG_EXPAND`) y
+/// sus subcarpetas aparecen cuando llega la lectura.
+#[cfg(feature = "arbol")]
+#[test]
+fn drag_hover_expands_tree_folder() {
+    let dir = std::env::temp_dir().join(format!("xdir-tdrop3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("subcarpeta")).unwrap();
+    let mut a = app_with_tree_drives(&[(dir.as_path(), "Disco3")]);
+    let at = a.tree.row_point("Disco3").unwrap();
+    let paths = vec![p("/app-tdrop3/x.txt")];
+    drag(&mut a, DragKind::Enter, at, &paths, false);
+    assert!(a.tree.row_point("subcarpeta").is_none());
+    a.tree.age_drag_hover(crate::tree::DRAG_EXPAND);
+    drag(&mut a, DragKind::Over, at, &paths, false);
+    let t0 = std::time::Instant::now();
+    loop {
+        a.on_app_message(crate::tree::WM_APP_TREE, 0, 0);
+        a.paint();
+        if a.tree.row_point("subcarpeta").is_some() {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10), "no se desplegó");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drag(&mut a, DragKind::Leave, (0.0, 0.0), &paths, false);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn undo_move_uses_engine() {
     let f = fake();

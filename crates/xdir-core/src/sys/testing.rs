@@ -332,7 +332,7 @@ impl DiskScan for FakeDiskScan {
     }
 
     fn permission_hint(&self) -> &'static str {
-        "{n} carpetas sin permiso (tecla A)"
+        "{n} carpetas sin permiso ({teclas})"
     }
 
     fn elevating_text(&self) -> &'static str {
@@ -1261,6 +1261,7 @@ pub struct RecordingPainter {
     forgotten: RefCell<Vec<thumbs::Source>>,
     icons: RefCell<Vec<(f32, f32, f32)>>,
     fills: RefCell<Vec<(Rect, Color)>>,
+    round_fills: RefCell<Vec<(Rect, Color)>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -1278,7 +1279,13 @@ impl RecordingPainter {
             forgotten: RefCell::new(Vec::new()),
             icons: RefCell::new(Vec::new()),
             fills: RefCell::new(Vec::new()),
+            round_fills: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Los rectángulos rellenados con `round_fill` (rectángulo y color), en orden.
+    pub fn round_fills(&self) -> Vec<(Rect, Color)> {
+        self.round_fills.borrow().clone()
     }
 
     /// Los rectángulos rellenados con `fill` (rectángulo y color), en orden.
@@ -1331,7 +1338,9 @@ impl Painter for RecordingPainter {
     fn fill(&self, r: Rect, c: Color) {
         self.fills.borrow_mut().push((r, c));
     }
-    fn round_fill(&self, _r: Rect, _radius: f32, _c: Color) {}
+    fn round_fill(&self, r: Rect, _radius: f32, c: Color) {
+        self.round_fills.borrow_mut().push((r, c));
+    }
     fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, _stroke: Option<(Color, f32)>) {
         self.paths.borrow_mut().push((pts.iter().map(|&(x, y, _)| (x, y)).collect(), closed, fill));
     }
@@ -1622,7 +1631,12 @@ impl WindowHost for FakeHost {
     }
 
     fn request_close(&self) {}
-    fn focus_main(&self) {}
+    // La ventana toma el foco: ninguna caja lo tiene.
+    fn focus_main(&self) {
+        for (_, _, focused) in self.text_boxes.borrow_mut().values_mut() {
+            *focused = false;
+        }
+    }
     fn focus_main_if_lost(&self) {}
     fn capture_mouse(&self) {}
     fn release_mouse(&self) {}

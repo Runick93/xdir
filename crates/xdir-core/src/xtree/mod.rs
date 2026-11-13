@@ -2,6 +2,7 @@
 
 pub mod colors;
 pub mod scan;
+pub mod search;
 pub mod tree;
 pub mod treemap;
 pub mod view;

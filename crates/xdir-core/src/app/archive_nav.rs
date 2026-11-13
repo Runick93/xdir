@@ -274,10 +274,11 @@ impl App {
     }
 
     /// Se soltó el arrastre desde un archivo comprimido en `(x, y)`: si es una carpeta de disco de
-    /// otro panel (o una carpeta de su lista), lo elegido se copia ahí con el motor.
+    /// otro panel (o una carpeta de su lista) o una carpeta del árbol, lo elegido se copia ahí con
+    /// el motor.
     pub(super) fn drop_archive_drag(&mut self, from: usize, x: f32, y: f32) {
         self.notice = None;
-        let Some((pane, _, dest)) = self.drop_folder(x, y) else { return };
+        let Some((at, dest)) = self.drop_folder(x, y) else { return };
         let tab = self.panes[from].tab();
         let Location::Archive { file, nested, .. } = &tab.location else { return };
         let entries: Vec<String> =
@@ -287,7 +288,9 @@ impl App {
         }
         let Some(archive) = real_archive(file, nested) else { return };
         self.start_transfer(JobSpec::ExtractEntries { archive, entries, dest });
-        self.set_active(pane);
+        if let super::fileops::DropAt::Pane(pane, _) = at {
+            self.set_active(pane);
+        }
     }
     /// Menú contextual dentro de un archivo comprimido (no hay menú del sistema para lo de
     /// adentro, pantalla X69): abrir, extraer y copiar; deshabilitado lo que escribe.

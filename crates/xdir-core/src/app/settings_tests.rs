@@ -649,6 +649,54 @@ fn advanced_lists_files_and_dir() {
     assert_eq!(files.last().unwrap().0, "rutas.txt");
 }
 
+/// #57: las teclas de xtree dicen el atajo en uso de los colores (ya no la T) y las letras; en
+/// Atajos de teclado, «xtree_colores» va en el grupo xtree y Ctrl+T no choca con «Pestaña nueva».
+#[test]
+fn xtree_keys_show_colors_shortcut() {
+    let mut a = app();
+    let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };
+    let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(&keys[..4], ["Letras", "Ctrl+T", "Ctrl+F", "Ctrl+Shift+A"]);
+    assert!(!keys.contains(&"A"), "la A sola ya no hace nada");
+    assert!(!keys.contains(&"T"));
+    a.config.keymap.set(Command::XtreeColors, &[commands::parse_combo("Ctrl+Shift+C").unwrap()]);
+    let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };
+    assert_eq!(rows[1].0, "Ctrl+Shift+C");
+}
+
+/// Grabar Ctrl+T para los colores de xtree no es un choque con «Pestaña nueva» (otro ámbito).
+#[test]
+fn xtree_colors_shortcut_records_without_conflict() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "xtree_colores", PART_RESET, 0.0);
+    a.config.keymap.set(Command::XtreeColors, &[]);
+    a.settings_part(0, "xtree_colores", PART_ADD, 0.0);
+    assert!(a.capturing_keys());
+    press(&mut a, &[VK_CONTROL], Key(b'T' as u16));
+    assert!(!a.capturing_keys(), "sin choque, se asigna");
+    assert_eq!(a.config.keymap.combos(Command::XtreeColors), [commands::parse_combo("Ctrl+T").unwrap()]);
+    assert_eq!(a.config.keymap.combos(Command::NewTab), [commands::parse_combo("Ctrl+T").unwrap()]);
+}
+
+/// M3: dentro de xtree siguen andando algunas teclas de la ventana (Ctrl+F busca) y las de la
+/// vista (F5): grabarlas para un comando de xtree se avisa (choque o rechazo), no se acepta callado.
+#[test]
+fn xtree_shortcut_flags_keys_live_in_xtree() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "xtree_colores", PART_ADD, 0.0);
+    press(&mut a, &[VK_CONTROL], Key(b'F' as u16));
+    assert!(a.capturing_keys(), "Ctrl+F busca dentro de xtree: se pregunta");
+    assert_eq!(a.recording().unwrap().conflict.map(|(_, c)| c), Some(Command::Filter));
+    assert!(!a.config.keymap.combos(Command::XtreeColors).contains(&commands::parse_combo("Ctrl+F").unwrap()));
+    a.set_recording(None);
+    a.settings_part(0, "xtree_colores", PART_ADD, 0.0);
+    press(&mut a, &[], Key(0x74));
+    assert!(a.capturing_keys(), "F5 la usa xtree");
+    assert_eq!(a.recording().unwrap().message, Some(crate::settings::keys::XTREE_KEY));
+    // Con otro comando de la ventana (no de xtree), F5 es Recargar: ese choque es el de siempre.
+    assert_eq!(a.config.keymap.owner_for(commands::parse_combo("F5").unwrap(), Command::Duplicate), Some(Command::Refresh));
+}
+
 #[test]
 fn portable_info_only_when_unsupported() {
     let a = app();

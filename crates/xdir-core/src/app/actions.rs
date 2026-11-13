@@ -322,7 +322,7 @@ impl App {
     /// Tecla con la vista de xtree abierta: primero la vista (F5, Retroceso, Esc, A), después sus
     /// atajos (`xtree_colores`) y, por último, solo los atajos de la ventana que no tocan los
     /// paneles tapados.
-    fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
+    pub(super) fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
         if !ctrl {
             let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_key(vk));
             if action != xtree_view::Action::None {

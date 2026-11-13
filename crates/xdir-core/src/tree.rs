@@ -459,8 +459,9 @@ impl Tree {
 
     // ---------- Red ----------
 
-    /// Para las pruebas: el centro de la fila con ese nombre, si está a la vista.
-    #[cfg(test)]
+    /// Para las pruebas (y el gancho de pruebas): el centro de la fila con ese nombre, si está a
+    /// la vista.
+    #[cfg(any(test, feature = "pruebas"))]
     pub fn row_point(&self, name: &str) -> Option<(f32, f32)> {
         let i = self.rows().iter().position(|&id| self.nodes[id].name == name)?;
         let y = self.area.top + TOP_PAD + i as f32 * ROW_H - self.scroll + ROW_H / 2.0;

@@ -288,11 +288,37 @@ pub fn write_file(path: &Path, h: &History) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = path.file_name().ok_or(std::io::ErrorKind::NotFound)?.to_string_lossy();
-    let tmp = dir.join(format!("{name}.{}.{n}.tmp", std::process::id()));
-    std::fs::write(&tmp, encode(h))?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    // Único: proceso, contador y reloj (un pid reusado después de un cierre forzado no choca).
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let tmp = dir.join(format!("{name}.{}.{n}{nanos:x}.tmp", std::process::id()));
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create_new(&tmp)?;
+        f.write_all(&encode(h))?;
+        // A disco antes de renombrar: con un corte de luz queda el archivo anterior o el nuevo
+        // entero, nunca uno vacío.
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    };
+    write().inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Temporales de más de una hora del archivo `name` en `dir` (de un cierre forzado): se borran.
+/// Uno más nuevo puede ser de otra escritura en curso (otra instancia) y queda.
+fn clean_stale(dir: &Path, name: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("{name}.");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for e in entries.flatten() {
+        let n = e.file_name();
+        let n = n.to_string_lossy();
+        if n.starts_with(&prefix) && n.ends_with(".tmp") && e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < old) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Días con una foto por día (los más nuevos).
@@ -547,6 +573,9 @@ pub fn load_for(dir: &Path, root: &Path) -> Loaded {
 /// `load_for` con la regla de mayúsculas dada (`fold`: el disco no las distingue; entonces las
 /// rutas se comparan en minúsculas).
 pub fn load_case(dir: &Path, root: &Path, fold: bool) -> Loaded {
+    if let Some(name) = file_for_case(dir, root, fold).file_name() {
+        clean_stale(dir, &name.to_string_lossy());
+    }
     let mut out = Loaded { fold, ..Default::default() };
     let low = |t: &str| if fold { t.to_lowercase() } else { t.to_string() };
     for top in root.ancestors() {
@@ -600,7 +629,11 @@ pub fn save_photo_case(dir: &Path, root: &Path, today: i32, photo: &Photo, fold:
     let mut h = read_own(dir, root, fold).unwrap_or_else(|| History { root: root.to_string_lossy().into_owned(), ..Default::default() });
     h.add_photo(today, &photo.sizes, photo.capped);
     h.consolidate(today);
-    write_file(&file_for_case(dir, root, fold), &h)
+    let file = file_for_case(dir, root, fold);
+    if let Some(name) = file.file_name() {
+        clean_stale(dir, &name.to_string_lossy());
+    }
+    write_file(&file, &h)
 }
 
 #[cfg(test)]
@@ -1107,5 +1140,37 @@ mod tests {
         assert_eq!(load_case(&dir2, &b, false).value(0, ""), Some(2));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    /// Los temporales viejos de esa raíz (de un cierre forzado) se limpian al guardar y al leer; uno
+    /// reciente (de otra escritura en curso) queda. Si el destino no se puede reemplazar, no queda
+    /// el temporal.
+    #[test]
+    fn stale_temps_are_cleaned() {
+        let dir = tmp_dir("temporales");
+        let root = base("temporales").join("r");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("{}.bin", key_case(&root, true));
+        let old = dir.join(format!("{name}.1.0.tmp"));
+        let fresh = dir.join(format!("{name}.2.0.tmp"));
+        let other = dir.join("otra-0000000000000000.bin.1.0.tmp");
+        for f in [&old, &fresh, &other] {
+            std::fs::write(f, b"medio").unwrap();
+        }
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for f in [&old, &other] {
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
+        }
+        save_photo_case(&dir, &root, 100, &Photo { sizes: vec![("".into(), 1)], capped: false }, true).unwrap();
+        assert!(!old.exists(), "el viejo de esta raíz se va");
+        assert!(fresh.exists(), "uno reciente puede ser de otra escritura");
+        assert!(other.exists(), "los de otra raíz no se tocan acá");
+        // Destino que no se puede reemplazar (es una carpeta): falla sin dejar temporal.
+        let blocked = dir.join("bloqueado.bin");
+        std::fs::create_dir_all(blocked.join("adentro")).unwrap();
+        assert!(write_file(&blocked, &History::default()).is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("bloqueado.bin.")).collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

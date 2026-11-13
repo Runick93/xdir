@@ -1313,6 +1313,9 @@ impl Xtree {
                 self.close_search();
                 Action::Redraw
             }
+            // Con la caja sin el foco (se hizo clic en otro lado), las flechas y Enter siguen
+            // siendo de los resultados.
+            VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN if self.search.is_some() => self.search_key(k),
             VK_ESCAPE => Action::Close,
             // Sin análisis todavía, F5 es «Analizar»: lo elegido en el desplegable.
             VK_F5 if !self.scanned() => {
@@ -1978,7 +1981,7 @@ mod tests {
         assert_eq!(hit_names(&x), ["Facturas", "facturas.zip", "factura-1.pdf"]);
         assert_eq!(x.on_char_at('d', Instant::now()), Action::None, "las letras son de la caja");
         assert_eq!(x.search_key(VK_DOWN), Action::Redraw);
-        assert_eq!(x.search_key(VK_DOWN), Action::Redraw);
+        assert_eq!(x.on_key(VK_DOWN), Action::Redraw, "también sin el foco en la caja");
         assert_eq!(x.search_key(VK_DOWN), Action::None, "ya está en el último");
         assert_eq!(x.search_key(VK_RETURN), Action::Redraw);
         assert!(!x.search_open());

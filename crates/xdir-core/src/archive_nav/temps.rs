@@ -298,7 +298,13 @@ impl Temps {
             self.remove_tree(&dst);
             return Err(CopyError::new(ErrKind::Other(TOO_BIG.into()), &dst));
         }
-        res?;
+        // Cortada o fallida (también justo después de escribir el archivo): no queda nada. Si
+        // quedara, la próxima vez estaría en su lugar sin estar anotada y se la tomaría por un
+        // gemelo (otra carpeta, otra ruta).
+        if let Err(e) = res {
+            self.remove_tree(&dst);
+            return Err(e);
+        }
         // Una entrada que no se pudo escribir (ya había algo, ruta no permitida…) es un error, nunca
         // lo que haya en ese lugar.
         if let Some(e) = failed {

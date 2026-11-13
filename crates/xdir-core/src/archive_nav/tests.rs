@@ -132,6 +132,40 @@ fn ensure_extracts_once_and_again_if_changed() {
     t.clean_own();
 }
 
+/// Una extracción cortada justo después de escribir el archivo no deja nada: la siguiente
+/// extrae a la ruta de siempre (antes quedaba el archivo sin anotar y la siguiente lo tomaba por
+/// un gemelo y lo extraía a `<hash>~<n>`, otra ruta: la vista previa no lo reconocía).
+#[test]
+fn ensure_cut_after_writing_leaves_nothing() {
+    install_fakes();
+    let b = base("cortada");
+    let zip = b.join("datos").join("fotos.zip");
+    FakeArchives::shared().add_archive(&zip, &[("foto.png", b"png")], 30);
+    let t = Temps::new(Some(&b));
+    let want = t.entry_path(&zip, &[], "foto.png").unwrap();
+    // Cuántas veces se pregunta si se cortó en una extracción entera (en otra carpeta)…
+    let count = Temps::new(Some(&b));
+    let n = std::cell::Cell::new(0);
+    let counting = || {
+        n.set(n.get() + 1);
+        false
+    };
+    count.ensure(&zip, &[], "foto.png", &super::temps::Limits { max: u64::MAX, cancel: &counting }).unwrap();
+    count.clean_own();
+    // …y el corte llega en la del final de la entrada: con el archivo ya escrito.
+    let calls = std::cell::Cell::new(0);
+    let cancel = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= n.get() - 3
+    };
+    let cut = t.ensure(&zip, &[], "foto.png", &super::temps::Limits { max: u64::MAX, cancel: &cancel });
+    assert_eq!(cut.unwrap_err().kind, ErrKind::Cancelled);
+    assert!(FakeCopyPrims::shared().read_content(&want).is_err(), "no queda a medias");
+    let again = t.ensure(&zip, &[], "foto.png", &super::temps::Limits::up_to(u64::MAX)).unwrap();
+    assert_eq!(again, want, "la ruta de siempre, no la de un gemelo");
+    t.clean_own();
+}
+
 /// Un zip dentro de otro se resuelve extrayendo el de adentro a la temporal.
 #[test]
 fn nested_chain_resolves() {

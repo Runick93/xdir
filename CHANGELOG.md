@@ -56,6 +56,7 @@
 - En xtree, analizar de nuevo con permisos pasa de la `A` a `Ctrl+Shift+A` / `⇧⌘A`: ninguna letra sola hace otra cosa que ir a la carpeta que empieza así.
 
 ### Arreglos
+- La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.
 - En la Mac, el tipo de archivo siempre empieza con mayúscula.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.

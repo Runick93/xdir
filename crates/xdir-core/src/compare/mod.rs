@@ -234,8 +234,15 @@ fn open_at(src: &Source, stop: &AtomicBool, progress: &Progress) -> Result<(sys:
 /// caminos al mismo (un enlace a la carpeta, la unidad de red y su UNC, otras mayúsculas).
 fn same_item(a: &Path, b: &Path) -> bool {
     let prims = sys::copy_prims();
-    let id = |p: &Path| prims.stat(p).ok().and_then(|s| s.file_id);
-    id(a).is_some_and(|x| id(b) == Some(x))
+    same_stat(prims.stat(a).ok(), prims.stat(b).ok())
+}
+
+/// `same_item` con los datos ya leídos: la identidad conocida y no nula (algunos discos dan 0) y,
+/// por si el disco repite números, el mismo tamaño y la misma fecha. Ante la duda, no: se compara.
+fn same_stat(a: Option<crate::sys::ItemStat>, b: Option<crate::sys::ItemStat>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else { return false };
+    let Some(id) = a.file_id.filter(|&(_, n)| n != 0) else { return false };
+    b.file_id == Some(id) && a.size == b.size && a.modified == b.modified
 }
 
 /// Compara el contenido de `a` y `b`: el mismo archivo, tamaños distintos (sin leer el contenido)

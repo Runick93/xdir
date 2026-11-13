@@ -355,3 +355,19 @@ fn same_file_by_identity() {
     let got = run(&Source::Disk(real.join("a.bin")), &Source::Disk(alias.join("a.bin")));
     assert_eq!(got, Ok(Verdict::SameFile));
 }
+
+/// «El mismo archivo» solo con una identidad conocida y no nula, y el mismo tamaño y fecha (un
+/// disco que repite números no da un falso «iguales»); si no, se compara byte a byte.
+#[test]
+fn same_identity_needs_size_and_date() {
+    use crate::sys::{ItemKind, ItemStat};
+    let st = |id: Option<(u64, u64)>, size: u64, modified: u64| ItemStat { kind: ItemKind::File, size, modified, cloud_only: false, file_id: id };
+    let a = st(Some((1, 7)), 10, 100);
+    assert!(same_stat(Some(a), Some(a)));
+    assert!(!same_stat(Some(a), Some(st(Some((1, 7)), 11, 100))), "otro tamaño");
+    assert!(!same_stat(Some(a), Some(st(Some((1, 7)), 10, 101))), "otra fecha");
+    assert!(!same_stat(Some(st(Some((0, 0)), 10, 100)), Some(st(Some((0, 0)), 10, 100))), "identidad nula");
+    assert!(!same_stat(Some(st(Some((5, 0)), 10, 100)), Some(st(Some((5, 0)), 10, 100))), "sin número de archivo");
+    assert!(!same_stat(Some(st(None, 10, 100)), Some(st(None, 10, 100))));
+    assert!(!same_stat(Some(a), None));
+}

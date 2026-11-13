@@ -143,17 +143,20 @@ impl SelSize {
     }
 }
 
-/// Corre `run` en otro hilo y espera su resultado. `run` recibe una bandera para cortarse y un
-/// contador que sube cada vez que avanza: si pasa `limit` sin avance, o `cancel` se enciende, se
-/// corta y devuelve `None` (el hilo queda abandonado si no responde).
-fn watched<T: Send + 'static>(
-    limit: Duration,
-    cancel: &AtomicBool,
-    run: impl FnOnce(Arc<AtomicBool>, Arc<AtomicU64>) -> T + Send + 'static,
-) -> Option<T> {
-    let (stop, beats) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
+/// Avance de una suma: cuántas veces avanzó y lo sumado hasta ahora.
+#[derive(Default)]
+struct Beat {
+    beats: AtomicU64,
+    bytes: AtomicU64,
+}
+
+/// Corre `run` en otro hilo y espera su resultado. `run` recibe una bandera para cortarse y el
+/// avance: si pasa `limit` sin avance, o `cancel` se enciende, se corta y devuelve `None` (el
+/// hilo queda abandonado si no responde).
+fn watched<T: Send + 'static>(limit: Duration, cancel: &AtomicBool, beat: Arc<Beat>, run: impl FnOnce(Arc<AtomicBool>, Arc<Beat>) -> T + Send + 'static) -> Option<T> {
+    let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = channel();
-    let (s, b) = (stop.clone(), beats.clone());
+    let (s, b) = (stop.clone(), beat.clone());
     std::thread::Builder::new()
         .name("xdir-tamano-red".into())
         .spawn(move || {
@@ -167,7 +170,7 @@ fn watched<T: Send + 'static>(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let now = beats.load(Ordering::Relaxed);
+        let now = beat.beats.load(Ordering::Relaxed);
         if now != last {
             (last, since) = (now, Instant::now());
         }
@@ -178,51 +181,51 @@ fn watched<T: Send + 'static>(
     }
 }
 
-/// Lo que pesa `path` (bytes, entera). Una carpeta solo en la nube no se lee (no se baja nada).
-/// Una de red se lee vigilada: sin avance en `limit`, se corta y queda a medias.
+/// Suma `path`: (bytes, entera). No sigue un enlace elegido, no lee lo que está solo en la nube
+/// (no se baja nada), no cruza a otro disco montado adentro y, en una suma local, no entra en
+/// una carpeta de red montada adentro. Todo lo que queda afuera deja el total «a medias».
+fn walk(path: &Path, remote: bool, stop: &AtomicBool, beat: &Beat) -> (u64, bool) {
+    let (fs, net) = (sys::file_system(), sys::network());
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if !m.file_type().is_symlink() => {}
+        _ => return (0, false),
+    }
+    beat.beats.fetch_add(1, Ordering::Relaxed);
+    if fs.cloud_only(path) {
+        return (0, false);
+    }
+    let volume = fs.volume_id(path);
+    let left_out = AtomicBool::new(false);
+    let skip = |p: &Path| {
+        beat.beats.fetch_add(1, Ordering::Relaxed);
+        // La red primero: preguntar por una carpeta de red colgada trabaría el hilo.
+        // Otro disco: por su `st_dev` o, si comparte el número (en la Mac, /System/Volumes/Data),
+        // porque ahí se monta otro.
+        let out = (!remote && net.is_remote(p)) || fs.cloud_only(p) || (volume.is_some() && fs.volume_id(p) != volume) || fs.is_mount_point(p);
+        if out {
+            left_out.store(true, Ordering::Relaxed);
+        }
+        out
+    };
+    let mut last = 0;
+    let skipped = crate::info::size::folder_size(path, &skip, stop, &mut |b, _, _| {
+        last = b;
+        beat.bytes.store(b, Ordering::Relaxed);
+        beat.beats.fetch_add(1, Ordering::Relaxed);
+    });
+    (last, skipped == 0 && !left_out.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed))
+}
+
+/// Lo que pesa `path` (bytes, entera). Una de red se suma vigilada: sin avance en `limit`, se
+/// corta y queda a medias.
 fn folder_bytes(path: &Path, remote: bool, limit: Duration, cancel: &Arc<AtomicBool>) -> (u64, bool) {
     if !remote {
-        if sys::file_system().cloud_only(path) {
-            return (0, false);
-        }
-        // Una subcarpeta que no se recorre (solo en la nube) deja el total a medias.
-        let skipped_cloud = std::cell::Cell::new(false);
-        let cloud = |p: &Path| {
-            let c = sys::file_system().cloud_only(p);
-            skipped_cloud.set(skipped_cloud.get() | c);
-            c
-        };
-        let mut last = 0;
-        let skipped = crate::info::size::folder_size(path, &cloud, cancel, &mut |b, _, _| last = b);
-        return (last, skipped == 0 && !skipped_cloud.get() && !cancel.load(Ordering::Relaxed));
+        return walk(path, false, cancel, &Beat::default());
     }
     let p = path.to_path_buf();
-    let bytes_seen = Arc::new(AtomicU64::new(0));
-    let seen = bytes_seen.clone();
-    let out = watched(limit, cancel, move |stop, beats| {
-        // También la primera pregunta va vigilada: un servidor colgado no traba el hilo.
-        if sys::file_system().cloud_only(&p) {
-            return (0, false);
-        }
-        beats.fetch_add(1, Ordering::Relaxed);
-        let skipped_cloud = AtomicBool::new(false);
-        let cloud = |q: &Path| {
-            beats.fetch_add(1, Ordering::Relaxed);
-            let c = sys::file_system().cloud_only(q);
-            if c {
-                skipped_cloud.store(true, Ordering::Relaxed);
-            }
-            c
-        };
-        let mut last = 0;
-        let skipped = crate::info::size::folder_size(&p, &cloud, &stop, &mut |b, _, _| {
-            last = b;
-            seen.store(b, Ordering::Relaxed);
-            beats.fetch_add(1, Ordering::Relaxed);
-        });
-        (last, skipped == 0 && !skipped_cloud.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed))
-    });
-    out.unwrap_or_else(|| (bytes_seen.load(Ordering::Relaxed), false))
+    let beat = Arc::new(Beat::default());
+    let out = watched(limit, cancel, beat.clone(), move |stop, beat| walk(&p, true, &stop, &beat));
+    out.unwrap_or_else(|| (beat.bytes.load(Ordering::Relaxed), false))
 }
 
 impl App {
@@ -345,7 +348,7 @@ mod tests {
     fn watched_cuts_without_progress() {
         let cancel = AtomicBool::new(false);
         let t0 = Instant::now();
-        let out = watched(Duration::from_millis(100), &cancel, |stop, _| {
+        let out = watched(Duration::from_millis(100), &cancel, Default::default(), |stop, _| {
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -353,15 +356,15 @@ mod tests {
         });
         assert_eq!(out, None);
         assert!(t0.elapsed() < Duration::from_secs(2));
-        let out = watched(Duration::from_millis(100), &cancel, |_, beats| {
+        let out = watched(Duration::from_millis(100), &cancel, Default::default(), |_, beat| {
             for _ in 0..8 {
                 std::thread::sleep(Duration::from_millis(40));
-                beats.fetch_add(1, Ordering::Relaxed);
+                beat.beats.fetch_add(1, Ordering::Relaxed);
             }
             7
         });
         assert_eq!(out, Some(7));
         cancel.store(true, Ordering::Relaxed);
-        assert_eq!(watched(Duration::from_secs(5), &cancel, |_, _| std::thread::sleep(Duration::from_millis(500))), None);
+        assert_eq!(watched(Duration::from_secs(5), &cancel, Default::default(), |_, _| std::thread::sleep(Duration::from_millis(500))), None);
     }
 }

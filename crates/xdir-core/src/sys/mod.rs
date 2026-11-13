@@ -363,6 +363,12 @@ pub trait FileSystem: Send + Sync {
     fn cloud_only(&self, _path: &Path) -> bool {
         false
     }
+    /// El disco de una ruta, sin seguir enlaces (`st_dev` en macOS y Linux), para no cruzar a otro
+    /// disco montado adentro al sumar una carpeta. `None` si no se sabe: en Windows los discos
+    /// montados en una carpeta son puntos de reanálisis y ya no se recorren.
+    fn volume_id(&self, _path: &Path) -> Option<u64> {
+        None
+    }
     /// Las reglas de nombres del sistema (`rename_many::NameRules::WINDOWS` o `UNIX`: en macOS
     /// «:» vale, el Finder lo muestra como «/»).
     fn name_rules(&self) -> crate::rename_many::NameRules {

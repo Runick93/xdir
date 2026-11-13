@@ -405,6 +405,10 @@ static EJECT_RESULTS: Mutex<BTreeMap<PathBuf, EjectResult>> = Mutex::new(BTreeMa
 static EJECTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 /// Carpetas solo en la nube para todos los hilos (`FakeFileSystem::set_cloud_only_everywhere`).
 static CLOUD_ALL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// Disco de cada ruta para `volume_id` (todos los hilos; sin dato, `None`).
+static VOLUME_IDS: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+/// Puntos de montaje del falso (`set_mount_point`).
+static MOUNTS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 impl FakeShell {
     /// Estos discos se pueden expulsar (se suman a los de otros tests).
@@ -631,6 +635,16 @@ impl FakeFileSystem {
         });
     }
 
+    /// Desde ahora `is_mount_point(path)` dice que sí (en todos los hilos).
+    pub fn set_mount_point(path: &Path) {
+        MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf());
+    }
+
+    /// Desde ahora `volume_id(path)` es `id` (en todos los hilos).
+    pub fn set_volume_id(path: &Path, id: u64) {
+        VOLUME_IDS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), id);
+    }
+
     /// Desde ahora `cloud_only(path)` dice que sí en todos los hilos (los hilos de trabajo también
     /// lo ven; cada test usa rutas propias).
     pub fn set_cloud_only_everywhere(path: &Path) {
@@ -816,8 +830,8 @@ impl FileSystem for FakeFileSystem {
         true
     }
 
-    fn is_mount_point(&self, _path: &Path) -> bool {
-        false
+    fn is_mount_point(&self, path: &Path) -> bool {
+        MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
     }
 
     fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
@@ -944,6 +958,11 @@ impl FileSystem for FakeFileSystem {
         }
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(path.to_path_buf()).or_insert((0, 0)).0 += 1;
         Some(Box::new(FakeWatch(path.to_path_buf())))
+    }
+
+    /// Lo puesto con `set_volume_id`.
+    fn volume_id(&self, path: &Path) -> Option<u64> {
+        VOLUME_IDS.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied()
     }
 
     /// Lo marcado con `set_cloud_only` en este hilo o con `set_cloud_only_everywhere`.

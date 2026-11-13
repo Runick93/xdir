@@ -444,6 +444,12 @@ impl FileSystem for MacFileSystem {
         fsp::is_mount_point(path)
     }
 
+    /// `st_dev` sin seguir enlaces.
+    fn volume_id(&self, path: &Path) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+    }
+
     fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
         fsp::disk_entry(path, name, meta)
     }

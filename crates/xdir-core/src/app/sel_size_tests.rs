@@ -241,3 +241,42 @@ fn unrelated_change_keeps_folder_sizes() {
     assert_eq!(a.sel_size.generation(), g, "no se cortó ni se volvió a arrancar");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// La suma no cruza a otro disco montado adentro ni entra en una carpeta de red montada adentro
+/// (esa queda para «calcular tamaño»): el total dice «al menos».
+#[test]
+fn walk_stays_on_its_volume_and_off_network_mounts() {
+    let dir = fixture("volumen");
+    FakeFileSystem::set_volume_id(&dir.join("b"), 1);
+    FakeFileSystem::set_volume_id(&dir.join("b").join("sub"), 2);
+    std::fs::create_dir_all(dir.join("a").join("nas")).unwrap();
+    std::fs::write(dir.join("a").join("nas").join("lejos.bin"), vec![0u8; 5000]).unwrap();
+    FakeNetwork::set_remote(&dir.join("a").join("nas"));
+    // Un disco montado adentro con el mismo `st_dev` (en la Mac, /System/Volumes/Data): se lo
+    // reconoce como punto de montaje.
+    std::fs::create_dir_all(dir.join("f2").join("datos")).unwrap();
+    std::fs::write(dir.join("f2").join("datos").join("d.bin"), vec![0u8; 700]).unwrap();
+    std::fs::write(dir.join("f2").join("propio.bin"), vec![0u8; 7]).unwrap();
+    FakeFileSystem::set_mount_point(&dir.join("f2").join("datos"));
+    let mut a = app_in(&dir);
+    select(&mut a, &["b"]);
+    wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(0)));
+    select(&mut a, &["a"]);
+    wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(100)));
+    select(&mut a, &["f2"]);
+    wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(7)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Una carpeta elegida que es un enlace no se sigue (podría llevar a un disco de red o a todo
+/// el disco): cuenta 0 y el total dice «al menos».
+#[cfg(unix)]
+#[test]
+fn symlinked_folder_is_not_followed() {
+    let dir = fixture("enlace");
+    std::os::unix::fs::symlink(dir.join("a"), dir.join("enlace")).unwrap();
+    let mut a = app_in(&dir);
+    select(&mut a, &["enlace", "b"]);
+    wait_status(&mut a, &format!("2 elementos seleccionados · al menos {}", size(50)));
+    let _ = std::fs::remove_dir_all(&dir);
+}

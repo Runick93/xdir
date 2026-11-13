@@ -167,6 +167,25 @@ fn failed(name: &str, e: &CopyError) -> Failure {
     }
 }
 
+/// Un lector que cuenta cada lectura del sistema como avance (no cada bloque de 1 MB: una red lenta
+/// pero viva no se corta por falta de avance) y deja de leer apenas se pide cortar.
+struct Counted<'a> {
+    inner: sys::Reader,
+    progress: &'a Progress,
+    stop: &'a AtomicBool,
+}
+
+impl Read for Counted<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(io::Error::other("cancelado"));
+        }
+        let n = self.inner.read(buf)?;
+        self.progress.beat();
+        Ok(n)
+    }
+}
+
 /// Abre `src` (extrayéndolo si es de un comprimido) sin bajar lo que está solo en la nube.
 fn open(src: &Source, stop: &AtomicBool, progress: &Progress) -> Result<sys::Opened, Failure> {
     let name = src.name();
@@ -196,14 +215,16 @@ pub fn compare_sources(a: &Source, b: &Source, stop: &AtomicBool, progress: &Pro
     if a == b {
         return Ok(Verdict::SameFile);
     }
-    let mut fa = open(a, stop, progress)?;
-    let mut fb = open(b, stop, progress)?;
+    let fa = open(a, stop, progress)?;
+    let fb = open(b, stop, progress)?;
     if fa.size != fb.size {
         return Ok(Verdict::SizeDiffers { a: fa.size, b: fb.size });
     }
     progress.total.store(fa.size, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
-    let res = compare_readers(&mut fa.reader, &mut fb.reader, &mut |n| {
+    let mut ra = Counted { inner: fa.reader, progress, stop };
+    let mut rb = Counted { inner: fb.reader, progress, stop };
+    let res = compare_readers(&mut ra, &mut rb, &mut |n| {
         progress.done.store(n, Ordering::Relaxed);
         progress.beat();
         if stop.load(Ordering::Relaxed) { Flow::Stop } else { Flow::Continue }
@@ -211,6 +232,7 @@ pub fn compare_sources(a: &Source, b: &Source, stop: &AtomicBool, progress: &Pro
     match res {
         Ok(Some(v)) => Ok(v),
         Ok(None) => Err(Failure::Cancelled),
+        Err(_) if stop.load(Ordering::Relaxed) => Err(Failure::Cancelled),
         Err((side, e)) => {
             let name = if side == 0 { a.name() } else { b.name() };
             Err(Failure::Failed(format!("No se pudo leer «{name}»: {e}")))
@@ -220,10 +242,11 @@ pub fn compare_sources(a: &Source, b: &Source, stop: &AtomicBool, progress: &Pro
 
 /// La suma `algo` de `src` en hexadecimal en minúscula. Bloqueante; `stop` corta.
 pub fn hash_source(src: &Source, algo: HashAlgo, stop: &AtomicBool, progress: &Progress) -> Result<String, Failure> {
-    let mut f = open(src, stop, progress)?;
+    let f = open(src, stop, progress)?;
     progress.total.store(f.size, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
-    let res = sys::hashes().hash(&mut f.reader, algo, &mut |n| {
+    let mut r = Counted { inner: f.reader, progress, stop };
+    let res = sys::hashes().hash(&mut r, algo, &mut |n| {
         progress.done.store(n, Ordering::Relaxed);
         progress.beat();
         if stop.load(Ordering::Relaxed) { Flow::Stop } else { Flow::Continue }
@@ -231,6 +254,7 @@ pub fn hash_source(src: &Source, algo: HashAlgo, stop: &AtomicBool, progress: &P
     match res {
         Ok(Some(h)) => Ok(h),
         Ok(None) => Err(Failure::Cancelled),
+        Err(_) if stop.load(Ordering::Relaxed) => Err(Failure::Cancelled),
         Err(e) => Err(Failure::Failed(format!("No se pudo leer «{}»: {e}", src.name()))),
     }
 }

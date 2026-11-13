@@ -4,7 +4,8 @@
 //! suma es determinística (FNV-1a de 64 bits, distinta por algoritmo) con el largo de cada uno.
 
 use std::io::{self, Cursor, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::{FakeCopyPrims, FakeNetwork};
@@ -12,10 +13,26 @@ use crate::sys::{CopyError, Flow, HashAlgo, Hashes, Opened, io_error};
 
 pub struct FakeHashes;
 
-/// Un lector que duerme `hang` antes de cada lectura.
+/// Rutas lentas pero vivas: (carpeta, bytes por lectura, pausa antes de cada una).
+static THROTTLED: Mutex<Vec<(PathBuf, usize, Duration)>> = Mutex::new(Vec::new());
+
+impl FakeHashes {
+    /// Lo que está bajo `prefix` se lee de a `chunk` bytes, con `delay` antes de cada lectura
+    /// (una red lenta que sigue respondiendo). En todos los hilos; cada prueba usa rutas propias.
+    pub fn throttle(prefix: &Path, chunk: usize, delay: Duration) {
+        THROTTLED.lock().unwrap_or_else(|e| e.into_inner()).push((prefix.to_path_buf(), chunk, delay));
+    }
+
+    fn throttle_for(path: &Path) -> Option<(usize, Duration)> {
+        THROTTLED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, ..)| path.starts_with(p)).map(|&(_, c, d)| (c, d))
+    }
+}
+
+/// Un lector que duerme `hang` antes de cada lectura y, si es lento, entrega de a `chunk`.
 struct Slow<R> {
     inner: R,
     hang: Option<Duration>,
+    chunk: Option<usize>,
 }
 
 impl<R: Read> Read for Slow<R> {
@@ -23,23 +40,25 @@ impl<R: Read> Read for Slow<R> {
         if let Some(d) = self.hang {
             std::thread::sleep(d);
         }
-        self.inner.read(buf)
+        let n = self.chunk.map_or(buf.len(), |c| c.min(buf.len()));
+        self.inner.read(&mut buf[..n])
     }
 }
 
 impl Hashes for FakeHashes {
     fn open(&self, path: &Path) -> Result<Opened, CopyError> {
         FakeNetwork::note_io("open", path);
-        let hang = FakeNetwork::hang_for(&path.to_string_lossy());
+        let (chunk, slow) = Self::throttle_for(path).unzip();
+        let hang = FakeNetwork::hang_for(&path.to_string_lossy()).or(slow);
         let disk = FakeCopyPrims::shared();
         if disk.exists(path) {
             let data = disk.read_content(path)?;
             let size = data.len() as u64;
-            return Ok(Opened { reader: Box::new(Slow { inner: Cursor::new(data), hang }), size });
+            return Ok(Opened { reader: Box::new(Slow { inner: Cursor::new(data), hang, chunk }), size });
         }
         let f = std::fs::File::open(path).map_err(|e| io_error(&e, path))?;
         let size = f.metadata().map_err(|e| io_error(&e, path))?.len();
-        Ok(Opened { reader: Box::new(Slow { inner: f, hang }), size })
+        Ok(Opened { reader: Box::new(Slow { inner: f, hang, chunk }), size })
     }
 
     fn hash(&self, r: &mut dyn Read, algo: HashAlgo, progress: &mut dyn FnMut(u64) -> Flow) -> io::Result<Option<String>> {

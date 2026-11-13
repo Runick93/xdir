@@ -268,3 +268,30 @@ fn offset_text() {
     assert_eq!(super::offset_text(1_234_567), "1.234.567 (0x12D687)");
 }
 
+
+/// Una red lenta pero viva (de a 128 KB, una pausa antes de cada lectura, más que el límite por
+/// bloque de 1 MB pero menos que el límite por lectura): no se corta, ni al comparar ni al sumar.
+#[test]
+fn slow_but_alive_network_is_not_cut() {
+    use crate::sys::testing::FakeHashes;
+    install_fakes();
+    let d = tmp("red-lenta");
+    let data: Vec<u8> = (0..(3 * BLOCK / 2)).map(|i| (i % 249) as u8).collect();
+    let (a, b) = (d.join("a.bin"), d.join("b.bin"));
+    std::fs::write(&a, &data).unwrap();
+    std::fs::write(&b, &data).unwrap();
+    FakeNetwork::set_remote(&d);
+    FakeHashes::throttle(&d, 128 << 10, Duration::from_millis(60));
+    let (sa, sb) = (Source::Disk(a), Source::Disk(b));
+    let progress = Arc::new(Progress::default());
+    let got = run_watched(sa.remote_host(), Duration::from_millis(250), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, {
+        let (sa, sb, p) = (sa.clone(), sb.clone(), progress.clone());
+        move |stop| compare_sources(&sa, &sb, stop, &p)
+    });
+    assert_eq!(got, Ok(Verdict::Same));
+    let got = run_watched(sa.remote_host(), Duration::from_millis(250), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, {
+        let (sa, p) = (sa.clone(), progress.clone());
+        move |stop| hash_source(&sa, HashAlgo::Sha256, stop, &p)
+    });
+    assert!(got.is_ok(), "{got:?}");
+}

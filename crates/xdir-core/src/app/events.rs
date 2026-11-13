@@ -39,6 +39,7 @@ impl App {
             }
             crate::paint::WM_APP_ICONS => self.redraw(),
             sel_size::WM_APP_SEL_SIZE => self.on_sel_size(),
+            compare::WM_APP_COMPARE => self.on_compare_message(wparam),
             WM_APP_CHANGED => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 // Cambió algo en la carpeta (un aviso de la navegación en curso): lo que pesan ella y
@@ -175,6 +176,15 @@ impl App {
     /// y la barra de dirección actualiza el desplegable de rutas.
     pub fn on_text_changed(&mut self, id: isize) {
         if self.rename_text_changed(id) || self.map_text_changed(id) {
+            return;
+        }
+        // «Comparar con…» de la suma de verificación: se compara mientras se escribe (y se decide el
+        // algoritmo al pegar, con Enter o al salir de la caja).
+        if let Some((b, info::EditKind::Expected)) = self.info.edit
+            && b.0 as isize == id
+        {
+            let text = self.host.text_get(b);
+            self.typed_expected(&text);
             return;
         }
         if let Some((edit, pane)) = self.filter_edit {
@@ -426,6 +436,10 @@ impl App {
                 self.info_wheel(delta * lines);
                 return;
             }
+            Hit::Compare(_) => {
+                self.compare_wheel(delta * lines);
+                return;
+            }
             Hit::Settings(i, _) => {
                 self.settings_wheel(i, delta * lines);
                 return;
@@ -511,6 +525,9 @@ impl App {
             self.folder_views.save_if_dirty();
             let _ = session::save(&self.session());
             let _ = self.history.save();
+            // En las pruebas la carpeta temporal es una para todo el proceso: cerrar una `App` de
+            // prueba no la borra (borraría lo que otras pruebas, en paralelo, están extrayendo).
+            #[cfg(not(test))]
             crate::archive_nav::temps::clean_at_exit();
         }
     }

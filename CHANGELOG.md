@@ -6,6 +6,7 @@
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
+- **Comparar contenido** (paleta o menú del archivo): con dos archivos elegidos, uno en cada panel o dos en el mismo, dice si son iguales byte a byte o en qué posición empiezan a ser distintos, con avance y Cancelar, también dentro de un comprimido o en una carpeta de red. El panel de información suma la sección **Suma de verificación** (SHA-256 o MD5, con «Copiar» y «Comparar con…» para pegar la suma publicada).
 - Expulsar un disco o desconectar una conexión da señal mientras dura: la barra de estado dice «Expulsando "Pendrive"…» (o cuántas operaciones faltan que terminen) y su ⏏ gira en el árbol, en «Este equipo» y en Configuración ▸ Red; un segundo clic no hace nada. Al terminar, «Se expulsó "Pendrive"».
 - Indicador de actividad en la barra de estado: un círculo girando mientras haya algo en segundo plano (conexiones, expulsar, tamaño de lo elegido, búsquedas, carpetas que tardan, xtree, extracciones). Al pasar el mouse dice qué está en curso; con copias, un clic abre su ventana. No aparece por lo que dura menos de 0,3 s.
 
@@ -64,6 +65,7 @@
 - xtree ya no es un programa aparte.
 
 ### Arreglos
+- La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.
 - En la Mac, el tipo de archivo siempre empieza con mayúscula.
 - **Seguridad**

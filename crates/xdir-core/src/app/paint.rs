@@ -86,8 +86,16 @@ impl App {
         if let Some(r) = preview_col.filter(|_| info_shown) {
             self.layout_info(r);
         }
+        let compare_shown = self.compare_open();
+        if let Some(r) = preview_col.filter(|_| compare_shown) {
+            self.layout_compare(r);
+        }
+        let compare_hover = match self.hover {
+            Hit::Compare(h) => Some(h),
+            _ => None,
+        };
         let preview_shown =
-            preview_col.filter(|_| !info_shown && rename_panel.is_none()).map(|_| self.preview_shown());
+            preview_col.filter(|_| !info_shown && !compare_shown && rename_panel.is_none()).map(|_| self.preview_shown());
         let info_hover = match self.hover {
             Hit::Info(h) => Some(h),
             _ => None,
@@ -259,6 +267,9 @@ impl App {
             }
             if info_shown && preview_col.is_some() {
                 crate::info::draw::draw(p, &self.info.layout, info_hover);
+            }
+            if let (true, Some(_), Some(st)) = (compare_shown, preview_col, &self.compare) {
+                crate::compare::draw::draw(p, &st.layout, compare_hover);
             }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);

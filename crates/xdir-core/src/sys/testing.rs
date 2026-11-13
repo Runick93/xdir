@@ -34,6 +34,8 @@ pub use archive_fake::FakeArchives;
 pub use copy_fake::FakeCopyPrims;
 mod net_fake;
 pub use net_fake::FakeNetwork;
+mod hash_fake;
+pub use hash_fake::FakeHashes;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
 /// instala, y si ya había servicios instalados no hace nada.
@@ -52,6 +54,7 @@ pub fn install_fakes() {
         archives: Box::new(FakeArchives::shared()),
         info: Box::new(FakeInfo),
         network: Box::new(FakeNetwork),
+        hashes: Box::new(FakeHashes),
     });
 }
 

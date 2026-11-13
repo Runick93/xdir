@@ -132,6 +132,71 @@ fn ensure_extracts_once_and_again_if_changed() {
     t.clean_own();
 }
 
+/// Una extracción cortada justo después de escribir el archivo no deja nada: la siguiente
+/// extrae a la ruta de siempre (antes quedaba el archivo sin anotar y la siguiente lo tomaba por
+/// un gemelo y lo extraía a `<hash>~<n>`, otra ruta: la vista previa no lo reconocía).
+#[test]
+fn ensure_cut_after_writing_leaves_nothing() {
+    install_fakes();
+    let b = base("cortada");
+    let zip = b.join("datos").join("fotos.zip");
+    FakeArchives::shared().add_archive(&zip, &[("foto.png", b"png")], 30);
+    let t = Temps::new(Some(&b));
+    let want = t.entry_path(&zip, &[], "foto.png").unwrap();
+    // Cuántas veces se pregunta si se cortó en una extracción entera (en otra carpeta)…
+    let count = Temps::new(Some(&b));
+    let n = std::cell::Cell::new(0);
+    let counting = || {
+        n.set(n.get() + 1);
+        false
+    };
+    count.ensure(&zip, &[], "foto.png", &super::temps::Limits { max: u64::MAX, cancel: &counting }).unwrap();
+    count.clean_own();
+    // …y el corte llega en la del final de la entrada: con el archivo ya escrito.
+    let calls = std::cell::Cell::new(0);
+    let cancel = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= n.get() - 3
+    };
+    let cut = t.ensure(&zip, &[], "foto.png", &super::temps::Limits { max: u64::MAX, cancel: &cancel });
+    assert_eq!(cut.unwrap_err().kind, ErrKind::Cancelled);
+    assert!(FakeCopyPrims::shared().read_content(&want).is_err(), "no queda a medias");
+    let again = t.ensure(&zip, &[], "foto.png", &super::temps::Limits::up_to(u64::MAX)).unwrap();
+    assert_eq!(again, want, "la ruta de siempre, no la de un gemelo");
+    t.clean_own();
+}
+
+/// Varias extracciones a la vez de archivos distintos (cada uno con su candado) crean las mismas
+/// carpetas de arriba: que otra la haya creado primero no es un error («Ya existe»).
+#[test]
+fn ensure_in_parallel_shares_parent_dirs() {
+    install_fakes();
+    for round in 0..40 {
+        let b = base(&format!("paralelo-{round}"));
+        let t = std::sync::Arc::new(Temps::new(Some(&b)));
+        let zips: Vec<PathBuf> = (0..8).map(|i| b.join("datos").join(format!("z{i}.zip"))).collect();
+        for z in &zips {
+            FakeArchives::shared().add_archive(z, &[("a.txt", b"a")], 30);
+        }
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(zips.len()));
+        let handles: Vec<_> = zips
+            .into_iter()
+            .map(|z| {
+                let (t, gate) = (t.clone(), gate.clone());
+                std::thread::spawn(move || {
+                    gate.wait();
+                    t.ensure(&z, &[], "a.txt", &super::temps::Limits::up_to(u64::MAX)).map(|_| ()).map_err(|e| e.message())
+                })
+            })
+            .collect();
+        for h in handles {
+            assert_eq!(h.join().unwrap(), Ok(()), "vuelta {round}");
+        }
+        t.clean_own();
+        let _ = std::fs::remove_dir_all(&b);
+    }
+}
+
 /// Un zip dentro de otro se resuelve extrayendo el de adentro a la temporal.
 #[test]
 fn nested_chain_resolves() {

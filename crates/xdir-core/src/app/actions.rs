@@ -44,6 +44,7 @@ impl App {
             }
             VK_ESCAPE if self.rename_many.is_some() => self.close_rename_many(),
             VK_ESCAPE if self.info_open() && self.info.focused => self.close_info(),
+            VK_ESCAPE if self.compare.as_ref().is_some_and(|c| c.focused) => self.close_compare(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
@@ -223,6 +224,7 @@ impl App {
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.rename_command(active),
             Command::RenameMany => self.open_rename_many(active),
+            Command::CompareContents => self.compare_contents(),
             // El panel de información (lo de la selección, la carpeta o el disco enfocado).
             Command::Properties => self.toggle_info(),
             Command::Duplicate => self.duplicate_selection(),
@@ -549,6 +551,7 @@ fn needs_folder(c: Command) -> bool {
             | Command::ShowOriginal
             | Command::Rename
             | Command::RenameMany
+            | Command::CompareContents
             | Command::Properties
             | Command::Duplicate
             | Command::Compress

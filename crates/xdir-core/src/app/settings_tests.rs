@@ -649,6 +649,34 @@ fn advanced_lists_files_and_dir() {
     assert_eq!(files.last().unwrap().0, "rutas.txt");
 }
 
+/// #57: las teclas de xtree dicen el atajo en uso de los colores (ya no la T) y las letras; en
+/// Atajos de teclado, «xtree_colores» va en el grupo xtree y Ctrl+T no choca con «Pestaña nueva».
+#[test]
+fn xtree_keys_show_colors_shortcut() {
+    let mut a = app();
+    let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };
+    let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(&keys[..2], ["Letras", "Ctrl+T"]);
+    assert!(!keys.contains(&"T"));
+    a.config.keymap.set(Command::XtreeColors, &[commands::parse_combo("Ctrl+Shift+C").unwrap()]);
+    let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };
+    assert_eq!(rows[1].0, "Ctrl+Shift+C");
+}
+
+/// Grabar Ctrl+T para los colores de xtree no es un choque con «Pestaña nueva» (otro ámbito).
+#[test]
+fn xtree_colors_shortcut_records_without_conflict() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "xtree_colores", PART_RESET, 0.0);
+    a.config.keymap.set(Command::XtreeColors, &[]);
+    a.settings_part(0, "xtree_colores", PART_ADD, 0.0);
+    assert!(a.capturing_keys());
+    press(&mut a, &[VK_CONTROL], Key(b'T' as u16));
+    assert!(!a.capturing_keys(), "sin choque, se asigna");
+    assert_eq!(a.config.keymap.combos(Command::XtreeColors), [commands::parse_combo("Ctrl+T").unwrap()]);
+    assert_eq!(a.config.keymap.combos(Command::NewTab), [commands::parse_combo("Ctrl+T").unwrap()]);
+}
+
 #[test]
 fn portable_info_only_when_unsupported() {
     let a = app();

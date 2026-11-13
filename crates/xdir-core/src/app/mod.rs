@@ -181,6 +181,8 @@ enum Hit {
     XtreeView,
     /// «← xdir» de la barra superior de xtree (vuelve a los paneles).
     XtreeBack,
+    /// «Colores: carpeta / tipo» de la barra superior de xtree.
+    XtreeColors,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),

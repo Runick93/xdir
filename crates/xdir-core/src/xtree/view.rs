@@ -4,7 +4,8 @@
 //!
 //! Recibe las coordenadas en DIPs de la ventana y dibuja con el `Painter` y el `Theme` de xdir; el
 //! mapa conserva su rueda de colores y sus categorías. Clic selecciona; doble clic entra en la
-//! carpeta; clic derecho o Retroceso suben; T cambia el color; F5 vuelve a analizar.
+//! carpeta; clic derecho o Retroceso suben; las letras van a la primera fila que empieza así; el
+//! botón «Colores» (o `xtree_colores`, Ctrl+T) cambia el color; F5 vuelve a analizar.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -41,9 +42,10 @@ const MENU_W: f32 = 400.0;
 const STATE_W: f32 = 220.0;
 /// Botón «← xdir», a la izquierda de todo en la barra superior.
 const BACK_W: f32 = 76.0;
+/// Botón «Colores: carpeta / tipo», que termina 40 antes del estado.
+const COLORS_W: f32 = 150.0;
 
 const VK_A: Key = Key(0x41);
-const VK_T: Key = Key(0x54);
 const VK_F5: Key = Key(0x74);
 
 /// Colores fijos (no dependen del tema): carpeta dorada y tilde de «Análisis completado».
@@ -109,6 +111,8 @@ pub struct Ui {
     pub back: Rect,
     pub combo: Rect,
     pub scan_btn: Rect,
+    /// «Colores: carpeta / tipo», a la izquierda del estado del análisis.
+    pub colors_btn: Rect,
 }
 
 /// Distribución de la vista en `area`. `legend_h` es 0 cuando no hay leyenda (color por carpeta):
@@ -132,7 +136,14 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
     let back = back_rect(area);
     let combo = rect(back.right + 8.0, t + 6.0, back.right + 8.0 + 250.0, t + TOP_H - 6.0);
     let scan_btn = rect(combo.right + 8.0, t + 6.0, combo.right + 108.0, t + TOP_H - 6.0);
-    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn }
+    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area) }
+}
+
+/// Botón «Colores: carpeta / tipo» de la vista en `area`: en la barra superior, 40 antes del estado
+/// del análisis.
+pub fn colors_rect(area: Rect) -> Rect {
+    let right = area.right - STATE_W - 40.0;
+    rect(right - COLORS_W, area.top + 6.0, right, area.top + TOP_H - 6.0)
 }
 
 /// Botón «← xdir» de la vista en `area`: a la izquierda de todo en la barra superior.
@@ -209,8 +220,13 @@ pub struct Xtree {
     hover_btn: Option<usize>,
     /// El mouse está sobre «← xdir».
     hover_back: bool,
+    /// El mouse está sobre «Colores».
+    hover_colors: bool,
+    /// Atajo en uso de los colores, para la ayuda de la barra de datos (lo pone la `App`; vacío si
+    /// no hay).
+    keys_colors: String,
     scroll: f32,
-    /// Colorear por tipo de archivo en vez de por posición (tecla T).
+    /// Colorear por tipo de archivo en vez de por posición (botón «Colores» o `xtree_colores`).
     by_type: bool,
     /// Espacio del volumen que contiene la carpeta: (total, libre).
     vol: Option<(u64, u64)>,
@@ -248,7 +264,7 @@ pub struct Xtree {
 
 impl Xtree {
     /// Abre la vista sobre `root` y empieza a analizarla; `by_type`: el mapa arranca coloreado por
-    /// tipo de archivo (`[opciones] xtree_por_tipo`; la tecla T lo sigue cambiando).
+    /// tipo de archivo (`[opciones] xtree_por_tipo`; el botón «Colores» lo sigue cambiando).
     pub fn new(hwnd: Handle, root: PathBuf, by_type: bool) -> Xtree {
         let id = NEXT_SCAN.fetch_add(1, Ordering::Relaxed);
         let scan = scan::start(hwnd, id, root.clone());
@@ -312,6 +328,8 @@ impl Xtree {
             hover_row: None,
             hover_btn: None,
             hover_back: false,
+            hover_colors: false,
+            keys_colors: String::new(),
             scroll: 0.0,
             by_type: false,
             vol: None,
@@ -378,6 +396,7 @@ impl Xtree {
         self.menu_open = false;
         self.menu_hover = None;
         self.hover_back = false;
+        self.hover_colors = false;
     }
 
     /// Abre el menú de discos sin pasar por el clic. Lo usan las pruebas de `App` (app/tests.rs).
@@ -401,10 +420,26 @@ impl Xtree {
         }
     }
 
-    /// Carpeta analizada.
     /// ¿El mapa está coloreado por tipo de archivo?
     pub fn by_type(&self) -> bool {
         self.by_type
+    }
+
+    /// Cambia los colores del mapa: por carpeta o por tipo de archivo (botón «Colores» o
+    /// `xtree_colores`). No se guarda: el switch de la configuración decide cómo arranca.
+    pub fn toggle_colors(&mut self) {
+        self.by_type = !self.by_type;
+        self.cells_for = None;
+    }
+
+    /// Lo que hace el botón «Colores» ahora (para su cartel, sin el atajo).
+    pub fn colors_tip(&self) -> &'static str {
+        if self.by_type { "Colorear por carpeta" } else { "Colorear por tipo de archivo" }
+    }
+
+    /// El atajo en uso de los colores (para la ayuda de la barra de datos).
+    pub fn set_key_labels(&mut self, colors: String) {
+        self.keys_colors = colors;
     }
 
     pub fn root(&self) -> &Path {
@@ -825,8 +860,10 @@ impl Xtree {
             return changed;
         }
         let back = contains(&back_rect(area), x, y);
-        let back_changed = back != self.hover_back;
+        let colors = contains(&colors_rect(area), x, y);
+        let back_changed = back != self.hover_back || colors != self.hover_colors;
         self.hover_back = back;
+        self.hover_colors = colors;
         if self.scanning {
             return back_changed; // mientras se escanea el mapa es solo de lectura
         }
@@ -875,6 +912,10 @@ impl Xtree {
         }
         if contains(&ui.scan_btn, x, y) {
             self.scan_pick();
+            return Action::Redraw;
+        }
+        if contains(&ui.colors_btn, x, y) {
+            self.toggle_colors();
             return Action::Redraw;
         }
         if self.arena.is_empty() || self.scanning {
@@ -973,7 +1014,8 @@ impl Xtree {
         if self.go_up() { Action::Redraw } else { Action::None }
     }
 
-    /// Teclas de la vista: Retroceso, Esc, T, F5 y A.
+    /// Teclas de la vista: Retroceso, Esc, F5 y A (los colores van por `xtree_colores`, que
+    /// resuelve la `App` con el `Keymap`).
     pub fn on_key(&mut self, k: Key) -> Action {
         match k {
             VK_BACK => self.on_right_click(),
@@ -983,11 +1025,6 @@ impl Xtree {
                 Action::Redraw
             }
             VK_ESCAPE => Action::Close,
-            VK_T => {
-                self.by_type = !self.by_type;
-                self.cells_for = None;
-                Action::Redraw
-            }
             // Sin análisis todavía, F5 es «Analizar»: lo elegido en el desplegable.
             VK_F5 if !self.scanned() => {
                 self.scan_pick();
@@ -1091,7 +1128,7 @@ impl Xtree {
                 fmt_size(progress.bytes.load(Ordering::Relaxed))
             )
         };
-        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - STATE_W - 60.0, t0 + TOP_H), th.text);
+        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, ui.colors_btn.left - 12.0, t0 + TOP_H), th.text);
         // Barra de avance (volumen entero) sobre el borde inferior de la barra superior.
         if self.scanning && !self.scan_stopped
             && let Some(pc) = self.percent()
@@ -1111,6 +1148,18 @@ impl Xtree {
         p.text(FontId::GlyphsSmall, "\u{E70D}", rect(cb.right - 26.0, cb.top, cb.right - 6.0, cb.bottom), th.text_dim);
         p.round_fill(ui.scan_btn, 6.0, th.accent);
         p.text(FontId::UiCenter, "Analizar", ui.scan_btn, white);
+        // «Colores: carpeta / tipo», con una muestra de 2×2 de los colores de cada modo.
+        let cbtn = ui.colors_btn;
+        p.round_fill(cbtn, 6.0, if self.hover_colors { th.hover } else { th.surface_alt });
+        p.round_stroke_w(cbtn, 6.0, th.border, 1.0);
+        let sy = (cbtn.top + cbtn.bottom) / 2.0 - 6.0;
+        for i in 0..4 {
+            let c = if self.by_type { rgb(CATS[i].1) } else { position_color(i as f32 * 0.25, 1, false) };
+            let (sx, dy) = (cbtn.left + 10.0 + (i % 2) as f32 * 7.0, (i / 2) as f32 * 7.0);
+            p.round_fill(rect(sx, sy + dy, sx + 5.0, sy + dy + 5.0), 1.0, c);
+        }
+        let label = if self.by_type { "Colores: tipo" } else { "Colores: carpeta" };
+        p.text(FontId::Ui, label, rect(cbtn.left + 30.0, cbtn.top, cbtn.right - 6.0, cbtn.bottom), th.text);
         let state = self.state_text();
         // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
         // es de escaneo.
@@ -1356,9 +1405,10 @@ impl Xtree {
         }
         if !hint.is_empty() {
             p.text(FontId::UiRight, &hint, rect((x + 10.0).max(bar.right - 480.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), warning);
-        } else if done {
-            let help = if self.by_type { "T: color por carpeta" } else { "T: color por tipo de archivo" };
-            p.text(FontId::UiRight, help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
+        } else if done && !self.keys_colors.is_empty() {
+            let what = if self.by_type { "color por carpeta" } else { "color por tipo de archivo" };
+            let help = format!("{}: {what}", self.keys_colors);
+            p.text(FontId::UiRight, &help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
         }
 
         // ----- lista de discos: va al final para quedar por encima de todo -----
@@ -1466,6 +1516,41 @@ mod tests {
         assert!(x.scroll > 0.0, "la tabla se desplazó hasta la fila");
         x.scanning = true;
         assert_eq!(x.on_char_at('c', Instant::now() + Duration::from_secs(5)), Action::None, "escaneando");
+    }
+
+    /// #57: la T ya no cambia los colores (es una letra para el salto); el botón «Colores» sí,
+    /// también mientras se escanea, y dice el modo; la ayuda de la barra de datos usa el atajo.
+    #[test]
+    fn colors_button_toggles_and_t_no_longer_does() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(level(&[("Temp", 10, true), ("datos", 5, true)]));
+        assert_eq!(x.on_key(Key(0x54)), Action::None, "la T no hace nada como tecla");
+        assert!(!x.by_type());
+        let ui = layout_ui(area, x.legend_h());
+        assert!(ui.colors_btn.left > ui.scan_btn.right && ui.colors_btn.right <= area.right - STATE_W - 20.0);
+        let (cx, cy) = ((ui.colors_btn.left + ui.colors_btn.right) / 2.0, (ui.colors_btn.top + ui.colors_btn.bottom) / 2.0);
+        assert!(contains(&colors_rect(area), cx, cy));
+        assert!(x.on_mouse_move(area, cx, cy), "resalta");
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Redraw);
+        assert!(x.by_type());
+        x.scanning = true;
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Redraw);
+        assert!(!x.by_type(), "también escaneando");
+        x.scanning = false;
+        x.set_key_labels("Ctrl+T".into());
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        assert!(texts.iter().any(|t| t == "Colores: carpeta"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Ctrl+T: color por tipo de archivo"), "{texts:?}");
+        x.toggle_colors();
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        assert!(texts.iter().any(|t| t == "Colores: tipo"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Ctrl+T: color por carpeta"), "{texts:?}");
+        assert_eq!(x.colors_tip(), "Colorear por carpeta");
     }
 
     /// Recorre la vista entera con hit-tests y clics: nada debe entrar en pánico.

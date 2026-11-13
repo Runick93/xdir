@@ -119,6 +119,13 @@ impl App {
             // El botón «xtree» dice qué hace; el cartel lleva el estado del escaneo, si lo hay.
             Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
             Hit::XtreeBack => return Some("Volver a xdir (Esc)".to_string()),
+            Hit::XtreeColors => {
+                let what = self.xtree.as_ref()?.colors_tip();
+                return Some(match self.config.keymap.label(Command::XtreeColors) {
+                    keys if keys.is_empty() => what.to_string(),
+                    keys => format!("{what} ({keys})"),
+                });
+            }
             // La entrada del árbol no dice qué es por sí sola cuando está en franja: sin escaneo,
             // «xtree».
             Hit::TreeXtree => return Some(self.xtree.as_ref().and_then(|x| x.badge_tip()).unwrap_or_else(|| "xtree".to_string())),

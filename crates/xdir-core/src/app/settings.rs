@@ -185,21 +185,25 @@ impl App {
             "xtree_analizar_al_abrir" => one(row(Control::Switch(self.config.xtree_scan_on_open))),
             "xtree_por_tipo" => one(row(Control::Switch(self.config.xtree_by_type))),
             "xtree_abrir" => one(row(Control::Dropdown(self.config.xtree_open.title().to_string()))),
-            "xtree_teclas" => vec![
-                Item::Row(row(Control::Table(
+            "xtree_teclas" => {
+                // Los atajos que se cambian en Atajos de teclado, con la tecla en uso.
+                let colors = self.config.keymap.label(Command::XtreeColors);
+                let mut rows = vec![("Letras".to_string(), "Ir a la primera fila que empieza así".to_string())];
+                if !colors.is_empty() {
+                    rows.push((colors, "Colorear el mapa por tipo de archivo o por carpeta".to_string()));
+                }
+                rows.extend(
                     [
-                        ("T", "Colorear el mapa por tipo de archivo o por carpeta"),
                         ("F5", "Volver a analizar"),
                         ("⌫", "Subir a la carpeta de arriba"),
                         ("A", "Analizar de nuevo con permisos de administrador"),
                         ("Esc", "Cerrar xtree"),
                     ]
                     .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-                ))),
-                Item::Action("ver_atajos", "Ver los atajos".to_string()),
-            ],
+                    .map(|(k, v)| (k.to_string(), v.to_string())),
+                );
+                vec![Item::Row(row(Control::Table(rows))), Item::Action("ver_atajos", "Ver los atajos".to_string())]
+            }
             "abrir_config" => {
                 let path = config::file_path().map(|p| p.display().to_string()).unwrap_or_default();
                 one(Row { desc: path, ..row(Control::Buttons(vec![("Abrir config.toml".to_string(), true)])) })
@@ -890,7 +894,7 @@ impl App {
             }
             Capture::Accept(k) => {
                 let combos = self.config.keymap.combos(rec.command);
-                match self.config.keymap.owner(k) {
+                match self.config.keymap.owner_for(k, rec.command) {
                     // La misma que ya tiene (en este chip u otro): nada cambia.
                     _ if combos.contains(&k) => self.set_recording(None),
                     Some(other) => self.set_recording(Some(Recording { conflict: Some((k, other)), message: None, pressed: Some(k), ..rec })),
@@ -941,7 +945,7 @@ impl App {
     /// comando quedan con ese (como al leer `config.toml`).
     fn reset_shortcut(&mut self, c: Command) {
         let factory = Keymap::default().combos(c);
-        let free: Vec<Combo> = factory.into_iter().filter(|k| self.config.keymap.owner(*k).is_none_or(|o| o == c)).collect();
+        let free: Vec<Combo> = factory.into_iter().filter(|k| self.config.keymap.owner_for(*k, c).is_none_or(|o| o == c)).collect();
         self.config.keymap.set(c, &free);
         self.config.own_shortcut_ids.remove(spec_id(c));
         self.edit_config(vec![ConfigEdit::Remove { section: "atajos", key: spec_id(c).to_string() }]);

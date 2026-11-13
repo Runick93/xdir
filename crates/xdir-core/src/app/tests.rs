@@ -2803,6 +2803,36 @@ fn xtree_letters_go_to_view() {
     assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
 }
 
+/// #57: dentro de xtree, Ctrl+T (⌘T) cambia los colores (no abre una pestaña); el botón tiene su
+/// cartel con el atajo en uso; la T sola ya no los cambia.
+#[test]
+fn xtree_colors_shortcut_and_tooltip() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    let tabs = a.panes[a.active].tabs.len();
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    assert!(a.on_key(Key(b'T' as u16)));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert!(a.xtree_open && a.xtree.as_ref().unwrap().by_type());
+    assert_eq!(a.panes[a.active].tabs.len(), tabs, "no abrió una pestaña");
+    assert!(!a.on_key(Key(b'T' as u16)), "la T sola no es un atajo");
+    assert!(a.xtree.as_ref().unwrap().by_type());
+    assert_eq!(a.tooltip_text(Hit::XtreeColors).as_deref(), Some("Colorear por carpeta (Ctrl+T)"));
+    a.config.keymap.set(Command::XtreeColors, &[]);
+    assert_eq!(a.tooltip_text(Hit::XtreeColors).as_deref(), Some("Colorear por carpeta"));
+    // El clic en el botón (donde quedó en el cuadro).
+    a.paint();
+    let (x, y) = point_of(&a, Hit::XtreeColors);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(!a.xtree.as_ref().unwrap().by_type());
+    // Fuera de xtree Ctrl+T sigue abriendo una pestaña.
+    a.close_xtree();
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_key(Key(b'T' as u16));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert_eq!(a.panes[a.active].tabs.len(), tabs + 1);
+}
+
 // ---------- entrada «xtree» del árbol ----------
 
 /// App con el árbol a la vista, el panel activo en una carpeta temporal y un cuadro dibujado.

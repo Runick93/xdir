@@ -40,6 +40,7 @@
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
 - Arrastrá archivos a una carpeta del árbol (desde un panel, el Finder o el Explorador) para moverlos o copiarlos ahí, como en una carpeta de la lista. Si te quedás un momento sobre una carpeta plegada, se despliega.
+- **Buscar en xtree**: escribí las primeras letras para ir a esa carpeta del nivel, y el botón «Colores» cambia el color del mapa.
 
 ### Cambios
 - Favoritos pasa a `Ctrl+Shift+D` / `⇧⌘D`: `Ctrl+D` ahora duplica.
@@ -51,6 +52,7 @@
 - xtree ya no es un programa aparte.
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
 - Los botones del pie del panel (carpeta nueva y vista) son más grandes.
+- En xtree, los colores del mapa pasan de la `T` a `Ctrl+T` / `⌘T` (se cambia en Atajos de teclado): la `T` ahora salta a la carpeta que empieza con T.
 
 ### Arreglos
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.

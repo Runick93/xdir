@@ -45,7 +45,7 @@ impl App {
             VK_ESCAPE if self.rename_many.is_some() => self.close_rename_many(),
             VK_ESCAPE if self.info_open() && self.info.focused => self.close_info(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
-            _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
+            _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift, alt, meta),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
             // Lo último: si nada más tomó el Escape, corta la apertura desde un archivo comprimido.
             VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {
@@ -286,6 +286,12 @@ impl App {
                 }
             }
             Command::Xtree => self.toggle_xtree(),
+            // Solo con la vista abierta (sus atajos no valen en los paneles).
+            Command::XtreeColors => {
+                if let Some(x) = self.xtree.as_mut().filter(|_| from_xtree) {
+                    x.toggle_colors();
+                }
+            }
             // Con xtree abierto la columna no se ve: el botón o el atajo cierran xtree y la muestran.
             Command::TogglePreview if from_xtree => self.show_preview(),
             Command::TogglePreview => self.toggle_preview(),
@@ -313,9 +319,10 @@ impl App {
     }
 
 
-    /// Tecla con la vista de xtree abierta: primero la vista (T, F5, Retroceso, Esc, A); después
-    /// solo los atajos de la ventana que no tocan los paneles tapados.
-    fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool) -> bool {
+    /// Tecla con la vista de xtree abierta: primero la vista (F5, Retroceso, Esc, A), después sus
+    /// atajos (`xtree_colores`) y, por último, solo los atajos de la ventana que no tocan los
+    /// paneles tapados.
+    fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
         if !ctrl {
             let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_key(vk));
             if action != xtree_view::Action::None {
@@ -323,7 +330,11 @@ impl App {
                 return true;
             }
         }
-        match self.config.keymap.lookup(vk, ctrl, shift, false, key_down(VK_LWIN)) {
+        if let Some(c) = self.config.keymap.lookup_xtree(vk, ctrl, shift, alt, meta) {
+            self.run_command(c);
+            return true;
+        }
+        match self.config.keymap.lookup(vk, ctrl, shift, false, meta) {
             Some(c @ (Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)) => {
                 self.run_command(c);
                 true
@@ -516,6 +527,7 @@ fn keeps_xtree(c: Command) -> bool {
             | Command::JumpTo
             | Command::SaveGroup
             | Command::Xtree
+            | Command::XtreeColors
             | Command::ToggleDarkMode
             | Command::About
             | Command::OpenConfig

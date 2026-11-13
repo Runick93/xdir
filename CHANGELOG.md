@@ -7,6 +7,7 @@
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
 - **Comparar contenido** (paleta o menú del archivo): con dos archivos elegidos, uno en cada panel o dos en el mismo, dice si son iguales byte a byte o en qué posición empiezan a ser distintos, con avance y Cancelar, también dentro de un comprimido o en una carpeta de red. El panel de información suma la sección **Suma de verificación** (SHA-256 o MD5, con «Copiar» y «Comparar con…» para pegar la suma publicada).
+- **Historial de crecimiento en xtree**: cada análisis guarda una foto de los tamaños, y la tarjeta de la carpeta muestra cuánto creció en 7, 30 o 90 días, un gráfico y las 5 subcarpetas que más crecieron (clic para entrar). En la tabla, una ▲ marca las carpetas que crecieron mucho. Se apaga o se borra en Configuración ▸ xtree; los discos de red no guardan historial.
 
 ### Cambios
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.

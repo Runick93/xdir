@@ -220,15 +220,40 @@ fn walk(path: &Path, remote: bool, stop: &AtomicBool, beat: &Beat) -> (u64, bool
     (last, skipped == 0 && !left_out.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed))
 }
 
+/// Carpetas de red con una suma en curso (o colgada en el servidor): no se apila otra.
+static IN_FLIGHT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn in_flight() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Lo que pesa `path` (bytes, entera). Una de red se suma vigilada: sin avance en `limit`, se
-/// corta y queda a medias.
+/// corta y queda a medias; si su suma anterior sigue colgada, no se arranca otra.
 fn folder_bytes(path: &Path, remote: bool, limit: Duration, cancel: &Arc<AtomicBool>) -> (u64, bool) {
     if !remote {
         return walk(path, false, cancel, &Beat::default());
     }
     let p = path.to_path_buf();
+    {
+        let mut f = in_flight();
+        if f.contains(&p) {
+            return (0, false);
+        }
+        f.push(p.clone());
+    }
+    // La marca se suelta cuando el hilo termina (o si no llegó a arrancar).
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            in_flight().retain(|x| *x != self.0);
+        }
+    }
+    let release = Release(p.clone());
     let beat = Arc::new(Beat::default());
-    let out = watched(limit, cancel, beat.clone(), move |stop, beat| walk(&p, true, &stop, &beat));
+    let out = watched(limit, cancel, beat.clone(), move |stop, beat| {
+        let release = release;
+        walk(&release.0, true, &stop, &beat)
+    });
     out.unwrap_or_else(|| (beat.bytes.load(Ordering::Relaxed), false))
 }
 
@@ -348,6 +373,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mientras una suma de una carpeta de red sigue en curso (o colgada), otra de la misma
+    /// carpeta no arranca otro hilo: queda a medias. Al terminar la primera, se puede de nuevo.
+    #[test]
+    fn one_remote_walk_per_folder() {
+        crate::sys::testing::install_fakes();
+        let dir = std::env::temp_dir().join(format!("xdir-sel-red-una-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.bin"), vec![0u8; 70]).unwrap();
+        crate::sys::testing::FakeNetwork::set_remote(&dir);
+        let cancel = Arc::new(AtomicBool::new(false));
+        in_flight().push(dir.clone());
+        assert_eq!(folder_bytes(&dir, true, Duration::from_secs(5), &cancel), (0, false));
+        in_flight().retain(|p| *p != dir);
+        assert_eq!(folder_bytes(&dir, true, Duration::from_secs(5), &cancel), (70, true));
+        assert!(!in_flight().contains(&dir), "al terminar se suelta");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Sin avance en el límite, se corta; con avance seguido, termina aunque tarde más.
     #[test]

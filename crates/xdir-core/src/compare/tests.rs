@@ -238,6 +238,10 @@ fn parse_published_sums() {
     assert_eq!(parse_expected(&format!("{sha}  xdir-0.1.23.zip")), Some((HashAlgo::Sha256, sha.into())));
     assert_eq!(parse_expected(&format!("{sha} *xdir.zip")), Some((HashAlgo::Sha256, sha.into())));
     assert_eq!(parse_expected(&format!("SHA256 (xdir.zip) = {sha}")), Some((HashAlgo::Sha256, sha.into())));
+    // En grupos y con el nombre al lado, o con el nombre antes («nombre: suma»).
+    let grouped: String = sha.as_bytes().chunks(8).map(|c| std::str::from_utf8(c).unwrap().to_uppercase()).collect::<Vec<_>>().join(" ");
+    assert_eq!(parse_expected(&format!("{grouped}  a-igual.bin")), Some((HashAlgo::Sha256, sha.into())));
+    assert_eq!(parse_expected(&format!("xdir.zip: {grouped}")), Some((HashAlgo::Sha256, sha.into())));
     // Con espacios en el medio (como certutil) y en otra línea.
     let spaced: String = md5.as_bytes().chunks(2).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(" ");
     assert_eq!(parse_expected(&spaced.to_uppercase()), Some((HashAlgo::Md5, md5.into())));

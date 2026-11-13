@@ -558,6 +558,30 @@ fn xtree_unscanned_reopen_follows_pane_and_option() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Lo elegido a mano en el desplegable de una vista sin analizar se conserva al volver a abrirla
+/// (aunque el panel esté en otra carpeta).
+#[test]
+fn xtree_unscanned_reopen_keeps_user_pick() {
+    let mut a = app();
+    let base = std::env::temp_dir().join(format!("xdir-xtree-eleccion-{}", std::process::id()));
+    let (d1, d2, elegido) = (base.join("uno"), base.join("dos"), base.join("elegido"));
+    for d in [&d1, &d2, &elegido] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d1));
+    a.run_command(Command::Xtree);
+    a.xtree.as_mut().unwrap().set_pick(elegido.clone());
+    a.run_command(Command::Xtree);
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d2));
+    a.run_command(Command::Xtree);
+    let x = a.xtree.as_ref().unwrap();
+    assert!(!x.scanned());
+    assert_eq!(x.pick(), elegido.as_path());
+    a.on_closing();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Con «Analizar al abrir xtree» encendido, como antes: arranca el análisis.
 #[test]
 fn xtree_scans_on_open_with_option() {

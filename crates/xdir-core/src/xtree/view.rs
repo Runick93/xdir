@@ -265,6 +265,22 @@ impl Xtree {
         x
     }
 
+    /// Lo elegido en el desplegable.
+    pub fn pick(&self) -> &Path {
+        &self.pick
+    }
+
+    /// Lo elegido a mano en el desplegable, si no es la raíz con la que se abrió la vista.
+    pub fn user_pick(&self) -> Option<PathBuf> {
+        (self.pick != self.root && !self.pick.as_os_str().is_empty()).then(|| self.pick.clone())
+    }
+
+    /// Elige en el desplegable sin pasar por el menú (pruebas de `App`).
+    #[cfg(test)]
+    pub fn set_pick(&mut self, p: PathBuf) {
+        self.pick = p;
+    }
+
     /// ¿Empezó algún análisis en esta vista? (una abierta sin analizar, todavía no).
     pub fn scanned(&self) -> bool {
         self.scan_started.is_some()

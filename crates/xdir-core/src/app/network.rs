@@ -1361,7 +1361,10 @@ impl App {
     /// `WM_APP_NET_TICK`: toca redibujar el aviso de una carpeta de red lenta.
     pub(super) fn on_net_tick(&mut self) {
         self.net.tick_due = None;
-        self.redraw();
+        // Si ya no se lee nada (la lectura terminó antes del umbral), no hay nada que cambiar.
+        if self.panes.iter().any(|p| p.tab().loading) {
+            self.redraw();
+        }
     }
 
     /// Después de «Reintentar»: el aviso vuelve a «Conectando…» al rato.

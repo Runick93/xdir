@@ -677,6 +677,27 @@ fn not_responding_is_still_in_activity() {
     assert_eq!(a.activity.next_tick(now), None);
 }
 
+/// Ronda 1: el redibujo de los 0,5 s de una lectura que ya terminó no repinta nada.
+#[test]
+fn net_tick_after_fast_load_does_not_repaint() {
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    a.sync_visibility();
+    let local = tmp_dir("a2-rapida");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local));
+    let t = Instant::now();
+    while a.panes.iter().any(|p| p.tab().loading) {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        if let Ok(ev) = a.rx.recv_timeout(Duration::from_millis(20)) {
+            a.on_load_event(ev);
+        }
+    }
+    let before = host.invalidations();
+    a.on_net_tick();
+    assert_eq!(host.invalidations(), before, "nada que mostrar: sin repintado");
+}
+
 /// En red el aviso de espera no cambia: «Conectando con…» en lugar de «Cargando…».
 #[test]
 fn remote_wait_box_instead_of_loading() {

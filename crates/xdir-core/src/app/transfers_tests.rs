@@ -378,7 +378,7 @@ fn activity_click_opens_copy_window_with_copies() {
     let (mut a, host) = app_window();
     let t0 = Instant::now();
     a.activity.begin(super::activity::ActivityKey::Connect(1), "Conectando con \"nas\"", t0);
-    a.clock = Some(t0 + Duration::from_millis(400));
+    crate::clock::set(Some(t0 + Duration::from_millis(400)));
     a.paint();
     let r = a.activity_rect.expect("el indicador");
     let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);

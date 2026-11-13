@@ -1303,7 +1303,7 @@ impl App {
     pub(super) fn update_placeholders(&mut self) {
         use crate::list::placeholder::Placeholder;
         use crate::tab::{SLOW_CONNECTING, SLOW_NOT_RESPONDING, Slow};
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         let mut next: Option<std::time::Duration> = None;
         for i in 0..self.panes.len() {
             let tab = self.panes[i].tab();

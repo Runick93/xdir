@@ -156,13 +156,9 @@ pub(super) fn sel_size_text(folders: usize) -> String {
 }
 
 impl App {
-    /// El reloj de lo que se muestra (las pruebas lo fijan).
+    /// El reloj de lo que se muestra (`crate::clock`: las pruebas lo fijan).
     pub(super) fn now(&self) -> Instant {
-        #[cfg(test)]
-        if let Some(t) = self.clock {
-            return t;
-        }
-        Instant::now()
+        crate::clock::now()
     }
 
     /// Antes de dibujar: lo que dice el estado de la `App` pasa al registro.
@@ -210,8 +206,8 @@ impl App {
 
     /// Después de dibujar: el próximo redibujo, solo mientras haya algo en curso.
     pub(super) fn schedule_activity_tick(&mut self) {
-        let Some(wait) = self.activity.next_tick(self.now()) else { return };
-        let now = Instant::now();
+        let now = self.now();
+        let Some(wait) = self.activity.next_tick(now) else { return };
         if self.activity.tick_due.is_some_and(|d| d > now && d <= now + wait) {
             return;
         }

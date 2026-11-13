@@ -536,7 +536,7 @@ fn remote_navigation_no_ui_io() {
     // Ajustes 2: desconectar y dibujar mientras tanto (⏏ girando, «Desconectando…», indicador).
     a.net.connections = vec![conn("smb://nas-n5nav/fotos", &root.to_string_lossy())];
     a.eject(root.clone());
-    a.clock = Some(Instant::now() + Duration::from_secs(1));
+    crate::clock::set(Some(Instant::now() + Duration::from_secs(1)));
     a.paint();
     assert!(a.activity_rect.is_some());
     assert_eq!(FakeNetwork::ui_io_calls()[seen..], Vec::<String>::new());

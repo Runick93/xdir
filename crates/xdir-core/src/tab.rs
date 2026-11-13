@@ -626,9 +626,10 @@ impl Tab {
             _ => None,
         };
         self.first_batch = false;
-        self.loading_since = Some(Instant::now());
+        // El mismo reloj que la `App` (umbrales de «Cargando…» y «Conectando…»).
+        self.loading_since = Some(crate::clock::now());
         self.load_started = match &self.location {
-            Location::Path(p) if sys::network().is_remote(p) => Some(Instant::now()),
+            Location::Path(p) if sys::network().is_remote(p) => Some(crate::clock::now()),
             _ => None,
         };
         self.spawn_load(hwnd, tx, generation);

@@ -43,7 +43,7 @@ fn center(r: geom::Rect) -> (f32, f32) {
 fn indicator_after_threshold_with_tooltip() {
     let (mut a, _host) = app_in("umbral");
     let t0 = Instant::now();
-    a.clock = Some(t0);
+    crate::clock::set(Some(t0));
     let list = &mut a.panes[0].tab_mut().list;
     let idx = list.entries.iter().position(|e| e.name == "a").unwrap();
     let pos = (0..list.count()).find(|&p| list.entry_of_pos(p) == Some(idx)).unwrap();
@@ -52,10 +52,10 @@ fn indicator_after_threshold_with_tooltip() {
     assert_eq!(a.sel_size.total(), crate::tab::SelTotal::Computing);
     assert!(a.activity.contains(&ActivityKey::SelSize));
     assert_eq!(a.activity_rect, None, "antes de 0,3 s no se ve");
-    a.clock = Some(t0 + ms(299));
+    crate::clock::set(Some(t0 + ms(299)));
     a.paint();
     assert_eq!(a.activity_rect, None);
-    a.clock = Some(t0 + ms(300));
+    crate::clock::set(Some(t0 + ms(300)));
     a.paint();
     let r = a.activity_rect.expect("el indicador a los 0,3 s");
     let (x, y) = center(r);
@@ -85,10 +85,10 @@ fn slow_load_in_indicator_from_half_second() {
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Computer);
     let t0 = Instant::now();
     a.panes[0].tab_mut().set_loading_since(Some(t0));
-    a.clock = Some(t0 + ms(400));
+    crate::clock::set(Some(t0 + ms(400)));
     a.paint();
     assert_eq!(a.activity_rect, None);
-    a.clock = Some(t0 + ms(500));
+    crate::clock::set(Some(t0 + ms(500)));
     a.paint();
     assert!(a.activity_rect.is_some());
     assert_eq!(a.tooltip_text(Hit::Activity).as_deref(), Some("Cargando \"Este equipo\""));
@@ -118,10 +118,10 @@ fn tooltip_lists_everything() {
     let t0 = Instant::now();
     a.activity.begin(ActivityKey::Connect(1), "Conectando con \"nas\"", t0);
     a.activity.begin(ActivityKey::Extract, "Extrayendo \"foto.jpg\"", t0 + ms(100));
-    a.clock = Some(t0 + ms(350));
+    crate::clock::set(Some(t0 + ms(350)));
     a.paint();
     assert_eq!(a.tooltip_text(Hit::Activity).as_deref(), Some("Conectando con \"nas\""));
-    a.clock = Some(t0 + ms(450));
+    crate::clock::set(Some(t0 + ms(450)));
     a.paint();
     assert_eq!(a.tooltip_text(Hit::Activity).as_deref(), Some("Conectando con \"nas\" · Extrayendo \"foto.jpg\""));
 }
@@ -134,11 +134,31 @@ fn fast_load_starts_no_timer() {
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Computer);
     let t0 = Instant::now();
     a.panes[0].tab_mut().set_loading_since(Some(t0));
-    a.clock = Some(t0 + ms(100));
+    crate::clock::set(Some(t0 + ms(100)));
     a.paint();
     assert!(!a.activity.is_empty());
     assert_eq!(a.activity.tick_due, None, "sin temporizador antes de los 0,5 s");
-    a.clock = Some(t0 + ms(600));
+    crate::clock::set(Some(t0 + ms(600)));
     a.paint();
     assert!(a.activity.tick_due.is_some());
+}
+
+/// Ronda 1: todo lo que decide los umbrales sigue el mismo reloj (`crate::clock`): el inicio de la
+/// lectura, el de expulsar y el «Cargando…» de la lista.
+#[test]
+fn thresholds_follow_the_fixed_clock() {
+    let (mut a, _host) = app_in("reloj");
+    let t = Instant::now() + Duration::from_secs(30);
+    crate::clock::set(Some(t));
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Computer);
+    assert_eq!(a.panes[0].tab().loading_since(), Some(t));
+    let root = PathBuf::from("/a2-reloj-usb");
+    assert!(a.eject_after_jobs(&root, "USB", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
+    assert_eq!(a.ejecting_now()[0].2, t);
+    crate::clock::set(Some(t + ms(600)));
+    a.paint();
+    assert!(a.panes[0].tab().loading_shown, "«Cargando…» con el reloj fijo");
+    assert!(a.activity_rect.is_some());
+    a.eject_done(&root);
 }

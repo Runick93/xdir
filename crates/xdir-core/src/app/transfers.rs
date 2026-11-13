@@ -1061,7 +1061,7 @@ impl App {
     /// expulsa (dijo que no).
     pub fn eject_after_jobs(&mut self, root: &Path, label: &str, verb: Verb, then: AfterJobs) -> bool {
         let ids = self.jobs_on_volume(root);
-        let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string(), verb, since: Instant::now(), readers: Arc::default() };
+        let ejecting = Ejecting { root: root.to_path_buf(), volume: self.root_volume(root), label: label.to_string(), verb, since: crate::clock::now(), readers: Arc::default() };
         if ids.is_empty() {
             // Hasta que termine de expulsar (`eject_done`) no empiezan copias sobre el disco.
             self.transfers.ejecting.lock().unwrap_or_else(|e| e.into_inner()).push(ejecting);

@@ -381,9 +381,6 @@ pub struct App {
     activity: activity::Activities,
     /// Dónde quedó el indicador de actividad en el último cuadro (`None`: no se ve).
     activity_rect: Option<geom::Rect>,
-    /// Reloj fijo para las pruebas (`App::now`).
-    #[cfg(test)]
-    clock: Option<Instant>,
     /// La versión más nueva que se abrió con esta sesión (se guarda en `version_vista`).
     seen_version: String,
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
@@ -594,6 +591,9 @@ impl App {
     /// Arma la aplicación (sin ventana: la plataforma la fija después con `App::attach`, que se la
     /// pasa al host) y abre sus paneles.
     pub fn new(init: Init, host: Rc<dyn WindowHost>) -> App {
+        // Pruebas: el reloj fijado por una prueba anterior en este hilo no pasa a esta.
+        #[cfg(test)]
+        crate::clock::set(None);
         let Init { session, history, config, favorites, groups, mut folder_views, probe, start_path, started, marks } = init;
         // Primera vez con memoria por carpeta: la vista y las columnas de la sesión pasan a ser
         // la vista por defecto.
@@ -656,8 +656,6 @@ impl App {
             size_link: None,
             activity: activity::Activities::default(),
             activity_rect: None,
-            #[cfg(test)]
-            clock: None,
             seen_version: crate::changelog::newest(session.seen_version.as_deref().unwrap_or(about::VERSION), about::VERSION).to_string(),
             transparent: false,
             favorites,

@@ -183,7 +183,7 @@ pub trait FileOps: Send + Sync {
 }
 
 /// Lo que el escáner y la vista de xtree necesitan del sistema: listar carpetas, el escaneo
-/// rápido de un volumen entero, el escaneo con permisos (tecla A), los discos y su espacio.
+/// rápido de un volumen entero, el escaneo con permisos (`xtree_permisos`), los discos y su espacio.
 pub trait DiskScan: Send + Sync {
     /// Listador de carpetas para un escaneo que empieza en `root` (cada sistema decide qué no
     /// recorrer: otros discos, enlaces...).
@@ -201,10 +201,11 @@ pub trait DiskScan: Send + Sync {
     fn whole_volume(&self, path: &Path) -> bool;
     /// Carpeta que se analiza al abrir xtree sin elegir nada (el disco del sistema).
     fn default_root(&self) -> PathBuf;
-    /// ¿Faltaron permisos en el escaneo? (aviso de la barra de datos y tecla A).
+    /// ¿Faltaron permisos en el escaneo? (aviso de la barra de datos y `xtree_permisos`).
     fn permission_issue(&self, p: &Progress) -> bool;
     /// Aviso de la barra de datos cuando faltan permisos; la vista cambia `{n}` por la cantidad
-    /// de carpetas sin permiso.
+    /// de carpetas sin permiso y `{teclas}` por el atajo en uso de `xtree_permisos` (sin atajo, se
+    /// quita « ({teclas})»).
     fn permission_hint(&self) -> &'static str;
     /// Texto de la barra de datos y de estado mientras corre `elevate`.
     fn elevating_text(&self) -> &'static str;

@@ -64,6 +64,8 @@ pub enum Capture {
 pub const LIST_KEY: &str = "Esa tecla ya la usa la lista";
 pub const SYSTEM_KEY: &str = "La usa el sistema";
 pub const UNNAMED_KEY: &str = "Esa tecla no se puede usar como atajo";
+/// Para un comando de xtree: las teclas propias de la vista (F5, Retroceso, Esc, flechas, Enter).
+pub const XTREE_KEY: &str = "Esa tecla ya la usa xtree";
 
 /// Clasifica la tecla grabada (`Ctrl` es ⌘ en macOS y `meta` es ⌃; en Windows y Linux `meta` es
 /// la tecla Windows/Super).

@@ -47,6 +47,12 @@ const TOP_PAD: f32 = 32.0;
 const SLIDE_SECS: f32 = 0.32;
 /// Máximo de carpetas del Acceso rápido que se muestran.
 const QUICK_MAX: usize = 20;
+/// Arrastrando archivos, tiempo sobre una carpeta plegada hasta que se despliega (#56).
+pub const DRAG_EXPAND: std::time::Duration = std::time::Duration::from_millis(800);
+/// Franja de arriba y de abajo de las filas donde un arrastre desplaza el árbol, y a qué
+/// velocidad (DIPs por segundo).
+const EDGE: f32 = 24.0;
+const EDGE_SPEED: f32 = ROW_H * 10.0;
 
 /// Qué es una fila, para su ícono y lo que abre.
 #[derive(Clone, Copy, PartialEq)]
@@ -73,6 +79,10 @@ enum Kind {
     NetFavorite,
     NetConnected,
     NetHost,
+    /// Lo que lista una carpeta virtual del Shell (las máquinas de la Red de Windows, `\\HOST`, y
+    /// las distribuciones de Linux): se abre y se despliega con un clic, pero no recibe lo que se
+    /// suelta ni se despliega al arrastrar.
+    ShellItem,
     /// Línea que separa grupos.
     Separator,
 }
@@ -268,6 +278,12 @@ pub struct Tree {
     net_sep_shell: Option<usize>,
     /// Nodos de «Red» que se pueden reusar.
     net_free: Vec<usize>,
+    /// Fila resaltada como destino de un arrastre (#56); la pone la `App` en `on_drag`.
+    pub drop_target: Option<usize>,
+    /// Arrastrando encima: la carpeta plegada bajo el puntero y desde cuándo.
+    drag_hover: Option<(usize, std::time::Instant)>,
+    /// Hora del evento de arrastre anterior (para desplazar según el tiempo).
+    drag_last: Option<std::time::Instant>,
 }
 
 /// Revelación pendiente (`Tree::reveal`).
@@ -324,6 +340,9 @@ impl Tree {
             net_sep_shell: None,
             net_free: Vec::new(),
             eject_rects: Vec::new(),
+            drop_target: None,
+            drag_hover: None,
+            drag_last: None,
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
         t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
@@ -444,8 +463,9 @@ impl Tree {
 
     // ---------- Red ----------
 
-    /// Para las pruebas: el centro de la fila con ese nombre, si está a la vista.
-    #[cfg(test)]
+    /// Para las pruebas (y el gancho de pruebas): el centro de la fila con ese nombre, si está a
+    /// la vista.
+    #[cfg(any(test, feature = "pruebas"))]
     pub fn row_point(&self, name: &str) -> Option<(f32, f32)> {
         let i = self.rows().iter().position(|&id| self.nodes[id].name == name)?;
         let y = self.area.top + TOP_PAD + i as f32 * ROW_H - self.scroll + ROW_H / 2.0;
@@ -532,6 +552,12 @@ impl Tree {
             }
             if self.scroll_to == Some(id) {
                 self.scroll_to = None;
+            }
+            if self.drop_target == Some(id) {
+                self.drop_target = None;
+            }
+            if self.drag_hover.is_some_and(|(h, _)| h == id) {
+                self.drag_hover = None;
             }
             self.eject_rects.retain(|(_, e)| *e != id);
             // Uno que todavía se está leyendo no se recicla: su lectura vuelve con este número.
@@ -788,9 +814,10 @@ impl Tree {
     pub fn on_loaded(&mut self) {
         while let Ok((id, dirs)) = self.rx.try_recv() {
             let depth = self.nodes[id].depth + 1;
+            let kind = if matches!(self.nodes[id].kind, Kind::Network | Kind::Linux) { Kind::ShellItem } else { Kind::Folder };
             let mut ids = Vec::with_capacity(dirs.len());
             for (name, path) in dirs {
-                self.nodes.push(Node::new(Kind::Folder, path, name, depth));
+                self.nodes.push(Node::new(kind, path, name, depth));
                 ids.push(self.nodes.len() - 1);
             }
             if self.nodes[id].kind == Kind::Network {
@@ -829,7 +856,7 @@ impl Tree {
             if self.roots.contains(&id) {
                 top = Some(id);
             }
-            if matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path) {
+            if matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::ShellItem) && fs.same_path(&self.nodes[id].path, path) {
                 if real_top.is_none_or(|t| t == top) {
                     shown.push((i, id));
                 } else {
@@ -985,7 +1012,102 @@ impl Tree {
         }
         let id = self.node_at(y)?;
         let n = &self.nodes[id];
-        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive).then(|| n.path.clone())
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::ShellItem).then(|| n.path.clone())
+    }
+
+    /// La fila bajo el punto si acepta que le suelten archivos (#56): una carpeta, una carpeta del
+    /// usuario, OneDrive, un disco o una conexión de red ya conectada. No «Este equipo», Inicio,
+    /// xtree, el Acceso rápido (el grupo), «Red», sus favoritos y máquinas, Linux ni la Papelera.
+    /// No toca el disco (la Papelera se reconoce por la ruta).
+    pub fn drop_node_at(&self, x: f32, y: f32) -> Option<(usize, PathBuf)> {
+        if !(self.contains(x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        let id = self.node_at(y)?;
+        let n = &self.nodes[id];
+        let folder = matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::NetConnected);
+        let ok = folder && !n.path.as_os_str().is_empty() && !crate::sys::file_system().is_trash(&Location::Path(n.path.clone()));
+        ok.then(|| (id, n.path.clone()))
+    }
+
+    /// Un evento de arrastre de archivos a la hora `now`, con el puntero en `at` (`None`: fuera del
+    /// árbol o tapado). Despliega la carpeta plegada que tiene el puntero encima desde hace
+    /// `DRAG_EXPAND` (la lee en otro hilo), desplaza cerca del borde de arriba o de abajo según el
+    /// tiempo desde el evento anterior y, suelto, abre la franja mientras el puntero está encima.
+    /// Devuelve si hay que repintar.
+    pub fn drag_over(&mut self, hwnd: Handle, at: Option<(f32, f32)>, now: std::time::Instant, show_hidden: bool) -> bool {
+        let at = at.filter(|&(x, y)| self.contains(x, y));
+        let mut changed = false;
+        if !self.pinned && self.visible && self.open != at.is_some() {
+            self.open = at.is_some();
+            changed = true;
+        }
+        let Some((_, y)) = at else {
+            self.drag_hover = None;
+            self.drag_last = None;
+            return changed;
+        };
+        // Desplazar en los bordes: lo que corresponde al tiempo desde el evento anterior (como
+        // mucho 0,1 s, así un evento tardío no salta de golpe).
+        let dt = self.drag_last.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f32().min(0.1));
+        self.drag_last = Some(now);
+        let rows_top = self.area.top + TOP_PAD;
+        let dir = if y < rows_top + EDGE {
+            -1.0
+        } else if y > self.area.top + self.view_h - EDGE {
+            1.0
+        } else {
+            0.0
+        };
+        if dir != 0.0 && dt > 0.0 {
+            let s = (self.scroll + dir * EDGE_SPEED * dt).clamp(0.0, self.max_scroll());
+            if s != self.scroll {
+                self.scroll = s;
+                changed = true;
+            }
+        }
+        // Desplegar: una carpeta plegada que tiene (o puede tener) subcarpetas.
+        let node = (y >= rows_top).then(|| self.node_at(y)).flatten().filter(|&id| {
+            let n = &self.nodes[id];
+            let kind = matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::NetConnected | Kind::Computer | Kind::QuickAccess);
+            kind && !n.expanded && n.children.as_ref().is_none_or(|c| !c.is_empty())
+        });
+        match (node, self.drag_hover) {
+            (Some(id), Some((h, since))) if h == id => {
+                if now.saturating_duration_since(since) >= DRAG_EXPAND {
+                    self.nodes[id].expanded = true;
+                    self.load_children(hwnd, id, show_hidden);
+                    self.drag_hover = None;
+                    changed = true;
+                }
+            }
+            (Some(id), _) => self.drag_hover = Some((id, now)),
+            (None, _) => self.drag_hover = None,
+        }
+        changed
+    }
+
+    /// Terminó el arrastre (se soltó o salió de la ventana, `left`). Al salir, suelto, vuelve a
+    /// la franja; al soltar queda como esté hasta que el mouse se mueva.
+    pub fn drag_end(&mut self, left: bool) {
+        self.drag_hover = None;
+        self.drag_last = None;
+        if left && !self.pinned {
+            self.open = false;
+        }
+    }
+
+    /// Para las pruebas de la `App`: el arrastre lleva `d` más sobre la fila que tiene debajo.
+    #[cfg(test)]
+    pub fn age_drag_hover(&mut self, d: std::time::Duration) {
+        if let Some((_, since)) = &mut self.drag_hover {
+            *since -= d;
+        }
+    }
+
+    /// La carpeta resaltada como destino del arrastre, si hay una.
+    pub fn drop_target_path(&self) -> Option<PathBuf> {
+        self.drop_target.and_then(|id| self.nodes.get(id)).map(|n| n.path.clone())
     }
 
     /// Se ve ahora.
@@ -1132,7 +1254,7 @@ impl Tree {
 
     /// ¿La fila de `n` es la carpeta del panel activo (`current`)? Solo las carpetas de disco.
     fn is_current(&self, n: &Node, current: Option<&Path>) -> bool {
-        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive)
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::ShellItem)
             && current.is_some_and(|c| crate::sys::file_system().same_path(c, &n.path))
     }
 
@@ -1220,7 +1342,11 @@ impl Tree {
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
                 let is_current = self.is_current(n, current);
-                if is_current {
+                // Destino de un arrastre: como la carpeta destino de la lista.
+                if self.drop_target == Some(id) {
+                    p.round_fill(row, 5.0, th.selection);
+                    p.round_stroke_w(row, 5.0, th.accent, 1.0);
+                } else if is_current {
                     p.round_fill(row, 5.0, alpha(th.text, 0.11));
                 } else if self.hover == Some(id) {
                     p.round_fill(row, 5.0, alpha(th.text, 0.06));
@@ -1607,6 +1733,191 @@ mod tests {
         finish_reveal(&mut t);
         assert_eq!(t.scroll_to, Some(quick));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- soltar en el árbol (#56) ----------
+
+    /// Árbol con `root` como única unidad, «Red» desplegada (un favorito, una conexión en
+    /// `root/red` y una máquina) y dibujado en 240×900.
+    fn drop_tree(root: &Path) -> (Tree, crate::sys::testing::RecordingPainter, Rect) {
+        let mut t = tree_with_drive(root);
+        t.set_network(vec![("NAS".into(), "smb://nas/x".into())], vec![("x (nas)".into(), root.join("red"), "smb://nas/x".into())], vec!["MAQ".into()]);
+        t.expand_network(Handle::default(), true);
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        let area = rect(0.0, 0.0, WIDTH, 900.0);
+        t.draw(&p, area, None, XtreeBadge::Idle);
+        (t, p, area)
+    }
+
+    /// Solo aceptan soltar las carpetas de verdad: discos, carpetas y conexiones de red; no
+    /// «Este equipo», Inicio, xtree, «Red», sus favoritos ni sus máquinas, ni la Papelera.
+    #[test]
+    fn tree_drop_node_kinds() {
+        install_fakes();
+        let root = temp_root("soltar");
+        let (t, _, _) = drop_tree(&root);
+        let at = |name: &str| {
+            let (x, y) = t.row_point(name).unwrap_or_else(|| panic!("fila {name}"));
+            t.drop_node_at(x, y).map(|(_, p)| p)
+        };
+        assert_eq!(at("Disco"), Some(root.clone()));
+        assert_eq!(at("x (nas)"), Some(root.join("red")));
+        for name in ["Inicio", "xtree", "Este equipo", "Red", "NAS", "MAQ"] {
+            assert_eq!(at(name), None, "{name}");
+        }
+        // Arriba de las filas (título y chincheta) y fuera del árbol: nada.
+        assert_eq!(t.drop_node_at(20.0, 10.0), None);
+        assert_eq!(t.drop_node_at(WIDTH + 30.0, t.row_point("Disco").unwrap().1), None);
+        // La Papelera no recibe nada.
+        FakeFileSystem::set_trash(Some(&root));
+        let (x, y) = t.row_point("Disco").unwrap();
+        assert_eq!(t.drop_node_at(x, y), None);
+        FakeFileSystem::set_trash(None);
+    }
+
+    /// I1: lo que la Red del Shell lista (las máquinas, `\\SRV01`) no recibe lo que se suelta ni
+    /// se despliega al arrastrar encima.
+    #[test]
+    fn tree_shell_network_children_refuse_drops() {
+        install_fakes();
+        FakeFileSystem::set_network_place(true);
+        FakeFileSystem::set_shell_subfolders(crate::sys::testing::FAKE_NETWORK_PLACE, vec![("SRV01".into(), PathBuf::from(r"\\SRV01"))]);
+        let root = temp_root("red-shell");
+        let mut t = tree_with_drive(&root);
+        FakeFileSystem::set_network_place(false);
+        t.expand_network(Handle::default(), true);
+        let start = std::time::Instant::now();
+        while !t.nodes.iter().any(|n| n.name == "SRV01") {
+            assert!(start.elapsed().as_secs() < 10, "no llegó la Red del Shell");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            t.on_loaded();
+        }
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, rect(0.0, 0.0, WIDTH, 900.0), None, XtreeBadge::Idle);
+        let at = t.row_point("SRV01").expect("la máquina a la vista");
+        assert_eq!(t.drop_node_at(at.0, at.1), None);
+        let id = t.nodes.iter().position(|n| n.name == "SRV01").unwrap();
+        let t0 = std::time::Instant::now();
+        t.drag_over(Handle::default(), Some(at), t0, false);
+        t.drag_over(Handle::default(), Some(at), t0 + DRAG_EXPAND * 2, false);
+        assert!(!t.nodes[id].expanded, "no se despliega");
+        // Se sigue pudiendo abrir con un clic (navega a la máquina).
+        assert!(matches!(t.hit(at.0, at.1), TreeHit::Open(_) | TreeHit::Toggle(_)));
+    }
+
+    /// La fila destino se dibuja como la de la lista: selección con borde de acento.
+    #[test]
+    fn tree_drop_target_draws_band() {
+        install_fakes();
+        let root = temp_root("soltar-banda");
+        let (mut t, _, area) = drop_tree(&root);
+        let (x, y) = t.row_point("Disco").unwrap();
+        let (id, _) = t.drop_node_at(x, y).unwrap();
+        t.drop_target = Some(id);
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, None, XtreeBadge::Idle);
+        let th = p.theme();
+        let in_row = |r: &Rect| r.top < y && r.bottom > y && r.right - r.left > 100.0;
+        assert!(p.round_fills().iter().any(|(r, c)| in_row(r) && *c == th.selection), "sin banda");
+        assert!(p.strokes().iter().any(|(r, c)| in_row(r) && *c == th.accent), "sin borde de acento");
+        assert_eq!(t.drop_target_path(), Some(root.clone()));
+    }
+
+    /// #56: quedarse `DRAG_EXPAND` sobre una carpeta plegada la despliega (y la lee en otro hilo);
+    /// pasar a otra fila vuelve a contar desde cero. Los tiempos llegan como parámetro.
+    #[test]
+    fn drag_hover_expands_after_delay() {
+        install_fakes();
+        let root = temp_root("arrastre-desplegar");
+        std::fs::create_dir_all(root.join("alfa")).unwrap();
+        let (mut t, _, _) = drop_tree(&root);
+        let disk = t.rows().into_iter().find(|&id| t.nodes[id].kind == Kind::Drive).unwrap();
+        let at = t.row_point("Disco").unwrap();
+        let home = t.row_point("Inicio").unwrap();
+        let t0 = std::time::Instant::now();
+        let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+        t.drag_over(Handle::default(), Some(at), t0, false);
+        t.drag_over(Handle::default(), Some(at), ms(500), false);
+        assert!(!t.nodes[disk].expanded, "todavía no");
+        // Pasa por otra fila: el tiempo vuelve a empezar.
+        t.drag_over(Handle::default(), Some(home), ms(600), false);
+        t.drag_over(Handle::default(), Some(at), ms(900), false);
+        t.drag_over(Handle::default(), Some(at), ms(1600), false);
+        assert!(!t.nodes[disk].expanded, "se reinició al cambiar de fila");
+        assert!(t.drag_over(Handle::default(), Some(at), ms(1750), false), "repinta al desplegar");
+        assert!(t.nodes[disk].expanded);
+        let start = std::time::Instant::now();
+        while t.nodes[disk].children.is_none() {
+            assert!(start.elapsed().as_secs() < 10, "no llegó la lectura");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            t.on_loaded();
+        }
+        assert!(node_by_path(&t, &root.join("alfa")).is_some());
+        // Lo que no es una carpeta (Inicio, «Red») no se despliega.
+        let red = t.rows().into_iter().find(|&id| t.nodes[id].kind == Kind::Network).unwrap();
+        t.expand_network(Handle::default(), false);
+        t.draw(&crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true))), t.area, None, XtreeBadge::Idle);
+        let r = t.row_point("Red").unwrap();
+        t.drag_over(Handle::default(), Some(r), ms(2000), false);
+        t.drag_over(Handle::default(), Some(r), ms(3000), false);
+        assert!(!t.nodes[red].expanded);
+        t.drag_end(true);
+    }
+
+    /// #56: cerca del borde de abajo el árbol baja y cerca del de arriba sube, según el tiempo
+    /// entre eventos; en el medio no se mueve.
+    #[test]
+    fn drag_edge_scrolls() {
+        install_fakes();
+        let root = temp_root("arrastre-borde");
+        let mut t = tree_with_drive(&root);
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        let area = rect(0.0, 0.0, WIDTH, 120.0);
+        t.draw(&p, area, None, XtreeBadge::Idle);
+        assert!(t.max_scroll() > 50.0, "hacen falta filas que no entren");
+        let t0 = std::time::Instant::now();
+        let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+        let (x, mid) = (100.0, (area.top + TOP_PAD + area.bottom) / 2.0);
+        t.drag_over(Handle::default(), Some((x, mid)), t0, false);
+        t.drag_over(Handle::default(), Some((x, mid)), ms(50), false);
+        assert_eq!(t.scroll, 0.0, "en el medio no se mueve");
+        let bottom = area.bottom - 4.0;
+        t.drag_over(Handle::default(), Some((x, bottom)), ms(100), false);
+        assert!(t.drag_over(Handle::default(), Some((x, bottom)), ms(150), false));
+        let down = t.scroll;
+        assert!(down > 0.0, "baja");
+        t.drag_over(Handle::default(), Some((x, bottom)), ms(200), false);
+        assert!(t.scroll > down, "sigue bajando");
+        let top = area.top + TOP_PAD + 2.0;
+        let before = t.scroll;
+        t.drag_over(Handle::default(), Some((x, top)), ms(250), false);
+        assert!(t.scroll < before, "sube");
+        // Un evento que llega mucho después no salta de golpe (como mucho 0,1 s).
+        let before = t.scroll;
+        t.drag_over(Handle::default(), Some((x, top)), ms(5000), false);
+        assert!(before - t.scroll <= EDGE_SPEED * 0.1 + 0.01);
+    }
+
+    /// #56: suelto (franja), el árbol se abre mientras se arrastra encima y se cierra al salir.
+    #[test]
+    fn drag_opens_unpinned_tree() {
+        install_fakes();
+        let mut t = Tree::new();
+        t.visible = true;
+        t.set_pinned(false, false);
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, rect(0.0, 0.0, COLLAPSED_W, 600.0), None, XtreeBadge::Idle);
+        let now = std::time::Instant::now();
+        assert!(t.drag_over(Handle::default(), Some((20.0, 200.0)), now, false));
+        assert!(t.open);
+        t.drag_over(Handle::default(), None, now, false);
+        assert!(!t.open, "afuera se cierra");
+        t.drag_over(Handle::default(), Some((20.0, 200.0)), now, false);
+        t.drag_end(true);
+        assert!(!t.open, "salir de la ventana la cierra");
     }
 
     // ---------- entrada «xtree» ----------

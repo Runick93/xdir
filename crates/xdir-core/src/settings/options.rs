@@ -36,7 +36,7 @@ pub const OPTIONS: &[OptionSpec] = &[
     opt("vista_previa", Section::Preview, "Mostrar la vista previa", "La columna a la derecha de los paneles (Alt+P)", &["vista", "previa", "columna", "mostrar"]),
     opt("vista_previa_ancho", Section::Preview, "Ancho", "De 240 a 640 píxeles", &["ancho", "tamaño", "columna"]),
     opt("xtree_analizar_al_abrir", Section::Xtree, "Analizar al abrir xtree", "Si no, elegís el disco y tocás Analizar", &["xtree", "analizar", "abrir", "escanear", "disco"]),
-    opt("xtree_por_tipo", Section::Xtree, "Colorear el mapa por tipo de archivo al abrir", "Lo mismo que la tecla T, desde que se abre", &["xtree", "color", "tipo", "mapa"]),
+    opt("xtree_por_tipo", Section::Xtree, "Colorear el mapa por tipo de archivo al abrir", "Lo mismo que el botón Colores, desde que se abre", &["xtree", "color", "tipo", "mapa"]),
     opt("xtree_abrir", Section::Xtree, "Disco que se analiza al abrir", "El del sistema, el de la carpeta del panel o el último", &["xtree", "disco", "analizar", "carpeta"]),
     opt("xtree_teclas", Section::Xtree, "Teclas de xtree", "Solo para ver: se cambian en Atajos de teclado", &["xtree", "teclas", "atajos"]),
     opt("abrir_config", Section::Advanced, "config.toml", "Atajos, colores y opciones escritos a mano", &["config", "toml", "abrir", "editor", "archivo"]),

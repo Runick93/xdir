@@ -110,6 +110,12 @@ pub enum Command {
     ToggleQuickPin,
     /// Abrir o cerrar xtree, el mapa de uso de disco.
     Xtree,
+    /// Dentro de xtree: colorear el mapa por carpeta o por tipo de archivo (solo vale con la vista
+    /// abierta: `xtree_only`).
+    XtreeColors,
+    /// Dentro de xtree: analizar de nuevo con permisos (administrador en Windows; en macOS, el
+    /// ajuste de Acceso total al disco), si faltaron.
+    XtreeElevate,
     /// La vista de la carpeta actual pasa a ser la por defecto y se borran las de las demás.
     ApplyViewToAll,
     /// La carpeta actual vuelve a la vista por defecto.
@@ -243,6 +249,8 @@ pub const ALL: &[Spec] = &[
     spec(Command::QuickLook, "vista_rapida", "Vista rápida", &["Espacio"]),
     spec(Command::ShowTransfers, "mostrar_operaciones", "Mostrar operaciones", &[]),
     spec(Command::Xtree, "xtree", "Mapa de uso de disco (xtree)", &[]),
+    spec(Command::XtreeColors, "xtree_colores", "xtree: colorear por carpeta o por tipo de archivo", &["Ctrl+T"]),
+    spec(Command::XtreeElevate, "xtree_permisos", "xtree: analizar de nuevo con permisos", &["Ctrl+Shift+A"]),
     spec(Command::About, "acerca_de", "Acerca de xdir (versión y reportar un problema)", &[]),
     spec(Command::Changelog, "novedades", "Novedades de xdir", &[]),
     spec(Command::View(0), "vista_detalles", "Vista: detalles", &["Ctrl+Shift+1"]),
@@ -282,11 +290,14 @@ pub enum Group {
     Views,
     Preview,
     Network,
+    /// Lo de la vista de xtree (sus atajos solo valen con la vista abierta).
+    Xtree,
     Other,
 }
 
 impl Group {
-    pub const ALL: [Group; 8] = [Group::Navigation, Group::TabsPanes, Group::Selection, Group::Files, Group::Views, Group::Preview, Group::Network, Group::Other];
+    pub const ALL: [Group; 9] =
+        [Group::Navigation, Group::TabsPanes, Group::Selection, Group::Files, Group::Views, Group::Preview, Group::Network, Group::Xtree, Group::Other];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -297,6 +308,7 @@ impl Group {
             Group::Views => "Vistas",
             Group::Preview => "Vista previa y vista rápida",
             Group::Network => "Red",
+            Group::Xtree => "xtree",
             Group::Other => "Otros",
         }
     }
@@ -366,16 +378,28 @@ pub fn group(c: Command) -> Group {
         | Command::ToggleDarkMode => Group::Views,
         Command::TogglePreview | Command::QuickLook => Group::Preview,
         Command::ConnectServer | Command::MapNetworkDrive | Command::DisconnectNetworkDrive => Group::Network,
+        Command::Xtree | Command::XtreeColors | Command::XtreeElevate => Group::Xtree,
         Command::Palette
         | Command::PowerShell
         | Command::Cmd
-        | Command::Xtree
         | Command::OpenConfig
         | Command::Settings
         | Command::SettingsKeys
         | Command::About
         | Command::Changelog => Group::Other,
     }
+}
+
+/// ¿El comando es de la vista de xtree? Sus atajos solo valen con la vista abierta y no chocan
+/// con los de la ventana (Ctrl+T cambia los colores en xtree y abre una pestaña en los paneles).
+pub fn xtree_only(c: Command) -> bool {
+    matches!(c, Command::XtreeColors | Command::XtreeElevate)
+}
+
+/// Comandos de la ventana que siguen andando con xtree abierto (`App::on_xtree_key`): un comando
+/// de xtree que tome su tecla choca con ellos.
+pub fn live_in_xtree(c: Command) -> bool {
+    matches!(c, Command::Filter | Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)
 }
 
 /// Tabla de atajos para la wiki: por grupo, en el orden de `ALL`, solo lo que existe en `env`.
@@ -603,8 +627,10 @@ impl Keymap {
     pub fn set(&mut self, command: Command, combos: &[Combo]) -> Vec<Command> {
         self.bindings.retain(|(_, c)| *c != command);
         let mut displaced = Vec::new();
+        let scope = xtree_only(command);
         for combo in combos {
-            if let Some(pos) = self.bindings.iter().position(|(k, _)| k == combo) {
+            // Solo le quita la tecla a un comando del mismo ámbito (la ventana o xtree).
+            if let Some(pos) = self.bindings.iter().position(|(k, c)| k == combo && xtree_only(*c) == scope) {
                 displaced.push(self.bindings.remove(pos).1);
             }
             self.bindings.push((*combo, command));
@@ -614,7 +640,13 @@ impl Keymap {
 
     pub fn lookup(&self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<Command> {
         let combo = Combo { vk: vk.0, ctrl, shift, alt, meta };
-        self.bindings.iter().find(|(k, _)| *k == combo).map(|(_, c)| *c)
+        self.bindings.iter().find(|(k, c)| *k == combo && !xtree_only(*c)).map(|(_, c)| *c)
+    }
+
+    /// Como `lookup`, pero entre los comandos de la vista de xtree (`xtree_only`).
+    pub fn lookup_xtree(&self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<Command> {
+        let combo = Combo { vk: vk.0, ctrl, shift, alt, meta };
+        self.bindings.iter().find(|(k, c)| *k == combo && xtree_only(*c)).map(|(_, c)| *c)
     }
 
     /// Los atajos de una acción, en orden (el primero es el principal).
@@ -624,7 +656,16 @@ impl Keymap {
 
     /// La acción que tiene esa combinación.
     pub fn owner(&self, k: Combo) -> Option<Command> {
-        self.bindings.iter().find(|(b, _)| *b == k).map(|(_, c)| *c)
+        self.bindings.iter().find(|(b, c)| *b == k && !xtree_only(*c)).map(|(_, c)| *c)
+    }
+
+    /// Quién tiene la tecla entre los comandos del mismo ámbito que `command` (con quién chocaría).
+    /// Para uno de xtree, también los de la ventana que siguen andando dentro de xtree
+    /// (`live_in_xtree`: Ctrl+F busca).
+    pub fn owner_for(&self, k: Combo, command: Command) -> Option<Command> {
+        let scope = xtree_only(command);
+        let same = self.bindings.iter().find(|(b, c)| *b == k && xtree_only(*c) == scope).map(|(_, c)| *c);
+        same.or_else(|| scope.then(|| self.bindings.iter().find(|(b, c)| *b == k && live_in_xtree(*c)).map(|(_, c)| *c)).flatten())
     }
 
     /// Atajos de una acción, para mostrar en la paleta.
@@ -800,8 +841,10 @@ mod tests {
         for s in ALL.iter().filter(|s| available(s.command)) {
             for k in s.keys() {
                 let c = parse_combo(k).unwrap();
-                assert!(seen.insert(c), "atajo repetido: {k}");
-                assert_eq!(km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta), Some(s.command), "{k}");
+                // Cada ámbito (la ventana, xtree) tiene sus propias teclas.
+                assert!(seen.insert((xtree_only(s.command), c)), "atajo repetido: {k}");
+                let found = if xtree_only(s.command) { km.lookup_xtree(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta) } else { km.lookup(Key(c.vk), c.ctrl, c.shift, c.alt, c.meta) };
+                assert_eq!(found, Some(s.command), "{k}");
             }
         }
         let ids: std::collections::HashSet<_> = ALL.iter().map(|s| s.id).collect();
@@ -879,6 +922,52 @@ mod tests {
 
     /// Vistas Lista y Contenido: `Command::View(4)` y `(5)` (índices de `list::VIEWS`), con sus
     /// ids, títulos y atajos Ctrl+Shift+5 / Ctrl+Shift+6 (⇧⌘5 / ⇧⌘6 en macOS).
+    /// #57: «xtree_colores» (Ctrl+T) solo vale dentro de xtree: no choca con «Pestaña nueva», que
+    /// sigue siendo Ctrl+T en los paneles; cambiar uno no le quita la tecla al otro.
+    #[test]
+    fn xtree_colors_command_is_scoped() {
+        install_fakes();
+        let s = ALL.iter().find(|s| s.id == "xtree_colores").unwrap();
+        assert_eq!((s.command, s.default_keys), (Command::XtreeColors, &["Ctrl+T"][..]));
+        assert!(xtree_only(Command::XtreeColors) && !xtree_only(Command::NewTab));
+        assert_eq!(group(Command::XtreeColors), Group::Xtree);
+        let mut km = Keymap::default();
+        let t = Key(b'T' as u16);
+        assert_eq!(km.lookup(t, true, false, false, false), Some(Command::NewTab));
+        assert_eq!(km.lookup_xtree(t, true, false, false, false), Some(Command::XtreeColors));
+        assert_eq!(km.lookup_xtree(Key(b'W' as u16), true, false, false, false), None, "solo los de xtree");
+        let ct = parse_combo("Ctrl+T").unwrap();
+        assert_eq!(km.owner(ct), Some(Command::NewTab));
+        assert_eq!(km.owner_for(ct, Command::XtreeColors), Some(Command::XtreeColors));
+        assert_eq!(km.owner_for(ct, Command::Duplicate), Some(Command::NewTab));
+        // Ctrl+K para los colores no le quita Ctrl+K a «Conectar a un servidor».
+        let k = parse_combo("Ctrl+K").unwrap();
+        assert_eq!(km.set(Command::XtreeColors, &[k]), Vec::<Command>::new());
+        assert_eq!(km.lookup(Key(b'K' as u16), true, false, false, false), Some(Command::ConnectServer));
+        assert_eq!(km.lookup_xtree(Key(b'K' as u16), true, false, false, false), Some(Command::XtreeColors));
+        assert_eq!(km.label(Command::XtreeColors), "Ctrl+K");
+        // Y un comando de la ventana con Ctrl+K desplaza solo al de la ventana.
+        assert_eq!(km.set(Command::Duplicate, &[k]), vec![Command::ConnectServer]);
+        assert_eq!(km.lookup_xtree(Key(b'K' as u16), true, false, false, false), Some(Command::XtreeColors));
+        assert!(markdown_table(env()).contains("### xtree\n"));
+    }
+
+    /// «xtree_permisos» (Ctrl+Shift+A): analizar con permisos, solo dentro de xtree (la A sola es
+    /// del salto por letra).
+    #[test]
+    fn xtree_elevate_command_is_scoped() {
+        install_fakes();
+        let s = ALL.iter().find(|s| s.id == "xtree_permisos").unwrap();
+        assert_eq!((s.command, s.default_keys), (Command::XtreeElevate, &["Ctrl+Shift+A"][..]));
+        assert!(xtree_only(Command::XtreeElevate));
+        assert_eq!(group(Command::XtreeElevate), Group::Xtree);
+        let km = Keymap::default();
+        let a = Key(b'A' as u16);
+        assert_eq!(km.lookup_xtree(a, true, true, false, false), Some(Command::XtreeElevate));
+        assert_eq!(km.lookup_xtree(a, false, false, false, false), None);
+        assert_eq!(combo_label_in(KeyStyle::Mac, parse_combo("Ctrl+Shift+A").unwrap()), "⇧⌘A");
+    }
+
     #[test]
     fn view_shortcuts() {
         install_fakes();

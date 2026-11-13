@@ -564,6 +564,32 @@ impl App {
                 }
             }
             "copiar" | "mover" | "ventana" | "comprimir" | "extraer_aqui" | "extraer_en" => self.transfer_test(verb, &format!("{a} {b}")),
+            // `arrastre <entrar|encima|soltar|salir> <fila del árbol> | <ruta>`: un arrastre de
+            // archivos como el del sistema, con el puntero en el centro de esa fila del árbol
+            // (#56); el efecto queda en el aviso.
+            #[cfg(feature = "arbol")]
+            "arrastre" => {
+                use crate::drop::{DragEvent, DragKind, Effect};
+                let rest = text.splitn(3, ' ').nth(2).unwrap_or("");
+                let (row, path) = rest.split_once(" | ").unwrap_or((rest, ""));
+                let kind = match a {
+                    "entrar" => DragKind::Enter,
+                    "encima" => DragKind::Over,
+                    "soltar" => DragKind::Drop,
+                    _ => DragKind::Leave,
+                };
+                let point = self.tree.row_point(row.trim()).unwrap_or((-1.0, -1.0));
+                let paths = vec![PathBuf::from(path.trim())];
+                let mut ev = DragEvent { kind, point, ctrl: false, shift: false, paths: Some(&paths), allowed: Effect::ALL, effect: Effect::NONE };
+                self.on_drag(&mut ev);
+                self.notice = Some(format!("arrastre {a} sobre «{}»: {:?}", row.trim(), ev.effect));
+            }
+            // `xtree_ctrl <letra>`: Ctrl (⌘) + esa letra con xtree abierto (Ctrl+T, Ctrl+F).
+            "xtree_ctrl" => {
+                if let Some(c) = a.chars().next() {
+                    self.on_xtree_key(crate::keys::Key(c.to_ascii_uppercase() as u16), true, false, false, false);
+                }
+            }
             _ => {}
         }
         self.redraw();

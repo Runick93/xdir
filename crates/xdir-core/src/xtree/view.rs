@@ -874,7 +874,9 @@ impl Xtree {
         // Resultado nuevo: el indicador lo muestra hasta que se abra la vista.
         self.seen = false;
         self.go(0);
-        self.hist.after_scan(self.hwnd, self.scan.id, &self.root, &self.arena);
+        // Una raíz que no se pudo leer no deja foto (se lee lo que había).
+        let complete = !self.progress().root_failed.load(Ordering::Relaxed);
+        self.hist.after_scan(self.hwnd, self.scan.id, &self.root, &self.arena, complete);
         // Los nodos son otros: la búsqueda abierta se repite sobre el árbol terminado.
         self.refresh_search();
         true
@@ -887,7 +889,7 @@ impl Xtree {
         self.arena = Arc::new(arena);
         self.scanning = false;
         self.go(0);
-        self.hist.after_scan_at(self.hwnd, self.scan.id, &self.root, &self.arena, Some(generation));
+        self.hist.after_scan_at(self.hwnd, self.scan.id, &self.root, &self.arena, true, Some(generation));
     }
 
     /// Aviso del escáner (`WM_APP_XTREE`). Devuelve si hay que repintar.
@@ -961,6 +963,8 @@ impl Xtree {
                 // Ya no faltan permisos: se apagan el aviso y `xtree_permisos`.
                 progress.need_admin.store(false, Ordering::Relaxed);
                 progress.denied.store(0, Ordering::Relaxed);
+                // El árbol elevado leyó la raíz: cuenta como análisis completo.
+                progress.root_failed.store(false, Ordering::Relaxed);
             }
             elevating.store(false, Ordering::Relaxed);
             // Siempre se avisa: el escaneo normal pudo haber terminado y ya no hay quien repinte.

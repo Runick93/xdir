@@ -341,3 +341,18 @@ fn ui_thread_never_waits_for_history_lock() {
     wait_history(&mut x);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Una raíz que no se pudo leer (sin permiso, borrada, disco desconectado) no deja una foto de 0:
+/// se lee el historial que había, sin agregar nada.
+#[test]
+fn unreadable_root_saves_no_snapshot() {
+    let dir = tmp("raiz-rota");
+    let root = tmp("raiz-raiz-rota");
+    history::save_snapshot(&dir, &root, 400, &[("".into(), 7), ("a".into(), 5)]).unwrap();
+    let mut x = view(&root, &dir, 500);
+    x.scan.progress.root_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+    finish_with(&mut x, vec![node("r", NO_PARENT, 0, true, vec![])]);
+    wait_history(&mut x);
+    assert_eq!(x.hist.loaded.as_ref().unwrap().days, [400]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

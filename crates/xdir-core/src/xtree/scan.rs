@@ -54,6 +54,9 @@ pub struct Progress {
     pub mft_total: AtomicU64,
     pub denied: AtomicU64,
     pub need_admin: AtomicBool,
+    /// La raíz misma no se pudo listar (sin permiso, borrada, disco desconectado): el árbol es la
+    /// raíz sola y no cuenta como análisis completo para el historial.
+    pub root_failed: AtomicBool,
 }
 
 pub struct Scan {
@@ -196,6 +199,9 @@ fn worker(ctx: &Ctx) {
         // curso quedaría sin bajar). Solo protege donde los pánicos se desenrollan (pruebas y
         // `dev`): en release (`panic = "abort"`) un pánico cierra xdir igual.
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.lister.list(&job.path))).unwrap_or(Err(ListError::Other));
+        if res.is_err() && job.node == 0 {
+            ctx.progress.root_failed.store(true, Ordering::Relaxed);
+        }
         match res {
             Ok(l) => insert_listing(ctx, &job, l),
             Err(ListError::Denied) => {
@@ -451,5 +457,23 @@ mod tests {
         let expected: u64 = (1..=1400u64).sum::<u64>() + 50;
         assert_eq!(t[0].size, expected);
         assert_eq!(p.files.load(Ordering::Relaxed), 1401);
+    }
+
+    /// Si la raíz no se pudo listar (sin permiso, borrada, disco desconectado) el escaneo lo marca:
+    /// el árbol de una raíz sola en 0 no es un análisis completo (no deja foto en el historial).
+    #[test]
+    fn walk_marks_unreadable_root() {
+        for err in [ListError::Denied, ListError::Other] {
+            let mut l = FakeLister::default();
+            l.dirs.insert("/r".into(), Err(err));
+            let (r, p) = run(&l);
+            assert_eq!(r.unwrap().len(), 1);
+            assert!(p.root_failed.load(Ordering::Relaxed), "{err:?}");
+        }
+        let mut l = FakeLister::default();
+        l.dirs.insert("/r".into(), Ok((vec!["no"], vec![])));
+        l.dirs.insert("/r/no".into(), Err(ListError::Denied));
+        let (_, p) = run(&l);
+        assert!(!p.root_failed.load(Ordering::Relaxed), "una subcarpeta negada no es la raíz");
     }
 }

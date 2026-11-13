@@ -12,6 +12,8 @@ fn node(name: &str, parent: u32, size: u64, is_dir: bool, children: Vec<u32>) ->
 }
 
 fn tmp(name: &str) -> PathBuf {
+    // El historial pregunta al sistema si el disco distingue mayúsculas.
+    install_fakes();
     let d = std::env::temp_dir().join(format!("xdir-xtree-hist-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     d
@@ -354,5 +356,22 @@ fn unreadable_root_saves_no_snapshot() {
     finish_with(&mut x, vec![node("r", NO_PARENT, 0, true, vec![])]);
     wait_history(&mut x);
     assert_eq!(x.hist.loaded.as_ref().unwrap().days, [400]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Datos nuevos (otro análisis, otro historial) tiran la lista de «Más crecieron» guardada: no se
+/// confía en que las direcciones de memoria cambien.
+#[test]
+fn growers_cache_dropped_on_new_data() {
+    let (mut x, dir) = with_history("cache");
+    let _ = texts(&mut x);
+    assert!(x.hist.growers_cached());
+    finish_with(&mut x, tree("r", 7 * GB, 3 * GB, 3 * GB));
+    assert!(!x.hist.growers_cached(), "análisis nuevo");
+    wait_history(&mut x);
+    let _ = texts(&mut x);
+    assert!(x.hist.growers_cached());
+    x.hist.take_for_tests(&x.root.clone(), Default::default());
+    assert!(!x.hist.growers_cached(), "historial nuevo");
     let _ = std::fs::remove_dir_all(&dir);
 }

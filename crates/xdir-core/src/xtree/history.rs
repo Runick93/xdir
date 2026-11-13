@@ -821,6 +821,8 @@ mod tests {
     }
 
     fn tmp_dir(name: &str) -> std::path::PathBuf {
+        // El historial pregunta al sistema si el disco distingue mayúsculas.
+        crate::sys::testing::install_fakes();
         let d = std::env::temp_dir().join(format!("xdir-historial-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d

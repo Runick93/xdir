@@ -72,6 +72,7 @@ impl HistState {
     pub fn after_scan_at(&mut self, hwnd: Handle, id: usize, root: &Path, arena: &Arc<Vec<Node>>, complete: bool, generation: Option<u64>) {
         self.loaded = None;
         self.pending = false;
+        self.growers_cache = None;
         let Some(dir) = self.dir.clone() else { return };
         if crate::sys::network().is_remote(root) {
             return;
@@ -106,7 +107,23 @@ impl HistState {
         }
         self.loaded = Some(loaded);
         self.pending = false;
+        self.growers_cache = None;
         true
+    }
+
+    /// ¿Hay una lista de «Más crecieron» guardada? (pruebas).
+    #[cfg(test)]
+    pub fn growers_cached(&self) -> bool {
+        self.growers_cache.is_some()
+    }
+
+    /// Deja `loaded` como si lo hubiera traído el hilo para `root` (pruebas).
+    #[cfg(test)]
+    pub fn take_for_tests(&mut self, root: &Path, loaded: Loaded) {
+        if let Ok(mut s) = self.slot.lock() {
+            *s = Some((root.to_path_buf(), Arc::new(loaded)));
+        }
+        self.take(root);
     }
 
     /// Se analiza otra cosa (o se borró el historial): lo que había ya no vale.
@@ -508,6 +525,7 @@ mod tests {
 
     /// Historial con fotos en `snaps` (día, [(ruta, tamaño)]), leído como lo lee la vista.
     fn loaded(name: &str, snaps: &[(i32, &[(&str, u64)])]) -> Loaded {
+        crate::sys::testing::install_fakes();
         let dir = std::env::temp_dir().join(format!("xdir-crecimiento-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("raiz");

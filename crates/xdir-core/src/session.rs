@@ -310,7 +310,11 @@ fn write(s: &Session) -> String {
 ", s.quick_open);
     out += &format!("vista_previa = {}\n", s.preview_on);
     out += &format!("vista_previa_ancho = {}\n", s.preview_width.round());
-    out += &format!("informacion_secciones = {}\n", s.info_sections);
+    // Las secciones de siempre (bits 0–6, lo que entiende un xdir anterior) y la suma de
+    // verificación en su propia clave.
+    let checksum = crate::info::Section::Checksum.bit();
+    out += &format!("informacion_secciones = {}\n", s.info_sections & LEGACY_SECTIONS);
+    out += &format!("informacion_suma = {}\n", s.info_sections & checksum != 0);
     if let Some(v) = &s.seen_version {
         out += &format!("version_vista = {}\n", quote(v));
     }
@@ -354,6 +358,10 @@ fn write(s: &Session) -> String {
     }
     out
 }
+
+/// Las secciones del panel de información que guarda `informacion_secciones` (las de antes de la
+/// suma de verificación).
+const LEGACY_SECTIONS: u32 = 0x7F;
 
 fn parse(text: &str) -> Session {
     // Sin `version_vista` en el archivo, la sesión es de una versión de antes de Novedades.
@@ -422,7 +430,16 @@ fn parse(text: &str) -> Session {
             ("vista_previa_ancho", None) => {
                 s.preview_width = float().filter(|w| w.is_finite()).unwrap_or(crate::ui::PREVIEW_W).clamp(crate::ui::PREVIEW_MIN_W, crate::ui::PREVIEW_MAX_W);
             }
-            ("informacion_secciones", None) => s.info_sections = int().filter(|n| (0..256).contains(n)).map_or(crate::info::DEFAULT_OPEN, |n| n as u32),
+            // Un número con bits de más (de un xdir más nuevo) no tira lo elegido: se toman los
+            // conocidos.
+            ("informacion_secciones", None) => {
+                let checksum = s.info_sections & !LEGACY_SECTIONS;
+                s.info_sections = int().filter(|n| *n >= 0).map_or(crate::info::DEFAULT_OPEN, |n| n as u32 & LEGACY_SECTIONS) | checksum;
+            }
+            ("informacion_suma", None) => {
+                let bit = crate::info::Section::Checksum.bit();
+                s.info_sections = if boolean() == Some(true) { s.info_sections | bit } else { s.info_sections & !bit };
+            }
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("xtree_ultimo", None) => s.xtree_last = parse_list(&format!("[{value}]")).into_iter().next().filter(|p| !p.is_empty()).map(PathBuf::from),
             ("version_vista", None) => s.seen_version = Some(value.trim_matches('"').trim().to_string()).filter(|v| !v.is_empty()),
@@ -729,9 +746,17 @@ mod tests {
         assert_eq!(parse(&text).info_sections, 0b0100_0011);
         assert_eq!(parse("").info_sections, crate::info::DEFAULT_OPEN);
         assert_eq!(Session::default().info_sections, crate::info::DEFAULT_OPEN);
-        // La suma de verificación (bit 7) abierta también vuelve.
+        // La suma de verificación (bit 7) abierta también vuelve, en una clave propia: lo de
+        // `informacion_secciones` sigue siendo lo que entiende un xdir anterior (0–127; con más,
+        // volvía a las de fábrica y perdía lo elegido).
         let s = Session { info_sections: crate::info::DEFAULT_OPEN | crate::info::Section::Checksum.bit(), ..Session::default() };
-        assert_eq!(parse(&write(&s)).info_sections, s.info_sections);
+        let text = write(&s);
+        assert!(text.contains(&format!("informacion_secciones = {}\n", crate::info::DEFAULT_OPEN)), "{text}");
+        assert!(text.contains("informacion_suma = true\n"), "{text}");
+        assert_eq!(parse(&text).info_sections, s.info_sections);
+        // Bits que todavía no existen (de un xdir más nuevo) no tiran lo elegido.
+        assert_eq!(parse("informacion_secciones = 67\n").info_sections, 67);
+        assert_eq!(parse("informacion_secciones = 579\n").info_sections, 67);
     }
 
     #[test]

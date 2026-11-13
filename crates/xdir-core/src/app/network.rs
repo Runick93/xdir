@@ -1289,8 +1289,8 @@ impl App {
         self.network_root(p).and_then(|c| Address::parse(&c.address).ok()).map(|a| a.host).unwrap_or_else(|| crate::tab::remote_host(p))
     }
 
-    /// Antes de dibujar: el aviso de cada lista a la vista que carga una carpeta de red lenta, y
-    /// el próximo redibujo (`WM_APP_NET_TICK`) para cuando cambie.
+    /// Antes de dibujar: el aviso de cada lista a la vista que carga una carpeta de red lenta o el
+    /// «Cargando…» de una que tarda, y el próximo redibujo (`WM_APP_NET_TICK`) para cuando cambie.
     pub(super) fn update_placeholders(&mut self) {
         use crate::list::placeholder::Placeholder;
         use crate::tab::{SLOW_CONNECTING, SLOW_NOT_RESPONDING, Slow};
@@ -1311,15 +1311,20 @@ impl App {
                 Slow::Connecting { .. } => Some(Placeholder::Connecting(host)),
                 Slow::NotResponding { .. } => Some(Placeholder::NotResponding(host)),
             };
-            // Cuánto falta para el próximo umbral de una carga remota sin lotes.
-            if let Some(wait) = tab.slow_pending(now, &[SLOW_CONNECTING, SLOW_NOT_RESPONDING]) {
+            // Cuánto falta para el próximo umbral de una carga remota sin lotes, o para el
+            // «Cargando…» de cualquier carpeta.
+            let waits = [tab.slow_pending(now, &[SLOW_CONNECTING, SLOW_NOT_RESPONDING]), tab.loading_pending(now)];
+            for wait in waits.into_iter().flatten() {
                 next = Some(next.map_or(wait, |n| n.min(wait)));
             }
+            let loading = tab.shows_loading(now);
             let hover = match self.hover {
                 super::Hit::Pane(j, crate::pane::PaneHit::Placeholder(b)) if j == i && ph.is_some() => Some(b),
                 _ => None,
             };
-            let list = &mut self.panes[i].tab_mut().list;
+            let tab = self.panes[i].tab_mut();
+            tab.loading_shown = loading && ph.is_none();
+            let list = &mut tab.list;
             list.placeholder_hover = hover;
             list.placeholder = ph;
         }

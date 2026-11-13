@@ -365,8 +365,8 @@ impl App {
         // Pestañas deslizándose hacia su lugar, o una búsqueda en curso (su indicador gira): otro cuadro.
         let searching = self.shown_panes().into_iter().any(|i| {
             let tab = self.panes[i].tab();
-            // También mientras se lee un archivo comprimido (su «Cargando…» gira).
-            tab.search.as_ref().is_some_and(|s| !s.done) || (tab.loading && tab.location.is_archive())
+            // También mientras una carpeta muestra «Cargando…» (su indicador gira).
+            tab.search.as_ref().is_some_and(|s| !s.done) || tab.loading_shown
         });
         // Un ⏏ girando (expulsando o desconectando).
         let searching = searching || !ejecting.is_empty();

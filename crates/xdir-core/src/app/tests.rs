@@ -1114,7 +1114,7 @@ fn command_xtree_is_listed() {
 // ---------- shell ----------
 
 /// Una fila de archivo para cargar a mano en la lista (sin leer el disco).
-fn file_entry(name: &str) -> fs::Entry {
+pub(super) fn file_entry(name: &str) -> fs::Entry {
     fs::Entry {
         name: name.into(),
         full: None,

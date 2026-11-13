@@ -502,6 +502,55 @@ fn slow_state_thresholds() {
     assert_eq!(a.panes[0].tab().slow_state(t0 + Duration::from_secs(21)), Slow::No);
 }
 
+/// Ajustes 2: cualquier carpeta que tarda más de 0,5 s en leerse muestra «Cargando…» (la de X70);
+/// antes, nada. Con elementos ya llegados, el cuadro va encima de la lista.
+#[test]
+fn local_slow_load_shows_loading_after_half_second() {
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    let local = tmp_dir("a2-cargando");
+    std::fs::write(local.join("ya-llego.txt"), "x").unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local.clone()));
+    let texts = |h: &FakeHost| h.drawn_texts().into_iter().map(|t| t.1).collect::<Vec<_>>();
+    // La carga sigue (sus mensajes no se entregaron): el inicio se fija para no depender del reloj.
+    let now = Instant::now();
+    a.panes[0].tab_mut().set_loading_since(Some(now - Duration::from_millis(300)));
+    assert!(!a.panes[0].tab().shows_loading(now));
+    a.paint();
+    assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
+    a.panes[0].tab_mut().set_loading_since(Some(now - Duration::from_millis(600)));
+    assert!(a.panes[0].tab().shows_loading(now));
+    a.paint();
+    assert!(texts(&host).iter().any(|t| t == "Cargando…"), "{:?}", texts(&host));
+    // Lo que ya llegó se ve debajo del cuadro.
+    a.panes[0].tab_mut().list.append(vec![super::tests::file_entry("ya-llego.txt")]);
+    a.paint();
+    let t = texts(&host);
+    assert!(t.iter().any(|t| t == "Cargando…") && t.iter().any(|t| t == "ya-llego.txt"), "{t:?}");
+    pump_pane(&mut a, 0);
+    a.paint();
+    assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
+    assert!(!a.panes[0].tab().shows_loading(Instant::now() + Duration::from_secs(5)));
+}
+
+/// En red el aviso de espera no cambia: «Conectando con…» en lugar de «Cargando…».
+#[test]
+fn remote_wait_box_instead_of_loading() {
+    let root = remote_dir("a2-red-espera");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(2));
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let t0 = Instant::now() - Duration::from_millis(700);
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    a.panes[0].tab_mut().set_loading_since(Some(t0));
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|t| t.starts_with("Conectando con")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "Cargando…"), "{texts:?}");
+}
+
 #[test]
 fn hung_load_shows_not_responding_and_close_works() {
     let root = remote_dir("n5-hung");

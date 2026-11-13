@@ -360,6 +360,8 @@ fn crumb_icon_and_loading_drawn() {
     // Una carga en curso (sin respuesta todavía): «Cargando…».
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
+    // Ajustes 2: como cualquier carpeta, desde los 0,5 s.
+    a.panes[0].tab_mut().set_loading_since(Some(std::time::Instant::now() - std::time::Duration::from_millis(600)));
     a.paint();
     let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
     assert!(texts.iter().any(|t| t == "Cargando…"), "{texts:?}");

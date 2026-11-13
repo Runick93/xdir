@@ -9,6 +9,7 @@
 - Expulsar un disco o desconectar una conexión da señal mientras dura: la barra de estado dice «Expulsando "Pendrive"…» (o cuántas operaciones faltan que terminen) y su ⏏ gira en el árbol, en «Este equipo» y en Configuración ▸ Red; un segundo clic no hace nada. Al terminar, «Se expulsó "Pendrive"».
 
 ### Cambios
+- Cualquier carpeta que tarda más de medio segundo en leerse (local, de red o comprimida) muestra «Cargando…» con el indicador girando, encima de lo que ya llegó. En red sigue el aviso «Conectando…» / «no responde».
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
 - Los botones del pie del panel (carpeta nueva y vista) son más grandes.
 

@@ -75,6 +75,12 @@ pub struct Tab {
     load_started: Option<Instant>,
     /// La carga en curso ya trajo algún lote.
     first_batch: bool,
+    /// Cuándo empezó la lectura en curso de cualquier carpeta (local, de red o comprimida; no las
+    /// búsquedas ni las recargas silenciosas): desde `LOADING_DELAY`, «Cargando…».
+    loading_since: Option<Instant>,
+    /// Lo decide la `App` antes de dibujar (`shows_loading` con su reloj): la lista muestra
+    /// «Cargando…».
+    pub loading_shown: bool,
 }
 
 /// Cuánto tarda una carpeta de red en cargar.
@@ -84,6 +90,9 @@ pub enum Slow {
     Connecting { host: String },
     NotResponding { host: String },
 }
+
+/// A partir de cuánto la lectura de una carpeta muestra «Cargando…» (Ajustes 2).
+pub const LOADING_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A partir de cuánto una carga remota sin ningún lote muestra «Conectando…» y «no responde».
 pub const SLOW_CONNECTING: std::time::Duration = std::time::Duration::from_millis(500);
@@ -231,6 +240,8 @@ impl Tab {
             left_view: None,
             load_started: None,
             first_batch: false,
+            loading_since: None,
+            loading_shown: false,
         }
     }
 
@@ -543,6 +554,8 @@ impl Tab {
             self.list.columns.insert(at, ColumnSpec { col: Column::Folder, width: list::COLUMNS[7].3 });
         }
         self.loading = true;
+        // La búsqueda tiene su propio indicador (en la caja de búsqueda).
+        self.loading_since = None;
         self.error = None;
         self.reload_buf = None;
         self.focus_after_load = None;
@@ -590,6 +603,7 @@ impl Tab {
         if self.is_page() {
             self.nav_id += 1;
             self.loading = false;
+            self.loading_since = None;
             self.error = None;
             self.list.clear();
             return;
@@ -612,6 +626,7 @@ impl Tab {
             _ => None,
         };
         self.first_batch = false;
+        self.loading_since = Some(Instant::now());
         self.load_started = match &self.location {
             Location::Path(p) if sys::network().is_remote(p) => Some(Instant::now()),
             _ => None,
@@ -663,6 +678,8 @@ impl Tab {
             LoadMsg::Listed(result) => {
                 self.loading = false;
                 self.load_started = None;
+                self.loading_since = None;
+                self.loading_shown = false;
                 if let Some(s) = &mut self.search {
                     s.done = true;
                     s.progress = 1.0;
@@ -887,6 +904,33 @@ impl Tab {
         let t0 = self.load_started.filter(|_| self.loading && !self.first_batch)?;
         let elapsed = now.saturating_duration_since(t0);
         thresholds.iter().filter(|&&t| t > elapsed).map(|&t| t - elapsed).min()
+    }
+
+    /// ¿La lista muestra «Cargando…»? Leyendo hace `LOADING_DELAY` o más, sin búsqueda y sin el
+    /// aviso de red («Conectando…» / «no responde», que va en su lugar).
+    pub fn shows_loading(&self, now: Instant) -> bool {
+        self.loading
+            && self.search.is_none()
+            && self.loading_since.is_some_and(|t0| now.saturating_duration_since(t0) >= LOADING_DELAY)
+            && self.slow_state(now) == Slow::No
+    }
+
+    /// Cuánto falta para que una lectura en curso muestre «Cargando…» (`None`: no hay o ya lo
+    /// muestra).
+    pub fn loading_pending(&self, now: Instant) -> Option<std::time::Duration> {
+        let t0 = self.loading_since.filter(|_| self.loading && self.search.is_none())?;
+        LOADING_DELAY.checked_sub(now.saturating_duration_since(t0)).filter(|d| !d.is_zero())
+    }
+
+    /// Desde cuándo se lee la carpeta (`None`: no se está leyendo).
+    pub fn loading_since(&self) -> Option<Instant> {
+        self.loading_since.filter(|_| self.loading && self.search.is_none())
+    }
+
+    /// Para las pruebas: la lectura en curso empezó en `t0`.
+    #[cfg(test)]
+    pub fn set_loading_since(&mut self, t0: Option<Instant>) {
+        self.loading_since = t0;
     }
 
     /// Para las pruebas: la carga remota en curso empezó en `t0`.

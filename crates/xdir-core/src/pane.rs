@@ -731,8 +731,9 @@ impl Pane {
             _ => None,
         };
         tab.list.draw(p, self.list, active_pane);
-        if tab.loading && tab.location.is_archive() && tab.list.entries.is_empty() {
-            draw_list_loading(p, self.list);
+        // Cualquier carpeta que tarda (la `App` decide desde cuándo); el aviso de red va en su lugar.
+        if tab.loading_shown && tab.list.placeholder.is_none() {
+            draw_list_loading(p, self.list, !tab.list.entries.is_empty());
         }
         // Carpeta de red que tarda: el aviso en lugar de la lista vacía (debajo del encabezado).
         tab.list.placeholder_buttons = match &tab.list.placeholder {
@@ -1147,12 +1148,18 @@ fn draw_archive_crumb(p: &dyn Painter, r: Rect, label: &str, color: crate::geom:
     p.text(FontId::UiCenter, label, rect(r.left + ARCHIVE_ICON_W, r.top, r.right, r.bottom), color);
 }
 
-/// «Cargando…» sobre la lista vacía mientras se lee un archivo comprimido (pantalla X70): el
-/// indicador girando y el texto, centrados a lo ancho a 80 del borde de arriba de la lista.
-fn draw_list_loading(p: &dyn Painter, list: Rect) {
+/// «Cargando…» mientras se lee una carpeta que tarda (pantalla X70): el indicador girando y el
+/// texto, centrados a lo ancho a 80 del borde de arriba de la lista. Con elementos ya llegados
+/// (`over_items`), en una tarjeta de 180×64 encima de ellos.
+fn draw_list_loading(p: &dyn Painter, list: Rect, over_items: bool) {
     let th = p.theme();
     let cx = (list.left + list.right) / 2.0;
     let top = list.top + crate::list::HEADER_H + 50.0;
+    if over_items {
+        let card = rect(cx - 90.0, top, cx + 90.0, top + 64.0);
+        p.round_fill(card, 8.0, th.surface_alt);
+        p.round_stroke(card, 8.0, th.border);
+    }
     spinner(p, cx, top + 20.0, th.accent);
     p.text(FontId::UiCenter, "Cargando…", rect(cx - 180.0, top + 34.0, cx + 180.0, top + 58.0), th.text_secondary);
 }

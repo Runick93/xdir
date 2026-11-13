@@ -77,10 +77,20 @@ impl Source {
         }
     }
 
-    /// El servidor, si se lee de una carpeta de red (sin E/S: `Network::is_remote`).
+    /// La conexión, si se lee de una carpeta de red (sin E/S: `Network::is_remote`): el servidor
+    /// de una ruta UNC o el nombre de la carpeta de red montada (la más alta que es de red), no el
+    /// archivo.
     pub fn remote_host(&self) -> Option<String> {
         let p = self.disk_path();
-        sys::network().is_remote(p).then(|| crate::tab::remote_host(p))
+        let net = sys::network();
+        if !net.is_remote(p) {
+            return None;
+        }
+        if crate::fs::is_unc(p) {
+            return Some(crate::tab::remote_host(p));
+        }
+        let mount = p.ancestors().filter(|a| net.is_remote(a)).last().unwrap_or(p);
+        Some(crate::tab::remote_host(mount))
     }
 
     /// El archivo del disco para leer: el mismo, o la extracción temporal (hasta

@@ -220,6 +220,9 @@ fn watched_stalled_network_slow_and_cancel() {
         move |stop| compare_sources(&sa, &sb, stop, &p)
     });
     assert!(matches!(&got, Err(Failure::Failed(m)) if m.contains("no responde")), "{got:?}");
+    // Nombra la conexión (la carpeta de red montada), no el archivo.
+    let share = d.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(got, Err(Failure::Failed(format!("\"{share}\" no responde"))));
     assert!(t0.elapsed() < Duration::from_secs(2), "no esperó al servidor");
     // Cancelar: corta enseguida aunque el hilo siga colgado.
     let cancel = Arc::new(AtomicBool::new(false));

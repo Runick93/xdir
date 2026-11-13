@@ -999,8 +999,8 @@ fn selection_text(count: usize, tail: Option<&str>) -> String {
     s
 }
 
-/// El enlace del final de la barra de estado cuando lo elegido tiene carpetas de red (o solo en
-/// la nube): el tamaño se calcula al tocarlo.
+/// El enlace del final de la barra de estado cuando lo elegido tiene carpetas de red: el tamaño
+/// se calcula al tocarlo (las solo en la nube no se leen nunca: el total dice «al menos»).
 pub const SIZE_LINK: &str = "calcular tamaño";
 
 /// Lo que la barra de estado dice del tamaño de lo elegido (lo arma `app::sel_size`).
@@ -1012,7 +1012,7 @@ pub enum SelTotal {
     Computing,
     /// Lo que pesan las carpetas; `partial`: alguna no se pudo leer entera («al menos»).
     Done { bytes: u64, partial: bool },
-    /// Carpetas de red o solo en la nube: se calcula al tocar el enlace.
+    /// Carpetas de red: se calcula al tocar el enlace.
     NeedsClick,
 }
 

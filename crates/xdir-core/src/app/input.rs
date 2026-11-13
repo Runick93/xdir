@@ -73,13 +73,14 @@ impl App {
         if self.transfers_progress().is_some() && contains(&self.transfers_button_rect(), x, y) {
             return Hit::Transfers;
         }
-        // «Ver novedades» del aviso de actualización (donde quedó en el último cuadro).
+        // «calcular tamaño» de la barra de estado (donde quedó en el último cuadro).
         if let Some(r) = self.size_link
             && contains(&r, x, y)
             && !self.xtree_open
         {
             return Hit::SizeLink;
         }
+        // «Ver novedades» del aviso de actualización (donde quedó en el último cuadro).
         if self.update_notice.is_some()
             && let Some(r) = self.update_link
             && contains(&r, x, y)

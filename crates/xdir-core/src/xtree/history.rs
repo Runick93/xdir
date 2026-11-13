@@ -41,7 +41,7 @@ pub fn select(arena: &[Node]) -> Vec<(String, u64)> {
         }
     }
     if out.len() > MAX_ENTRIES {
-        out[1..].sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        out[1..].sort_unstable_by_key(|e| std::cmp::Reverse(e.1));
         out.truncate(MAX_ENTRIES);
     }
     out

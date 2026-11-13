@@ -209,6 +209,8 @@ pub struct Session {
     pub settings_page: Option<String>,
     /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`).
     pub xtree_last: Option<PathBuf>,
+    /// Período del historial en la tarjeta de xtree (`xtree_dias`: 7, 30 o 90).
+    pub xtree_days: u16,
     /// La versión más nueva de xdir que se abrió con esta sesión (`version_vista`), para avisar
     /// una vez que se actualizó. Una sesión nueva (primera instalación) ya tiene la de ahora; una
     /// leída de un archivo sin la clave (de antes de Novedades) queda en `None`.
@@ -250,6 +252,7 @@ impl Default for Session {
             info_sections: crate::info::DEFAULT_OPEN,
             settings_page: None,
             xtree_last: None,
+            xtree_days: 7,
             seen_version: Some(crate::about::VERSION.to_string()),
             panes: Vec::new(),
             columns: default_columns(),
@@ -321,6 +324,7 @@ fn write(s: &Session) -> String {
     if let Some(p) = &s.xtree_last {
         out += &format!("xtree_ultimo = {}\n", quote(&p.to_string_lossy()));
     }
+    out += &format!("xtree_dias = {}\n", s.xtree_days);
     if let Some(g) = &s.group {
         out += &format!("grupo = {}
 ", quote(g));
@@ -442,6 +446,7 @@ fn parse(text: &str) -> Session {
             }
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("xtree_ultimo", None) => s.xtree_last = parse_list(&format!("[{value}]")).into_iter().next().filter(|p| !p.is_empty()).map(PathBuf::from),
+            ("xtree_dias", None) => s.xtree_days = int().filter(|d| [7, 30, 90].contains(d)).map_or(7, |d| d as u16),
             ("version_vista", None) => s.seen_version = Some(value.trim_matches('"').trim().to_string()).filter(|v| !v.is_empty()),
             ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
@@ -650,6 +655,7 @@ mod tests {
             info_sections: 0b101,
             settings_page: Some("atajos".into()),
             xtree_last: Some(r#"C:\datos "x""#.into()),
+            xtree_days: 30,
             seen_version: Some("0.1.24".into()),
             panes: vec![
                 PaneState {
@@ -683,6 +689,10 @@ mod tests {
         assert_eq!(parse("columnas = [\"tamano:90\"]\n").columns, default_columns());
         // Las sesiones de antes (sin la clave) muestran las extensiones.
         assert!(parse("layout = 2\n").show_extensions);
+        // Período del historial de xtree: 7, 30 o 90; otra cosa, 7.
+        assert_eq!(parse("layout = 2\n").xtree_days, 7);
+        assert_eq!(parse("xtree_dias = 90\n").xtree_days, 90);
+        assert_eq!(parse("xtree_dias = 12\n").xtree_days, 7);
     }
 
     /// La pestaña Novedades va como `xdir:novedades`; la versión vista, como `version_vista`. Una

@@ -467,6 +467,8 @@ pub struct App {
     portable_marker: bool,
     /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`), de la sesión.
     xtree_last: Option<PathBuf>,
+    /// Período del historial en la tarjeta de xtree (de la sesión; la vista abierta manda).
+    xtree_days: u16,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -690,6 +692,7 @@ impl App {
             portable_now: session::portable_active(),
             portable_marker: session::portable_active(),
             xtree_last: session.xtree_last.clone(),
+            xtree_days: session.xtree_days,
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

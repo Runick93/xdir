@@ -8,10 +8,13 @@ impl App {
     /// historial (`<configuración>/xtree-historial`).
     pub(super) fn setup_xtree_history(&mut self) {
         let dir = crate::session::config_dir().map(|d| d.join(crate::xtree::history::DIR_NAME));
-        let on = self.config.xtree_history;
+        let (on, days) = (self.config.xtree_history, self.xtree_days);
         if let Some(x) = &mut self.xtree {
-            let days = x.history_days();
             x.set_history(on, days, dir);
         }
     }
 }
+
+#[cfg(test)]
+#[path = "xtree_history_tests.rs"]
+mod tests;

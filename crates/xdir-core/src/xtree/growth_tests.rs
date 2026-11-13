@@ -147,3 +147,120 @@ fn cancelled_scan_and_stale_history() {
     assert!(x.hist.loaded.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------- tarjeta ----------
+
+const AREA: Rect = Rect { left: 0.0, top: 0.0, right: 1400.0, bottom: 790.0 };
+const GB: u64 = 1024 * MB;
+
+fn texts(x: &mut Xtree) -> Vec<String> {
+    let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+    x.paint(&p, AREA);
+    p.texts().into_iter().map(|(_, s, _)| s).collect()
+}
+
+fn center(r: Rect) -> (f32, f32) {
+    ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
+}
+
+/// Vista con historial guardado de antes (días 480 y 493) y un análisis de hoy (500).
+fn with_history(name: &str) -> (Xtree, PathBuf) {
+    let dir = tmp(name);
+    let root = tmp(&format!("raiz-{name}"));
+    history::save_snapshot(&dir, &root, 480, &[("".into(), 4 * GB), ("a".into(), GB), ("a/a1".into(), GB), ("b".into(), 2 * GB)]).unwrap();
+    history::save_snapshot(&dir, &root, 493, &[("".into(), 5 * GB), ("a".into(), 2 * GB), ("a/a1".into(), GB), ("b".into(), 2 * GB)]).unwrap();
+    let mut x = view(&root, &dir, 500);
+    finish_with(&mut x, tree("r", 7 * GB, 3 * GB, 3 * GB));
+    wait_history(&mut x);
+    (x, dir)
+}
+
+/// Con historial, la tarjeta crece hacia arriba (el mapa se achica) y los botones quedan en la
+/// parte de siempre; sin carpeta del historial, todo igual que antes.
+#[test]
+fn card_grows_with_strip() {
+    let (x, dir) = with_history("crece");
+    let (base, ui) = (layout_ui(AREA, 0.0), x.ui(AREA));
+    assert_eq!(ui.card.top, base.card.top - growth::STRIP_H);
+    assert_eq!(ui.map.bottom, base.map.bottom - growth::STRIP_H);
+    assert_eq!(ui.card.bottom, base.card.bottom);
+    assert!(ui.buttons.iter().all(|b| b.bottom < ui.card.top + CARD_H));
+    // Una ventana baja no tiene lugar para la franja.
+    let short = rect(0.0, 0.0, 1400.0, 470.0);
+    assert_eq!(x.ui(short).card.top, layout_ui(short, 0.0).card.top);
+    let mut plain = Xtree::idle(PathBuf::from("raiz"));
+    plain.set_arena(tree("r", 1, 1, 1));
+    assert_eq!(plain.ui(AREA).card.top, base.card.top);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Con datos: selector, cambio, fotos, gráfico y las que más crecieron.
+#[test]
+fn card_shows_change_chart_and_growers() {
+    let (mut x, dir) = with_history("datos");
+    let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+    x.paint(&p, AREA);
+    let t: Vec<String> = p.texts().into_iter().map(|(_, s, _)| s).collect();
+    for want in ["7 días", "30 días", "90 días", "+5,0 GB en 7 días", "Foto del 09/05: 5,00 GB", "Más crecieron", "a", "+5,0 GB", "b", "+1,0 GB"] {
+        assert!(t.iter().any(|s| s == want), "falta «{want}»: {t:?}");
+    }
+    // El gráfico: una línea con la foto de comparación y hoy.
+    assert!(p.paths().iter().any(|(pts, closed, _)| !closed && pts.len() == 2), "{:?}", p.paths());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// El selector cambia el período (y se recuerda en la vista); un clic en una de «Más crecieron»
+/// entra en esa carpeta del mapa.
+#[test]
+fn card_period_and_grower_clicks() {
+    let (mut x, dir) = with_history("clics");
+    x.prepare(AREA);
+    let s = growth::strip(x.ui(AREA).card);
+    let (px, py) = center(s.periods[1]);
+    assert!(x.on_mouse_move(AREA, px, py));
+    assert_eq!(x.hist.hover, Some(StripHit::Period(1)));
+    assert_eq!(x.on_click(AREA, px, py, false), Action::Redraw);
+    assert_eq!(x.history_days(), 30);
+    assert!(texts(&mut x).iter().any(|s| s == "+6,0 GB en 20 días"), "con la foto del día 480");
+    // Primera de «Más crecieron»: «a».
+    let row = rect(s.right.left, s.right.top + 20.0, s.right.right, s.right.top + 39.0);
+    let (gx, gy) = center(row);
+    assert_eq!(x.on_click(AREA, gx, gy, false), Action::Redraw);
+    assert_eq!(&*x.arena[x.current as usize].name, "a");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sin historial, con una sola foto, una carpeta sin datos y un archivo.
+#[test]
+fn card_empty_states() {
+    let dir = tmp("vacio");
+    let root = tmp("raiz-vacio");
+    let mut x = view(&root, &dir, 500);
+    x.set_history(false, 7, Some(dir.clone()));
+    finish_with(&mut x, tree("r", 1, 1, 1));
+    wait_history(&mut x);
+    assert!(texts(&mut x).iter().any(|s| s == "El historial está apagado"));
+    x.set_history(true, 7, Some(dir.clone()));
+    assert!(texts(&mut x).iter().any(|s| s == "Sin historial todavía: se arma cada vez que analizás"));
+    finish_with(&mut x, tree("r", 1, 1, 1));
+    wait_history(&mut x);
+    // 500 es el 16/05/1971.
+    assert!(texts(&mut x).iter().any(|s| s == "Primera foto: 16/05"), "{:?}", texts(&mut x));
+    x.selected = Some(3);
+    assert!(texts(&mut x).iter().any(|s| s == "Los archivos no tienen historial"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Mientras analiza, la franja lo dice (y no responde a clics).
+#[test]
+fn card_while_scanning() {
+    let (mut x, dir) = with_history("analizando");
+    x.scanning = true;
+    x.scan.live.write().unwrap().extend(tree("r", 1, 1, 1));
+    assert!(texts(&mut x).iter().any(|s| s == "El historial se actualiza al terminar el análisis"));
+    let s = growth::strip(x.ui(AREA).card);
+    let (px, py) = center(s.periods[2]);
+    assert_eq!(x.on_click(AREA, px, py, false), Action::None);
+    assert_eq!(x.history_days(), 7);
+    let _ = std::fs::remove_dir_all(&dir);
+}

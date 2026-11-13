@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::growth::HistState;
+use super::growth::{self, CardState, HistState, StripHit};
 use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on};
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
 use super::tree::{NO_PARENT, Node, node_path, rows_of};
@@ -373,6 +373,12 @@ impl Xtree {
             self.hist.days = days;
         }
         self.hist.dir = dir;
+    }
+
+    /// Carpeta del historial que recibió la vista (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_dir(&self) -> Option<&Path> {
+        self.hist.dir.as_deref()
     }
 
     /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
@@ -796,7 +802,49 @@ impl Xtree {
     }
 
     fn button_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
-        layout_ui(area, self.legend_h()).buttons.iter().position(|b| contains(b, x, y))
+        self.ui(area).buttons.iter().position(|b| contains(b, x, y))
+    }
+
+    /// Distribución de la vista con la franja de historial (#58) en la tarjeta, si entra: la
+    /// tarjeta crece hacia arriba y el mapa se achica.
+    fn ui(&self, area: Rect) -> Ui {
+        let mut ui = layout_ui(area, self.legend_h());
+        if (self.scanning || !self.arena.is_empty()) && self.hist.visible(&self.root) && ui.map.bottom - ui.map.top - growth::STRIP_H >= growth::MIN_MAP_H {
+            ui.card.top -= growth::STRIP_H;
+            ui.map.bottom -= growth::STRIP_H;
+            for b in &mut ui.buttons {
+                b.top -= growth::STRIP_H;
+                b.bottom -= growth::STRIP_H;
+            }
+        }
+        ui
+    }
+
+    /// ¿La tarjeta tiene la franja de historial?
+    fn has_strip(ui: &Ui) -> bool {
+        ui.card.bottom - ui.card.top > CARD_H + 1.0
+    }
+
+    /// Parte de la franja de historial en `(x, y)` (con el árbol terminado y datos que mostrar) y,
+    /// si es una de «Más crecieron», su nodo.
+    fn strip_hit_at(&mut self, area: Rect, x: f32, y: f32) -> Option<(StripHit, Option<u32>)> {
+        let ui = self.ui(area);
+        if self.scanning || self.arena.is_empty() || !Self::has_strip(&ui) || !contains(&ui.card, x, y) {
+            return None;
+        }
+        // Con el mouse en la tarjeta, muestra la elegida (o la carpeta actual).
+        let id = self.selected.filter(|&n| (n as usize) < self.arena.len()).unwrap_or(self.current);
+        let today = self.hist.today();
+        if !matches!(growth::card_state(&self.hist, &self.arena, id, today), CardState::Data(_)) {
+            return None;
+        }
+        let growers = self.hist.top_growers(&self.arena, id, today);
+        let hit = growth::strip_hit(ui.card, x, y, growers.len())?;
+        let node = match hit {
+            StripHit::Grower(i) => growers.get(i).map(|g| g.0),
+            StripHit::Period(_) => None,
+        };
+        Some((hit, node))
     }
 
     /// Fila del menú de discos bajo el cursor.
@@ -855,7 +903,9 @@ impl Xtree {
             return back_changed; // mientras se escanea el mapa es solo de lectura
         }
         let (row, cell, btn) = (self.row_at(area, x, y), self.cell_at(x, y), self.button_at(area, x, y));
-        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn;
+        let strip = self.strip_hit_at(area, x, y).map(|h| h.0);
+        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn || strip != self.hist.hover;
+        self.hist.hover = strip;
         self.hover_row = row;
         self.hover = cell;
         self.hover_btn = btn;
@@ -903,6 +953,18 @@ impl Xtree {
         }
         if self.arena.is_empty() || self.scanning {
             return Action::None;
+        }
+        if let Some((hit, node)) = self.strip_hit_at(area, x, y) {
+            match hit {
+                StripHit::Period(i) => self.hist.days = growth::PERIODS[i],
+                StripHit::Grower(_) => {
+                    if let Some(n) = node {
+                        self.go(n);
+                    }
+                }
+            }
+            self.hist.hover = None;
+            return Action::Redraw;
         }
         if let Some(b) = self.button_at(area, x, y) {
             let t = self.target();
@@ -1005,7 +1067,7 @@ impl Xtree {
             self.take_result();
         }
         self.hist.take(&self.root);
-        let ui = layout_ui(area, self.legend_h());
+        let ui = self.ui(area);
         let live = self.scan.live.clone();
         let guard = if self.scanning { Some(live.read().unwrap()) } else { None };
         let arena: &[Node] = match &guard {
@@ -1028,7 +1090,7 @@ impl Xtree {
     pub fn paint(&mut self, p: &dyn Painter, area: Rect) {
         self.prepare(area);
         let th = p.theme();
-        let ui = layout_ui(area, self.legend_h());
+        let ui = self.ui(area);
         let (l0, t0, r0, b0) = (area.left, area.top, area.right, area.bottom);
         let white = color(1.0, 1.0, 1.0);
         let warning = if th.dark { rgb(FOLDER_ICON) } else { hex(0xB7791F) };
@@ -1245,7 +1307,7 @@ impl Xtree {
             let cd = ui.card;
             p.round_fill(cd, 8.0, th.surface);
             p.round_stroke_w(cd, 8.0, th.border, 1.0);
-            let cy = (cd.top + cd.bottom) / 2.0;
+            let cy = cd.top + CARD_H / 2.0;
             if n.is_dir {
                 p.round_fill(rect(cd.left + 18.0, cy - 12.0, cd.left + 30.0, cy - 6.0), 2.0, rgb(FOLDER_ICON));
                 p.round_fill(rect(cd.left + 18.0, cy - 8.0, cd.left + 46.0, cy + 12.0), 3.0, rgb(FOLDER_ICON));
@@ -1273,6 +1335,9 @@ impl Xtree {
                 let tc = alpha(th.text, k);
                 p.text(FontId::Glyphs, glyph, rect(b.left + 10.0, b.top, b.left + 30.0, b.bottom), tc);
                 p.text(FontId::Ui, label, rect(b.left + 40.0, b.top, b.right - 6.0, b.bottom), tc);
+            }
+            if Self::has_strip(&ui) {
+                growth::paint_strip(p, cd, &mut self.hist, arena, shown, self.scanning);
             }
 
             // ----- leyenda (solo al colorear por tipo; por carpeta el color no necesita explicación) -----

@@ -415,6 +415,7 @@ impl App {
             settings_page: self.settings_session_page(),
             // Solo una raíz analizada (una vista que todavía no analizó no cuenta).
             xtree_last: self.xtree.as_ref().filter(|x| x.scanned()).map(|x| x.root().to_path_buf()).or_else(|| self.xtree_last.clone()),
+            xtree_days: self.xtree.as_ref().map_or(self.xtree_days, |x| x.history_days()),
             // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
             columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),

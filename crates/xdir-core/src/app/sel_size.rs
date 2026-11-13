@@ -23,13 +23,14 @@ use crate::tab::SelTotal;
 /// Llegó el tamaño de una carpeta elegida.
 pub(super) const WM_APP_SEL_SIZE: u32 = WM_APP + 35;
 
-/// Qué se está sumando: el panel, la pestaña, su carpeta y las carpetas elegidas.
+/// Qué se está sumando: el panel, la pestaña, su carpeta y las carpetas elegidas con su fecha
+/// de la lista (si al releer la carpeta cambió la fecha de una, cambió lo de adentro).
 #[derive(Clone, Debug, PartialEq)]
 struct Key {
     pane: usize,
     tab: usize,
     location: Location,
-    folders: Vec<PathBuf>,
+    folders: Vec<(PathBuf, u64)>,
 }
 
 /// Respuesta del hilo: lo que pesa una carpeta; `complete` es falso si no se leyó entera (sin
@@ -52,8 +53,9 @@ pub(super) struct SelSize {
     pending: Vec<PathBuf>,
     /// Hay carpetas de red y todavía no se tocó «calcular tamaño».
     needs_click: bool,
-    /// Tamaño de cada carpeta ya sumada (`complete`, como en `Reply`).
-    cache: HashMap<PathBuf, (u64, bool)>,
+    /// Tamaño de cada carpeta ya sumada: (bytes, `complete` como en `Reply`, su fecha en la
+    /// lista). Vale mientras la fecha sea la misma.
+    cache: HashMap<PathBuf, (u64, bool, u64)>,
     tx: Sender<Reply>,
     rx: Receiver<Reply>,
     /// Límite sin avance para una carpeta de red (`net::ITEM_LIMIT`; las pruebas lo achican).
@@ -106,7 +108,7 @@ impl SelSize {
     /// ¿Se recuerda el tamaño de esa carpeta? Pruebas.
     #[cfg(test)]
     pub(super) fn cached(&self, path: &Path) -> Option<u64> {
-        self.cache.get(path).map(|&(b, _)| b)
+        self.cache.get(path).map(|&(b, ..)| b)
     }
 
     /// Lo que va en la barra de estado.
@@ -119,15 +121,22 @@ impl SelSize {
         }
     }
 
-    /// Algo cambió en `dir` (su vigilante avisó o se actualizó): se olvida lo que se sabía de
-    /// las carpetas de adentro y de las que la contienen (su tamaño incluye el de `dir`) y, si lo
-    /// elegido es una de ellas, se vuelve a sumar.
+    /// Actualizar en `dir`: se olvida lo que se sabía de las carpetas de adentro y de las que la
+    /// contienen y, si lo elegido es una de ellas, se vuelve a sumar.
     pub(super) fn invalidate(&mut self, dir: &Path) {
-        let related = |p: &Path| p.starts_with(dir) || dir.starts_with(p);
-        let before = self.cache.len();
+        self.forget(|p| p.starts_with(dir) || dir.starts_with(p));
+    }
+
+    /// El vigilante de `dir` avisó un cambio: cambió lo que pesa `dir` y lo que pesan las carpetas
+    /// que la contienen. Las de adentro no se tocan: al releer `dir`, la que cambió trae otra
+    /// fecha (un archivo suelto que cambia no corta la suma de las carpetas elegidas).
+    pub(super) fn changed_in(&mut self, dir: &Path) {
+        self.forget(|p| dir.starts_with(p));
+    }
+
+    fn forget(&mut self, related: impl Fn(&Path) -> bool) {
         self.cache.retain(|p, _| !related(p));
-        let touched = self.key.as_ref().is_some_and(|k| k.folders.iter().any(|f| related(f)));
-        if touched || before != self.cache.len() {
+        if self.key.as_ref().is_some_and(|k| k.folders.iter().any(|(f, _)| related(f))) {
             self.cancel();
             self.key = None;
         }
@@ -229,7 +238,8 @@ impl App {
         if !matches!(tab.location, Location::Path(_)) || sys::file_system().is_trash(&tab.location) {
             return None;
         }
-        let folders: Vec<PathBuf> = tab.list.selected_indices().filter(|&i| tab.list.entries[i].is_dir).map(|i| tab.entry_path(i)).collect();
+        let folders: Vec<(PathBuf, u64)> =
+            tab.list.selected_indices().filter(|&i| tab.list.entries[i].is_dir).map(|i| (tab.entry_path(i), tab.list.entries[i].modified)).collect();
         (!folders.is_empty()).then(|| Key { pane: self.active, tab: tab.id, location: tab.location.clone(), folders })
     }
 
@@ -261,8 +271,8 @@ impl App {
         s.pending.clear();
         let Some(key) = &s.key else { return };
         let mut todo = Vec::new();
-        for f in &key.folders {
-            if let Some(&(b, complete)) = s.cache.get(f) {
+        for (f, modified) in &key.folders {
+            if let Some(&(b, complete, _)) = s.cache.get(f).filter(|c| c.2 == *modified) {
                 s.sum += b;
                 s.partial |= !complete;
             } else if let Some(b) = self.xtree.as_ref().and_then(|x| x.size_of(f)) {
@@ -316,7 +326,8 @@ impl App {
             s.pending.remove(i);
             s.sum += r.bytes;
             s.partial |= !r.complete;
-            s.cache.insert(r.path, (r.bytes, r.complete));
+            let modified = s.key.as_ref().and_then(|k| k.folders.iter().find(|(f, _)| *f == r.path)).map_or(0, |&(_, m)| m);
+            s.cache.insert(r.path, (r.bytes, r.complete, modified));
             changed = true;
         }
         if changed {

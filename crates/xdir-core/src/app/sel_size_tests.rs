@@ -64,6 +64,20 @@ fn wait_status(a: &mut App, done: &str) {
     }
 }
 
+/// El vigilante de la carpeta del panel avisa un cambio: se relee y se dibuja.
+fn watcher_fires(a: &mut App) {
+    let (id, nav) = (a.panes[0].tab().id, a.panes[0].tab().nav_id());
+    a.on_app_message(WM_APP_CHANGED, id, nav as isize);
+    let t0 = Instant::now();
+    while a.panes[0].tab().loading || a.panes[0].tab().reload_pending() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la carpeta no se releyó");
+        if let Ok(ev) = a.rx.recv_timeout(Duration::from_millis(20)) {
+            a.on_load_event(ev);
+        }
+    }
+    a.paint();
+}
+
 fn size(b: u64) -> String {
     crate::format::size_short(b)
 }
@@ -117,12 +131,13 @@ fn cache_reused_and_invalidated_by_watcher() {
     select(&mut a, &["a", "b"]);
     wait_status(&mut a, &size(150));
     assert_eq!(a.sel_size.cached(&dir.join("a")), Some(100));
+    // Algunos discos guardan la fecha al segundo (el de Docker en la Mac): que la de «a» cambie.
+    std::thread::sleep(Duration::from_millis(1100));
     std::fs::write(dir.join("a").join("z.bin"), vec![0u8; 1000]).unwrap();
     select(&mut a, &["a"]);
     assert!(a.status_text().ends_with(&size(100)), "de lo recordado, sin «calculando…»: {}", a.status_text());
-    let id = a.panes[0].tab().id;
-    a.on_app_message(WM_APP_CHANGED, id, 0);
-    a.paint();
+    // El vigilante de la carpeta avisa: se vuelve a leer y «a» trae otra fecha.
+    watcher_fires(&mut a);
     assert!(a.status_text().ends_with("calculando\u{2026}"), "{}", a.status_text());
     wait_status(&mut a, &size(1100));
     let _ = std::fs::remove_dir_all(&dir);
@@ -208,5 +223,21 @@ fn change_in_subfolder_drops_ancestor_cache() {
     assert_eq!(a.sel_size.cached(&dir.join("b")), None, "b quedó con el tamaño viejo");
     a.paint();
     wait_status(&mut a, &size(1050));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Un cambio en un archivo suelto de la carpeta (una descarga, `.DS_Store`) no vuelve a sumar las
+/// carpetas elegidas: su fecha no cambió.
+#[test]
+fn unrelated_change_keeps_folder_sizes() {
+    let dir = fixture("suelto");
+    let mut a = app_in(&dir);
+    select(&mut a, &["a", "b"]);
+    wait_status(&mut a, &size(150));
+    let g = a.sel_size.generation();
+    std::fs::write(dir.join("f.txt"), vec![0u8; 11]).unwrap();
+    watcher_fires(&mut a);
+    assert!(a.status_text().ends_with(&format!("2 elementos seleccionados · {}", size(150))), "{}", a.status_text());
+    assert_eq!(a.sel_size.generation(), g, "no se cortó ni se volvió a arrancar");
     let _ = std::fs::remove_dir_all(&dir);
 }

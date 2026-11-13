@@ -697,7 +697,9 @@ impl FakeFileSystem {
             pidl: None,
             is_dir,
             size: if is_dir { 0 } else { meta.len() },
-            modified: 0,
+            // La fecha real del disco (en unidades de 100 ns): al cambiar lo de adentro de una
+            // carpeta, cambia la suya.
+            modified: meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| (d.as_nanos() / 100) as u64 + 116_444_736_000_000_000),
             created: 0,
             attrs,
             type_name: Arc::from(if is_dir { "Carpeta" } else { "Archivo" }),

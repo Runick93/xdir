@@ -1,7 +1,11 @@
 //! Sumas de verificación (SHA-256 y MD5) de lo que se lee por bloques, con avance y corte.
+//! `SystemHashes` se instala detrás de `xdir_core::sys::Hashes` en las tres plataformas.
 
 use std::io::{self, Read};
 use std::ops::ControlFlow;
+use std::path::Path;
+
+use xdir_core::sys::{CopyError, ErrKind, Flow, Hashes, Reader};
 
 #[cfg(test)]
 mod tests;
@@ -9,12 +13,8 @@ mod tests;
 /// Lo que se lee de una vez (1 MB).
 pub const BLOCK: usize = 1 << 20;
 
-/// Los algoritmos que se ofrecen.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Algo {
-    Sha256,
-    Md5,
-}
+/// Los algoritmos que se ofrecen (los del núcleo).
+pub use xdir_core::sys::HashAlgo as Algo;
 
 /// El estado de una suma en curso.
 enum State {
@@ -95,4 +95,27 @@ pub fn hex(bytes: &[u8]) -> String {
         s.push(DIGITS[(b & 0xF) as usize] as char);
     }
     s
+}
+
+/// El servicio de cada sistema: abre con `std::fs` y suma con `hash_reader`.
+pub struct SystemHashes;
+
+impl Hashes for SystemHashes {
+    fn open(&self, path: &Path) -> Result<Reader, CopyError> {
+        match std::fs::File::open(path) {
+            Ok(f) => Ok(Box::new(f)),
+            Err(e) => {
+                let mut err = xdir_core::sys::io_error(&e, path);
+                // Windows: violación de uso compartido o de bloqueo (otro programa lo tiene).
+                if cfg!(windows) && matches!(e.raw_os_error(), Some(32) | Some(33)) {
+                    err.kind = ErrKind::InUse;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn hash(&self, r: &mut dyn Read, algo: Algo, progress: &mut dyn FnMut(u64) -> Flow) -> io::Result<Option<String>> {
+        hash_reader(r, algo, &mut |b| if progress(b) == Flow::Stop { ControlFlow::Break(()) } else { ControlFlow::Continue(()) })
+    }
 }

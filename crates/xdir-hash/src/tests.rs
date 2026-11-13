@@ -107,3 +107,21 @@ fn read_error_is_returned() {
 fn hex_is_lowercase() {
     assert_eq!(hex(&[0x00, 0xAB, 0x0F, 0xF0]), "00ab0ff0");
 }
+
+/// El servicio del sistema: abre del disco, suma con los vectores conocidos y corta.
+#[test]
+fn system_service_opens_and_hashes() {
+    use xdir_core::sys::{ErrKind, Flow, Hashes};
+    let dir = std::env::temp_dir().join(format!("xdir-hash-servicio-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("abc.txt");
+    std::fs::write(&f, b"abc").unwrap();
+    let s = SystemHashes;
+    let mut r = s.open(&f).unwrap();
+    let got = s.hash(&mut r, Algo::Sha256, &mut |_| Flow::Continue).unwrap();
+    assert_eq!(got.as_deref(), Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+    let mut r = s.open(&f).unwrap();
+    assert_eq!(s.hash(&mut r, Algo::Md5, &mut |_| Flow::Stop).unwrap(), None);
+    assert!(matches!(s.open(&dir.join("no-esta")), Err(e) if e.kind == ErrKind::NotFound));
+    let _ = std::fs::remove_dir_all(&dir);
+}

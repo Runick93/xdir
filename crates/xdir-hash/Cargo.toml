@@ -6,5 +6,6 @@ edition.workspace = true
 # Sumas de verificación (SHA-256 y MD5) con las crates de RustCrypto, sin features de más. Solo la
 # usan las crates de cada sistema, a través de `sys::Hashes`: xdir-core sigue sin dependencias.
 [dependencies]
+xdir-core = { path = "../xdir-core" }
 sha2 = { version = "0.11.1", default-features = false }
 md-5 = { version = "0.11.0", default-features = false }

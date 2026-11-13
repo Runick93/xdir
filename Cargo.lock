@@ -854,6 +854,7 @@ version = "0.1.23"
 dependencies = [
  "md-5",
  "sha2",
+ "xdir-core",
 ]
 
 [[package]]
@@ -864,6 +865,7 @@ dependencies = [
  "notify",
  "xdir-archive",
  "xdir-core",
+ "xdir-hash",
 ]
 
 [[package]]
@@ -888,6 +890,7 @@ dependencies = [
  "tar",
  "xdir-archive",
  "xdir-core",
+ "xdir-hash",
 ]
 
 [[package]]
@@ -899,6 +902,7 @@ dependencies = [
  "windows-numerics",
  "xdir-archive",
  "xdir-core",
+ "xdir-hash",
 ]
 
 [[package]]

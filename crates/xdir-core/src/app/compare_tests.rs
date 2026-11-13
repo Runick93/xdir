@@ -610,3 +610,36 @@ fn spawn_failure_answers_the_right_job() {
     assert!(st.hashes[0].job.is_none());
     assert!(matches!(&st.hashes[0].result, Some(Err(m)) if m.contains("hilo")), "{:?}", st.hashes[0].result);
 }
+
+/// En una ventana baja el panel se desplaza con la rueda; el avance no redibuja con el panel
+/// oculto (xtree encima).
+#[test]
+fn panel_scrolls_and_no_ticks_while_hidden() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("rueda", &[("a.txt", b"hola"), ("b.txt", b"hola")]);
+    go(&mut a, 0, Location::Path(d.clone()));
+    select(&mut a, 0, &["a.txt", "b.txt"]);
+    a.run_command(Command::CompareContents);
+    wait_done(&mut a);
+    host.client.set((1280.0, 330.0));
+    a.paint();
+    let max = a.compare.as_ref().unwrap().layout.max_scroll();
+    assert!(max > 0.0, "no entra en una ventana baja");
+    let r = a.compare.as_ref().unwrap().layout.panel;
+    a.on_wheel((r.left + r.right) / 2.0, r.top + 100.0, -50.0, 1.0);
+    a.paint();
+    assert_eq!(a.compare.as_ref().unwrap().scroll, max);
+    // Calculando a la vista, el avance redibuja; oculto (xtree encima), no.
+    host.client.set((1280.0, 800.0));
+    FakeNetwork::hang(&d.to_string_lossy(), Duration::from_millis(300));
+    a.compare_hash(0);
+    a.paint();
+    let before = host.invalidations();
+    a.on_compare_message(1);
+    assert!(host.invalidations() > before);
+    a.toggle_xtree();
+    let before = host.invalidations();
+    a.on_compare_message(1);
+    assert_eq!(host.invalidations(), before);
+}

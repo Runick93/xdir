@@ -435,6 +435,10 @@ impl App {
                 self.info_wheel(delta * lines);
                 return;
             }
+            Hit::Compare(_) => {
+                self.compare_wheel(delta * lines);
+                return;
+            }
             Hit::Settings(i, _) => {
                 self.settings_wheel(i, delta * lines);
                 return;

@@ -102,6 +102,8 @@ pub(super) struct CompareState {
     pub focused: bool,
     /// Cómo quedó armado el panel en el último cuadro (dibujo y clics).
     pub layout: cdraw::Layout,
+    /// Cuánto se desplazó el contenido (ventanas bajas).
+    pub scroll: f32,
 }
 
 impl CompareState {
@@ -221,7 +223,7 @@ impl App {
         } else {
             Status::Running
         };
-        let mut st = CompareState { sides, status, job: None, hashes: Default::default(), focused: false, layout: cdraw::Layout::default() };
+        let mut st = CompareState { sides, status, job: None, hashes: Default::default(), focused: false, layout: cdraw::Layout::default(), scroll: 0.0 };
         if st.status == Status::Running {
             let (a, b) = (st.sides[0].source.clone(), st.sides[1].source.clone());
             let remote = a.remote_host().or_else(|| b.remote_host());
@@ -281,8 +283,14 @@ impl App {
 
     /// `WM_APP_COMPARE`: llegó un resultado (o hay que redibujar el avance).
     pub(super) fn on_compare_message(&mut self, wparam: usize) {
+        // El avance: solo se redibuja si se ve un trabajo en curso (el panel de comparar, o la suma
+        // del panel de información).
         if wparam == 1 {
-            self.redraw();
+            let comparing = self.compare_open() && self.compare.as_ref().is_some_and(|c| c.job.is_some() || c.hashes.iter().any(|h| h.job.is_some()));
+            let summing = self.info_open() && self.preview_visible() && self.info.sum.job.is_some();
+            if comparing || summing {
+                self.redraw();
+            }
             return;
         }
         while let Ok(r) = self.jobs.rx.try_recv() {
@@ -440,10 +448,20 @@ impl App {
     pub(super) fn layout_compare(&mut self, r: geom::Rect) {
         let Some(view) = self.compare_view() else { return };
         let host = self.host.clone();
-        let l = cdraw::layout(r, &view, &|s| host.text_width(s, false));
+        let scroll = self.compare.as_ref().map_or(0.0, |s| s.scroll);
+        let l = cdraw::layout(r, &view, scroll, &|s| host.text_width(s, false));
         if let Some(st) = &mut self.compare {
+            st.scroll = l.scroll;
             st.layout = l;
         }
+    }
+
+    /// La rueda sobre el panel lo desplaza.
+    pub(super) fn compare_wheel(&mut self, delta: f32) {
+        if let Some(st) = &mut self.compare {
+            st.scroll = (st.scroll - delta * crate::info::draw::ROW_H).clamp(0.0, st.layout.max_scroll());
+        }
+        self.redraw();
     }
 
     /// Qué hay del panel en `(x, y)`.

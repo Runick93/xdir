@@ -301,11 +301,11 @@ pub fn hit(l: &Layout, x: f32, y: f32) -> Option<InfoHit> {
         .or(Some(InfoHit::Body))
 }
 
-fn moved(r: Rect, dy: f32) -> Rect {
+pub(crate) fn moved(r: Rect, dy: f32) -> Rect {
     rect(r.left, r.top + dy, r.right, r.bottom + dy)
 }
 
-fn shift(p: Prim, dy: f32) -> Prim {
+pub(crate) fn shift(p: Prim, dy: f32) -> Prim {
     match p {
         Prim::Text { font, s, r, tone } => Prim::Text { font, s, r: moved(r, dy), tone },
         Prim::Fill { r, radius, tone } => Prim::Fill { r: moved(r, dy), radius, tone },

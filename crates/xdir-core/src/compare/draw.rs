@@ -79,12 +79,24 @@ pub enum CompareHit {
     Body,
 }
 
-/// El panel armado: lo que se pinta y lo que se toca.
+/// El panel armado: lo que se pinta (la barra superior fija y el contenido, ya desplazado) y lo
+/// que se toca; la parte que se desplaza, el alto del contenido y el desplazamiento (ya limitado).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Layout {
     pub panel: Rect,
+    pub view: Rect,
+    pub fixed: Vec<Prim>,
     pub prims: Vec<Prim>,
     pub hits: Vec<(CompareHit, Rect)>,
+    pub content_h: f32,
+    pub scroll: f32,
+}
+
+impl Layout {
+    /// Desplazamiento máximo.
+    pub fn max_scroll(&self) -> f32 {
+        (self.content_h - (self.view.bottom - self.view.top)).max(0.0)
+    }
 }
 
 struct Builder<'a> {
@@ -126,15 +138,18 @@ impl Builder<'_> {
 }
 
 /// Arma el panel en `r`. `measure` da el ancho de un texto en la letra de la interfaz.
-pub fn layout(r: Rect, v: &View, measure: &dyn Fn(&str) -> f32) -> Layout {
+/// `scroll` desplaza el contenido debajo de la barra superior (se limita a lo que hay).
+pub fn layout(r: Rect, v: &View, scroll: f32, measure: &dyn Fn(&str) -> f32) -> Layout {
     let (x0, x1) = (r.left + MARGIN, r.right - MARGIN);
-    let mut b = Builder { prims: Vec::new(), hits: Vec::new(), measure, x1 };
-    // Barra superior.
-    b.text(FontId::Ui, TITLE, rect(x0, r.top + 12.0, x1 - 28.0, r.top + 28.0), Tone::Text);
+    // Barra superior (fija).
     let close = rect(r.right - 33.0, r.top + 8.0, r.right - 9.0, r.top + 32.0);
-    b.prims.push(Prim::Cross { x: (close.left + close.right) / 2.0, y: (close.top + close.bottom) / 2.0, size: 5.0, tone: Tone::Secondary });
-    b.hits.push((CompareHit::Close, close));
-    let mut y = r.top + TOP_H + 4.0;
+    let fixed = vec![
+        Prim::Text { font: FontId::Ui, s: TITLE.to_string(), r: rect(x0, r.top + 12.0, x1 - 28.0, r.top + 28.0), tone: Tone::Text },
+        Prim::Cross { x: (close.left + close.right) / 2.0, y: (close.top + close.bottom) / 2.0, size: 5.0, tone: Tone::Secondary },
+    ];
+    let mut b = Builder { prims: Vec::new(), hits: Vec::new(), measure, x1 };
+    let top = r.top + TOP_H;
+    let mut y = top + 4.0;
     // Los dos archivos.
     for s in &v.sides {
         b.prims.push(Prim::Icon { icon: s.icon, x: x0, y: y + 6.0, size: ICON });
@@ -216,8 +231,17 @@ pub fn layout(r: Rect, v: &View, measure: &dyn Fn(&str) -> f32) -> Layout {
     if let [HashView::Done(a), HashView::Done(c)] = &v.hashes {
         let (text, tone) = if a == c { ("Las dos sumas coinciden", Tone::Ok) } else { ("Las sumas no coinciden", Tone::Danger) };
         b.text(FontId::UiBold, text, rect(x0, y, x1, y + 16.0), tone);
+        y += 16.0;
     }
-    Layout { panel: r, prims: b.prims, hits: b.hits }
+    y += 16.0;
+    let mut l = Layout { panel: r, view: rect(r.left, top, r.right, r.bottom - 1.0), fixed, content_h: y - top, ..Layout::default() };
+    l.scroll = scroll.clamp(0.0, l.max_scroll());
+    let dy = -l.scroll;
+    let view = l.view;
+    l.prims = b.prims.into_iter().map(|p| idraw::shift(p, dy)).collect();
+    l.hits.push((CompareHit::Close, close));
+    l.hits.extend(b.hits.into_iter().map(|(h, rc)| (h, idraw::moved(rc, dy))).filter(|(_, rc)| rc.top >= view.top && rc.bottom <= view.bottom));
+    l
 }
 
 /// Lo que hay en `(x, y)` (None: fuera del panel).
@@ -238,9 +262,23 @@ pub fn draw(p: &dyn Painter, l: &Layout, hover: Option<CompareHit>) {
         return;
     }
     p.clip(r, &mut || {
+        for prim in &l.fixed {
+            idraw::paint(p, prim);
+        }
+    });
+    p.clip(l.view, &mut || {
         for prim in &l.prims {
             idraw::paint(p, prim);
         }
+    });
+    // Barra de desplazamiento (4 de ancho) si el contenido no entra.
+    let vh = l.view.bottom - l.view.top;
+    if l.content_h > vh + 0.5 {
+        let thumb_h = (vh * vh / l.content_h).max(24.0);
+        let y = l.view.top + (vh - thumb_h) * (l.scroll / l.max_scroll().max(1.0));
+        p.round_fill(rect(r.right - 7.0, y, r.right - 3.0, y + thumb_h), 2.0, th.scrollbar);
+    }
+    p.clip(r, &mut || {
         if let Some(h) = hover.filter(|h| *h != CompareHit::Body)
             && let Some((_, rc)) = l.hits.iter().find(|(x, _)| *x == h)
         {
@@ -277,10 +315,30 @@ mod tests {
 
     const R: Rect = Rect { left: 1000.0, top: 40.0, right: 1320.0, bottom: 820.0 };
 
+    /// En una ventana baja el contenido se desplaza debajo de la barra superior: lo de abajo se
+    /// alcanza y ✕ queda en su lugar.
+    #[test]
+    fn short_panel_scrolls() {
+        let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string();
+        let v = view(ResultView::Cancelled, [HashView::Done(sha.clone()), HashView::Done(sha)]);
+        let short = Rect { bottom: R.top + 300.0, ..R };
+        let l = layout(short, &v, 0.0, &|s| s.len() as f32 * 7.0);
+        assert!(l.max_scroll() > 0.0);
+        assert!(!l.hits.iter().any(|(h, _)| *h == CompareHit::Copy(1)), "fuera de la vista no se toca");
+        let l = layout(short, &v, 1e6, &|s| s.len() as f32 * 7.0);
+        assert_eq!(l.scroll, l.max_scroll(), "se limita a lo que hay");
+        let copy = l.hits.iter().find(|(h, _)| *h == CompareHit::Copy(1)).expect("abajo de todo").1;
+        assert!(copy.bottom <= short.bottom && copy.top >= short.top + TOP_H);
+        let close = l.hits.iter().find(|(h, _)| *h == CompareHit::Close).unwrap().1;
+        assert_eq!(close.top, short.top + 8.0);
+        // Entra entero: no se desplaza.
+        assert_eq!(layout(R, &v, 50.0, &|s| s.len() as f32 * 7.0).scroll, 0.0);
+    }
+
     /// Comparando: avance, Cancelar y los botones de las sumas.
     #[test]
     fn running_shows_progress_and_cancel() {
-        let l = layout(R, &view(ResultView::Running { label: "Comparando…".into(), fraction: 0.37, detail: "1 de 3".into() }, [HashView::Idle, HashView::Idle]), &|s| s.len() as f32 * 7.0);
+        let l = layout(R, &view(ResultView::Running { label: "Comparando…".into(), fraction: 0.37, detail: "1 de 3".into() }, [HashView::Idle, HashView::Idle]), 0.0, &|s| s.len() as f32 * 7.0);
         let t = texts(&l);
         assert!(t.contains(&"Comparando…".to_string()) && t.contains(&"37 %".to_string()), "{t:?}");
         let cancel = l.hits.iter().find(|(h, _)| *h == CompareHit::Cancel).unwrap().1;
@@ -296,10 +354,10 @@ mod tests {
     /// «Iguales» en `ok` y «Distintos» en `danger`.
     #[test]
     fn verdict_colors() {
-        let l = layout(R, &view(ResultView::Verdict { same: true, detail: "x".into() }, [HashView::Idle, HashView::Idle]), &|s| s.len() as f32 * 7.0);
+        let l = layout(R, &view(ResultView::Verdict { same: true, detail: "x".into() }, [HashView::Idle, HashView::Idle]), 0.0, &|s| s.len() as f32 * 7.0);
         assert_eq!(tone_of(&l, "Iguales"), Some(Tone::Ok));
         assert!(!l.hits.iter().any(|(h, _)| *h == CompareHit::Cancel));
-        let l = layout(R, &view(ResultView::Verdict { same: false, detail: "x".into() }, [HashView::Idle, HashView::Idle]), &|s| s.len() as f32 * 7.0);
+        let l = layout(R, &view(ResultView::Verdict { same: false, detail: "x".into() }, [HashView::Idle, HashView::Idle]), 0.0, &|s| s.len() as f32 * 7.0);
         assert_eq!(tone_of(&l, "Distintos"), Some(Tone::Danger));
     }
 
@@ -308,14 +366,14 @@ mod tests {
     #[test]
     fn sums_with_copy_and_match() {
         let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string();
-        let l = layout(R, &view(ResultView::Cancelled, [HashView::Done(sha.clone()), HashView::Done(sha.clone())]), &|s| s.len() as f32 * 7.0);
+        let l = layout(R, &view(ResultView::Cancelled, [HashView::Done(sha.clone()), HashView::Done(sha.clone())]), 0.0, &|s| s.len() as f32 * 7.0);
         let mono: Vec<String> = l.prims.iter().filter_map(|p| if let Prim::Text { font: FontId::Mono, s, .. } = p { Some(s.clone()) } else { None }).collect();
         assert_eq!(mono.concat(), sha.repeat(2));
         assert!(mono.iter().all(|m| m.len() == 32), "{mono:?}");
         assert!(l.hits.iter().any(|(h, _)| *h == CompareHit::Copy(1)));
         assert_eq!(tone_of(&l, "Las dos sumas coinciden"), Some(Tone::Ok));
         assert!(l.hits.iter().any(|(h, _)| *h == CompareHit::Retry));
-        let l = layout(R, &view(ResultView::Cancelled, [HashView::Done(sha.clone()), HashView::Done(sha.replace('e', "f"))]), &|s| s.len() as f32 * 7.0);
+        let l = layout(R, &view(ResultView::Cancelled, [HashView::Done(sha.clone()), HashView::Done(sha.replace('e', "f"))]), 0.0, &|s| s.len() as f32 * 7.0);
         assert_eq!(tone_of(&l, "Las sumas no coinciden"), Some(Tone::Danger));
     }
 }

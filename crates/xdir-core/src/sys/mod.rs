@@ -369,6 +369,13 @@ pub trait FileSystem: Send + Sync {
     fn volume_id(&self, _path: &Path) -> Option<u64> {
         None
     }
+    /// ¿Este enlace (o punto de reanálisis) lleva a una carpeta? Sin seguirlo: en Windows, una
+    /// unión, un disco montado en una carpeta o un enlace a carpeta. La suma de una carpeta no
+    /// entra y lo marca como «al menos». Por defecto no (en macOS y Linux, lo que se monta adentro
+    /// lo dicen `volume_id` e `is_mount_point`).
+    fn is_dir_link(&self, _path: &Path) -> bool {
+        false
+    }
     /// Las reglas de nombres del sistema (`rename_many::NameRules::WINDOWS` o `UNIX`: en macOS
     /// «:» vale, el Finder lo muestra como «/»).
     fn name_rules(&self) -> crate::rename_many::NameRules {

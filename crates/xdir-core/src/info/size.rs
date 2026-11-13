@@ -14,12 +14,20 @@ pub const STEP: u64 = 500;
 /// con su tamaño lógico (sin abrirlos); las carpetas solo en la nube cuentan, pero no se entra.
 /// Devuelve cuántas carpetas no se pudieron leer (sin permiso: quedan fuera de la cuenta).
 pub fn folder_size(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &AtomicBool, step: &mut dyn FnMut(u64, u64, u64)) -> u64 {
-    folder_size_every(path, cloud_only, ctl, STEP, step)
+    folder_size_every(path, cloud_only, &|_| {}, ctl, STEP, step)
 }
 
 /// `folder_size` informando el avance cada `every` elementos (1: con cada uno, para vigilar una
-/// suma en una carpeta de red).
-pub fn folder_size_every(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &AtomicBool, every: u64, step: &mut dyn FnMut(u64, u64, u64)) -> u64 {
+/// suma en una carpeta de red). `link` recibe cada enlace que se encuentra (no se sigue: cuenta
+/// lo que pesa el enlace).
+pub fn folder_size_every(
+    path: &Path,
+    cloud_only: &dyn Fn(&Path) -> bool,
+    link: &dyn Fn(&Path),
+    ctl: &AtomicBool,
+    every: u64,
+    step: &mut dyn FnMut(u64, u64, u64),
+) -> u64 {
     let every = every.max(1);
     let mut skipped = 0u64;
     let (mut bytes, mut files, mut folders) = (0u64, 0u64, 0u64);
@@ -46,6 +54,9 @@ pub fn folder_size_every(path: &Path, cloud_only: &dyn Fn(&Path) -> bool, ctl: &
                     stack.push(p);
                 }
             } else {
+                if ft.is_symlink() {
+                    link(&p);
+                }
                 files += 1;
                 if let Ok(m) = entry.metadata() {
                     bytes += m.len();
@@ -78,7 +89,7 @@ mod tests {
         let ctl = AtomicBool::new(false);
         let mut calls = 0;
         let mut last = (0, 0, 0);
-        let skipped = folder_size_every(&dir, &|_| false, &ctl, 1, &mut |b, f, d| {
+        let skipped = folder_size_every(&dir, &|_| false, &|_| {}, &ctl, 1, &mut |b, f, d| {
             calls += 1;
             last = (b, f, d);
         });

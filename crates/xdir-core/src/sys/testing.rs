@@ -407,6 +407,8 @@ static EJECTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static CLOUD_ALL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 /// Disco de cada ruta para `volume_id` (todos los hilos; sin dato, `None`).
 static VOLUME_IDS: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+/// Enlaces a carpetas del falso (`set_dir_link`).
+static DIR_LINKS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 /// Puntos de montaje del falso (`set_mount_point`).
 static MOUNTS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
@@ -633,6 +635,11 @@ impl FakeFileSystem {
                 c.remove(path);
             }
         });
+    }
+
+    /// Desde ahora `is_dir_link(path)` dice que sí (en todos los hilos).
+    pub fn set_dir_link(path: &Path) {
+        DIR_LINKS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf());
     }
 
     /// Desde ahora `is_mount_point(path)` dice que sí (en todos los hilos).
@@ -958,6 +965,11 @@ impl FileSystem for FakeFileSystem {
         }
         WATCHES.lock().unwrap_or_else(|e| e.into_inner()).entry(path.to_path_buf()).or_insert((0, 0)).0 += 1;
         Some(Box::new(FakeWatch(path.to_path_buf())))
+    }
+
+    /// Lo puesto con `set_dir_link`.
+    fn is_dir_link(&self, path: &Path) -> bool {
+        DIR_LINKS.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
     }
 
     /// Lo puesto con `set_volume_id`.

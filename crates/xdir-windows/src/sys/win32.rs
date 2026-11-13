@@ -489,6 +489,15 @@ impl FileSystem for Win32FileSystem {
         fsp::is_mount_point(path)
     }
 
+    /// Unión, disco montado en una carpeta o enlace a carpeta: un punto de reanálisis que es
+    /// carpeta (sin seguirlo).
+    fn is_dir_link(&self, path: &Path) -> bool {
+        use std::os::windows::fs::MetadataExt;
+        const DIRECTORY: u32 = 0x10;
+        const REPARSE_POINT: u32 = 0x400;
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_attributes() & (DIRECTORY | REPARSE_POINT) == DIRECTORY | REPARSE_POINT)
+    }
+
     fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
         fsp::disk_entry(path, name, meta)
     }

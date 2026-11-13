@@ -313,3 +313,19 @@ fn key_built_only_when_selection_changes() {
     assert_eq!(a.sel_size.key_builds, n + 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Un enlace a una carpeta adentro (en Windows, una unión o un disco montado en una carpeta) no
+/// se recorre, y el total lo dice: «al menos».
+#[cfg(unix)]
+#[test]
+fn folder_link_inside_marks_partial() {
+    let dir = fixture("union");
+    let link = dir.join("a").join("atajo");
+    std::os::unix::fs::symlink(dir.join("b"), &link).unwrap();
+    FakeFileSystem::set_dir_link(&link);
+    let own = std::fs::symlink_metadata(&link).unwrap().len();
+    let mut a = app_in(&dir);
+    select(&mut a, &["a"]);
+    wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(100 + own)));
+    let _ = std::fs::remove_dir_all(&dir);
+}

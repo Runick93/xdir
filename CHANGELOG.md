@@ -62,6 +62,7 @@
 - xtree ya no es un programa aparte.
 
 ### Arreglos
+- La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Los atajos con Alt y Ctrl juntos (en la Mac, ⌥ y ⌘) no andaban.
 - En la Mac, el tipo de archivo siempre empieza con mayúscula.
 - **Seguridad**

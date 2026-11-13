@@ -542,3 +542,19 @@ fn eject_stops_compare_and_checksum_and_waits() {
         FakeFileSystem::set_drives(&[]);
     }
 }
+
+/// Un enlace a un archivo (en Windows la lista muestra el tamaño del enlace, 0): no se responde
+/// «tamaños distintos» con la lista; se mira el destino en el hilo.
+#[test]
+fn link_size_is_not_trusted() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("enlace", &[("a.bin", b"hola mundo"), ("b.bin", b"hola mundo")]);
+    go(&mut a, 0, Location::Path(d));
+    let list = &mut a.panes[0].tab_mut().list;
+    let i = list.entries.iter().position(|e| e.name == "b.bin").unwrap();
+    list.entries[i].attrs |= crate::fs::ATTR_LINK;
+    list.entries[i].size = 0;
+    select(&mut a, 0, &["a.bin", "b.bin"]);
+    a.run_command(Command::CompareContents);
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
+}

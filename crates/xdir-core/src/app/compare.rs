@@ -39,6 +39,8 @@ pub(super) struct Side {
     pub folder: String,
     pub size: u64,
     pub icon: i32,
+    /// Es un enlace: el tamaño de la lista puede ser el del enlace (Windows), no el del destino.
+    pub link: bool,
 }
 
 /// Un trabajo en otro hilo: su número, su corte y su avance.
@@ -147,7 +149,8 @@ fn side_of(tab: &Tab, i: usize) -> Option<Side> {
         Source::Disk(p) => p.parent().map(super::info::short_location).unwrap_or_default(),
         Source::Archive { .. } => super::info::short_location(std::path::Path::new(&tab.location.address_text())),
     };
-    Some(Side { source, name: e.display.clone(), folder, size: e.size, icon: e.icon })
+    let link = e.attrs & ATTR_LINK != 0;
+    Some(Side { source, name: e.display.clone(), folder, size: e.size, icon: e.icon, link })
 }
 
 impl App {
@@ -199,7 +202,8 @@ impl App {
         }
         let status = if sides[0].source == sides[1].source {
             Status::Done(Verdict::SameFile)
-        } else if sides[0].size != sides[1].size {
+        } else if sides[0].size != sides[1].size && !sides.iter().any(|s| s.link) {
+            // (Un enlace se mira en el hilo: los tamaños que compara son los del destino.)
             Status::Done(Verdict::SizeDiffers { a: sides[0].size, b: sides[1].size })
         } else {
             Status::Running

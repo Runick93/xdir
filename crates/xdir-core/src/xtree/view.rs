@@ -1619,19 +1619,21 @@ impl Xtree {
             p.round_stroke_w(sbtn, 6.0, if self.search.is_some() { th.accent } else { th.border }, 1.0);
             p.text(FontId::GlyphsSmall, "\u{E721}", sbtn, th.text);
         }
+        // El estado (y su punto) después de «Analizar» si la ventana es angosta: lo recorta.
+        let state_l = (r0 - STATE_W).max(ui.scan_btn.right + 36.0);
         let state = self.state_text();
         // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
         // es de escaneo.
         let done_state = done && !self.elevated_pending();
         if unscanned {
             // Sin análisis: sin punto de estado, el texto apagado.
-            p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text_dim);
+            p.text(FontId::Ui, &state, rect(state_l, t0, r0 - MARGIN, t0 + TOP_H), th.text_dim);
         } else {
-            p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
+            p.circle(state_l - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
             if done_state {
-                p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
+                p.text(FontId::UiCenter, "\u{2713}", rect(state_l - 27.0, t0, state_l - 9.0, t0 + TOP_H), white);
             }
-            p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
+            p.text(FontId::Ui, &state, rect(state_l, t0, r0 - MARGIN, t0 + TOP_H), th.text);
         }
 
         if arena.is_empty() {
@@ -2005,6 +2007,20 @@ mod tests {
         assert_eq!(mid.colors_btn.right - mid.colors_btn.left, SEARCH_W, "angosta: solo la muestra");
         let narrow = layout_ui(rect(0.0, 0.0, 560.0, 790.0), 0.0);
         assert!(narrow.colors_btn.right <= narrow.colors_btn.left && narrow.search_btn.right <= narrow.search_btn.left, "sin lugar: no están");
+        // El estado del análisis tampoco pisa «Analizar» (empieza después de él y de su punto).
+        for w in [560.0, 640.0] {
+            let area = rect(0.0, 0.0, w, 790.0);
+            let mut x = Xtree::idle(PathBuf::from("raiz"));
+            x.set_arena(vec![node("raiz", NO_PARENT, 5, true, vec![])]);
+            x.scan_started = Some(Instant::now());
+            x.scan_elapsed = Some(Duration::from_secs(1));
+            let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+            x.paint(&p, area);
+            let s = layout_ui(area, 0.0).scan_btn;
+            let want = x.state_text();
+            let st = p.texts().into_iter().find(|(_, t, _)| *t == want).expect("estado").2;
+            assert!(st.left >= s.right + 30.0, "ancho {w}: el estado en {st:?} pisa «Analizar» ({s:?})");
+        }
         // Un clic donde no están no hace nada con ellos.
         let mut x = Xtree::idle(PathBuf::from("raiz"));
         let a = rect(0.0, 0.0, 560.0, 790.0);

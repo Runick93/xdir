@@ -1,7 +1,8 @@
 //! «Suma de verificación» del panel de información (issue #59): el algoritmo elegido (SHA-256 o
 //! MD5), la suma de un archivo calculada en otro hilo (`compare::hash_source`, vigilado como la
 //! comparación: avance, Cancelar y límite sin avance en la red) y «Comparar con…» con la suma
-//! publicada (`compare::parse_expected`: el largo elige el algoritmo y, si falta, se calcula).
+//! publicada (`compare::pick_expected`: el largo elige el algoritmo y, si falta, se calcula; de un
+//! archivo de sumas, la línea del archivo).
 //!
 //! Se calcula solo al pedirlo y se corta al cambiar de archivo o al cerrar el panel. Un archivo de
 //! adentro de un comprimido se extrae antes a la temporal de la app (con sus límites).
@@ -61,11 +62,28 @@ impl Checksum {
     }
 
     /// Lo que dice «Comparar con…» (`None`: nada pegado o falta calcular).
+    /// La suma pegada que vale para este archivo (con varias, la línea que lo nombra).
+    fn picked(&self) -> Option<compare::Picked> {
+        let name = self.target.as_ref().map(Source::name).unwrap_or_default();
+        compare::pick_expected(&self.expected, &name)
+    }
+
+    /// Con varias sumas pegadas, qué línea se usó.
+    fn note(&self) -> Option<String> {
+        let p = self.picked().filter(|p| p.of > 1)?;
+        let name = self.target.as_ref().map(Source::name).unwrap_or_default();
+        Some(if p.by_name {
+            format!("Se usó la línea {} («{name}»)", p.line)
+        } else {
+            format!("Se usó la línea {} de {}: ninguna nombra «{name}»", p.line, p.of)
+        })
+    }
+
     fn check(&self) -> Option<SumCheck> {
         if self.expected.trim().is_empty() {
             return None;
         }
-        let Some((algo, want)) = compare::parse_expected(&self.expected) else { return Some(SumCheck::Invalid) };
+        let Some(compare::Picked { algo, hex: want, .. }) = self.picked() else { return Some(SumCheck::Invalid) };
         match self.result(algo)? {
             Ok(got) if *got == want => Some(SumCheck::Matches),
             Ok(_) => Some(SumCheck::Differs),
@@ -120,7 +138,7 @@ impl App {
                 _ => SumState::Idle,
             }
         };
-        ChecksumView { algo: s.algo, state, expected: s.expected.clone(), check: s.check() }
+        ChecksumView { algo: s.algo, state, expected: s.expected.clone(), check: s.check(), note: s.note() }
     }
 
     /// Calcula la suma `algo` del archivo del panel (corta la que estuviera en curso).
@@ -180,7 +198,7 @@ impl App {
     /// calculada, se calcula.
     pub(super) fn set_expected(&mut self, text: &str) {
         self.info.sum.expected = text.to_string();
-        if let Some((algo, _)) = compare::parse_expected(text) {
+        if let Some(algo) = self.info.sum.picked().map(|p| p.algo) {
             if self.info.sum.algo != algo {
                 self.info.sum.stop();
                 self.info.sum.algo = algo;

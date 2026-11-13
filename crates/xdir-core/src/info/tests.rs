@@ -253,7 +253,7 @@ fn checksum_layout(v: draw::ChecksumView) -> draw::Layout {
 }
 
 fn sum_view(state: draw::SumState) -> draw::ChecksumView {
-    draw::ChecksumView { algo: crate::sys::HashAlgo::Sha256, state, expected: String::new(), check: None }
+    draw::ChecksumView { algo: crate::sys::HashAlgo::Sha256, state, expected: String::new(), check: None, note: None }
 }
 
 fn texts_of(l: &draw::Layout) -> Vec<(String, draw::Tone)> {
@@ -319,4 +319,12 @@ fn checksum_cloud_only_has_no_button() {
     let l = checksum_layout(sum_view(draw::SumState::CloudOnly));
     assert!(!l.hits.iter().any(|(x, _)| *x == InfoHit::HashRun));
     assert!(texts_of(&l).iter().any(|t| t.0 == draw::CLOUD_TEXT));
+}
+
+/// Con varias sumas pegadas, la sección dice qué línea se usó.
+#[test]
+fn checksum_says_which_line_was_used() {
+    let mut v = sum_view(draw::SumState::Idle);
+    v.note = Some("Se usó la línea 2 («a.zip»)".into());
+    assert!(texts_of(&checksum_layout(v)).iter().any(|t| t.0 == "Se usó la línea 2 («a.zip»)"));
 }

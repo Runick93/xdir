@@ -145,6 +145,8 @@ pub struct ChecksumView {
     pub state: SumState,
     pub expected: String,
     pub check: Option<SumCheck>,
+    /// Con varias sumas pegadas: qué línea se usó.
+    pub note: Option<String>,
 }
 
 /// Lo que hay bajo el mouse en el panel.
@@ -604,6 +606,10 @@ impl Builder<'_> {
                 y += 24.0;
             }
             None => {}
+        }
+        if let Some(n) = &v.note {
+            self.text(FontId::Small, n, rect(x0, y, x1, y + 16.0), Tone::Dim);
+            y += 22.0;
         }
         y
     }

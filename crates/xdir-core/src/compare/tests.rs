@@ -300,3 +300,18 @@ fn slow_but_alive_network_is_not_cut() {
     });
     assert!(got.is_ok(), "{got:?}");
 }
+
+/// Un archivo de sumas entero (SHA256SUMS): se usa la línea del archivo y se dice cuál; si ninguna
+/// lo nombra, la primera, y también se dice.
+#[test]
+fn pick_line_of_a_sums_file() {
+    let (s1, s2) = ("1".repeat(64), "2".repeat(64));
+    let sums = format!("{s1}  xdir-0.2.0-mac.zip\n{s2} *xdir-0.2.0-windows.zip\n");
+    let p = pick_expected(&sums, "xdir-0.2.0-windows.zip").unwrap();
+    assert_eq!((p.algo, p.hex.as_str(), p.line, p.of, p.by_name), (HashAlgo::Sha256, s2.as_str(), 2, 2, true));
+    let p = pick_expected(&sums, "otro.zip").unwrap();
+    assert_eq!((p.hex.as_str(), p.line, p.of, p.by_name), (s1.as_str(), 1, 2, false));
+    let p = pick_expected(&format!("{s1}  a.zip"), "b.zip").unwrap();
+    assert_eq!((p.line, p.of), (1, 1));
+    assert!(pick_expected("nada", "a.zip").is_none());
+}

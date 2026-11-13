@@ -326,6 +326,34 @@ pub fn parse_expected(text: &str) -> Option<(HashAlgo, String)> {
     text.lines().find_map(parse_line)
 }
 
+/// La suma elegida de lo pegado: con varias líneas (un archivo de sumas entero), la que nombra al
+/// archivo `name`; si ninguna, la primera. `line` es su número (desde 1) y `of`, cuántas sumas
+/// había.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picked {
+    pub algo: HashAlgo,
+    pub hex: String,
+    pub line: usize,
+    pub of: usize,
+    pub by_name: bool,
+}
+
+pub fn pick_expected(text: &str, name: &str) -> Option<Picked> {
+    let found: Vec<(usize, &str, (HashAlgo, String))> = text.lines().enumerate().filter_map(|(i, l)| parse_line(l).map(|p| (i + 1, l, p))).collect();
+    // El nombre como palabra de la línea, sin `*` (modo binario), comillas ni la carpeta.
+    let names = |l: &str| {
+        l.split_whitespace().any(|t| {
+            let t = t.trim_matches(|c: char| matches!(c, '*' | '(' | ')' | '"' | '\'' | ','));
+            let base = t.rsplit(['/', '\\']).next().unwrap_or(t);
+            !name.is_empty() && base.eq_ignore_ascii_case(name)
+        })
+    };
+    let of = found.len();
+    let by_name = found.iter().position(|(_, l, _)| names(l));
+    let (line, _, (algo, hex)) = found.into_iter().nth(by_name.unwrap_or(0))?;
+    Some(Picked { algo, hex, line, of, by_name: by_name.is_some() })
+}
+
 /// La suma de una línea (ver `parse_expected`).
 fn parse_line(line: &str) -> Option<(HashAlgo, String)> {
     let hex = |s: &str| -> Option<(HashAlgo, String)> {

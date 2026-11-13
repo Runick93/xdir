@@ -73,6 +73,12 @@ impl App {
         if self.transfers_progress().is_some() && contains(&self.transfers_button_rect(), x, y) {
             return Hit::Transfers;
         }
+        // El indicador de actividad (donde quedó en el último cuadro).
+        if let Some(r) = self.activity_rect
+            && contains(&r, x, y)
+        {
+            return Hit::Activity;
+        }
         // «calcular tamaño» de la barra de estado (donde quedó en el último cuadro).
         if let Some(r) = self.size_link
             && contains(&r, x, y)
@@ -283,6 +289,7 @@ impl App {
             Hit::Xtree => self.toggle_xtree(),
             Hit::PreviewToggle => self.run_command(Command::TogglePreview),
             Hit::Transfers => self.show_transfers(),
+            Hit::Activity => self.activity_click(),
             Hit::RenamePanel(h) => {
                 self.rename_panel_click(h);
                 return;

@@ -69,6 +69,9 @@ pub(super) struct NetState {
     pub page: super::network_page::PageState,
     /// Tiempo límite de conectar (`None`: 30 s; las pruebas lo achican).
     pub connect_limit: Option<Duration>,
+    /// Pruebas: el trabajo de conectar entra en pánico.
+    #[cfg(test)]
+    pub panic_connect: bool,
     /// Quien escribe `red.toml`.
     pub writer: net::PlacesWriter,
     /// Fecha de `red.toml` leída (para volver a leerlo si cambió).
@@ -170,27 +173,42 @@ impl App {
     /// `spawn_connect` con una generación ya dada (el reintento del conflicto 1219 usa la misma).
     fn spawn_connect_as(&mut self, pane: usize, tab: Option<usize>, generation: u64, addr: Address, opts: ConnectOptions) {
         let (owner, limit, late_tx) = (self.hwnd, self.net.connect_limit.unwrap_or(CONNECT_LIMIT), self.task_tx.clone());
-        self.spawn_task(move || {
-            // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
-            // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda
-            // huérfano detrás de un error.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let a = addr.clone();
-            std::thread::spawn(move || {
-                let r = sys::network().connect(owner, &a, opts, &AtomicBool::new(false));
-                if let Err(std::sync::mpsc::SendError(Ok(path))) = tx.send(r)
-                    && late_tx.send(TaskDone::LateConnected { generation, addr: a, path }).is_ok()
-                {
-                    owner.post(super::tasks::WM_APP_TASK, 0, 0);
-                }
-            });
-            let result = match rx.recv_timeout(limit) {
-                Ok(r) => r,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NetError::Timeout { host: addr.host.clone() }),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NetError::Other("La conexión terminó sin respuesta".into())),
-            };
-            TaskDone::Connected { pane, tab, generation, addr, result }
-        });
+        // Hasta que vuelva (`TaskDone::Connected`), en el indicador de actividad.
+        let now = self.now();
+        self.activity.begin(super::activity::ActivityKey::Connect(generation), format!("Conectando con \"{}\"", addr.host), now);
+        #[cfg(test)]
+        let panic_connect = self.net.panic_connect;
+        let fail_addr = addr.clone();
+        self.spawn_task_or(
+            move || {
+                #[cfg(test)]
+                assert!(!panic_connect, "conectar (prueba)");
+                // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
+                // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda
+                // huérfano detrás de un error.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let a = addr.clone();
+                std::thread::spawn(move || {
+                    let r = sys::network().connect(owner, &a, opts, &AtomicBool::new(false));
+                    if let Err(std::sync::mpsc::SendError(Ok(path))) = tx.send(r)
+                        && late_tx.send(TaskDone::LateConnected { generation, addr: a, path }).is_ok()
+                    {
+                        owner.post(super::tasks::WM_APP_TASK, 0, 0);
+                    }
+                });
+                let result = match rx.recv_timeout(limit) {
+                    Ok(r) => r,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NetError::Timeout { host: addr.host.clone() }),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NetError::Other("La conexión terminó sin respuesta".into())),
+                };
+                TaskDone::Connected { pane, tab, generation, addr, result }
+            },
+            // El trabajo falló por dentro: el error, y la conexión sale del indicador.
+            move || {
+                let result = Err(NetError::Other("La conexión terminó sin respuesta".into()));
+                TaskDone::Connected { pane, tab, generation, addr: fail_addr, result }
+            },
+        );
     }
 
     /// Windows: ya hay una conexión con ese servidor con otro usuario. Pregunta si se desconectan
@@ -211,6 +229,10 @@ impl App {
         // hilo); al terminar la última, `on_disconnected` reintenta la conexión.
         self.net.conflict_retry = Some(ConflictRetry { pane, tab, generation, addr: addr.clone(), pending: others.clone() });
         for local in others {
+            // Ya se está desconectando: su `on_disconnected` llega igual.
+            if self.is_ejecting(&local) {
+                continue;
+            }
             if !self.disconnect(local) {
                 // Dijo que no a cancelar las copias: no se reintenta.
                 self.net.conflict_retry = None;
@@ -1011,6 +1033,8 @@ impl App {
             Some(d) if d.busy.is_some() && !close => {
                 if let Some(g) = d.busy.take() {
                     self.net.cancelled.push(g);
+                    // Ya no se espera: sale del indicador de actividad.
+                    self.activity.end(&super::activity::ActivityKey::Connect(g));
                 }
                 self.redraw();
             }
@@ -1193,6 +1217,9 @@ impl App {
     /// suelta lo de xdir (pestañas, xtree, vista previa) y desconecta en otro hilo.
     /// `false` si no se desconecta (dijo que no a cancelar las copias).
     pub(super) fn disconnect(&mut self, root: PathBuf) -> bool {
+        if self.is_ejecting(&root) {
+            return false;
+        }
         let label = self.connection_label(&root);
         let at = root.clone();
         self.eject_after_jobs(&at, &label, super::transfers::Verb::Disconnect, Box::new(move |app: &mut App| app.disconnect_now(root, false)))
@@ -1209,14 +1236,23 @@ impl App {
         let reading = self.release_volume(&root);
         let label = self.connection_label(&root);
         let limit = self.jobs.limit;
-        self.spawn_task(move || {
-            // Los lectores de esa conexión sueltan los archivos (como mucho el límite).
-            super::compare::wait_bounded(reading, limit);
-            let r = root.clone();
-            let host = label.clone();
-            let result = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&r, force));
-            TaskDone::Disconnected { root, label, force, result }
-        });
+        let left = self.ejecting_readers(&root, reading.len());
+        let (r0, l0) = (root.clone(), label.clone());
+        self.spawn_task_or(
+            move || {
+                // Los lectores de esa conexión sueltan los archivos (como mucho el límite).
+                super::compare::wait_bounded(reading, limit, &left);
+                let r = root.clone();
+                let host = label.clone();
+                let result = net::with_timeout(DISCONNECT_LIMIT, &host, move || sys::network().disconnect(&r, force));
+                TaskDone::Disconnected { root, label, force, result }
+            },
+            // El hilo falló: como si el servidor no contestara (se puede reintentar).
+            move || {
+                let host = l0.clone();
+                TaskDone::Disconnected { root: r0, label: l0, force, result: Err(NetError::Timeout { host }) }
+            },
+        );
     }
 
     /// Terminó de desconectar: el aviso, o la pregunta de reintentar (y, si el sistema puede y
@@ -1285,12 +1321,12 @@ impl App {
         self.network_root(p).and_then(|c| Address::parse(&c.address).ok()).map(|a| a.host).unwrap_or_else(|| crate::tab::remote_host(p))
     }
 
-    /// Antes de dibujar: el aviso de cada lista a la vista que carga una carpeta de red lenta, y
-    /// el próximo redibujo (`WM_APP_NET_TICK`) para cuando cambie.
+    /// Antes de dibujar: el aviso de cada lista a la vista que carga una carpeta de red lenta o el
+    /// «Cargando…» de una que tarda, y el próximo redibujo (`WM_APP_NET_TICK`) para cuando cambie.
     pub(super) fn update_placeholders(&mut self) {
         use crate::list::placeholder::Placeholder;
         use crate::tab::{SLOW_CONNECTING, SLOW_NOT_RESPONDING, Slow};
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         let mut next: Option<std::time::Duration> = None;
         for i in 0..self.panes.len() {
             let tab = self.panes[i].tab();
@@ -1307,15 +1343,20 @@ impl App {
                 Slow::Connecting { .. } => Some(Placeholder::Connecting(host)),
                 Slow::NotResponding { .. } => Some(Placeholder::NotResponding(host)),
             };
-            // Cuánto falta para el próximo umbral de una carga remota sin lotes.
-            if let Some(wait) = tab.slow_pending(now, &[SLOW_CONNECTING, SLOW_NOT_RESPONDING]) {
+            // Cuánto falta para el próximo umbral de una carga remota sin lotes, o para el
+            // «Cargando…» de cualquier carpeta.
+            let waits = [tab.slow_pending(now, &[SLOW_CONNECTING, SLOW_NOT_RESPONDING]), tab.loading_pending(now)];
+            for wait in waits.into_iter().flatten() {
                 next = Some(next.map_or(wait, |n| n.min(wait)));
             }
+            let loading = tab.shows_loading(now);
             let hover = match self.hover {
                 super::Hit::Pane(j, crate::pane::PaneHit::Placeholder(b)) if j == i && ph.is_some() => Some(b),
                 _ => None,
             };
-            let list = &mut self.panes[i].tab_mut().list;
+            let tab = self.panes[i].tab_mut();
+            tab.loading_shown = loading && ph.is_none();
+            let list = &mut tab.list;
             list.placeholder_hover = hover;
             list.placeholder = ph;
         }
@@ -1335,7 +1376,10 @@ impl App {
     /// `WM_APP_NET_TICK`: toca redibujar el aviso de una carpeta de red lenta.
     pub(super) fn on_net_tick(&mut self) {
         self.net.tick_due = None;
-        self.redraw();
+        // Si ya no se lee nada (la lectura terminó antes del umbral), no hay nada que cambiar.
+        if self.panes.iter().any(|p| p.tab().loading) {
+            self.redraw();
+        }
     }
 
     /// Después de «Reintentar»: el aviso vuelve a «Conectando…» al rato.

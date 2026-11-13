@@ -19,6 +19,9 @@ const XTREE_W: f32 = 74.0;
 const XTREE_WIDE_W: f32 = 105.0;
 /// Indicador de las operaciones de copia: anillo y «100 %».
 const TRANSFERS_W: f32 = 68.0;
+/// Indicador de actividad (el círculo girando) y su separación de lo que tiene a la derecha.
+const ACTIVITY_W: f32 = 24.0;
+const ACTIVITY_GAP: f32 = 6.0;
 /// Lado del indicador del escaneo de xtree.
 pub const BADGE: f32 = 14.0;
 const MIN_SPLIT: f32 = 0.15;
@@ -342,6 +345,13 @@ pub fn transfers_rect(w: f32, h: f32, badge: XtreeBadge) -> Rect {
     rect(x.left - 10.0 - TRANSFERS_W, x.top, x.left - 10.0, x.bottom)
 }
 
+/// Indicador de lo que corre en segundo plano: 24 de ancho, a 6 a la izquierda del indicador de
+/// las copias (`transfers`: si se ve) o del botón «xtree».
+pub fn activity_rect(w: f32, h: f32, badge: XtreeBadge, transfers: bool) -> Rect {
+    let next = if transfers { transfers_rect(w, h, badge) } else { xtree_rect(w, h, badge) };
+    rect(next.left - ACTIVITY_GAP - ACTIVITY_W, next.top, next.left - ACTIVITY_GAP, next.bottom)
+}
+
 /// Puntos de un sector de anillo de `BADGE`×`BADGE` en `r` (radio interior 64 % del exterior),
 /// desde el ángulo `start` (radianes; 0 = derecha, sentido horario) y de largo `sweep`.
 fn ring_sector(r: Rect, start: f32, sweep: f32) -> Vec<(f32, f32, f32)> {
@@ -427,6 +437,13 @@ pub struct StatusButtons {
     /// El texto termina en el enlace «calcular tamaño» (`tab::SIZE_LINK`), y si está bajo el mouse.
     pub size_link: bool,
     pub size_link_hot: bool,
+    /// Hay algo en segundo plano (el indicador gira), si está bajo el mouse y si el clic hace
+    /// algo (con copias, abre su ventana).
+    pub activity: bool,
+    pub activity_hot: bool,
+    pub activity_clickable: bool,
+    /// Solo hay carpetas que «no responden»: el aviso quieto en lugar del giro.
+    pub activity_still: bool,
 }
 
 /// Separador entre el aviso y el resto de la barra de estado (el de `aviso   ·   estado`).
@@ -459,12 +476,35 @@ pub fn draw_update_notice(p: &dyn Painter, h: f32, version: &str, hot: bool) -> 
 
 /// Dibuja la barra de estado. Devuelve dónde quedó el enlace «calcular tamaño», si lo hay y entra.
 pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) -> Option<Rect> {
-    let StatusButtons { gear_hot, groups_hot, xtree_hot, xtree_on, xtree: badge, preview_hot, preview_on, transfers, transfers_failed, transfers_hot, lead, size_link, size_link_hot } = b;
+    let StatusButtons {
+        gear_hot,
+        groups_hot,
+        xtree_hot,
+        xtree_on,
+        xtree: badge,
+        preview_hot,
+        preview_on,
+        transfers,
+        transfers_failed,
+        transfers_hot,
+        lead,
+        size_link,
+        size_link_hot,
+        activity,
+        activity_hot,
+        activity_clickable,
+        activity_still,
+    } = b;
     let th = p.theme();
     let buttons = layout_buttons(w, h);
     let groups = groups_rect(w, h);
     let xtree = xtree_rect(w, h, badge);
-    let text_end = if transfers.is_some() { transfers_rect(w, h, badge).left } else { xtree.left };
+    let activity_r = activity_rect(w, h, badge, transfers.is_some());
+    let text_end = match (activity, transfers.is_some()) {
+        (true, _) => activity_r.left,
+        (false, true) => transfers_rect(w, h, badge).left,
+        (false, false) => xtree.left,
+    };
     let text_r = rect(GAP * 2.0 + lead, h - STATUSBAR_H, (text_end - GAP).max(GAP * 2.0 + lead), h);
     let mut link_rect = None;
     match text.strip_suffix(crate::tab::SIZE_LINK).filter(|_| size_link) {
@@ -485,6 +525,19 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
             }
         }
         None => p.text(FontId::Ui, text, text_r, th.text_dim),
+    }
+
+    if activity {
+        if activity_hot && activity_clickable {
+            p.round_fill(activity_r, 4.0, th.hover);
+        }
+        let (cx, cy) = ((activity_r.left + activity_r.right) / 2.0, (activity_r.top + activity_r.bottom) / 2.0);
+        if activity_still {
+            // Quieto: el aviso de xtree (en advertencia), no un giro congelado.
+            draw_xtree_badge(p, rect(cx - BADGE / 2.0, cy - BADGE / 2.0, cx + BADGE / 2.0, cy + BADGE / 2.0), XtreeBadge::DoneWithIssues);
+        } else {
+            crate::pane::spinner(p, cx, cy, th.accent);
+        }
     }
 
     if let Some(f) = transfers {

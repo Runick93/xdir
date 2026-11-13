@@ -41,6 +41,18 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        // Lo que corre en segundo plano: el indicador (y su cartel) desde su umbral.
+        let clock = self.now();
+        self.sync_activity(clock);
+        // Lo que se ve desde este cuadro queda al menos `MIN_SHOWN` (sin destellos).
+        self.activity.observe(clock);
+        let activity = !self.activity.shown(clock).is_empty();
+        let activity_clickable = self.transfers_progress().is_some();
+        let activity_still = self.activity.all_still(clock);
+        // Expulsando o desconectando algo: delante de todo, mientras dure.
+        if let Some(e) = self.eject_status() {
+            status = format!("{e}   ·   {status}");
+        }
         // El aviso de actualización va delante (con su enlace); otro aviso lo tapa mientras está.
         let update_notice = self.update_notice.clone().filter(|_| self.notice.is_none());
         if update_notice.is_none() {
@@ -101,6 +113,11 @@ impl App {
         let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w, groups_h, preview_w), self.splits);
         let (rects, mut animating) = self.animated_rects(target);
         animating |= tree_animating;
+        let ejecting = self.ejecting_roots();
+        #[cfg(feature = "arbol")]
+        {
+            self.tree.ejecting = ejecting.iter().cloned().collect();
+        }
         for i in self.shown_panes() {
             animating |= self.panes[i].tab_mut().list.tick(dt);
             // Botón «Devolver» con la Papelera a la vista (apagado sin selección).
@@ -119,7 +136,10 @@ impl App {
                     .collect(),
                 _ => Vec::new(),
             };
-            self.panes[i].tab_mut().list.eject_rows = ejects;
+            let busy = ejects.iter().copied().filter(|&k| ejecting.iter().any(|r| crate::sys::same_path_folded(r, &tab.entry_path(k)))).collect();
+            let list = &mut self.panes[i].tab_mut().list;
+            list.eject_rows = ejects;
+            list.eject_busy = busy;
         }
         self.last_frame = animating.then_some(now);
         for p in &mut self.panes {
@@ -293,7 +313,12 @@ impl App {
                 lead: 0.0,
                 size_link,
                 size_link_hot: hover == Hit::SizeLink,
+                activity,
+                activity_hot: hover == Hit::Activity,
+                activity_clickable,
+                activity_still,
             };
+            self.activity_rect = activity.then(|| ui::activity_rect(w, h, xtree_badge, transfers.is_some()));
             let mut buttons = buttons;
             if let Some(v) = &update_notice {
                 let (link, lead) = ui::draw_update_notice(p, h, v, hover == Hit::UpdateNotice);
@@ -367,8 +392,7 @@ impl App {
         // Pestañas deslizándose hacia su lugar, o una búsqueda en curso (su indicador gira): otro cuadro.
         let searching = self.shown_panes().into_iter().any(|i| {
             let tab = self.panes[i].tab();
-            // También mientras se lee un archivo comprimido (su «Cargando…» gira).
-            tab.search.as_ref().is_some_and(|s| !s.done) || (tab.loading && tab.location.is_archive())
+            tab.search.as_ref().is_some_and(|s| !s.done)
         });
         if self.panes.iter().any(|p| p.tab_busy) || searching {
             animating = true;
@@ -377,6 +401,9 @@ impl App {
         if animating {
             self.redraw();
         }
+        // El indicador de actividad, el ⏏ que gira y «Cargando…»: un cuadro cada 100 ms mientras
+        // haya algo en curso (sin nada, ningún temporizador).
+        self.schedule_activity_tick();
         self.notify_a11y_focus();
         // Superposiciones y metadatos de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());

@@ -137,16 +137,23 @@ impl App {
         let name = e.name.to_string_lossy().into_owned();
         let (file, nested) = (file.clone(), nested.clone());
         self.notice = Some(format!("Abriendo «{name}»…   Esc cancela"));
+        let now = self.now();
+        self.activity.begin(super::activity::ActivityKey::Extract, format!("Extrayendo \"{name}\""), now);
         // Una apertura nueva corta la anterior.
         let stop = Arc::new(AtomicBool::new(false));
         if let Some(old) = self.archive.opening.replace(stop.clone()) {
             old.store(true, Ordering::Relaxed);
         }
-        self.spawn_task(move || {
-            let cancel = || stop.load(Ordering::Relaxed);
-            let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
-            TaskDone::ArchiveOpened { name, with, token: stop.clone(), result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
-        });
+        let (n0, t0) = (name.clone(), stop.clone());
+        self.spawn_task_or(
+            move || {
+                let cancel = || stop.load(Ordering::Relaxed);
+                let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
+                TaskDone::ArchiveOpened { name, with, token: stop.clone(), result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
+            },
+            // El hilo falló (un comprimido roto): el aviso, y deja de estar «Extrayendo».
+            move || TaskDone::ArchiveOpened { name: n0, with, token: t0, result: Err("no se pudo leer el archivo comprimido".into()) },
+        );
     }
 
     /// Escape con una apertura desde un archivo comprimido en curso: se corta. `false` si no había.
@@ -166,6 +173,7 @@ impl App {
             return;
         }
         self.archive.opening = None;
+        self.activity.end(&super::activity::ActivityKey::Extract);
         // Cancelada con Escape.
         if token.load(Ordering::Relaxed) || matches!(&result, Err(m) if m == CANCELLED) {
             return;

@@ -8,6 +8,49 @@ use super::*;
 /// Terminó un trabajo de `spawn_task`; el resultado está en el canal.
 pub const WM_APP_TASK: u32 = crate::WM_APP + 26;
 
+/// Cuánto se espera al sistema al expulsar un disco (`App::eject_limit`).
+pub(super) const EJECT_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// El motivo cuando el sistema no contesta a tiempo (o el hilo de expulsar falla).
+const NO_ANSWER: &str = "el sistema no respondió";
+
+fn no_answer() -> crate::shell::EjectError {
+    crate::shell::EjectError { busy_by: None, busy: false, message: NO_ANSWER.into() }
+}
+
+/// Expulsa `root` esperando como mucho `limit` (y sin caerse si el sistema entra en pánico): si
+/// no contesta, el error `NO_ANSWER`. El pedido sigue en su hilo: si después expulsa bien, `late`
+/// manda `TaskDone::LateEjected` (corrige el aviso); un error tardío no se avisa.
+fn eject_within(root: &std::path::Path, limit: std::time::Duration, late: impl FnOnce() + Send + 'static) -> Result<(), crate::shell::EjectError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Quién recibe: el que espera (mientras espera) o, si ya se fue, el aviso tardío. Con el
+    // candado, el resultado no se pierde entre los dos.
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+    let theirs = slot.clone();
+    let r = root.to_path_buf();
+    std::thread::spawn(move || {
+        let result = sys::shell().eject(&r);
+        let waiting = theirs.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match waiting {
+            Some(tx) => {
+                let _ = tx.send(result);
+            }
+            None if result.is_ok() => late(),
+            None => {}
+        }
+    });
+    match rx.recv_timeout(limit) {
+        Ok(r) => r,
+        Err(_) => {
+            // Si llegó justo ahora, se toma; si no, el que espera se va.
+            let gone = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            match gone {
+                Some(_) => Err(no_answer()),
+                None => rx.recv().unwrap_or_else(|_| Err(no_answer())),
+            }
+        }
+    }
+}
+
 /// Lo que devuelve un trabajo suelto.
 pub(super) enum TaskDone {
     /// Terminó de escribir `config.toml` (la pestaña Configuración): lo que quedó, o el error.
@@ -42,6 +85,8 @@ pub(super) enum TaskDone {
     FreeLetters(Vec<char>),
     /// Una conexión que había vencido terminó bien después.
     LateConnected { generation: u64, addr: crate::net::Address, path: PathBuf },
+    /// Se expulsó `root` después de que venciera la espera: el aviso se corrige.
+    LateEjected { root: PathBuf, label: String },
     /// Las subcarpetas de la flecha `chevron` del panel `pane` (pedidas en otro hilo).
     Subfolders { pane: usize, chevron: usize, loc: Location, items: Vec<(String, Location)> },
     /// Terminó de desconectar `root` (`label`: el último tramo de la dirección; `force`: si fue
@@ -59,7 +104,23 @@ impl App {
     pub(super) fn spawn_task(&self, f: impl FnOnce() -> TaskDone + Send + 'static) {
         let (tx, hwnd) = (self.task_tx.clone(), self.hwnd);
         std::thread::spawn(move || {
-            if tx.send(f()).is_ok() {
+            // Si entra en pánico no vuelve nada (como antes); los que dejan estado puesto usan
+            // `spawn_task_or`.
+            if let Ok(t) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                && tx.send(t).is_ok()
+            {
+                hwnd.post(WM_APP_TASK, 0, 0);
+            }
+        });
+    }
+
+    /// Como `spawn_task`, pero si `f` entra en pánico vuelve `fallback()` (el resultado de error):
+    /// expulsar, desconectar o extraer nunca quedan «en curso» para siempre.
+    pub(super) fn spawn_task_or(&self, f: impl FnOnce() -> TaskDone + Send + 'static, fallback: impl FnOnce() -> TaskDone + Send + 'static) {
+        let (tx, hwnd) = (self.task_tx.clone(), self.hwnd);
+        std::thread::spawn(move || {
+            let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| fallback());
+            if tx.send(t).is_ok() {
                 hwnd.post(WM_APP_TASK, 0, 0);
             }
         });
@@ -110,10 +171,14 @@ impl App {
             TaskDone::NetPlaces(places) => self.on_net_places(places),
             TaskDone::NetConnections(result) => self.on_net_connections(result),
             TaskDone::NetVolumeIds(ids) => self.remember_net_volume_ids(ids),
-            TaskDone::Connected { pane, tab, generation, addr, result } => self.on_connected(pane, tab, generation, addr, result),
+            TaskDone::Connected { pane, tab, generation, addr, result } => {
+                self.activity.end(&super::activity::ActivityKey::Connect(generation));
+                self.on_connected(pane, tab, generation, addr, result)
+            }
             TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
             TaskDone::Subfolders { pane, chevron, loc, items } => self.on_subfolders(pane, chevron, loc, items),
             TaskDone::LateConnected { generation, addr, path } => self.on_late_connected(generation, addr, path),
+            TaskDone::LateEjected { root, label } => self.on_ejected(root, label, Ok(())),
             TaskDone::FreeLetters(letters) => self.on_free_letters(letters),
             TaskDone::Disconnected { root, label, force, result } => self.on_disconnected(root, label, force, result),
         }
@@ -122,8 +187,10 @@ impl App {
     /// Terminó de expulsar: el aviso, o la pregunta de reintentar si alguien lo está usando.
     fn on_ejected(&mut self, root: PathBuf, label: String, result: Result<(), crate::shell::EjectError>) {
         match result {
+            // El sistema no contestó (o el hilo falló): un aviso; el ⏏ ya se puede volver a tocar.
+            Err(e) if e.message == NO_ANSWER => self.notice = Some(format!("No se pudo expulsar \"{label}\": {NO_ANSWER}")),
             Ok(()) => {
-                self.notice = Some(format!("Se puede quitar \"{label}\" con seguridad"));
+                self.notice = Some(format!("Se expulsó \"{label}\": ya lo podés quitar"));
                 self.ejectable.remove(&root);
             }
             Err(e) => {
@@ -208,6 +275,10 @@ impl App {
     /// cancelan y espera a que limpien lo a medio copiar (`eject_after_jobs`); después suelta lo
     /// de xdir y expulsa en otro hilo.
     pub(super) fn eject(&mut self, root: PathBuf) {
+        // Ya se está expulsando (su ⏏ gira): un segundo pedido no hace nada.
+        if self.is_ejecting(&root) {
+            return;
+        }
         // Una conexión de red se desconecta (mismo flujo: trabajos, soltar, en otro hilo).
         if let Some(c) = self.network_root(&root) {
             let local = c.local.clone();
@@ -225,14 +296,25 @@ impl App {
         let reading = self.release_volume(&root);
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
-        let limit = self.jobs.limit;
-        self.spawn_task(move || {
-            // Como mucho el límite: un lector trabado no deja el disco sin expulsar (si sigue
-            // abierto, el sistema lo dice al expulsar).
-            super::compare::wait_bounded(reading, limit);
-            let result = sys::shell().eject(&root);
-            TaskDone::Ejected { root, label, result }
-        });
+        let (limit, eject_limit) = (self.jobs.limit, self.eject_limit);
+        let left = self.ejecting_readers(&root, reading.len());
+        let (r, l) = (root.clone(), label.clone());
+        let (late_root, late_label, late_tx, hwnd) = (root.clone(), label.clone(), self.task_tx.clone(), self.hwnd);
+        let late = move || {
+            if late_tx.send(TaskDone::LateEjected { root: late_root, label: late_label }).is_ok() {
+                hwnd.post(WM_APP_TASK, 0, 0);
+            }
+        };
+        self.spawn_task_or(
+            move || {
+                // Como mucho el límite: un lector trabado no deja el disco sin expulsar (si sigue
+                // abierto, el sistema lo dice al expulsar).
+                super::compare::wait_bounded(reading, limit, &left);
+                let result = eject_within(&root, eject_limit, late);
+                TaskDone::Ejected { root, label, result }
+            },
+            move || TaskDone::Ejected { root: r, label: l, result: Err(no_answer()) },
+        );
     }
 
     /// «Mostrar el original» del elemento seleccionado (si es un enlace).
@@ -269,5 +351,20 @@ impl App {
         if !targets.is_empty() {
             sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Shortcuts { targets });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ronda 1: un trabajo que entra en pánico manda su resultado de error (no deja el estado puesto).
+    #[test]
+    fn panicking_task_sends_fallback() {
+        crate::sys::testing::install_fakes();
+        let a = App::new(Init::blank(), crate::sys::testing::FakeHost::new());
+        a.spawn_task_or(|| panic!("prueba"), || TaskDone::FreeLetters(vec!['Z']));
+        let t = a.task_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("llega el de error");
+        assert!(matches!(t, TaskDone::FreeLetters(l) if l == ['Z']));
     }
 }

@@ -241,6 +241,57 @@ pub fn write_file(path: &Path, h: &History) -> std::io::Result<()> {
     })
 }
 
+/// Días con una foto por día (los más nuevos).
+pub const DAILY_DAYS: i32 = 30;
+/// Hasta cuántos días atrás se guarda (una por semana después de los diarios).
+pub const KEEP_DAYS: i32 = 365;
+
+impl History {
+    /// Agrega la foto `sizes` del día `day`; una del mismo día se reemplaza.
+    pub fn add(&mut self, day: i32, sizes: &[(String, u64)]) {
+        let mut index: std::collections::HashMap<&str, u32> = self.paths.iter().enumerate().map(|(i, p)| (p.as_str(), i as u32)).collect();
+        let mut new_paths = Vec::new();
+        let mut pairs = Vec::with_capacity(sizes.len());
+        for (p, v) in sizes {
+            let i = match index.get(p.as_str()) {
+                Some(&i) => i,
+                None => {
+                    let i = (self.paths.len() + new_paths.len()) as u32;
+                    index.insert(p.as_str(), i);
+                    new_paths.push(p.clone());
+                    i
+                }
+            };
+            pairs.push((i, *v));
+        }
+        drop(index);
+        self.paths.extend(new_paths);
+        let snap = Snapshot { day, sizes: pairs };
+        match self.snaps.binary_search_by_key(&day, |s| s.day) {
+            Ok(i) => self.snaps[i] = snap,
+            Err(i) => self.snaps.insert(i, snap),
+        }
+    }
+
+    /// Una foto por día los últimos 30 días, una por semana (la más nueva de cada una) hasta un año;
+    /// lo más viejo se descarta. Una foto de un día posterior a `today` (el reloj volvió atrás)
+    /// también.
+    pub fn consolidate(&mut self, today: i32) {
+        self.snaps.retain(|s| s.day <= today && today - s.day <= KEEP_DAYS);
+        // De las viejas, la más nueva de cada semana: como están en orden, una se queda si la que
+        // le sigue es de otra semana (o ya es de las diarias).
+        let n = self.snaps.len();
+        let keep: Vec<bool> = (0..n)
+            .map(|i| {
+                let d = self.snaps[i].day;
+                today - d < DAILY_DAYS || self.snaps.get(i + 1).is_none_or(|next| today - next.day < DAILY_DAYS || next.day.div_euclid(7) != d.div_euclid(7))
+            })
+            .collect();
+        let mut it = keep.into_iter();
+        self.snaps.retain(|_| it.next().unwrap_or(true));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +507,60 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         assert_eq!(read_file(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn days(h: &History) -> Vec<i32> {
+        h.snaps.iter().map(|s| s.day).collect()
+    }
+
+    #[test]
+    fn add_replaces_same_day_and_keeps_order() {
+        let mut h = History::default();
+        h.add(10, &[("".into(), 5), ("a".into(), 3)]);
+        h.add(8, &[("".into(), 4)]);
+        h.add(10, &[("".into(), 9), ("b".into(), 1)]);
+        assert_eq!(days(&h), [8, 10]);
+        let last = &h.snaps[1];
+        let named: Vec<(&str, u64)> = last.sizes.iter().map(|&(i, v)| (h.paths[i as usize].as_str(), v)).collect();
+        assert_eq!(named, [("", 9), ("b", 1)]);
+        assert_eq!(h.paths.iter().filter(|p| p.is_empty()).count(), 1, "rutas sin repetir");
+    }
+
+    #[test]
+    fn consolidate_daily_weekly_and_drop() {
+        let today = 20_000;
+        let mut h = History::default();
+        // Un año y medio de fotos diarias.
+        for d in (today - 540)..=today {
+            h.add(d, &[("".into(), d as u64)]);
+        }
+        h.consolidate(today);
+        let ds = days(&h);
+        // Los últimos 30 días, todos.
+        assert!(((today - DAILY_DAYS + 1)..=today).all(|d| ds.contains(&d)));
+        // Antes, una por semana.
+        let old: Vec<i32> = ds.iter().copied().filter(|&d| d <= today - DAILY_DAYS).collect();
+        let weeks: Vec<i32> = old.iter().map(|d| d.div_euclid(7)).collect();
+        let mut uniq = weeks.clone();
+        uniq.dedup();
+        assert_eq!(weeks, uniq, "una por semana");
+        assert!(old.len() >= 47 && old.len() <= 50, "{}", old.len());
+        // La más nueva de cada semana.
+        assert!(old.iter().all(|d| d.rem_euclid(7) == 6 || *d == today - DAILY_DAYS));
+        assert!(ds.iter().all(|&d| d >= today - KEEP_DAYS), "nada de más de un año");
+        assert!(ds.len() < 85);
+        // Consolidar de nuevo no cambia nada.
+        let again = ds.clone();
+        h.consolidate(today);
+        assert_eq!(days(&h), again);
+    }
+
+    #[test]
+    fn consolidate_drops_future_days() {
+        let mut h = History::default();
+        h.add(100, &[("".into(), 1)]);
+        h.add(105, &[("".into(), 2)]);
+        h.consolidate(101);
+        assert_eq!(days(&h), [100]);
     }
 }

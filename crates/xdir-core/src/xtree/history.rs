@@ -417,21 +417,31 @@ impl History {
     }
 
     /// Una foto por día los últimos 30 días, una por semana (la más nueva de cada una) hasta un año;
-    /// lo más viejo se descarta. Los días se cuentan desde la foto más nueva (aunque sea de un día
-    /// posterior a `today`, porque el reloj volvió atrás); la foto de `today` queda siempre.
+    /// lo más viejo se descarta. Los días se cuentan desde `today`; las fotos de días posteriores
+    /// (el reloj volvió atrás o estuvo adelantado) quedan sin contar; la de `today` queda siempre.
     pub fn consolidate(&mut self, today: i32) {
-        // Las edades se miden desde la foto más nueva, no desde el reloj: si el reloj vuelve atrás
-        // no se borra nada «futuro». La de hoy queda siempre.
-        let today_photo = today;
-        let Some(today) = self.snaps.iter().map(|s| s.day).max() else { return };
-        self.snaps.retain(|s| s.day == today_photo || today - s.day <= KEEP_DAYS);
+        // Las edades se miden desde hoy. Las fotos de días posteriores a hoy (el reloj volvió atrás,
+        // o estuvo adelantado una vez) quedan, pero no cuentan para las diarias ni las semanales:
+        // así ninguna de las dos cosas borra historial real. La de hoy queda siempre.
+        // Si la foto anterior a hoy más nueva tiene más de un año (el reloj saltó adelante, o hacía
+        // mucho que no se analizaba), esta vez no se descarta ni se raleia nada por edad: un reloj
+        // adelantado una vez no borra todo; tras una ausencia larga se recorta en el guardado
+        // siguiente.
+        let recent = self.snaps.iter().rev().find(|s| s.day < today).is_some_and(|s| today - s.day <= KEEP_DAYS);
+        if !recent {
+            while self.snaps.len() > 1 && !self.fits() {
+                self.snaps.remove(0);
+            }
+            return;
+        }
+        self.snaps.retain(|s| s.day >= today || today - s.day <= KEEP_DAYS);
         // De las viejas, la más nueva de cada semana: como están en orden, una se queda si la que
-        // le sigue es de otra semana (o ya es de las diarias).
+        // le sigue es de otra semana (o ya es de las diarias o del futuro).
         let n = self.snaps.len();
         let keep: Vec<bool> = (0..n)
             .map(|i| {
                 let d = self.snaps[i].day;
-                d == today_photo || today - d < DAILY_DAYS || self.snaps.get(i + 1).is_none_or(|next| today - next.day < DAILY_DAYS || next.day.div_euclid(7) != d.div_euclid(7))
+                d >= today || today - d < DAILY_DAYS || self.snaps.get(i + 1).is_none_or(|next| today - next.day < DAILY_DAYS || next.day.div_euclid(7) != d.div_euclid(7))
             })
             .collect();
         let mut it = keep.into_iter();
@@ -1004,9 +1014,29 @@ mod tests {
         let ds = days(&h);
         assert!(((20_040 - DAILY_DAYS)..20_040).all(|d| ds.contains(&d)), "{ds:?}");
         assert!(ds.contains(&11_000), "la foto de hoy queda");
-        // La edad se mide desde la foto más nueva: una vieja de verdad igual se va.
+    }
+
+    /// El reloj estuvo adelantado una vez (una foto del día 23.000): la edad se sigue midiendo
+    /// desde hoy, así que esa foto no borra el historial real (queda, pero no cuenta).
+    #[test]
+    fn one_future_photo_does_not_wipe_history() {
+        let mut h = History::default();
+        for d in 20_000..20_040 {
+            h.add(d, &[("".into(), d as u64)]);
+            h.consolidate(d);
+        }
+        h.add(23_000, &[("".into(), 1)]);
+        h.consolidate(23_000);
+        for d in 20_040..20_045 {
+            h.add(d, &[("".into(), d as u64)]);
+            h.consolidate(d);
+        }
+        let ds = days(&h);
+        assert!(((20_045 - DAILY_DAYS)..20_045).all(|d| ds.contains(&d)), "{ds:?}");
+        assert!(ds.contains(&23_000), "la futura queda");
+        // Una vieja de verdad (más de un año antes de hoy) se va.
         h.add(19_000, &[("".into(), 1)]);
-        h.consolidate(11_000);
+        h.consolidate(20_045);
         assert!(!days(&h).contains(&19_000));
     }
 
@@ -1095,7 +1125,11 @@ mod tests {
         let root = base("consolida").join("r");
         save_snapshot(&dir, &root, 100, &[("".into(), 1)]).unwrap();
         save_snapshot(&dir, &root, 100 + KEEP_DAYS + 1, &[("".into(), 2)]).unwrap();
-        assert_eq!(load_for(&dir, &root).days, [100 + KEEP_DAYS + 1]);
+        // Más de un año sin fotos: esta vez no se recorta (puede ser el reloj adelantado)…
+        assert_eq!(load_for(&dir, &root).days, [100, 100 + KEEP_DAYS + 1]);
+        // …y en el guardado siguiente, sí.
+        save_snapshot(&dir, &root, 100 + KEEP_DAYS + 2, &[("".into(), 3)]).unwrap();
+        assert_eq!(load_for(&dir, &root).days, [100 + KEEP_DAYS + 1, 100 + KEEP_DAYS + 2]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

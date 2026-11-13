@@ -565,6 +565,15 @@ impl App {
                 }
             }
             "copiar" | "mover" | "ventana" | "comprimir" | "extraer_aqui" | "extraer_en" => self.transfer_test(verb, &format!("{a} {b}")),
+            // `xtree_dia <n>`: el historial de xtree hace como si hoy fuera `n` días después de
+            // hoy (negativo: antes), para armar fotos de días pasados; `xtree_dia` solo vuelve al
+            // reloj.
+            "xtree_dia" => {
+                let today = crate::sys::env().local_now().day as i32;
+                if let Some(x) = &mut self.xtree {
+                    x.set_today(a.parse::<i32>().ok().map(|n| today + n));
+                }
+            }
             _ => {}
         }
         self.redraw();

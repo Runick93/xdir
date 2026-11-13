@@ -415,6 +415,7 @@ impl App {
             settings_page: self.settings_session_page(),
             // Solo una raíz analizada (una vista que todavía no analizó no cuenta).
             xtree_last: self.xtree.as_ref().filter(|x| x.scanned()).map(|x| x.root().to_path_buf()).or_else(|| self.xtree_last.clone()),
+            xtree_days: self.xtree.as_ref().map_or(self.xtree_days, |x| x.history_days()),
             // Ya no se usan (las vistas son por carpeta), pero una versión anterior las lee.
             columns: self.folder_views.default_view().columns.clone(),
             views: self.panes.iter().map(|p| p.tab().list.view).collect(),
@@ -564,6 +565,30 @@ impl App {
                 }
             }
             "copiar" | "mover" | "ventana" | "comprimir" | "extraer_aqui" | "extraer_en" => self.transfer_test(verb, &format!("{a} {b}")),
+            // `xtree_hist <periodo|crecio|marca> <n>`: la franja de historial y la ▲ de xtree.
+            "xtree_hist" if a == "marca" => {
+                // El mouse sobre el tamaño de la fila `n` de la tabla: el cartel de la ▲ aparece
+                // con la espera de siempre.
+                let area = self.xtree_area();
+                if let Some((x, y)) = self.xtree.as_ref().map(|v| v.size_cell_center(area, nb)) {
+                    self.on_mouse_move(x, y);
+                }
+            }
+            "xtree_hist" => {
+                let area = self.xtree_area();
+                if let Some(action) = self.xtree.as_mut().map(|x| x.history_test(area, a, nb)) {
+                    self.xtree_action(action);
+                }
+            }
+            // `xtree_dia <n>`: el historial de xtree hace como si hoy fuera `n` días después de
+            // hoy (negativo: antes), para armar fotos de días pasados; `xtree_dia` solo vuelve al
+            // reloj.
+            "xtree_dia" => {
+                let today = crate::sys::env().local_now().day as i32;
+                if let Some(x) = &mut self.xtree {
+                    x.set_today(a.parse::<i32>().ok().map(|n| today + n));
+                }
+            }
             // `arrastre <entrar|encima|soltar|salir> <fila del árbol> | <ruta>`: un arrastre de
             // archivos como el del sistema, con el puntero en el centro de esa fila del árbol
             // (#56); el efecto queda en el aviso.

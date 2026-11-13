@@ -638,7 +638,7 @@ fn advanced_lists_files_and_dir() {
     let items = a.settings_items(Section::Advanced);
     let Control::Table(files) = row_of(&items, "archivos").control else { panic!() };
     let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["config.toml", "sesion.toml", "carpetas.toml", "favoritos.txt", "grupos.toml", "historial.txt", "red.toml"]);
+    assert_eq!(names, ["config.toml", "sesion.toml", "carpetas.toml", "favoritos.txt", "grupos.toml", "historial.txt", "red.toml", "xtree-historial"]);
     let dir = row_of(&items, "carpeta_config");
     assert_eq!(dir.desc, session::config_dir().unwrap().display().to_string());
     assert_eq!(dir.control, Control::Buttons(vec![("Mostrar en el Explorador".to_string(), true)]));

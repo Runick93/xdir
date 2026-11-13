@@ -1612,6 +1612,28 @@ fn xtree_remote_volume_off_thread() {
     assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("volume_space")), "{:?}", FakeNetwork::ui_io_calls());
 }
 
+/// I4 (#58): el historial de xtree se guarda y se lee en otro hilo al terminar el análisis; el
+/// de la ventana nunca toca `xtree-historial`.
+#[test]
+fn xtree_history_off_ui_thread() {
+    install_fakes();
+    let root = crate::sys::testing::FakeDiskScan::root();
+    FakeNetwork::mark_ui_thread();
+    let mut a = net_app();
+    a.config.xtree_scan_on_open = true;
+    a.run_command(Command::Xtree);
+    assert_eq!(a.xtree.as_ref().unwrap().root(), root.as_path());
+    let t0 = Instant::now();
+    while a.xtree.as_ref().is_none_or(|x| x.history_loaded().is_none()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "el historial no llegó");
+        a.paint();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(a.xtree.as_ref().unwrap().history_loaded().unwrap().days.len(), 1);
+    assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("historial")), "{:?}", FakeNetwork::ui_io_calls());
+    a.on_closing();
+}
+
 /// I5: soltar el guardián de una carpeta de red colgada no espera en el hilo de la ventana.
 #[test]
 fn remote_watcher_released_off_thread() {

@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::growth::{self, CardState, HistState, StripHit};
 use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on};
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
 use super::search::{self, Found, WM_APP_XTREE_FOUND};
@@ -347,6 +348,8 @@ pub struct Xtree {
     seen: bool,
     /// Avisos del escaneo recibidos: fase del arco del indicador que gira.
     ticks: u8,
+    /// Historial de tamaños de la raíz (#58).
+    hist: HistState,
     /// Búsqueda al teclear en la tabla (#57): lo escrito y cuándo.
     typeahead: crate::typeahead::TypeAhead,
     /// La búsqueda por nombre, si está abierta (#57).
@@ -456,6 +459,7 @@ impl Xtree {
             elevating: Arc::new(AtomicBool::new(false)),
             seen: false,
             ticks: 0,
+            hist: HistState::default(),
             typeahead: Default::default(),
             scroll_to_selected: false,
             level_names: None,
@@ -508,6 +512,87 @@ impl Xtree {
             };
         }
         Some(node.size)
+    }
+
+    /// Historial de tamaños: `on` guarda una foto con cada análisis completo (`[opciones]
+    /// xtree_historial`), `days` es el período de la tarjeta y `dir` la carpeta del historial.
+    pub fn set_history(&mut self, on: bool, days: u16, dir: Option<PathBuf>) {
+        self.hist.on = on;
+        if super::growth::PERIODS.contains(&days) {
+            self.hist.days = days;
+        }
+        self.hist.dir = dir;
+    }
+
+    /// Carpeta del historial que recibió la vista (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_dir(&self) -> Option<&Path> {
+        self.hist.dir.as_deref()
+    }
+
+    /// ¿Guarda una foto con cada análisis? (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_on(&self) -> bool {
+        self.hist.on
+    }
+
+    /// Contador de «Borrar historial» de la App: con él, una foto en camino después de borrar no
+    /// se guarda.
+    pub fn set_history_clears(&mut self, clears: super::history::Clears) {
+        self.hist.clears = clears;
+    }
+
+    /// ¿Se recibieron las opciones del historial (`set_history`)? Antes, el período es el de
+    /// fábrica y no cuenta como elegido.
+    pub fn history_chosen(&self) -> bool {
+        self.hist.dir.is_some()
+    }
+
+    /// ¿Hay un hilo guardando o leyendo el historial? (para el indicador de actividad).
+    pub fn history_busy(&self) -> bool {
+        self.hist.busy()
+    }
+
+    /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
+    pub fn history_days(&self) -> u16 {
+        self.hist.days
+    }
+
+    /// Fija el día de hoy (días desde 1970): pruebas y gancho de pruebas. `None` vuelve al reloj.
+    pub fn set_today(&mut self, day: Option<i32>) {
+        self.hist.today_fix = day;
+    }
+
+    /// El historial que llegó del hilo (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_loaded(&self) -> Option<&super::history::Loaded> {
+        self.hist.loaded.as_deref()
+    }
+
+    /// Gancho de pruebas del historial (#58): `periodo <i>` toca el período `i`, `crecio <i>` la
+    /// fila `i` de «Más crecieron».
+    #[cfg(feature = "pruebas")]
+    pub fn history_test(&mut self, area: Rect, what: &str, i: usize) -> Action {
+        self.prepare(area);
+        let ui = self.ui(area);
+        let s = growth::strip(ui.card);
+        let at = match what {
+            "periodo" => s.periods.get(i).map(|r| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)),
+            "crecio" => Some((s.right.left + 40.0, s.right.top + 20.0 + (i as f32 + 0.5) * 19.0)),
+            _ => None,
+        };
+        let Some((x, y)) = at else { return Action::None };
+        self.on_mouse_move(area, x, y);
+        self.on_click(area, x, y, false)
+    }
+
+    /// Se borró el historial: la tarjeta deja de mostrar el que había.
+    pub fn clear_history(&mut self) {
+        self.hist.reset();
+        // Con un análisis a la vista, la tarjeta pasa a «sin historial» (no a «cargando»).
+        if !self.arena.is_empty() {
+            self.hist.loaded = Some(Default::default());
+        }
     }
 
     /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).
@@ -778,6 +863,7 @@ impl Xtree {
         self.selected = None;
         self.scroll = 0.0;
         self.scanning = true;
+        self.hist.reset();
         self.start_clock();
         self.refresh_search();
     }
@@ -799,9 +885,26 @@ impl Xtree {
         // Resultado nuevo: el indicador lo muestra hasta que se abra la vista.
         self.seen = false;
         self.go(0);
+        // Una raíz que no se pudo leer no deja foto (se lee lo que había).
+        let complete = !self.progress().root_failed.load(Ordering::Relaxed);
+        // Las carpetas sin leer (permisos): su tamaño y el de las de arriba es «al menos».
+        let denied = self.progress().denied_nodes.lock().map(|v| v.clone()).unwrap_or_default();
+        let overflow = self.progress().denied_overflow.load(Ordering::Relaxed);
+        self.hist.set_partial_now(&self.arena, &denied, overflow);
+        self.hist.after_scan(self.hwnd, self.scan.id, &self.root, &self.arena, complete);
         // Los nodos son otros: la búsqueda abierta se repite sobre el árbol terminado.
         self.refresh_search();
         true
+    }
+
+    /// `take_result` con el historial guardado con una generación de borrado vieja (pruebas).
+    #[cfg(test)]
+    pub fn take_result_with_generation(&mut self, generation: u64) {
+        let Some(arena) = self.scan.result.lock().unwrap().take() else { return };
+        self.arena = Arc::new(arena);
+        self.scanning = false;
+        self.go(0);
+        self.hist.after_scan_at(self.hwnd, self.scan.id, &self.root, &self.arena, true, Some(generation));
     }
 
     /// Aviso del escáner (`WM_APP_XTREE`). Devuelve si hay que repintar.
@@ -874,7 +977,9 @@ impl Xtree {
             if delivered {
                 // Ya no faltan permisos: se apagan el aviso y `xtree_permisos`.
                 progress.need_admin.store(false, Ordering::Relaxed);
-                progress.denied.store(0, Ordering::Relaxed);
+                progress.clear_denied();
+                // El árbol elevado leyó la raíz: cuenta como análisis completo.
+                progress.root_failed.store(false, Ordering::Relaxed);
             }
             elevating.store(false, Ordering::Relaxed);
             // Siempre se avisa: el escaneo normal pudo haber terminado y ya no hay quien repinte.
@@ -1113,7 +1218,105 @@ impl Xtree {
     }
 
     fn button_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
-        layout_ui(area, self.legend_h()).buttons.iter().position(|b| contains(b, x, y))
+        self.ui(area).buttons.iter().position(|b| contains(b, x, y))
+    }
+
+    /// Distribución de la vista con la franja de historial (#58) en la tarjeta, si entra: la
+    /// tarjeta crece hacia arriba y el mapa se achica.
+    fn ui(&self, area: Rect) -> Ui {
+        let mut ui = layout_ui(area, self.legend_h());
+        if (self.scanning || !self.arena.is_empty()) && self.hist.visible(&self.root) && ui.map.bottom - ui.map.top - growth::STRIP_H >= growth::MIN_MAP_H {
+            ui.card.top -= growth::STRIP_H;
+            ui.map.bottom -= growth::STRIP_H;
+            for b in &mut ui.buttons {
+                b.top -= growth::STRIP_H;
+                b.bottom -= growth::STRIP_H;
+            }
+        }
+        ui
+    }
+
+    /// ¿La tarjeta tiene la franja de historial?
+    fn has_strip(ui: &Ui) -> bool {
+        ui.card.bottom - ui.card.top > CARD_H + 1.0
+    }
+
+    /// Parte de la franja de historial en `(x, y)` (con el árbol terminado y datos que mostrar) y,
+    /// si es una de «Más crecieron», su nodo.
+    fn strip_hit_at(&mut self, area: Rect, x: f32, y: f32) -> Option<(StripHit, Option<u32>)> {
+        let ui = self.ui(area);
+        if self.scanning || self.arena.is_empty() || !Self::has_strip(&ui) || !contains(&ui.card, x, y) {
+            return None;
+        }
+        // Con el mouse en la tarjeta, muestra la elegida (o la carpeta actual).
+        let id = self.selected.filter(|&n| (n as usize) < self.arena.len()).unwrap_or(self.current);
+        let today = self.hist.today();
+        if !matches!(growth::card_state(&self.hist, &self.arena, id, today), CardState::Data(_)) {
+            return None;
+        }
+        let growers = self.hist.top_growers(&self.arena, id, today);
+        let hit = growth::strip_hit(ui.card, x, y, growers.len())?;
+        let node = match hit {
+            StripHit::Grower(i) => growers.get(i).map(|g| g.0),
+            StripHit::Period(_) => None,
+        };
+        Some((hit, node))
+    }
+
+    /// La carpeta de la fila `row` si el mouse (en `x`) está sobre su tamaño y lleva la ▲.
+    fn mark_at(&self, area: Rect, row: Option<usize>, x: f32) -> Option<u32> {
+        let l = self.ui(area).list;
+        let id = self.rows().get(row?).copied().flatten()?;
+        if !(l.right - 214.0..=l.right - 124.0).contains(&x) {
+            return None;
+        }
+        growth::row_mark(&self.hist, &self.arena, id, self.hist.today()).map(|_| id)
+    }
+
+    /// La carpeta con ▲ cuyo tamaño está en `(x, y)`: el cartel de ayuda de xdir lo pide
+    /// (`Hit::XtreeMark`).
+    pub fn mark_at_point(&self, area: Rect, x: f32, y: f32) -> Option<u32> {
+        if self.scanning || self.menu_open {
+            return None;
+        }
+        self.mark_at(area, self.row_at(area, x, y), x)
+    }
+
+    /// Texto del cartel de la ▲ de la carpeta `id`: «+3,4 GB en 7 días».
+    pub fn mark_tip(&self, id: u32) -> Option<String> {
+        // Con la tabla tapada (búsqueda) o cambiando, el cartel que quedaba se va.
+        if self.scanning || self.search.is_some() {
+            return None;
+        }
+        growth::row_mark(&self.hist, &self.arena, id, self.hist.today())
+    }
+
+    /// Termina un análisis con `arena` sin escáner (pruebas de `App`).
+    #[cfg(test)]
+    pub fn finish_for_tests(&mut self, arena: Vec<Node>) {
+        *self.scan.result.lock().unwrap() = Some(arena);
+        self.scanning = true;
+        self.take_result();
+    }
+
+    /// Centro de la celda del tamaño de la fila `row` de la tabla (pruebas).
+    #[cfg(any(test, feature = "pruebas"))]
+    pub fn size_cell_center(&self, area: Rect, row: usize) -> (f32, f32) {
+        let l = self.ui(area).list;
+        (l.right - 150.0, l.top + TABLE_H + (row as f32 + 0.5) * ROW_H - self.scroll)
+    }
+
+    /// Centro del período `i` del selector de la franja (pruebas de `App`).
+    #[cfg(test)]
+    pub fn period_center(&self, area: Rect, i: usize) -> (f32, f32) {
+        let r = growth::strip(self.ui(area).card).periods[i];
+        ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
+    }
+
+    /// La fila o el bloque elegido (pruebas de `App`).
+    #[cfg(test)]
+    pub fn selected_for_tests(&self) -> Option<u32> {
+        self.selected
     }
 
     /// Fila del menú de discos bajo el cursor.
@@ -1181,7 +1384,9 @@ impl Xtree {
             return back_changed; // mientras se escanea el mapa es solo de lectura
         }
         let (row, cell, btn) = (self.row_at(area, x, y), self.cell_at(x, y), self.button_at(area, x, y));
-        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn;
+        let strip = self.strip_hit_at(area, x, y).map(|h| h.0);
+        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn || strip != self.hist.hover;
+        self.hist.hover = strip;
         self.hover_row = row;
         self.hover = cell;
         self.hover_btn = btn;
@@ -1224,7 +1429,7 @@ impl Xtree {
             }
             return Action::Redraw;
         }
-        let ui = layout_ui(area, self.legend_h());
+        let ui = self.ui(area);
         if contains(&ui.back, x, y) {
             return Action::Close;
         }
@@ -1262,6 +1467,18 @@ impl Xtree {
         }
         if self.arena.is_empty() || self.scanning {
             return Action::None;
+        }
+        if let Some((hit, node)) = self.strip_hit_at(area, x, y) {
+            match hit {
+                StripHit::Period(i) => self.hist.days = growth::PERIODS[i],
+                StripHit::Grower(_) => {
+                    if let Some(n) = node {
+                        self.go(n);
+                    }
+                }
+            }
+            self.hist.hover = None;
+            return Action::Redraw;
         }
         if let Some(b) = self.button_at(area, x, y) {
             let t = self.target();
@@ -1401,7 +1618,8 @@ impl Xtree {
         if self.scanning {
             self.take_result();
         }
-        let ui = layout_ui(area, self.legend_h());
+        self.hist.take(&self.root);
+        let ui = self.ui(area);
         let live = self.scan.live.clone();
         let guard = if self.scanning { Some(live.read().unwrap()) } else { None };
         let arena: &[Node] = match &guard {
@@ -1524,7 +1742,7 @@ impl Xtree {
     pub fn paint(&mut self, p: &dyn Painter, area: Rect) {
         self.prepare(area);
         let th = p.theme();
-        let ui = layout_ui(area, self.legend_h());
+        let ui = self.ui(area);
         let (l0, t0, r0, b0) = (area.left, area.top, area.right, area.bottom);
         let white = color(1.0, 1.0, 1.0);
         let warning = if th.dark { rgb(FOLDER_ICON) } else { hex(0xB7791F) };
@@ -1670,6 +1888,7 @@ impl Xtree {
                 .or_else(|| self.hover_row.and_then(|i| rows.get(i).copied().flatten()));
 
             // ----- tabla (con la búsqueda abierta va la búsqueda) -----
+            let today = self.hist.today();
             if self.search.is_none() {
                 let l = ui.list;
                 p.round_fill(l, 8.0, th.surface);
@@ -1702,7 +1921,12 @@ impl Xtree {
                                 let ic = if n.is_dir { rgb(FOLDER_ICON) } else { file_icon };
                                 icon(l.left + 12.0, top + (ROW_H - 16.0) / 2.0, n.is_dir, ic);
                                 p.text(FontId::Ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
-                                p.text(FontId::UiRight, &fmt_size(n.size), rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
+                                let size = fmt_size(n.size);
+                                p.text(FontId::UiRight, &size, rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
+                                // Creció mucho en el período: ▲ junto al tamaño.
+                                if done && growth::row_mark(&self.hist, arena, *id, today).is_some() {
+                                    growth::draw_mark(p, l.right - 124.0, p.measure(FontId::Ui, &size), top, top + ROW_H);
+                                }
                                 let pc = format!("{:.1} %", frac * 100.0).replace('.', ",");
                                 p.text(FontId::UiRight, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
                                 let track = rect(l.right - 62.0, top + ROW_H / 2.0 - 4.0, l.right - 12.0, top + ROW_H / 2.0 + 4.0);
@@ -1775,7 +1999,7 @@ impl Xtree {
             let cd = ui.card;
             p.round_fill(cd, 8.0, th.surface);
             p.round_stroke_w(cd, 8.0, th.border, 1.0);
-            let cy = (cd.top + cd.bottom) / 2.0;
+            let cy = cd.top + CARD_H / 2.0;
             if n.is_dir {
                 p.round_fill(rect(cd.left + 18.0, cy - 12.0, cd.left + 30.0, cy - 6.0), 2.0, rgb(FOLDER_ICON));
                 p.round_fill(rect(cd.left + 18.0, cy - 8.0, cd.left + 46.0, cy + 12.0), 3.0, rgb(FOLDER_ICON));
@@ -1803,6 +2027,9 @@ impl Xtree {
                 let tc = alpha(th.text, k);
                 p.text(FontId::Glyphs, glyph, rect(b.left + 10.0, b.top, b.left + 30.0, b.bottom), tc);
                 p.text(FontId::Ui, label, rect(b.left + 40.0, b.top, b.right - 6.0, b.bottom), tc);
+            }
+            if Self::has_strip(&ui) {
+                growth::paint_strip(p, cd, &mut self.hist, arena, shown, self.scanning);
             }
 
             // ----- leyenda (solo al colorear por tipo; por carpeta el color no necesita explicación) -----
@@ -2863,3 +3090,7 @@ mod tests {
         crate::sys::testing::FakeDiskScan::set_volume(None, false);
     }
 }
+
+#[cfg(test)]
+#[path = "growth_tests.rs"]
+mod growth_tests;

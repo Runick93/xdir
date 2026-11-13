@@ -55,6 +55,8 @@ fn eject_within(root: &std::path::Path, limit: std::time::Duration, late: impl F
 pub(super) enum TaskDone {
     /// Terminó de escribir `config.toml` (la pestaña Configuración): lo que quedó, o el error.
     ConfigSaved { result: Result<Config, String> },
+    /// Terminó «Borrar historial» de xtree.
+    XtreeHistoryCleared(Result<(), String>),
     /// Terminó de activar (`on`) o desactivar el modo portable.
     Portable { on: bool, result: Result<(), String> },
     /// El original de un acceso directo (`None`: no se resolvió o ya no existe).
@@ -138,6 +140,7 @@ impl App {
         match t {
             TaskDone::ConfigSaved { result } => self.on_config_saved(result),
             TaskDone::Portable { on, result } => self.on_portable_done(on, result),
+            TaskDone::XtreeHistoryCleared(result) => self.on_xtree_history_cleared(result),
             TaskDone::Renamed { dir, result, undoing } => self.on_renamed(dir, result, undoing),
             TaskDone::CaseInfo { dir, case_insensitive } => self.on_case_info(&dir, case_insensitive),
             TaskDone::ArchiveOpened { name, with, token, result } => self.on_archive_opened(name, with, token, result),

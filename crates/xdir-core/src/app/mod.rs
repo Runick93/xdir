@@ -30,6 +30,7 @@ mod sel_size;
 mod tasks;
 mod tooltip;
 mod transfers;
+mod xtree_history;
 
 #[cfg(test)]
 mod tests;
@@ -188,6 +189,9 @@ enum Hit {
     Info(crate::info::draw::InfoHit),
     /// La vista de xtree abierta, sobre el área de los paneles.
     XtreeView,
+    /// La ▲ de una carpeta que creció mucho, en la tabla de xtree (su cartel tiene el cambio); el
+    /// resto se maneja como `XtreeView`.
+    XtreeMark(u32),
     /// «← xdir» de la barra superior de xtree (vuelve a los paneles).
     XtreeBack,
     /// «Colores: carpeta / tipo» de la barra superior de xtree.
@@ -485,6 +489,13 @@ pub struct App {
     portable_marker: bool,
     /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`), de la sesión.
     xtree_last: Option<PathBuf>,
+    /// Período del historial en la tarjeta de xtree (de la sesión; la vista abierta manda).
+    xtree_days: u16,
+    /// Resultado de «Borrar historial» de xtree, para la fila de la configuración.
+    xtree_history_msg: Option<String>,
+    /// Contador de «Borrar historial» de xtree (lo comparte con la vista: una foto en camino
+    /// después de borrar no se guarda).
+    xtree_history_clears: crate::xtree::history::Clears,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -720,6 +731,9 @@ impl App {
             portable_now: session::portable_active(),
             portable_marker: session::portable_active(),
             xtree_last: session.xtree_last.clone(),
+            xtree_days: session.xtree_days,
+            xtree_history_msg: None,
+            xtree_history_clears: Default::default(),
             term_menu: None,
             term_ctx: None,
             history_ctx: None,

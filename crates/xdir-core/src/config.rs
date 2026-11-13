@@ -99,6 +99,9 @@ pub struct Config {
     /// `[opciones] xtree_analizar_al_abrir`: xtree analiza apenas se abre (de fábrica, no: se
     /// elige el disco y se toca «Analizar»).
     pub xtree_scan_on_open: bool,
+    /// `[opciones] xtree_historial`: xtree guarda una foto de los tamaños con cada análisis
+    /// completo (de fábrica, sí).
+    pub xtree_history: bool,
     /// Problemas al leer el archivo, para avisar en la barra de estado.
     pub errors: Vec<String>,
     /// Los problemas de `[atajos]`, como se muestran arriba de la página Atajos
@@ -115,7 +118,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_scan_on_open: false, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_scan_on_open: false, xtree_history: true, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
     }
 }
 
@@ -309,6 +312,8 @@ impl Config {
                             ("xtree_por_tipo", None) => c.errors.push(format!("línea {}: xtree_por_tipo va como true o false", e.line)),
                             ("xtree_analizar_al_abrir", Some(on)) => c.xtree_scan_on_open = on,
                             ("xtree_analizar_al_abrir", None) => c.errors.push(format!("línea {}: xtree_analizar_al_abrir va como true o false", e.line)),
+                            ("xtree_historial", Some(on)) => c.xtree_history = on,
+                            ("xtree_historial", None) => c.errors.push(format!("línea {}: xtree_historial va como true o false", e.line)),
                             ("xtree_abrir", _) => match XtreeOpen::ALL.into_iter().find(|o| e.value.as_str() == Some(o.id())) {
                                 Some(o) => c.xtree_open = o,
                                 None => c.errors.push(format!("línea {}: xtree_abrir va como \"sistema\", \"panel\" o \"ultimo\"", e.line)),
@@ -461,7 +466,10 @@ pub fn template() -> String {
             # carpeta del panel activo) o \"ultimo\" (la última analizada).\n\
             # xtree_abrir = \"panel\"\n\
             # xtree analiza apenas se abre (si no, se elige el disco y se toca Analizar).\n\
-            # xtree_analizar_al_abrir = false\n";
+            # xtree_analizar_al_abrir = false\n\
+            # xtree guarda una foto de los tamaños con cada análisis, para ver cuánto creció cada\n\
+            # carpeta (false lo apaga).\n\
+            # xtree_historial = true\n";
     out
 }
 
@@ -629,6 +637,20 @@ mod tests {
         assert!(!bad.xtree_scan_on_open);
         assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
         assert!(template().contains("\n# xtree_analizar_al_abrir = false\n"));
+    }
+
+    /// `xtree_historial`: de fábrica encendido; false lo apaga; otra cosa es un error.
+    #[test]
+    fn xtree_history_option_parses() {
+        crate::sys::testing::install_fakes();
+        assert!(Config::parse("").xtree_history);
+        let c = Config::parse("[opciones]\nxtree_historial = false\n");
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert!(!c.xtree_history);
+        let bad = Config::parse("[opciones]\nxtree_historial = 1\n");
+        assert!(bad.xtree_history);
+        assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
+        assert!(template().contains("\n# xtree_historial = true\n"));
     }
 
     #[test]

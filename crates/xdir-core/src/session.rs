@@ -72,6 +72,7 @@ pub fn files(mac: bool) -> Vec<(&'static str, &'static str)> {
         ("grupos.toml", "Los grupos de paneles guardados"),
         ("historial.txt", "Las carpetas visitadas, para el salto rápido"),
         ("red.toml", "Servidores favoritos y recientes"),
+        ("xtree-historial", "Carpeta con el historial de tamaños de xtree, un archivo por carpeta analizada"),
     ];
     if mac {
         out.push(("rutas.txt", "Las rutas escritas en la barra de dirección"));
@@ -80,17 +81,50 @@ pub fn files(mac: bool) -> Vec<(&'static str, &'static str)> {
 }
 
 /// Activa el modo portable: copia a `to` (la carpeta del ejecutable) los archivos de
-/// configuración de `from` que existan (sin pisar los que ya estén en `to`) y crea
+/// configuración de `from` que existan, también la carpeta del historial de xtree (sin pisar lo que
+/// ya esté en `to`), y crea
 /// `xdir.portable`. Bloqueante: para un hilo de trabajo.
 pub fn portable_files(from: &Path, to: &Path) -> Result<(), String> {
     let fail = |e: std::io::Error| format!("No se pudo escribir en {}: {e}", to.display());
     for (name, _) in files(true) {
         let (src, dst) = (from.join(name), to.join(name));
-        if src.is_file() && !dst.exists() && src != dst {
+        if src == dst || dst.exists() {
+            continue;
+        }
+        if src.is_file() {
             std::fs::copy(&src, &dst).map_err(fail)?;
+        } else if src.is_dir() {
+            copy_dir_files(&src, to, name).map_err(fail)?;
         }
     }
     std::fs::write(to.join(PORTABLE_MARKER), "").map_err(fail)
+}
+
+/// Copia los archivos de la carpeta `src` (el historial de xtree; sin los temporales a medio
+/// escribir) a `to/name` por un temporal que se renombra al final: una copia cortada no deja una
+/// carpeta a medias que la próxima vez parezca completa. Los temporales de copias cortadas antes
+/// se borran.
+fn copy_dir_files(src: &Path, to: &Path, name: &str) -> std::io::Result<()> {
+    for e in std::fs::read_dir(to)?.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if n.starts_with(&format!("{name}.")) && n.ends_with(".tmp") && e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+    let tmp = to.join(format!("{name}.{}.tmp", std::process::id()));
+    let copy = || -> std::io::Result<()> {
+        std::fs::create_dir_all(&tmp)?;
+        for e in std::fs::read_dir(src)?.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().is_none_or(|x| x != "tmp") {
+                std::fs::copy(&p, tmp.join(e.file_name()))?;
+            }
+        }
+        std::fs::rename(&tmp, to.join(name))
+    };
+    copy().inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&tmp);
+    })
 }
 
 /// Desactiva el modo portable: borra `xdir.portable` de `dir` (los archivos quedan).
@@ -209,6 +243,8 @@ pub struct Session {
     pub settings_page: Option<String>,
     /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`).
     pub xtree_last: Option<PathBuf>,
+    /// Período del historial en la tarjeta de xtree (`xtree_dias`: 7, 30 o 90).
+    pub xtree_days: u16,
     /// La versión más nueva de xdir que se abrió con esta sesión (`version_vista`), para avisar
     /// una vez que se actualizó. Una sesión nueva (primera instalación) ya tiene la de ahora; una
     /// leída de un archivo sin la clave (de antes de Novedades) queda en `None`.
@@ -250,6 +286,7 @@ impl Default for Session {
             info_sections: crate::info::DEFAULT_OPEN,
             settings_page: None,
             xtree_last: None,
+            xtree_days: 7,
             seen_version: Some(crate::about::VERSION.to_string()),
             panes: Vec::new(),
             columns: default_columns(),
@@ -321,6 +358,7 @@ fn write(s: &Session) -> String {
     if let Some(p) = &s.xtree_last {
         out += &format!("xtree_ultimo = {}\n", quote(&p.to_string_lossy()));
     }
+    out += &format!("xtree_dias = {}\n", s.xtree_days);
     if let Some(g) = &s.group {
         out += &format!("grupo = {}
 ", quote(g));
@@ -442,6 +480,7 @@ fn parse(text: &str) -> Session {
             }
             ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("xtree_ultimo", None) => s.xtree_last = parse_list(&format!("[{value}]")).into_iter().next().filter(|p| !p.is_empty()).map(PathBuf::from),
+            ("xtree_dias", None) => s.xtree_days = int().filter(|d| [7, 30, 90].contains(d)).map_or(7, |d| d as u16),
             ("version_vista", None) => s.seen_version = Some(value.trim_matches('"').trim().to_string()).filter(|v| !v.is_empty()),
             ("grupo", None) => s.group = Some(value.trim_matches('"').to_string()).filter(|g| !g.is_empty()),
             ("barra_favoritos", None) => s.show_favorites = boolean().unwrap_or(true),
@@ -564,6 +603,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Activar el modo portable también copia la carpeta del historial de xtree (sus archivos,
+    /// sin temporales), salvo que ya haya una en el destino.
+    #[test]
+    fn portable_copies_xtree_history() {
+        let base = std::env::temp_dir().join(format!("xdir-portable-historial-{}", std::process::id()));
+        let (from, exe) = (base.join("usuario"), base.join("exe"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(from.join("xtree-historial")).unwrap();
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::write(from.join("xtree-historial").join("a-1.bin"), "uno").unwrap();
+        std::fs::write(from.join("xtree-historial").join("a-1.bin.9.0.tmp"), "medio").unwrap();
+        portable_files(&from, &exe).unwrap();
+        assert_eq!(std::fs::read_to_string(exe.join("xtree-historial").join("a-1.bin")).unwrap(), "uno");
+        assert!(!exe.join("xtree-historial").join("a-1.bin.9.0.tmp").exists());
+        // La copia va a un temporal y se renombra: uno que quedó de una copia cortada se borra.
+        let names: Vec<String> = std::fs::read_dir(&exe).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        let again = base.join("exe2");
+        std::fs::create_dir_all(again.join("xtree-historial.123.tmp")).unwrap();
+        std::fs::write(again.join("xtree-historial.123.tmp").join("medio.bin"), "x").unwrap();
+        portable_files(&from, &again).unwrap();
+        assert!(again.join("xtree-historial").join("a-1.bin").exists());
+        assert!(!again.join("xtree-historial.123.tmp").exists(), "el resto de la copia cortada se va");
+        // Ya había historial junto a xdir: gana ese.
+        std::fs::write(from.join("xtree-historial").join("b-2.bin"), "dos").unwrap();
+        portable_files(&from, &exe).unwrap();
+        assert!(!exe.join("xtree-historial").join("b-2.bin").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// La carpeta de configuración se decide una vez por proceso: crear o borrar `xdir.portable`
     /// después no la cambia (se aplica al volver a abrir xdir).
     #[test]
@@ -650,6 +719,7 @@ mod tests {
             info_sections: 0b101,
             settings_page: Some("atajos".into()),
             xtree_last: Some(r#"C:\datos "x""#.into()),
+            xtree_days: 30,
             seen_version: Some("0.1.24".into()),
             panes: vec![
                 PaneState {
@@ -683,6 +753,10 @@ mod tests {
         assert_eq!(parse("columnas = [\"tamano:90\"]\n").columns, default_columns());
         // Las sesiones de antes (sin la clave) muestran las extensiones.
         assert!(parse("layout = 2\n").show_extensions);
+        // Período del historial de xtree: 7, 30 o 90; otra cosa, 7.
+        assert_eq!(parse("layout = 2\n").xtree_days, 7);
+        assert_eq!(parse("xtree_dias = 90\n").xtree_days, 90);
+        assert_eq!(parse("xtree_dias = 12\n").xtree_days, 7);
     }
 
     /// La pestaña Novedades va como `xdir:novedades`; la versión vista, como `version_vista`. Una

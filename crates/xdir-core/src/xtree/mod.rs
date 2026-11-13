@@ -1,6 +1,8 @@
 //! Núcleo neutro de xtree (uso de disco en un treemap): árbol de nodos, diseño del mapa y colores.
 
 pub mod colors;
+pub mod growth;
+pub mod history;
 pub mod scan;
 pub mod search;
 pub mod tree;

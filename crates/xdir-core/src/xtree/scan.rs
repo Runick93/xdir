@@ -54,6 +54,45 @@ pub struct Progress {
     pub mft_total: AtomicU64,
     pub denied: AtomicU64,
     pub need_admin: AtomicBool,
+    /// La raíz misma no se pudo listar (sin permiso, borrada, disco desconectado): el árbol es la
+    /// raíz sola y no cuenta como análisis completo para el historial.
+    pub root_failed: AtomicBool,
+    /// Las carpetas que no se pudieron leer (su nodo en el árbol), hasta `MAX_DENIED_NODES`: el
+    /// historial no las toma como «pesaban 0» (#58).
+    pub denied_nodes: Mutex<Vec<u32>>,
+    /// Hubo más carpetas sin leer que las que se anotan.
+    pub denied_overflow: AtomicBool,
+    /// Llegó el árbol elevado: lo que siga negando el recorrido normal es de otro árbol y no se
+    /// anota (se cambia con el candado de `denied_nodes` tomado).
+    denied_frozen: AtomicBool,
+}
+
+/// Tope de carpetas sin leer anotadas en `Progress::denied_nodes`.
+pub const MAX_DENIED_NODES: usize = 10_000;
+
+impl Progress {
+    /// Anota la carpeta `node` que no se pudo leer (con tope).
+    fn note_denied(&self, node: u32) {
+        let mut v = self.denied_nodes.lock().unwrap_or_else(|e| e.into_inner());
+        if self.denied_frozen.load(Ordering::Relaxed) {
+            return;
+        }
+        if v.len() < MAX_DENIED_NODES {
+            v.push(node);
+        } else {
+            self.denied_overflow.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Ya no faltan permisos (llegó el árbol elevado): se olvidan las carpetas sin leer, y las que
+    /// el recorrido normal (cortado) siga negando después ya no se anotan.
+    pub fn clear_denied(&self) {
+        self.denied.store(0, Ordering::Relaxed);
+        let mut v = self.denied_nodes.lock().unwrap_or_else(|e| e.into_inner());
+        v.clear();
+        self.denied_frozen.store(true, Ordering::Relaxed);
+        self.denied_overflow.store(false, Ordering::Relaxed);
+    }
 }
 
 pub struct Scan {
@@ -196,10 +235,14 @@ fn worker(ctx: &Ctx) {
         // curso quedaría sin bajar). Solo protege donde los pánicos se desenrollan (pruebas y
         // `dev`): en release (`panic = "abort"`) un pánico cierra xdir igual.
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.lister.list(&job.path))).unwrap_or(Err(ListError::Other));
+        if res.is_err() && job.node == 0 {
+            ctx.progress.root_failed.store(true, Ordering::Relaxed);
+        }
         match res {
             Ok(l) => insert_listing(ctx, &job, l),
             Err(ListError::Denied) => {
                 ctx.progress.denied.fetch_add(1, Ordering::Relaxed);
+                ctx.progress.note_denied(job.node);
             }
             Err(ListError::Other) => {}
         }
@@ -451,5 +494,54 @@ mod tests {
         let expected: u64 = (1..=1400u64).sum::<u64>() + 50;
         assert_eq!(t[0].size, expected);
         assert_eq!(p.files.load(Ordering::Relaxed), 1401);
+    }
+
+    /// Si la raíz no se pudo listar (sin permiso, borrada, disco desconectado) el escaneo lo marca:
+    /// el árbol de una raíz sola en 0 no es un análisis completo (no deja foto en el historial).
+    #[test]
+    fn walk_marks_unreadable_root() {
+        for err in [ListError::Denied, ListError::Other] {
+            let mut l = FakeLister::default();
+            l.dirs.insert("/r".into(), Err(err));
+            let (r, p) = run(&l);
+            assert_eq!(r.unwrap().len(), 1);
+            assert!(p.root_failed.load(Ordering::Relaxed), "{err:?}");
+        }
+        let mut l = FakeLister::default();
+        l.dirs.insert("/r".into(), Ok((vec!["no"], vec![])));
+        l.dirs.insert("/r/no".into(), Err(ListError::Denied));
+        let (_, p) = run(&l);
+        assert!(!p.root_failed.load(Ordering::Relaxed), "una subcarpeta negada no es la raíz");
+    }
+
+    /// Las carpetas que no se pudieron leer quedan anotadas (su nodo en el árbol, con tope): el
+    /// historial las marca como «no se sabe» en vez de «pesaban 0».
+    #[test]
+    fn walk_records_denied_folders() {
+        let mut l = FakeLister::default();
+        l.dirs.insert("/r".into(), Ok((vec!["ok", "no"], vec![])));
+        l.dirs.insert("/r/ok".into(), Ok((vec!["tampoco"], vec![f("q", 9)])));
+        l.dirs.insert("/r/ok/tampoco".into(), Err(ListError::Denied));
+        l.dirs.insert("/r/no".into(), Err(ListError::Denied));
+        let (r, p) = run(&l);
+        let t = r.unwrap();
+        let mut names: Vec<std::path::PathBuf> = p.denied_nodes.lock().unwrap().iter().map(|&n| super::super::tree::node_path(&t, Path::new("/r"), n)).collect();
+        names.sort();
+        // Las rutas se arman con `join`: en Windows el separador es «\».
+        let root = Path::new("/r");
+        assert_eq!(names, [root.join("no"), root.join("ok").join("tampoco")]);
+        assert!(!p.denied_overflow.load(Ordering::Relaxed));
+    }
+
+    /// Llegó el árbol elevado (`clear_denied`): un listado del recorrido normal que termina después
+    /// en «sin permiso» ya no anota su nodo (es de otro árbol).
+    #[test]
+    fn denied_after_elevated_tree_is_ignored() {
+        let p = Progress::default();
+        p.note_denied(3);
+        p.clear_denied();
+        p.note_denied(5);
+        assert!(p.denied_nodes.lock().unwrap().is_empty());
+        assert!(!p.denied_overflow.load(Ordering::Relaxed));
     }
 }

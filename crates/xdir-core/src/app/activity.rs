@@ -41,6 +41,8 @@ pub(super) enum ActivityKey {
     Stalled(usize),
     /// El análisis de xtree con la vista cerrada.
     XtreeScan,
+    /// Guardar o leer el historial de tamaños de xtree con la vista cerrada (#58).
+    XtreeHistory,
     /// Extraer a la temporal un archivo de adentro de un comprimido para abrirlo.
     Extract,
 }
@@ -250,6 +252,11 @@ impl App {
             let root = x.root();
             let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
             list.push((ActivityKey::XtreeScan, format!("Analizando \"{name}\" en xtree"), None, SHOW_AFTER));
+        }
+        // El historial de xtree se guarda en un hilo al terminar el análisis: suele ser cosa de
+        // milisegundos (no se ve por el umbral); si tarda (un pendrive lento), el indicador lo dice.
+        if !self.xtree_open && self.xtree.as_ref().is_some_and(|x| x.history_busy()) {
+            list.push((ActivityKey::XtreeHistory, "Guardando el historial de xtree".to_string(), None, SHOW_AFTER));
         }
         self.activity.set_derived(list, now);
     }

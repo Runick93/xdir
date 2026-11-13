@@ -148,10 +148,9 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
     Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area), search_btn: search_btn_rect(area) }
 }
 
-/// La lupa de la barra superior de la vista en `area`.
+/// La lupa de la barra superior de la vista en `area` (ver `top_buttons`).
 pub fn search_btn_rect(area: Rect) -> Rect {
-    let c = colors_rect(area);
-    rect(c.left - 6.0 - SEARCH_W, c.top, c.left - 6.0, c.bottom)
+    top_buttons(area).1
 }
 
 /// Recuadro de la caja de búsqueda: arriba de la columna de la tabla.
@@ -202,11 +201,29 @@ struct SearchState {
     found_tree: u64,
 }
 
-/// Botón «Colores: carpeta / tipo» de la vista en `area`: en la barra superior, 40 antes del estado
-/// del análisis.
-pub fn colors_rect(area: Rect) -> Rect {
+/// La lupa y «Colores» de la barra superior en `area`: terminan 40 antes del estado del análisis
+/// y nunca pisan «Analizar». Si no entran, «Colores» queda solo con la muestra (del ancho de la
+/// lupa) y, si tampoco, no están (rectángulos vacíos: ningún punto cae adentro).
+fn top_buttons(area: Rect) -> (Rect, Rect) {
+    let (top, bottom) = (area.top + 6.0, area.top + TOP_H - 6.0);
     let right = area.right - STATE_W - 40.0;
-    rect(right - COLORS_W, area.top + 6.0, right, area.top + TOP_H - 6.0)
+    // «Analizar» termina en `back` (76) + 8 + combo (250) + 8 + 100.
+    let min_left = area.left + MARGIN + BACK_W + 8.0 + 250.0 + 8.0 + 100.0 + 8.0;
+    let colors_w = if right - COLORS_W - 6.0 - SEARCH_W >= min_left {
+        COLORS_W
+    } else if right - SEARCH_W - 6.0 - SEARCH_W >= min_left {
+        SEARCH_W
+    } else {
+        let none = rect(area.left, top, area.left, bottom);
+        return (none, none);
+    };
+    let colors = rect(right - colors_w, top, right, bottom);
+    (colors, rect(colors.left - 6.0 - SEARCH_W, top, colors.left - 6.0, bottom))
+}
+
+/// Botón «Colores: carpeta / tipo» de la vista en `area` (ver `top_buttons`).
+pub fn colors_rect(area: Rect) -> Rect {
+    top_buttons(area).0
 }
 
 /// Botón «← xdir» de la vista en `area`: a la izquierda de todo en la barra superior.
@@ -1532,7 +1549,11 @@ impl Xtree {
                 fmt_size(progress.bytes.load(Ordering::Relaxed))
             )
         };
-        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, ui.search_btn.left - 12.0, t0 + TOP_H), th.text);
+        // El texto hasta la lupa (o, sin ella, hasta antes del estado); si no queda lugar, no va.
+        let text_end = if ui.search_btn.right > ui.search_btn.left { ui.search_btn.left - 12.0 } else { r0 - STATE_W - 60.0 };
+        if text_end > ui.scan_btn.right + 60.0 {
+            p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, text_end, t0 + TOP_H), th.text);
+        }
         // Barra de avance (volumen entero) sobre el borde inferior de la barra superior.
         if self.scanning && !self.scan_stopped
             && let Some(pc) = self.percent()
@@ -1552,23 +1573,32 @@ impl Xtree {
         p.text(FontId::GlyphsSmall, "\u{E70D}", rect(cb.right - 26.0, cb.top, cb.right - 6.0, cb.bottom), th.text_dim);
         p.round_fill(ui.scan_btn, 6.0, th.accent);
         p.text(FontId::UiCenter, "Analizar", ui.scan_btn, white);
-        // «Colores: carpeta / tipo», con una muestra de 2×2 de los colores de cada modo.
+        // «Colores: carpeta / tipo», con una muestra de 2×2 de los colores de cada modo (angosta:
+        // solo la muestra; sin lugar, ni este ni la lupa).
         let cbtn = ui.colors_btn;
-        p.round_fill(cbtn, 6.0, if self.hover_colors { th.hover } else { th.surface_alt });
-        p.round_stroke_w(cbtn, 6.0, th.border, 1.0);
-        let sy = (cbtn.top + cbtn.bottom) / 2.0 - 6.0;
-        for (i, cat) in CATS.iter().take(4).enumerate() {
-            let c = if self.by_type { rgb(cat.1) } else { position_color(i as f32 * 0.25, 1, false) };
-            let (sx, dy) = (cbtn.left + 10.0 + (i % 2) as f32 * 7.0, (i / 2) as f32 * 7.0);
-            p.round_fill(rect(sx, sy + dy, sx + 5.0, sy + dy + 5.0), 1.0, c);
+        if cbtn.right > cbtn.left {
+            p.round_fill(cbtn, 6.0, if self.hover_colors { th.hover } else { th.surface_alt });
+            p.round_stroke_w(cbtn, 6.0, th.border, 1.0);
+            let compact = cbtn.right - cbtn.left < COLORS_W;
+            let sx0 = if compact { (cbtn.left + cbtn.right) / 2.0 - 6.0 } else { cbtn.left + 10.0 };
+            let sy = (cbtn.top + cbtn.bottom) / 2.0 - 6.0;
+            for (i, cat) in CATS.iter().take(4).enumerate() {
+                let c = if self.by_type { rgb(cat.1) } else { position_color(i as f32 * 0.25, 1, false) };
+                let (sx, dy) = (sx0 + (i % 2) as f32 * 7.0, (i / 2) as f32 * 7.0);
+                p.round_fill(rect(sx, sy + dy, sx + 5.0, sy + dy + 5.0), 1.0, c);
+            }
+            if !compact {
+                let label = if self.by_type { "Colores: tipo" } else { "Colores: carpeta" };
+                p.text(FontId::Ui, label, rect(cbtn.left + 30.0, cbtn.top, cbtn.right - 6.0, cbtn.bottom), th.text);
+            }
         }
-        let label = if self.by_type { "Colores: tipo" } else { "Colores: carpeta" };
-        p.text(FontId::Ui, label, rect(cbtn.left + 30.0, cbtn.top, cbtn.right - 6.0, cbtn.bottom), th.text);
         // La lupa: borde de acento con la búsqueda abierta.
         let sbtn = ui.search_btn;
-        p.round_fill(sbtn, 6.0, if self.hover_search { th.hover } else { th.surface_alt });
-        p.round_stroke_w(sbtn, 6.0, if self.search.is_some() { th.accent } else { th.border }, 1.0);
-        p.text(FontId::GlyphsSmall, "\u{E721}", sbtn, th.text);
+        if sbtn.right > sbtn.left {
+            p.round_fill(sbtn, 6.0, if self.hover_search { th.hover } else { th.surface_alt });
+            p.round_stroke_w(sbtn, 6.0, if self.search.is_some() { th.accent } else { th.border }, 1.0);
+            p.text(FontId::GlyphsSmall, "\u{E721}", sbtn, th.text);
+        }
         let state = self.state_text();
         // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
         // es de escaneo.
@@ -1932,6 +1962,36 @@ mod tests {
         assert!(x.scroll > 0.0, "la tabla se desplazó hasta la fila");
         x.scanning = true;
         assert_eq!(x.on_char_at('c', Instant::now() + Duration::from_secs(5)), Action::None, "escaneando");
+    }
+
+    /// M1: en una ventana angosta los botones nuevos nunca pisan «Analizar» ni el desplegable:
+    /// primero «Colores» queda solo con la muestra, y si tampoco entra, no están.
+    #[test]
+    fn top_buttons_never_overlap_analizar() {
+        let overlap = |a: Rect, b: Rect| a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+        for w in [560.0, 640.0, 700.0, 760.0, 800.0, 860.0, 900.0, 1000.0, 1400.0] {
+            let area = rect(0.0, 0.0, w, 790.0);
+            let ui = layout_ui(area, 0.0);
+            for b in [ui.colors_btn, ui.search_btn] {
+                for other in [ui.scan_btn, ui.combo, ui.back] {
+                    assert!(!overlap(b, other), "ancho {w}: {b:?} pisa {other:?}");
+                }
+                assert!(b.right - b.left <= 0.0 || b.left >= ui.scan_btn.right + 8.0, "ancho {w}");
+            }
+        }
+        let wide = layout_ui(rect(0.0, 0.0, 1400.0, 790.0), 0.0);
+        assert_eq!(wide.colors_btn.right - wide.colors_btn.left, COLORS_W, "ancha: con el texto");
+        let mid = layout_ui(rect(0.0, 0.0, 800.0, 790.0), 0.0);
+        assert_eq!(mid.colors_btn.right - mid.colors_btn.left, SEARCH_W, "angosta: solo la muestra");
+        let narrow = layout_ui(rect(0.0, 0.0, 560.0, 790.0), 0.0);
+        assert!(narrow.colors_btn.right <= narrow.colors_btn.left && narrow.search_btn.right <= narrow.search_btn.left, "sin lugar: no están");
+        // Un clic donde no están no hace nada con ellos.
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let a = rect(0.0, 0.0, 560.0, 790.0);
+        let s = layout_ui(a, 0.0).scan_btn;
+        assert!(!contains(&colors_rect(a), s.right - 2.0, (s.top + s.bottom) / 2.0));
+        let _ = x.on_click(a, s.right - 2.0, (s.top + s.bottom) / 2.0, false);
+        assert!(!x.by_type());
     }
 
     /// #57: la T ya no cambia los colores (es una letra para el salto); el botón «Colores» sí,

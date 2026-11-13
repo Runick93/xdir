@@ -677,7 +677,7 @@ impl App {
 
     /// La grabación en curso, solo si la configuración es la pestaña a la vista del panel activo
     /// (si no, las teclas son de lo que se ve).
-    fn recording(&self) -> Option<&Recording> {
+    pub(super) fn recording(&self) -> Option<&Recording> {
         if !self.shown_panes().contains(&self.active) {
             return None;
         }
@@ -705,7 +705,7 @@ impl App {
         Some(&mut self.panes[pane].tabs[index].settings.as_mut()?.recording)
     }
 
-    fn set_recording(&mut self, r: Option<Recording>) {
+    pub(super) fn set_recording(&mut self, r: Option<Recording>) {
         if let Some(slot) = self.recording_mut() {
             *slot = r;
         }
@@ -898,6 +898,10 @@ impl App {
             Capture::Reject(m) => {
                 let pressed = Combo { vk: vk.0, ctrl, shift, alt, meta };
                 self.set_recording(Some(Recording { message: Some(m), pressed: Some(pressed), conflict: None, ..rec }));
+            }
+            // Las teclas propias de la vista de xtree no se pueden dar a un comando de xtree.
+            Capture::Accept(k) if commands::xtree_only(rec.command) && !k.ctrl && !k.alt && !k.meta && crate::xtree::view::is_view_key(Key(k.vk)) => {
+                self.set_recording(Some(Recording { message: Some(skeys::XTREE_KEY), pressed: Some(k), conflict: None, ..rec }));
             }
             Capture::Accept(k) => {
                 let combos = self.config.keymap.combos(rec.command);

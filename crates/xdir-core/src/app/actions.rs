@@ -346,7 +346,7 @@ impl App {
                 self.open_xtree_search();
                 true
             }
-            Some(c @ (Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)) => {
+            Some(c) if crate::commands::live_in_xtree(c) => {
                 self.run_command(c);
                 true
             }

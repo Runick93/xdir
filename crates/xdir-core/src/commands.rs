@@ -392,6 +392,12 @@ pub fn xtree_only(c: Command) -> bool {
     matches!(c, Command::XtreeColors | Command::XtreeElevate)
 }
 
+/// Comandos de la ventana que siguen andando con xtree abierto (`App::on_xtree_key`): un comando
+/// de xtree que tome su tecla choca con ellos.
+pub fn live_in_xtree(c: Command) -> bool {
+    matches!(c, Command::Filter | Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)
+}
+
 /// Tabla de atajos para la wiki: por grupo, en el orden de `ALL`, solo lo que existe en `env`.
 pub fn markdown_table(env: &dyn SystemEnv) -> String {
     let mut out = String::new();
@@ -650,9 +656,12 @@ impl Keymap {
     }
 
     /// Quién tiene la tecla entre los comandos del mismo ámbito que `command` (con quién chocaría).
+    /// Para uno de xtree, también los de la ventana que siguen andando dentro de xtree
+    /// (`live_in_xtree`: Ctrl+F busca).
     pub fn owner_for(&self, k: Combo, command: Command) -> Option<Command> {
         let scope = xtree_only(command);
-        self.bindings.iter().find(|(b, c)| *b == k && xtree_only(*c) == scope).map(|(_, c)| *c)
+        let same = self.bindings.iter().find(|(b, c)| *b == k && xtree_only(*c) == scope).map(|(_, c)| *c);
+        same.or_else(|| scope.then(|| self.bindings.iter().find(|(b, c)| *b == k && live_in_xtree(*c)).map(|(_, c)| *c)).flatten())
     }
 
     /// Atajos de una acción, para mostrar en la paleta.

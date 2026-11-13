@@ -226,6 +226,12 @@ pub fn colors_rect(area: Rect) -> Rect {
     top_buttons(area).0
 }
 
+/// ¿Es una tecla propia de la vista (sin modificadores)? Retroceso, Esc, F5, flechas, Re Pág /
+/// Av Pág y Enter: no se le pueden dar a un comando de xtree.
+pub fn is_view_key(k: Key) -> bool {
+    matches!(k, VK_BACK | VK_ESCAPE | VK_F5 | VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN)
+}
+
 /// Botón «← xdir» de la vista en `area`: a la izquierda de todo en la barra superior.
 pub fn back_rect(area: Rect) -> Rect {
     rect(area.left + MARGIN, area.top + 6.0, area.left + MARGIN + BACK_W, area.top + TOP_H - 6.0)

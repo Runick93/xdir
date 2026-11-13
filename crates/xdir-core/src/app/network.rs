@@ -1018,6 +1018,8 @@ impl App {
             Some(d) if d.busy.is_some() && !close => {
                 if let Some(g) = d.busy.take() {
                     self.net.cancelled.push(g);
+                    // Ya no se espera: sale del indicador de actividad.
+                    self.activity.end(&super::activity::ActivityKey::Connect(g));
                 }
                 self.redraw();
             }

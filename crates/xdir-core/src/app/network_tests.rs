@@ -239,8 +239,12 @@ fn cancel_discards_late_result() {
     let (mut a, _h) = open_with("smb://nas-n4late/x");
     let tabs = a.panes[a.active].tabs.len();
     a.connect_dialog_click(Some(DialogHit::Connect), false);
+    let g = a.net.dialog.as_ref().and_then(|d| d.busy).expect("intento en curso");
+    assert!(a.activity.contains(&super::activity::ActivityKey::Connect(g)));
     a.connect_dialog_click(Some(DialogHit::Cancel), false);
     assert!(a.net.dialog.as_ref().is_some_and(|d| d.busy.is_none()), "Cancelar con un intento en curso lo descarta y el panel queda");
+    // Ajustes 2 (ronda 1): cancelada, sale del indicador de actividad enseguida.
+    assert!(!a.activity.contains(&super::activity::ActivityKey::Connect(g)));
     wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
     assert!(a.net.dialog.is_some());
     assert_eq!(a.panes[a.active].tabs.len(), tabs);

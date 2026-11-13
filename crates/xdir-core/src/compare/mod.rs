@@ -193,6 +193,11 @@ impl Read for Counted<'_> {
 
 /// Abre `src` (extrayéndolo si es de un comprimido) sin bajar lo que está solo en la nube.
 fn open(src: &Source, stop: &AtomicBool, progress: &Progress) -> Result<sys::Opened, Failure> {
+    open_at(src, stop, progress).map(|(f, _)| f)
+}
+
+/// `open`, con la ruta del disco que se abrió (la temporal, si es de un comprimido).
+fn open_at(src: &Source, stop: &AtomicBool, progress: &Progress) -> Result<(sys::Opened, PathBuf), Failure> {
     let name = src.name();
     if matches!(src, Source::Archive { .. }) {
         progress.extracting.store(true, Ordering::Relaxed);
@@ -211,7 +216,16 @@ fn open(src: &Source, stop: &AtomicBool, progress: &Progress) -> Result<sys::Ope
         return Err(Failure::Failed(format!("«{name}» está solo en la nube: no se baja para leerlo")));
     }
     progress.beat();
-    sys::hashes().open(&path).map_err(|e| failed(&name, &e))
+    let f = sys::hashes().open(&path).map_err(|e| failed(&name, &e))?;
+    Ok((f, path))
+}
+
+/// ¿Son el mismo archivo? Por su identidad (disco y número de archivo, la del motor de copia): dos
+/// caminos al mismo (un enlace a la carpeta, la unidad de red y su UNC, otras mayúsculas).
+fn same_item(a: &Path, b: &Path) -> bool {
+    let prims = sys::copy_prims();
+    let id = |p: &Path| prims.stat(p).ok().and_then(|s| s.file_id);
+    id(a).is_some_and(|x| id(b) == Some(x))
 }
 
 /// Compara el contenido de `a` y `b`: el mismo archivo, tamaños distintos (sin leer el contenido)
@@ -220,8 +234,12 @@ pub fn compare_sources(a: &Source, b: &Source, stop: &AtomicBool, progress: &Pro
     if a == b {
         return Ok(Verdict::SameFile);
     }
-    let fa = open(a, stop, progress)?;
-    let fb = open(b, stop, progress)?;
+    let (fa, pa) = open_at(a, stop, progress)?;
+    let (fb, pb) = open_at(b, stop, progress)?;
+    progress.beat();
+    if same_item(&pa, &pb) {
+        return Ok(Verdict::SameFile);
+    }
     if fa.size != fb.size {
         return Ok(Verdict::SizeDiffers { a: fa.size, b: fb.size });
     }

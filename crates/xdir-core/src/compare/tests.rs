@@ -337,3 +337,18 @@ fn pick_line_of_a_sums_file() {
     assert_eq!((p.line, p.of), (1, 1));
     assert!(pick_expected("nada", "a.zip").is_none());
 }
+
+/// El mismo archivo por dos caminos (un alias de la carpeta, una unidad de red y su UNC): por la
+/// identidad del archivo (la del motor de copia) es «el mismo archivo», sin leerlo.
+#[test]
+fn same_file_by_identity() {
+    use crate::sys::testing::FakeCopyPrims;
+    install_fakes();
+    let disk = FakeCopyPrims::shared();
+    let base = std::env::temp_dir().join("xdir-test-comparar-identidad").join(std::process::id().to_string());
+    let (real, alias) = (base.join("real"), base.join("alias"));
+    disk.add_file(&real.join("a.bin"), b"hola".to_vec());
+    disk.add_alias(&alias, &real);
+    let got = run(&Source::Disk(real.join("a.bin")), &Source::Disk(alias.join("a.bin")));
+    assert_eq!(got, Ok(Verdict::SameFile));
+}

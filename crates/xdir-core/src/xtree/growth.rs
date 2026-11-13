@@ -17,7 +17,8 @@ use crate::sys::Handle;
 pub const PERIODS: [u16; 3] = [7, 30, 90];
 
 /// Historial que deja el hilo: la raíz de la que es y lo leído.
-type Delivered = (PathBuf, Arc<Loaded>);
+/// El número de pedido va primero: uno viejo nunca pisa a uno más nuevo.
+type Delivered = (u64, PathBuf, Arc<Loaded>);
 
 /// Lo que la vista sabe del historial de su raíz.
 pub struct HistState {
@@ -33,6 +34,11 @@ pub struct HistState {
     pub loaded: Option<Arc<Loaded>>,
     /// Lo que deja el hilo: la raíz de la que es y su historial.
     slot: Arc<Mutex<Option<Delivered>>>,
+    /// Número del último pedido al hilo (cada análisis terminado pide uno).
+    request: u64,
+    /// Pruebas: hacer como si no se pudiera crear el hilo.
+    #[cfg(test)]
+    pub fail_spawn_for_tests: bool,
     /// Hay un hilo guardando o leyendo.
     pub pending: bool,
     /// Contador de «Borrar historial» (el de la App); el hilo no guarda si cambió.
@@ -54,7 +60,7 @@ type GrowersKey = (usize, usize, u32, u16, i32, usize);
 
 impl Default for HistState {
     fn default() -> Self {
-        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), pending: false, clears: Default::default(), hover: None, denied_paths: Default::default(), partial_all: false, denied_now: Default::default(), growers_cache: None }
+        HistState { on: true, days: PERIODS[0], dir: None, today_fix: None, loaded: None, slot: Default::default(), request: 0, #[cfg(test)] fail_spawn_for_tests: false, pending: false, clears: Default::default(), hover: None, denied_paths: Default::default(), partial_all: false, denied_now: Default::default(), growers_cache: None }
     }
 }
 
@@ -91,32 +97,45 @@ impl HistState {
         let clears = self.clears.clone();
         let generation = generation.unwrap_or_else(|| clears.load(std::sync::atomic::Ordering::SeqCst));
         self.pending = true;
-        let _ = std::thread::Builder::new().spawn(move || {
-            let photo = arena.map(|a| history::select_photo_with(&a, &denied)).unwrap_or_default();
-            let done = history::if_current(&clears, generation, || {
-                if !photo.sizes.is_empty() {
-                    let _ = history::save_photo(&dir, &root, today, &photo);
-                }
-                history::load_for(&dir, &root)
-            });
-            let loaded = Arc::new(done.unwrap_or_default());
-            if let Ok(mut s) = slot.lock() {
-                *s = Some((root, loaded));
-            }
-            hwnd.post(WM_APP_XTREE, id, 0);
-        });
+        self.request += 1;
+        let request = self.request;
+        #[cfg(test)]
+        let fail = self.fail_spawn_for_tests;
+        #[cfg(not(test))]
+        let fail = false;
+        let spawn = if fail {
+            Err(std::io::Error::other("prueba"))
+        } else {
+            std::thread::Builder::new().spawn(move || {
+                let photo = arena.map(|a| history::select_photo_with(&a, &denied)).unwrap_or_default();
+                let done = history::if_current(&clears, generation, || {
+                    if !photo.sizes.is_empty() {
+                        let _ = history::save_photo(&dir, &root, today, &photo);
+                    }
+                    history::load_for(&dir, &root)
+                });
+                deliver(&slot, request, root, Arc::new(done.unwrap_or_default()));
+                hwnd.post(WM_APP_XTREE, id, 0);
+            })
+        };
+        // Sin hilo no hay historial nuevo: la tarjeta no queda «cargando» ni el indicador prendido.
+        if spawn.is_err() {
+            self.pending = false;
+            self.loaded = Some(Arc::new(Loaded::default()));
+        }
     }
 
     /// ¿Sigue el hilo guardando o leyendo? (ya dejó su resultado: no, aunque nadie lo haya tomado
     /// todavía porque la vista está cerrada). Solo mira el lugar del resultado, sin E/S.
     pub fn busy(&self) -> bool {
-        self.pending && self.slot.lock().is_ok_and(|s| s.is_none())
+        self.pending && self.slot.lock().is_ok_and(|s| s.as_ref().is_none_or(|d| d.0 != self.request))
     }
 
     /// Toma el historial que dejó el hilo, si es de `root`. Devuelve si llegó.
     pub fn take(&mut self, root: &Path) -> bool {
-        let Some((from, loaded)) = self.slot.lock().ok().and_then(|mut s| s.take()) else { return false };
-        if from != root {
+        let Some((request, from, loaded)) = self.slot.lock().ok().and_then(|mut s| s.take()) else { return false };
+        // Uno de un pedido viejo (otra raíz, otro análisis) se descarta.
+        if request != self.request || from != root {
             return false;
         }
         self.loaded = Some(loaded);
@@ -134,10 +153,22 @@ impl HistState {
     /// Deja `loaded` como si lo hubiera traído el hilo para `root` (pruebas).
     #[cfg(test)]
     pub fn take_for_tests(&mut self, root: &Path, loaded: Loaded) {
-        if let Ok(mut s) = self.slot.lock() {
-            *s = Some((root.to_path_buf(), Arc::new(loaded)));
-        }
+        deliver(&self.slot, self.request, root.to_path_buf(), Arc::new(loaded));
         self.take(root);
+    }
+
+    /// Un pedido nuevo al hilo, sin hilo (pruebas): su número.
+    #[cfg(test)]
+    pub fn next_request_for_tests(&mut self) -> u64 {
+        self.request += 1;
+        self.pending = true;
+        self.request
+    }
+
+    /// Lo que dejaría el hilo del pedido `request` (pruebas).
+    #[cfg(test)]
+    pub fn deliver_for_tests(&self, request: u64, root: &Path, loaded: Loaded) {
+        deliver(&self.slot, request, root.to_path_buf(), Arc::new(loaded));
     }
 
     /// Se analiza otra cosa (o se borró el historial): lo que había ya no vale.
@@ -195,6 +226,15 @@ impl HistState {
             self.growers_cache = Some((key, list));
         }
         self.growers_cache.as_ref().map_or(&[], |(_, g)| g.as_slice())
+    }
+}
+
+/// Deja el resultado del pedido `request` en `slot`, salvo que ya haya uno de un pedido más nuevo.
+fn deliver(slot: &Mutex<Option<Delivered>>, request: u64, root: PathBuf, loaded: Arc<Loaded>) {
+    if let Ok(mut s) = slot.lock()
+        && s.as_ref().is_none_or(|d| d.0 <= request)
+    {
+        *s = Some((request, root, loaded));
     }
 }
 

@@ -404,3 +404,33 @@ fn denied_then_allowed_is_not_growth() {
     assert_eq!(l.lookup(0, "a/a1"), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Un hilo viejo que termina después del nuevo no pisa su resultado: la tarjeta y el indicador
+/// de actividad quedan con el nuevo (y el indicador se apaga).
+#[test]
+fn stale_history_result_does_not_overwrite_newer() {
+    let dir = tmp("viejo-nuevo");
+    let root = tmp("raiz-viejo-nuevo");
+    let mut x = view(&root, &dir, 500);
+    let (old, new) = (x.hist.next_request_for_tests(), x.hist.next_request_for_tests());
+    let mut l = history::Loaded::default();
+    assert!(l.is_empty());
+    x.hist.deliver_for_tests(new, &root, std::mem::take(&mut l));
+    x.hist.deliver_for_tests(old, &root, history::load_for(&dir, &tmp("otra-raiz")));
+    assert!(!x.hist.busy(), "el resultado del pedido de ahora ya está");
+    assert!(x.hist.take(&root));
+    assert!(!x.hist.busy());
+}
+
+/// Si no se puede crear el hilo, la tarjeta no queda «cargando» ni el indicador encendido.
+#[test]
+fn spawn_failure_ends_history_activity() {
+    let dir = tmp("sin-hilo");
+    let root = tmp("raiz-sin-hilo");
+    let mut x = view(&root, &dir, 500);
+    x.hist.fail_spawn_for_tests = true;
+    finish_with(&mut x, tree("r", 1, 1, 1));
+    assert!(!x.hist.busy());
+    assert!(!x.hist.pending);
+    assert!(x.hist.loaded.as_ref().is_some_and(|l| l.is_empty()));
+}

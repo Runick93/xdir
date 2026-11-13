@@ -176,6 +176,8 @@ enum Hit {
     Info(crate::info::draw::InfoHit),
     /// La vista de xtree abierta, sobre el área de los paneles.
     XtreeView,
+    /// «← xdir» de la barra superior de xtree (vuelve a los paneles).
+    XtreeBack,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),

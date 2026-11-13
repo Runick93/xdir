@@ -962,6 +962,23 @@ fn click_xtree_button(a: &mut App) {
     a.on_left_up(x, y);
 }
 
+/// «← xdir» de la barra de xtree: su cartel dice qué hace y el clic vuelve a los paneles (como Esc).
+#[test]
+fn xtree_back_button_closes_and_has_tooltip() {
+    let (mut a, _) = app_in("volver");
+    click_xtree_button(&mut a);
+    assert!(a.xtree_open);
+    let r = crate::xtree::view::back_rect(a.xtree_area());
+    let (x, y) = center(&r);
+    assert_eq!(a.hit(x, y), Hit::XtreeBack);
+    assert_eq!(a.tooltip_text(Hit::XtreeBack).as_deref(), Some("Volver a xdir (Esc)"));
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(!a.xtree_open);
+    assert!(a.xtree.as_ref().is_some_and(|x| !x.cancelled()), "volver no cancela el escaneo");
+    a.on_closing();
+}
+
 #[test]
 fn xtree_button_toggles_view() {
     let (mut a, _) = app_in("toggle");

@@ -85,6 +85,9 @@ impl App {
             if let Some(l) = ui::layout_at(w, h, x, y) {
                 return Hit::Layout(l);
             }
+            if contains(&crate::xtree::view::back_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeBack;
+            }
             return if contains(&ui::xtree_area(w, h), x, y) { Hit::XtreeView } else { Hit::None };
         }
         if self.preview_edge_at(x, y) {
@@ -270,6 +273,10 @@ impl App {
                 self.host.capture_mouse();
                 let grab = self.preview_column().map_or(0.0, |r| r.left - x);
                 self.drag = Drag::PreviewEdge(grab);
+            }
+            Hit::XtreeBack => {
+                self.close_xtree();
+                self.redraw();
             }
             Hit::XtreeView => {
                 let area = self.xtree_area();

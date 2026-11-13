@@ -37,6 +37,7 @@
 - Historial de Atrás y Adelante con clic derecho sobre el botón.
 - Más consolas: Windows Terminal e iTerm, si están instalados.
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
+- Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 
 ### Cambios
 - Favoritos pasa a `Ctrl+Shift+D` / `⇧⌘D`: `Ctrl+D` ahora duplica.

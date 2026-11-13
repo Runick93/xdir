@@ -281,3 +281,16 @@ fn symlinked_folder_is_not_followed() {
     wait_status(&mut a, &format!("2 elementos seleccionados · al menos {}", size(50)));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Lo que quedó a medias no se recuerda (se puede volver a intentar); lo entero, sí.
+#[test]
+fn incomplete_results_not_cached() {
+    let dir = fixture("a-medias");
+    FakeFileSystem::set_cloud_only_everywhere(&dir.join("a"));
+    let mut a = app_in(&dir);
+    select(&mut a, &["a", "b"]);
+    wait_status(&mut a, &format!("2 elementos seleccionados · al menos {}", size(50)));
+    assert_eq!(a.sel_size.cached(&dir.join("a")), None);
+    assert_eq!(a.sel_size.cached(&dir.join("b")), Some(50));
+    let _ = std::fs::remove_dir_all(&dir);
+}

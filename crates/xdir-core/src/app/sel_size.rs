@@ -55,8 +55,8 @@ pub(super) struct SelSize {
     pending: Vec<PathBuf>,
     /// Hay carpetas de red y todavía no se tocó «calcular tamaño».
     needs_click: bool,
-    /// Tamaño de cada carpeta ya sumada: (bytes, `complete` como en `Reply`, su fecha en la
-    /// lista). Vale mientras la fecha sea la misma.
+    /// Tamaño de cada carpeta ya sumada entera: (bytes, `complete`, su fecha en la lista). Vale
+    /// mientras la fecha sea la misma.
     cache: HashMap<PathBuf, (u64, bool, u64)>,
     tx: Sender<Reply>,
     rx: Receiver<Reply>,
@@ -329,8 +329,12 @@ impl App {
             s.pending.remove(i);
             s.sum += r.bytes;
             s.partial |= !r.complete;
-            let modified = s.key.as_ref().and_then(|k| k.folders.iter().find(|(f, _)| *f == r.path)).map_or(0, |&(_, m)| m);
-            s.cache.insert(r.path, (r.bytes, r.complete, modified));
+            // Solo se recuerda lo entero: lo que quedó a medias (la red no respondió, sin permiso)
+            // se vuelve a intentar la próxima vez.
+            if r.complete {
+                let modified = s.key.as_ref().and_then(|k| k.folders.iter().find(|(f, _)| *f == r.path)).map_or(0, |&(_, m)| m);
+                s.cache.insert(r.path, (r.bytes, true, modified));
+            }
             changed = true;
         }
         if changed {

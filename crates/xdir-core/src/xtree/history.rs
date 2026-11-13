@@ -515,6 +515,12 @@ impl Loaded {
     /// su nivel y no se recortó (no existía o estaba vacía); `None` si no se sabe (más abajo y
     /// chica, o la foto se recortó por el tope).
     pub fn value(&self, snap: usize, rel: &str) -> Option<u64> {
+        self.lookup(snap, rel).map(|v| v.unwrap_or(0))
+    }
+
+    /// Como `value`, pero distingue «no estaba» (`Some(None)`: la foto cubre su nivel y no se
+    /// recortó) de un tamaño guardado (`Some(Some(v))`); `None` si no se sabe.
+    pub fn lookup(&self, snap: usize, rel: &str) -> Option<Option<u64>> {
         let pairs = self.sizes.get(snap)?;
         let folded;
         let rel = if self.fold {
@@ -526,10 +532,10 @@ impl Loaded {
         if let Some(&i) = self.index.get(rel)
             && let Ok(k) = pairs.binary_search_by_key(&i, |p| p.0)
         {
-            return Some(pairs[k].1);
+            return Some(Some(pairs[k].1));
         }
         let depth = if rel.is_empty() { 0 } else { rel.split('/').count() as i32 };
-        (depth <= self.levels[snap] && !self.capped[snap]).then_some(0)
+        (depth <= self.levels[snap] && !self.capped[snap]).then_some(None)
     }
 
     /// Índice de la ruta `rel` (la agrega si no estaba).

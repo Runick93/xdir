@@ -175,6 +175,9 @@ pub struct Change {
     pub base_day: i32,
     pub base: u64,
     pub now: u64,
+    /// No estaba en la foto de comparación (que cubre su nivel): es nueva o la renombraron. No se
+    /// cuenta como crecimiento desde 0 (sin ▲; en «Más crecieron» dice «nueva»).
+    pub new: bool,
 }
 
 impl Change {
@@ -192,9 +195,13 @@ pub fn change(l: &Loaded, rel: &str, now: u64, today: i32, period: u16) -> Optio
         if day >= today {
             break;
         }
-        let Some(base) = l.value(i, rel) else { continue };
+        let Some(found) = l.lookup(i, rel) else { continue };
         if best.is_none_or(|b| (day - start).abs() < (b.base_day - start).abs()) {
-            best = Some(Change { snap: i, base_day: day, base, now });
+            let (base, new) = match found {
+                Some(v) => (v, false),
+                None => (0, true),
+            };
+            best = Some(Change { snap: i, base_day: day, base, now, new });
         }
     }
     best
@@ -222,6 +229,9 @@ fn in_days(days: i32) -> String {
 /// Texto del cambio: «+14,2 GB en 7 días», «−1,1 GB en 30 días» o «Sin cambios en 7 días»; los
 /// días son los que pasaron desde la foto con que se compara.
 pub fn change_text(c: &Change, today: i32) -> String {
+    if c.new {
+        return format!("Nueva: no estaba el {}", day_text(c.base_day));
+    }
     let days = in_days(today - c.base_day);
     match c.delta() {
         0 => format!("Sin cambios {days}"),
@@ -267,7 +277,7 @@ pub fn growers(l: &Loaded, arena: &[Node], id: u32, today: i32, period: u16, n: 
 /// inicio del período): la flecha ▲ de la tabla.
 pub fn grew_a_lot(c: &Change) -> bool {
     let d = c.delta();
-    d >= history::BIG as i128 && (d >= 1024 * 1024 * 1024 || d * 4 >= c.base as i128)
+    !c.new && d >= history::BIG as i128 && (d >= 1024 * 1024 * 1024 || d * 4 >= c.base as i128)
 }
 
 /// Cartel de la ▲ de la fila del nodo `id`, si creció mucho en el período: «+3,4 GB en 7 días».
@@ -483,7 +493,7 @@ pub fn draw_strip(p: &dyn Painter, card: Rect, v: &StripView) {
         if v.hover == Some(StripHit::Grower(i)) {
             p.round_fill(r, 4.0, th.hover);
         }
-        let delta = fmt_delta(g.delta());
+        let delta = if g.new { "nueva".to_string() } else { fmt_delta(g.delta()) };
         let dw = p.measure(FontId::Ui, &delta);
         p.text(FontId::Ui, name, rect(s.right.left, r.top, s.right.right - dw - 12.0, r.bottom), th.text);
         p.text(FontId::UiRight, &delta, rect(s.right.right - dw - 8.0, r.top, s.right.right, r.bottom), th.warning);
@@ -564,7 +574,8 @@ mod tests {
         assert_eq!(fmt_delta(14 * GB as i128 + 200 * MB as i128), "+14,2 GB");
         assert_eq!(fmt_delta(-(GB as i128) - 100 * MB as i128), "\u{2212}1,1 GB");
         assert_eq!(fmt_delta(512), "+512 B");
-        let c = Change { snap: 0, base_day: 93, base: 5, now: 5 };
+        let c = Change { snap: 0, base_day: 93, base: 5, now: 5, new: false };
+        assert_eq!(change_text(&Change { base: 0, new: true, ..c }, 100), "Nueva: no estaba el 04/04");
         assert_eq!(change_text(&c, 100), "Sin cambios en 7 días");
         assert_eq!(change_text(&Change { base_day: 99, now: 4, ..c }, 100), "\u{2212}1 B en 1 día");
         // 2026-11-10 es el día 20.402.
@@ -593,8 +604,9 @@ mod tests {
             node("nueva", 0, GB, true, vec![]),
             node("f.bin", 0, 9 * GB, false, vec![]),
         ];
-        let g: Vec<(&str, i128)> = growers(&l, &t, 0, 100, 7, 5).iter().map(|(k, c)| (&*t[*k as usize].name, c.delta())).collect();
-        assert_eq!(g, [("a", 6 * GB as i128), ("c", 3 * GB as i128), ("nueva", GB as i128)]);
+        let g: Vec<(&str, i128, bool)> = growers(&l, &t, 0, 100, 7, 5).iter().map(|(k, c)| (&*t[*k as usize].name, c.delta(), c.new)).collect();
+        // «nueva» no estaba en la foto (que cubre su nivel): es nueva (o renombrada), no creció.
+        assert_eq!(g, [("a", 6 * GB as i128, false), ("c", 3 * GB as i128, false), ("nueva", GB as i128, true)]);
         assert_eq!(growers(&l, &t, 0, 100, 7, 1).len(), 1);
     }
 
@@ -618,7 +630,8 @@ mod tests {
 
     #[test]
     fn grew_a_lot_rule() {
-        let c = |base: u64, now: u64| Change { snap: 0, base_day: 0, base, now };
+        let c = |base: u64, now: u64| Change { snap: 0, base_day: 0, base, now, new: false };
+        assert!(!grew_a_lot(&Change { new: true, ..c(0, 5 * GB) }), "una nueva (o renombrada) no lleva ▲");
         assert!(grew_a_lot(&c(0, 100 * MB)), "de la nada a 100 MB");
         assert!(!grew_a_lot(&c(0, 99 * MB)), "menos de 100 MB nunca");
         assert!(!grew_a_lot(&c(100 * MB, 199 * MB)));

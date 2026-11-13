@@ -376,24 +376,32 @@ impl History {
 /// Carpeta del historial dentro de la de configuración.
 pub const DIR_NAME: &str = "xtree-historial";
 
-/// La ruta de la raíz como se compara: sin separador final (salvo que sea solo eso) y en
-/// minúsculas.
-fn norm(root: &Path) -> String {
-    let text = root.to_string_lossy().to_lowercase();
+/// La ruta de la raíz como se compara: sin separador final (salvo que sea solo eso) y, si el disco
+/// no distingue mayúsculas (`fold`), en minúsculas.
+fn norm(root: &Path, fold: bool) -> String {
+    let text = root.to_string_lossy();
+    let text = if fold { text.to_lowercase() } else { text.into_owned() };
     let trimmed = text.trim_end_matches(['/', '\\']);
     if trimmed.is_empty() { text } else { trimmed.to_string() }
 }
 
+/// ¿El disco de `root` no distingue mayúsculas? Lo dice el sistema (`FileSystem::case_insensitive`:
+/// Windows siempre; macOS según el volumen; Linux no). Bloqueante: en un hilo de trabajo.
+pub fn folds(root: &Path) -> bool {
+    crate::sys::file_system().case_insensitive(root)
+}
+
 /// Nombre del archivo de una raíz (sin `.bin`): su último tramo legible y un FNV-1a de la ruta
-/// normalizada, así dos raíces con el mismo nombre no chocan.
-pub fn key(root: &Path) -> String {
-    let n = norm(root);
+/// normalizada, así dos raíces con el mismo nombre no chocan. Con `fold` (disco que no distingue
+/// mayúsculas: `C:\` y `c:\` son lo mismo) la ruta va en minúsculas; si no, como está.
+pub fn key_case(root: &Path, fold: bool) -> String {
+    let n = norm(root, fold);
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in n.bytes() {
         hash ^= b as u64;
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    let last = n.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("");
+    let last = n.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("").to_lowercase();
     let mut name: String = last.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).take(40).collect();
     if name.trim_matches(['_', '.']).is_empty() {
         name = "raiz".to_string();
@@ -439,9 +447,18 @@ pub fn clear(dir: &Path, clears: &std::sync::atomic::AtomicU64) -> Result<(), St
     }
 }
 
-/// Archivo del historial de `root` en la carpeta del historial `dir`.
+/// `key_case` con la regla del disco de `root` (bloqueante).
+pub fn key(root: &Path) -> String {
+    key_case(root, folds(root))
+}
+
+/// Archivo del historial de `root` en la carpeta del historial `dir` (con la regla del disco).
 pub fn file_for(dir: &Path, root: &Path) -> PathBuf {
-    dir.join(format!("{}.bin", key(root)))
+    file_for_case(dir, root, folds(root))
+}
+
+fn file_for_case(dir: &Path, root: &Path, fold: bool) -> PathBuf {
+    dir.join(format!("{}.bin", key_case(root, fold)))
 }
 
 /// El historial de una raíz listo para consultar: por foto, su día, los niveles bajo la raíz que
@@ -453,6 +470,8 @@ pub struct Loaded {
     levels: Vec<i32>,
     /// Por foto: se recortó por el tope.
     capped: Vec<bool>,
+    /// El disco no distingue mayúsculas: las rutas de `index` van en minúsculas y se buscan así.
+    fold: bool,
     index: HashMap<String, u32>,
     /// Por foto, pares (índice en `index`, tamaño) ordenados por índice.
     sizes: Vec<Vec<(u32, u64)>>,
@@ -468,6 +487,13 @@ impl Loaded {
     /// chica, o la foto se recortó por el tope).
     pub fn value(&self, snap: usize, rel: &str) -> Option<u64> {
         let pairs = self.sizes.get(snap)?;
+        let folded;
+        let rel = if self.fold {
+            folded = rel.to_lowercase();
+            folded.as_str()
+        } else {
+            rel
+        };
         if let Some(&i) = self.index.get(rel)
             && let Ok(k) = pairs.binary_search_by_key(&i, |p| p.0)
         {
@@ -507,18 +533,25 @@ fn rel_within(top: &Path, root: &Path) -> Option<String> {
 }
 
 /// El historial guardado de `root` en `dir`, si es de esa raíz y se entiende.
-fn read_own(dir: &Path, root: &Path) -> Option<History> {
-    read_file(&file_for(dir, root)).filter(|h| norm(Path::new(&h.root)) == norm(root))
+fn read_own(dir: &Path, root: &Path, fold: bool) -> Option<History> {
+    read_file(&file_for_case(dir, root, fold)).filter(|h| norm(Path::new(&h.root), fold) == norm(root, fold))
 }
 
 /// Lee el historial de `root` de la carpeta del historial `dir` (bloqueante: en un hilo de
 /// trabajo): el archivo propio y los de las carpetas de más arriba que la cubran, recortados a
 /// `root` y unidos por día (gana el propio, después el más cercano).
 pub fn load_for(dir: &Path, root: &Path) -> Loaded {
-    let mut out = Loaded::default();
+    load_case(dir, root, folds(root))
+}
+
+/// `load_for` con la regla de mayúsculas dada (`fold`: el disco no las distingue; entonces las
+/// rutas se comparan en minúsculas).
+pub fn load_case(dir: &Path, root: &Path, fold: bool) -> Loaded {
+    let mut out = Loaded { fold, ..Default::default() };
+    let low = |t: &str| if fold { t.to_lowercase() } else { t.to_string() };
     for top in root.ancestors() {
-        let Some(prefix) = rel_within(top, root) else { continue };
-        let Some(h) = read_own(dir, top) else { continue };
+        let Some(prefix) = rel_within(top, root).map(|p| low(&p)) else { continue };
+        let Some(h) = read_own(dir, top, fold) else { continue };
         let depth = if prefix.is_empty() { 0 } else { prefix.split('/').count() as i32 };
         let under = format!("{prefix}/");
         // Cada ruta del archivo se recorta y se busca una sola vez: índice del archivo → índice
@@ -527,9 +560,10 @@ pub fn load_for(dir: &Path, root: &Path) -> Loaded {
             .paths
             .iter()
             .map(|p| {
+                let p = low(p);
                 let rel = if prefix.is_empty() {
                     p.as_str()
-                } else if *p == prefix {
+                } else if p == prefix {
                     ""
                 } else {
                     p.strip_prefix(under.as_str())?
@@ -537,7 +571,7 @@ pub fn load_for(dir: &Path, root: &Path) -> Loaded {
                 Some(out.intern(rel))
             })
             .collect();
-        let Some(top_id) = h.paths.iter().position(|p| *p == prefix).and_then(|i| map[i]) else { continue };
+        let Some(top_id) = h.paths.iter().position(|p| low(p) == prefix).and_then(|i| map[i]) else { continue };
         for snap in &h.snaps {
             // La foto sirve si tiene a la subcarpeta.
             let pairs: Vec<(u32, u64)> = snap.sizes.iter().filter_map(|&(i, v)| map.get(i as usize).copied().flatten().map(|j| (j, v))).collect();
@@ -558,10 +592,15 @@ pub fn save_snapshot(dir: &Path, root: &Path, today: i32, sizes: &[(String, u64)
 
 /// `save_snapshot` con una foto armada (con su aviso de recorte).
 pub fn save_photo(dir: &Path, root: &Path, today: i32, photo: &Photo) -> std::io::Result<()> {
-    let mut h = read_own(dir, root).unwrap_or_else(|| History { root: root.to_string_lossy().into_owned(), ..Default::default() });
+    save_photo_case(dir, root, today, photo, folds(root))
+}
+
+/// `save_photo` con la regla de mayúsculas dada.
+pub fn save_photo_case(dir: &Path, root: &Path, today: i32, photo: &Photo, fold: bool) -> std::io::Result<()> {
+    let mut h = read_own(dir, root, fold).unwrap_or_else(|| History { root: root.to_string_lossy().into_owned(), ..Default::default() });
     h.add_photo(today, &photo.sizes, photo.capped);
     h.consolidate(today);
-    write_file(&file_for(dir, root), &h)
+    write_file(&file_for_case(dir, root, fold), &h)
 }
 
 #[cfg(test)]
@@ -854,7 +893,8 @@ mod tests {
         let r = base("clave").join("Proyectos");
         let with_sep = PathBuf::from(format!("{}{}", r.display(), std::path::MAIN_SEPARATOR));
         assert_eq!(key(&r), key(&with_sep));
-        assert_eq!(key(&r), key(&PathBuf::from(r.to_string_lossy().to_uppercase())));
+        assert_eq!(key_case(&r, true), key_case(&PathBuf::from(r.to_string_lossy().to_uppercase()), true));
+        assert_ne!(key_case(&r, false), key_case(&PathBuf::from(r.to_string_lossy().to_uppercase()), false), "distingue mayúsculas");
         assert_ne!(key(&r), key(&base("clave").join("Otros")));
         assert_ne!(key(&r), key(&base("clave2").join("Proyectos")), "mismo nombre, otra carpeta");
         let k = key(&base("clave").join("año 2026: ñ*?"));
@@ -1042,5 +1082,30 @@ mod tests {
         assert_eq!(l.value(1, "b"), Some(0), "completa: no estaba");
         assert_eq!(l.value(0, "a"), Some(7));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// En un disco que no distingue mayúsculas (Windows, APFS de fábrica), `c:\\users\\x` usa las
+    /// fotos de `C:\\` aunque las rutas guardadas tengan otra capitalización; en uno que distingue
+    /// (Linux), `Foo` y `foo` son raíces distintas y no se mezclan.
+    #[test]
+    fn case_rule_comes_from_the_volume() {
+        let dir = tmp_dir("mayusculas");
+        let top = base("mayusculas").join("Top");
+        save_photo_case(&dir, &top, 100, &Photo { sizes: vec![("".into(), 9), ("Sub".into(), 5), ("Sub/X".into(), 3)], capped: false }, true).unwrap();
+        let low = base("mayusculas").join("top").join("sub");
+        let l = load_case(&dir, &low, true);
+        assert_eq!(l.days, [100]);
+        assert_eq!(l.value(0, ""), Some(5));
+        assert_eq!(l.value(0, "x"), Some(3), "busca sin mayúsculas");
+        assert!(load_case(&dir, &low, false).is_empty(), "distingue: otra raíz");
+        // Distingue: dos raíces que solo cambian en mayúsculas no comparten archivo.
+        let dir2 = tmp_dir("mayusculas2");
+        let (a, b) = (base("may2").join("Foo"), base("may2").join("foo"));
+        save_photo_case(&dir2, &a, 100, &Photo { sizes: vec![("".into(), 1)], capped: false }, false).unwrap();
+        save_photo_case(&dir2, &b, 100, &Photo { sizes: vec![("".into(), 2)], capped: false }, false).unwrap();
+        assert_eq!(load_case(&dir2, &a, false).value(0, ""), Some(1));
+        assert_eq!(load_case(&dir2, &b, false).value(0, ""), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 }

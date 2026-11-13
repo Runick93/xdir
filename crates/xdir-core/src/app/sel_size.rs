@@ -120,11 +120,13 @@ impl SelSize {
     }
 
     /// Algo cambió en `dir` (su vigilante avisó o se actualizó): se olvida lo que se sabía de
-    /// las carpetas de adentro y, si lo elegido es de ahí, se vuelve a sumar.
+    /// las carpetas de adentro y de las que la contienen (su tamaño incluye el de `dir`) y, si lo
+    /// elegido es una de ellas, se vuelve a sumar.
     pub(super) fn invalidate(&mut self, dir: &Path) {
+        let related = |p: &Path| p.starts_with(dir) || dir.starts_with(p);
         let before = self.cache.len();
-        self.cache.retain(|p, _| !p.starts_with(dir));
-        let touched = self.key.as_ref().is_some_and(|k| k.folders.iter().any(|f| f.starts_with(dir)));
+        self.cache.retain(|p, _| !related(p));
+        let touched = self.key.as_ref().is_some_and(|k| k.folders.iter().any(|f| related(f)));
         if touched || before != self.cache.len() {
             self.cancel();
             self.key = None;

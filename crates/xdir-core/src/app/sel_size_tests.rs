@@ -194,3 +194,19 @@ fn nested_cloud_only_folder_counts_as_partial() {
     wait_status(&mut a, &format!("1 elemento seleccionado · al menos {}", size(0)));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Un cambio dentro de una subcarpeta (su vigilante avisa) también olvida el tamaño de las
+/// carpetas que la contienen, y si están elegidas se vuelven a sumar.
+#[test]
+fn change_in_subfolder_drops_ancestor_cache() {
+    let dir = fixture("ancestro");
+    let mut a = app_in(&dir);
+    select(&mut a, &["b"]);
+    wait_status(&mut a, &size(50));
+    std::fs::write(dir.join("b").join("sub").join("z.bin"), vec![0u8; 1000]).unwrap();
+    a.sel_size.invalidate(&dir.join("b").join("sub"));
+    assert_eq!(a.sel_size.cached(&dir.join("b")), None, "b quedó con el tamaño viejo");
+    a.paint();
+    wait_status(&mut a, &size(1050));
+    let _ = std::fs::remove_dir_all(&dir);
+}

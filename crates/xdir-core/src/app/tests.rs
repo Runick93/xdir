@@ -2807,6 +2807,28 @@ fn xtree_letters_go_to_view() {
     assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
 }
 
+/// M7: con la búsqueda de xtree abierta y su caja sin el foco (un clic en el mapa), lo que se
+/// escribe va a la caja; Ctrl+P (⌘P) desde la caja abre la paleta, no se pierde.
+#[test]
+fn xtree_search_typing_goes_to_box_and_palette_key_passes() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_xtree_host(&[("alfa", 6), ("beta", 4)], host.clone());
+    a.open_xtree_search();
+    let b = a.xtree_search_box.unwrap();
+    host.focus_main();
+    assert!(!host.text_has_focus(b));
+    a.on_char('b');
+    a.on_char('e');
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some("be"));
+    assert!(host.text_has_focus(b), "la caja vuelve a tener el foco");
+    assert_eq!(a.xtree.as_ref().unwrap().search_query(), Some("be"));
+    assert_eq!(a.xtree.as_ref().unwrap().search_found().unwrap().hits[0].name, "beta");
+    // Ctrl+P en la caja: la paleta (de carpetas).
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, 0x50, 1));
+    assert!(a.palette.is_some(), "abrió la paleta");
+}
+
 /// #57: la A sola es una letra (salto por letra); analizar con permisos es `xtree_permisos`
 /// (Ctrl+Shift+A / ⇧⌘A) dentro de xtree.
 #[test]

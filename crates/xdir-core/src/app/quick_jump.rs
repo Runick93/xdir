@@ -41,6 +41,11 @@ impl App {
     pub(super) fn on_palette_key(&mut self, vk: Key, ctrl: bool) {
         // La caja de la búsqueda de xtree es del mismo tipo: sus teclas, si la paleta no está.
         if self.palette.is_none() && self.xtree_search_box.is_some() {
+            // Ctrl+P / Ctrl+Shift+P desde la caja: la paleta, como en cualquier lado.
+            if ctrl && vk == Key(0x50) {
+                self.open_palette(if key_down(VK_SHIFT) { PaletteMode::All } else { PaletteMode::Folders });
+                return;
+            }
             self.on_xtree_search_key(vk);
             return;
         }

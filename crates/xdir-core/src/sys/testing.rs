@@ -1599,7 +1599,12 @@ impl WindowHost for FakeHost {
     }
 
     fn request_close(&self) {}
-    fn focus_main(&self) {}
+    // La ventana toma el foco: ninguna caja lo tiene.
+    fn focus_main(&self) {
+        for (_, _, focused) in self.text_boxes.borrow_mut().values_mut() {
+            *focused = false;
+        }
+    }
     fn focus_main_if_lost(&self) {}
     fn capture_mouse(&self) {}
     fn release_mouse(&self) {}

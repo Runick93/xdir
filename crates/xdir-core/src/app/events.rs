@@ -382,6 +382,20 @@ impl App {
         if c.is_control() || key_down(VK_CONTROL) {
             return;
         }
+        // Con la búsqueda de xtree abierta y su caja sin el foco (un clic en el mapa), lo escrito
+        // va a la caja: vuelve el foco y se agrega al final.
+        if let Some(b) = self.xtree_search_box.filter(|_| self.xtree_open) {
+            let text = self.host.text_get(b) + &c.to_string();
+            self.host.text_set(b, &text);
+            let end = text.encode_utf16().count();
+            self.host.text_focus(b);
+            self.host.text_select(b, end, end as isize);
+            if let Some(x) = &mut self.xtree {
+                x.set_query(&text);
+            }
+            self.redraw();
+            return;
+        }
         // Con xtree abierto, las letras van a su tabla (salto por letra, #57).
         if self.xtree_open {
             let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_char(c));

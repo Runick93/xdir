@@ -525,9 +525,11 @@ mod tests {
         l.dirs.insert("/r/no".into(), Err(ListError::Denied));
         let (r, p) = run(&l);
         let t = r.unwrap();
-        let mut names: Vec<String> = p.denied_nodes.lock().unwrap().iter().map(|&n| super::super::tree::node_path(&t, Path::new("/r"), n).to_string_lossy().into_owned()).collect();
+        let mut names: Vec<std::path::PathBuf> = p.denied_nodes.lock().unwrap().iter().map(|&n| super::super::tree::node_path(&t, Path::new("/r"), n)).collect();
         names.sort();
-        assert_eq!(names, ["/r/no", "/r/ok/tampoco"]);
+        // Las rutas se arman con `join`: en Windows el separador es «\».
+        let root = Path::new("/r");
+        assert_eq!(names, [root.join("no"), root.join("ok").join("tampoco")]);
         assert!(!p.denied_overflow.load(Ordering::Relaxed));
     }
 

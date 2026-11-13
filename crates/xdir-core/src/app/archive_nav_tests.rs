@@ -467,9 +467,12 @@ fn alt_double_click_nested_opens_with_system() {
     a.apply(0, Action::Open(i));
     FakeEnv::hold_keys(&[]);
     assert_eq!(a.panes[0].tab().location, root(&zip));
-    task(&mut a);
+    // Se procesan los trabajos en el orden en que lleguen hasta que se resuelva esta apertura
+    // (puede llegar otro antes).
+    tasks_until(&mut a, |a| a.archive.opening.is_none());
     let temp = crate::archive_nav::temps::global().entry_path(&zip, &[], "viejo.zip").unwrap();
-    assert!(FakeShell::take_calls().contains(&ShellCall::OpenFile(temp.clone(), temp.parent().map(Path::to_path_buf))));
+    let calls = FakeShell::take_calls();
+    assert!(calls.contains(&ShellCall::OpenFile(temp.clone(), temp.parent().map(Path::to_path_buf))), "{calls:?} · aviso: {:?}", a.notice);
 }
 
 /// Lo listo para la vista previa se olvida cuando el archivo se vuelve a leer (pudo cambiar y

@@ -240,6 +240,10 @@ pub struct Xtree {
     seen: bool,
     /// Avisos del escaneo recibidos: fase del arco del indicador que gira.
     ticks: u8,
+    /// Búsqueda al teclear en la tabla (#57): lo escrito y cuándo.
+    typeahead: crate::typeahead::TypeAhead,
+    /// El próximo cuadro deja a la vista la fila elegida (desplazando lo justo).
+    scroll_to_selected: bool,
 }
 
 impl Xtree {
@@ -281,6 +285,12 @@ impl Xtree {
         self.pick = p;
     }
 
+    /// Nombre de lo elegido en la tabla o el mapa (pruebas de `App`).
+    #[cfg(test)]
+    pub fn selected_name(&self) -> Option<String> {
+        self.selected.and_then(|n| self.arena.get(n as usize)).map(|n| n.name.to_string())
+    }
+
     /// ¿Empezó algún análisis en esta vista? (una abierta sin analizar, todavía no).
     pub fn scanned(&self) -> bool {
         self.scan_started.is_some()
@@ -318,6 +328,8 @@ impl Xtree {
             elevating: Arc::new(AtomicBool::new(false)),
             seen: false,
             ticks: 0,
+            typeahead: Default::default(),
+            scroll_to_selected: false,
         }
     }
 
@@ -719,6 +731,7 @@ impl Xtree {
         self.hover_row = None;
         self.selected = None;
         self.scroll = 0.0;
+        self.typeahead.clear();
     }
 
     fn go_up(&mut self) -> bool {
@@ -924,6 +937,37 @@ impl Xtree {
         }
     }
 
+    /// Una letra escrita con la tabla a la vista (#57): marca la primera fila del nivel actual
+    /// cuyo nombre empieza con lo escrito (sin mayúsculas ni tildes), como la búsqueda al teclear
+    /// de la lista. Mientras se escanea no hace nada (la tabla es solo de lectura).
+    pub fn on_char(&mut self, c: char) -> Action {
+        self.on_char_at(c, Instant::now())
+    }
+
+    /// `on_char` a la hora `now` (las pruebas pasan los tiempos).
+    pub fn on_char_at(&mut self, c: char, now: Instant) -> Action {
+        if c.is_control() || self.scanning || self.menu_open || self.arena.is_empty() {
+            return Action::None;
+        }
+        let rows = self.rows();
+        let step = self.typeahead.push(c, now);
+        let prefix = crate::palette::fold(&step.prefix);
+        let at = self.selected.and_then(|sel| rows.iter().position(|r| *r == Some(sel)));
+        let start = match (step.next, at) {
+            (true, Some(i)) => i + 1,
+            (false, Some(i)) => i,
+            _ => 0,
+        };
+        let arena = &self.arena;
+        let found = crate::typeahead::find_from(rows.len(), start, |i| {
+            rows[i].and_then(|id| arena.get(id as usize)).is_some_and(|n| crate::palette::fold(&n.name).starts_with(&prefix))
+        });
+        let Some(id) = found.and_then(|i| rows[i]) else { return Action::None };
+        self.selected = Some(id);
+        self.scroll_to_selected = true;
+        Action::Redraw
+    }
+
     /// Clic derecho: sube a la carpeta superior.
     pub fn on_right_click(&mut self) -> Action {
         if self.go_up() { Action::Redraw } else { Action::None }
@@ -984,7 +1028,19 @@ impl Xtree {
             self.hover = None;
         }
         let visible = (ui.list.bottom - ui.list.top - TABLE_H).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, (rows_of(arena, self.current).len() as f32 * ROW_H - visible).max(0.0));
+        let rows = rows_of(arena, self.current);
+        // La fila elegida al teclear: se desplaza lo justo para que se vea entera.
+        if std::mem::take(&mut self.scroll_to_selected)
+            && let Some(i) = self.selected.and_then(|sel| rows.iter().position(|r| *r == Some(sel)))
+        {
+            let top = i as f32 * ROW_H;
+            if top < self.scroll {
+                self.scroll = top;
+            } else if top + ROW_H > self.scroll + visible {
+                self.scroll = top + ROW_H - visible;
+            }
+        }
+        self.scroll = self.scroll.clamp(0.0, (rows.len() as f32 * ROW_H - visible).max(0.0));
     }
 
     pub fn paint(&mut self, p: &dyn Painter, area: Rect) {
@@ -1338,6 +1394,78 @@ mod tests {
 
     fn node(name: &str, parent: u32, size: u64, is_dir: bool, children: Vec<u32>) -> Node {
         Node { name: name.into(), parent, size, is_dir, small: false, children }
+    }
+
+    /// Raíz con estos hijos (nombre, tamaño, carpeta), en ese orden de tamaño.
+    fn level(kids: &[(&str, u64, bool)]) -> Vec<Node> {
+        let total = kids.iter().map(|k| k.1).sum();
+        let mut a = vec![node("raiz", NO_PARENT, total, true, (1..=kids.len() as u32).collect())];
+        a.extend(kids.iter().map(|&(n, size, dir)| node(n, 0, size, dir, vec![])));
+        a
+    }
+
+    fn selected_name(x: &Xtree) -> Option<String> {
+        x.selected.map(|n| x.arena[n as usize].name.to_string())
+    }
+
+    /// #57: letras con la tabla a la vista van a la primera fila del nivel que empieza así, sin
+    /// mayúsculas ni tildes; seguidas se juntan; la misma letra repetida pasa a la siguiente.
+    #[test]
+    fn xtree_type_to_find_jumps_and_cycles() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(level(&[
+            ("Users", 900, true),
+            ("Program Files", 800, true),
+            ("Program Files (x86)", 700, true),
+            ("pagefile.sys", 600, false),
+            ("Árbol", 500, true),
+            ("temp", 400, true),
+            ("Tests", 300, true),
+        ]));
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        assert_eq!(x.on_char_at('p', t0), Action::Redraw);
+        assert_eq!(selected_name(&x).as_deref(), Some("Program Files"));
+        assert_eq!(x.on_char_at('A', ms(200)), Action::Redraw, "«pa»");
+        assert_eq!(selected_name(&x).as_deref(), Some("pagefile.sys"));
+        // La misma letra repetida recorre los que empiezan con «t».
+        x.on_char_at('t', ms(2000));
+        assert_eq!(selected_name(&x).as_deref(), Some("temp"));
+        x.on_char_at('t', ms(2100));
+        assert_eq!(selected_name(&x).as_deref(), Some("Tests"));
+        x.on_char_at('t', ms(2200));
+        assert_eq!(selected_name(&x).as_deref(), Some("temp"), "da la vuelta");
+        // Sin tildes: «a» encuentra «Árbol».
+        x.on_char_at('a', ms(4000));
+        assert_eq!(selected_name(&x).as_deref(), Some("Árbol"));
+        // Nada empieza con «z»: queda como estaba.
+        assert_eq!(x.on_char_at('z', ms(6000)), Action::None);
+        assert_eq!(selected_name(&x).as_deref(), Some("Árbol"));
+    }
+
+    /// #57: la fila encontrada queda a la vista (la tabla se desplaza) y la búsqueda es del nivel
+    /// actual (no baja a las subcarpetas); sin árbol o escaneando no hace nada.
+    #[test]
+    fn xtree_type_to_find_scrolls_and_stays_in_level() {
+        let area = rect(0.0, 0.0, 1400.0, 500.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        assert_eq!(x.on_char_at('a', Instant::now()), Action::None, "sin árbol");
+        let names: Vec<String> = (0..40).map(|i| format!("carpeta{i:02}")).collect();
+        let mut kids: Vec<(&str, u64, bool)> = names.iter().enumerate().map(|(i, n)| (n.as_str(), 1000 - i as u64, true)).collect();
+        kids.push(("zeta", 10, true));
+        let mut arena = level(&kids);
+        // «zorro» vive dentro de «carpeta00»: no se encuentra desde la raíz.
+        arena[1].children = vec![arena.len() as u32];
+        arena.push(node("zorro", 1, 5, false, vec![]));
+        x.set_arena(arena);
+        x.prepare(area);
+        assert_eq!(x.scroll, 0.0);
+        x.on_char_at('z', Instant::now());
+        assert_eq!(selected_name(&x).as_deref(), Some("zeta"));
+        x.prepare(area);
+        assert!(x.scroll > 0.0, "la tabla se desplazó hasta la fila");
+        x.scanning = true;
+        assert_eq!(x.on_char_at('c', Instant::now() + Duration::from_secs(5)), Action::None, "escaneando");
     }
 
     /// Recorre la vista entera con hit-tests y clics: nada debe entrar en pánico.

@@ -362,11 +362,18 @@ impl App {
         if std::mem::take(&mut self.swallow_space) && c == ' ' {
             return;
         }
-        if !c.is_control() && !key_down(VK_CONTROL) && !self.xtree_open {
-            let action = self.tab_mut().list.on_char(c);
-            self.apply(self.active, action);
-            self.quick_look_follow_list();
+        if c.is_control() || key_down(VK_CONTROL) {
+            return;
         }
+        // Con xtree abierto, las letras van a su tabla (salto por letra, #57).
+        if self.xtree_open {
+            let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_char(c));
+            self.xtree_action(action);
+            return;
+        }
+        let action = self.tab_mut().list.on_char(c);
+        self.apply(self.active, action);
+        self.quick_look_follow_list();
     }
 
     /// El mouse salió de la ventana.

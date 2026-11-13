@@ -4,7 +4,7 @@
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::a11y::ItemInfo;
 use crate::folder_views::ViewSettings;
@@ -303,9 +303,6 @@ struct Band {
     base: Vec<bool>,
 }
 
-/// La búsqueda por tipeo sigue el mismo nombre si la tecla siguiente llega antes de esto.
-const TYPEAHEAD_MS: u64 = 900;
-
 pub struct FileList {
     pub entries: Vec<Entry>,
     /// Índices de `entries` que se muestran (sin los ocultos), ordenados, sin agrupar.
@@ -333,8 +330,7 @@ pub struct FileList {
     /// Casillas de selección (el switch «Casillas de selección»; lo fija la `App`).
     pub checkboxes: bool,
     hover: Option<usize>,
-    typeahead: String,
-    typeahead_at: Option<Instant>,
+    typeahead: crate::typeahead::TypeAhead,
     /// Área de la última vez que se dibujó (para hit-testing).
     area: Rect,
     /// Arrastre de la barra de desplazamiento: distancia entre el mouse y el borde del pulgar.
@@ -507,8 +503,7 @@ impl Default for FileList {
             show_extensions: true,
             checkboxes: false,
             hover: None,
-            typeahead: String::new(),
-            typeahead_at: None,
+            typeahead: Default::default(),
             area: rect(0.0, 0.0, 0.0, 0.0),
             thumb_drag: None,
             pending_select: None,
@@ -1863,7 +1858,7 @@ impl FileList {
     /// ¿Hay una búsqueda por tipeo en curso? (se escribió algo hace menos de `TYPEAHEAD_MS`): el
     /// Espacio es parte del nombre y no abre la vista rápida.
     pub fn typeahead_active(&self) -> bool {
-        !self.typeahead.is_empty() && self.typeahead_at.is_some_and(|t| t.elapsed() < Duration::from_millis(TYPEAHEAD_MS))
+        self.typeahead.active(Instant::now())
     }
 
     /// ¿El foco está en el encabezado de un grupo? (el Espacio lo pliega).
@@ -1886,33 +1881,18 @@ impl FileList {
 
     /// Búsqueda al teclear: salta al primer nombre que empieza con lo escrito.
     pub fn on_char(&mut self, c: char) -> Action {
-        let now = Instant::now();
-        let fresh = self.typeahead_at.is_none_or(|t| now - t > Duration::from_millis(TYPEAHEAD_MS));
-        if fresh {
-            self.typeahead.clear();
-        }
-        self.typeahead_at = Some(now);
-        self.typeahead.extend(c.to_lowercase());
-
         // Con una sola letra repetida ("aaa") se recorren los que empiezan con esa letra.
-        let repeated = self.typeahead.chars().count() > 1
-            && self.typeahead.chars().all(|ch| Some(ch) == self.typeahead.chars().next());
-        let prefix: String = if repeated { self.typeahead.chars().take(1).collect() } else { self.typeahead.clone() };
-        let start = match (fresh || repeated, self.focus) {
+        let step = self.typeahead.push(c, Instant::now());
+        let start = match (step.next, self.focus) {
             (true, Some(f)) => f + 1,
             (false, Some(f)) => f,
             _ => 0,
         };
-        let n = self.visible.len();
-        for k in 0..n {
-            let pos = (start + k) % n;
-            if self.entries[self.visible[pos] as usize].sort_key.starts_with(&prefix) {
-                self.select_only(pos);
-                self.ensure_visible(pos);
-                return Action::Redraw;
-            }
-        }
-        Action::None
+        let found = crate::typeahead::find_from(self.visible.len(), start, |pos| self.entries[self.visible[pos] as usize].sort_key.starts_with(&step.prefix));
+        let Some(pos) = found else { return Action::None };
+        self.select_only(pos);
+        self.ensure_visible(pos);
+        Action::Redraw
     }
 
     /// Clic derecho: si cae en un elemento no seleccionado, lo selecciona solo a él.

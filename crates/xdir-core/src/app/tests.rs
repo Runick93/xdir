@@ -2776,6 +2776,33 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     a.on_closing();
 }
 
+/// xtree abierto con un árbol terminado: la raíz `raiz` con estos hijos (nombre, tamaño).
+fn app_with_xtree(kids: &[(&str, u64)]) -> App {
+    use crate::xtree::tree::{NO_PARENT, Node};
+    let mut a = app();
+    let total = kids.iter().map(|k| k.1).sum();
+    let mut arena = vec![Node { name: "raiz".into(), parent: NO_PARENT, size: total, is_dir: true, small: false, children: (1..=kids.len() as u32).collect() }];
+    arena.extend(kids.iter().map(|&(n, size)| Node { name: n.into(), parent: 0, size, is_dir: true, small: false, children: vec![] }));
+    let mut x = Xtree::idle(PathBuf::from("raiz"));
+    x.set_arena(arena);
+    a.xtree = Some(x);
+    a.xtree_open = true;
+    a
+}
+
+/// #57: con xtree abierto, las letras van a su tabla (salto por letra), no a la lista del panel.
+#[test]
+fn xtree_letters_go_to_view() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    a.on_char('b');
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
+    // Con Ctrl no es una letra escrita.
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_char('a');
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
+}
+
 // ---------- entrada «xtree» del árbol ----------
 
 /// App con el árbol a la vista, el panel activo en una carpeta temporal y un cuadro dibujado.

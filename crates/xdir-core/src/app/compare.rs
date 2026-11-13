@@ -59,13 +59,10 @@ impl Job {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// Lo corta y devuelve su hilo para esperar a que suelte los archivos (no si es de la red:
-    /// un servidor colgado no lo dejaría terminar).
+    /// Lo corta y devuelve su hilo para esperar a que suelte los archivos (también si toca la red:
+    /// la espera tiene un límite, `wait_bounded`).
     pub(super) fn release(self) -> Option<std::thread::JoinHandle<()>> {
         self.stop();
-        if self.remote {
-            return None;
-        }
         self.worker.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
@@ -129,6 +126,21 @@ pub(super) struct Jobs {
     /// Pruebas: como si no se pudiera crear el hilo.
     #[cfg(test)]
     pub fail_spawn: bool,
+}
+
+/// Espera a que terminen los hilos `handles`, como mucho `limit` en total; los que siguen (un
+/// lector trabado en un disco que falla o en un servidor colgado) quedan sueltos y se sigue igual.
+/// Bloqueante: en hilos de trabajo.
+pub(super) fn wait_bounded(handles: Vec<std::thread::JoinHandle<()>>, limit: Duration) {
+    let until = std::time::Instant::now() + limit;
+    for h in handles {
+        while !h.is_finished() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if h.is_finished() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl Jobs {

@@ -643,3 +643,72 @@ fn panel_scrolls_and_no_ticks_while_hidden() {
     a.on_compare_message(1);
     assert_eq!(host.invalidations(), before);
 }
+
+/// Prepara un «disco» expulsable con dos archivos grandes que tardan `hang` en cada lectura.
+fn ejectable_disk(a: &mut App, name: &str, hang: Duration) -> PathBuf {
+    use crate::sys::testing::{FakeFileSystem, FakeShell};
+    let big = vec![4u8; 3 << 20];
+    let root = fixture(name, &[("a.bin", &big), ("b.bin", &big)]);
+    FakeFileSystem::set_drives(&[(&root, "PENDRIVE")]);
+    a.ejectable.insert(root.clone());
+    FakeShell::set_eject_result(&root, Ok(()));
+    // Solo las lecturas del archivo tardan (no la lista ni el resto del disco falso).
+    crate::sys::testing::FakeHashes::throttle(&root, 1 << 20, hang);
+    root
+}
+
+fn eject_and_wait(a: &mut App) {
+    a.run_command(Command::Eject);
+    while a.notice.is_none() {
+        let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("expulsar termina");
+        a.on_task_done(t);
+    }
+}
+
+/// Un lector trabado (un pendrive que muere) no deja la expulsión esperando para siempre: se espera
+/// como mucho el límite y se expulsa igual (el error de «en uso», si lo hay, lo da el sistema).
+#[test]
+fn eject_waits_at_most_the_limit() {
+    use crate::sys::testing::FakeHashes;
+    let mut a = app(FakeHost::new());
+    let root = ejectable_disk(&mut a, "expulsa-trabado", Duration::from_secs(3));
+    a.jobs.limit = Duration::from_millis(200);
+    go(&mut a, 0, Location::Path(root.clone()));
+    a.set_active(0);
+    select(&mut a, 0, &["a.bin", "b.bin"]);
+    a.run_command(Command::CompareContents);
+    let t0 = Instant::now();
+    while FakeHashes::open_readers(&root) == 0 {
+        assert!(t0.elapsed() < Duration::from_secs(10), "no empezó a leer");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let t0 = Instant::now();
+    eject_and_wait(&mut a);
+    assert!(t0.elapsed() < Duration::from_millis(2500), "esperó al lector trabado: {:?}", t0.elapsed());
+    crate::sys::testing::FakeFileSystem::set_drives(&[]);
+}
+
+/// Una comparación de un archivo del pendrive con uno de la red también se espera al expulsar el
+/// pendrive (antes, por tocar la red, no se esperaba).
+#[test]
+fn eject_waits_for_a_job_that_also_touches_the_network() {
+    use crate::sys::testing::FakeHashes;
+    let mut a = app(FakeHost::new());
+    let root = ejectable_disk(&mut a, "expulsa-con-red", Duration::from_millis(300));
+    let net = fixture("expulsa-red-otro", &[("b.bin", &vec![4u8; 3 << 20])]);
+    FakeNetwork::set_remote(&net);
+    go(&mut a, 0, Location::Path(root.clone()));
+    go(&mut a, 1, Location::Path(net));
+    select(&mut a, 0, &["a.bin"]);
+    select(&mut a, 1, &["b.bin"]);
+    a.set_active(0);
+    a.run_command(Command::CompareContents);
+    let t0 = Instant::now();
+    while FakeHashes::open_readers(&root) == 0 {
+        assert!(t0.elapsed() < Duration::from_secs(10), "no empezó a leer");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    eject_and_wait(&mut a);
+    assert_eq!(FakeHashes::open_readers(&root), 0, "se expulsó con el archivo abierto");
+    crate::sys::testing::FakeFileSystem::set_drives(&[]);
+}

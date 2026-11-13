@@ -225,10 +225,11 @@ impl App {
         let reading = self.release_volume(&root);
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
+        let limit = self.jobs.limit;
         self.spawn_task(move || {
-            for h in reading {
-                let _ = h.join();
-            }
+            // Como mucho el límite: un lector trabado no deja el disco sin expulsar (si sigue
+            // abierto, el sistema lo dice al expulsar).
+            super::compare::wait_bounded(reading, limit);
             let result = sys::shell().eject(&root);
             TaskDone::Ejected { root, label, result }
         });

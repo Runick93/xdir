@@ -198,6 +198,8 @@ struct SearchState {
     scroll: f32,
     /// El próximo cuadro deja a la vista el elegido.
     reveal: bool,
+    /// De qué árbol son los resultados (`Xtree::tree_gen`).
+    found_tree: u64,
 }
 
 /// Botón «Colores: carpeta / tipo» de la vista en `area`: en la barra superior, 40 antes del estado
@@ -324,8 +326,11 @@ pub struct Xtree {
     search: Option<SearchState>,
     /// Generación de la búsqueda: una que cambió corta la del hilo.
     search_gen: Arc<AtomicUsize>,
-    /// Lo que deja el hilo de búsqueda (generación y resultados); se toma con `on_found`.
-    search_slot: Arc<std::sync::Mutex<Option<(usize, Found)>>>,
+    /// Lo que deja el hilo de búsqueda (generación, árbol y resultados); se toma con `on_found`.
+    search_slot: Arc<std::sync::Mutex<Option<(usize, u64, Found)>>>,
+    /// Cambia cada vez que cambia el árbol (llegó el terminado, se analiza de nuevo): los ids de
+    /// unos resultados viejos son de otro árbol.
+    tree_gen: u64,
     /// Desde cuántos nodos se busca en otro hilo (`search::THREAD_FROM`; las pruebas lo bajan).
     search_thread_from: usize,
     /// El mouse está sobre la lupa.
@@ -425,6 +430,7 @@ impl Xtree {
             search_gen: Arc::new(AtomicUsize::new(0)),
             search_slot: Default::default(),
             search_thread_from: search::THREAD_FROM,
+            tree_gen: 0,
             hover_search: false,
         }
     }
@@ -447,6 +453,7 @@ impl Xtree {
     #[cfg(test)]
     pub fn set_arena(&mut self, arena: Vec<Node>) {
         self.arena = Arc::new(arena);
+        self.tree_gen += 1;
         self.scanning = false;
         self.go(0);
     }
@@ -727,6 +734,7 @@ impl Xtree {
         let id = NEXT_SCAN.fetch_add(1, Ordering::Relaxed);
         self.scan = scan::start(self.hwnd, id, self.root.clone());
         self.arena = Arc::default();
+        self.tree_gen += 1;
         self.cells.clear();
         self.cells_for = None;
         self.current = 0;
@@ -744,6 +752,7 @@ impl Xtree {
     fn take_result(&mut self) -> bool {
         let Some(arena) = self.scan.result.lock().unwrap().take() else { return false };
         self.arena = Arc::new(arena);
+        self.tree_gen += 1;
         // El espacio libre cambió mientras se escaneaba.
         self.read_volume();
         // Primer árbol de este escaneo: queda fijo el tiempo total. Un árbol elevado que llega
@@ -894,11 +903,12 @@ impl Xtree {
         }
         if !self.scanning && self.arena.len() < self.search_thread_from {
             st.found = search::search(&self.arena, query, &|| false);
+            st.found_tree = self.tree_gen;
             st.pending = false;
             return;
         }
         st.pending = true;
-        let (gen_now, slot, hwnd, query) = (self.search_gen.clone(), self.search_slot.clone(), self.hwnd, query.to_string());
+        let (gen_now, slot, hwnd, query, tree) = (self.search_gen.clone(), self.search_slot.clone(), self.hwnd, query.to_string(), self.tree_gen);
         let (live, arena) = if self.scanning { (Some(self.scan.live.clone()), None) } else { (None, Some(self.arena.clone())) };
         let _ = std::thread::Builder::new().name("xdir-xtree-buscar".into()).spawn(move || {
             let stop = || gen_now.load(Ordering::Relaxed) != generation;
@@ -910,8 +920,8 @@ impl Xtree {
             let Some(found) = found.filter(|_| !stop()) else { return };
             if let Ok(mut s) = slot.lock() {
                 // Una búsqueda vieja que termina tarde no pisa a una más nueva.
-                if s.as_ref().is_none_or(|(g, _)| *g < generation) {
-                    *s = Some((generation, found));
+                if s.as_ref().is_none_or(|(g, _, _)| *g < generation) {
+                    *s = Some((generation, tree, found));
                 }
             }
             hwnd.post(WM_APP_XTREE_FOUND, 0, 0);
@@ -928,11 +938,12 @@ impl Xtree {
     /// Llegó lo de una búsqueda en otro hilo (`WM_APP_XTREE_FOUND`). Devuelve si hay que repintar
     /// (era la búsqueda de lo que está escrito ahora).
     pub fn on_found(&mut self) -> bool {
-        let Some((generation, found)) = self.search_slot.lock().ok().and_then(|mut s| s.take()) else { return false };
+        let Some((generation, tree, found)) = self.search_slot.lock().ok().and_then(|mut s| s.take()) else { return false };
         let current = self.search_gen.load(Ordering::Relaxed);
         match &mut self.search {
-            Some(st) if generation == current && found.query == st.query => {
+            Some(st) if generation == current && found.query == st.query && tree == self.tree_gen => {
                 st.found = Some(found);
+                st.found_tree = tree;
                 st.pending = false;
                 true
             }
@@ -971,9 +982,18 @@ impl Xtree {
         Action::Redraw
     }
 
+    /// ¿Los resultados a la vista se pueden abrir? No mientras se busca otra cosa ni si son de
+    /// otro árbol (sus ids serían de otros nodos).
+    fn results_usable(&self) -> bool {
+        self.search.as_ref().is_some_and(|st| !st.pending && st.found_tree == self.tree_gen)
+    }
+
     /// Entra en el resultado `i`: en la carpeta o, si es un archivo, en la suya con el archivo
-    /// marcado. Cierra la búsqueda.
+    /// marcado. Cierra la búsqueda. No con resultados viejos (`results_usable`).
     fn open_result(&mut self, i: usize) -> Action {
+        if !self.results_usable() {
+            return Action::None;
+        }
         let Some(hit) = self.search_found().and_then(|f| f.hits.get(i)).cloned() else { return Action::None };
         // El nodo tiene que seguir siendo el mismo (mientras se analiza, el árbol en vivo).
         let live = self.scan.live.clone();
@@ -1425,6 +1445,9 @@ impl Xtree {
         }
         p.text(FontId::Small, &count, head, th.text_dim);
         let file_icon = if th.dark { hex(0xD9E0ED) } else { hex(0x9AA5B3) };
+        // Los resultados viejos (se busca otra cosa) se ven atenuados: no se pueden abrir.
+        let usable = self.results_usable();
+        let text = if usable { th.text } else { alpha(th.text, 0.5) };
         let rows = search_results_rect(area);
         p.clip(rows, &mut || {
             for (i, hit) in found.hits.iter().enumerate() {
@@ -1436,7 +1459,7 @@ impl Xtree {
                 if i == st.selected {
                     p.round_fill(band, 5.0, th.selection);
                     p.round_stroke_w(band, 5.0, th.accent, 1.0);
-                } else if st.hover == Some(i) {
+                } else if st.hover == Some(i) && usable {
                     p.round_fill(band, 5.0, th.hover);
                 }
                 let (ix, iy) = (r.left + 9.0, r.top + 7.0);
@@ -1447,8 +1470,8 @@ impl Xtree {
                     p.round_fill(rect(ix + 2.0, iy, ix + 14.0, iy + 16.0), 2.0, file_icon);
                 }
                 let text_l = r.left + 33.0;
-                p.text(FontId::Ui, &hit.name, rect(text_l, r.top + 3.0, r.right - 100.0, r.top + 23.0), th.text);
-                p.text(FontId::UiRight, &fmt_size(hit.size), rect(r.right - 100.0, r.top + 3.0, r.right - 9.0, r.top + 23.0), th.text);
+                p.text(FontId::Ui, &hit.name, rect(text_l, r.top + 3.0, r.right - 100.0, r.top + 23.0), text);
+                p.text(FontId::UiRight, &fmt_size(hit.size), rect(r.right - 100.0, r.top + 3.0, r.right - 9.0, r.top + 23.0), text);
                 // La carpeta que lo contiene, relativa a lo analizado (en la raíz: la raíz).
                 let rel = if hit.rel.as_os_str().is_empty() { self.root.display().to_string() } else { hit.rel.display().to_string() };
                 p.text(FontId::Small, &rel, rect(text_l, r.top + 22.0, r.right - 9.0, r.top + 40.0), th.text_dim);
@@ -1964,7 +1987,7 @@ mod tests {
     /// Espera (con tiempo límite) a que llegue la búsqueda del hilo y la aplica.
     fn wait_found(x: &mut Xtree, query: &str) {
         let t0 = Instant::now();
-        while x.search_found().is_none_or(|f| f.query != query) {
+        while x.search_pending() || x.search_found().is_none_or(|f| f.query != query) {
             assert!(t0.elapsed() < Duration::from_secs(10), "la búsqueda «{query}» no llegó");
             std::thread::sleep(Duration::from_millis(2));
             x.on_found();
@@ -2027,6 +2050,49 @@ mod tests {
             x.on_found();
         }
         assert_eq!(x.search_found().unwrap().query, "carpeta-499");
+    }
+
+    /// I2: mientras se busca otra cosa (o el árbol cambió y se está buscando de nuevo), los
+    /// resultados viejos se ven pero Enter y el clic no los abren: podrían ser de otro texto o de
+    /// otro árbol (un nodo con el mismo nombre en otro lugar).
+    #[test]
+    fn xtree_search_stale_results_do_not_open() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        // raiz › a › src y raiz › b › src: el árbol nuevo tiene los mismos nombres con otros ids.
+        let tree = |swap: bool| {
+            let (a, b) = if swap { ("b", "a") } else { ("a", "b") };
+            vec![
+                node("raiz", NO_PARENT, 30, true, vec![1, 2]),
+                node(a, 0, 20, true, vec![3]),
+                node(b, 0, 10, true, vec![4]),
+                node("src", 1, 20, true, vec![]),
+                node("src", 2, 10, true, vec![]),
+            ]
+        };
+        x.set_arena(tree(false));
+        x.search_thread_from = 0;
+        x.open_search();
+        x.set_query("src");
+        wait_found(&mut x, "src");
+        // Se escribe otra cosa: hasta que llegue, Enter y el clic no hacen nada.
+        x.set_query("sr");
+        assert!(x.search_pending());
+        assert_eq!(x.search_key(VK_RETURN), Action::None);
+        let r = search_row_rect(area, 0, 0.0);
+        assert_eq!(x.on_click(area, r.left + 40.0, (r.top + r.bottom) / 2.0, false), Action::None);
+        assert!(x.search_open() && x.current == 0);
+        wait_found(&mut x, "sr");
+        // Llega otro árbol (un reescaneo): la búsqueda se repite; mientras, los viejos no abren.
+        x.scanning = true;
+        *x.scan.result.lock().unwrap() = Some(tree(true));
+        assert!(x.take_result());
+        assert!(x.search_pending());
+        assert_eq!(x.search_key(VK_RETURN), Action::None);
+        assert_eq!(x.current, 0);
+        wait_found(&mut x, "sr");
+        assert_eq!(x.search_key(VK_RETURN), Action::Redraw, "los nuevos sí");
+        assert_eq!(x.current, 3, "la «src» más grande del árbol nuevo (bajo «b»)");
     }
 
     /// #57: mientras se analiza, busca en lo que ya se leyó (el árbol en vivo, en otro hilo); al

@@ -344,13 +344,14 @@ impl App {
         let shown = target.as_ref().filter(|_| ev.effect != Effect::NONE && ev.kind != DragKind::Drop).map(|(at, _)| *at);
         self.set_drop_targets(shown);
 
-        if ev.kind == DragKind::Drop && ev.effect != Effect::NONE {
-            if let (Some((at, dest)), Some(paths)) = (target, ev.paths) {
-                let sources = paths.to_vec();
-                self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
-                if let DropAt::Pane(pane, _) = at {
-                    self.set_active(pane);
-                }
+        if ev.kind == DragKind::Drop
+            && ev.effect != Effect::NONE
+            && let (Some((at, dest)), Some(paths)) = (target, ev.paths)
+        {
+            let sources = paths.to_vec();
+            self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
+            if let DropAt::Pane(pane, _) = at {
+                self.set_active(pane);
             }
         }
     }

@@ -185,6 +185,10 @@ pub fn search_row_rect(area: Rect, i: usize, scroll: f32) -> Rect {
     rect(r.left + 3.0, top, r.right - 3.0, top + RES_H)
 }
 
+/// Las filas de un nivel con sus nombres plegados, y de qué carpeta y árbol son (`(current,
+/// tree_gen)`).
+type LevelNames = ((u32, u64), Vec<(Option<u32>, String)>);
+
 /// La búsqueda abierta (#57): lo escrito, lo encontrado y la fila elegida.
 #[derive(Default)]
 struct SearchState {
@@ -362,7 +366,7 @@ pub struct Xtree {
     scroll_to_selected: bool,
     /// Las filas del nivel con sus nombres ya plegados, para el salto por letra: de qué carpeta
     /// y árbol son (se arman una vez por nivel, no en cada tecla).
-    level_names: Option<((u32, u64), Vec<(Option<u32>, String)>)>,
+    level_names: Option<LevelNames>,
     /// Cuántas veces se armaron (pruebas).
     level_folds: usize,
 }

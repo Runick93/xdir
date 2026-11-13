@@ -534,10 +534,11 @@ impl App {
             self.folder_views.save_if_dirty();
             let _ = session::save(&self.session());
             let _ = self.history.save();
-            // En las pruebas la carpeta temporal es una para todo el proceso: cerrar una `App` de
-            // prueba no la borra (borraría lo que otras pruebas, en paralelo, están extrayendo).
-            #[cfg(not(test))]
-            crate::archive_nav::temps::clean_at_exit();
+            // Las pruebas lo apagan (`Init::clean_temps_on_close`): la carpeta es una para todo el
+            // proceso y otras pruebas, en paralelo, están extrayendo ahí.
+            if self.clean_temps_on_close {
+                crate::archive_nav::temps::clean_at_exit();
+            }
         }
     }
 }

@@ -57,6 +57,33 @@ pub struct Progress {
     /// La raíz misma no se pudo listar (sin permiso, borrada, disco desconectado): el árbol es la
     /// raíz sola y no cuenta como análisis completo para el historial.
     pub root_failed: AtomicBool,
+    /// Las carpetas que no se pudieron leer (su nodo en el árbol), hasta `MAX_DENIED_NODES`: el
+    /// historial no las toma como «pesaban 0» (#58).
+    pub denied_nodes: Mutex<Vec<u32>>,
+    /// Hubo más carpetas sin leer que las que se anotan.
+    pub denied_overflow: AtomicBool,
+}
+
+/// Tope de carpetas sin leer anotadas en `Progress::denied_nodes`.
+pub const MAX_DENIED_NODES: usize = 10_000;
+
+impl Progress {
+    /// Anota la carpeta `node` que no se pudo leer (con tope).
+    fn note_denied(&self, node: u32) {
+        let mut v = self.denied_nodes.lock().unwrap_or_else(|e| e.into_inner());
+        if v.len() < MAX_DENIED_NODES {
+            v.push(node);
+        } else {
+            self.denied_overflow.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Ya no faltan permisos (llegó el árbol elevado): se olvidan las carpetas sin leer.
+    pub fn clear_denied(&self) {
+        self.denied.store(0, Ordering::Relaxed);
+        self.denied_nodes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.denied_overflow.store(false, Ordering::Relaxed);
+    }
 }
 
 pub struct Scan {
@@ -206,6 +233,7 @@ fn worker(ctx: &Ctx) {
             Ok(l) => insert_listing(ctx, &job, l),
             Err(ListError::Denied) => {
                 ctx.progress.denied.fetch_add(1, Ordering::Relaxed);
+                ctx.progress.note_denied(job.node);
             }
             Err(ListError::Other) => {}
         }
@@ -475,5 +503,22 @@ mod tests {
         l.dirs.insert("/r/no".into(), Err(ListError::Denied));
         let (_, p) = run(&l);
         assert!(!p.root_failed.load(Ordering::Relaxed), "una subcarpeta negada no es la raíz");
+    }
+
+    /// Las carpetas que no se pudieron leer quedan anotadas (su nodo en el árbol, con tope): el
+    /// historial las marca como «no se sabe» en vez de «pesaban 0».
+    #[test]
+    fn walk_records_denied_folders() {
+        let mut l = FakeLister::default();
+        l.dirs.insert("/r".into(), Ok((vec!["ok", "no"], vec![])));
+        l.dirs.insert("/r/ok".into(), Ok((vec!["tampoco"], vec![f("q", 9)])));
+        l.dirs.insert("/r/ok/tampoco".into(), Err(ListError::Denied));
+        l.dirs.insert("/r/no".into(), Err(ListError::Denied));
+        let (r, p) = run(&l);
+        let t = r.unwrap();
+        let mut names: Vec<String> = p.denied_nodes.lock().unwrap().iter().map(|&n| super::super::tree::node_path(&t, Path::new("/r"), n).to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["/r/no", "/r/ok/tampoco"]);
+        assert!(!p.denied_overflow.load(Ordering::Relaxed));
     }
 }

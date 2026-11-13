@@ -973,7 +973,7 @@ impl Xtree {
             if delivered {
                 // Ya no faltan permisos: se apagan el aviso y `xtree_permisos`.
                 progress.need_admin.store(false, Ordering::Relaxed);
-                progress.denied.store(0, Ordering::Relaxed);
+                progress.clear_denied();
                 // El árbol elevado leyó la raíz: cuenta como análisis completo.
                 progress.root_failed.store(false, Ordering::Relaxed);
             }

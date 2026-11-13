@@ -609,9 +609,24 @@ fn local_slow_load_shows_loading_after_half_second() {
     a.paint();
     let t = texts(&host);
     assert!(t.iter().any(|t| t == "Cargando…") && t.iter().any(|t| t == "ya-llego.txt"), "{t:?}");
+    // Ronda 1: la tarjeta frena los clics (no elige la fila tapada) y, sin encabezado (Íconos),
+    // va a 50 del borde de arriba de la lista.
+    let card = a.panes[0].loading_card.expect("la tarjeta");
+    let list = a.panes[0].list;
+    assert_eq!(card.top, list.top + crate::list::HEADER_H + 50.0);
+    let (x, y) = ((card.left + card.right) / 2.0, (card.top + card.bottom) / 2.0);
+    assert_eq!(a.panes[0].hit(x, y), crate::pane::PaneHit::None);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(a.panes[0].tab().list.selected_indices().count(), 0);
+    a.set_view(0, crate::list::View::Icons);
+    a.paint();
+    let card = a.panes[0].loading_card.expect("la tarjeta en Íconos");
+    assert_eq!(card.top, a.panes[0].list.top + 50.0);
     pump_pane(&mut a, 0);
     a.paint();
     assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
+    assert_eq!(a.panes[0].loading_card, None);
     assert!(!a.panes[0].tab().shows_loading(Instant::now() + Duration::from_secs(5)));
 }
 

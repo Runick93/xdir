@@ -61,26 +61,28 @@ impl HistState {
     /// Terminó un análisis completo de `root` con el árbol `arena`: en un hilo guarda la foto (si
     /// está encendido) y lee el historial de la raíz; al terminar avisa a la ventana como el
     /// escáner (`WM_APP_XTREE` con `id`, `lparam` 0). Los discos de red no tienen historial.
-    pub fn after_scan(&mut self, hwnd: Handle, id: usize, root: &Path, arena: &[Node]) {
+    pub fn after_scan(&mut self, hwnd: Handle, id: usize, root: &Path, arena: &Arc<Vec<Node>>) {
         self.after_scan_at(hwnd, id, root, arena, None);
     }
 
     /// `after_scan` con la generación de borrado con que sale el hilo (`None`: la de ahora; las
     /// pruebas pasan una vieja). Si se borró el historial desde entonces, el hilo no guarda ni lee
     /// y entrega uno vacío.
-    pub fn after_scan_at(&mut self, hwnd: Handle, id: usize, root: &Path, arena: &[Node], generation: Option<u64>) {
+    pub fn after_scan_at(&mut self, hwnd: Handle, id: usize, root: &Path, arena: &Arc<Vec<Node>>, generation: Option<u64>) {
         self.loaded = None;
         self.pending = false;
         let Some(dir) = self.dir.clone() else { return };
         if crate::sys::network().is_remote(root) {
             return;
         }
-        let photo = if self.on { history::select_photo(arena) } else { Default::default() };
+        // La foto se arma en el hilo (recorre medio árbol): se le pasa el árbol compartido.
+        let arena = self.on.then(|| arena.clone());
         let (root, today, slot) = (root.to_path_buf(), self.today(), self.slot.clone());
         let clears = self.clears.clone();
         let generation = generation.unwrap_or_else(|| clears.load(std::sync::atomic::Ordering::SeqCst));
         self.pending = true;
         let _ = std::thread::Builder::new().spawn(move || {
+            let photo = arena.map(|a| history::select_photo(&a)).unwrap_or_default();
             let done = history::if_current(&clears, generation, || {
                 if !photo.sizes.is_empty() {
                     let _ = history::save_photo(&dir, &root, today, &photo);

@@ -34,6 +34,9 @@ pub struct Photo {
 /// tamaño, las de menos nivel y después por ruta: una carpeta pesa al menos lo que sus hijas, así
 /// que nunca queda una hija sin su madre, y el mismo árbol da siempre la misma foto.
 pub fn select_photo(arena: &[Node]) -> Photo {
+    // La auditoría del hilo de interfaz: armar la foto recorre medio árbol, va en el hilo.
+    #[cfg(test)]
+    crate::sys::testing::FakeNetwork::note_disk_io("historial armar la foto", Path::new(""));
     let Some(root) = arena.first().filter(|n| n.parent == NO_PARENT) else { return Photo::default() };
     let mut out = vec![(String::new(), root.size)];
     // (nodo, nivel, ruta). Debajo del segundo nivel solo se baja por carpetas grandes: lo de

@@ -75,15 +75,15 @@ impl HistState {
         if crate::sys::network().is_remote(root) {
             return;
         }
-        let sizes = if self.on { history::select(arena) } else { Vec::new() };
+        let photo = if self.on { history::select_photo(arena) } else { Default::default() };
         let (root, today, slot) = (root.to_path_buf(), self.today(), self.slot.clone());
         let clears = self.clears.clone();
         let generation = generation.unwrap_or_else(|| clears.load(std::sync::atomic::Ordering::SeqCst));
         self.pending = true;
         let _ = std::thread::Builder::new().spawn(move || {
             let done = history::if_current(&clears, generation, || {
-                if !sizes.is_empty() {
-                    let _ = history::save_snapshot(&dir, &root, today, &sizes);
+                if !photo.sizes.is_empty() {
+                    let _ = history::save_photo(&dir, &root, today, &photo);
                 }
                 history::load_for(&dir, &root)
             });

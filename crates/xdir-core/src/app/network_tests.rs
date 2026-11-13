@@ -393,6 +393,10 @@ fn pump_pane(a: &mut App, pane: usize) {
 #[test]
 fn remote_navigation_no_ui_io() {
     let root = remote_dir("n5-nav");
+    std::fs::write(root.join("b.txt"), "x").unwrap();
+    // Un comprimido en la carpeta de red (la lista lo ve en el disco; lo de adentro, el falso).
+    std::fs::write(root.join("z.zip"), b"zip").unwrap();
+    crate::sys::testing::FakeArchives::shared().add_archive(&root.join("z.zip"), &[("x.txt", b"hola"), ("y.txt", b"hola")], 30);
     let mut init = Init::blank();
     init.session.panes = vec![crate::session::PaneState { tabs: vec![Location::Path(root.join("sub"))], active: 0 }];
     FakeNetwork::mark_ui_thread();
@@ -484,7 +488,73 @@ fn remote_navigation_no_ui_io() {
         drag(&mut a, DragKind::Over);
         drag(&mut a, DragKind::Leave);
     }
+    // #59: comparar dos archivos de red y la suma de uno, en el panel de comparar: se abren y se
+    // leen en otro hilo (nada del disco en este).
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        let name = list.entries[list.entry_of_pos(p).unwrap()].name.clone();
+        list.set_selected_pos(p, name == "a.txt" || name == "b.txt");
+    }
+    a.run_command(Command::CompareContents);
+    a.paint();
+    let t0 = Instant::now();
+    while a.compare.as_ref().is_some_and(|c| c.job.is_some() || c.status == super::compare::Status::Running) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la comparación no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert_eq!(a.compare.as_ref().unwrap().status, super::compare::Status::Done(crate::compare::Verdict::Same));
+    a.compare_hash(0);
+    while a.compare.as_ref().is_some_and(|c| c.hashes[0].job.is_some()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert!(matches!(a.compare.as_ref().unwrap().hashes[0].result, Some(Ok(_))));
+    a.paint();
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+    // Dos de adentro de un comprimido en la carpeta de red: se extraen y se comparan en otro hilo.
+    a.go_to_text(0, &root.join("z.zip").to_string_lossy());
+    pump_pane(&mut a, 0);
+    assert!(a.panes[0].tab().location.is_archive());
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        list.set_selected_pos(p, true);
+    }
+    a.run_command(Command::CompareContents);
+    a.paint();
+    while a.compare.as_ref().is_some_and(|c| c.job.is_some()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la comparación en el comprimido no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert_eq!(a.compare.as_ref().unwrap().status, super::compare::Status::Done(crate::compare::Verdict::Same));
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+    a.go_to_text(0, &root.to_string_lossy());
+    pump_pane(&mut a, 0);
+    // La suma de verificación del panel de información, con «Comparar con…». (El `FakeInfo`
+    // responde en este hilo: lo que lee al abrir el panel es del falso y no cuenta.)
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        let name = list.entries[list.entry_of_pos(p).unwrap()].name.clone();
+        list.set_selected_pos(p, name == "a.txt");
+    }
+    a.run_command(Command::Properties);
+    a.paint();
+    a.flush_info();
+    a.on_app_message(crate::info::WM_APP_INFO, 0, 0);
+    a.paint();
+    let seen = FakeNetwork::ui_io_calls().len();
+    a.set_expected("d41d8cd98f00b204e9800998ecf8427e");
+    while a.info.sum.job.is_some() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma del panel no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert!(a.info.sum.results.iter().any(|(_, r)| r.is_ok()), "{:?}", a.info.sum.results);
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls()[seen..], Vec::<String>::new());
 }
 
 #[test]

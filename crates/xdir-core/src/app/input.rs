@@ -112,6 +112,9 @@ impl App {
         if let Some(h) = self.info_hit(x, y) {
             return Hit::Info(h);
         }
+        if let Some(h) = self.compare_hit(x, y) {
+            return Hit::Compare(h);
+        }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
             return if self.tree.on_pin_button(x, y) {
@@ -159,6 +162,9 @@ impl App {
         // Grabando un atajo, un clic fuera de su fila deja de grabar (y sigue su curso).
         self.cancel_recording_unless(hit);
         self.info.focused = matches!(hit, Hit::Info(_));
+        if let Some(st) = &mut self.compare {
+            st.focused = matches!(hit, Hit::Compare(_));
+        }
         if self.about_open {
             match hit {
                 Hit::About(about::AboutHit::Report) => self.host.open_url(about::ISSUES_URL),
@@ -282,6 +288,7 @@ impl App {
                 return;
             }
             Hit::Info(h) => self.info_click(h),
+            Hit::Compare(h) => self.compare_click(h),
             Hit::PreviewEdge => {
                 self.host.capture_mouse();
                 let grab = self.preview_column().map_or(0.0, |r| r.left - x);

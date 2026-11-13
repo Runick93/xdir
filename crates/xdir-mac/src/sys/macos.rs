@@ -635,6 +635,7 @@ pub fn install() {
         archives: Box::new(xdir_archive::Service { tar_gz: true, utc_offset, copy_origin: crate::origin::copy_origin }),
         info: Box::new(crate::info::MacInfo),
         network: Box::new(crate::net::MacNetwork::new()),
+        hashes: Box::new(xdir_hash::SystemHashes),
     });
 }
 

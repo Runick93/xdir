@@ -501,6 +501,10 @@ impl App {
             }
         }
         entries.push(item("Copiar como ruta de acceso", Command::CopyPaths));
+        // Dos archivos elegidos (en este panel, o uno acá y otro en el de al lado): compararlos.
+        if self.compare_candidates().is_ok() {
+            entries.push(item("Comparar contenido", Command::CompareContents));
+        }
         // Con varios seleccionados en una carpeta del disco: Renombrar varios.
         let n = self.panes[self.active].tab().list.selected_positions().len();
         if n > 1 && self.can_rename_many(self.active) {

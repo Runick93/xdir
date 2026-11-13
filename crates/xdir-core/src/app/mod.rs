@@ -6,6 +6,8 @@ mod actions;
 mod appearance;
 mod archive_nav;
 mod changelog;
+mod checksum;
+mod compare;
 mod edit;
 mod events;
 mod favs;
@@ -54,6 +56,8 @@ mod settings_tests;
 mod changelog_tests;
 #[cfg(test)]
 mod sel_size_tests;
+#[cfg(test)]
+mod compare_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -198,6 +202,8 @@ enum Hit {
     SizeLink,
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
+    /// El panel de comparar: un botón, o el panel sin nada debajo.
+    Compare(crate::compare::draw::CompareHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
     /// «Conectar a un servidor» abierto: un control, o el panel sin nada debajo.
@@ -486,6 +492,10 @@ pub struct App {
     quick_look: Option<quick_look::QlState>,
     /// Renombrar varios abierto (el panel de la derecha y la vista previa en la lista).
     rename_many: Option<rename_many::RenameMany>,
+    /// «Comparar contenido» abierto (el panel de la derecha con los dos archivos).
+    compare: Option<compare::CompareState>,
+    /// Trabajos de comparar y de las sumas de verificación (canal y límite de la red).
+    jobs: compare::Jobs,
     /// Hay un Renombrar varios (o su deshacer) corriendo: no se larga otro hasta que termine.
     renaming: bool,
     /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
@@ -702,6 +712,8 @@ impl App {
             info: info::InfoState::new(session.info_sections),
             quick_look: None,
             rename_many: None,
+            compare: None,
+            jobs: compare::Jobs::new(),
             renaming: false,
             swallow_space: false,
             transfers: transfers::Transfers::new(),

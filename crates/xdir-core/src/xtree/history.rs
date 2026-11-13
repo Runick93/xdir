@@ -2,7 +2,8 @@
 //! los dos primeros niveles y de las que pesan 100 MB o más, guardada por raíz en la carpeta de
 //! configuración (`xtree-historial/<clave>.bin`).
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use super::tree::{NO_PARENT, Node};
 
@@ -292,6 +293,138 @@ impl History {
     }
 }
 
+/// Carpeta del historial dentro de la de configuración.
+pub const DIR_NAME: &str = "xtree-historial";
+
+/// La ruta de la raíz como se compara: sin separador final (salvo que sea solo eso) y en
+/// minúsculas.
+fn norm(root: &Path) -> String {
+    let text = root.to_string_lossy().to_lowercase();
+    let trimmed = text.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() { text } else { trimmed.to_string() }
+}
+
+/// Nombre del archivo de una raíz (sin `.bin`): su último tramo legible y un FNV-1a de la ruta
+/// normalizada, así dos raíces con el mismo nombre no chocan.
+pub fn key(root: &Path) -> String {
+    let n = norm(root);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in n.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let last = n.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("");
+    let mut name: String = last.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).take(40).collect();
+    if name.trim_matches(['_', '.']).is_empty() {
+        name = "raiz".to_string();
+    }
+    format!("{name}-{hash:016x}")
+}
+
+/// Archivo del historial de `root` en la carpeta del historial `dir`.
+pub fn file_for(dir: &Path, root: &Path) -> PathBuf {
+    dir.join(format!("{}.bin", key(root)))
+}
+
+/// El historial de una raíz listo para consultar: por foto, su día, los niveles bajo la raíz que
+/// cubre seguro (2 en la propia; menos si viene de una carpeta de más arriba) y los tamaños por
+/// ruta relativa a la raíz.
+#[derive(Clone, Debug, Default)]
+pub struct Loaded {
+    pub days: Vec<i32>,
+    levels: Vec<i32>,
+    index: HashMap<String, u32>,
+    /// Por foto, pares (índice en `index`, tamaño) ordenados por índice.
+    sizes: Vec<Vec<(u32, u64)>>,
+}
+
+impl Loaded {
+    pub fn is_empty(&self) -> bool {
+        self.days.is_empty()
+    }
+
+    /// Tamaño de la carpeta `rel` en la foto `snap`: el guardado; 0 si no está pero la foto cubre
+    /// su nivel (no existía o estaba vacía); `None` si no se sabe (más abajo y chica).
+    pub fn value(&self, snap: usize, rel: &str) -> Option<u64> {
+        let pairs = self.sizes.get(snap)?;
+        if let Some(&i) = self.index.get(rel)
+            && let Ok(k) = pairs.binary_search_by_key(&i, |p| p.0)
+        {
+            return Some(pairs[k].1);
+        }
+        let depth = if rel.is_empty() { 0 } else { rel.split('/').count() as i32 };
+        (depth <= self.levels[snap]).then_some(0)
+    }
+
+    /// Une una foto (`levels`: niveles cubiertos) si su día no está todavía.
+    fn merge(&mut self, day: i32, levels: i32, pairs: impl Iterator<Item = (String, u64)>) {
+        let Err(at) = self.days.binary_search(&day) else { return };
+        let mut sizes: Vec<(u32, u64)> = pairs
+            .map(|(p, v)| {
+                let n = self.index.len() as u32;
+                (*self.index.entry(p).or_insert(n), v)
+            })
+            .collect();
+        sizes.sort_unstable_by_key(|p| p.0);
+        self.days.insert(at, day);
+        self.levels.insert(at, levels);
+        self.sizes.insert(at, sizes);
+    }
+}
+
+/// Ruta relativa de `root` dentro de `top` (tramos con `/`); `None` si no está adentro.
+fn rel_within(top: &Path, root: &Path) -> Option<String> {
+    let rest = root.strip_prefix(top).ok()?;
+    let parts: Vec<String> = rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    Some(parts.join("/"))
+}
+
+/// El historial guardado de `root` en `dir`, si es de esa raíz y se entiende.
+fn read_own(dir: &Path, root: &Path) -> Option<History> {
+    read_file(&file_for(dir, root)).filter(|h| norm(Path::new(&h.root)) == norm(root))
+}
+
+/// Lee el historial de `root` de la carpeta del historial `dir` (bloqueante: en un hilo de
+/// trabajo): el archivo propio y los de las carpetas de más arriba que la cubran, recortados a
+/// `root` y unidos por día (gana el propio, después el más cercano).
+pub fn load_for(dir: &Path, root: &Path) -> Loaded {
+    let mut out = Loaded::default();
+    for top in root.ancestors() {
+        let Some(prefix) = rel_within(top, root) else { continue };
+        let Some(h) = read_own(dir, top) else { continue };
+        let depth = if prefix.is_empty() { 0 } else { prefix.split('/').count() as i32 };
+        let under = format!("{prefix}/");
+        for snap in &h.snaps {
+            let path = |i: u32| h.paths.get(i as usize).map(String::as_str);
+            // La foto sirve si tiene a la subcarpeta.
+            if !snap.sizes.iter().any(|&(i, _)| path(i) == Some(prefix.as_str())) {
+                continue;
+            }
+            let pairs = snap.sizes.iter().filter_map(|&(i, v)| {
+                let p = path(i)?;
+                if prefix.is_empty() {
+                    Some((p.to_string(), v))
+                } else if p == prefix {
+                    Some((String::new(), v))
+                } else {
+                    p.strip_prefix(under.as_str()).map(|r| (r.to_string(), v))
+                }
+            });
+            out.merge(snap.day, LEVELS as i32 - depth, pairs);
+        }
+    }
+    out
+}
+
+/// Agrega la foto `sizes` del día `today` al historial de `root` y lo escribe (bloqueante: en un
+/// hilo de trabajo). Un archivo roto, de otra versión o de otra raíz se reemplaza.
+pub fn save_snapshot(dir: &Path, root: &Path, today: i32, sizes: &[(String, u64)]) -> std::io::Result<()> {
+    let mut h = read_own(dir, root).unwrap_or_else(|| History { root: root.to_string_lossy().into_owned(), ..Default::default() });
+    h.add(today, sizes);
+    h.consolidate(today);
+    write_file(&file_for(dir, root), &h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +695,93 @@ mod tests {
         h.add(105, &[("".into(), 2)]);
         h.consolidate(101);
         assert_eq!(days(&h), [100]);
+    }
+
+    fn base(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xdir-raices-{name}"))
+    }
+
+    #[test]
+    fn key_is_stable_and_safe() {
+        let r = base("clave").join("Proyectos");
+        let with_sep = PathBuf::from(format!("{}{}", r.display(), std::path::MAIN_SEPARATOR));
+        assert_eq!(key(&r), key(&with_sep));
+        assert_eq!(key(&r), key(&PathBuf::from(r.to_string_lossy().to_uppercase())));
+        assert_ne!(key(&r), key(&base("clave").join("Otros")));
+        assert_ne!(key(&r), key(&base("clave2").join("Proyectos")), "mismo nombre, otra carpeta");
+        let k = key(&base("clave").join("año 2026: ñ*?"));
+        assert!(k.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)), "{k}");
+        assert!(k.starts_with("a_o_2026"), "{k}");
+        assert!(!key(Path::new("/")).is_empty());
+    }
+
+    fn values(l: &Loaded, rel: &str) -> Vec<Option<u64>> {
+        (0..l.days.len()).map(|i| l.value(i, rel)).collect()
+    }
+
+    #[test]
+    fn save_then_load_own_root() {
+        let dir = tmp_dir("propio");
+        let root = base("propio").join("r");
+        save_snapshot(&dir, &root, 100, &[("".into(), 10), ("a".into(), 7), ("a/b/c/d".into(), 300 * MB)]).unwrap();
+        save_snapshot(&dir, &root, 101, &[("".into(), 12), ("x".into(), 2)]).unwrap();
+        save_snapshot(&dir, &root, 101, &[("".into(), 13), ("x".into(), 3)]).unwrap();
+        let l = load_for(&dir, &root);
+        assert_eq!(l.days, [100, 101]);
+        assert_eq!(values(&l, ""), [Some(10), Some(13)]);
+        assert_eq!(values(&l, "a"), [Some(7), Some(0)], "no estar en el primer nivel es pesar 0");
+        assert_eq!(values(&l, "x"), [Some(0), Some(3)]);
+        assert_eq!(values(&l, "a/b/c/d"), [Some(300 * MB), None], "más abajo y sin dato: no se sabe");
+        assert!(load_for(&dir, &base("propio").join("otra")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subfolder_uses_ancestor_snapshots() {
+        let dir = tmp_dir("sub");
+        let top = base("sub");
+        let sub = top.join("a").join("b");
+        save_snapshot(&dir, &top, 100, &[("".into(), 50), ("a".into(), 40), ("a/b".into(), 30), ("a/b/c".into(), 20)]).unwrap();
+        // Una foto de arriba que no tiene a la subcarpeta no sirve.
+        save_snapshot(&dir, &top, 101, &[("".into(), 50), ("a".into(), 40)]).unwrap();
+        save_snapshot(&dir, &top, 102, &[("".into(), 60), ("a/b".into(), 35)]).unwrap();
+        // La propia gana el mismo día.
+        save_snapshot(&dir, &sub, 102, &[("".into(), 36), ("c".into(), 1)]).unwrap();
+        save_snapshot(&dir, &sub, 103, &[("".into(), 37)]).unwrap();
+        let l = load_for(&dir, &sub);
+        assert_eq!(l.days, [100, 102, 103]);
+        assert_eq!(values(&l, ""), [Some(30), Some(36), Some(37)]);
+        // La foto de arriba cubre dos niveles bajo `top`: bajo `a/b` ninguno seguro.
+        assert_eq!(values(&l, "c"), [Some(20), Some(1), Some(0)]);
+        assert_eq!(values(&l, "d"), [None, Some(0), Some(0)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_replaces_broken_or_foreign_file() {
+        let dir = tmp_dir("roto");
+        let root = base("roto").join("r");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(file_for(&dir, &root), b"XDHT\x09\x00basura").unwrap();
+        assert!(load_for(&dir, &root).is_empty());
+        save_snapshot(&dir, &root, 100, &[("".into(), 1)]).unwrap();
+        assert_eq!(load_for(&dir, &root).days, [100]);
+        // Un archivo con esta clave pero de otra raíz (choque de clave) no se mezcla.
+        let other = History { root: base("roto").join("otra").to_string_lossy().into_owned(), paths: vec!["".into()], snaps: vec![Snapshot { day: 90, sizes: vec![(0, 5)] }] };
+        write_file(&file_for(&dir, &root), &other).unwrap();
+        assert!(load_for(&dir, &root).is_empty());
+        save_snapshot(&dir, &root, 100, &[("".into(), 2)]).unwrap();
+        assert_eq!(load_for(&dir, &root).days, [100]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_consolidates() {
+        let dir = tmp_dir("consolida");
+        let root = base("consolida").join("r");
+        save_snapshot(&dir, &root, 100, &[("".into(), 1)]).unwrap();
+        save_snapshot(&dir, &root, 100 + KEEP_DAYS + 1, &[("".into(), 2)]).unwrap();
+        assert_eq!(load_for(&dir, &root).days, [100 + KEEP_DAYS + 1]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

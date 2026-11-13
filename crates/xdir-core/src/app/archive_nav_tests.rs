@@ -565,6 +565,20 @@ fn cancelled_preview_for_refocused_item_is_requested_again() {
     a.archive.pending.insert(path.clone());
     a.archive.prefetch_last = Some(path.clone());
     a.on_task_done(tasks::TaskDone::ArchivePrepared { path: path.clone(), ok: false, cancelled: true });
-    task(&mut a);
-    assert!(a.archive.ready.contains(&path));
+    // Puede haber otra extracción en camino (la que pidió el foco al entrar): la que llegue
+    // primero puede venir cortada por la nueva. Se espera a que el elemento quede listo, sin
+    // suponer en qué orden llegan.
+    tasks_until(&mut a, |a| a.archive.ready.contains(&path));
+}
+
+/// Procesa los trabajos sueltos que lleguen hasta que se cumpla `done` (o 10 s), en el orden que
+/// lleguen.
+fn tasks_until(a: &mut App, done: impl Fn(&App) -> bool) {
+    let t0 = std::time::Instant::now();
+    while !done(a) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "no se cumplió a tiempo");
+        if let Ok(t) = a.task_rx.recv_timeout(Duration::from_millis(50)) {
+            a.on_task_done(t);
+        }
+    }
 }

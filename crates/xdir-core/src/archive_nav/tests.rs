@@ -166,6 +166,37 @@ fn ensure_cut_after_writing_leaves_nothing() {
     t.clean_own();
 }
 
+/// Varias extracciones a la vez de archivos distintos (cada uno con su candado) crean las mismas
+/// carpetas de arriba: que otra la haya creado primero no es un error («Ya existe»).
+#[test]
+fn ensure_in_parallel_shares_parent_dirs() {
+    install_fakes();
+    for round in 0..40 {
+        let b = base(&format!("paralelo-{round}"));
+        let t = std::sync::Arc::new(Temps::new(Some(&b)));
+        let zips: Vec<PathBuf> = (0..8).map(|i| b.join("datos").join(format!("z{i}.zip"))).collect();
+        for z in &zips {
+            FakeArchives::shared().add_archive(z, &[("a.txt", b"a")], 30);
+        }
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(zips.len()));
+        let handles: Vec<_> = zips
+            .into_iter()
+            .map(|z| {
+                let (t, gate) = (t.clone(), gate.clone());
+                std::thread::spawn(move || {
+                    gate.wait();
+                    t.ensure(&z, &[], "a.txt", &super::temps::Limits::up_to(u64::MAX)).map(|_| ()).map_err(|e| e.message())
+                })
+            })
+            .collect();
+        for h in handles {
+            assert_eq!(h.join().unwrap(), Ok(()), "vuelta {round}");
+        }
+        t.clean_own();
+        let _ = std::fs::remove_dir_all(&b);
+    }
+}
+
 /// Un zip dentro de otro se resuelve extrayendo el de adentro a la temporal.
 #[test]
 fn nested_chain_resolves() {

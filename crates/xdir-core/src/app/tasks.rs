@@ -178,8 +178,10 @@ impl App {
     /// «Este equipo» (y sueltan su guardián), se cierra xtree si su raíz está ahí y se vacía la
     /// vista previa. El panel de información suelta lo de ese disco y corta la suma de carpeta:
     /// devuelve su hilo para esperar a que cierre la carpeta que tenía abierta (sale enseguida:
-    /// mira el corte en cada elemento y antes de abrir cada carpeta).
-    pub(super) fn release_volume(&mut self, root: &std::path::Path) -> Option<std::thread::JoinHandle<()>> {
+    /// mira el corte en cada elemento y antes de abrir cada carpeta). También corta las
+    /// comparaciones y sumas de verificación que leen de ahí y devuelve sus hilos (salen en la
+    /// próxima lectura).
+    pub(super) fn release_volume(&mut self, root: &std::path::Path) -> Vec<std::thread::JoinHandle<()>> {
         // La vista rápida de un archivo de ese disco se cierra primero (suelta el archivo). Las
         // miniaturas no guardan nada abierto: con las pestañas fuera del disco no se piden más.
         if self.quick_look_under(root) {
@@ -196,7 +198,10 @@ impl App {
             self.xtree = None;
         }
         self.clear_preview_subject();
-        self.release_info_under(root)
+        let mut waits = self.release_compare_under(root);
+        waits.extend(self.info.sum.release_under(root));
+        waits.extend(self.release_info_under(root));
+        waits
     }
 
     /// Expulsa el disco de `root`. Con operaciones de copia sobre ese disco pregunta si se
@@ -217,11 +222,11 @@ impl App {
 
     /// Suelta lo de xdir en el disco y lo expulsa en otro hilo (sin trabajos de copia encima).
     fn eject_now(&mut self, root: PathBuf) {
-        let summing = self.release_volume(&root);
+        let reading = self.release_volume(&root);
         let fs = sys::file_system();
         let label = fs.drive_label(&fs.drive_name(&root));
         self.spawn_task(move || {
-            if let Some(h) = summing {
+            for h in reading {
                 let _ = h.join();
             }
             let result = sys::shell().eject(&root);

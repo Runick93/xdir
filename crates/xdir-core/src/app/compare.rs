@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
@@ -45,11 +46,25 @@ pub(super) struct Job {
     pub id: u64,
     pub cancel: Arc<AtomicBool>,
     pub progress: Arc<Progress>,
+    /// Es de la red: si se cuelga, no se espera a su hilo.
+    pub remote: bool,
+    /// El hilo que lee (lo deja `compare::run_watched` al arrancarlo).
+    pub worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl Job {
     pub(super) fn stop(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Lo corta y devuelve su hilo para esperar a que suelte los archivos (no si es de la red:
+    /// un servidor colgado no lo dejaría terminar).
+    pub(super) fn release(self) -> Option<std::thread::JoinHandle<()>> {
+        self.stop();
+        if self.remote {
+            return None;
+        }
+        self.worker.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
 
@@ -212,11 +227,13 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Progress::default());
         let (hwnd, tx, limit) = (self.hwnd, self.jobs.tx.clone(), self.jobs.limit);
-        let (c, p) = (cancel.clone(), progress.clone());
+        let is_remote = remote.is_some();
+        let worker = Arc::new(Mutex::new(None));
+        let (c, p, w) = (cancel.clone(), progress.clone(), worker.clone());
         let spawned = std::thread::Builder::new().name("xdir-comparar-vigia".into()).spawn(move || {
             let pw = p.clone();
             let tick = || hwnd.post(WM_APP_COMPARE, 1, 0);
-            let result = compare::run_watched(remote, limit, &c, &p, TICK, &tick, move |stop| work(stop, &pw));
+            let result = compare::run_watched(remote, limit, &c, &p, TICK, &tick, &w, move |stop| work(stop, &pw));
             // Cancelado: nadie lo espera.
             if !c.load(Ordering::Relaxed) && tx.send(wrap(id, result)).is_ok() {
                 hwnd.post(WM_APP_COMPARE, 0, 0);
@@ -225,7 +242,7 @@ impl App {
         if spawned.is_err() {
             let _ = self.jobs.tx.send(JobReply::Compared { id, result: Err(Failure::Failed("No se pudo crear un hilo".into())) });
         }
-        Job { id, cancel, progress }
+        Job { id, cancel, progress, remote: is_remote, worker }
     }
 
     /// `WM_APP_COMPARE`: llegó un resultado (o hay que redibujar el avance).
@@ -267,6 +284,20 @@ impl App {
                 Err(Failure::Failed(m)) => Some(Err(m)),
             };
         }
+    }
+
+    /// Expulsar o desconectar el disco de `root`: si el panel compara (o suma) algo de ahí, se
+    /// cierra y se cortan sus trabajos. Devuelve los hilos para esperar a que suelten los archivos.
+    pub(super) fn release_compare_under(&mut self, root: &std::path::Path) -> Vec<std::thread::JoinHandle<()>> {
+        let Some(st) = &self.compare else { return Vec::new() };
+        if !st.sides.iter().any(|s| s.source.disk_path().starts_with(root)) {
+            return Vec::new();
+        }
+        let Some(mut st) = self.compare.take() else { return Vec::new() };
+        let jobs = [st.job.take(), st.hashes[0].job.take(), st.hashes[1].job.take()];
+        self.compare = Some(st);
+        self.close_compare();
+        jobs.into_iter().flatten().filter_map(Job::release).collect()
     }
 
     /// Cancelar la comparación en curso.

@@ -37,6 +37,17 @@ impl Checksum {
         }
     }
 
+    /// Expulsar el disco de `root`: si la suma lee de ahí, se corta y se olvida; devuelve su hilo
+    /// para esperar a que suelte el archivo.
+    pub(super) fn release_under(&mut self, root: &std::path::Path) -> Option<std::thread::JoinHandle<()>> {
+        if !self.target.as_ref().is_some_and(|t| t.disk_path().starts_with(root)) {
+            return None;
+        }
+        let handle = self.job.take().and_then(|(_, j)| j.release());
+        self.reset(None);
+        handle
+    }
+
     /// Otro archivo (o ninguno): se corta lo que estaba y se olvida todo, salvo el algoritmo.
     pub(super) fn reset(&mut self, target: Option<Source>) {
         self.stop();

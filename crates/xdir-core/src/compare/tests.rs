@@ -193,7 +193,7 @@ fn watched_stalled_network_slow_and_cancel() {
     assert!(sa.remote_host().is_some());
     let t0 = Instant::now();
     let progress = Arc::new(Progress::default());
-    let got = run_watched(sa.remote_host(), Duration::from_millis(200), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, {
+    let got = run_watched(sa.remote_host(), Duration::from_millis(200), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, &std::sync::Mutex::new(None), {
         let (sa, sb, p) = (sa.clone(), sb.clone(), progress.clone());
         move |stop| compare_sources(&sa, &sb, stop, &p)
     });
@@ -207,7 +207,7 @@ fn watched_stalled_network_slow_and_cancel() {
         c2.store(true, Ordering::Relaxed);
     });
     let t0 = Instant::now();
-    let got = run_watched(sa.remote_host(), Duration::from_secs(30), &cancel, &progress, Duration::from_millis(50), &|| {}, {
+    let got = run_watched(sa.remote_host(), Duration::from_secs(30), &cancel, &progress, Duration::from_millis(50), &|| {}, &std::sync::Mutex::new(None), {
         let (sa, sb, p) = (sa.clone(), sb.clone(), progress.clone());
         move |stop| compare_sources(&sa, &sb, stop, &p)
     });
@@ -218,7 +218,7 @@ fn watched_stalled_network_slow_and_cancel() {
     let tick = || {
         ticks.fetch_add(1, Ordering::Relaxed);
     };
-    let ok = run_watched(None, Duration::from_millis(50), &AtomicBool::new(false), &Arc::new(Progress::default()), Duration::from_millis(30), &tick, |_| {
+    let ok = run_watched(None, Duration::from_millis(50), &AtomicBool::new(false), &Arc::new(Progress::default()), Duration::from_millis(30), &tick, &std::sync::Mutex::new(None), |_| {
         std::thread::sleep(Duration::from_millis(200));
         Ok(7)
     });
@@ -284,12 +284,12 @@ fn slow_but_alive_network_is_not_cut() {
     FakeHashes::throttle(&d, 128 << 10, Duration::from_millis(60));
     let (sa, sb) = (Source::Disk(a), Source::Disk(b));
     let progress = Arc::new(Progress::default());
-    let got = run_watched(sa.remote_host(), Duration::from_millis(250), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, {
+    let got = run_watched(sa.remote_host(), Duration::from_millis(250), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, &std::sync::Mutex::new(None), {
         let (sa, sb, p) = (sa.clone(), sb.clone(), progress.clone());
         move |stop| compare_sources(&sa, &sb, stop, &p)
     });
     assert_eq!(got, Ok(Verdict::Same));
-    let got = run_watched(sa.remote_host(), Duration::from_millis(250), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, {
+    let got = run_watched(sa.remote_host(), Duration::from_millis(250), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, &std::sync::Mutex::new(None), {
         let (sa, p) = (sa.clone(), progress.clone());
         move |stop| hash_source(&sa, HashAlgo::Sha256, stop, &p)
     });

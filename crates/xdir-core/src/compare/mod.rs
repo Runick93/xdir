@@ -12,7 +12,8 @@
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
@@ -69,7 +70,7 @@ impl Source {
     }
 
     /// El archivo del disco que hay que leer (el del disco o el comprimido de afuera).
-    fn disk_path(&self) -> &Path {
+    pub fn disk_path(&self) -> &Path {
         match self {
             Source::Disk(p) => p,
             Source::Archive { file, .. } => file,
@@ -264,7 +265,9 @@ pub fn hash_source(src: &Source, algo: HashAlgo, stop: &AtomicBool, progress: &P
 /// enciende, corta y devuelve `Cancelled` enseguida; si es de la red (`remote`, el servidor) y
 /// pasa `limit` sin que `progress` avance, corta con «"srv" no responde». En los dos casos el hilo
 /// queda abandonado si no responde (un servidor colgado no traba nada). Mientras espera, llama a
-/// `tick` cada `every` (para redibujar el avance).
+/// `tick` cada `every` (para redibujar el avance). El hilo que lee queda en `worker` (expulsar un
+/// disco espera a que suelte los archivos).
+#[allow(clippy::too_many_arguments)]
 pub fn run_watched<T: Send + 'static>(
     remote: Option<String>,
     limit: Duration,
@@ -272,6 +275,7 @@ pub fn run_watched<T: Send + 'static>(
     progress: &Arc<Progress>,
     every: Duration,
     tick: &dyn Fn(),
+    worker: &Mutex<Option<JoinHandle<()>>>,
     work: impl FnOnce(&AtomicBool) -> Result<T, Failure> + Send + 'static,
 ) -> Result<T, Failure> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -280,8 +284,9 @@ pub fn run_watched<T: Send + 'static>(
     let spawned = std::thread::Builder::new().name("xdir-comparar".into()).spawn(move || {
         let _ = tx.send(work(&s));
     });
-    if spawned.is_err() {
-        return Err(Failure::Failed("No se pudo crear un hilo".into()));
+    match spawned {
+        Ok(h) => *worker.lock().unwrap_or_else(|e| e.into_inner()) = Some(h),
+        Err(_) => return Err(Failure::Failed("No se pudo crear un hilo".into())),
     }
     let (mut last, mut since) = (progress.beats.load(Ordering::Relaxed), Instant::now());
     let mut ticked = Instant::now();

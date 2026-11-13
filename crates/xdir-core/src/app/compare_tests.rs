@@ -499,3 +499,46 @@ fn info_checksum_inside_an_archive() {
     wait_sum(&mut a);
     assert_eq!(mono_text(&host), sum_of(&d.join("a.txt"), HashAlgo::Sha256));
 }
+
+// ---------- Expulsar ----------
+
+/// Expulsar el disco con una comparación (o una suma del panel de información) leyendo de ahí: se
+/// cierra el panel, se cortan los trabajos y se espera a que suelten los archivos antes de expulsar.
+#[test]
+fn eject_stops_compare_and_checksum_and_waits() {
+    use crate::sys::testing::{FakeFileSystem, FakeHashes, FakeShell};
+    for info in [false, true] {
+        let mut a = app(FakeHost::new());
+        let big = vec![4u8; 3 << 20];
+        let root = fixture(if info { "expulsa-suma" } else { "expulsa-comparar" }, &[("a.bin", &big), ("b.bin", &big)]);
+        FakeFileSystem::set_drives(&[(&root, "PENDRIVE")]);
+        a.ejectable.insert(root.clone());
+        FakeShell::set_eject_result(&root, Ok(()));
+        // Cada lectura tarda: el trabajo queda leyendo cuando se expulsa.
+        FakeNetwork::hang(&root.to_string_lossy(), Duration::from_millis(300));
+        go(&mut a, 0, Location::Path(root.clone()));
+        a.set_active(0);
+        if info {
+            select(&mut a, 0, &["a.bin"]);
+            open_info(&mut a);
+            a.start_checksum(HashAlgo::Sha256);
+        } else {
+            select(&mut a, 0, &["a.bin", "b.bin"]);
+            a.run_command(Command::CompareContents);
+        }
+        let t0 = Instant::now();
+        while FakeHashes::open_readers(&root) == 0 {
+            assert!(t0.elapsed() < Duration::from_secs(10), "no empezó a leer");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        a.run_command(Command::Eject);
+        assert!(a.compare.is_none() && a.info.sum.job.is_none(), "se cortó al soltar el disco");
+        while a.notice.is_none() {
+            let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("expulsar termina");
+            a.on_task_done(t);
+        }
+        assert_eq!(FakeHashes::open_readers(&root), 0, "se expulsó con archivos abiertos");
+        assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"PENDRIVE\" con seguridad"));
+        FakeFileSystem::set_drives(&[]);
+    }
+}

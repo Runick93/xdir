@@ -15,12 +15,19 @@ pub struct FakeHashes;
 
 /// Rutas lentas pero vivas: (carpeta, bytes por lectura, pausa antes de cada una).
 static THROTTLED: Mutex<Vec<(PathBuf, usize, Duration)>> = Mutex::new(Vec::new());
+/// Archivos abiertos ahora (uno por lector vivo).
+static OPEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 impl FakeHashes {
     /// Lo que está bajo `prefix` se lee de a `chunk` bytes, con `delay` antes de cada lectura
     /// (una red lenta que sigue respondiendo). En todos los hilos; cada prueba usa rutas propias.
     pub fn throttle(prefix: &Path, chunk: usize, delay: Duration) {
         THROTTLED.lock().unwrap_or_else(|e| e.into_inner()).push((prefix.to_path_buf(), chunk, delay));
+    }
+
+    /// Cuántos lectores siguen abiertos bajo `prefix` (expulsar tiene que esperar a que se cierren).
+    pub fn open_readers(prefix: &Path) -> usize {
+        OPEN.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|p| p.starts_with(prefix)).count()
     }
 
     fn throttle_for(path: &Path) -> Option<(usize, Duration)> {
@@ -33,6 +40,23 @@ struct Slow<R> {
     inner: R,
     hang: Option<Duration>,
     chunk: Option<usize>,
+    path: PathBuf,
+}
+
+impl<R> Slow<R> {
+    fn new(inner: R, hang: Option<Duration>, chunk: Option<usize>, path: &Path) -> Slow<R> {
+        OPEN.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
+        Slow { inner, hang, chunk, path: path.to_path_buf() }
+    }
+}
+
+impl<R> Drop for Slow<R> {
+    fn drop(&mut self) {
+        let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = open.iter().position(|p| *p == self.path) {
+            open.remove(i);
+        }
+    }
 }
 
 impl<R: Read> Read for Slow<R> {
@@ -54,11 +78,11 @@ impl Hashes for FakeHashes {
         if disk.exists(path) {
             let data = disk.read_content(path)?;
             let size = data.len() as u64;
-            return Ok(Opened { reader: Box::new(Slow { inner: Cursor::new(data), hang, chunk }), size });
+            return Ok(Opened { reader: Box::new(Slow::new(Cursor::new(data), hang, chunk, path)), size });
         }
         let f = std::fs::File::open(path).map_err(|e| io_error(&e, path))?;
         let size = f.metadata().map_err(|e| io_error(&e, path))?.len();
-        Ok(Opened { reader: Box::new(Slow { inner: f, hang, chunk }), size })
+        Ok(Opened { reader: Box::new(Slow::new(f, hang, chunk, path)), size })
     }
 
     fn hash(&self, r: &mut dyn Read, algo: HashAlgo, progress: &mut dyn FnMut(u64) -> Flow) -> io::Result<Option<String>> {

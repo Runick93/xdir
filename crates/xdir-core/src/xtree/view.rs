@@ -887,6 +887,10 @@ impl Xtree {
         self.go(0);
         // Una raíz que no se pudo leer no deja foto (se lee lo que había).
         let complete = !self.progress().root_failed.load(Ordering::Relaxed);
+        // Las carpetas sin leer (permisos): su tamaño y el de las de arriba es «al menos».
+        let denied = self.progress().denied_nodes.lock().map(|v| v.clone()).unwrap_or_default();
+        let overflow = self.progress().denied_overflow.load(Ordering::Relaxed);
+        self.hist.set_partial_now(&self.arena, &denied, overflow);
         self.hist.after_scan(self.hwnd, self.scan.id, &self.root, &self.arena, complete);
         // Los nodos son otros: la búsqueda abierta se repite sobre el árbol terminado.
         self.refresh_search();

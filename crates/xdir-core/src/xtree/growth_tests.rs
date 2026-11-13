@@ -375,3 +375,32 @@ fn growers_cache_dropped_on_new_data() {
     assert!(!x.hist.growers_cached(), "historial nuevo");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Primer análisis sin permiso para «a» (macOS sin Acceso total al disco), el siguiente con
+/// permiso: «a» no aparece como que creció de golpe (ni ▲ ni «Más crecieron») y el cambio de la raíz
+/// es aproximado («≈»).
+#[test]
+fn denied_then_allowed_is_not_growth() {
+    let dir = tmp("sin-permiso");
+    let root = tmp("raiz-sin-permiso");
+    let mut x = view(&root, &dir, 493);
+    // tree(): 1 = a, 2 = b. «a» no se pudo leer: pesa 0 y su hija no aparece.
+    let mut first = tree("r", 0, 0, 3 * GB);
+    first[1].children.clear();
+    first.truncate(4);
+    x.scan.progress.denied_nodes.lock().unwrap().push(1);
+    finish_with(&mut x, first);
+    wait_history(&mut x);
+    x.scan.progress.clear_denied();
+    x.set_today(Some(500));
+    finish_with(&mut x, tree("r", 20 * GB, 10 * GB, 3 * GB));
+    wait_history(&mut x);
+    let t = texts(&mut x);
+    assert!(t.iter().any(|s| s.starts_with("\u{2248} +20,0 GB")), "{t:?}");
+    assert!(t.iter().any(|s| s == "Ninguna subcarpeta creció"), "«a» no entra: {t:?}");
+    assert!(x.mark_tip(1).is_none(), "sin ▲ en «a»");
+    // «a/a1» no estaba en la foto, pero debajo de una sin leer: no se sabe (no es «nueva»).
+    let l = x.hist.loaded.clone().unwrap();
+    assert_eq!(l.lookup(0, "a/a1"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

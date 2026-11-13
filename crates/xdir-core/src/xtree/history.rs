@@ -28,17 +28,39 @@ pub fn select(arena: &[Node]) -> Vec<(String, u64)> {
 pub struct Photo {
     pub sizes: Vec<(String, u64)>,
     pub capped: bool,
+    /// Carpetas de la foto con algo adentro que no se pudo leer (permisos): su tamaño es «al
+    /// menos». Son las carpetas sin leer y todas las de arriba.
+    pub partial: Vec<String>,
 }
 
 /// `select` con el aviso de recorte. Con más de `MAX_ENTRIES` quedan las más pesadas; a igual
 /// tamaño, las de menos nivel y después por ruta: una carpeta pesa al menos lo que sus hijas, así
 /// que nunca queda una hija sin su madre, y el mismo árbol da siempre la misma foto.
 pub fn select_photo(arena: &[Node]) -> Photo {
+    select_photo_with(arena, &[])
+}
+
+/// `select_photo` con las carpetas que el escáner no pudo leer (`denied`, nodos del árbol): entran
+/// en la foto aunque pesen 0 (si están en los dos primeros niveles) y quedan marcadas como
+/// parciales junto con todas las de arriba.
+pub fn select_photo_with(arena: &[Node], denied: &[u32]) -> Photo {
     // La auditoría del hilo de interfaz: armar la foto recorre medio árbol, va en el hilo.
     #[cfg(test)]
     crate::sys::testing::FakeNetwork::note_disk_io("historial armar la foto", Path::new(""));
     let Some(root) = arena.first().filter(|n| n.parent == NO_PARENT) else { return Photo::default() };
+    // Las sin leer y todas las de arriba.
+    let mut partial_ids = std::collections::HashSet::new();
+    for &d in denied {
+        let mut cur = d;
+        while (cur as usize) < arena.len() && partial_ids.insert(cur) {
+            cur = arena[cur as usize].parent;
+        }
+    }
     let mut out = vec![(String::new(), root.size)];
+    let mut partial: Vec<String> = Vec::new();
+    if partial_ids.contains(&0) {
+        partial.push(String::new());
+    }
     // (nodo, nivel, ruta). Debajo del segundo nivel solo se baja por carpetas grandes: lo de
     // adentro de una carpeta chica es más chico todavía.
     let mut stack: Vec<(u32, usize, String)> = vec![(0, 0, String::new())];
@@ -48,7 +70,8 @@ pub fn select_photo(arena: &[Node]) -> Photo {
             let Some(k) = arena.get(c as usize) else { continue };
             // Un nombre que no era UTF-8 (Linux) llega con el carácter de reemplazo y puede quedar
             // igual a otro: ni él ni lo de adentro entran (nunca se mezclan dos carpetas).
-            if !k.is_dir || k.small || k.size == 0 || k.name.contains(char::REPLACEMENT_CHARACTER) {
+            let part = partial_ids.contains(&c);
+            if !k.is_dir || k.small || (k.size == 0 && !part) || k.name.contains(char::REPLACEMENT_CHARACTER) {
                 continue;
             }
             let d = depth + 1;
@@ -59,6 +82,9 @@ pub fn select_photo(arena: &[Node]) -> Photo {
             if p.len() > MAX_PATH {
                 continue;
             }
+            if part {
+                partial.push(p.clone());
+            }
             out.push((p.clone(), k.size));
             stack.push((c, d, p));
         }
@@ -68,14 +94,16 @@ pub fn select_photo(arena: &[Node]) -> Photo {
         let level = |p: &str| p.bytes().filter(|&b| b == b'/').count();
         out[1..].sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| level(&a.0).cmp(&level(&b.0))).then_with(|| a.0.cmp(&b.0)));
         out.truncate(MAX_ENTRIES);
+        let kept: std::collections::HashSet<&str> = out.iter().map(|e| e.0.as_str()).collect();
+        partial.retain(|p| kept.contains(p.as_str()));
     }
-    Photo { sizes: out, capped }
+    Photo { sizes: out, capped, partial }
 }
 
 /// Versión del formato de `xtree-historial/*.bin`. Un archivo de otra versión se ignora (y se
 /// reemplaza con la próxima foto).
-/// 2: cada foto dice si se recortó por el tope.
-pub const VERSION: u16 = 2;
+/// 2: cada foto dice si se recortó por el tope. 3: y qué carpetas tenían algo sin leer.
+pub const VERSION: u16 = 3;
 const MAGIC: &[u8; 4] = b"XDHT";
 /// Tope del archivo: uno más grande no se lee.
 pub const MAX_FILE: usize = 32 * 1024 * 1024;
@@ -96,6 +124,8 @@ pub struct Snapshot {
     pub sizes: Vec<(u32, u64)>,
     /// Se recortó por el tope: lo que falta no se sabe cuánto pesaba.
     pub capped: bool,
+    /// Índices (de la tabla de rutas, en orden) de las carpetas con algo sin leer: «al menos».
+    pub partial: Vec<u32>,
 }
 
 /// El historial de una raíz: su ruta, la tabla de rutas relativas (compartida por todas las fotos)
@@ -134,7 +164,12 @@ fn pruned(h: &History) -> History {
     let snaps = h
         .snaps
         .iter()
-        .map(|s| Snapshot { day: s.day, capped: s.capped, sizes: s.sizes.iter().filter_map(|&(i, v)| map.get(i as usize).map(|&j| (j, v))).collect() })
+        .map(|s| Snapshot {
+            day: s.day,
+            capped: s.capped,
+            sizes: s.sizes.iter().filter_map(|&(i, v)| map.get(i as usize).map(|&j| (j, v))).collect(),
+            partial: s.partial.iter().filter_map(|&i| map.get(i as usize).copied().filter(|&j| j != u32::MAX)).collect(),
+        })
         .collect();
     History { root: h.root.clone(), paths, snaps }
 }
@@ -155,7 +190,7 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
 /// Little endian; enteros sin signo en LEB128: `XDHT`, `u16` versión, raíz (largo + UTF-8),
 /// cantidad de rutas y cada una (largo + UTF-8, relativa, tramos con `/`), cantidad de fotos y por
 /// foto `i32` día, `u8` banderas (1 = recortada), cantidad de pares y cada par (índice de ruta,
-/// tamaño).
+/// tamaño), y la cantidad de carpetas parciales y sus índices de ruta (en orden, de las del par).
 fn encode_raw(h: &History) -> Vec<u8> {
     let mut out = MAGIC.to_vec();
     out.extend(VERSION.to_le_bytes());
@@ -172,6 +207,10 @@ fn encode_raw(h: &History) -> Vec<u8> {
         for &(i, v) in &s.sizes {
             put_uint(&mut out, i as u64);
             put_uint(&mut out, v);
+        }
+        put_uint(&mut out, s.partial.len() as u64);
+        for &i in &s.partial {
+            put_uint(&mut out, i as u64);
         }
     }
     out
@@ -262,7 +301,17 @@ pub fn decode(bytes: &[u8]) -> Option<History> {
             }
             sizes.push((i, r.uint()?));
         }
-        snaps.push(Snapshot { day, sizes, capped });
+        // Las parciales: en orden estricto y todas de los pares de esta foto.
+        let m = r.count(1, n)?;
+        let mut partial: Vec<u32> = Vec::with_capacity(m);
+        for _ in 0..m {
+            let i = u32::try_from(r.uint()?).ok().filter(|&i| (i as usize) < paths.len() && seen[i as usize] == k as u32)?;
+            if partial.last().is_some_and(|&l| l >= i) {
+                return None;
+            }
+            partial.push(i);
+        }
+        snaps.push(Snapshot { day, sizes, capped, partial });
     }
     r.0.is_empty().then_some(History { root, paths, snaps })
 }
@@ -334,11 +383,12 @@ pub const KEEP_DAYS: i32 = 365;
 impl History {
     /// Agrega la foto `sizes` del día `day`; una del mismo día se reemplaza.
     pub fn add(&mut self, day: i32, sizes: &[(String, u64)]) {
-        self.add_photo(day, sizes, false);
+        self.add_photo(day, &Photo { sizes: sizes.to_vec(), ..Default::default() });
     }
 
-    /// `add` con el aviso de recorte de la foto.
-    pub fn add_photo(&mut self, day: i32, sizes: &[(String, u64)], capped: bool) {
+    /// `add` con una foto armada (aviso de recorte y carpetas parciales).
+    pub fn add_photo(&mut self, day: i32, photo: &Photo) {
+        let sizes = &photo.sizes;
         let mut index: std::collections::HashMap<&str, u32> = self.paths.iter().enumerate().map(|(i, p)| (p.as_str(), i as u32)).collect();
         let mut new_paths = Vec::new();
         let mut pairs = Vec::with_capacity(sizes.len());
@@ -354,9 +404,12 @@ impl History {
             };
             pairs.push((i, *v));
         }
+        let mut partial: Vec<u32> = photo.partial.iter().filter_map(|p| index.get(p.as_str()).copied()).collect();
+        partial.sort_unstable();
+        partial.dedup();
         drop(index);
         self.paths.extend(new_paths);
-        let snap = Snapshot { day, sizes: pairs, capped };
+        let snap = Snapshot { day, sizes: pairs, capped: photo.capped, partial };
         match self.snaps.binary_search_by_key(&day, |s| s.day) {
             Ok(i) => self.snaps[i] = snap,
             Err(i) => self.snaps.insert(i, snap),
@@ -506,6 +559,8 @@ pub struct Loaded {
     index: HashMap<String, u32>,
     /// Por foto, pares (índice en `index`, tamaño) ordenados por índice.
     sizes: Vec<Vec<(u32, u64)>>,
+    /// Por foto, las carpetas (índice en `index`, en orden) con algo sin leer.
+    partial: Vec<Vec<u32>>,
 }
 
 impl Loaded {
@@ -540,8 +595,26 @@ impl Loaded {
         {
             return Some(Some(pairs[k].1));
         }
+        // Debajo de una carpeta con algo sin leer (salvo la raíz: las sin leer del primer nivel
+        // están en la foto): no se sabe.
+        let mut up = rel;
+        while let Some((parent, _)) = up.rsplit_once('/') {
+            if self.partial_folded(snap, parent) {
+                return None;
+            }
+            up = parent;
+        }
         let depth = if rel.is_empty() { 0 } else { rel.split('/').count() as i32 };
         (depth <= self.levels[snap] && !self.capped[snap]).then_some(None)
+    }
+
+    /// ¿La carpeta `rel` tenía algo sin leer en la foto `snap`? (su tamaño es «al menos»).
+    pub fn partial(&self, snap: usize, rel: &str) -> bool {
+        if self.fold { self.partial_folded(snap, &rel.to_lowercase()) } else { self.partial_folded(snap, rel) }
+    }
+
+    fn partial_folded(&self, snap: usize, rel: &str) -> bool {
+        self.index.get(rel).is_some_and(|i| self.partial.get(snap).is_some_and(|p| p.binary_search(i).is_ok()))
     }
 
     /// Índice de la ruta `rel` (la agrega si no estaba).
@@ -556,9 +629,11 @@ impl Loaded {
 
     /// Une una foto (`levels`: niveles cubiertos; pares por índice de `intern`) si su día no está
     /// todavía.
-    fn merge(&mut self, day: i32, levels: i32, capped: bool, mut sizes: Vec<(u32, u64)>) {
+    fn merge(&mut self, day: i32, levels: i32, capped: bool, mut sizes: Vec<(u32, u64)>, mut partial: Vec<u32>) {
         let Err(at) = self.days.binary_search(&day) else { return };
         sizes.sort_unstable_by_key(|p| p.0);
+        partial.sort_unstable();
+        self.partial.insert(at, partial);
         self.days.insert(at, day);
         self.levels.insert(at, levels);
         self.capped.insert(at, capped);
@@ -622,7 +697,8 @@ pub fn load_case(dir: &Path, root: &Path, fold: bool) -> Loaded {
             if !pairs.iter().any(|&(j, _)| j == top_id) {
                 continue;
             }
-            out.merge(snap.day, LEVELS as i32 - depth, snap.capped, pairs);
+            let partial = snap.partial.iter().filter_map(|&i| map.get(i as usize).copied().flatten()).collect();
+            out.merge(snap.day, LEVELS as i32 - depth, snap.capped, pairs, partial);
         }
     }
     out
@@ -631,7 +707,7 @@ pub fn load_case(dir: &Path, root: &Path, fold: bool) -> Loaded {
 /// Agrega la foto `sizes` del día `today` al historial de `root` y lo escribe (bloqueante: en un
 /// hilo de trabajo). Un archivo roto, de otra versión o de otra raíz se reemplaza.
 pub fn save_snapshot(dir: &Path, root: &Path, today: i32, sizes: &[(String, u64)]) -> std::io::Result<()> {
-    save_photo(dir, root, today, &Photo { sizes: sizes.to_vec(), capped: false })
+    save_photo(dir, root, today, &Photo { sizes: sizes.to_vec(), ..Default::default() })
 }
 
 /// `save_snapshot` con una foto armada (con su aviso de recorte).
@@ -642,7 +718,7 @@ pub fn save_photo(dir: &Path, root: &Path, today: i32, photo: &Photo) -> std::io
 /// `save_photo` con la regla de mayúsculas dada.
 pub fn save_photo_case(dir: &Path, root: &Path, today: i32, photo: &Photo, fold: bool) -> std::io::Result<()> {
     let mut h = read_own(dir, root, fold).unwrap_or_else(|| History { root: root.to_string_lossy().into_owned(), ..Default::default() });
-    h.add_photo(today, &photo.sizes, photo.capped);
+    h.add_photo(today, photo);
     h.consolidate(today);
     let file = file_for_case(dir, root, fold);
     if let Some(name) = file.file_name() {
@@ -719,8 +795,8 @@ mod tests {
             root: "/Users/x/Proyectos".into(),
             paths: vec!["".into(), "a".into(), "a/ñandú".into(), "sin usar".into()],
             snaps: vec![
-                Snapshot { day: 20_400, sizes: vec![(0, 10), (1, 7)], capped: false },
-                Snapshot { day: 20_401, sizes: vec![(0, 12 * 1024 * MB), (2, u64::MAX)], capped: false },
+                Snapshot { day: 20_400, sizes: vec![(0, 10), (1, 7)], capped: false, partial: vec![] },
+                Snapshot { day: 20_401, sizes: vec![(0, 12 * 1024 * MB), (2, u64::MAX)], capped: false, partial: vec![] },
             ],
         }
     }
@@ -747,7 +823,7 @@ mod tests {
     fn encode_dedups_paths_across_snapshots() {
         let mut h = hist_pruned();
         let one = encode(&h).len();
-        h.snaps.push(Snapshot { day: 20_402, sizes: vec![(0, 1), (1, 1), (2, 1)], capped: false });
+        h.snaps.push(Snapshot { day: 20_402, sizes: vec![(0, 1), (1, 1), (2, 1)], capped: false, partial: vec![] });
         // La foto nueva suma el día, la cantidad y tres pares chicos: las rutas no se repiten.
         assert!(encode(&h).len() - one < 16);
     }
@@ -1005,7 +1081,7 @@ mod tests {
         save_snapshot(&dir, &root, 100, &[("".into(), 1)]).unwrap();
         assert_eq!(load_for(&dir, &root).days, [100]);
         // Un archivo con esta clave pero de otra raíz (choque de clave) no se mezcla.
-        let other = History { root: base("roto").join("otra").to_string_lossy().into_owned(), paths: vec!["".into()], snaps: vec![Snapshot { day: 90, sizes: vec![(0, 5)], capped: false }] };
+        let other = History { root: base("roto").join("otra").to_string_lossy().into_owned(), paths: vec!["".into()], snaps: vec![Snapshot { day: 90, sizes: vec![(0, 5)], capped: false, partial: vec![] }] };
         write_file(&file_for(&dir, &root), &other).unwrap();
         assert!(load_for(&dir, &root).is_empty());
         save_snapshot(&dir, &root, 100, &[("".into(), 2)]).unwrap();
@@ -1063,13 +1139,13 @@ mod tests {
         b.push(0);
         assert_eq!(decode(&b), None, "ruta larga");
         // El mismo índice dos veces en una foto.
-        let h = History { root: "r".into(), paths: vec!["".into(), "a".into()], snaps: vec![Snapshot { day: 1, sizes: vec![(1, 5), (1, 6)], capped: false }] };
+        let h = History { root: "r".into(), paths: vec!["".into(), "a".into()], snaps: vec![Snapshot { day: 1, sizes: vec![(1, 5), (1, 6)], capped: false, partial: vec![] }] };
         assert_eq!(decode(&encode_raw(&h)), None, "índice repetido");
         // Más pares en total que el tope.
         let paths: Vec<String> = (0..MAX_ENTRIES).map(|i| i.to_string()).collect();
         let sizes: Vec<(u32, u64)> = (0..MAX_ENTRIES as u32).map(|i| (i, 1)).collect();
         let n = MAX_PAIRS / MAX_ENTRIES + 1;
-        let snaps = (0..n).map(|d| Snapshot { day: d as i32, sizes: sizes.clone(), capped: false }).collect();
+        let snaps = (0..n).map(|d| Snapshot { day: d as i32, sizes: sizes.clone(), capped: false, partial: vec![] }).collect();
         let h = History { root: "r".into(), paths, snaps };
         assert_eq!(decode(&encode_raw(&h)), None, "demasiados pares");
     }
@@ -1124,7 +1200,7 @@ mod tests {
     fn capped_photo_absent_is_unknown() {
         let dir = tmp_dir("recortada");
         let root = base("recortada").join("r");
-        let cut = Photo { sizes: vec![("".into(), 10), ("a".into(), 7)], capped: true };
+        let cut = Photo { sizes: vec![("".into(), 10), ("a".into(), 7)], capped: true, partial: vec![] };
         save_photo(&dir, &root, 100, &cut).unwrap();
         save_snapshot(&dir, &root, 101, &[("".into(), 10), ("a".into(), 7)]).unwrap();
         let l = load_for(&dir, &root);
@@ -1141,7 +1217,7 @@ mod tests {
     fn case_rule_comes_from_the_volume() {
         let dir = tmp_dir("mayusculas");
         let top = base("mayusculas").join("Top");
-        save_photo_case(&dir, &top, 100, &Photo { sizes: vec![("".into(), 9), ("Sub".into(), 5), ("Sub/X".into(), 3)], capped: false }, true).unwrap();
+        save_photo_case(&dir, &top, 100, &Photo { sizes: vec![("".into(), 9), ("Sub".into(), 5), ("Sub/X".into(), 3)], capped: false, partial: vec![] }, true).unwrap();
         let low = base("mayusculas").join("top").join("sub");
         let l = load_case(&dir, &low, true);
         assert_eq!(l.days, [100]);
@@ -1151,8 +1227,8 @@ mod tests {
         // Distingue: dos raíces que solo cambian en mayúsculas no comparten archivo.
         let dir2 = tmp_dir("mayusculas2");
         let (a, b) = (base("may2").join("Foo"), base("may2").join("foo"));
-        save_photo_case(&dir2, &a, 100, &Photo { sizes: vec![("".into(), 1)], capped: false }, false).unwrap();
-        save_photo_case(&dir2, &b, 100, &Photo { sizes: vec![("".into(), 2)], capped: false }, false).unwrap();
+        save_photo_case(&dir2, &a, 100, &Photo { sizes: vec![("".into(), 1)], capped: false, partial: vec![] }, false).unwrap();
+        save_photo_case(&dir2, &b, 100, &Photo { sizes: vec![("".into(), 2)], capped: false, partial: vec![] }, false).unwrap();
         assert_eq!(load_case(&dir2, &a, false).value(0, ""), Some(1));
         assert_eq!(load_case(&dir2, &b, false).value(0, ""), Some(2));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1178,7 +1254,7 @@ mod tests {
         for f in [&old, &other] {
             std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
         }
-        save_photo_case(&dir, &root, 100, &Photo { sizes: vec![("".into(), 1)], capped: false }, true).unwrap();
+        save_photo_case(&dir, &root, 100, &Photo { sizes: vec![("".into(), 1)], capped: false, partial: vec![] }, true).unwrap();
         assert!(!old.exists(), "el viejo de esta raíz se va");
         assert!(fresh.exists(), "uno reciente puede ser de otra escritura");
         assert!(other.exists(), "los de otra raíz no se tocan acá");
@@ -1211,6 +1287,37 @@ mod tests {
         assert_eq!(l.value(0, "b"), Some(10 * MB));
         assert_eq!(l.lookup(0, "a\u{FFFD}"), None, "no se sabe, no «no estaba»");
         assert_eq!(l.lookup(0, "a\u{FFFD}/hija"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Carpetas sin leer (permisos): entran en la foto como «parciales» junto con todas las de
+    /// arriba; lo que está debajo de una parcial y no está en la foto no se sabe (no es «nueva»).
+    #[test]
+    fn denied_folders_are_partial() {
+        let t = vec![
+            node("/r", NO_PARENT, 10 * MB, true, vec![1, 2, 3]),
+            node("a", 0, 0, true, vec![]),
+            node("b", 0, 5 * MB, true, vec![]),
+            node("d", 0, 5 * MB, true, vec![4]),
+            node("e", 3, 5 * MB, true, vec![5]),
+            node("f", 4, 0, true, vec![]),
+        ];
+        let p = select_photo_with(&t, &[1, 5]);
+        let mut partial = p.partial.clone();
+        partial.sort();
+        assert_eq!(partial, ["", "a", "d", "d/e"]);
+        assert!(p.sizes.iter().any(|(r, s)| r == "a" && *s == 0), "la negada entra aunque pese 0");
+        let dir = tmp_dir("parciales");
+        let root = base("parciales").join("r");
+        save_photo(&dir, &root, 100, &p).unwrap();
+        let l = load_for(&dir, &root);
+        assert!(l.partial(0, "") && l.partial(0, "a") && l.partial(0, "d/e"));
+        assert!(!l.partial(0, "b"));
+        assert_eq!(l.lookup(0, "a/x"), None, "debajo de una sin leer: no se sabe");
+        assert_eq!(l.lookup(0, "zz"), Some(None), "una que no estaba sigue siendo «no estaba»");
+        // Ida y vuelta por el formato.
+        let h = read_file(&file_for(&dir, &root)).unwrap();
+        assert_eq!(decode(&encode(&h)), Some(h.clone()));
+        assert!(!h.snaps[0].partial.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

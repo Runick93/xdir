@@ -133,10 +133,20 @@ impl Activities {
         (!texts.is_empty()).then(|| texts.join(" · "))
     }
 
-    /// Cuándo hace falta el próximo redibujo: mientras haya algo en curso, `FRAME` (el indicador
-    /// gira y lo que espera su umbral aparece a tiempo); sin nada, ninguno.
-    pub fn next_tick(&self) -> Option<Duration> {
-        (!self.items.is_empty()).then_some(FRAME)
+    /// Cuándo hace falta el próximo redibujo: con algo a la vista (o un ⏏ girando), `FRAME`; si
+    /// no, cuando lo próximo pase su umbral. Las lecturas de carpetas antes de los 0,5 s no piden
+    /// nada (el «Cargando…» lo anuncia `update_placeholders`): una lectura rápida no prende el
+    /// temporizador. Sin nada en curso, ninguno.
+    pub fn next_tick(&self, now: Instant) -> Option<Duration> {
+        let spinning = |a: &Activity| a.shown(now) || matches!(a.key, ActivityKey::Eject(_));
+        if self.items.iter().any(spinning) {
+            return Some(FRAME);
+        }
+        self.items
+            .iter()
+            .filter(|a| !matches!(a.key, ActivityKey::Load(_)))
+            .map(|a| (a.since + a.delay).saturating_duration_since(now))
+            .min()
     }
 }
 
@@ -200,9 +210,9 @@ impl App {
 
     /// Después de dibujar: el próximo redibujo, solo mientras haya algo en curso.
     pub(super) fn schedule_activity_tick(&mut self) {
-        let Some(wait) = self.activity.next_tick() else { return };
+        let Some(wait) = self.activity.next_tick(self.now()) else { return };
         let now = Instant::now();
-        if self.activity.tick_due.is_some_and(|d| d > now) {
+        if self.activity.tick_due.is_some_and(|d| d > now && d <= now + wait) {
             return;
         }
         self.activity.tick_due = Some(now + wait);
@@ -286,10 +296,19 @@ mod tests {
     fn ticks_only_while_active() {
         let t0 = Instant::now();
         let mut a = Activities::default();
-        assert_eq!(a.next_tick(), None);
+        assert_eq!(a.next_tick(t0), None);
+        // Antes del umbral, un solo redibujo cuando lo pasa; después, uno por cuadro.
         a.begin(ActivityKey::SelSize, "x", t0);
-        assert_eq!(a.next_tick(), Some(FRAME));
+        assert_eq!(a.next_tick(t0 + ms(100)), Some(ms(200)));
+        assert_eq!(a.next_tick(t0 + ms(300)), Some(FRAME));
         a.end(&ActivityKey::SelSize);
-        assert_eq!(a.next_tick(), None);
+        assert_eq!(a.next_tick(t0 + ms(300)), None);
+        // Expulsar: su ⏏ gira desde el principio.
+        a.set_derived(vec![(ActivityKey::Eject("e".into()), "Expulsando".into(), Some(t0), SHOW_AFTER)], t0);
+        assert_eq!(a.next_tick(t0), Some(FRAME));
+        // Una lectura rápida no pide ningún redibujo; pasados los 0,5 s, uno por cuadro.
+        a.set_derived(vec![(ActivityKey::Load(1), "Cargando".into(), Some(t0), crate::tab::LOADING_DELAY)], t0);
+        assert_eq!(a.next_tick(t0 + ms(100)), None);
+        assert_eq!(a.next_tick(t0 + ms(500)), Some(FRAME));
     }
 }

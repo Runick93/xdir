@@ -125,3 +125,20 @@ fn tooltip_lists_everything() {
     a.paint();
     assert_eq!(a.tooltip_text(Hit::Activity).as_deref(), Some("Conectando con \"nas\" · Extrayendo \"foto.jpg\""));
 }
+
+/// Una lectura rápida no prende el temporizador; pasados los 0,5 s, sí (gira «Cargando…»).
+#[test]
+fn fast_load_starts_no_timer() {
+    let (mut a, _host) = app_in("lectura-rapida");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Computer);
+    let t0 = Instant::now();
+    a.panes[0].tab_mut().set_loading_since(Some(t0));
+    a.clock = Some(t0 + ms(100));
+    a.paint();
+    assert!(!a.activity.is_empty());
+    assert_eq!(a.activity.tick_due, None, "sin temporizador antes de los 0,5 s");
+    a.clock = Some(t0 + ms(600));
+    a.paint();
+    assert!(a.activity.tick_due.is_some());
+}

@@ -394,6 +394,9 @@ fn pump_pane(a: &mut App, pane: usize) {
 fn remote_navigation_no_ui_io() {
     let root = remote_dir("n5-nav");
     std::fs::write(root.join("b.txt"), "x").unwrap();
+    // Un comprimido en la carpeta de red (la lista lo ve en el disco; lo de adentro, el falso).
+    std::fs::write(root.join("z.zip"), b"zip").unwrap();
+    crate::sys::testing::FakeArchives::shared().add_archive(&root.join("z.zip"), &[("x.txt", b"hola"), ("y.txt", b"hola")], 30);
     let mut init = Init::blank();
     init.session.panes = vec![crate::session::PaneState { tabs: vec![Location::Path(root.join("sub"))], active: 0 }];
     FakeNetwork::mark_ui_thread();
@@ -474,6 +477,7 @@ fn remote_navigation_no_ui_io() {
         std::thread::sleep(Duration::from_millis(5));
         a.on_compare_message(0);
     }
+    assert_eq!(a.compare.as_ref().unwrap().status, super::compare::Status::Done(crate::compare::Verdict::Same));
     a.compare_hash(0);
     while a.compare.as_ref().is_some_and(|c| c.hashes[0].job.is_some()) {
         assert!(t0.elapsed() < Duration::from_secs(10), "la suma no llegó");
@@ -483,6 +487,26 @@ fn remote_navigation_no_ui_io() {
     assert!(matches!(a.compare.as_ref().unwrap().hashes[0].result, Some(Ok(_))));
     a.paint();
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+    // Dos de adentro de un comprimido en la carpeta de red: se extraen y se comparan en otro hilo.
+    a.go_to_text(0, &root.join("z.zip").to_string_lossy());
+    pump_pane(&mut a, 0);
+    assert!(a.panes[0].tab().location.is_archive());
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        list.set_selected_pos(p, true);
+    }
+    a.run_command(Command::CompareContents);
+    a.paint();
+    while a.compare.as_ref().is_some_and(|c| c.job.is_some()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la comparación en el comprimido no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert_eq!(a.compare.as_ref().unwrap().status, super::compare::Status::Done(crate::compare::Verdict::Same));
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+    a.go_to_text(0, &root.to_string_lossy());
+    pump_pane(&mut a, 0);
     // La suma de verificación del panel de información, con «Comparar con…». (El `FakeInfo`
     // responde en este hilo: lo que lee al abrir el panel es del falso y no cuenta.)
     let list = &mut a.panes[0].tab_mut().list;

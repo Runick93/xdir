@@ -607,6 +607,57 @@ pub struct Loaded {
     denied: Vec<Vec<u32>>,
     /// La ruta de cada índice de `index`.
     names: Vec<String>,
+    /// Por foto, las rutas de las carpetas sin leer, ordenadas (para `same_denied_under`).
+    denied_names: Vec<Vec<String>>,
+}
+
+/// Lo que hay debajo de `rel` (ella incluida) en la lista ordenada `sorted`: si está `rel` y la
+/// tajada de las que empiezan con `rel/` (con `rel` vacía, toda la lista).
+fn under<'a>(sorted: &'a [String], rel: &str) -> (bool, &'a [String]) {
+    if rel.is_empty() {
+        return (false, sorted);
+    }
+    let exact = sorted.binary_search_by(|p| p.as_str().cmp(rel)).is_ok();
+    let (lo, hi) = (format!("{rel}/"), format!("{rel}0"));
+    let a = sorted.partition_point(|p| p.as_str() < lo.as_str());
+    let b = sorted.partition_point(|p| p.as_str() < hi.as_str());
+    (exact, &sorted[a..b])
+}
+
+/// Las carpetas sin leer del análisis de ahora (rutas relativas a la raíz), ordenadas tal cual y en
+/// minúsculas una sola vez por análisis.
+#[derive(Clone, Debug, Default)]
+pub struct DeniedSet {
+    raw: Vec<String>,
+    folded: Vec<String>,
+}
+
+impl DeniedSet {
+    pub fn new(mut raw: Vec<String>) -> DeniedSet {
+        count_build();
+        raw.sort();
+        raw.dedup();
+        let mut folded: Vec<String> = raw.iter().map(|p| p.to_lowercase()).collect();
+        folded.sort();
+        folded.dedup();
+        DeniedSet { raw, folded }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DENIED_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Cuántas listas de carpetas sin leer se armaron en este hilo (pruebas: no por fila).
+#[cfg(test)]
+pub fn denied_builds() -> usize {
+    DENIED_BUILDS.with(std::cell::Cell::get)
+}
+
+fn count_build() {
+    #[cfg(test)]
+    DENIED_BUILDS.with(|c| c.set(c.get() + 1));
 }
 
 impl Loaded {
@@ -661,20 +712,20 @@ impl Loaded {
     }
 
     /// ¿Lo que no se pudo leer debajo de `rel` (ella incluida) en la foto `snap` es lo mismo que
-    /// en `now` (rutas relativas a la raíz de las sin leer del análisis de ahora)? Si es lo mismo,
-    /// las dos mediciones cuentan lo ilegible igual (como 0) y el cambio de `rel` es exacto; si no,
-    /// es aproximado.
-    pub fn same_denied_under(&self, snap: usize, rel: &str, now: &[String]) -> bool {
-        let fold = |t: &str| if self.fold { t.to_lowercase() } else { t.to_string() };
-        let rel = fold(rel);
-        let under = |p: &str| rel.is_empty() || p == rel || p.strip_prefix(rel.as_str()).is_some_and(|r| r.starts_with('/'));
-        let mut base: Vec<&str> = self.denied.get(snap).map(|d| d.iter().filter_map(|&i| self.names.get(i as usize)).map(String::as_str).filter(|p| under(p)).collect()).unwrap_or_default();
-        let now: Vec<String> = now.iter().map(|p| fold(p)).filter(|p| under(p)).collect();
-        let mut now: Vec<&str> = now.iter().map(String::as_str).collect();
-        base.sort_unstable();
-        now.sort_unstable();
-        now.dedup();
-        base == now
+    /// en `now` (las sin leer del análisis de ahora)? Si es lo mismo, las dos mediciones cuentan lo
+    /// ilegible igual (como 0) y el cambio de `rel` es exacto; si no, es aproximado. Las dos listas
+    /// ya están ordenadas: es una búsqueda por rango, sin armar nada.
+    pub fn same_denied_under(&self, snap: usize, rel: &str, now: &DeniedSet) -> bool {
+        let folded;
+        let rel = if self.fold {
+            folded = rel.to_lowercase();
+            folded.as_str()
+        } else {
+            rel
+        };
+        let base = self.denied_names.get(snap).map_or(&[][..], Vec::as_slice);
+        let now = if self.fold { now.folded.as_slice() } else { now.raw.as_slice() };
+        under(base, rel) == under(now, rel)
     }
 
     /// Índice de la ruta `rel` (la agrega si no estaba).
@@ -694,6 +745,10 @@ impl Loaded {
         let Err(at) = self.days.binary_search(&day) else { return };
         sizes.sort_unstable_by_key(|p| p.0);
         denied.sort_unstable();
+        count_build();
+        let mut names: Vec<String> = denied.iter().filter_map(|&i| self.names.get(i as usize).cloned()).collect();
+        names.sort();
+        self.denied_names.insert(at, names);
         self.denied.insert(at, denied);
         self.days.insert(at, day);
         self.levels.insert(at, levels);
@@ -1406,7 +1461,7 @@ mod tests {
         assert_eq!(l.lookup(0, "a/x"), None, "adentro de una sin leer: no se sabe");
         assert_eq!(l.lookup(0, "d/e/f/x"), None);
         assert_eq!(l.lookup(0, "zz"), Some(None), "una que no estaba sigue siendo «no estaba»");
-        let now = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let now = |v: &[&str]| DeniedSet::new(v.iter().map(|s| s.to_string()).collect());
         assert!(l.same_denied_under(0, "", &now(&["a", "d/e/f"])));
         assert!(!l.same_denied_under(0, "", &now(&["a"])), "ahora se leyó «d/e/f»");
         assert!(l.same_denied_under(0, "b", &now(&["a"])), "debajo de «b» no cambió nada");

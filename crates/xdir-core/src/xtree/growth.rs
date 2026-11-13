@@ -46,7 +46,7 @@ pub struct HistState {
     /// Parte de la franja bajo el mouse.
     pub hover: Option<StripHit>,
     /// Rutas (relativas a la raíz) de las carpetas que no se pudieron leer en el análisis de ahora.
-    denied_paths: Vec<String>,
+    denied_paths: history::DeniedSet,
     /// Hubo más sin leer que las anotadas: todo es aproximado.
     partial_all: bool,
     /// Las carpetas sin leer del análisis de ahora (nodos), para la foto.
@@ -188,12 +188,14 @@ impl HistState {
     /// `overflow` (más de las que se anotan), todo.
     pub fn set_partial_now(&mut self, arena: &[Node], denied: &[u32], overflow: bool) {
         // Con la misma regla que la foto (`select_photo_with`): así se comparan iguales.
-        self.denied_paths = denied
-            .iter()
-            .take(history::MAX_DENIED)
-            .map(|&d| rel_path(arena, d))
-            .filter(|p| !p.is_empty() && p.len() <= history::MAX_PATH && !p.contains(char::REPLACEMENT_CHARACTER))
-            .collect();
+        self.denied_paths = history::DeniedSet::new(
+            denied
+                .iter()
+                .take(history::MAX_DENIED)
+                .map(|&d| rel_path(arena, d))
+                .filter(|p| !p.is_empty() && p.len() <= history::MAX_PATH && !p.contains(char::REPLACEMENT_CHARACTER))
+                .collect(),
+        );
         self.partial_all = overflow;
         self.denied_now = Arc::new(denied.to_vec());
         self.growers_cache = None;
@@ -810,5 +812,37 @@ mod tests {
         assert_eq!(row_mark(&h, &t, 1, 100).as_deref(), Some("+20,0 GB en 7 días"));
         assert!(matches!(card_state(&h, &t, 0, 100), CardState::Data(c) if !c.approx));
         assert!(matches!(card_state(&h, &t, 3, 100), CardState::Data(c) if !c.approx), "sin leer las dos veces: 0 y 0");
+    }
+
+    /// Con 10.000 carpetas sin leer, pintar 30 filas (y mover el mouse) no vuelve a armar ni
+    /// ordenar las listas: se arman una vez por análisis (y por historial leído) y cada fila es una
+    /// búsqueda por rango.
+    #[test]
+    fn denied_lookup_is_cheap_per_row() {
+        let n = history::MAX_DENIED as u32;
+        let mut t = vec![node("/r", NO_PARENT, 40 * GB, true, (1..=30).collect())];
+        for i in 0..30 {
+            t.push(node(&format!("c{i:02}"), 0, GB, true, vec![]));
+        }
+        let first = t.len() as u32;
+        for i in 0..n {
+            let parent = 1 + i % 30;
+            t[parent as usize].children.push(first + i);
+            t.push(node(&format!("negada{i}"), parent, 0, true, vec![]));
+        }
+        let sizes: Vec<(&str, u64)> = vec![("", 30 * GB)];
+        let denied: Vec<String> = (0..n).map(|i| format!("c{:02}/negada{i}", i % 30)).collect();
+        let denied_refs: Vec<&str> = denied.iter().map(String::as_str).collect();
+        let l = loaded_denied("barato", &sizes, &denied_refs);
+        let mut h = HistState { loaded: Some(Arc::new(l)), ..Default::default() };
+        let denied_nodes: Vec<u32> = (first..first + n).collect();
+        h.set_partial_now(&t, &denied_nodes, false);
+        let before = history::denied_builds();
+        for _ in 0..10 {
+            for row in 1..=30 {
+                let _ = row_mark(&h, &t, row, 100);
+            }
+        }
+        assert_eq!(history::denied_builds(), before, "ninguna lista armada ni ordenada por fila");
     }
 }

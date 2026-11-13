@@ -62,6 +62,9 @@ pub struct Progress {
     pub denied_nodes: Mutex<Vec<u32>>,
     /// Hubo más carpetas sin leer que las que se anotan.
     pub denied_overflow: AtomicBool,
+    /// Llegó el árbol elevado: lo que siga negando el recorrido normal es de otro árbol y no se
+    /// anota (se cambia con el candado de `denied_nodes` tomado).
+    denied_frozen: AtomicBool,
 }
 
 /// Tope de carpetas sin leer anotadas en `Progress::denied_nodes`.
@@ -71,6 +74,9 @@ impl Progress {
     /// Anota la carpeta `node` que no se pudo leer (con tope).
     fn note_denied(&self, node: u32) {
         let mut v = self.denied_nodes.lock().unwrap_or_else(|e| e.into_inner());
+        if self.denied_frozen.load(Ordering::Relaxed) {
+            return;
+        }
         if v.len() < MAX_DENIED_NODES {
             v.push(node);
         } else {
@@ -78,10 +84,13 @@ impl Progress {
         }
     }
 
-    /// Ya no faltan permisos (llegó el árbol elevado): se olvidan las carpetas sin leer.
+    /// Ya no faltan permisos (llegó el árbol elevado): se olvidan las carpetas sin leer, y las que
+    /// el recorrido normal (cortado) siga negando después ya no se anotan.
     pub fn clear_denied(&self) {
         self.denied.store(0, Ordering::Relaxed);
-        self.denied_nodes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let mut v = self.denied_nodes.lock().unwrap_or_else(|e| e.into_inner());
+        v.clear();
+        self.denied_frozen.store(true, Ordering::Relaxed);
         self.denied_overflow.store(false, Ordering::Relaxed);
     }
 }
@@ -519,6 +528,18 @@ mod tests {
         let mut names: Vec<String> = p.denied_nodes.lock().unwrap().iter().map(|&n| super::super::tree::node_path(&t, Path::new("/r"), n).to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["/r/no", "/r/ok/tampoco"]);
+        assert!(!p.denied_overflow.load(Ordering::Relaxed));
+    }
+
+    /// Llegó el árbol elevado (`clear_denied`): un listado del recorrido normal que termina después
+    /// en «sin permiso» ya no anota su nodo (es de otro árbol).
+    #[test]
+    fn denied_after_elevated_tree_is_ignored() {
+        let p = Progress::default();
+        p.note_denied(3);
+        p.clear_denied();
+        p.note_denied(5);
+        assert!(p.denied_nodes.lock().unwrap().is_empty());
         assert!(!p.denied_overflow.load(Ordering::Relaxed));
     }
 }

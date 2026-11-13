@@ -69,6 +69,9 @@ pub(super) struct NetState {
     pub page: super::network_page::PageState,
     /// Tiempo límite de conectar (`None`: 30 s; las pruebas lo achican).
     pub connect_limit: Option<Duration>,
+    /// Pruebas: el trabajo de conectar entra en pánico.
+    #[cfg(test)]
+    pub panic_connect: bool,
     /// Quien escribe `red.toml`.
     pub writer: net::PlacesWriter,
     /// Fecha de `red.toml` leída (para volver a leerlo si cambió).
@@ -173,27 +176,39 @@ impl App {
         // Hasta que vuelva (`TaskDone::Connected`), en el indicador de actividad.
         let now = self.now();
         self.activity.begin(super::activity::ActivityKey::Connect(generation), format!("Conectando con \"{}\"", addr.host), now);
-        self.spawn_task(move || {
-            // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
-            // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda
-            // huérfano detrás de un error.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let a = addr.clone();
-            std::thread::spawn(move || {
-                let r = sys::network().connect(owner, &a, opts, &AtomicBool::new(false));
-                if let Err(std::sync::mpsc::SendError(Ok(path))) = tx.send(r)
-                    && late_tx.send(TaskDone::LateConnected { generation, addr: a, path }).is_ok()
-                {
-                    owner.post(super::tasks::WM_APP_TASK, 0, 0);
-                }
-            });
-            let result = match rx.recv_timeout(limit) {
-                Ok(r) => r,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NetError::Timeout { host: addr.host.clone() }),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NetError::Other("La conexión terminó sin respuesta".into())),
-            };
-            TaskDone::Connected { pane, tab, generation, addr, result }
-        });
+        #[cfg(test)]
+        let panic_connect = self.net.panic_connect;
+        let fail_addr = addr.clone();
+        self.spawn_task_or(
+            move || {
+                #[cfg(test)]
+                assert!(!panic_connect, "conectar (prueba)");
+                // Como `with_timeout`, pero si la conexión termina bien después de vencer (el usuario
+                // tardó en la ventana de credenciales del sistema), se avisa igual: lo montado no queda
+                // huérfano detrás de un error.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let a = addr.clone();
+                std::thread::spawn(move || {
+                    let r = sys::network().connect(owner, &a, opts, &AtomicBool::new(false));
+                    if let Err(std::sync::mpsc::SendError(Ok(path))) = tx.send(r)
+                        && late_tx.send(TaskDone::LateConnected { generation, addr: a, path }).is_ok()
+                    {
+                        owner.post(super::tasks::WM_APP_TASK, 0, 0);
+                    }
+                });
+                let result = match rx.recv_timeout(limit) {
+                    Ok(r) => r,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NetError::Timeout { host: addr.host.clone() }),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NetError::Other("La conexión terminó sin respuesta".into())),
+                };
+                TaskDone::Connected { pane, tab, generation, addr, result }
+            },
+            // El trabajo falló por dentro: el error, y la conexión sale del indicador.
+            move || {
+                let result = Err(NetError::Other("La conexión terminó sin respuesta".into()));
+                TaskDone::Connected { pane, tab, generation, addr: fail_addr, result }
+            },
+        );
     }
 
     /// Windows: ya hay una conexión con ese servidor con otro usuario. Pregunta si se desconectan

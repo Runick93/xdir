@@ -727,6 +727,16 @@ fn net_tick_after_fast_load_does_not_repaint() {
     assert_eq!(host.invalidations(), before, "nada que mostrar: sin repintado");
 }
 
+/// Ronda 2: si el trabajo de conectar falla por dentro, vuelve el error (y sale del indicador).
+#[test]
+fn connect_task_panic_returns_error() {
+    let mut a = net_app();
+    a.net.panic_connect = true;
+    let g = a.spawn_connect(0, None, Address::parse("smb://nas-a2panico/fotos").unwrap(), Default::default());
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { result: Err(_), .. }));
+    assert!(!a.activity.contains(&super::activity::ActivityKey::Connect(g)));
+}
+
 /// En red el aviso de espera no cambia: «Conectando con…» en lugar de «Cargando…».
 #[test]
 fn remote_wait_box_instead_of_loading() {

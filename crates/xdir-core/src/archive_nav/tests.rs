@@ -166,6 +166,32 @@ fn ensure_cut_after_writing_leaves_nothing() {
     t.clean_own();
 }
 
+/// M5: una extracción cortada borra solo lo que escribió ella: si en el lugar ya había algo (un
+/// gemelo de antes), queda.
+#[test]
+fn ensure_cut_keeps_what_was_already_there() {
+    install_fakes();
+    let b = base("cortada-gemelo");
+    let zip = b.join("datos").join("fotos.zip");
+    FakeArchives::shared().add_archive(&zip, &[("foto.png", b"png")], 30);
+    let t = Temps::new(Some(&b));
+    let want = t.entry_path(&zip, &[], "foto.png").unwrap();
+    // Una vuelta entera para que existan la carpeta y el archivo.
+    t.ensure(&zip, &[], "foto.png", &super::temps::Limits::up_to(u64::MAX)).unwrap();
+    // El lugar del gemelo ya tiene algo de antes.
+    let dir = want.parent().unwrap();
+    let twin = dir.with_file_name(format!("{}~0", dir.file_name().unwrap().to_string_lossy())).join("foto.png");
+    FakeCopyPrims::shared().add_file(&twin, b"de antes".to_vec());
+    // Y esta ejecución se olvida de lo que extrajo (como si fuera de antes).
+    t.forget_done();
+    // El corte llega en el aviso de avance del final de la entrada (ya cacheada la lista).
+    let cancel = || true;
+    let r = t.ensure(&zip, &[], "foto.png", &super::temps::Limits { max: u64::MAX, cancel: &cancel });
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(FakeCopyPrims::shared().read_content(&twin).unwrap(), b"de antes", "lo de antes queda");
+    t.clean_own();
+}
+
 /// Varias extracciones a la vez de archivos distintos (cada uno con su candado) crean las mismas
 /// carpetas de arriba: que otra la haya creado primero no es un error («Ya existe»).
 #[test]

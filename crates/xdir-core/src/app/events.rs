@@ -39,6 +39,7 @@ impl App {
             }
             crate::paint::WM_APP_ICONS => self.redraw(),
             sel_size::WM_APP_SEL_SIZE => self.on_sel_size(),
+            compare::WM_APP_COMPARE => self.on_compare_message(wparam),
             WM_APP_CHANGED => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 // Cambió algo en la carpeta (un aviso de la navegación en curso): lo que pesan ella y

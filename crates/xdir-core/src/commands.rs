@@ -76,6 +76,8 @@ pub enum Command {
     Rename,
     /// Renombrar varios: el panel de la derecha con la vista previa en la lista.
     RenameMany,
+    /// Comparar el contenido de dos archivos elegidos (byte a byte), en el panel de la derecha.
+    CompareContents,
     Properties,
     /// Copia de cada seleccionado a su lado («nombre copia»).
     Duplicate,
@@ -224,6 +226,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::DisconnectNetworkDrive, "desconectar_unidad_red", "Desconectar unidad de red…", &[]),
     spec(Command::Rename, "renombrar", "Renombrar", &["F2"]),
     spec(Command::RenameMany, "renombrar_varios", "Renombrar varios…", &[]),
+    spec(Command::CompareContents, "comparar_contenido", "Comparar contenido", &[]),
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
     spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),
     spec(Command::ToggleFavorite, "favorito", "Agregar o quitar de favoritos", &["Ctrl+Shift+D"]),
@@ -344,6 +347,7 @@ pub fn group(c: Command) -> Group {
         | Command::Eject
         | Command::Rename
         | Command::RenameMany
+        | Command::CompareContents
         | Command::Properties
         | Command::Duplicate
         | Command::Compress

@@ -237,12 +237,15 @@ pub fn hash_source(src: &Source, algo: HashAlgo, stop: &AtomicBool, progress: &P
 /// trabajo, nunca desde el de interfaz). `work` recibe una bandera para cortarse. Si `cancel` se
 /// enciende, corta y devuelve `Cancelled` enseguida; si es de la red (`remote`, el servidor) y
 /// pasa `limit` sin que `progress` avance, corta con «"srv" no responde». En los dos casos el hilo
-/// queda abandonado si no responde (un servidor colgado no traba nada).
+/// queda abandonado si no responde (un servidor colgado no traba nada). Mientras espera, llama a
+/// `tick` cada `every` (para redibujar el avance).
 pub fn run_watched<T: Send + 'static>(
     remote: Option<String>,
     limit: Duration,
     cancel: &AtomicBool,
     progress: &Arc<Progress>,
+    every: Duration,
+    tick: &dyn Fn(),
     work: impl FnOnce(&AtomicBool) -> Result<T, Failure> + Send + 'static,
 ) -> Result<T, Failure> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -255,6 +258,7 @@ pub fn run_watched<T: Send + 'static>(
         return Err(Failure::Failed("No se pudo crear un hilo".into()));
     }
     let (mut last, mut since) = (progress.beats.load(Ordering::Relaxed), Instant::now());
+    let mut ticked = Instant::now();
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(r) => return r,
@@ -264,6 +268,10 @@ pub fn run_watched<T: Send + 'static>(
         if cancel.load(Ordering::Relaxed) {
             stop.store(true, Ordering::Relaxed);
             return Err(Failure::Cancelled);
+        }
+        if ticked.elapsed() >= every {
+            ticked = Instant::now();
+            tick();
         }
         let now = progress.beats.load(Ordering::Relaxed);
         if now != last {

@@ -292,6 +292,7 @@ impl App {
             ExtractTo,
             Copy,
             CopyPath,
+            Compare,
             Refresh,
             None,
         }
@@ -302,8 +303,9 @@ impl App {
             shell::Entry::Item { id: acts.len() as u32, label: label.into(), enabled, checked: false }
         };
         let sep = || shell::Entry::Sep;
+        let can_compare = has_items && self.compare_candidates().is_ok();
         let entries = if has_items {
-            vec![
+            let mut v = vec![
                 item("Abrir", Do::Open, true),
                 item("Abrir con…", Do::OpenWith, true),
                 sep(),
@@ -313,13 +315,20 @@ impl App {
                 item("Cortar", Do::None, false),
                 item("Copiar", Do::Copy, true),
                 item("Copiar como ruta de acceso", Do::CopyPath, true),
+            ];
+            // Dos archivos elegidos: compararlos (se extraen a la temporal).
+            if can_compare {
+                v.push(item("Comparar contenido", Do::Compare, true));
+            }
+            v.extend([
                 sep(),
                 item("Eliminar", Do::None, false),
                 item("Renombrar", Do::None, false),
                 sep(),
                 item("Nueva carpeta", Do::None, false),
                 item("Comprimir", Do::None, false),
-            ]
+            ]);
+            v
         } else {
             vec![item("Actualizar", Do::Refresh, true), sep(), item("Pegar", Do::None, false), item("Nueva carpeta", Do::None, false)]
         };
@@ -341,6 +350,7 @@ impl App {
             Do::ExtractTo => self.extract_from_archive(pane, true),
             Do::Copy => self.run_command(Command::Copy),
             Do::CopyPath => self.copy_archive_paths(pane),
+            Do::Compare => self.run_command(Command::CompareContents),
             Do::Refresh => self.run_command(Command::Refresh),
             Do::None => {}
         }

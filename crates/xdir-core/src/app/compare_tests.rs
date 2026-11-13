@@ -1,0 +1,254 @@
+//! «Comparar contenido» en la `App`: qué dos archivos se toman, el resultado en otro hilo, Cancelar,
+//! la red que no responde, los comprimidos y el menú (carpetas temporales reales).
+
+use super::compare::{NEED_TWO, Status};
+use super::*;
+use crate::compare::Verdict;
+use crate::sys::testing::{FakeArchives, FakeEnv, FakeHost, FakeNetwork, FakePreview};
+use std::time::{Duration, Instant};
+
+fn app(host: Rc<FakeHost>) -> App {
+    crate::sys::testing::install_fakes();
+    FakeEnv::hold_keys(&[]);
+    FakePreview::set_delay(None);
+    let mut a = App::new(Init::blank(), host);
+    a.set_layout(Layout::TwoSide);
+    a.preview.on = false;
+    a
+}
+
+/// Carpeta real con esos archivos (nombre, contenido).
+fn fixture(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+    let dir = std::env::temp_dir().join("xdir-test-comparar-app").join(format!("{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (f, data) in files {
+        if f.ends_with('/') {
+            std::fs::create_dir_all(dir.join(f)).unwrap();
+        } else {
+            std::fs::write(dir.join(f), data).unwrap();
+        }
+    }
+    dir
+}
+
+fn go(a: &mut App, pane: usize, to: Location) {
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[pane].tab_mut().navigate(hwnd, &tx, to);
+    while a.panes[pane].tab().loading {
+        let ev = a.rx.recv_timeout(Duration::from_secs(10)).expect("la carga termina");
+        a.on_load_event(ev);
+    }
+}
+
+fn clear(a: &mut App, pane: usize) {
+    let list = &mut a.panes[pane].tab_mut().list;
+    for p in 0..list.count() {
+        list.set_selected_pos(p, false);
+    }
+}
+
+fn select(a: &mut App, pane: usize, names: &[&str]) {
+    clear(a, pane);
+    let list = &mut a.panes[pane].tab_mut().list;
+    for n in names {
+        let pos = (0..list.count()).find(|&p| list.entries[list.entry_of_pos(p).unwrap()].name == *n).expect(n);
+        list.set_selected_pos(pos, true);
+    }
+}
+
+/// Espera a que la comparación termine (sin suponer el orden en que llegan los avisos).
+fn wait_done(a: &mut App) -> Status {
+    let t0 = Instant::now();
+    loop {
+        a.on_compare_message(0);
+        let st = a.compare.as_ref().expect("panel de comparar").status.clone();
+        if st != Status::Running {
+            return st;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10), "la comparación no terminó");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// El comando: identificador, nombre, sin atajo de fábrica, en «Archivos» y en la tabla de la wiki.
+#[test]
+fn command_spec_and_wiki_table() {
+    crate::sys::testing::install_fakes();
+    let s = crate::commands::ALL.iter().find(|s| s.id == "comparar_contenido").expect("comando");
+    assert_eq!((s.command, s.name, s.default_keys), (Command::CompareContents, "Comparar contenido", &[][..]));
+    assert_eq!(crate::commands::group(Command::CompareContents), crate::commands::Group::Files);
+    assert!(crate::commands::markdown_table(sys::env()).contains("| Comparar contenido |  | `comparar_contenido` |"));
+    // El editor de atajos lo lista con los demás de «Archivos».
+    let km = crate::commands::Keymap::default();
+    assert!(km.combos(Command::CompareContents).is_empty());
+}
+
+/// Dos archivos en el panel activo: iguales.
+#[test]
+fn two_in_the_active_pane() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("activo", &[("a.txt", b"hola mundo"), ("b.txt", b"hola mundo"), ("c.txt", b"hola Mundo")]);
+    go(&mut a, 0, Location::Path(d.clone()));
+    select(&mut a, 0, &["a.txt", "b.txt"]);
+    a.run_command(Command::CompareContents);
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
+    let st = a.compare.as_ref().unwrap();
+    assert_eq!([st.sides[0].name.as_str(), st.sides[1].name.as_str()], ["a.txt", "b.txt"]);
+    assert_eq!(st.sides[0].folder, d.display().to_string());
+    // Distintos: la posición del primer byte distinto.
+    select(&mut a, 0, &["a.txt", "c.txt"]);
+    a.run_command(Command::CompareContents);
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::DiffersAt(5)));
+}
+
+/// Uno elegido en cada panel (con dos a la vista); con más paneles, no.
+#[test]
+fn one_in_each_visible_pane() {
+    let mut a = app(FakeHost::new());
+    let d1 = fixture("izq", &[("a.bin", b"1234")]);
+    let d2 = fixture("der", &[("b.bin", b"1234"), ("c.bin", b"5678")]);
+    go(&mut a, 0, Location::Path(d1));
+    go(&mut a, 1, Location::Path(d2));
+    select(&mut a, 0, &["a.bin"]);
+    select(&mut a, 1, &["b.bin"]);
+    a.set_active(0);
+    a.run_command(Command::CompareContents);
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
+    // Dos elegidos en el otro panel: no se sabe con cuál.
+    select(&mut a, 1, &["b.bin", "c.bin"]);
+    a.compare = None;
+    a.run_command(Command::CompareContents);
+    assert!(a.compare.is_none());
+    assert_eq!(a.notice.as_deref(), Some(NEED_TWO));
+    // Con cuatro paneles a la vista, el «otro» no está claro.
+    select(&mut a, 1, &["b.bin"]);
+    a.set_layout(Layout::Four);
+    a.notice = None;
+    a.run_command(Command::CompareContents);
+    assert!(a.compare.is_none());
+    assert_eq!(a.notice.as_deref(), Some(NEED_TWO));
+}
+
+/// Una carpeta elegida, o uno solo: aviso y nada más.
+#[test]
+fn folders_or_one_file_only_warn() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("carpeta", &[("a.txt", b"x"), ("sub/", b"")]);
+    go(&mut a, 0, Location::Path(d.clone()));
+    go(&mut a, 1, Location::Path(d));
+    clear(&mut a, 1);
+    select(&mut a, 0, &["a.txt", "sub"]);
+    a.run_command(Command::CompareContents);
+    assert!(a.compare.is_none());
+    assert_eq!(a.notice.as_deref(), Some(NEED_TWO));
+    select(&mut a, 0, &["a.txt"]);
+    a.notice = None;
+    a.run_command(Command::CompareContents);
+    assert!(a.compare.is_none());
+    assert_eq!(a.notice.as_deref(), Some(NEED_TWO));
+}
+
+/// Tamaños distintos (los de la lista): la respuesta es inmediata, sin hilo.
+#[test]
+fn different_sizes_answer_without_reading() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("tamanos", &[("a.txt", b"hola"), ("b.txt", b"hola mundo")]);
+    go(&mut a, 0, Location::Path(d));
+    select(&mut a, 0, &["a.txt", "b.txt"]);
+    a.run_command(Command::CompareContents);
+    let st = a.compare.as_ref().unwrap();
+    assert!(st.job.is_none(), "no se lee nada");
+    assert_eq!(st.status, Status::Done(Verdict::SizeDiffers { a: 4, b: 10 }));
+}
+
+/// Cancelar corta y deja «cancelada»; el resultado que llegue después no la pisa.
+#[test]
+fn cancel_stops_and_ignores_late_result() {
+    let mut a = app(FakeHost::new());
+    let big = vec![9u8; 3 << 20];
+    let d = fixture("cancelar", &[("a.bin", &big), ("b.bin", &big)]);
+    FakeNetwork::set_remote(&d);
+    FakeNetwork::hang(&d.to_string_lossy(), Duration::from_millis(300));
+    go(&mut a, 0, Location::Path(d));
+    select(&mut a, 0, &["a.bin", "b.bin"]);
+    a.run_command(Command::CompareContents);
+    assert_eq!(a.compare.as_ref().unwrap().status, Status::Running);
+    a.cancel_compare();
+    assert_eq!(a.compare.as_ref().unwrap().status, Status::Cancelled);
+    std::thread::sleep(Duration::from_millis(400));
+    a.on_compare_message(0);
+    assert_eq!(a.compare.as_ref().unwrap().status, Status::Cancelled);
+}
+
+/// Un servidor de red que deja de responder: «no responde» al pasar el límite sin avance.
+#[test]
+fn stalled_network_says_not_responding() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("colgada", &[("a.bin", b"12345678"), ("b.bin", b"12345678")]);
+    FakeNetwork::set_remote(&d);
+    FakeNetwork::hang(&d.to_string_lossy(), Duration::from_secs(3));
+    a.jobs.limit = Duration::from_millis(150);
+    go(&mut a, 0, Location::Path(d));
+    select(&mut a, 0, &["a.bin", "b.bin"]);
+    let t0 = Instant::now();
+    a.run_command(Command::CompareContents);
+    let st = wait_done(&mut a);
+    assert!(matches!(&st, Status::Failed(m) if m.contains("no responde")), "{st:?}");
+    assert!(t0.elapsed() < Duration::from_secs(2));
+}
+
+/// Dentro de un comprimido: dos elementos se extraen a la temporal y se comparan.
+#[test]
+fn inside_an_archive() {
+    let host = FakeHost::new();
+    let mut a = app(host.clone());
+    let d = fixture("zip", &[("fotos.zip", b"zip")]);
+    let zip = d.join("fotos.zip");
+    FakeArchives::shared().add_archive(&zip, &[("a.txt", b"hola mundo"), ("b.txt", b"hola mundo"), ("c.txt", b"hola Mundo")], 40);
+    go(&mut a, 0, Location::Archive { file: zip.clone(), nested: Vec::new(), inner: String::new() });
+    select(&mut a, 0, &["a.txt", "c.txt"]);
+    a.run_command(Command::CompareContents);
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::DiffersAt(5)));
+    // Uno de adentro y uno de afuera, en el otro panel.
+    std::fs::write(d.join("afuera.txt"), b"hola mundo").unwrap();
+    go(&mut a, 1, Location::Path(d.clone()));
+    select(&mut a, 0, &["b.txt"]);
+    select(&mut a, 1, &["afuera.txt"]);
+    a.set_active(0);
+    a.run_command(Command::CompareContents);
+    assert_eq!(wait_done(&mut a), Status::Done(Verdict::Same));
+    // El menú de adentro lo ofrece con dos elegidos.
+    host.set_menu_choice(None);
+    select(&mut a, 0, &["a.txt", "b.txt"]);
+    a.archive_context_menu(0);
+    let labels: Vec<String> = host.menus().last().unwrap().iter().filter_map(|e| match e {
+        shell::Entry::Item { label, .. } => Some(label.clone()),
+        _ => None,
+    }).collect();
+    assert!(labels.iter().any(|l| l == "Comparar contenido"), "{labels:?}");
+}
+
+/// El menú de los elementos: «Comparar contenido» con dos archivos, no con uno.
+#[test]
+fn item_menu_offers_compare() {
+    let mut a = app(FakeHost::new());
+    let d = fixture("menu", &[("a.txt", b"x"), ("b.txt", b"y")]);
+    go(&mut a, 0, Location::Path(d.clone()));
+    go(&mut a, 1, Location::Path(d));
+    clear(&mut a, 1);
+    let labels = |a: &App| {
+        let mut cmds = Vec::new();
+        a.item_entries(&mut cmds)
+            .into_iter()
+            .filter_map(|e| match e {
+                shell::Entry::Item { label, .. } => Some(label),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    select(&mut a, 0, &["a.txt"]);
+    assert!(!labels(&a).iter().any(|l| l == "Comparar contenido"));
+    select(&mut a, 0, &["a.txt", "b.txt"]);
+    assert!(labels(&a).iter().any(|l| l == "Comparar contenido"));
+}

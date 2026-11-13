@@ -193,7 +193,7 @@ fn watched_stalled_network_slow_and_cancel() {
     assert!(sa.remote_host().is_some());
     let t0 = Instant::now();
     let progress = Arc::new(Progress::default());
-    let got = run_watched(sa.remote_host(), Duration::from_millis(200), &AtomicBool::new(false), &progress, {
+    let got = run_watched(sa.remote_host(), Duration::from_millis(200), &AtomicBool::new(false), &progress, Duration::from_millis(50), &|| {}, {
         let (sa, sb, p) = (sa.clone(), sb.clone(), progress.clone());
         move |stop| compare_sources(&sa, &sb, stop, &p)
     });
@@ -207,18 +207,23 @@ fn watched_stalled_network_slow_and_cancel() {
         c2.store(true, Ordering::Relaxed);
     });
     let t0 = Instant::now();
-    let got = run_watched(sa.remote_host(), Duration::from_secs(30), &cancel, &progress, {
+    let got = run_watched(sa.remote_host(), Duration::from_secs(30), &cancel, &progress, Duration::from_millis(50), &|| {}, {
         let (sa, sb, p) = (sa.clone(), sb.clone(), progress.clone());
         move |stop| compare_sources(&sa, &sb, stop, &p)
     });
     assert_eq!(got, Err(Failure::Cancelled));
     assert!(t0.elapsed() < Duration::from_secs(2));
     // Local y lento, pero avanzando: termina.
-    let ok = run_watched(None, Duration::from_millis(50), &AtomicBool::new(false), &Arc::new(Progress::default()), |_| {
+    let ticks = std::sync::atomic::AtomicUsize::new(0);
+    let tick = || {
+        ticks.fetch_add(1, Ordering::Relaxed);
+    };
+    let ok = run_watched(None, Duration::from_millis(50), &AtomicBool::new(false), &Arc::new(Progress::default()), Duration::from_millis(30), &tick, |_| {
         std::thread::sleep(Duration::from_millis(200));
         Ok(7)
     });
     assert_eq!(ok, Ok(7));
+    assert!(ticks.load(Ordering::Relaxed) >= 2, "avisa mientras espera");
 }
 
 /// «Comparar con…»: la suma publicada sin espacios ni mayúsculas, con el nombre al lado o en la

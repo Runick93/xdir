@@ -223,6 +223,7 @@ impl App {
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.rename_command(active),
             Command::RenameMany => self.open_rename_many(active),
+            Command::CompareContents => self.compare_contents(),
             // El panel de información (lo de la selección, la carpeta o el disco enfocado).
             Command::Properties => self.toggle_info(),
             Command::Duplicate => self.duplicate_selection(),
@@ -549,6 +550,7 @@ fn needs_folder(c: Command) -> bool {
             | Command::ShowOriginal
             | Command::Rename
             | Command::RenameMany
+            | Command::CompareContents
             | Command::Properties
             | Command::Duplicate
             | Command::Compress

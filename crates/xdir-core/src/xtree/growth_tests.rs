@@ -397,6 +397,8 @@ fn denied_then_allowed_is_not_growth() {
     wait_history(&mut x);
     let t = texts(&mut x);
     assert!(t.iter().any(|s| s.starts_with("\u{2248} +20,0 GB")), "{t:?}");
+    // Ahora se leyó todo: el texto dice que es aproximado por permisos, sin afirmar que hoy falten.
+    assert!(t.iter().any(|s| s == "Ahora: 23,00 GB \u{B7} aprox. (sin permiso)"), "{t:?}");
     assert!(t.iter().any(|s| s == "Ninguna subcarpeta creció"), "«a» no entra: {t:?}");
     assert!(x.mark_tip(1).is_none(), "sin ▲ en «a»");
     // «a/a1» no estaba en la foto, pero debajo de una sin leer: no se sabe (no es «nueva»).

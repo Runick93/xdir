@@ -549,7 +549,7 @@ pub fn draw_strip(p: &dyn Painter, card: Rect, v: &StripView) {
     p.text(FontId::Title, &change_text(&c, v.today), rect(s.left.left, top + 8.0, s.left.right, top + 36.0), tc);
     let from = format!("Foto del {}: {}", day_text(c.base_day), fmt_size(c.base));
     p.text(FontId::Small, &from, rect(s.left.left, top + 38.0, s.left.right, top + 54.0), th.text_dim);
-    let now = if c.approx { format!("Ahora: {} \u{B7} hay carpetas sin permiso", fmt_size(c.now)) } else { format!("Ahora: {}", fmt_size(c.now)) };
+    let now = if c.approx { format!("Ahora: {} \u{B7} aprox. (sin permiso)", fmt_size(c.now)) } else { format!("Ahora: {}", fmt_size(c.now)) };
     p.text(FontId::Small, &now, rect(s.left.left, top + 56.0, s.left.right, top + 72.0), th.text_dim);
 
     // Gráfico de línea: un punto por foto (x según la fecha), de la de comparación a hoy.

@@ -48,8 +48,6 @@ pub(super) struct Job {
     pub id: u64,
     pub cancel: Arc<AtomicBool>,
     pub progress: Arc<Progress>,
-    /// Es de la red: si se cuelga, no se espera a su hilo.
-    pub remote: bool,
     /// El hilo que lee (lo deja `compare::run_watched` al arrancarlo).
     pub worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
@@ -258,7 +256,6 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Progress::default());
         let (hwnd, tx, limit) = (self.hwnd, self.jobs.tx.clone(), self.jobs.limit);
-        let is_remote = remote.is_some();
         let worker = Arc::new(Mutex::new(None));
         let (c, p, w) = (cancel.clone(), progress.clone(), worker.clone());
         // La respuesta (con la clase de trabajo que corresponde): la manda el hilo o, si no se pudo
@@ -290,7 +287,7 @@ impl App {
         {
             send(Err(Failure::Failed("No se pudo crear un hilo".into())));
         }
-        Job { id, cancel, progress, remote: is_remote, worker }
+        Job { id, cancel, progress, worker }
     }
 
     /// `WM_APP_COMPARE`: llegó un resultado (o hay que redibujar el avance).

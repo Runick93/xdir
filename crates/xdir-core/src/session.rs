@@ -94,17 +94,37 @@ pub fn portable_files(from: &Path, to: &Path) -> Result<(), String> {
         if src.is_file() {
             std::fs::copy(&src, &dst).map_err(fail)?;
         } else if src.is_dir() {
-            // Una carpeta (el historial de xtree): sus archivos, sin los temporales a medio escribir.
-            std::fs::create_dir_all(&dst).map_err(fail)?;
-            for e in std::fs::read_dir(&src).map_err(fail)?.flatten() {
-                let p = e.path();
-                if p.is_file() && p.extension().is_none_or(|x| x != "tmp") {
-                    std::fs::copy(&p, dst.join(e.file_name())).map_err(fail)?;
-                }
-            }
+            copy_dir_files(&src, to, name).map_err(fail)?;
         }
     }
     std::fs::write(to.join(PORTABLE_MARKER), "").map_err(fail)
+}
+
+/// Copia los archivos de la carpeta `src` (el historial de xtree; sin los temporales a medio
+/// escribir) a `to/name` por un temporal que se renombra al final: una copia cortada no deja una
+/// carpeta a medias que la próxima vez parezca completa. Los temporales de copias cortadas antes
+/// se borran.
+fn copy_dir_files(src: &Path, to: &Path, name: &str) -> std::io::Result<()> {
+    for e in std::fs::read_dir(to)?.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if n.starts_with(&format!("{name}.")) && n.ends_with(".tmp") && e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+    let tmp = to.join(format!("{name}.{}.tmp", std::process::id()));
+    let copy = || -> std::io::Result<()> {
+        std::fs::create_dir_all(&tmp)?;
+        for e in std::fs::read_dir(src)?.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().is_none_or(|x| x != "tmp") {
+                std::fs::copy(&p, tmp.join(e.file_name()))?;
+            }
+        }
+        std::fs::rename(&tmp, to.join(name))
+    };
+    copy().inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&tmp);
+    })
 }
 
 /// Desactiva el modo portable: borra `xdir.portable` de `dir` (los archivos quedan).
@@ -597,6 +617,15 @@ mod tests {
         portable_files(&from, &exe).unwrap();
         assert_eq!(std::fs::read_to_string(exe.join("xtree-historial").join("a-1.bin")).unwrap(), "uno");
         assert!(!exe.join("xtree-historial").join("a-1.bin.9.0.tmp").exists());
+        // La copia va a un temporal y se renombra: uno que quedó de una copia cortada se borra.
+        let names: Vec<String> = std::fs::read_dir(&exe).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        let again = base.join("exe2");
+        std::fs::create_dir_all(again.join("xtree-historial.123.tmp")).unwrap();
+        std::fs::write(again.join("xtree-historial.123.tmp").join("medio.bin"), "x").unwrap();
+        portable_files(&from, &again).unwrap();
+        assert!(again.join("xtree-historial").join("a-1.bin").exists());
+        assert!(!again.join("xtree-historial.123.tmp").exists(), "el resto de la copia cortada se va");
         // Ya había historial junto a xdir: gana ese.
         std::fs::write(from.join("xtree-historial").join("b-2.bin"), "dos").unwrap();
         portable_files(&from, &exe).unwrap();

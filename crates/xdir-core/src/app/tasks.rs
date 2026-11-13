@@ -18,14 +18,37 @@ fn no_answer() -> crate::shell::EjectError {
 }
 
 /// Expulsa `root` esperando como mucho `limit` (y sin caerse si el sistema entra en pánico): si
-/// no contesta, el error `NO_ANSWER` (el pedido sigue solo en su hilo).
-fn eject_within(root: &std::path::Path, limit: std::time::Duration) -> Result<(), crate::shell::EjectError> {
+/// no contesta, el error `NO_ANSWER`. El pedido sigue en su hilo: si después expulsa bien, `late`
+/// manda `TaskDone::LateEjected` (corrige el aviso); un error tardío no se avisa.
+fn eject_within(root: &std::path::Path, limit: std::time::Duration, late: impl FnOnce() + Send + 'static) -> Result<(), crate::shell::EjectError> {
     let (tx, rx) = std::sync::mpsc::channel();
+    // Quién recibe: el que espera (mientras espera) o, si ya se fue, el aviso tardío. Con el
+    // candado, el resultado no se pierde entre los dos.
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+    let theirs = slot.clone();
     let r = root.to_path_buf();
     std::thread::spawn(move || {
-        let _ = tx.send(sys::shell().eject(&r));
+        let result = sys::shell().eject(&r);
+        let waiting = theirs.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match waiting {
+            Some(tx) => {
+                let _ = tx.send(result);
+            }
+            None if result.is_ok() => late(),
+            None => {}
+        }
     });
-    rx.recv_timeout(limit).unwrap_or_else(|_| Err(no_answer()))
+    match rx.recv_timeout(limit) {
+        Ok(r) => r,
+        Err(_) => {
+            // Si llegó justo ahora, se toma; si no, el que espera se va.
+            let gone = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            match gone {
+                Some(_) => Err(no_answer()),
+                None => rx.recv().unwrap_or_else(|_| Err(no_answer())),
+            }
+        }
+    }
 }
 
 /// Lo que devuelve un trabajo suelto.
@@ -62,6 +85,8 @@ pub(super) enum TaskDone {
     FreeLetters(Vec<char>),
     /// Una conexión que había vencido terminó bien después.
     LateConnected { generation: u64, addr: crate::net::Address, path: PathBuf },
+    /// Se expulsó `root` después de que venciera la espera: el aviso se corrige.
+    LateEjected { root: PathBuf, label: String },
     /// Las subcarpetas de la flecha `chevron` del panel `pane` (pedidas en otro hilo).
     Subfolders { pane: usize, chevron: usize, loc: Location, items: Vec<(String, Location)> },
     /// Terminó de desconectar `root` (`label`: el último tramo de la dirección; `force`: si fue
@@ -153,6 +178,7 @@ impl App {
             TaskDone::DriveLabels(labels) => self.on_drive_labels(labels),
             TaskDone::Subfolders { pane, chevron, loc, items } => self.on_subfolders(pane, chevron, loc, items),
             TaskDone::LateConnected { generation, addr, path } => self.on_late_connected(generation, addr, path),
+            TaskDone::LateEjected { root, label } => self.on_ejected(root, label, Ok(())),
             TaskDone::FreeLetters(letters) => self.on_free_letters(letters),
             TaskDone::Disconnected { root, label, force, result } => self.on_disconnected(root, label, force, result),
         }
@@ -273,12 +299,18 @@ impl App {
         let (limit, eject_limit) = (self.jobs.limit, self.eject_limit);
         let left = self.ejecting_readers(&root, reading.len());
         let (r, l) = (root.clone(), label.clone());
+        let (late_root, late_label, late_tx, hwnd) = (root.clone(), label.clone(), self.task_tx.clone(), self.hwnd);
+        let late = move || {
+            if late_tx.send(TaskDone::LateEjected { root: late_root, label: late_label }).is_ok() {
+                hwnd.post(WM_APP_TASK, 0, 0);
+            }
+        };
         self.spawn_task_or(
             move || {
                 // Como mucho el límite: un lector trabado no deja el disco sin expulsar (si sigue
                 // abierto, el sistema lo dice al expulsar).
                 super::compare::wait_bounded(reading, limit, &left);
-                let result = eject_within(&root, eject_limit);
+                let result = eject_within(&root, eject_limit, late);
                 TaskDone::Ejected { root, label, result }
             },
             move || TaskDone::Ejected { root: r, label: l, result: Err(no_answer()) },

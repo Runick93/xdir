@@ -629,7 +629,8 @@ fn eject_timeout_or_panic_frees_the_button() {
     FakeShell::set_eject_result(&e, Ok(()));
     a.eject_limit = Duration::from_millis(100);
     let questions = host.questions().len();
-    for panic in [false, true] {
+    // Primero el pánico (vuelve enseguida); después la demora, cuyo resultado tardío llega solo.
+    for panic in [true, false] {
         if panic {
             FakeShell::set_eject_panic(&e, true);
         } else {
@@ -644,10 +645,37 @@ fn eject_timeout_or_panic_frees_the_button() {
         FakeShell::set_eject_panic(&e, false);
         FakeShell::set_eject_delay(&e, None);
     }
+    // El pedido demorado termina después y avisa (ronda 2); se espera ese aviso, no el orden.
+    loop {
+        let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("llega el resultado tardío");
+        let late = matches!(t, super::tasks::TaskDone::LateEjected { .. });
+        a.on_task_done(t);
+        if late {
+            break;
+        }
+    }
     // Reintentar anda.
     a.eject(e.clone());
     wait_task(&mut a);
     assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
+}
+
+/// Ronda 2: si el sistema expulsa después del límite, el resultado tardío corrige el aviso y el
+/// disco deja de ofrecerse para expulsar.
+#[test]
+fn late_eject_success_corrects_the_notice() {
+    let (mut a, e, _c) = computer_with_drives(FakeHost::new(), "tardio");
+    FakeShell::set_eject_result(&e, Ok(()));
+    FakeShell::set_eject_delay(&e, Some(Duration::from_millis(400)));
+    a.eject_limit = Duration::from_millis(100);
+    a.eject(e.clone());
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("No se pudo expulsar \"USB (E:)\": el sistema no respondió"));
+    assert!(a.ejectable.contains(&e));
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
+    assert!(!a.ejectable.contains(&e));
+    FakeShell::set_eject_delay(&e, None);
 }
 
 /// Ocupado: se pregunta si reintentar, nombrando el programa; Sí vuelve a intentar.

@@ -928,6 +928,11 @@ impl Xtree {
                 self.cells_for = None;
                 Action::Redraw
             }
+            // Sin análisis todavía, F5 es «Analizar»: lo elegido en el desplegable.
+            VK_F5 if !self.scanned() => {
+                self.scan_pick();
+                Action::Redraw
+            }
             VK_F5 => {
                 self.rescan();
                 Action::Redraw
@@ -1391,6 +1396,20 @@ mod tests {
         assert!(texts.iter().any(|t| t == "Sin analizar"), "{texts:?}");
         assert!(!texts.iter().any(|t| t.starts_with("Escaneando")), "{texts:?}");
         poke(&mut x, area);
+    }
+
+    /// F5 en una vista sin analizar analiza lo elegido en el desplegable (como «Analizar»).
+    #[test]
+    fn f5_unscanned_scans_the_pick() {
+        crate::sys::testing::install_fakes();
+        let root = std::env::temp_dir().join("xdir-xtree-f5-raiz");
+        let other = std::env::temp_dir().join("xdir-xtree-f5-elegida");
+        let mut x = Xtree::unscanned(Handle::default(), root, false);
+        x.pick = other.clone();
+        assert_eq!(x.on_key(VK_F5), Action::Redraw);
+        assert!(x.scanned());
+        assert_eq!(x.root(), other.as_path());
+        x.cancel();
     }
 
     #[test]

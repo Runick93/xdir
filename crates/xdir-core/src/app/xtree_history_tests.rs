@@ -169,3 +169,40 @@ fn period_chosen_in_view_survives_switch() {
     assert_eq!(a.xtree_days, 30);
     a.on_closing();
 }
+
+/// Guardar o leer el historial con xtree cerrado entra en el indicador de actividad (con su umbral:
+/// lo rápido no se ve); al terminar sale, aunque la vista siga cerrada.
+#[test]
+fn history_save_shows_in_activity_while_busy() {
+    use super::super::activity::ActivityKey;
+    let mut a = app();
+    a.run_command(Command::Xtree);
+    let root = crate::sys::testing::FakeDiskScan::root();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _g = crate::xtree::history::hold_io_lock_for_tests();
+        tx.send(()).unwrap();
+        let _ = done_rx.recv();
+    });
+    rx.recv().unwrap();
+    a.xtree.as_mut().unwrap().finish_for_tests(vec![crate::xtree::tree::Node { name: root.to_string_lossy().into(), parent: crate::xtree::tree::NO_PARENT, size: 5, is_dir: true, small: false, children: vec![] }]);
+    a.run_command(Command::Xtree);
+    assert!(!a.xtree_open);
+    let now = a.now();
+    a.sync_activity(now);
+    assert!(a.activity.contains(&ActivityKey::XtreeHistory), "guardando");
+    done_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let t0 = std::time::Instant::now();
+    loop {
+        let now = a.now();
+        a.sync_activity(now);
+        if !a.activity.contains(&ActivityKey::XtreeHistory) {
+            break;
+        }
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "no salió del indicador");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    a.on_closing();
+}

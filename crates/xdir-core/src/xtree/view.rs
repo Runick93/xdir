@@ -548,6 +548,11 @@ impl Xtree {
         self.hist.dir.is_some()
     }
 
+    /// ¿Hay un hilo guardando o leyendo el historial? (para el indicador de actividad).
+    pub fn history_busy(&self) -> bool {
+        self.hist.busy()
+    }
+
     /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
     pub fn history_days(&self) -> u16 {
         self.hist.days

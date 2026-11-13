@@ -99,6 +99,12 @@ impl HistState {
         });
     }
 
+    /// ¿Sigue el hilo guardando o leyendo? (ya dejó su resultado: no, aunque nadie lo haya tomado
+    /// todavía porque la vista está cerrada). Solo mira el lugar del resultado, sin E/S.
+    pub fn busy(&self) -> bool {
+        self.pending && self.slot.lock().is_ok_and(|s| s.is_none())
+    }
+
     /// Toma el historial que dejó el hilo, si es de `root`. Devuelve si llegó.
     pub fn take(&mut self, root: &Path) -> bool {
         let Some((from, loaded)) = self.slot.lock().ok().and_then(|mut s| s.take()) else { return false };

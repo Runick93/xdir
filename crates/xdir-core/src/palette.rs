@@ -72,10 +72,12 @@ pub struct Palette {
     pub hover: Option<usize>,
 }
 
-/// Minúsculas sin tildes, para que "pestana" encuentre "Pestaña".
+/// Minúsculas sin tildes, para que "pestana" encuentre "Pestaña". También con los acentos
+/// descompuestos (NFD, como guarda nombres la Mac a veces): las marcas que combinan se quitan.
 pub fn fold(s: &str) -> String {
     s.to_lowercase()
         .chars()
+        .filter(|c| !('\u{300}'..='\u{36f}').contains(c))
         .map(|c| match c {
             'á' | 'à' | 'ä' | 'â' => 'a',
             'é' | 'è' | 'ë' | 'ê' => 'e',
@@ -414,6 +416,14 @@ mod tests {
     #[cfg(windows)]
     fn names(items: &[Item]) -> Vec<String> {
         items.iter().map(|i| i.title.clone()).collect()
+    }
+
+    /// M2: los nombres con los acentos descompuestos (NFD, comunes en la Mac) también se pliegan.
+    #[test]
+    fn folds_decomposed_accents() {
+        assert_eq!(fold("A\u{301}rbol"), "arbol");
+        assert_eq!(fold("Pestan\u{303}a"), "pestana");
+        assert_eq!(fold("cami\u{301}on"), fold("camión"));
     }
 
     #[test]

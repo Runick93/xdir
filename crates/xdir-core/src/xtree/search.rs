@@ -174,6 +174,15 @@ mod tests {
         assert_eq!(search(&a, "  FOTOS ", &|| false).unwrap().hits.len(), 1, "sin espacios a los costados");
     }
 
+    /// M2: un nombre con el acento descompuesto (NFD) se encuentra sin tilde.
+    #[test]
+    fn search_finds_decomposed_names() {
+        let mut a = vec![node("raiz", NO_PARENT, 10, true), node("A\u{301}rbol", 0, 10, true)];
+        a[0].children = vec![1];
+        assert_eq!(search(&a, "arb", &|| false).unwrap().total, 1);
+        assert_eq!(search(&a, "árb", &|| false).unwrap().total, 1);
+    }
+
     #[test]
     fn search_caps_results_and_counts_all() {
         let mut a = vec![node("raiz", NO_PARENT, 0, true)];

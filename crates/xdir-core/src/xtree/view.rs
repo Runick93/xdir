@@ -360,6 +360,11 @@ pub struct Xtree {
     hover_search: bool,
     /// El próximo cuadro deja a la vista la fila elegida (desplazando lo justo).
     scroll_to_selected: bool,
+    /// Las filas del nivel con sus nombres ya plegados, para el salto por letra: de qué carpeta
+    /// y árbol son (se arman una vez por nivel, no en cada tecla).
+    level_names: Option<((u32, u64), Vec<(Option<u32>, String)>)>,
+    /// Cuántas veces se armaron (pruebas).
+    level_folds: usize,
 }
 
 impl Xtree {
@@ -449,6 +454,8 @@ impl Xtree {
             ticks: 0,
             typeahead: Default::default(),
             scroll_to_selected: false,
+            level_names: None,
+            level_folds: 0,
             search: None,
             search_gen: Arc::new(AtomicUsize::new(0)),
             search_slot: Default::default(),
@@ -1321,20 +1328,23 @@ impl Xtree {
         if c.is_control() || self.scanning || self.menu_open || self.search.is_some() || self.arena.is_empty() {
             return Action::None;
         }
-        let rows = self.rows();
+        let key = (self.current, self.tree_gen);
+        if self.level_names.as_ref().is_none_or(|(k, _)| *k != key) {
+            let names = self.rows().into_iter().map(|r| (r, r.and_then(|id| self.arena.get(id as usize)).map_or(String::new(), |n| crate::palette::fold(&n.name)))).collect();
+            self.level_names = Some((key, names));
+            self.level_folds += 1;
+        }
+        let Some((_, rows)) = &self.level_names else { return Action::None };
         let step = self.typeahead.push(c, now);
         let prefix = crate::palette::fold(&step.prefix);
-        let at = self.selected.and_then(|sel| rows.iter().position(|r| *r == Some(sel)));
+        let at = self.selected.and_then(|sel| rows.iter().position(|(r, _)| *r == Some(sel)));
         let start = match (step.next, at) {
             (true, Some(i)) => i + 1,
             (false, Some(i)) => i,
             _ => 0,
         };
-        let arena = &self.arena;
-        let found = crate::typeahead::find_from(rows.len(), start, |i| {
-            rows[i].and_then(|id| arena.get(id as usize)).is_some_and(|n| crate::palette::fold(&n.name).starts_with(&prefix))
-        });
-        let Some(id) = found.and_then(|i| rows[i]) else { return Action::None };
+        let found = crate::typeahead::find_from(rows.len(), start, |i| rows[i].0.is_some() && rows[i].1.starts_with(&prefix));
+        let Some(id) = found.and_then(|i| rows[i].0) else { return Action::None };
         self.selected = Some(id);
         self.scroll_to_selected = true;
         Action::Redraw
@@ -1495,8 +1505,8 @@ impl Xtree {
                 let text_l = r.left + 33.0;
                 p.text(FontId::Ui, &hit.name, rect(text_l, r.top + 3.0, r.right - 100.0, r.top + 23.0), text);
                 p.text(FontId::UiRight, &fmt_size(hit.size), rect(r.right - 100.0, r.top + 3.0, r.right - 9.0, r.top + 23.0), text);
-                // La carpeta que lo contiene, relativa a lo analizado (en la raíz: la raíz).
-                let rel = if hit.rel.as_os_str().is_empty() { self.root.display().to_string() } else { hit.rel.display().to_string() };
+                // La carpeta que lo contiene, relativa a lo analizado.
+                let rel = if hit.rel.as_os_str().is_empty() { "en la raíz".to_string() } else { hit.rel.display().to_string() };
                 p.text(FontId::Small, &rel, rect(text_l, r.top + 22.0, r.right - 9.0, r.top + 40.0), th.text_dim);
             }
             if found.total > found.hits.len() {
@@ -2159,6 +2169,40 @@ mod tests {
         wait_found(&mut x, "sr");
         assert_eq!(x.search_key(VK_RETURN), Action::Redraw, "los nuevos sí");
         assert_eq!(x.current, 3, "la «src» más grande del árbol nuevo (bajo «b»)");
+    }
+
+    /// M8: un resultado que está en la raíz dice «en la raíz» (no la ruta analizada entera); el
+    /// resto, la carpeta relativa a lo analizado.
+    #[test]
+    fn xtree_search_root_results_say_root() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz-larga"));
+        x.set_arena(search_sample());
+        x.open_search();
+        x.set_query("fact");
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        // Cada resultado: nombre, tamaño y la segunda línea.
+        let zip = texts.iter().rposition(|t| t == "facturas.zip").unwrap();
+        assert_eq!(texts[zip + 2], "en la raíz", "{texts:?}");
+    }
+
+    /// M8: el salto por letra pliega los nombres del nivel una vez (no en cada tecla); al cambiar
+    /// de nivel o de árbol se vuelven a armar.
+    #[test]
+    fn xtree_type_to_find_folds_level_once() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(search_sample());
+        let t0 = Instant::now();
+        for (i, c) in "dfd".chars().enumerate() {
+            x.on_char_at(c, t0 + Duration::from_secs(2 * i as u64));
+        }
+        assert_eq!(x.level_folds, 1);
+        x.go(1);
+        x.on_char_at('f', t0 + Duration::from_secs(10));
+        assert_eq!(selected_name(&x).as_deref(), Some("Facturas"));
+        assert_eq!(x.level_folds, 2);
     }
 
     /// #57: mientras se analiza, busca en lo que ya se leyó (el árbol en vivo, en otro hilo); al

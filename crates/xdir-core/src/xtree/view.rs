@@ -542,6 +542,12 @@ impl Xtree {
         self.hist.clears = clears;
     }
 
+    /// ¿Se recibieron las opciones del historial (`set_history`)? Antes, el período es el de
+    /// fábrica y no cuenta como elegido.
+    pub fn history_chosen(&self) -> bool {
+        self.hist.dir.is_some()
+    }
+
     /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
     pub fn history_days(&self) -> u16 {
         self.hist.days
@@ -1289,6 +1295,13 @@ impl Xtree {
     pub fn size_cell_center(&self, area: Rect, row: usize) -> (f32, f32) {
         let l = self.ui(area).list;
         (l.right - 150.0, l.top + TABLE_H + (row as f32 + 0.5) * ROW_H - self.scroll)
+    }
+
+    /// Centro del período `i` del selector de la franja (pruebas de `App`).
+    #[cfg(test)]
+    pub fn period_center(&self, area: Rect, i: usize) -> (f32, f32) {
+        let r = growth::strip(self.ui(area).card).periods[i];
+        ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
     }
 
     /// La fila o el bloque elegido (pruebas de `App`).

@@ -469,6 +469,8 @@ impl App {
     pub(super) fn xtree_action(&mut self, action: xtree_view::Action) {
         // La búsqueda pudo abrirse o cerrarse (la lupa, el ✕, Enter, Esc): su caja la sigue.
         self.sync_xtree_search();
+        // El período de la tarjeta pudo cambiar: la App lo recuerda (#58).
+        self.sync_xtree_days();
         match action {
             xtree_view::Action::None => return,
             xtree_view::Action::Redraw => {}

@@ -139,3 +139,33 @@ fn marker_tooltip_uses_app_tooltips() {
     assert_eq!(a.xtree.as_ref().unwrap().selected_for_tests(), Some(n));
     a.on_closing();
 }
+
+/// El período elegido en la tarjeta queda en la App: tocar el switch de Configuración (que vuelve
+/// a pasarle las opciones a la vista) no lo vuelve a 7.
+#[test]
+fn period_chosen_in_view_survives_switch() {
+    let mut a = app();
+    let dir = crate::session::config_dir().unwrap().join(crate::xtree::history::DIR_NAME);
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = crate::sys::testing::FakeDiskScan::root();
+    crate::xtree::history::save_snapshot(&dir, &root, 400, &[("".into(), 1)]).unwrap();
+    a.run_command(Command::Xtree);
+    let x = a.xtree.as_mut().unwrap();
+    x.set_today(Some(407));
+    x.finish_for_tests(vec![crate::xtree::tree::Node { name: root.to_string_lossy().into(), parent: crate::xtree::tree::NO_PARENT, size: 5, is_dir: true, small: false, children: vec![] }]);
+    let t0 = std::time::Instant::now();
+    while a.xtree.as_ref().unwrap().history_loaded().is_none_or(|l| l.days.len() < 2) {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "el historial no llegó");
+        a.paint();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let area = a.xtree_area();
+    let (px, py) = a.xtree.as_ref().unwrap().period_center(area, 1);
+    a.on_left_down(px, py, false);
+    a.on_left_up(px, py);
+    assert_eq!(a.xtree.as_ref().unwrap().history_days(), 30);
+    a.toggle_xtree_history();
+    assert_eq!(a.xtree.as_ref().unwrap().history_days(), 30, "el switch no lo cambia");
+    assert_eq!(a.xtree_days, 30);
+    a.on_closing();
+}

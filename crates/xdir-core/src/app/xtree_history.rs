@@ -9,11 +9,20 @@ impl App {
     /// Le pasa a la vista de xtree la opción `xtree_historial`, el período y la carpeta del
     /// historial (`<configuración>/xtree-historial`).
     pub(super) fn setup_xtree_history(&mut self) {
+        self.sync_xtree_days();
         let dir = crate::session::config_dir().map(|d| d.join(crate::xtree::history::DIR_NAME));
         let (on, days) = (self.config.xtree_history, self.xtree_days);
         if let Some(x) = &mut self.xtree {
             x.set_history(on, days, dir);
             x.set_history_clears(self.xtree_history_clears.clone());
+        }
+    }
+
+    /// Lo elegido en la tarjeta de xtree queda en la App (sesión, vista que se rearma, switch). Una
+    /// vista recién armada todavía no eligió nada: manda lo de la App.
+    pub(super) fn sync_xtree_days(&mut self) {
+        if let Some(x) = self.xtree.as_ref().filter(|x| x.history_chosen()) {
+            self.xtree_days = x.history_days();
         }
     }
 

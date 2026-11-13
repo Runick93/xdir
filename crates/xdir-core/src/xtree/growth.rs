@@ -192,8 +192,7 @@ impl HistState {
             denied
                 .iter()
                 .take(history::MAX_DENIED)
-                .map(|&d| rel_path(arena, d))
-                .filter(|p| !p.is_empty() && p.len() <= history::MAX_PATH && !p.contains(char::REPLACEMENT_CHARACTER))
+                .filter_map(|&d| history::denied_rel(arena, d))
                 .collect(),
         );
         self.partial_all = overflow;
@@ -844,5 +843,39 @@ mod tests {
             }
         }
         assert_eq!(history::denied_builds(), before, "ninguna lista armada ni ordenada por fila");
+    }
+    /// Una carpeta sin leer cuyo nombre no era UTF-8 (o cuya ruta pasa de 4 KB) no se puede anotar
+    /// tal cual: se anota la de arriba más cercana que sí, así sus madres nunca quedan «exactas»
+    /// cuando después se lee.
+    #[test]
+    fn unrepresentable_denied_marks_ancestor() {
+        crate::sys::testing::install_fakes();
+        let base_tree = vec![
+            node("/r", NO_PARENT, 6 * GB, true, vec![1, 2]),
+            node("a", 0, GB, true, vec![3]),
+            node("b", 0, 5 * GB, true, vec![]),
+            node("x\u{FFFD}", 1, 0, true, vec![]),
+        ];
+        let photo = history::select_photo_with(&base_tree, &[3]);
+        assert_eq!(photo.denied, ["a"]);
+        let dir = std::env::temp_dir().join(format!("xdir-crecimiento-no-utf8-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("raiz");
+        history::save_photo(&dir, &root, 93, &photo).unwrap();
+        let l = history::load_for(&dir, &root);
+        let _ = std::fs::remove_dir_all(&dir);
+        // Ahora se lee: «x…» pesa 5 GB.
+        let mut now = base_tree.clone();
+        now[3].size = 5 * GB;
+        now[1].size = 6 * GB;
+        now[0].size = 11 * GB;
+        let mut h = HistState { loaded: Some(Arc::new(l.clone())), ..Default::default() };
+        h.set_partial_now(&now, &[], false);
+        assert_eq!(row_mark(&h, &now, 1, 100), None, "«a» no es exacta");
+        assert!(matches!(card_state(&h, &now, 0, 100), CardState::Data(c) if c.approx));
+        // Sigue sin leerse: lo mismo de los dos lados, exacto.
+        let mut h = HistState { loaded: Some(Arc::new(l)), ..Default::default() };
+        h.set_partial_now(&base_tree, &[3], false);
+        assert!(matches!(card_state(&h, &base_tree, 1, 100), CardState::Data(c) if !c.approx));
     }
 }

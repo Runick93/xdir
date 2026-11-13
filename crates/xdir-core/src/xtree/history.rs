@@ -64,15 +64,7 @@ pub fn select_photo_with(arena: &[Node], denied: &[u32]) -> Photo {
     // Las rutas de las sin leer (a cualquier profundidad).
     let mut denied_paths: Vec<String> = Vec::new();
     for &d in denied.iter().take(MAX_DENIED) {
-        let mut parts = Vec::new();
-        let mut cur = d;
-        while let Some(n) = arena.get(cur as usize).filter(|n| n.parent != NO_PARENT) {
-            parts.push(&*n.name);
-            cur = n.parent;
-        }
-        parts.reverse();
-        let p = parts.join("/");
-        if !p.is_empty() && p.len() <= MAX_PATH && !p.contains(char::REPLACEMENT_CHARACTER) {
+        if let Some(p) = denied_rel(arena, d) {
             denied_paths.push(p);
         }
     }
@@ -110,6 +102,31 @@ pub fn select_photo_with(arena: &[Node], denied: &[u32]) -> Photo {
         out.truncate(MAX_ENTRIES);
     }
     Photo { sizes: out, capped, denied: denied_paths }
+}
+
+/// La ruta (relativa a la raíz) con que se anota la carpeta sin leer `node`. Si su ruta no se
+/// puede guardar (un tramo que no era UTF-8, o más de `MAX_PATH`), la de arriba más cercana que sí
+/// (puede ser la raíz, `""`): así lo de adentro de esa queda «no se sabe» y sus madres nunca
+/// quedan exactas por algo que no se pudo anotar. `None` si `node` no está en el árbol. La usan
+/// la foto y el análisis de ahora (`growth::HistState::set_partial_now`): mismas reglas en los dos
+/// lados.
+pub fn denied_rel(arena: &[Node], node: u32) -> Option<String> {
+    arena.get(node as usize)?;
+    let mut parts = Vec::new();
+    let mut cur = node;
+    while let Some(n) = arena.get(cur as usize).filter(|n| n.parent != NO_PARENT) {
+        parts.push(&*n.name);
+        cur = n.parent;
+    }
+    parts.reverse();
+    if let Some(bad) = parts.iter().position(|p| p.contains(char::REPLACEMENT_CHARACTER)) {
+        parts.truncate(bad);
+    }
+    let mut p = parts.join("/");
+    while p.len() > MAX_PATH {
+        p.truncate(p.rfind('/').unwrap_or(0));
+    }
+    Some(p)
 }
 
 /// Versión del formato de `xtree-historial/*.bin`. Un archivo de otra versión se ignora (y se
@@ -700,7 +717,9 @@ impl Loaded {
             }
             up = parent;
         }
-        if self.denied_folded(snap, rel) {
+        // (La raíz anotada como sin leer, por un nombre que no se pudo guardar en el primer nivel,
+        // no vuelve desconocida a la raíz misma.)
+        if !rel.is_empty() && self.denied_folded(snap, rel) {
             return None;
         }
         let depth = if rel.is_empty() { 0 } else { rel.split('/').count() as i32 };

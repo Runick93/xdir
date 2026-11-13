@@ -40,6 +40,8 @@ pub const ADD_TAG_TEXT: &str = "Agregar etiqueta";
 pub const MORE_TEXT: &str = "Más en el sistema…";
 pub const CHANGE_ALL_TEXT: &str = "Cambiar todos…";
 pub const EJECT_TEXT: &str = "⏏ Expulsar";
+/// El mismo botón mientras se expulsa (con el indicador girando a la izquierda).
+pub const EJECTING_TEXT: &str = "Expulsando…";
 /// Lo que dice la caja «Comparar con…» vacía.
 pub const EXPECTED_HINT: &str = "Pegá la suma publicada";
 pub const INVALID_SUM_TEXT: &str = "No es una suma SHA-256 (64 caracteres) ni MD5 (32)";
@@ -56,6 +58,8 @@ pub struct Panel {
     pub more_button: bool,
     /// Botón «⏏ Expulsar» (un disco expulsable).
     pub eject_button: bool,
+    /// Ese disco se está expulsando: el botón gira, dice «Expulsando…» y no se puede tocar.
+    pub ejecting: bool,
 }
 
 /// Encabezado: la imagen de la vista previa (si `image`, la grande de `key`; si no, el ícono), el
@@ -262,7 +266,16 @@ pub fn layout(r: Rect, panel: &Panel, scroll: f32, measure: &dyn Fn(&str) -> f32
     // Abajo, en una fila: «⏏ Expulsar» a la izquierda y «Más en el sistema…» a la derecha.
     if panel.more_button || panel.eject_button {
         y += 16.0;
-        if panel.eject_button {
+        if panel.eject_button && panel.ejecting {
+            // Gira en lugar del ⏏, el texto tenue y sin lugar para el clic.
+            let w = (c.measure)(EJECTING_TEXT) + 40.0;
+            let b = rect(x0, y, x0 + w, y + MORE_H);
+            c.prims.push(Prim::Fill { r: b, radius: 4.0, tone: Tone::SurfaceAlt });
+            c.prims.push(Prim::Stroke { r: b, radius: 4.0, tone: Tone::Border });
+            let cy = (b.top + b.bottom) / 2.0;
+            c.prims.push(Prim::Spinner { x: b.left + 16.0, y: cy });
+            c.text(FontId::Ui, EJECTING_TEXT, rect(b.left + 28.0, cy - 8.0, b.right - 4.0, cy + 8.0), Tone::Dim);
+        } else if panel.eject_button {
             let w = (c.measure)(EJECT_TEXT) + 28.0;
             let b = rect(x0, y, x0 + w, y + MORE_H);
             c.button(b, EJECT_TEXT);

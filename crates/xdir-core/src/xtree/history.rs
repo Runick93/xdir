@@ -333,17 +333,21 @@ impl History {
     }
 
     /// Una foto por día los últimos 30 días, una por semana (la más nueva de cada una) hasta un año;
-    /// lo más viejo se descarta. Una foto de un día posterior a `today` (el reloj volvió atrás)
-    /// también.
+    /// lo más viejo se descarta. Los días se cuentan desde la foto más nueva (aunque sea de un día
+    /// posterior a `today`, porque el reloj volvió atrás); la foto de `today` queda siempre.
     pub fn consolidate(&mut self, today: i32) {
-        self.snaps.retain(|s| s.day <= today && today - s.day <= KEEP_DAYS);
+        // Las edades se miden desde la foto más nueva, no desde el reloj: si el reloj vuelve atrás
+        // no se borra nada «futuro». La de hoy queda siempre.
+        let today_photo = today;
+        let Some(today) = self.snaps.iter().map(|s| s.day).max() else { return };
+        self.snaps.retain(|s| s.day == today_photo || today - s.day <= KEEP_DAYS);
         // De las viejas, la más nueva de cada semana: como están en orden, una se queda si la que
         // le sigue es de otra semana (o ya es de las diarias).
         let n = self.snaps.len();
         let keep: Vec<bool> = (0..n)
             .map(|i| {
                 let d = self.snaps[i].day;
-                today - d < DAILY_DAYS || self.snaps.get(i + 1).is_none_or(|next| today - next.day < DAILY_DAYS || next.day.div_euclid(7) != d.div_euclid(7))
+                d == today_photo || today - d < DAILY_DAYS || self.snaps.get(i + 1).is_none_or(|next| today - next.day < DAILY_DAYS || next.day.div_euclid(7) != d.div_euclid(7))
             })
             .collect();
         let mut it = keep.into_iter();
@@ -824,12 +828,21 @@ mod tests {
     }
 
     #[test]
-    fn consolidate_drops_future_days() {
+    fn consolidate_keeps_future_days() {
+        // El reloj volvió atrás (pila del CMOS, zona horaria): las fotos «futuras» no se borran.
         let mut h = History::default();
-        h.add(100, &[("".into(), 1)]);
-        h.add(105, &[("".into(), 2)]);
-        h.consolidate(101);
-        assert_eq!(days(&h), [100]);
+        for d in 20_000..20_040 {
+            h.add(d, &[("".into(), d as u64)]);
+        }
+        h.add(11_000, &[("".into(), 1)]);
+        h.consolidate(11_000);
+        let ds = days(&h);
+        assert!(((20_040 - DAILY_DAYS)..20_040).all(|d| ds.contains(&d)), "{ds:?}");
+        assert!(ds.contains(&11_000), "la foto de hoy queda");
+        // La edad se mide desde la foto más nueva: una vieja de verdad igual se va.
+        h.add(19_000, &[("".into(), 1)]);
+        h.consolidate(11_000);
+        assert!(!days(&h).contains(&19_000));
     }
 
     fn base(name: &str) -> PathBuf {

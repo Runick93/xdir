@@ -79,6 +79,10 @@ enum Kind {
     NetFavorite,
     NetConnected,
     NetHost,
+    /// Lo que lista una carpeta virtual del Shell (las máquinas de la Red de Windows, `\\HOST`, y
+    /// las distribuciones de Linux): se abre y se despliega con un clic, pero no recibe lo que se
+    /// suelta ni se despliega al arrastrar.
+    ShellItem,
     /// Línea que separa grupos.
     Separator,
 }
@@ -810,9 +814,10 @@ impl Tree {
     pub fn on_loaded(&mut self) {
         while let Ok((id, dirs)) = self.rx.try_recv() {
             let depth = self.nodes[id].depth + 1;
+            let kind = if matches!(self.nodes[id].kind, Kind::Network | Kind::Linux) { Kind::ShellItem } else { Kind::Folder };
             let mut ids = Vec::with_capacity(dirs.len());
             for (name, path) in dirs {
-                self.nodes.push(Node::new(Kind::Folder, path, name, depth));
+                self.nodes.push(Node::new(kind, path, name, depth));
                 ids.push(self.nodes.len() - 1);
             }
             if self.nodes[id].kind == Kind::Network {
@@ -851,7 +856,7 @@ impl Tree {
             if self.roots.contains(&id) {
                 top = Some(id);
             }
-            if matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) && fs.same_path(&self.nodes[id].path, path) {
+            if matches!(self.nodes[id].kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::ShellItem) && fs.same_path(&self.nodes[id].path, path) {
                 if real_top.is_none_or(|t| t == top) {
                     shown.push((i, id));
                 } else {
@@ -1007,7 +1012,7 @@ impl Tree {
         }
         let id = self.node_at(y)?;
         let n = &self.nodes[id];
-        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive).then(|| n.path.clone())
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::ShellItem).then(|| n.path.clone())
     }
 
     /// La fila bajo el punto si acepta que le suelten archivos (#56): una carpeta, una carpeta del
@@ -1249,7 +1254,7 @@ impl Tree {
 
     /// ¿La fila de `n` es la carpeta del panel activo (`current`)? Solo las carpetas de disco.
     fn is_current(&self, n: &Node, current: Option<&Path>) -> bool {
-        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive)
+        matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::ShellItem)
             && current.is_some_and(|c| crate::sys::file_system().same_path(c, &n.path))
     }
 
@@ -1769,6 +1774,37 @@ mod tests {
         let (x, y) = t.row_point("Disco").unwrap();
         assert_eq!(t.drop_node_at(x, y), None);
         FakeFileSystem::set_trash(None);
+    }
+
+    /// I1: lo que la Red del Shell lista (las máquinas, `\\SRV01`) no recibe lo que se suelta ni
+    /// se despliega al arrastrar encima.
+    #[test]
+    fn tree_shell_network_children_refuse_drops() {
+        install_fakes();
+        FakeFileSystem::set_network_place(true);
+        FakeFileSystem::set_shell_subfolders(crate::sys::testing::FAKE_NETWORK_PLACE, vec![("SRV01".into(), PathBuf::from(r"\\SRV01"))]);
+        let root = temp_root("red-shell");
+        let mut t = tree_with_drive(&root);
+        FakeFileSystem::set_network_place(false);
+        t.expand_network(Handle::default(), true);
+        let start = std::time::Instant::now();
+        while !t.nodes.iter().any(|n| n.name == "SRV01") {
+            assert!(start.elapsed().as_secs() < 10, "no llegó la Red del Shell");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            t.on_loaded();
+        }
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, rect(0.0, 0.0, WIDTH, 900.0), None, XtreeBadge::Idle);
+        let at = t.row_point("SRV01").expect("la máquina a la vista");
+        assert_eq!(t.drop_node_at(at.0, at.1), None);
+        let id = t.nodes.iter().position(|n| n.name == "SRV01").unwrap();
+        let t0 = std::time::Instant::now();
+        t.drag_over(Handle::default(), Some(at), t0, false);
+        t.drag_over(Handle::default(), Some(at), t0 + DRAG_EXPAND * 2, false);
+        assert!(!t.nodes[id].expanded, "no se despliega");
+        // Se sigue pudiendo abrir con un clic (navega a la máquina).
+        assert!(matches!(t.hit(at.0, at.1), TreeHit::Open(_) | TreeHit::Toggle(_)));
     }
 
     /// La fila destino se dibuja como la de la lista: selección con borde de acento.

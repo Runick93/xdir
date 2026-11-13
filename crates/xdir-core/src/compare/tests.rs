@@ -371,3 +371,18 @@ fn same_identity_needs_size_and_date() {
     assert!(!same_stat(Some(st(None, 10, 100)), Some(st(None, 10, 100))));
     assert!(!same_stat(Some(a), None));
 }
+
+/// Un trabajo cortado antes de arrancar su lector (expulsar justo después de «Calcular») no lo
+/// arranca: nunca abre el archivo.
+#[test]
+fn cancelled_before_start_never_runs() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let r = ran.clone();
+    let got: Result<(), Failure> = run_watched(None, Duration::from_secs(1), &AtomicBool::new(true), &Arc::new(Progress::default()), Duration::from_millis(50), &|| {}, &std::sync::Mutex::new(None), move |_| {
+        r.store(true, Ordering::Relaxed);
+        Ok(())
+    });
+    assert_eq!(got, Err(Failure::Cancelled));
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!ran.load(Ordering::Relaxed), "arrancó el lector");
+}

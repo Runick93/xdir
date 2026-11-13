@@ -326,16 +326,26 @@ pub fn run_watched<T: Send + 'static>(
     worker: &Mutex<Option<JoinHandle<()>>>,
     work: impl FnOnce(&AtomicBool) -> Result<T, Failure> + Send + 'static,
 ) -> Result<T, Failure> {
-    let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = channel();
-    let s = stop.clone();
-    let spawned = std::thread::Builder::new().name("xdir-comparar".into()).spawn(move || {
-        let _ = tx.send(work(&s));
-    });
-    match spawned {
-        Ok(h) => *worker.lock().unwrap_or_else(|e| e.into_inner()) = Some(h),
-        Err(_) => return Err(Failure::Failed("No se pudo crear un hilo".into())),
-    }
+    let stop = {
+        // Mirar el corte, arrancar el lector y dejar su hilo en `worker` van juntos, con `worker`
+        // tomado: quien corta (expulsar) enciende `cancel` y después toma `worker`, así o el lector
+        // no arranca, o su hilo ya está ahí para esperarlo.
+        let mut slot = worker.lock().unwrap_or_else(|e| e.into_inner());
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Failure::Cancelled);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let spawned = std::thread::Builder::new().name("xdir-comparar".into()).spawn(move || {
+            let _ = tx.send(work(&s));
+        });
+        match spawned {
+            Ok(h) => *slot = Some(h),
+            Err(_) => return Err(Failure::Failed("No se pudo crear un hilo".into())),
+        }
+        stop
+    };
     let (mut last, mut since) = (progress.beats.load(Ordering::Relaxed), Instant::now());
     let mut ticked = Instant::now();
     loop {

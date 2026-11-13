@@ -397,20 +397,25 @@ impl App {
             cmds.push(command);
             Entry::Item { id: cmds.len() as u32 - 1, label: label.to_string(), enabled, checked }
         };
+        // Donde el menú del sistema no trae «Nuevo» (Mac y Linux), crear va arriba, con el atajo en
+        // uso detrás de un tabulador (la plataforma lo muestra a la derecha). Solo en una carpeta del
+        // disco: ni la Papelera ni «Este equipo» ni las páginas ni las carpetas virtuales.
+        let creates = matches!(self.panes[pane].tab().location, Location::Path(_)) && !sys::file_system().is_trash(&self.panes[pane].tab().location);
+        let mut new_entries = Vec::new();
+        if creates && !sys::shell().menu_has_new() {
+            for (label, c) in [("Carpeta nueva", Command::NewFolder), ("Archivo de texto nuevo", Command::NewTextFile)] {
+                let keys = self.config.keymap.label(c);
+                let text = if keys.is_empty() { label.to_string() } else { format!("{label}\t{keys}") };
+                new_entries.push(item(&text, c, true, false));
+            }
+            new_entries.push(Entry::Sep);
+        }
         let views = self.views_submenu(pane, &mut item);
         let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
         let undo = item("Deshacer", Command::Undo, !self.undo.is_empty(), false);
         // Sin el árbol no se agrega nada después.
-        #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
-        let mut entries = vec![
-            views,
-            sorts,
-            groupings,
-            item("Actualizar", Command::Refresh, true, false),
-            Entry::Sep,
-            item("Pegar", Command::Paste, true, false),
-            undo,
-        ];
+        let mut entries = new_entries;
+        entries.extend([views, sorts, groupings, item("Actualizar", Command::Refresh, true, false), Entry::Sep, item("Pegar", Command::Paste, true, false), undo]);
         // Anclar la carpeta que se está viendo al Acceso rápido de Windows (el menú del fondo del
         // Shell no trae ese verbo).
         #[cfg(feature = "arbol")]

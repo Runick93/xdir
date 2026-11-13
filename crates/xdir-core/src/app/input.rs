@@ -73,6 +73,13 @@ impl App {
         if self.transfers_progress().is_some() && contains(&self.transfers_button_rect(), x, y) {
             return Hit::Transfers;
         }
+        // «calcular tamaño» de la barra de estado (donde quedó en el último cuadro).
+        if let Some(r) = self.size_link
+            && contains(&r, x, y)
+            && !self.xtree_open
+        {
+            return Hit::SizeLink;
+        }
         // «Ver novedades» del aviso de actualización (donde quedó en el último cuadro).
         if self.update_notice.is_some()
             && let Some(r) = self.update_link
@@ -84,6 +91,9 @@ impl App {
         if self.xtree_open {
             if let Some(l) = ui::layout_at(w, h, x, y) {
                 return Hit::Layout(l);
+            }
+            if contains(&crate::xtree::view::back_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeBack;
             }
             return if contains(&ui::xtree_area(w, h), x, y) { Hit::XtreeView } else { Hit::None };
         }
@@ -271,6 +281,10 @@ impl App {
                 let grab = self.preview_column().map_or(0.0, |r| r.left - x);
                 self.drag = Drag::PreviewEdge(grab);
             }
+            Hit::XtreeBack => {
+                self.close_xtree();
+                self.redraw();
+            }
             Hit::XtreeView => {
                 let area = self.xtree_area();
                 let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_click(area, x, y, double));
@@ -310,6 +324,7 @@ impl App {
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
             Hit::Picker(ui::PickerHit::Changelog) => self.run_command(Command::Changelog),
             Hit::UpdateNotice => self.open_update_notice(),
+            Hit::SizeLink => self.request_sel_size(),
             Hit::Changelog(i) => {
                 self.set_active(i);
                 self.redraw();

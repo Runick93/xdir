@@ -60,6 +60,8 @@ thread_local! {
     static SIZES: Retained<NSByteCountFormatter> = {
         let f = NSByteCountFormatter::new();
         f.setCountStyle(NSByteCountFormatterCountStyle::File);
+        // Cero con número («0 bytes»): la palabra («Zero KB») sale en inglés.
+        f.setAllowsNonnumericFormatting(false);
         f
     };
 }
@@ -444,6 +446,12 @@ impl FileSystem for MacFileSystem {
         fsp::is_mount_point(path)
     }
 
+    /// `st_dev` sin seguir enlaces.
+    fn volume_id(&self, path: &Path) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+    }
+
     fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
         fsp::disk_entry(path, name, meta)
     }
@@ -638,4 +646,18 @@ pub(crate) fn utc_offset(unix: i64) -> i64 {
     // memoria entre hilos).
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() { 0 } else { tm.tm_gmtoff as i64 }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::MacEnv;
+    use xdir_core::sys::SystemEnv;
+
+    /// Cero se escribe con número («0 bytes»), no con la palabra del sistema («Zero KB», en inglés).
+    #[test]
+    fn zero_size_is_numeric() {
+        let t = MacEnv.format_size_short(0);
+        assert!(t.starts_with('0'), "{t}");
+        assert!(!t.to_lowercase().contains("zero"), "{t}");
+    }
 }

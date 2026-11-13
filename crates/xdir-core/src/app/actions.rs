@@ -143,7 +143,12 @@ impl App {
             Command::Back => self.tab_mut().go_back(hwnd, &tx),
             Command::Forward => self.tab_mut().go_forward(hwnd, &tx),
             Command::Up => self.tab_mut().go_up(hwnd, &tx),
-            Command::Refresh => self.tab_mut().reload(hwnd, &tx, false),
+            Command::Refresh => {
+                if let Location::Path(dir) = self.panes[active].tab().location.clone() {
+                    self.sel_size.invalidate(&dir);
+                }
+                self.tab_mut().reload(hwnd, &tx, false)
+            }
             Command::EditAddress => self.begin_edit(active),
             Command::Filter => self.begin_filter(active),
             Command::GoComputer => self.tab_mut().navigate(hwnd, &tx, Location::Computer),
@@ -333,10 +338,18 @@ impl App {
         if self.xtree_open {
             self.close_xtree();
         } else {
-            if self.xtree.is_none() {
-                let root = self.xtree_root();
-                self.xtree_last = Some(root.clone());
-                self.xtree = Some(Xtree::new(self.hwnd, root, self.config.xtree_by_type));
+            // Una vista que no analizó nada se arma de nuevo con la raíz de ahora (`xtree_abrir`)
+            // y la opción de ahora; solo se conserva lo que se eligió a mano en el desplegable.
+            if self.xtree.as_ref().is_none_or(|x| !x.scanned()) {
+                let picked = self.xtree.as_ref().and_then(|x| x.user_pick());
+                let root = picked.unwrap_or_else(|| self.xtree_root());
+                // De fábrica no se analiza solo: la vista vacía con la raíz en el desplegable.
+                self.xtree = Some(if self.config.xtree_scan_on_open {
+                    self.xtree_last = Some(root.clone());
+                    Xtree::new(self.hwnd, root, self.config.xtree_by_type)
+                } else {
+                    Xtree::unscanned(self.hwnd, root, self.config.xtree_by_type)
+                });
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.close_quick_look();

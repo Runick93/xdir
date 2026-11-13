@@ -500,6 +500,7 @@ fn xtree_open_uses_option() {
     assert_eq!(a.xtree_root(), here, "si ya no existe, la del panel");
     // Cada análisis nuevo anota su raíz (y va a la sesión).
     a.config.xtree_open = XtreeOpen::Pane;
+    a.config.xtree_scan_on_open = true;
     a.run_command(Command::Xtree);
     assert_eq!(a.session().xtree_last, Some(here));
 }
@@ -513,6 +514,97 @@ fn xtree_starts_by_type_from_config() {
     let mut b = app();
     b.run_command(Command::Xtree);
     assert!(!b.xtree.as_ref().unwrap().by_type());
+}
+
+/// De fábrica xtree no analiza al abrirse: muestra la vista vacía con la raíz elegida, sin escaneo,
+/// y la sesión no anota una raíz que no se analizó.
+#[test]
+fn xtree_opens_without_scanning_by_default() {
+    let mut a = app();
+    assert!(!a.config.xtree_scan_on_open);
+    a.run_command(Command::Xtree);
+    let x = a.xtree.as_ref().unwrap();
+    assert!(a.xtree_open && !x.scanned());
+    assert_eq!(x.root(), a.xtree_root());
+    assert_eq!(a.xtree_badge(), crate::xtree::view::XtreeBadge::Idle);
+    assert_eq!(a.session().xtree_last, None);
+    // Al cerrar y volver a abrir se ve lo mismo (no se crea otra vista).
+    a.run_command(Command::Xtree);
+    a.run_command(Command::Xtree);
+    assert!(!a.xtree.as_ref().unwrap().scanned());
+}
+
+/// Una vista que no analizó nada no se guarda: al volver a abrir xtree en otra carpeta, el
+/// desplegable muestra la que corresponde, y si mientras tanto se prendió la opción, analiza.
+#[test]
+fn xtree_unscanned_reopen_follows_pane_and_option() {
+    let mut a = app();
+    let base = std::env::temp_dir().join(format!("xdir-xtree-reabrir-{}", std::process::id()));
+    let (d1, d2) = (base.join("uno"), base.join("dos"));
+    std::fs::create_dir_all(&d1).unwrap();
+    std::fs::create_dir_all(&d2).unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d1));
+    a.run_command(Command::Xtree);
+    a.run_command(Command::Xtree);
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d2));
+    a.run_command(Command::Xtree);
+    assert_eq!(a.xtree.as_ref().unwrap().root(), a.xtree_root());
+    a.run_command(Command::Xtree);
+    a.config.xtree_scan_on_open = true;
+    a.run_command(Command::Xtree);
+    assert!(a.xtree.as_ref().unwrap().scanned());
+    a.on_closing();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Lo elegido a mano en el desplegable de una vista sin analizar se conserva al volver a abrirla
+/// (aunque el panel esté en otra carpeta).
+#[test]
+fn xtree_unscanned_reopen_keeps_user_pick() {
+    let mut a = app();
+    let base = std::env::temp_dir().join(format!("xdir-xtree-eleccion-{}", std::process::id()));
+    let (d1, d2, elegido) = (base.join("uno"), base.join("dos"), base.join("elegido"));
+    for d in [&d1, &d2, &elegido] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d1));
+    a.run_command(Command::Xtree);
+    a.xtree.as_mut().unwrap().set_pick(elegido.clone());
+    a.run_command(Command::Xtree);
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d2));
+    a.run_command(Command::Xtree);
+    let x = a.xtree.as_ref().unwrap();
+    assert!(!x.scanned());
+    assert_eq!(x.pick(), elegido.as_path());
+    a.on_closing();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Con «Analizar al abrir xtree» encendido, como antes: arranca el análisis.
+#[test]
+fn xtree_scans_on_open_with_option() {
+    let mut a = app();
+    a.config.xtree_scan_on_open = true;
+    a.run_command(Command::Xtree);
+    assert!(a.xtree.as_ref().unwrap().scanned());
+    a.on_closing();
+}
+
+/// El switch de Configuración ▸ xtree escribe `xtree_analizar_al_abrir`.
+#[test]
+fn xtree_scan_on_open_switch_writes_option() {
+    fresh_config();
+    let (mut a, _host) = settings_app(Section::Xtree);
+    click(&mut a, "xtree_analizar_al_abrir", 0);
+    assert!(a.config.xtree_scan_on_open);
+    wait_config(&mut a);
+    assert!(config_text().contains("# xtree_analizar_al_abrir = false\nxtree_analizar_al_abrir = true\n"), "{}", config_text());
+    click(&mut a, "xtree_analizar_al_abrir", 0);
+    assert!(!a.config.xtree_scan_on_open);
+    wait_config(&mut a);
+    assert!(!config_text().contains("\nxtree_analizar_al_abrir = true"));
 }
 
 #[test]

@@ -434,6 +434,21 @@ fn remote_navigation_no_ui_io() {
     a.apply_group(gi);
     pump_pane(&mut a, 0);
     a.paint();
+    // Ajustes 1: elegir una carpeta de red. El tamaño espera «calcular tamaño» y, al tocarlo, se
+    // suma en otro hilo (nada del disco en este).
+    let i = a.panes[0].tab().list.entries.iter().position(|e| e.name == "sub").expect("la lista tiene «sub»");
+    a.panes[0].tab_mut().list.select_index(i);
+    a.paint();
+    assert_eq!(a.sel_size.total(), crate::tab::SelTotal::NeedsClick);
+    a.request_sel_size();
+    a.paint();
+    let t0 = Instant::now();
+    while a.sel_size.total() == crate::tab::SelTotal::Computing {
+        assert!(t0.elapsed() < Duration::from_secs(10), "el tamaño no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_sel_size();
+    }
+    a.paint();
     // Ronda 1: la flecha de las migas, arrastrar, xtree y el desplegable de la barra.
     let k = (0..10).find(|&k| a.panes[0].chevron(k).is_some_and(|(_, l)| l == Location::Path(root.clone()))).expect("la flecha de la carpeta de red");
     a.show_subfolder_menu(0, k);

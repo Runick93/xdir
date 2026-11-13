@@ -39,6 +39,8 @@ const MENU_W: f32 = 400.0;
 /// Ancho del estado del análisis, a la derecha de la barra superior («Análisis completado en
 /// 1:02:15»).
 const STATE_W: f32 = 220.0;
+/// Botón «← xdir», a la izquierda de todo en la barra superior.
+const BACK_W: f32 = 76.0;
 
 const VK_A: Key = Key(0x41);
 const VK_T: Key = Key(0x54);
@@ -102,7 +104,9 @@ pub struct Ui {
     pub status: Rect,
     /// «Abrir en el panel», «Copiar ruta», «Explorar aquí».
     pub buttons: [Rect; 3],
-    /// Desplegable de discos y botón «Analizar», en la barra superior.
+    /// «← xdir» (vuelve a los paneles), desplegable de discos y botón «Analizar», en la barra
+    /// superior.
+    pub back: Rect,
     pub combo: Rect,
     pub scan_btn: Rect,
 }
@@ -125,9 +129,15 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
         buttons[i] = rect(x - widths[i], top, x, bottom);
         x -= widths[i] + 8.0;
     }
-    let combo = rect(l + MARGIN, t + 6.0, l + MARGIN + 250.0, t + TOP_H - 6.0);
+    let back = back_rect(area);
+    let combo = rect(back.right + 8.0, t + 6.0, back.right + 8.0 + 250.0, t + TOP_H - 6.0);
     let scan_btn = rect(combo.right + 8.0, t + 6.0, combo.right + 108.0, t + TOP_H - 6.0);
-    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, combo, scan_btn }
+    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn }
+}
+
+/// Botón «← xdir» de la vista en `area`: a la izquierda de todo en la barra superior.
+pub fn back_rect(area: Rect) -> Rect {
+    rect(area.left + MARGIN, area.top + 6.0, area.left + MARGIN + BACK_W, area.top + TOP_H - 6.0)
 }
 
 /// Lista desplegable de discos (más la fila «Seleccionar carpeta…»), justo debajo del desplegable.
@@ -169,8 +179,7 @@ fn pct(v: u64, of: u64) -> String {
     format!("{:.1} %", v as f64 / of.max(1) as f64 * 100.0).replace('.', ",")
 }
 
-/// Escaneo vacío y ya cancelado: para una vista sin análisis (pruebas).
-#[cfg(test)]
+/// Escaneo vacío (ningún hilo): el de una vista que todavía no analizó nada.
 fn idle_scan() -> Scan {
     Scan {
         id: 0,
@@ -198,6 +207,8 @@ pub struct Xtree {
     hover: Option<usize>,
     hover_row: Option<usize>,
     hover_btn: Option<usize>,
+    /// El mouse está sobre «← xdir».
+    hover_back: bool,
     scroll: f32,
     /// Colorear por tipo de archivo en vez de por posición (tecla T).
     by_type: bool,
@@ -244,6 +255,37 @@ impl Xtree {
         x
     }
 
+    /// Abre la vista sobre `root` sin analizar (`[opciones] xtree_analizar_al_abrir` apagado): el
+    /// desplegable muestra la raíz y el análisis empieza con «Analizar». Solo se piden los datos
+    /// del disco (los de red, en otro hilo).
+    pub fn unscanned(hwnd: Handle, root: PathBuf, by_type: bool) -> Xtree {
+        let mut x = Xtree::with_scan(hwnd, root, idle_scan());
+        x.by_type = by_type;
+        x.read_volume();
+        x
+    }
+
+    /// Lo elegido en el desplegable.
+    pub fn pick(&self) -> &Path {
+        &self.pick
+    }
+
+    /// Lo elegido a mano en el desplegable, si no es la raíz con la que se abrió la vista.
+    pub fn user_pick(&self) -> Option<PathBuf> {
+        (self.pick != self.root && !self.pick.as_os_str().is_empty()).then(|| self.pick.clone())
+    }
+
+    /// Elige en el desplegable sin pasar por el menú (pruebas de `App`).
+    #[cfg(test)]
+    pub fn set_pick(&mut self, p: PathBuf) {
+        self.pick = p;
+    }
+
+    /// ¿Empezó algún análisis en esta vista? (una abierta sin analizar, todavía no).
+    pub fn scanned(&self) -> bool {
+        self.scan_started.is_some()
+    }
+
     fn with_scan(hwnd: Handle, root: PathBuf, scan: Scan) -> Xtree {
         Xtree {
             hwnd,
@@ -259,6 +301,7 @@ impl Xtree {
             hover: None,
             hover_row: None,
             hover_btn: None,
+            hover_back: false,
             scroll: 0.0,
             by_type: false,
             vol: None,
@@ -322,6 +365,7 @@ impl Xtree {
     pub fn close_menu(&mut self) {
         self.menu_open = false;
         self.menu_hover = None;
+        self.hover_back = false;
     }
 
     /// Abre el menú de discos sin pasar por el clic. Lo usan las pruebas de `App` (app/tests.rs).
@@ -429,7 +473,9 @@ impl Xtree {
     /// «Análisis completado en 1:23» o «Detenido a los 0:37».
     fn state_text(&self) -> String {
         let t = fmt_elapsed(self.elapsed());
-        if self.scan_stopped {
+        if !self.scanned() && !self.elevating.load(Ordering::Relaxed) {
+            "Sin analizar".to_string()
+        } else if self.scan_stopped {
             format!("Detenido a los {t}")
         } else if self.elevated_pending() || (self.scanning && self.elevating.load(Ordering::Relaxed)) {
             // El ayudante elevado no informa bytes leídos: solo el cronómetro (como el indicador,
@@ -765,11 +811,14 @@ impl Xtree {
             self.menu_hover = row;
             return changed;
         }
+        let back = contains(&back_rect(area), x, y);
+        let back_changed = back != self.hover_back;
+        self.hover_back = back;
         if self.scanning {
-            return false; // mientras se escanea el mapa es solo de lectura
+            return back_changed; // mientras se escanea el mapa es solo de lectura
         }
         let (row, cell, btn) = (self.row_at(area, x, y), self.cell_at(x, y), self.button_at(area, x, y));
-        let changed = row != self.hover_row || cell != self.hover || btn != self.hover_btn;
+        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn;
         self.hover_row = row;
         self.hover = cell;
         self.hover_btn = btn;
@@ -803,6 +852,9 @@ impl Xtree {
             return Action::Redraw;
         }
         let ui = layout_ui(area, self.legend_h());
+        if contains(&ui.back, x, y) {
+            return Action::Close;
+        }
         if contains(&ui.combo, x, y) {
             self.drives = disk_scan().drives();
             self.menu_open = true;
@@ -892,6 +944,11 @@ impl Xtree {
                 self.cells_for = None;
                 Action::Redraw
             }
+            // Sin análisis todavía, F5 es «Analizar»: lo elegido en el desplegable.
+            VK_F5 if !self.scanned() => {
+                self.scan_pick();
+                Action::Redraw
+            }
             VK_F5 => {
                 self.rescan();
                 Action::Redraw
@@ -965,7 +1022,10 @@ impl Xtree {
         let done = !self.scanning && !arena.is_empty();
 
         // ----- barra superior: disco y total a la izquierda, estado del análisis a la derecha -----
-        let top_text = if done {
+        let unscanned = !self.scanned() && arena.is_empty();
+        let top_text = if unscanned {
+            self.root.display().to_string()
+        } else if done {
             format!("{}  \u{B7}  {} analizados", self.name_of(arena, 0), fmt_size(arena[0].size))
         } else {
             format!(
@@ -984,6 +1044,10 @@ impl Xtree {
             p.fill(rect(l0, y0, r0, y1), th.border);
             p.fill(rect(l0, y0, l0 + (r0 - l0) * pc as f32 / 100.0, y1), th.accent);
         }
+        let bb = ui.back;
+        p.round_fill(bb, 6.0, if self.hover_back { th.hover } else { th.surface_alt });
+        p.round_stroke_w(bb, 6.0, th.border, 1.0);
+        p.text(FontId::UiCenter, "\u{2190} xdir", bb, th.text);
         let cb = ui.combo;
         p.round_fill(cb, 6.0, th.surface_alt);
         p.round_stroke_w(cb, 6.0, if self.menu_open { th.accent } else { th.border }, 1.0);
@@ -995,11 +1059,16 @@ impl Xtree {
         // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
         // es de escaneo.
         let done_state = done && !self.elevated_pending();
-        p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
-        if done_state {
-            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
+        if unscanned {
+            // Sin análisis: sin punto de estado, el texto apagado.
+            p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text_dim);
+        } else {
+            p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
+            if done_state {
+                p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
+            }
+            p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
         }
-        p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
 
         if arena.is_empty() {
             p.round_fill(ui.map, 8.0, th.surface);
@@ -1013,6 +1082,7 @@ impl Xtree {
                     format!("Leyendo la tabla de archivos (MFT)\u{2026} {pct} %")
                 }
                 2 => "Armando el árbol de carpetas\u{2026}".to_string(),
+                _ if unscanned => "Elegí un disco o una carpeta y tocá Analizar".to_string(),
                 _ if self.scan_stopped => self.state_text(),
                 _ if self.scanning => "Escaneando el disco\u{2026}".to_string(),
                 _ => "No hay nada que mostrar".to_string(),
@@ -1193,7 +1263,7 @@ impl Xtree {
             let cur = &arena[self.current as usize];
             let count = cur.children.iter().filter(|&&c| arena.get(c as usize).is_some_and(|n| n.size > 0)).count();
             cols.push(("Carpeta actual", format!("{} \u{B7} {} elementos", fmt_size(cur.size), count)));
-        } else {
+        } else if !unscanned {
             cols.push(("Analizado", fmt_size(progress.bytes.load(Ordering::Relaxed))));
         }
         if let Some((total, free)) = self.volume() {
@@ -1274,7 +1344,7 @@ mod tests {
     fn poke(x: &mut Xtree, area: Rect) {
         x.prepare(area);
         let ui = layout_ui(area, x.legend_h());
-        for r in [ui.list, ui.map, ui.card, ui.legend, ui.status, ui.combo, ui.scan_btn, ui.buttons[0], ui.buttons[1], ui.buttons[2]] {
+        for r in [ui.list, ui.map, ui.card, ui.legend, ui.status, ui.back, ui.combo, ui.scan_btn, ui.buttons[0], ui.buttons[1], ui.buttons[2]] {
             let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
             assert_eq!(x.row_at(area, cx, cy), None);
             let _ = x.cell_at(cx, cy);
@@ -1289,6 +1359,73 @@ mod tests {
         let _ = x.on_right_click();
         let _ = x.on_key(VK_BACK);
         x.prepare(area);
+    }
+
+    /// «← xdir» va a la izquierda de todo en la barra superior; el desplegable y «Analizar» se
+    /// corren a su derecha.
+    #[test]
+    fn back_button_left_of_combo() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let ui = layout_ui(area, 0.0);
+        assert_eq!(ui.back, back_rect(area));
+        assert_eq!((ui.back.left, ui.back.right - ui.back.left), (MARGIN, 76.0));
+        assert_eq!(ui.combo.left, ui.back.right + 8.0);
+        assert!(ui.scan_btn.left > ui.combo.right);
+        assert_eq!((ui.back.top, ui.back.bottom), (ui.combo.top, ui.combo.bottom));
+    }
+
+    /// El clic en «← xdir» cierra la vista (también con el menú de discos cerrado y mientras se
+    /// escanea); el mouse encima lo resalta.
+    #[test]
+    fn back_button_closes_view() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let b = layout_ui(area, 0.0).back;
+        let (cx, cy) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+        assert!(x.on_mouse_move(area, cx, cy), "resalta");
+        assert!(!x.on_mouse_move(area, cx + 1.0, cy), "sigue resaltado");
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Close);
+        x.scanning = true;
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Close);
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.scanning = false;
+        x.paint(&p, area);
+        assert!(p.texts().iter().any(|(_, t, _)| t == "\u{2190} xdir"));
+    }
+
+    /// Vista abierta sin analizar: no escanea, el indicador queda quieto, el desplegable muestra la
+    /// raíz y el mapa dice qué hacer.
+    #[test]
+    fn unscanned_view_shows_hint() {
+        crate::sys::testing::install_fakes();
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let root = std::env::temp_dir().join("xdir-xtree-sin-analizar");
+        let mut x = Xtree::unscanned(Handle::default(), root.clone(), true);
+        assert!(!x.scanned() && !x.scanning && x.by_type());
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+        assert_eq!(x.status_text(), format!("xtree \u{B7} {}", root.display()));
+        assert_eq!(x.pick_label(), root.display().to_string());
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        assert!(texts.iter().any(|t| t == "Elegí un disco o una carpeta y tocá Analizar"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Sin analizar"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.starts_with("Escaneando")), "{texts:?}");
+        poke(&mut x, area);
+    }
+
+    /// F5 en una vista sin analizar analiza lo elegido en el desplegable (como «Analizar»).
+    #[test]
+    fn f5_unscanned_scans_the_pick() {
+        crate::sys::testing::install_fakes();
+        let root = std::env::temp_dir().join("xdir-xtree-f5-raiz");
+        let other = std::env::temp_dir().join("xdir-xtree-f5-elegida");
+        let mut x = Xtree::unscanned(Handle::default(), root, false);
+        x.pick = other.clone();
+        assert_eq!(x.on_key(VK_F5), Action::Redraw);
+        assert!(x.scanned());
+        assert_eq!(x.root(), other.as_path());
+        x.cancel();
     }
 
     #[test]

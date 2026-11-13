@@ -11,9 +11,11 @@ use crate::theme::alpha;
 pub const TABSTRIP_H: f32 = 34.0;
 pub const NAVBAR_H: f32 = 42.0;
 pub const FAVBAR_H: f32 = 30.0;
-/// Franja al pie de cada panel, con el botón del tamaño de la vista a la derecha.
-const FOOTER_H: f32 = 26.0;
-const VIEW_BTN_W: f32 = 32.0;
+/// Franja al pie de cada panel, con «Carpeta nueva» y «Cambiar la vista» a la derecha (botones
+/// de `VIEW_BTN_W`×`FOOTER_BTN_H`, con 2 libres arriba y abajo).
+const FOOTER_H: f32 = 30.0;
+const VIEW_BTN_W: f32 = 36.0;
+const FOOTER_BTN_H: f32 = 26.0;
 const PANE_RADIUS: f32 = 8.0;
 /// Inclinación de los lados de las pestañas.
 const TAB_SLANT: f32 = 10.0;
@@ -210,6 +212,12 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// Botones del pie en el último cuadro: (carpeta nueva, vista). Pruebas de `App`.
+    #[cfg(test)]
+    pub fn footer_buttons(&self) -> (Rect, Rect) {
+        (self.new_folder_button, self.view_button)
+    }
+
     pub fn new(tabs: Vec<Tab>, active: usize) -> Self {
         let zero = rect(0.0, 0.0, 0.0, 0.0);
         let active = active.min(tabs.len().saturating_sub(1));
@@ -699,19 +707,20 @@ impl Pane {
         // Línea gris que separa el final de la lista del pie con los botones.
         p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
         // Botón del pie: cambia el tamaño de los íconos de este panel, vuelve a la primera vista al final.
-        let vb = rect(area.right - PANE_RADIUS - VIEW_BTN_W, area.bottom - FOOTER_H + 2.0, area.right - PANE_RADIUS, area.bottom - 4.0);
+        let vb_top = area.bottom - FOOTER_H + 2.0;
+        let vb = rect(area.right - PANE_RADIUS - VIEW_BTN_W, vb_top, area.right - PANE_RADIUS, vb_top + FOOTER_BTN_H);
         if hover == PaneHit::ViewButton {
             let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
             p.round_fill(vb, 6.0, c);
         }
-        p.text(FontId::GlyphsSmall, "\u{E8A9}", vb, th.text_dim);
+        p.text(FontId::Glyphs, "\u{E8A9}", vb, th.text_dim);
         self.view_button = vb;
         let nb = rect(vb.left - VIEW_BTN_W, vb.top, vb.left, vb.bottom);
         if hover == PaneHit::NewFolderButton {
             let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
             p.round_fill(nb, 6.0, c);
         }
-        p.text(FontId::GlyphsSmall, "\u{E8F4}", nb, th.text_dim);
+        p.text(FontId::Glyphs, "\u{E8F4}", nb, th.text_dim);
         self.new_folder_button = nb;
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];

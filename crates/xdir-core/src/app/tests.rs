@@ -950,6 +950,8 @@ fn xtree_dir(name: &str) -> PathBuf {
 /// App con el panel activo en una carpeta temporal.
 fn app_in(name: &str) -> (App, PathBuf) {
     let mut a = app();
+    // Estas pruebas miran el escaneo: xtree analiza al abrirse (como antes de la opción).
+    a.config.xtree_scan_on_open = true;
     let dir = xtree_dir(name);
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir.clone()));
@@ -960,6 +962,23 @@ fn click_xtree_button(a: &mut App) {
     let (x, y) = center(&a.xtree_button_rect());
     a.on_left_down(x, y, false);
     a.on_left_up(x, y);
+}
+
+/// «← xdir» de la barra de xtree: su cartel dice qué hace y el clic vuelve a los paneles (como Esc).
+#[test]
+fn xtree_back_button_closes_and_has_tooltip() {
+    let (mut a, _) = app_in("volver");
+    click_xtree_button(&mut a);
+    assert!(a.xtree_open);
+    let r = crate::xtree::view::back_rect(a.xtree_area());
+    let (x, y) = center(&r);
+    assert_eq!(a.hit(x, y), Hit::XtreeBack);
+    assert_eq!(a.tooltip_text(Hit::XtreeBack).as_deref(), Some("Volver a xdir (Esc)"));
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(!a.xtree_open);
+    assert!(a.xtree.as_ref().is_some_and(|x| !x.cancelled()), "volver no cancela el escaneo");
+    a.on_closing();
 }
 
 #[test]
@@ -1071,6 +1090,7 @@ fn view_default_root_comes_from_disk_scan() {
     use crate::sys::testing::FakeDiskScan;
     let mut a = app();
     assert!(!matches!(a.panes[a.active].tab().location, Location::Path(_)), "la App en blanco arranca en «Este equipo»");
+    a.config.xtree_scan_on_open = true;
     a.run_command(Command::Xtree);
     assert!(a.xtree_open);
     let root = FakeDiskScan::root();
@@ -1154,7 +1174,102 @@ fn context_menu_own_entries_reach_shell() {
             shell::Entry::Sep => "-",
         })
         .collect();
-    assert_eq!(&labels[..7], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+    assert_eq!(&labels[3..10], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+}
+
+/// Pie del panel: 30 de alto, «Carpeta nueva» y «Cambiar la vista» de 36×26, pegados y a 8 del
+/// borde derecho, con el ícono en Glyphs; la lista termina donde empieza el pie.
+#[test]
+fn footer_buttons_are_36_by_26() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("pie-del-panel");
+    a.new_tab(0, Location::Path(dir), true);
+    a.paint();
+    let (nb, vb) = a.panes[0].footer_buttons();
+    assert_eq!((vb.right - vb.left, vb.bottom - vb.top), (36.0, 26.0));
+    assert_eq!((nb.right - nb.left, nb.bottom - nb.top), (36.0, 26.0));
+    assert_eq!(nb.right, vb.left);
+    let list = a.panes[0].list;
+    assert_eq!(vb.top, list.bottom + 2.0, "la lista termina donde empieza el pie");
+    assert_eq!(vb.bottom, list.bottom + 28.0, "pie de 30, 2 libres abajo");
+    for (glyph, r) in [("\u{E8F4}", nb), ("\u{E8A9}", vb)] {
+        let texts = host.drawn_texts();
+        let (font, _, at) = texts.iter().rev().find(|(_, t, at)| t == glyph && *at == r).unwrap_or_else(|| panic!("no se dibujó {glyph:?}"));
+        assert_eq!((*font, *at), (crate::paint::FontId::Glyphs, r));
+    }
+    // Las zonas de clic siguen a los botones.
+    let (cx, cy) = center(&nb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::NewFolderButton));
+    let (cx, cy) = center(&vb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::ViewButton));
+}
+
+/// Etiquetas de las entradas propias del menú del fondo del panel activo (los submenús por su nombre).
+fn background_labels(a: &App) -> (Vec<String>, Vec<Command>) {
+    let mut cmds = Vec::new();
+    let labels = a
+        .background_entries(a.active, &mut cmds)
+        .iter()
+        .map(|e| match e {
+            shell::Entry::Item { label, .. } | shell::Entry::Sub(label, _) => label.clone(),
+            shell::Entry::Sep => "-".to_string(),
+        })
+        .collect();
+    (labels, cmds)
+}
+
+/// Donde el menú del sistema no trae «Nuevo» (Mac y Linux), el fondo de una carpeta ofrece arriba
+/// «Carpeta nueva» y «Archivo de texto nuevo», con el atajo en uso después de un tabulador, y
+/// elegirlas corre esas acciones.
+#[test]
+fn background_menu_offers_new_entries() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    FakeShell::set_menu_has_new(false);
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-nuevo");
+    a.new_tab(0, Location::Path(dir), true);
+    let (labels, cmds) = background_labels(&a);
+    let folder = format!("Carpeta nueva\t{}", a.config.keymap.label(Command::NewFolder));
+    let file = format!("Archivo de texto nuevo\t{}", a.config.keymap.label(Command::NewTextFile));
+    assert_eq!(&labels[..3], [folder.as_str(), file.as_str(), "-"]);
+    assert_eq!(&cmds[..2], [Command::NewFolder, Command::NewTextFile]);
+    // Un atajo cambiado se ve en el menú; sin atajo, sin tabulador.
+    a.config.keymap.set(Command::NewTextFile, &[]);
+    let (labels, _) = background_labels(&a);
+    assert_eq!(labels[1], "Archivo de texto nuevo");
+}
+
+/// Donde no se puede crear nada (Papelera, «Este equipo», Configuración, Novedades, carpetas
+/// virtuales) no aparecen.
+#[test]
+fn background_menu_new_entries_only_where_creating() {
+    use crate::sys::testing::{FakeFileSystem, FakeShell};
+    let mut a = app();
+    FakeShell::set_menu_has_new(false);
+    let trash = std::env::temp_dir().join("xdir-tests").join("papelera-menu-nuevo");
+    FakeFileSystem::set_trash(Some(&trash));
+    let shell_loc = Location::Shell { parsing: "::{red}".into(), name: "Red".into(), parent: None };
+    for loc in [Location::Path(trash.clone()), Location::Computer, Location::Settings, Location::Changelog, shell_loc] {
+        a.new_tab(0, loc.clone(), true);
+        let (labels, cmds) = background_labels(&a);
+        assert!(!cmds.contains(&Command::NewFolder) && !cmds.contains(&Command::NewTextFile), "{loc:?}: {labels:?}");
+    }
+    FakeFileSystem::set_trash(None);
+}
+
+/// En Windows el menú del Shell ya trae «Nuevo ▸»: no se duplica.
+#[test]
+fn background_menu_no_new_entries_with_system_new() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    FakeShell::set_menu_has_new(true);
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-windows");
+    a.new_tab(0, Location::Path(dir), true);
+    let (labels, cmds) = background_labels(&a);
+    FakeShell::set_menu_has_new(false);
+    assert!(!cmds.contains(&Command::NewFolder) && !cmds.contains(&Command::NewTextFile), "{labels:?}");
+    assert_eq!(labels[0], "Ver");
 }
 
 // ---------- ventana (WindowHost) ----------
@@ -2605,6 +2720,7 @@ fn scan_notices_repaint_status_with_view_closed() {
     let host = FakeHost::new();
     let mut a = app_with_host(Init::blank(), host.clone());
     let dir = xtree_dir("repinta");
+    a.config.xtree_scan_on_open = true;
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
     click_xtree_button(&mut a);
@@ -2633,6 +2749,7 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     let mut a = app_with_host(Init::blank(), host.clone());
     crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
     let dir = xtree_dir("sin-cambio");
+    a.config.xtree_scan_on_open = true;
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
     click_xtree_button(&mut a);

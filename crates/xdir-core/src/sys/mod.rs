@@ -264,6 +264,11 @@ pub trait Shell: Send + Sync {
     fn unpin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String>;
     /// Modo de los menús nativos: `None` sigue al sistema, `Some(oscuro)` lo fuerza.
     fn set_menu_mode(&self, dark: Option<bool>);
+    /// ¿El menú del fondo de una carpeta ya trae «Nuevo» del sistema (Windows)? Si no, xdir pone
+    /// «Carpeta nueva» y «Archivo de texto nuevo».
+    fn menu_has_new(&self) -> bool {
+        false
+    }
     /// Volumen de una ruta, para decidir si arrastrar mueve o copia.
     fn volume_of(&self, path: &Path) -> Option<OsString>;
 }
@@ -356,6 +361,19 @@ pub trait FileSystem: Send + Sync {
     /// ¿El elemento está solo en la nube (iCloud, OneDrive, Dropbox)? Entonces no se lee su
     /// contenido ni se pide su imagen en macOS: abrirlo lo bajaría entero. No toca el contenido.
     fn cloud_only(&self, _path: &Path) -> bool {
+        false
+    }
+    /// El disco de una ruta, sin seguir enlaces (`st_dev` en macOS y Linux), para no cruzar a otro
+    /// disco montado adentro al sumar una carpeta. `None` si no se sabe: en Windows los discos
+    /// montados en una carpeta son puntos de reanálisis y ya no se recorren.
+    fn volume_id(&self, _path: &Path) -> Option<u64> {
+        None
+    }
+    /// ¿Este enlace (o punto de reanálisis) lleva a una carpeta? Sin seguirlo: en Windows, una
+    /// unión, un disco montado en una carpeta o un enlace a carpeta. La suma de una carpeta no
+    /// entra y lo marca como «al menos». Por defecto no (en macOS y Linux, lo que se monta adentro
+    /// lo dicen `volume_id` e `is_mount_point`).
+    fn is_dir_link(&self, _path: &Path) -> bool {
         false
     }
     /// Las reglas de nombres del sistema (`rename_many::NameRules::WINDOWS` o `UNIX`: en macOS

@@ -182,6 +182,7 @@ impl App {
             }
             "vista_previa" => one(row(Control::Switch(self.preview.on))),
             "vista_previa_ancho" => one(row(Control::Slider { value: self.preview.width, min: ui::PREVIEW_MIN_W, max: ui::PREVIEW_MAX_W })),
+            "xtree_analizar_al_abrir" => one(row(Control::Switch(self.config.xtree_scan_on_open))),
             "xtree_por_tipo" => one(row(Control::Switch(self.config.xtree_by_type))),
             "xtree_abrir" => one(row(Control::Dropdown(self.config.xtree_open.title().to_string()))),
             "xtree_teclas" => vec![
@@ -388,6 +389,16 @@ impl App {
                 let on = !self.config.xtree_by_type;
                 self.config.xtree_by_type = on;
                 let key = "xtree_por_tipo".to_string();
+                self.edit_config(vec![if on {
+                    ConfigEdit::Set { section: "opciones", key, value: "true".into() }
+                } else {
+                    ConfigEdit::Remove { section: "opciones", key }
+                }]);
+            }
+            ("xtree_analizar_al_abrir", _) => {
+                let on = !self.config.xtree_scan_on_open;
+                self.config.xtree_scan_on_open = on;
+                let key = "xtree_analizar_al_abrir".to_string();
                 self.edit_config(vec![if on {
                     ConfigEdit::Set { section: "opciones", key, value: "true".into() }
                 } else {

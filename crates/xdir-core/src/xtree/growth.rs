@@ -80,7 +80,7 @@ impl HistState {
         self.pending = false;
         self.growers_cache = None;
         let Some(dir) = self.dir.clone() else { return };
-        if crate::sys::network().is_remote(root) {
+        if crate::sys::network().is_remote(root) || !history::has_history(root) {
             return;
         }
         // La foto se arma en el hilo (recorre medio árbol): se le pasa el árbol compartido.
@@ -150,7 +150,7 @@ impl HistState {
 
     /// ¿La raíz `root` tiene franja de historial? (hay carpeta del historial y no es de red).
     pub fn visible(&self, root: &Path) -> bool {
-        self.dir.is_some() && !crate::sys::network().is_remote(root)
+        self.dir.is_some() && history::has_history(root) && !crate::sys::network().is_remote(root)
     }
 
     /// El análisis de ahora tuvo carpetas sin leer: estas (y las de arriba) son «al menos». Con

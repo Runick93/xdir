@@ -476,8 +476,12 @@ impl History {
         }
     }
 
-    /// ¿Entra en los topes de `decode` (fotos, pares y rutas usadas)?
+    /// ¿Entra en los topes de `decode` (fotos, pares, rutas usadas y bytes del archivo)?
     fn fits(&self) -> bool {
+        self.fits_counts() && encode(self).len() <= MAX_FILE
+    }
+
+    fn fits_counts(&self) -> bool {
         let pairs: usize = self.snaps.iter().map(|s| s.sizes.len()).sum();
         let mut used = vec![false; self.paths.len()];
         for s in &self.snaps {
@@ -489,6 +493,12 @@ impl History {
         }
         self.snaps.len() <= MAX_SNAPS && pairs <= MAX_PAIRS && used.iter().filter(|&&u| u).count() <= MAX_PATHS
     }
+}
+
+/// ¿Puede tener historial la raíz `root`? No si su ruta pasa del tope de una ruta del archivo
+/// (`MAX_PATH`, 4 KB: rutas largas de Windows): se escribiría algo que no se puede leer. Sin E/S.
+pub fn has_history(root: &Path) -> bool {
+    root.as_os_str().len() <= MAX_PATH && root.to_string_lossy().len() <= MAX_PATH
 }
 
 /// Carpeta del historial dentro de la de configuración.
@@ -714,6 +724,9 @@ pub fn load_for(dir: &Path, root: &Path) -> Loaded {
 /// `load_for` con la regla de mayúsculas dada (`fold`: el disco no las distingue; entonces las
 /// rutas se comparan en minúsculas).
 pub fn load_case(dir: &Path, root: &Path, fold: bool) -> Loaded {
+    if !has_history(root) {
+        return Loaded::default();
+    }
     if let Some(name) = file_for_case(dir, root, fold).file_name() {
         clean_stale(dir, &name.to_string_lossy());
     }
@@ -768,6 +781,9 @@ pub fn save_photo(dir: &Path, root: &Path, today: i32, photo: &Photo) -> std::io
 
 /// `save_photo` con la regla de mayúsculas dada.
 pub fn save_photo_case(dir: &Path, root: &Path, today: i32, photo: &Photo, fold: bool) -> std::io::Result<()> {
+    if !has_history(root) {
+        return Ok(());
+    }
     let mut h = read_own(dir, root, fold).unwrap_or_else(|| History { root: root.to_string_lossy().into_owned(), ..Default::default() });
     h.add_photo(today, photo);
     h.consolidate(today);
@@ -1400,6 +1416,40 @@ mod tests {
         let h = read_file(&file_for(&dir, &root)).unwrap();
         assert_eq!(decode(&encode(&h)), Some(h.clone()));
         assert_eq!(h.snaps[0].denied.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Lo que se escribe siempre se puede volver a leer: si las rutas largas pasan del tope de bytes
+    /// del archivo, se van las fotos más viejas antes de escribir.
+    #[test]
+    fn save_fits_byte_budget() {
+        let mut h = History::default();
+        let pad = "x".repeat(400);
+        for d in 0..10 {
+            let sizes: Vec<(String, u64)> = (0..MAX_ENTRIES).map(|i| (format!("{pad}/{d}/{i}"), 1)).collect();
+            h.add(d, &sizes);
+        }
+        assert!(encode(&h).len() > MAX_FILE, "la prueba tiene que pasarse del tope");
+        h.consolidate(10);
+        let bytes = encode(&h);
+        assert!(bytes.len() <= MAX_FILE);
+        assert!(decode(&bytes).is_some());
+        assert_eq!(h.snaps.last().unwrap().day, 9, "quedan las nuevas");
+    }
+
+    /// Una raíz más larga que el tope de una ruta no tiene historial (nunca se escribe algo que no
+    /// se pueda leer).
+    #[test]
+    fn long_root_has_no_history() {
+        let dir = tmp_dir("raiz-larga");
+        let mut root = base("raiz-larga");
+        while root.as_os_str().len() <= MAX_PATH {
+            root = root.join("una-carpeta-con-nombre-largo");
+        }
+        save_snapshot(&dir, &root, 100, &[("".into(), 1)]).unwrap();
+        assert!(!file_for(&dir, &root).exists());
+        assert!(load_for(&dir, &root).is_empty());
+        assert!(!has_history(&root));
+        assert!(has_history(&base("raiz-corta")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

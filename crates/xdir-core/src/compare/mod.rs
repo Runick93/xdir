@@ -130,8 +130,9 @@ pub fn compare_readers(a: &mut dyn Read, b: &mut dyn Read, progress: &mut dyn Fn
         if let Some(i) = ba[..n].iter().zip(&bb[..n]).position(|(x, y)| x != y) {
             return Ok(Some(Verdict::DiffersAt(total + i as u64)));
         }
+        // Uno se terminó antes: los largos leídos (el del otro, hasta acá).
         if na != nb {
-            return Ok(Some(Verdict::DiffersAt(total + n as u64)));
+            return Ok(Some(Verdict::SizeDiffers { a: total + na as u64, b: total + nb as u64 }));
         }
         if n == 0 {
             return Ok(Some(Verdict::Same));
@@ -174,6 +175,8 @@ struct Counted<'a> {
     inner: sys::Reader,
     progress: &'a Progress,
     stop: &'a AtomicBool,
+    /// Bytes leídos.
+    read: u64,
 }
 
 impl Read for Counted<'_> {
@@ -182,6 +185,7 @@ impl Read for Counted<'_> {
             return Err(io::Error::other("cancelado"));
         }
         let n = self.inner.read(buf)?;
+        self.read += n as u64;
         self.progress.beat();
         Ok(n)
     }
@@ -223,14 +227,23 @@ pub fn compare_sources(a: &Source, b: &Source, stop: &AtomicBool, progress: &Pro
     }
     progress.total.store(fa.size, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
-    let mut ra = Counted { inner: fa.reader, progress, stop };
-    let mut rb = Counted { inner: fb.reader, progress, stop };
+    let size = fa.size;
+    let mut ra = Counted { inner: fa.reader, progress, stop, read: 0 };
+    let mut rb = Counted { inner: fb.reader, progress, stop, read: 0 };
     let res = compare_readers(&mut ra, &mut rb, &mut |n| {
         progress.done.store(n, Ordering::Relaxed);
         progress.beat();
         if stop.load(Ordering::Relaxed) { Flow::Stop } else { Flow::Continue }
     });
+    // Leído entero con otro largo que el que tenía al abrirlo (o uno se terminó antes): cambió
+    // mientras se comparaba; no es una diferencia de contenido.
+    let changed = || {
+        let name = if ra.read != size { a.name() } else { b.name() };
+        Err(Failure::Failed(format!("«{name}» cambió mientras se comparaba")))
+    };
     match res {
+        Ok(Some(Verdict::SizeDiffers { .. })) => changed(),
+        Ok(Some(Verdict::Same)) if ra.read != size || rb.read != size => changed(),
         Ok(Some(v)) => Ok(v),
         Ok(None) => Err(Failure::Cancelled),
         Err(_) if stop.load(Ordering::Relaxed) => Err(Failure::Cancelled),
@@ -246,7 +259,7 @@ pub fn hash_source(src: &Source, algo: HashAlgo, stop: &AtomicBool, progress: &P
     let f = open(src, stop, progress)?;
     progress.total.store(f.size, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
-    let mut r = Counted { inner: f.reader, progress, stop };
+    let mut r = Counted { inner: f.reader, progress, stop, read: 0 };
     let res = sys::hashes().hash(&mut r, algo, &mut |n| {
         progress.done.store(n, Ordering::Relaxed);
         progress.beat();

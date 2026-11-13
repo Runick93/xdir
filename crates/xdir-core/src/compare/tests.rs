@@ -42,11 +42,33 @@ fn first_differing_offset() {
     assert_eq!(cmp(&data, &b), Verdict::DiffersAt(BLOCK as u64 + 5));
 }
 
-/// Si uno se termina antes (cambió mientras se leía), es distinto donde se terminó.
+/// Si uno se termina antes, los largos leídos son distintos.
 #[test]
 fn shorter_reader_differs_where_it_ends() {
-    assert_eq!(cmp(b"abcdef", b"abc"), Verdict::DiffersAt(3));
-    assert_eq!(cmp(b"", b"x"), Verdict::DiffersAt(0));
+    assert_eq!(cmp(b"abcdef", b"abc"), Verdict::SizeDiffers { a: 6, b: 3 });
+    assert_eq!(cmp(b"", b"x"), Verdict::SizeDiffers { a: 0, b: 1 });
+}
+
+/// Un archivo que cambia de tamaño mientras se compara (el que se abrió decía otro tamaño): se
+/// avisa que cambió, no se informa una diferencia de contenido.
+#[test]
+fn file_changed_during_compare() {
+    use crate::sys::testing::FakeHashes;
+    install_fakes();
+    let d = tmp("cambio");
+    let (a, b) = (d.join("a.bin"), d.join("b.bin"));
+    std::fs::write(&a, b"12345678").unwrap();
+    std::fs::write(&b, b"1234567890").unwrap();
+    // Al abrirlos los dos medían 10; «a» se achicó a 8 mientras se leía.
+    FakeHashes::report_size(&a, 10);
+    let got = run(&Source::Disk(a.clone()), &Source::Disk(b.clone()));
+    assert_eq!(got, Err(Failure::Failed("«a.bin» cambió mientras se comparaba".into())));
+    // Los dos crecieron igual (o se achicaron igual): tampoco son «iguales» a lo que se abrió.
+    std::fs::write(&a, b"1234567890").unwrap();
+    FakeHashes::report_size(&a, 12);
+    FakeHashes::report_size(&b, 12);
+    let got = run(&Source::Disk(a), &Source::Disk(b));
+    assert_eq!(got, Err(Failure::Failed("«a.bin» cambió mientras se comparaba".into())));
 }
 
 /// Un lector que entrega de a pedazos chicos: los bloques se completan igual.

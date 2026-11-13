@@ -15,6 +15,8 @@ pub struct FakeHashes;
 
 /// Rutas lentas pero vivas: (carpeta, bytes por lectura, pausa antes de cada una).
 static THROTTLED: Mutex<Vec<(PathBuf, usize, Duration)>> = Mutex::new(Vec::new());
+/// Tamaños que se informan al abrir en lugar del real (un archivo que cambia mientras se lee).
+static SIZES: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
 /// Archivos abiertos ahora (uno por lector vivo).
 static OPEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
@@ -23,6 +25,17 @@ impl FakeHashes {
     /// (una red lenta que sigue respondiendo). En todos los hilos; cada prueba usa rutas propias.
     pub fn throttle(prefix: &Path, chunk: usize, delay: Duration) {
         THROTTLED.lock().unwrap_or_else(|e| e.into_inner()).push((prefix.to_path_buf(), chunk, delay));
+    }
+
+    /// Al abrir `path`, dice que mide `size` (lo que se lee sigue siendo el contenido real).
+    pub fn report_size(path: &Path, size: u64) {
+        let mut s = SIZES.lock().unwrap_or_else(|e| e.into_inner());
+        s.retain(|(p, _)| p != path);
+        s.push((path.to_path_buf(), size));
+    }
+
+    fn reported(path: &Path, real: u64) -> u64 {
+        SIZES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == path).map_or(real, |&(_, s)| s)
     }
 
     /// Cuántos lectores siguen abiertos bajo `prefix` (expulsar tiene que esperar a que se cierren).
@@ -77,11 +90,11 @@ impl Hashes for FakeHashes {
         let disk = FakeCopyPrims::shared();
         if disk.exists(path) {
             let data = disk.read_content(path)?;
-            let size = data.len() as u64;
+            let size = Self::reported(path, data.len() as u64);
             return Ok(Opened { reader: Box::new(Slow::new(Cursor::new(data), hang, chunk, path)), size });
         }
         let f = std::fs::File::open(path).map_err(|e| io_error(&e, path))?;
-        let size = f.metadata().map_err(|e| io_error(&e, path))?.len();
+        let size = Self::reported(path, f.metadata().map_err(|e| io_error(&e, path))?.len());
         Ok(Opened { reader: Box::new(Slow::new(f, hang, chunk, path)), size })
     }
 

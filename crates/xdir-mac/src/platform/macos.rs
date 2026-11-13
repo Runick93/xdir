@@ -84,7 +84,7 @@ struct KeyEquivalent {
 }
 
 /// Atajo como lo muestra xdir en la Mac («⇧⌘N», «⌥⌘N») → equivalente de teclado. Solo una letra o
-/// un número después de los modificadores; lo demás (F5, flechas) no se muestra.
+/// un número después de los modificadores; lo demás (F5, flechas) va como texto (`title_and_key`).
 fn key_equivalent(text: &str) -> Option<KeyEquivalent> {
     let mut k = KeyEquivalent { key: String::new(), cmd: false, shift: false, alt: false, ctrl: false };
     let mut rest = text.trim();
@@ -108,6 +108,18 @@ fn key_equivalent(text: &str) -> Option<KeyEquivalent> {
     }
 }
 
+/// Título y equivalente de teclado de una etiqueta «Título\tatajo». Si el atajo no se puede
+/// poner como equivalente (F5, flechas), queda escrito en el título.
+fn title_and_key(label: &str) -> (String, Option<KeyEquivalent>) {
+    match label.split_once('\t') {
+        Some((title, keys)) => match key_equivalent(keys) {
+            Some(k) => (title.to_string(), Some(k)),
+            None => (format!("{title}    {}", keys.trim()), None),
+        },
+        None => (label.to_string(), None),
+    }
+}
+
 fn build_menu(entries: &[Entry], target: &MenuTarget, dot: Option<(u32, Color)>, mtm: MainThreadMarker) -> Retained<NSMenu> {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
@@ -116,12 +128,9 @@ fn build_menu(entries: &[Entry], target: &MenuTarget, dot: Option<(u32, Color)>,
             Entry::Sep => menu.addItem(&NSMenuItem::separatorItem(mtm)),
             Entry::Item { id, label, enabled, checked } => {
                 // «Carpeta nueva\t⇧⌘N»: el atajo va a la derecha como equivalente de teclado.
-                let (title, key) = match label.split_once('\t') {
-                    Some((title, keys)) => (title, key_equivalent(keys)),
-                    None => (label.as_str(), None),
-                };
+                let (title, key) = title_and_key(label);
                 let item = unsafe {
-                    NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(title), Some(sel!(pick:)), &NSString::new())
+                    NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(&title), Some(sel!(pick:)), &NSString::new())
                 };
                 if let Some(k) = key {
                     item.setKeyEquivalent(&NSString::from_str(&k.key));
@@ -178,7 +187,17 @@ pub fn popup_menu(entries: &[Entry], at: MenuAt, dot: Option<(u32, Color)>) -> O
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyEquivalent, key_equivalent};
+    use super::{KeyEquivalent, key_equivalent, title_and_key};
+
+    /// Con un atajo que no es letra ni número, el atajo queda a la vista en el título.
+    #[test]
+    fn menu_shortcut_text_kept_when_not_a_key_equivalent() {
+        let (t, k) = title_and_key("Carpeta nueva\t⇧⌘N");
+        assert_eq!((t.as_str(), k.map(|k| k.key)), ("Carpeta nueva", Some("n".to_string())));
+        let (t, k) = title_and_key("Actualizar\t⌘F5");
+        assert_eq!((t.as_str(), k), ("Actualizar    ⌘F5", None));
+        assert_eq!(title_and_key("Pegar"), ("Pegar".to_string(), None));
+    }
 
     /// «⇧⌘N» y «⌥⌘N» pasan a equivalentes de teclado; F5 o un texto suelto, no.
     #[test]

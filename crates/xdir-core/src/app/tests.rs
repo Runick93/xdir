@@ -950,6 +950,8 @@ fn xtree_dir(name: &str) -> PathBuf {
 /// App con el panel activo en una carpeta temporal.
 fn app_in(name: &str) -> (App, PathBuf) {
     let mut a = app();
+    // Estas pruebas miran el escaneo: xtree analiza al abrirse (como antes de la opción).
+    a.config.xtree_scan_on_open = true;
     let dir = xtree_dir(name);
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir.clone()));
@@ -960,6 +962,23 @@ fn click_xtree_button(a: &mut App) {
     let (x, y) = center(&a.xtree_button_rect());
     a.on_left_down(x, y, false);
     a.on_left_up(x, y);
+}
+
+/// «← xdir» de la barra de xtree: su cartel dice qué hace y el clic vuelve a los paneles (como Esc).
+#[test]
+fn xtree_back_button_closes_and_has_tooltip() {
+    let (mut a, _) = app_in("volver");
+    click_xtree_button(&mut a);
+    assert!(a.xtree_open);
+    let r = crate::xtree::view::back_rect(a.xtree_area());
+    let (x, y) = center(&r);
+    assert_eq!(a.hit(x, y), Hit::XtreeBack);
+    assert_eq!(a.tooltip_text(Hit::XtreeBack).as_deref(), Some("Volver a xdir (Esc)"));
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(!a.xtree_open);
+    assert!(a.xtree.as_ref().is_some_and(|x| !x.cancelled()), "volver no cancela el escaneo");
+    a.on_closing();
 }
 
 #[test]
@@ -1071,6 +1090,7 @@ fn view_default_root_comes_from_disk_scan() {
     use crate::sys::testing::FakeDiskScan;
     let mut a = app();
     assert!(!matches!(a.panes[a.active].tab().location, Location::Path(_)), "la App en blanco arranca en «Este equipo»");
+    a.config.xtree_scan_on_open = true;
     a.run_command(Command::Xtree);
     assert!(a.xtree_open);
     let root = FakeDiskScan::root();
@@ -1094,7 +1114,7 @@ fn command_xtree_is_listed() {
 // ---------- shell ----------
 
 /// Una fila de archivo para cargar a mano en la lista (sin leer el disco).
-fn file_entry(name: &str) -> fs::Entry {
+pub(super) fn file_entry(name: &str) -> fs::Entry {
     fs::Entry {
         name: name.into(),
         full: None,
@@ -1154,7 +1174,102 @@ fn context_menu_own_entries_reach_shell() {
             shell::Entry::Sep => "-",
         })
         .collect();
-    assert_eq!(&labels[..7], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+    assert_eq!(&labels[3..10], ["Ver", "Ordenar por", "Agrupar por", "Actualizar", "-", "Pegar", "Deshacer"]);
+}
+
+/// Pie del panel: 30 de alto, «Carpeta nueva» y «Cambiar la vista» de 36×26, pegados y a 8 del
+/// borde derecho, con el ícono en Glyphs; la lista termina donde empieza el pie.
+#[test]
+fn footer_buttons_are_36_by_26() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("pie-del-panel");
+    a.new_tab(0, Location::Path(dir), true);
+    a.paint();
+    let (nb, vb) = a.panes[0].footer_buttons();
+    assert_eq!((vb.right - vb.left, vb.bottom - vb.top), (36.0, 26.0));
+    assert_eq!((nb.right - nb.left, nb.bottom - nb.top), (36.0, 26.0));
+    assert_eq!(nb.right, vb.left);
+    let list = a.panes[0].list;
+    assert_eq!(vb.top, list.bottom + 2.0, "la lista termina donde empieza el pie");
+    assert_eq!(vb.bottom, list.bottom + 28.0, "pie de 30, 2 libres abajo");
+    for (glyph, r) in [("\u{E8F4}", nb), ("\u{E8A9}", vb)] {
+        let texts = host.drawn_texts();
+        let (font, _, at) = texts.iter().rev().find(|(_, t, at)| t == glyph && *at == r).unwrap_or_else(|| panic!("no se dibujó {glyph:?}"));
+        assert_eq!((*font, *at), (crate::paint::FontId::Glyphs, r));
+    }
+    // Las zonas de clic siguen a los botones.
+    let (cx, cy) = center(&nb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::NewFolderButton));
+    let (cx, cy) = center(&vb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::ViewButton));
+}
+
+/// Etiquetas de las entradas propias del menú del fondo del panel activo (los submenús por su nombre).
+fn background_labels(a: &App) -> (Vec<String>, Vec<Command>) {
+    let mut cmds = Vec::new();
+    let labels = a
+        .background_entries(a.active, &mut cmds)
+        .iter()
+        .map(|e| match e {
+            shell::Entry::Item { label, .. } | shell::Entry::Sub(label, _) => label.clone(),
+            shell::Entry::Sep => "-".to_string(),
+        })
+        .collect();
+    (labels, cmds)
+}
+
+/// Donde el menú del sistema no trae «Nuevo» (Mac y Linux), el fondo de una carpeta ofrece arriba
+/// «Carpeta nueva» y «Archivo de texto nuevo», con el atajo en uso después de un tabulador, y
+/// elegirlas corre esas acciones.
+#[test]
+fn background_menu_offers_new_entries() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    FakeShell::set_menu_has_new(false);
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-nuevo");
+    a.new_tab(0, Location::Path(dir), true);
+    let (labels, cmds) = background_labels(&a);
+    let folder = format!("Carpeta nueva\t{}", a.config.keymap.label(Command::NewFolder));
+    let file = format!("Archivo de texto nuevo\t{}", a.config.keymap.label(Command::NewTextFile));
+    assert_eq!(&labels[..3], [folder.as_str(), file.as_str(), "-"]);
+    assert_eq!(&cmds[..2], [Command::NewFolder, Command::NewTextFile]);
+    // Un atajo cambiado se ve en el menú; sin atajo, sin tabulador.
+    a.config.keymap.set(Command::NewTextFile, &[]);
+    let (labels, _) = background_labels(&a);
+    assert_eq!(labels[1], "Archivo de texto nuevo");
+}
+
+/// Donde no se puede crear nada (Papelera, «Este equipo», Configuración, Novedades, carpetas
+/// virtuales) no aparecen.
+#[test]
+fn background_menu_new_entries_only_where_creating() {
+    use crate::sys::testing::{FakeFileSystem, FakeShell};
+    let mut a = app();
+    FakeShell::set_menu_has_new(false);
+    let trash = std::env::temp_dir().join("xdir-tests").join("papelera-menu-nuevo");
+    FakeFileSystem::set_trash(Some(&trash));
+    let shell_loc = Location::Shell { parsing: "::{red}".into(), name: "Red".into(), parent: None };
+    for loc in [Location::Path(trash.clone()), Location::Computer, Location::Settings, Location::Changelog, shell_loc] {
+        a.new_tab(0, loc.clone(), true);
+        let (labels, cmds) = background_labels(&a);
+        assert!(!cmds.contains(&Command::NewFolder) && !cmds.contains(&Command::NewTextFile), "{loc:?}: {labels:?}");
+    }
+    FakeFileSystem::set_trash(None);
+}
+
+/// En Windows el menú del Shell ya trae «Nuevo ▸»: no se duplica.
+#[test]
+fn background_menu_no_new_entries_with_system_new() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    FakeShell::set_menu_has_new(true);
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-windows");
+    a.new_tab(0, Location::Path(dir), true);
+    let (labels, cmds) = background_labels(&a);
+    FakeShell::set_menu_has_new(false);
+    assert!(!cmds.contains(&Command::NewFolder) && !cmds.contains(&Command::NewTextFile), "{labels:?}");
+    assert_eq!(labels[0], "Ver");
 }
 
 // ---------- ventana (WindowHost) ----------
@@ -2605,6 +2720,7 @@ fn scan_notices_repaint_status_with_view_closed() {
     let host = FakeHost::new();
     let mut a = app_with_host(Init::blank(), host.clone());
     let dir = xtree_dir("repinta");
+    a.config.xtree_scan_on_open = true;
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
     click_xtree_button(&mut a);
@@ -2633,6 +2749,7 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     let mut a = app_with_host(Init::blank(), host.clone());
     crate::sys::testing::FakeDiskScan::set_volume(Some((1000, 0)), true);
     let dir = xtree_dir("sin-cambio");
+    a.config.xtree_scan_on_open = true;
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir));
     click_xtree_button(&mut a);
@@ -2657,6 +2774,160 @@ fn scan_notice_without_badge_change_does_not_repaint() {
     assert!(host.invalidations() > before);
     crate::sys::testing::FakeDiskScan::set_volume(None, false);
     a.on_closing();
+}
+
+/// xtree abierto con un árbol terminado: la raíz `raiz` con estos hijos (nombre, tamaño).
+fn app_with_xtree(kids: &[(&str, u64)]) -> App {
+    app_with_xtree_host(kids, FakeHost::new())
+}
+
+fn app_with_xtree_host(kids: &[(&str, u64)], host: Rc<FakeHost>) -> App {
+    use crate::xtree::tree::{NO_PARENT, Node};
+    let mut a = app_with_host(Init::blank(), host);
+    let total = kids.iter().map(|k| k.1).sum();
+    let mut arena = vec![Node { name: "raiz".into(), parent: NO_PARENT, size: total, is_dir: true, small: false, children: (1..=kids.len() as u32).collect() }];
+    arena.extend(kids.iter().map(|&(n, size)| Node { name: n.into(), parent: 0, size, is_dir: true, small: false, children: vec![] }));
+    let mut x = Xtree::idle(PathBuf::from("raiz"));
+    x.set_arena(arena);
+    a.xtree = Some(x);
+    a.xtree_open = true;
+    a
+}
+
+/// #57: con xtree abierto, las letras van a su tabla (salto por letra), no a la lista del panel.
+#[test]
+fn xtree_letters_go_to_view() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    a.on_char('b');
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
+    // Con Ctrl no es una letra escrita.
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_char('a');
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("beta"));
+}
+
+/// M7: con la búsqueda de xtree abierta y su caja sin el foco (un clic en el mapa), lo que se
+/// escribe va a la caja; Ctrl+P (⌘P) desde la caja abre la paleta, no se pierde.
+#[test]
+fn xtree_search_typing_goes_to_box_and_palette_key_passes() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_xtree_host(&[("alfa", 6), ("beta", 4)], host.clone());
+    a.open_xtree_search();
+    let b = a.xtree_search_box.unwrap();
+    host.focus_main();
+    assert!(!host.text_has_focus(b));
+    a.on_char('b');
+    a.on_char('e');
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some("be"));
+    assert!(host.text_has_focus(b), "la caja vuelve a tener el foco");
+    assert_eq!(a.xtree.as_ref().unwrap().search_query(), Some("be"));
+    assert_eq!(a.xtree.as_ref().unwrap().search_found().unwrap().hits[0].name, "beta");
+    // Ctrl+P en la caja: la paleta (de carpetas).
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, 0x50, 1));
+    assert!(a.palette.is_some(), "abrió la paleta");
+}
+
+/// #57: la A sola es una letra (salto por letra); analizar con permisos es `xtree_permisos`
+/// (Ctrl+Shift+A / ⇧⌘A) dentro de xtree.
+#[test]
+fn xtree_elevate_is_ctrl_shift_a() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    assert!(!a.on_key(Key(b'A' as u16)), "la A sola no es un atajo");
+    a.on_char('a');
+    assert_eq!(a.xtree.as_ref().unwrap().selected_name().as_deref(), Some("alfa"));
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL, VK_SHIFT]);
+    let used = a.on_key(Key(b'A' as u16));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert!(used, "Ctrl+Shift+A es de xtree");
+    assert!(a.xtree_open);
+}
+
+/// #57: dentro de xtree, Ctrl+T (⌘T) cambia los colores (no abre una pestaña); el botón tiene su
+/// cartel con el atajo en uso; la T sola ya no los cambia.
+#[test]
+fn xtree_colors_shortcut_and_tooltip() {
+    let mut a = app_with_xtree(&[("alfa", 6), ("beta", 4)]);
+    let tabs = a.panes[a.active].tabs.len();
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    assert!(a.on_key(Key(b'T' as u16)));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert!(a.xtree_open && a.xtree.as_ref().unwrap().by_type());
+    assert_eq!(a.panes[a.active].tabs.len(), tabs, "no abrió una pestaña");
+    assert!(!a.on_key(Key(b'T' as u16)), "la T sola no es un atajo");
+    assert!(a.xtree.as_ref().unwrap().by_type());
+    assert_eq!(a.tooltip_text(Hit::XtreeColors).as_deref(), Some("Colorear por carpeta (Ctrl+T)"));
+    a.config.keymap.set(Command::XtreeColors, &[]);
+    assert_eq!(a.tooltip_text(Hit::XtreeColors).as_deref(), Some("Colorear por carpeta"));
+    // El clic en el botón (donde quedó en el cuadro).
+    a.paint();
+    let (x, y) = point_of(&a, Hit::XtreeColors);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(!a.xtree.as_ref().unwrap().by_type());
+    // Fuera de xtree Ctrl+T sigue abriendo una pestaña.
+    a.close_xtree();
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    a.on_key(Key(b'T' as u16));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    assert_eq!(a.panes[a.active].tabs.len(), tabs + 1);
+}
+
+/// #57: Ctrl+F (los atajos de «Buscar») dentro de xtree abre la búsqueda con su caja (la de la
+/// paleta); lo escrito busca, Enter entra y saca la caja; la lupa abre y Esc cierra; cerrar xtree
+/// saca la caja y al volver aparece con lo escrito.
+#[test]
+fn xtree_search_box_flow() {
+    use crate::host::{TextKind, WM_APP_PALETTE_KEY};
+    let host = FakeHost::new();
+    let mut a = app_with_xtree_host(&[("alfa", 6), ("beta", 4)], host.clone());
+    a.paint();
+    assert_eq!(a.tooltip_text(Hit::XtreeSearch).as_deref(), Some("Buscar en xtree (Ctrl+F)"));
+    crate::sys::testing::FakeEnv::hold_keys(&[VK_CONTROL]);
+    assert!(a.on_key(Key(b'F' as u16)));
+    crate::sys::testing::FakeEnv::hold_keys(&[]);
+    let x = |a: &App| a.xtree.as_ref().unwrap().search_open();
+    assert!(x(&a) && a.xtree_open);
+    let b = a.xtree_search_box.expect("la caja");
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some(""));
+    assert!(host.text_has_focus(b));
+    host.text_set(b, "BET");
+    a.on_text_changed(b.0 as isize);
+    let names: Vec<String> = a.xtree.as_ref().unwrap().search_found().unwrap().hits.iter().map(|h| h.name.clone()).collect();
+    assert_eq!(names, ["beta"]);
+    // Perder el foco no cierra nada.
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, 0, 0));
+    assert!(x(&a) && a.xtree_search_box.is_some());
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_RETURN.0 as usize, 0));
+    assert!(!x(&a));
+    assert_eq!(host.text_of(TextKind::Palette), None, "Enter saca la caja");
+    assert!(a.xtree_open, "sigue en xtree");
+    // La lupa la abre; Esc en la caja la cierra; otro Esc cierra xtree.
+    a.paint();
+    let (lx, ly) = point_of(&a, Hit::XtreeSearch);
+    a.on_left_down(lx, ly, false);
+    a.on_left_up(lx, ly);
+    assert!(x(&a) && a.xtree_search_box.is_some());
+    assert!(a.on_app_message(WM_APP_PALETTE_KEY, VK_ESCAPE.0 as usize, 0));
+    assert!(!x(&a) && a.xtree_search_box.is_none());
+    assert!(a.on_key(VK_ESCAPE));
+    assert!(!a.xtree_open);
+    // Cerrar xtree con la búsqueda abierta saca la caja; al volver vuelve con lo escrito.
+    a.toggle_xtree();
+    a.open_xtree_search();
+    let b = a.xtree_search_box.unwrap();
+    host.text_set(b, "alf");
+    a.on_text_changed(b.0 as isize);
+    a.toggle_xtree();
+    assert_eq!(host.text_of(TextKind::Palette), None);
+    // (La vista de prueba no analizó nada: `toggle_xtree` la armaría de nuevo; se reabre como una
+    // que ya analizó.)
+    a.xtree_open = true;
+    a.sync_xtree_search();
+    assert_eq!(host.text_of(TextKind::Palette).as_deref(), Some("alf"));
+    // Un aviso de búsqueda (de un hilo) sin nada pendiente no hace nada.
+    assert!(a.on_app_message(crate::xtree::search::WM_APP_XTREE_FOUND, 0, 0));
 }
 
 // ---------- entrada «xtree» del árbol ----------

@@ -6,6 +6,8 @@ mod actions;
 mod appearance;
 mod archive_nav;
 mod changelog;
+mod checksum;
+mod compare;
 mod edit;
 mod events;
 mod favs;
@@ -23,9 +25,12 @@ mod quick_look;
 mod panes;
 mod preview;
 mod rename_many;
+mod activity;
+mod sel_size;
 mod tasks;
 mod tooltip;
 mod transfers;
+mod xtree_history;
 
 #[cfg(test)]
 mod tests;
@@ -51,6 +56,12 @@ mod network_tests;
 mod settings_tests;
 #[cfg(test)]
 mod changelog_tests;
+#[cfg(test)]
+mod sel_size_tests;
+#[cfg(test)]
+mod activity_tests;
+#[cfg(test)]
+mod compare_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -170,12 +181,23 @@ enum Hit {
     PreviewToggle,
     /// Indicador de las operaciones de copia en la barra de estado (abre la ventana de copia).
     Transfers,
+    /// Indicador de lo que corre en segundo plano (su cartel dice qué; con copias, abre su ventana).
+    Activity,
     /// Borde izquierdo de la columna de vista previa (cambiar su ancho).
     PreviewEdge,
     /// El panel de información (en el lugar de la columna).
     Info(crate::info::draw::InfoHit),
     /// La vista de xtree abierta, sobre el área de los paneles.
     XtreeView,
+    /// La ▲ de una carpeta que creció mucho, en la tabla de xtree (su cartel tiene el cambio); el
+    /// resto se maneja como `XtreeView`.
+    XtreeMark(u32),
+    /// «← xdir» de la barra superior de xtree (vuelve a los paneles).
+    XtreeBack,
+    /// «Colores: carpeta / tipo» de la barra superior de xtree.
+    XtreeColors,
+    /// La lupa de la barra superior de xtree (abre y cierra la búsqueda).
+    XtreeSearch,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
@@ -185,8 +207,12 @@ enum Hit {
     Changelog(usize),
     /// «Ver novedades» del aviso de actualización en la barra de estado.
     UpdateNotice,
+    /// «calcular tamaño» de la barra de estado (carpetas de red elegidas).
+    SizeLink,
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
+    /// El panel de comparar: un botón, o el panel sin nada debajo.
+    Compare(crate::compare::draw::CompareHit),
     /// Diálogo "Acerca de" abierto: un botón, o el diálogo sin nada debajo.
     About(about::AboutHit),
     /// «Conectar a un servidor» abierto: un control, o el panel sin nada debajo.
@@ -355,6 +381,16 @@ pub struct App {
     update_notice: Option<String>,
     /// Dónde quedó «Ver novedades» en el último cuadro (para el clic).
     update_link: Option<geom::Rect>,
+    /// Tamaño de lo elegido (carpetas incluidas) para la barra de estado.
+    sel_size: sel_size::SelSize,
+    /// Dónde quedó «calcular tamaño» en la barra de estado en el último cuadro.
+    size_link: Option<geom::Rect>,
+    /// Lo que corre en segundo plano (el indicador de la barra de estado).
+    activity: activity::Activities,
+    /// Cuánto se espera al sistema al expulsar (las pruebas lo achican).
+    eject_limit: std::time::Duration,
+    /// Dónde quedó el indicador de actividad en el último cuadro (`None`: no se ve).
+    activity_rect: Option<geom::Rect>,
     /// La versión más nueva que se abrió con esta sesión (se guarda en `version_vista`).
     seen_version: String,
     /// Fondo Mica activo (ventana con marco extendido y composición translúcida).
@@ -384,6 +420,10 @@ pub struct App {
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
     palette: Option<(Palette, TextBox)>,
+    /// La caja de la búsqueda de xtree (#57), mientras la búsqueda está abierta y se ve.
+    xtree_search_box: Option<TextBox>,
+    /// Ver `Init::clean_temps_on_close`.
+    pub(super) clean_temps_on_close: bool,
     /// Árbol de carpetas lateral (experimental).
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
@@ -449,6 +489,13 @@ pub struct App {
     portable_marker: bool,
     /// La última carpeta que analizó xtree (`xtree_abrir = "ultimo"`), de la sesión.
     xtree_last: Option<PathBuf>,
+    /// Período del historial en la tarjeta de xtree (de la sesión; la vista abierta manda).
+    xtree_days: u16,
+    /// Resultado de «Borrar historial» de xtree, para la fila de la configuración.
+    xtree_history_msg: Option<String>,
+    /// Contador de «Borrar historial» de xtree (lo comparte con la vista: una foto en camino
+    /// después de borrar no se guarda).
+    xtree_history_clears: crate::xtree::history::Clears,
     /// Menú de consola abierto, en este panel.
     term_menu: Option<usize>,
     /// Consola del menú de terminales sobre la que se hizo clic derecho.
@@ -467,6 +514,10 @@ pub struct App {
     quick_look: Option<quick_look::QlState>,
     /// Renombrar varios abierto (el panel de la derecha y la vista previa en la lista).
     rename_many: Option<rename_many::RenameMany>,
+    /// «Comparar contenido» abierto (el panel de la derecha con los dos archivos).
+    compare: Option<compare::CompareState>,
+    /// Trabajos de comparar y de las sumas de verificación (canal y límite de la red).
+    jobs: compare::Jobs,
     /// Hay un Renombrar varios (o su deshacer) corriendo: no se larga otro hasta que termine.
     renaming: bool,
     /// El Espacio que llega después de usar la tecla (`WM_CHAR` en Windows) no se escribe.
@@ -516,6 +567,9 @@ pub struct Init {
     pub start_path: Option<PathBuf>,
     pub started: Instant,
     pub marks: Vec<(&'static str, f64)>,
+    /// Al cerrar, borrar la carpeta temporal de los comprimidos (`temps::clean_at_exit`). Las
+    /// pruebas la apagan: esa carpeta es una para todo el proceso y la usan otras en paralelo.
+    pub clean_temps_on_close: bool,
 }
 
 impl Init {
@@ -534,7 +588,7 @@ impl Init {
         if probe.is_none() {
             crate::archive_nav::temps::clean_at_start();
         }
-        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, probe, start_path, started, marks }
+        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, probe, start_path, started, marks, clean_temps_on_close: true }
     }
 
     /// Datos vacíos y sesión por defecto: nada del disco.
@@ -553,6 +607,7 @@ impl Init {
             start_path: None,
             started: Instant::now(),
             marks: Vec::new(),
+            clean_temps_on_close: false,
         }
     }
 }
@@ -561,7 +616,10 @@ impl App {
     /// Arma la aplicación (sin ventana: la plataforma la fija después con `App::attach`, que se la
     /// pasa al host) y abre sus paneles.
     pub fn new(init: Init, host: Rc<dyn WindowHost>) -> App {
-        let Init { session, history, config, favorites, groups, mut folder_views, probe, start_path, started, marks } = init;
+        // Pruebas: el reloj fijado por una prueba anterior en este hilo no pasa a esta.
+        #[cfg(test)]
+        crate::clock::set(None);
+        let Init { session, history, config, favorites, groups, mut folder_views, probe, start_path, started, marks, clean_temps_on_close } = init;
         // Primera vez con memoria por carpeta: la vista y las columnas de la sesión pasan a ser
         // la vista por defecto.
         if folder_views.is_fresh() {
@@ -619,6 +677,11 @@ impl App {
             // Se marca como vista enseguida: el aviso sale una sola vez.
             update_notice: crate::changelog::should_notify(session.seen_version.as_deref(), about::VERSION).then(|| about::VERSION.to_string()),
             update_link: None,
+            sel_size: sel_size::SelSize::new(),
+            size_link: None,
+            activity: activity::Activities::default(),
+            eject_limit: tasks::EJECT_LIMIT,
+            activity_rect: None,
             seen_version: crate::changelog::newest(session.seen_version.as_deref().unwrap_or(about::VERSION), about::VERSION).to_string(),
             transparent: false,
             favorites,
@@ -633,6 +696,8 @@ impl App {
             tree_followed: None,
             groups_menu_closed: None,
             palette: None,
+            xtree_search_box: None,
+            clean_temps_on_close,
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(),
             show_favorites: session.show_favorites,
@@ -666,6 +731,9 @@ impl App {
             portable_now: session::portable_active(),
             portable_marker: session::portable_active(),
             xtree_last: session.xtree_last.clone(),
+            xtree_days: session.xtree_days,
+            xtree_history_msg: None,
+            xtree_history_clears: Default::default(),
             term_menu: None,
             term_ctx: None,
             history_ctx: None,
@@ -675,6 +743,8 @@ impl App {
             info: info::InfoState::new(session.info_sections),
             quick_look: None,
             rename_many: None,
+            compare: None,
+            jobs: compare::Jobs::new(),
             renaming: false,
             swallow_space: false,
             transfers: transfers::Transfers::new(),

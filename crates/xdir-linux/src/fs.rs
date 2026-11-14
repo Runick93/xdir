@@ -69,6 +69,11 @@ impl FileSystem for LinuxFileSystem {
         }
     }
 
+    /// `st_dev` sin seguir enlaces.
+    fn volume_id(&self, path: &Path) -> Option<u64> {
+        std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+    }
+
     fn disk_entry(&self, path: &Path, name: OsString, meta: &Metadata) -> Entry {
         let mut e = load::entry_for(name, meta, 0, None);
         e.full = Some(path.as_os_str().to_os_string());

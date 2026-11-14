@@ -137,16 +137,23 @@ impl App {
         let name = e.name.to_string_lossy().into_owned();
         let (file, nested) = (file.clone(), nested.clone());
         self.notice = Some(format!("Abriendo «{name}»…   Esc cancela"));
+        let now = self.now();
+        self.activity.begin(super::activity::ActivityKey::Extract, format!("Extrayendo \"{name}\""), now);
         // Una apertura nueva corta la anterior.
         let stop = Arc::new(AtomicBool::new(false));
         if let Some(old) = self.archive.opening.replace(stop.clone()) {
             old.store(true, Ordering::Relaxed);
         }
-        self.spawn_task(move || {
-            let cancel = || stop.load(Ordering::Relaxed);
-            let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
-            TaskDone::ArchiveOpened { name, with, token: stop.clone(), result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
-        });
+        let (n0, t0) = (name.clone(), stop.clone());
+        self.spawn_task_or(
+            move || {
+                let cancel = || stop.load(Ordering::Relaxed);
+                let result = temps::global().ensure(&file, &nested, &rel, &temps::Limits { max: temps::OPEN_MAX, cancel: &cancel });
+                TaskDone::ArchiveOpened { name, with, token: stop.clone(), result: result.map_err(|e| if e.kind == sys::ErrKind::Cancelled { CANCELLED.to_string() } else { e.message() }) }
+            },
+            // El hilo falló (un comprimido roto): el aviso, y deja de estar «Extrayendo».
+            move || TaskDone::ArchiveOpened { name: n0, with, token: t0, result: Err("no se pudo leer el archivo comprimido".into()) },
+        );
     }
 
     /// Escape con una apertura desde un archivo comprimido en curso: se corta. `false` si no había.
@@ -166,6 +173,7 @@ impl App {
             return;
         }
         self.archive.opening = None;
+        self.activity.end(&super::activity::ActivityKey::Extract);
         // Cancelada con Escape.
         if token.load(Ordering::Relaxed) || matches!(&result, Err(m) if m == CANCELLED) {
             return;
@@ -266,10 +274,11 @@ impl App {
     }
 
     /// Se soltó el arrastre desde un archivo comprimido en `(x, y)`: si es una carpeta de disco de
-    /// otro panel (o una carpeta de su lista), lo elegido se copia ahí con el motor.
+    /// otro panel (o una carpeta de su lista) o una carpeta del árbol, lo elegido se copia ahí con
+    /// el motor.
     pub(super) fn drop_archive_drag(&mut self, from: usize, x: f32, y: f32) {
         self.notice = None;
-        let Some((pane, _, dest)) = self.drop_folder(x, y) else { return };
+        let Some((at, dest)) = self.drop_folder(x, y) else { return };
         let tab = self.panes[from].tab();
         let Location::Archive { file, nested, .. } = &tab.location else { return };
         let entries: Vec<String> =
@@ -279,7 +288,9 @@ impl App {
         }
         let Some(archive) = real_archive(file, nested) else { return };
         self.start_transfer(JobSpec::ExtractEntries { archive, entries, dest });
-        self.set_active(pane);
+        if let super::fileops::DropAt::Pane(pane, _) = at {
+            self.set_active(pane);
+        }
     }
     /// Menú contextual dentro de un archivo comprimido (no hay menú del sistema para lo de
     /// adentro, pantalla X69): abrir, extraer y copiar; deshabilitado lo que escribe.
@@ -292,6 +303,7 @@ impl App {
             ExtractTo,
             Copy,
             CopyPath,
+            Compare,
             Refresh,
             None,
         }
@@ -302,8 +314,9 @@ impl App {
             shell::Entry::Item { id: acts.len() as u32, label: label.into(), enabled, checked: false }
         };
         let sep = || shell::Entry::Sep;
+        let can_compare = has_items && self.compare_candidates().is_ok();
         let entries = if has_items {
-            vec![
+            let mut v = vec![
                 item("Abrir", Do::Open, true),
                 item("Abrir con…", Do::OpenWith, true),
                 sep(),
@@ -313,13 +326,20 @@ impl App {
                 item("Cortar", Do::None, false),
                 item("Copiar", Do::Copy, true),
                 item("Copiar como ruta de acceso", Do::CopyPath, true),
+            ];
+            // Dos archivos elegidos: compararlos (se extraen a la temporal).
+            if can_compare {
+                v.push(item("Comparar contenido", Do::Compare, true));
+            }
+            v.extend([
                 sep(),
                 item("Eliminar", Do::None, false),
                 item("Renombrar", Do::None, false),
                 sep(),
                 item("Nueva carpeta", Do::None, false),
                 item("Comprimir", Do::None, false),
-            ]
+            ]);
+            v
         } else {
             vec![item("Actualizar", Do::Refresh, true), sep(), item("Pegar", Do::None, false), item("Nueva carpeta", Do::None, false)]
         };
@@ -341,6 +361,7 @@ impl App {
             Do::ExtractTo => self.extract_from_archive(pane, true),
             Do::Copy => self.run_command(Command::Copy),
             Do::CopyPath => self.copy_archive_paths(pane),
+            Do::Compare => self.run_command(Command::CompareContents),
             Do::Refresh => self.run_command(Command::Refresh),
             Do::None => {}
         }

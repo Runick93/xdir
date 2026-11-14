@@ -182,23 +182,40 @@ impl App {
             }
             "vista_previa" => one(row(Control::Switch(self.preview.on))),
             "vista_previa_ancho" => one(row(Control::Slider { value: self.preview.width, min: ui::PREVIEW_MIN_W, max: ui::PREVIEW_MAX_W })),
+            "xtree_analizar_al_abrir" => one(row(Control::Switch(self.config.xtree_scan_on_open))),
             "xtree_por_tipo" => one(row(Control::Switch(self.config.xtree_by_type))),
             "xtree_abrir" => one(row(Control::Dropdown(self.config.xtree_open.title().to_string()))),
-            "xtree_teclas" => vec![
-                Item::Row(row(Control::Table(
+            "xtree_historial" => one(row(Control::Switch(self.config.xtree_history))),
+            "xtree_borrar_historial" => {
+                let desc = self.xtree_history_msg.clone().map_or_else(|| row(Control::None).desc, |m| format!("{} \u{B7} {m}", row(Control::None).desc));
+                one(Row { desc, ..row(Control::Buttons(vec![("Borrar historial".to_string(), true)])) })
+            }
+            "xtree_teclas" => {
+                // Los atajos que se cambian en Atajos de teclado, con la tecla en uso.
+                let colors = self.config.keymap.label(Command::XtreeColors);
+                let mut rows = vec![("Letras".to_string(), "Ir a la primera fila que empieza así".to_string())];
+                if !colors.is_empty() {
+                    rows.push((colors, "Colorear el mapa por tipo de archivo o por carpeta".to_string()));
+                }
+                let search = self.config.keymap.label(Command::Filter);
+                if !search.is_empty() {
+                    rows.push((search, "Buscar por nombre en todo lo analizado".to_string()));
+                }
+                let elevate = self.config.keymap.label(Command::XtreeElevate);
+                if !elevate.is_empty() {
+                    rows.push((elevate, "Analizar de nuevo con permisos de administrador".to_string()));
+                }
+                rows.extend(
                     [
-                        ("T", "Colorear el mapa por tipo de archivo o por carpeta"),
                         ("F5", "Volver a analizar"),
                         ("⌫", "Subir a la carpeta de arriba"),
-                        ("A", "Analizar de nuevo con permisos de administrador"),
                         ("Esc", "Cerrar xtree"),
                     ]
                     .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-                ))),
-                Item::Action("ver_atajos", "Ver los atajos".to_string()),
-            ],
+                    .map(|(k, v)| (k.to_string(), v.to_string())),
+                );
+                vec![Item::Row(row(Control::Table(rows))), Item::Action("ver_atajos", "Ver los atajos".to_string())]
+            }
             "abrir_config" => {
                 let path = config::file_path().map(|p| p.display().to_string()).unwrap_or_default();
                 one(Row { desc: path, ..row(Control::Buttons(vec![("Abrir config.toml".to_string(), true)])) })
@@ -394,7 +411,19 @@ impl App {
                     ConfigEdit::Remove { section: "opciones", key }
                 }]);
             }
+            ("xtree_analizar_al_abrir", _) => {
+                let on = !self.config.xtree_scan_on_open;
+                self.config.xtree_scan_on_open = on;
+                let key = "xtree_analizar_al_abrir".to_string();
+                self.edit_config(vec![if on {
+                    ConfigEdit::Set { section: "opciones", key, value: "true".into() }
+                } else {
+                    ConfigEdit::Remove { section: "opciones", key }
+                }]);
+            }
             ("xtree_abrir", _) => self.xtree_open_menu(pane),
+            ("xtree_historial", _) => self.toggle_xtree_history(),
+            ("xtree_borrar_historial", _) => self.clear_xtree_history(),
             ("ver_atajos", _) => self.open_settings(Some(PageId::Builtin(Section::Keys))),
             ("abrir_config", _) => self.run_command(Command::OpenConfig),
             ("carpeta_config", _) => {
@@ -464,7 +493,7 @@ impl App {
                 exe.display()
             );
             // Lo que ya esté ahí (de otra vez) no se pisa: gana sobre lo de ahora.
-            let old: Vec<&str> = session::files(true).into_iter().map(|(n, _)| n).filter(|n| exe.join(n).is_file() && exe != from).collect();
+            let old: Vec<&str> = session::files(true).into_iter().map(|(n, _)| n).filter(|n| exe.join(n).exists() && exe != from).collect();
             if !old.is_empty() {
                 question += &format!(" Ya hay archivos de configuración en esa carpeta ({}): se usan esos y no se copian los de ahora.", old.join(", "));
             }
@@ -655,7 +684,7 @@ impl App {
 
     /// La grabación en curso, solo si la configuración es la pestaña a la vista del panel activo
     /// (si no, las teclas son de lo que se ve).
-    fn recording(&self) -> Option<&Recording> {
+    pub(super) fn recording(&self) -> Option<&Recording> {
         if !self.shown_panes().contains(&self.active) {
             return None;
         }
@@ -683,7 +712,7 @@ impl App {
         Some(&mut self.panes[pane].tabs[index].settings.as_mut()?.recording)
     }
 
-    fn set_recording(&mut self, r: Option<Recording>) {
+    pub(super) fn set_recording(&mut self, r: Option<Recording>) {
         if let Some(slot) = self.recording_mut() {
             *slot = r;
         }
@@ -877,9 +906,13 @@ impl App {
                 let pressed = Combo { vk: vk.0, ctrl, shift, alt, meta };
                 self.set_recording(Some(Recording { message: Some(m), pressed: Some(pressed), conflict: None, ..rec }));
             }
+            // Las teclas propias de la vista de xtree no se pueden dar a un comando de xtree.
+            Capture::Accept(k) if commands::xtree_only(rec.command) && !k.ctrl && !k.alt && !k.meta && crate::xtree::view::is_view_key(Key(k.vk)) => {
+                self.set_recording(Some(Recording { message: Some(skeys::XTREE_KEY), pressed: Some(k), conflict: None, ..rec }));
+            }
             Capture::Accept(k) => {
                 let combos = self.config.keymap.combos(rec.command);
-                match self.config.keymap.owner(k) {
+                match self.config.keymap.owner_for(k, rec.command) {
                     // La misma que ya tiene (en este chip u otro): nada cambia.
                     _ if combos.contains(&k) => self.set_recording(None),
                     Some(other) => self.set_recording(Some(Recording { conflict: Some((k, other)), message: None, pressed: Some(k), ..rec })),
@@ -930,7 +963,7 @@ impl App {
     /// comando quedan con ese (como al leer `config.toml`).
     fn reset_shortcut(&mut self, c: Command) {
         let factory = Keymap::default().combos(c);
-        let free: Vec<Combo> = factory.into_iter().filter(|k| self.config.keymap.owner(*k).is_none_or(|o| o == c)).collect();
+        let free: Vec<Combo> = factory.into_iter().filter(|k| self.config.keymap.owner_for(*k, c).is_none_or(|o| o == c)).collect();
         self.config.keymap.set(c, &free);
         self.config.own_shortcut_ids.remove(spec_id(c));
         self.edit_config(vec![ConfigEdit::Remove { section: "atajos", key: spec_id(c).to_string() }]);

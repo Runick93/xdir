@@ -30,12 +30,28 @@ impl App {
         let listed = self.all_listed();
         let mark_list_frame = listed && !self.list_frame_done;
 
+        // Lo elegido cambió: se corta el cálculo del tamaño anterior y arranca el nuevo.
+        self.sync_sel_size();
         let mut status = match self.xtree.as_ref().filter(|_| self.xtree_open) {
             Some(v) => v.status_text(),
-            None => self.panes[self.active].tab().status(),
+            None => self.status_text(),
         };
+        // Carpetas de red elegidas: el texto termina en el enlace «calcular tamaño».
+        let size_link = !self.xtree_open && self.sel_size.total() == crate::tab::SelTotal::NeedsClick;
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
+        }
+        // Lo que corre en segundo plano: el indicador (y su cartel) desde su umbral.
+        let clock = self.now();
+        self.sync_activity(clock);
+        // Lo que se ve desde este cuadro queda al menos `MIN_SHOWN` (sin destellos).
+        self.activity.observe(clock);
+        let activity = !self.activity.shown(clock).is_empty();
+        let activity_clickable = self.transfers_progress().is_some();
+        let activity_still = self.activity.all_still(clock);
+        // Expulsando o desconectando algo: delante de todo, mientras dure.
+        if let Some(e) = self.eject_status() {
+            status = format!("{e}   ·   {status}");
         }
         // El aviso de actualización va delante (con su enlace); otro aviso lo tapa mientras está.
         let update_notice = self.update_notice.clone().filter(|_| self.notice.is_none());
@@ -73,8 +89,16 @@ impl App {
         if let Some(r) = preview_col.filter(|_| info_shown) {
             self.layout_info(r);
         }
+        let compare_shown = self.compare_open();
+        if let Some(r) = preview_col.filter(|_| compare_shown) {
+            self.layout_compare(r);
+        }
+        let compare_hover = match self.hover {
+            Hit::Compare(h) => Some(h),
+            _ => None,
+        };
         let preview_shown =
-            preview_col.filter(|_| !info_shown && rename_panel.is_none()).map(|_| self.preview_shown());
+            preview_col.filter(|_| !info_shown && !compare_shown && rename_panel.is_none()).map(|_| self.preview_shown());
         let info_hover = match self.hover {
             Hit::Info(h) => Some(h),
             _ => None,
@@ -89,6 +113,11 @@ impl App {
         let target = ui::visible_rects(self.layout, self.maximized, ui::panes_area(cw, ch, tree_w, groups_h, preview_w), self.splits);
         let (rects, mut animating) = self.animated_rects(target);
         animating |= tree_animating;
+        let ejecting = self.ejecting_roots();
+        #[cfg(feature = "arbol")]
+        {
+            self.tree.ejecting = ejecting.iter().cloned().collect();
+        }
         for i in self.shown_panes() {
             animating |= self.panes[i].tab_mut().list.tick(dt);
             // Botón «Devolver» con la Papelera a la vista (apagado sin selección).
@@ -107,7 +136,10 @@ impl App {
                     .collect(),
                 _ => Vec::new(),
             };
-            self.panes[i].tab_mut().list.eject_rows = ejects;
+            let busy = ejects.iter().copied().filter(|&k| ejecting.iter().any(|r| crate::sys::same_path_folded(r, &tab.entry_path(k)))).collect();
+            let list = &mut self.panes[i].tab_mut().list;
+            list.eject_rows = ejects;
+            list.eject_busy = busy;
         }
         self.last_frame = animating.then_some(now);
         for p in &mut self.panes {
@@ -173,7 +205,10 @@ impl App {
             }
             let xtree_shown = xtree_open && self.xtree.is_some();
             let rects = if xtree_shown { &[][..] } else { &rects[..] };
+            let colors_keys = self.config.keymap.label(Command::XtreeColors);
+            let elevate_keys = self.config.keymap.label(Command::XtreeElevate);
             if let Some(v) = self.xtree.as_mut().filter(|_| xtree_open) {
+                v.set_key_labels(colors_keys, elevate_keys);
                 v.paint(p, ui::xtree_area(w, h));
             } else if groups_h > 0.0 {
                 let names: Vec<(&str, bool)> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
@@ -239,6 +274,9 @@ impl App {
             if info_shown && preview_col.is_some() {
                 crate::info::draw::draw(p, &self.info.layout, info_hover);
             }
+            if let (true, Some(_), Some(st)) = (compare_shown, preview_col, &self.compare) {
+                crate::compare::draw::draw(p, &st.layout, compare_hover);
+            }
             if let Some((title, r, detach)) = &ghost {
                 pane::Pane::draw_ghost(p, *r, title, *detach);
             }
@@ -273,14 +311,21 @@ impl App {
                 transfers_failed,
                 transfers_hot: hover == Hit::Transfers,
                 lead: 0.0,
+                size_link,
+                size_link_hot: hover == Hit::SizeLink,
+                activity,
+                activity_hot: hover == Hit::Activity,
+                activity_clickable,
+                activity_still,
             };
+            self.activity_rect = activity.then(|| ui::activity_rect(w, h, xtree_badge, transfers.is_some()));
             let mut buttons = buttons;
             if let Some(v) = &update_notice {
                 let (link, lead) = ui::draw_update_notice(p, h, v, hover == Hit::UpdateNotice);
                 self.update_link = Some(link);
                 buttons.lead = lead;
             }
-            ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
+            self.size_link = ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado
             // (entra en el área de su lista; en un panel muy bajo puede pasarse).
             for &(i, _) in rects {
@@ -347,8 +392,7 @@ impl App {
         // Pestañas deslizándose hacia su lugar, o una búsqueda en curso (su indicador gira): otro cuadro.
         let searching = self.shown_panes().into_iter().any(|i| {
             let tab = self.panes[i].tab();
-            // También mientras se lee un archivo comprimido (su «Cargando…» gira).
-            tab.search.as_ref().is_some_and(|s| !s.done) || (tab.loading && tab.location.is_archive())
+            tab.search.as_ref().is_some_and(|s| !s.done)
         });
         if self.panes.iter().any(|p| p.tab_busy) || searching {
             animating = true;
@@ -357,6 +401,9 @@ impl App {
         if animating {
             self.redraw();
         }
+        // El indicador de actividad, el ⏏ que gira y «Cargando…»: un cuadro cada 100 ms mientras
+        // haya algo en curso (sin nada, ningún temporizador).
+        self.schedule_activity_tick();
         self.notify_a11y_focus();
         // Superposiciones y metadatos de las filas recién dibujadas.
         let (hwnd, tx) = (self.hwnd, self.tx.clone());

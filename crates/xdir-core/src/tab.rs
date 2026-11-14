@@ -75,6 +75,12 @@ pub struct Tab {
     load_started: Option<Instant>,
     /// La carga en curso ya trajo algún lote.
     first_batch: bool,
+    /// Cuándo empezó la lectura en curso de cualquier carpeta (local, de red o comprimida; no las
+    /// búsquedas ni las recargas silenciosas): desde `LOADING_DELAY`, «Cargando…».
+    loading_since: Option<Instant>,
+    /// Lo decide la `App` antes de dibujar (`shows_loading` con su reloj): la lista muestra
+    /// «Cargando…».
+    pub loading_shown: bool,
 }
 
 /// Cuánto tarda una carpeta de red en cargar.
@@ -84,6 +90,9 @@ pub enum Slow {
     Connecting { host: String },
     NotResponding { host: String },
 }
+
+/// A partir de cuánto la lectura de una carpeta muestra «Cargando…» (Ajustes 2).
+pub const LOADING_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A partir de cuánto una carga remota sin ningún lote muestra «Conectando…» y «no responde».
 pub const SLOW_CONNECTING: std::time::Duration = std::time::Duration::from_millis(500);
@@ -231,6 +240,8 @@ impl Tab {
             left_view: None,
             load_started: None,
             first_batch: false,
+            loading_since: None,
+            loading_shown: false,
         }
     }
 
@@ -543,6 +554,8 @@ impl Tab {
             self.list.columns.insert(at, ColumnSpec { col: Column::Folder, width: list::COLUMNS[7].3 });
         }
         self.loading = true;
+        // La búsqueda tiene su propio indicador (en la caja de búsqueda).
+        self.loading_since = None;
         self.error = None;
         self.reload_buf = None;
         self.focus_after_load = None;
@@ -590,6 +603,7 @@ impl Tab {
         if self.is_page() {
             self.nav_id += 1;
             self.loading = false;
+            self.loading_since = None;
             self.error = None;
             self.list.clear();
             return;
@@ -612,8 +626,10 @@ impl Tab {
             _ => None,
         };
         self.first_batch = false;
+        // El mismo reloj que la `App` (umbrales de «Cargando…» y «Conectando…»).
+        self.loading_since = Some(crate::clock::now());
         self.load_started = match &self.location {
-            Location::Path(p) if sys::network().is_remote(p) => Some(Instant::now()),
+            Location::Path(p) if sys::network().is_remote(p) => Some(crate::clock::now()),
             _ => None,
         };
         self.spawn_load(hwnd, tx, generation);
@@ -663,6 +679,8 @@ impl Tab {
             LoadMsg::Listed(result) => {
                 self.loading = false;
                 self.load_started = None;
+                self.loading_since = None;
+                self.loading_shown = false;
                 if let Some(s) = &mut self.search {
                     s.done = true;
                     s.progress = 1.0;
@@ -889,6 +907,33 @@ impl Tab {
         thresholds.iter().filter(|&&t| t > elapsed).map(|&t| t - elapsed).min()
     }
 
+    /// ¿La lista muestra «Cargando…»? Leyendo hace `LOADING_DELAY` o más, sin búsqueda y sin el
+    /// aviso de red («Conectando…» / «no responde», que va en su lugar).
+    pub fn shows_loading(&self, now: Instant) -> bool {
+        self.loading
+            && self.search.is_none()
+            && self.loading_since.is_some_and(|t0| now.saturating_duration_since(t0) >= LOADING_DELAY)
+            && self.slow_state(now) == Slow::No
+    }
+
+    /// Cuánto falta para que una lectura en curso muestre «Cargando…» (`None`: no hay o ya lo
+    /// muestra).
+    pub fn loading_pending(&self, now: Instant) -> Option<std::time::Duration> {
+        let t0 = self.loading_since.filter(|_| self.loading && self.search.is_none())?;
+        LOADING_DELAY.checked_sub(now.saturating_duration_since(t0)).filter(|d| !d.is_zero())
+    }
+
+    /// Desde cuándo se lee la carpeta (`None`: no se está leyendo).
+    pub fn loading_since(&self) -> Option<Instant> {
+        self.loading_since.filter(|_| self.loading && self.search.is_none())
+    }
+
+    /// Para las pruebas: la lectura en curso empezó en `t0`.
+    #[cfg(test)]
+    pub fn set_loading_since(&mut self, t0: Option<Instant>) {
+        self.loading_since = t0;
+    }
+
     /// Para las pruebas: la carga remota en curso empezó en `t0`.
     #[cfg(test)]
     pub fn set_load_started(&mut self, t0: Option<Instant>) {
@@ -907,6 +952,12 @@ impl Tab {
     }
 
     pub fn status(&self) -> String {
+        self.status_with(SelTotal::Files)
+    }
+
+    /// `status` con el tamaño de lo elegido que lleva la `App` (las carpetas se suman en otro
+    /// hilo, `app::sel_size`).
+    pub fn status_with(&self, sel: SelTotal) -> String {
         if self.is_settings() {
             return "Configuración   ·   los cambios se guardan solos".to_string();
         }
@@ -934,8 +985,9 @@ impl Tab {
         if let Some(e) = &self.error {
             return format!("No se pudo abrir: {e}");
         }
-        // Con selección, como el Explorador: cuántos y cuánto pesan los archivos (las carpetas no
-        // suman; si solo hay carpetas, no hay tamaño).
+        // Con selección: cuántos y cuánto pesan. Los archivos se suman acá; las carpetas, en otro
+        // hilo (`sel`): «calculando…», el total (con «al menos» si alguna no se leyó entera) o,
+        // en una carpeta de red, el enlace para calcularlo.
         let (count, bytes, files) = self
             .list
             .selected_entries()
@@ -951,12 +1003,17 @@ impl Tab {
         if let Some(n) = &self.load_notice {
             s = format!("{n}   ·   {s}");
         }
+        // Solo los filtros por columna (no el filtro rápido, que ya se ve en el buscador). Con el
+        // enlace para calcular el tamaño, antes de la selección: el enlace va al final.
+        let filtered = self.list.is_filtered();
+        if filtered && count > 0 && sel == SelTotal::NeedsClick {
+            s.push_str(" (filtrado)");
+        }
         if count > 0 {
             s.push_str("   ·   ");
-            s.push_str(&selection_summary(count, (files > 0).then_some(bytes)));
+            s.push_str(&selection_text(count, selection_size_text(bytes, files, sel).as_deref()));
         }
-        // Solo los filtros por columna (no el filtro rápido, que ya se ve en el buscador).
-        if self.list.is_filtered() {
+        if filtered && !(count > 0 && sel == SelTotal::NeedsClick) {
             s.push_str(" (filtrado)");
         }
         s
@@ -966,12 +1023,49 @@ impl Tab {
 /// Texto de la barra de estado con elementos seleccionados: «3 elementos seleccionados · 4,2 MB».
 /// `file_bytes` es lo que suman los archivos (`None` si solo hay carpetas: no se muestra tamaño).
 pub fn selection_summary(count: usize, file_bytes: Option<u64>) -> String {
+    selection_text(count, file_bytes.map(crate::format::size_short).as_deref())
+}
+
+/// «3 elementos seleccionados» y, si hay, « · » y lo que sigue (el tamaño, «calculando…»…).
+fn selection_text(count: usize, tail: Option<&str>) -> String {
     let mut s = if count == 1 { "1 elemento seleccionado".to_string() } else { format!("{count} elementos seleccionados") };
-    if let Some(b) = file_bytes {
+    if let Some(t) = tail {
         s.push_str(" · ");
-        s.push_str(&crate::format::size_short(b));
+        s.push_str(t);
     }
     s
+}
+
+/// El tamaño de lo elegido para la barra de estado: `file_bytes` de `files` archivos y lo que
+/// diga `sel` de las carpetas, con el mismo formato que la columna Tamaño y el panel de
+/// información (`format::size_short`). Si todo lo que se contó quedó afuera (total 0 y a medias),
+/// «no se pudo calcular».
+fn selection_size_text(file_bytes: u64, files: usize, sel: SelTotal) -> Option<String> {
+    let size = crate::format::size_short;
+    match sel {
+        SelTotal::Files => (files > 0).then(|| size(file_bytes)),
+        SelTotal::Computing => Some("calculando\u{2026}".to_string()),
+        SelTotal::Done { bytes: 0, partial: true } if file_bytes == 0 => Some("no se pudo calcular".to_string()),
+        SelTotal::Done { bytes, partial } => Some(format!("{}{}", if partial { "al menos " } else { "" }, size(file_bytes + bytes))),
+        SelTotal::NeedsClick => Some(SIZE_LINK.to_string()),
+    }
+}
+
+/// El enlace del final de la barra de estado cuando lo elegido tiene carpetas de red: el tamaño
+/// se calcula al tocarlo (las solo en la nube no se leen nunca: el total dice «al menos»).
+pub const SIZE_LINK: &str = "calcular tamaño";
+
+/// Lo que la barra de estado dice del tamaño de lo elegido (lo arma `app::sel_size`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelTotal {
+    /// Solo cuentan los archivos (sin carpetas elegidas, o donde no se calcula).
+    Files,
+    /// Hay carpetas sumándose en otro hilo.
+    Computing,
+    /// Lo que pesan las carpetas; `partial`: alguna no se pudo leer entera («al menos»).
+    Done { bytes: u64, partial: bool },
+    /// Carpetas de red: se calcula al tocar el enlace.
+    NeedsClick,
 }
 
 /// Nombre del hijo directo de `parent` en el camino hacia `descendant`.
@@ -1027,6 +1121,23 @@ mod tests {
         install_fakes();
         assert_eq!(selection_summary(1, Some(2048)), format!("1 elemento seleccionado · {}", crate::format::size_short(2048)));
         assert_eq!(selection_summary(3, None), "3 elementos seleccionados");
+    }
+
+    /// El tamaño de lo elegido en la barra va con el formato de la columna Tamaño
+    /// (`format::size_short`); si todo lo que se contó quedó afuera, «no se pudo calcular» en lugar
+    /// de «al menos 0 bytes».
+    #[test]
+    fn selection_size_texts() {
+        install_fakes();
+        let t = |file_bytes, files, sel| selection_size_text(file_bytes, files, sel);
+        assert_eq!(t(0, 0, SelTotal::Done { bytes: 0, partial: true }).as_deref(), Some("no se pudo calcular"));
+        assert_eq!(t(0, 0, SelTotal::Done { bytes: 0, partial: false }).as_deref(), Some("0 bytes"));
+        assert_eq!(t(10, 1, SelTotal::Done { bytes: 0, partial: true }).as_deref(), Some("al menos 10 bytes"));
+        assert_eq!(t(0, 0, SelTotal::Done { bytes: 2048, partial: false }).as_deref(), Some("2,00 KB"));
+        assert_eq!(t(2048, 1, SelTotal::Files).as_deref(), Some("2,00 KB"));
+        assert_eq!(t(0, 0, SelTotal::Files), None);
+        assert_eq!(t(0, 0, SelTotal::Computing).as_deref(), Some("calculando\u{2026}"));
+        assert_eq!(t(0, 0, SelTotal::NeedsClick).as_deref(), Some(SIZE_LINK));
     }
 
     /// Una pestaña que se muestra en una carpeta la lee con el `FileSystem` instalado y recibe

@@ -153,6 +153,14 @@ impl FakeNetwork {
         }
     }
 
+    /// Anota `what` si corre en el hilo marcado, sea la ruta local o remota: para lo que nunca debe
+    /// tocar el disco en el hilo de interfaz (el historial de xtree).
+    pub fn note_disk_io(what: &str, path: &Path) {
+        if UI_THREAD.with(Cell::get) {
+            UI_IO.with(|c| c.borrow_mut().push(format!("{what} {}", path.display())));
+        }
+    }
+
     fn remote(path: &Path) -> bool {
         crate::fs::is_unc(path) || lock(&REMOTE).iter().any(|p| path.starts_with(p))
     }

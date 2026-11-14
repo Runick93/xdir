@@ -91,6 +91,7 @@ impl App {
         // Hay un solo panel a la vez: si estaba el de información, se cierra.
         self.close_rename_many();
         self.close_info();
+        self.close_compare();
         self.end_rename(false);
         self.end_edit(false);
         self.end_filter(true);

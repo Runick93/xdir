@@ -11,9 +11,11 @@ use crate::theme::alpha;
 pub const TABSTRIP_H: f32 = 34.0;
 pub const NAVBAR_H: f32 = 42.0;
 pub const FAVBAR_H: f32 = 30.0;
-/// Franja al pie de cada panel, con el botón del tamaño de la vista a la derecha.
-const FOOTER_H: f32 = 26.0;
-const VIEW_BTN_W: f32 = 32.0;
+/// Franja al pie de cada panel, con «Carpeta nueva» y «Cambiar la vista» a la derecha (botones
+/// de `VIEW_BTN_W`×`FOOTER_BTN_H`, con 2 libres arriba y abajo).
+const FOOTER_H: f32 = 30.0;
+const VIEW_BTN_W: f32 = 36.0;
+const FOOTER_BTN_H: f32 = 26.0;
 const PANE_RADIUS: f32 = 8.0;
 /// Inclinación de los lados de las pestañas.
 const TAB_SLANT: f32 = 10.0;
@@ -207,9 +209,18 @@ pub struct Pane {
     pub restore: Option<bool>,
     restore_button: Rect,
     pub list: Rect,
+    /// La tarjeta «Cargando…» encima de lo que ya llegó, si se dibujó en el último cuadro: los
+    /// clics ahí no llegan a la fila tapada.
+    pub loading_card: Option<Rect>,
 }
 
 impl Pane {
+    /// Botones del pie en el último cuadro: (carpeta nueva, vista). Pruebas de `App`.
+    #[cfg(test)]
+    pub fn footer_buttons(&self) -> (Rect, Rect) {
+        (self.new_folder_button, self.view_button)
+    }
+
     pub fn new(tabs: Vec<Tab>, active: usize) -> Self {
         let zero = rect(0.0, 0.0, 0.0, 0.0);
         let active = active.min(tabs.len().saturating_sub(1));
@@ -242,6 +253,7 @@ impl Pane {
             fav_overflow: None,
             favbar: zero,
             view_button: zero,
+            loading_card: None,
             new_folder_button: zero,
             restore: None,
             restore_button: zero,
@@ -476,6 +488,9 @@ impl Pane {
         if contains(&self.view_button, x, y) {
             return PaneHit::ViewButton;
         }
+        if self.loading_card.is_some_and(|r| contains(&r, x, y)) {
+            return PaneHit::None;
+        }
         if contains(&self.list, x, y) {
             if let Some(b) = crate::list::placeholder::hit(&self.tabs[self.active].list.placeholder_buttons, x, y) {
                 return PaneHit::Placeholder(b);
@@ -548,6 +563,8 @@ impl Pane {
         search: SearchView,
     ) {
         self.rect = area;
+        // Se vuelve a anotar si se dibuja (las páginas y la configuración no la tienen).
+        self.loading_card = None;
         let th = p.theme();
         // Cuerpo del panel (debajo de las pestañas) y pestaña activa forman una sola pieza: un
         // contorno continuo que sube por la pestaña y vuelve a bajar, sin uniones.
@@ -699,19 +716,20 @@ impl Pane {
         // Línea gris que separa el final de la lista del pie con los botones.
         p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
         // Botón del pie: cambia el tamaño de los íconos de este panel, vuelve a la primera vista al final.
-        let vb = rect(area.right - PANE_RADIUS - VIEW_BTN_W, area.bottom - FOOTER_H + 2.0, area.right - PANE_RADIUS, area.bottom - 4.0);
+        let vb_top = area.bottom - FOOTER_H + 2.0;
+        let vb = rect(area.right - PANE_RADIUS - VIEW_BTN_W, vb_top, area.right - PANE_RADIUS, vb_top + FOOTER_BTN_H);
         if hover == PaneHit::ViewButton {
             let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
             p.round_fill(vb, 6.0, c);
         }
-        p.text(FontId::GlyphsSmall, "\u{E8A9}", vb, th.text_dim);
+        p.text(FontId::Glyphs, "\u{E8A9}", vb, th.text_dim);
         self.view_button = vb;
         let nb = rect(vb.left - VIEW_BTN_W, vb.top, vb.left, vb.bottom);
         if hover == PaneHit::NewFolderButton {
             let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
             p.round_fill(nb, 6.0, c);
         }
-        p.text(FontId::GlyphsSmall, "\u{E8F4}", nb, th.text_dim);
+        p.text(FontId::Glyphs, "\u{E8F4}", nb, th.text_dim);
         self.new_folder_button = nb;
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];
@@ -722,8 +740,9 @@ impl Pane {
             _ => None,
         };
         tab.list.draw(p, self.list, active_pane);
-        if tab.loading && tab.location.is_archive() && tab.list.entries.is_empty() {
-            draw_list_loading(p, self.list);
+        // Cualquier carpeta que tarda (la `App` decide desde cuándo); el aviso de red va en su lugar.
+        if tab.loading_shown && tab.list.placeholder.is_none() {
+            self.loading_card = draw_list_loading(p, self.list, tab.list.view.has_header(), !tab.list.entries.is_empty());
         }
         // Carpeta de red que tarda: el aviso en lugar de la lista vacía (debajo del encabezado).
         tab.list.placeholder_buttons = match &tab.list.placeholder {
@@ -1138,18 +1157,29 @@ fn draw_archive_crumb(p: &dyn Painter, r: Rect, label: &str, color: crate::geom:
     p.text(FontId::UiCenter, label, rect(r.left + ARCHIVE_ICON_W, r.top, r.right, r.bottom), color);
 }
 
-/// «Cargando…» sobre la lista vacía mientras se lee un archivo comprimido (pantalla X70): el
-/// indicador girando y el texto, centrados a lo ancho a 80 del borde de arriba de la lista.
-fn draw_list_loading(p: &dyn Painter, list: Rect) {
+/// «Cargando…» mientras se lee una carpeta que tarda (pantalla X70): el indicador girando y el
+/// texto, centrados a lo ancho a 50 debajo del encabezado (`header`; sin él, del borde de arriba
+/// de la lista). Con elementos ya llegados (`over_items`), en una tarjeta de 180×64 encima de
+/// ellos: devuelve dónde quedó (frena los clics).
+fn draw_list_loading(p: &dyn Painter, list: Rect, header: bool, over_items: bool) -> Option<Rect> {
     let th = p.theme();
     let cx = (list.left + list.right) / 2.0;
-    let top = list.top + crate::list::HEADER_H + 50.0;
+    let top = list.top + if header { crate::list::HEADER_H } else { 0.0 } + 50.0;
+    let mut card = None;
+    if over_items {
+        let r = rect(cx - 90.0, top, cx + 90.0, top + 64.0);
+        p.round_fill(r, 8.0, th.surface_alt);
+        p.round_stroke(r, 8.0, th.border);
+        card = Some(r);
+    }
     spinner(p, cx, top + 20.0, th.accent);
     p.text(FontId::UiCenter, "Cargando…", rect(cx - 180.0, top + 34.0, cx + 180.0, top + 58.0), th.text_secondary);
+    card
 }
 
 /// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
-fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
+/// Ocupa unos 14×14 DIPs alrededor de `(cx, cy)`.
+pub fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();

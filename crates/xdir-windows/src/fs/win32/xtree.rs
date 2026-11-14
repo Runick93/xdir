@@ -1,6 +1,6 @@
 //! xtree en Windows: listado de carpetas con una sola llamada nativa por bloque
 //! (`NtQueryDirectoryFile`), escaneo rápido de discos NTFS leyendo la MFT, el ayudante elevado
-//! (tecla A) y la lista de unidades.
+//! (`xtree_permisos`) y la lista de unidades.
 
 use std::cell::RefCell;
 use std::ffi::{OsString, c_void};
@@ -43,7 +43,7 @@ const FILE_ID_FULL_DIR_INFO: u32 = 38;
 /// Buffer de `NtQueryDirectoryFile` (128 KiB), uno por hilo de trabajo.
 const LIST_BUF_WORDS: usize = 128 * 1024 / 8;
 
-/// Argumento con el que xdir se relanza como administrador para leer la MFT (tecla A).
+/// Argumento con el que xdir se relanza como administrador para leer la MFT (`xtree_permisos`).
 pub const XTREE_HELPER_ARG: &str = "--xtree-mft";
 /// Pedidos al ayudante elevado de este proceso: cada uno usa su propio archivo temporal.
 static NEXT_HELPER_FILE: AtomicU32 = AtomicU32::new(0);
@@ -245,7 +245,7 @@ pub fn xtree_fast_scan(root: &Path, progress: &Progress, cancel: &AtomicBool) ->
     }
 }
 
-// ---------- ayudante elevado (tecla A) ----------
+// ---------- ayudante elevado (`xtree_permisos`) ----------
 
 /// Tecla A: relanza xdir como administrador (Windows pide confirmación, delante de la ventana de
 /// xdir) con `--xtree-mft C: %TEMP%\xdir-xtree-<pid>-<n>.bin <pid>`; ese proceso lee la MFT, deja
@@ -429,13 +429,13 @@ pub fn xtree_default_root() -> PathBuf {
     PathBuf::from(format!("{drive}\\"))
 }
 
-/// En Windows lo que falta es leer la MFT, que requiere administrador (tecla A).
+/// En Windows lo que falta es leer la MFT, que requiere administrador (`xtree_permisos`).
 pub fn xtree_permission_issue(p: &Progress) -> bool {
     p.need_admin.load(Ordering::Relaxed)
 }
 
-/// Aviso de la barra de datos cuando el escaneo rápido necesita administrador (tecla A).
-pub const XTREE_PERMISSION_HINT: &str = "Escaneo rápido de la MFT: requiere administrador (tecla A)";
+/// Aviso de la barra de datos cuando el escaneo rápido necesita administrador (`xtree_permisos`).
+pub const XTREE_PERMISSION_HINT: &str = "Escaneo rápido de la MFT: requiere administrador ({teclas})";
 
-/// Texto de la barra de datos y de estado mientras corre el escaneo con permisos (tecla A).
+/// Texto de la barra de datos y de estado mientras corre el escaneo con permisos (`xtree_permisos`).
 pub const XTREE_ELEVATING_TEXT: &str = "Leyendo la tabla de archivos (MFT) como administrador\u{2026}";

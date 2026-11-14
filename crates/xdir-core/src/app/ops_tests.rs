@@ -568,7 +568,7 @@ fn eject_click_releases_tabs_first() {
     assert_eq!(a.panes[3].tab().location, Location::Path(c.clone()));
     wait_task(&mut a);
     assert_eq!(ejects_of(&e) - before, 1);
-    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"USB (E:)\" con seguridad"));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
 }
 
 #[test]
@@ -578,7 +578,104 @@ fn eject_success_notice() {
     a.panes[0].tab_mut().list.select_pos(1);
     a.run_command(Command::Eject);
     wait_task(&mut a);
-    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"USB (E:)\" con seguridad"));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
+}
+
+/// Ajustes 2: mientras expulsa, la barra de estado dice «Expulsando…», el ⏏ gira (sin su
+/// símbolo) y un segundo clic no hace nada; al terminar, el aviso y el ⏏ vuelve a ser botón.
+#[test]
+fn eject_shows_progress_spins_and_ignores_second_click() {
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "girando");
+    FakeShell::set_eject_result(&e, Err(crate::shell::EjectError { busy_by: None, busy: false, message: "falló".into() }));
+    host.set_answer(Some(false));
+    let glyphs = |h: &FakeHost| h.drawn_texts().iter().filter(|(_, s, _)| s == crate::list::EJECT_GLYPH).count();
+    a.paint();
+    let r = a.panes[0].tab().list.eject_button(1).expect("⏏ de E:");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let before = ejects_of(&e);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(a.eject_status().as_deref(), Some("Expulsando \"USB (E:)\"…"));
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|t| t.starts_with("Expulsando \"USB (E:)\"…")), "{texts:?}");
+    assert_eq!(glyphs(&host), 0, "el ⏏ gira en lugar del símbolo");
+    assert_eq!(a.panes[0].tab().list.eject_busy, vec![1]);
+    // Otro clic en el mismo lugar (y el comando) no piden otra expulsión.
+    let r = a.panes[0].tab().list.eject_button(1).expect("el lugar del ⏏ sigue");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    a.panes[0].tab_mut().list.select_pos(1);
+    a.run_command(Command::Eject);
+    wait_task(&mut a);
+    assert!(a.task_rx.recv_timeout(Duration::from_millis(200)).is_err(), "un solo pedido");
+    assert_eq!(ejects_of(&e) - before, 1);
+    // Falló: la pregunta de hoy; dijo que no. Ya no gira.
+    assert_eq!(host.questions().last().map(|q| q.1.clone()), Some("No se pudo expulsar \"USB (E:)\": falló. ¿Reintentar?".to_string()));
+    assert_eq!(a.eject_status(), None);
+    a.paint();
+    assert!(a.panes[0].tab().list.eject_busy.is_empty());
+    assert_eq!(glyphs(&host), 1);
+}
+
+/// Ronda 1: si el sistema no contesta en el límite, o el hilo de expulsar entra en pánico, el aviso
+/// dice que no respondió, el ⏏ vuelve a ser botón y se puede reintentar.
+#[test]
+fn eject_timeout_or_panic_frees_the_button() {
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "sin-respuesta");
+    FakeShell::set_eject_result(&e, Ok(()));
+    a.eject_limit = Duration::from_millis(100);
+    let questions = host.questions().len();
+    // Primero el pánico (vuelve enseguida); después la demora, cuyo resultado tardío llega solo.
+    for panic in [true, false] {
+        if panic {
+            FakeShell::set_eject_panic(&e, true);
+        } else {
+            FakeShell::set_eject_delay(&e, Some(Duration::from_secs(2)));
+        }
+        a.eject(e.clone());
+        assert!(a.is_ejecting(&e));
+        wait_task(&mut a);
+        assert_eq!(a.notice.as_deref(), Some("No se pudo expulsar \"USB (E:)\": el sistema no respondió"), "pánico: {panic}");
+        assert!(!a.is_ejecting(&e), "el ⏏ vuelve a ser botón");
+        assert_eq!(host.questions().len(), questions, "un aviso, sin pregunta");
+        FakeShell::set_eject_panic(&e, false);
+        FakeShell::set_eject_delay(&e, None);
+    }
+    // El pedido demorado termina después y avisa (ronda 2); se espera ese aviso, no el orden.
+    loop {
+        let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("llega el resultado tardío");
+        let late = matches!(t, super::tasks::TaskDone::LateEjected { .. });
+        a.on_task_done(t);
+        if late {
+            break;
+        }
+    }
+    // Reintentar anda.
+    a.eject(e.clone());
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
+}
+
+/// Ronda 2: si el sistema expulsa después del límite, el resultado tardío corrige el aviso y el
+/// disco deja de ofrecerse para expulsar.
+#[test]
+fn late_eject_success_corrects_the_notice() {
+    let (mut a, e, _c) = computer_with_drives(FakeHost::new(), "tardio");
+    FakeShell::set_eject_result(&e, Ok(()));
+    FakeShell::set_eject_delay(&e, Some(Duration::from_millis(400)));
+    a.eject_limit = Duration::from_millis(100);
+    a.eject(e.clone());
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("No se pudo expulsar \"USB (E:)\": el sistema no respondió"));
+    assert!(a.ejectable.contains(&e));
+    wait_task(&mut a);
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
+    assert!(!a.ejectable.contains(&e));
+    FakeShell::set_eject_delay(&e, None);
 }
 
 /// Ocupado: se pregunta si reintentar, nombrando el programa; Sí vuelve a intentar.
@@ -671,6 +768,63 @@ fn eject_from_tree_node() {
     assert_eq!(ejects_of(&e) - before, 1);
 }
 
+/// Ajustes 2: el ⏏ del disco en el árbol gira mientras se expulsa y otro clic no hace nada.
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_eject_spins_while_ejecting() {
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "arbol-gira");
+    FakeShell::set_eject_result(&e, Ok(()));
+    a.tree.visible = true;
+    a.tree.pinned = true;
+    a.tree.refresh_drives();
+    a.tree.ejectable = a.ejectable.clone();
+    a.paint();
+    a.paint();
+    let r = a.tree.eject_button(&e).expect("⏏ en el árbol");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let before = ejects_of(&e);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    a.paint();
+    assert!(a.tree.ejecting.contains(&e));
+    let glyphs = host.drawn_texts().iter().filter(|(_, s, _)| s == crate::list::EJECT_GLYPH).count();
+    // El de «Este equipo» (panel 0) y el del árbol giran: ninguno con el símbolo.
+    assert_eq!(glyphs, 0);
+    let r = a.tree.eject_button(&e).expect("el lugar del ⏏ sigue");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    wait_task(&mut a);
+    assert!(a.task_rx.recv_timeout(Duration::from_millis(200)).is_err(), "un solo pedido");
+    assert_eq!(ejects_of(&e) - before, 1);
+    a.paint();
+    assert!(a.tree.ejecting.is_empty());
+}
+
+/// Ajustes 2 (ronda 1): una raíz con otras mayúsculas también hace girar el ⏏ del árbol (como el
+/// de la lista y el freno del clic).
+#[cfg(feature = "arbol")]
+#[test]
+fn tree_eject_spins_with_other_case() {
+    let host = FakeHost::new();
+    let (mut a, e, _c) = computer_with_drives(host.clone(), "arbol-mayus");
+    a.tree.visible = true;
+    a.tree.pinned = true;
+    a.tree.refresh_drives();
+    a.tree.ejectable = a.ejectable.clone();
+    a.paint();
+    a.paint();
+    assert!(a.tree.eject_button(&e).is_some());
+    let other = PathBuf::from(e.to_string_lossy().to_uppercase());
+    assert_ne!(other, e);
+    assert!(a.eject_after_jobs(&other, "USB (E:)", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
+    a.paint();
+    let glyphs = host.drawn_texts().iter().filter(|(_, s, _)| s == crate::list::EJECT_GLYPH).count();
+    assert_eq!(glyphs, 0, "el del árbol también gira");
+    a.eject_done(&other);
+}
+
 /// Al tomar la ventana ya se pregunta qué discos se expulsan (para «Expulsar» desde una carpeta
 /// sin haber pasado por «Este equipo»).
 #[test]
@@ -714,7 +868,7 @@ fn eject_waits_for_copy_on_the_volume() {
     wait_task(&mut a);
     assert_eq!(ejects_of(&e), 1);
     assert!(!f.exists(&e.join("destino/grande.bin")));
-    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"USB (E:)\" con seguridad"));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"USB (E:)\": ya lo podés quitar"));
 }
 
 /// En «Este equipo» el menú de los discos no ofrece crear cosas (Duplicar, accesos, carpeta con la

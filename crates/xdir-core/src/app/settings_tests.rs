@@ -500,6 +500,7 @@ fn xtree_open_uses_option() {
     assert_eq!(a.xtree_root(), here, "si ya no existe, la del panel");
     // Cada análisis nuevo anota su raíz (y va a la sesión).
     a.config.xtree_open = XtreeOpen::Pane;
+    a.config.xtree_scan_on_open = true;
     a.run_command(Command::Xtree);
     assert_eq!(a.session().xtree_last, Some(here));
 }
@@ -513,6 +514,97 @@ fn xtree_starts_by_type_from_config() {
     let mut b = app();
     b.run_command(Command::Xtree);
     assert!(!b.xtree.as_ref().unwrap().by_type());
+}
+
+/// De fábrica xtree no analiza al abrirse: muestra la vista vacía con la raíz elegida, sin escaneo,
+/// y la sesión no anota una raíz que no se analizó.
+#[test]
+fn xtree_opens_without_scanning_by_default() {
+    let mut a = app();
+    assert!(!a.config.xtree_scan_on_open);
+    a.run_command(Command::Xtree);
+    let x = a.xtree.as_ref().unwrap();
+    assert!(a.xtree_open && !x.scanned());
+    assert_eq!(x.root(), a.xtree_root());
+    assert_eq!(a.xtree_badge(), crate::xtree::view::XtreeBadge::Idle);
+    assert_eq!(a.session().xtree_last, None);
+    // Al cerrar y volver a abrir se ve lo mismo (no se crea otra vista).
+    a.run_command(Command::Xtree);
+    a.run_command(Command::Xtree);
+    assert!(!a.xtree.as_ref().unwrap().scanned());
+}
+
+/// Una vista que no analizó nada no se guarda: al volver a abrir xtree en otra carpeta, el
+/// desplegable muestra la que corresponde, y si mientras tanto se prendió la opción, analiza.
+#[test]
+fn xtree_unscanned_reopen_follows_pane_and_option() {
+    let mut a = app();
+    let base = std::env::temp_dir().join(format!("xdir-xtree-reabrir-{}", std::process::id()));
+    let (d1, d2) = (base.join("uno"), base.join("dos"));
+    std::fs::create_dir_all(&d1).unwrap();
+    std::fs::create_dir_all(&d2).unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d1));
+    a.run_command(Command::Xtree);
+    a.run_command(Command::Xtree);
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d2));
+    a.run_command(Command::Xtree);
+    assert_eq!(a.xtree.as_ref().unwrap().root(), a.xtree_root());
+    a.run_command(Command::Xtree);
+    a.config.xtree_scan_on_open = true;
+    a.run_command(Command::Xtree);
+    assert!(a.xtree.as_ref().unwrap().scanned());
+    a.on_closing();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Lo elegido a mano en el desplegable de una vista sin analizar se conserva al volver a abrirla
+/// (aunque el panel esté en otra carpeta).
+#[test]
+fn xtree_unscanned_reopen_keeps_user_pick() {
+    let mut a = app();
+    let base = std::env::temp_dir().join(format!("xdir-xtree-eleccion-{}", std::process::id()));
+    let (d1, d2, elegido) = (base.join("uno"), base.join("dos"), base.join("elegido"));
+    for d in [&d1, &d2, &elegido] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d1));
+    a.run_command(Command::Xtree);
+    a.xtree.as_mut().unwrap().set_pick(elegido.clone());
+    a.run_command(Command::Xtree);
+    a.tab_mut().navigate(hwnd, &tx, Location::Path(d2));
+    a.run_command(Command::Xtree);
+    let x = a.xtree.as_ref().unwrap();
+    assert!(!x.scanned());
+    assert_eq!(x.pick(), elegido.as_path());
+    a.on_closing();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Con «Analizar al abrir xtree» encendido, como antes: arranca el análisis.
+#[test]
+fn xtree_scans_on_open_with_option() {
+    let mut a = app();
+    a.config.xtree_scan_on_open = true;
+    a.run_command(Command::Xtree);
+    assert!(a.xtree.as_ref().unwrap().scanned());
+    a.on_closing();
+}
+
+/// El switch de Configuración ▸ xtree escribe `xtree_analizar_al_abrir`.
+#[test]
+fn xtree_scan_on_open_switch_writes_option() {
+    fresh_config();
+    let (mut a, _host) = settings_app(Section::Xtree);
+    click(&mut a, "xtree_analizar_al_abrir", 0);
+    assert!(a.config.xtree_scan_on_open);
+    wait_config(&mut a);
+    assert!(config_text().contains("# xtree_analizar_al_abrir = false\nxtree_analizar_al_abrir = true\n"), "{}", config_text());
+    click(&mut a, "xtree_analizar_al_abrir", 0);
+    assert!(!a.config.xtree_scan_on_open);
+    wait_config(&mut a);
+    assert!(!config_text().contains("\nxtree_analizar_al_abrir = true"));
 }
 
 #[test]
@@ -546,7 +638,7 @@ fn advanced_lists_files_and_dir() {
     let items = a.settings_items(Section::Advanced);
     let Control::Table(files) = row_of(&items, "archivos").control else { panic!() };
     let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["config.toml", "sesion.toml", "carpetas.toml", "favoritos.txt", "grupos.toml", "historial.txt", "red.toml"]);
+    assert_eq!(names, ["config.toml", "sesion.toml", "carpetas.toml", "favoritos.txt", "grupos.toml", "historial.txt", "red.toml", "xtree-historial"]);
     let dir = row_of(&items, "carpeta_config");
     assert_eq!(dir.desc, session::config_dir().unwrap().display().to_string());
     assert_eq!(dir.control, Control::Buttons(vec![("Mostrar en el Explorador".to_string(), true)]));
@@ -555,6 +647,54 @@ fn advanced_lists_files_and_dir() {
     FakeEnv::set_key_style(sys::KeyStyle::Windows);
     let Control::Table(files) = row_of(&items, "archivos").control else { panic!() };
     assert_eq!(files.last().unwrap().0, "rutas.txt");
+}
+
+/// #57: las teclas de xtree dicen el atajo en uso de los colores (ya no la T) y las letras; en
+/// Atajos de teclado, «xtree_colores» va en el grupo xtree y Ctrl+T no choca con «Pestaña nueva».
+#[test]
+fn xtree_keys_show_colors_shortcut() {
+    let mut a = app();
+    let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };
+    let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(&keys[..4], ["Letras", "Ctrl+T", "Ctrl+F", "Ctrl+Shift+A"]);
+    assert!(!keys.contains(&"A"), "la A sola ya no hace nada");
+    assert!(!keys.contains(&"T"));
+    a.config.keymap.set(Command::XtreeColors, &[commands::parse_combo("Ctrl+Shift+C").unwrap()]);
+    let Control::Table(rows) = row_of(&a.settings_items(Section::Xtree), "xtree_teclas").control else { panic!() };
+    assert_eq!(rows[1].0, "Ctrl+Shift+C");
+}
+
+/// Grabar Ctrl+T para los colores de xtree no es un choque con «Pestaña nueva» (otro ámbito).
+#[test]
+fn xtree_colors_shortcut_records_without_conflict() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "xtree_colores", PART_RESET, 0.0);
+    a.config.keymap.set(Command::XtreeColors, &[]);
+    a.settings_part(0, "xtree_colores", PART_ADD, 0.0);
+    assert!(a.capturing_keys());
+    press(&mut a, &[VK_CONTROL], Key(b'T' as u16));
+    assert!(!a.capturing_keys(), "sin choque, se asigna");
+    assert_eq!(a.config.keymap.combos(Command::XtreeColors), [commands::parse_combo("Ctrl+T").unwrap()]);
+    assert_eq!(a.config.keymap.combos(Command::NewTab), [commands::parse_combo("Ctrl+T").unwrap()]);
+}
+
+/// M3: dentro de xtree siguen andando algunas teclas de la ventana (Ctrl+F busca) y las de la
+/// vista (F5): grabarlas para un comando de xtree se avisa (choque o rechazo), no se acepta callado.
+#[test]
+fn xtree_shortcut_flags_keys_live_in_xtree() {
+    let (mut a, _) = keys_app();
+    a.settings_part(0, "xtree_colores", PART_ADD, 0.0);
+    press(&mut a, &[VK_CONTROL], Key(b'F' as u16));
+    assert!(a.capturing_keys(), "Ctrl+F busca dentro de xtree: se pregunta");
+    assert_eq!(a.recording().unwrap().conflict.map(|(_, c)| c), Some(Command::Filter));
+    assert!(!a.config.keymap.combos(Command::XtreeColors).contains(&commands::parse_combo("Ctrl+F").unwrap()));
+    a.set_recording(None);
+    a.settings_part(0, "xtree_colores", PART_ADD, 0.0);
+    press(&mut a, &[], Key(0x74));
+    assert!(a.capturing_keys(), "F5 la usa xtree");
+    assert_eq!(a.recording().unwrap().message, Some(crate::settings::keys::XTREE_KEY));
+    // Con otro comando de la ventana (no de xtree), F5 es Recargar: ese choque es el de siempre.
+    assert_eq!(a.config.keymap.owner_for(commands::parse_combo("F5").unwrap(), Command::Duplicate), Some(Command::Refresh));
 }
 
 #[test]

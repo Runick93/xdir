@@ -34,6 +34,8 @@ pub use archive_fake::FakeArchives;
 pub use copy_fake::FakeCopyPrims;
 mod net_fake;
 pub use net_fake::FakeNetwork;
+mod hash_fake;
+pub use hash_fake::FakeHashes;
 
 /// Instala los servicios falsos. Se puede llamar desde todos los tests: solo la primera vez
 /// instala, y si ya había servicios instalados no hace nada.
@@ -52,6 +54,7 @@ pub fn install_fakes() {
         archives: Box::new(FakeArchives::shared()),
         info: Box::new(FakeInfo),
         network: Box::new(FakeNetwork),
+        hashes: Box::new(FakeHashes),
     });
 }
 
@@ -329,7 +332,7 @@ impl DiskScan for FakeDiskScan {
     }
 
     fn permission_hint(&self) -> &'static str {
-        "{n} carpetas sin permiso (tecla A)"
+        "{n} carpetas sin permiso ({teclas})"
     }
 
     fn elevating_text(&self) -> &'static str {
@@ -367,6 +370,8 @@ struct ShellState {
     error: Option<String>,
     /// Carpeta que devuelve `pick_folder`.
     picked: Option<PathBuf>,
+    /// Lo que responde `menu_has_new` (de fábrica, no: como la Mac y Linux).
+    menu_has_new: bool,
 }
 
 thread_local! {
@@ -401,6 +406,17 @@ static EJECTABLE: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 type EjectResult = Result<(), crate::shell::EjectError>;
 static EJECT_RESULTS: Mutex<BTreeMap<PathBuf, EjectResult>> = Mutex::new(BTreeMap::new());
 static EJECTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// Expulsar estos discos tarda (`set_eject_delay`) o entra en pánico (`set_eject_panic`).
+static EJECT_DELAYS: Mutex<BTreeMap<PathBuf, std::time::Duration>> = Mutex::new(BTreeMap::new());
+static EJECT_PANICS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// Carpetas solo en la nube para todos los hilos (`FakeFileSystem::set_cloud_only_everywhere`).
+static CLOUD_ALL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// Disco de cada ruta para `volume_id` (todos los hilos; sin dato, `None`).
+static VOLUME_IDS: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+/// Enlaces a carpetas del falso (`set_dir_link`).
+static DIR_LINKS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// Puntos de montaje del falso (`set_mount_point`).
+static MOUNTS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 impl FakeShell {
     /// Estos discos se pueden expulsar (se suman a los de otros tests).
@@ -411,6 +427,25 @@ impl FakeShell {
     /// Lo que devuelve `eject(root)` (por defecto, éxito).
     pub fn set_eject_result(root: &Path, result: Result<(), crate::shell::EjectError>) {
         EJECT_RESULTS.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), result);
+    }
+
+    /// Expulsar `root` tarda `delay` (`None`: enseguida).
+    pub fn set_eject_delay(root: &Path, delay: Option<std::time::Duration>) {
+        let mut m = EJECT_DELAYS.lock().unwrap_or_else(|e| e.into_inner());
+        match delay {
+            Some(d) => m.insert(root.to_path_buf(), d),
+            None => m.remove(root),
+        };
+    }
+
+    /// Expulsar `root` entra en pánico (`false`: ya no).
+    pub fn set_eject_panic(root: &Path, on: bool) {
+        let mut s = EJECT_PANICS.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            s.insert(root.to_path_buf());
+        } else {
+            s.remove(root);
+        }
     }
 
     /// Todos los discos que se pidió expulsar (de todo el proceso).
@@ -426,6 +461,11 @@ impl FakeShell {
     /// Las llamadas hechas desde este hilo hasta ahora (y vacía el registro).
     pub fn take_calls() -> Vec<ShellCall> {
         shell_state(|s| std::mem::take(&mut s.calls))
+    }
+
+    /// El menú del fondo del sistema trae «Nuevo» (como Windows) o no.
+    pub fn set_menu_has_new(on: bool) {
+        shell_state(|s| s.menu_has_new = on);
     }
 
     /// Contenido del portapapeles de archivos de este hilo.
@@ -470,6 +510,13 @@ impl Shell for FakeShell {
 
     fn eject(&self, root: &Path) -> Result<(), crate::shell::EjectError> {
         EJECTS.lock().unwrap_or_else(|e| e.into_inner()).push(root.to_path_buf());
+        if EJECT_PANICS.lock().unwrap_or_else(|e| e.into_inner()).contains(root) {
+            panic!("expulsar {} (prueba)", root.display());
+        }
+        let delay = EJECT_DELAYS.lock().unwrap_or_else(|e| e.into_inner()).get(root).copied();
+        if let Some(d) = delay {
+            std::thread::sleep(d);
+        }
         EJECT_RESULTS.lock().unwrap_or_else(|e| e.into_inner()).get(root).cloned().unwrap_or(Ok(()))
     }
 
@@ -550,6 +597,10 @@ impl Shell for FakeShell {
         record(ShellCall::SetMenuMode(dark));
     }
 
+    fn menu_has_new(&self) -> bool {
+        shell_state(|s| s.menu_has_new)
+    }
+
     fn volume_of(&self, path: &Path) -> Option<OsString> {
         FakeNetwork::note_io("volume_of", path);
         path.components().next().map(|c| c.as_os_str().to_ascii_lowercase())
@@ -618,6 +669,27 @@ impl FakeFileSystem {
         });
     }
 
+    /// Desde ahora `is_dir_link(path)` dice que sí (en todos los hilos).
+    pub fn set_dir_link(path: &Path) {
+        DIR_LINKS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf());
+    }
+
+    /// Desde ahora `is_mount_point(path)` dice que sí (en todos los hilos).
+    pub fn set_mount_point(path: &Path) {
+        MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf());
+    }
+
+    /// Desde ahora `volume_id(path)` es `id` (en todos los hilos).
+    pub fn set_volume_id(path: &Path, id: u64) {
+        VOLUME_IDS.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), id);
+    }
+
+    /// Desde ahora `cloud_only(path)` dice que sí en todos los hilos (los hilos de trabajo también
+    /// lo ven; cada test usa rutas propias).
+    pub fn set_cloud_only_everywhere(path: &Path) {
+        CLOUD_ALL.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf());
+    }
+
     /// Desde ahora (en este hilo) hay Red del Shell (`network_place` no vacío), como en Windows.
     pub fn set_network_place(on: bool) {
         NET_PLACE.with(|c| c.set(on));
@@ -678,7 +750,9 @@ impl FakeFileSystem {
             pidl: None,
             is_dir,
             size: if is_dir { 0 } else { meta.len() },
-            modified: 0,
+            // La fecha real del disco (en unidades de 100 ns): al cambiar lo de adentro de una
+            // carpeta, cambia la suya.
+            modified: meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| (d.as_nanos() / 100) as u64 + 116_444_736_000_000_000),
             created: 0,
             attrs,
             type_name: Arc::from(if is_dir { "Carpeta" } else { "Archivo" }),
@@ -795,8 +869,8 @@ impl FileSystem for FakeFileSystem {
         true
     }
 
-    fn is_mount_point(&self, _path: &Path) -> bool {
-        false
+    fn is_mount_point(&self, path: &Path) -> bool {
+        MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
     }
 
     fn disk_entry(&self, path: &Path, name: OsString, meta: &std::fs::Metadata) -> FsEntry {
@@ -925,11 +999,21 @@ impl FileSystem for FakeFileSystem {
         Some(Box::new(FakeWatch(path.to_path_buf())))
     }
 
-    /// Solo lo marcado con `set_cloud_only` en este hilo.
+    /// Lo puesto con `set_dir_link`.
+    fn is_dir_link(&self, path: &Path) -> bool {
+        DIR_LINKS.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
+    }
+
+    /// Lo puesto con `set_volume_id`.
+    fn volume_id(&self, path: &Path) -> Option<u64> {
+        VOLUME_IDS.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied()
+    }
+
+    /// Lo marcado con `set_cloud_only` en este hilo o con `set_cloud_only_everywhere`.
     fn cloud_only(&self, path: &Path) -> bool {
         FakeNetwork::note_io("cloud_only", path);
         CLOUD_CHECKS.with(|n| n.set(n.get() + 1));
-        CLOUD.with(|c| c.borrow().contains(path))
+        CLOUD.with(|c| c.borrow().contains(path)) || CLOUD_ALL.lock().unwrap_or_else(|e| e.into_inner()).contains(path)
     }
 
     /// Sobre el disco real (las carpetas temporales de cada test), sin pisar: falla si `to` existe
@@ -1177,6 +1261,7 @@ pub struct RecordingPainter {
     forgotten: RefCell<Vec<thumbs::Source>>,
     icons: RefCell<Vec<(f32, f32, f32)>>,
     fills: RefCell<Vec<(Rect, Color)>>,
+    round_fills: RefCell<Vec<(Rect, Color)>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -1194,7 +1279,13 @@ impl RecordingPainter {
             forgotten: RefCell::new(Vec::new()),
             icons: RefCell::new(Vec::new()),
             fills: RefCell::new(Vec::new()),
+            round_fills: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Los rectángulos rellenados con `round_fill` (rectángulo y color), en orden.
+    pub fn round_fills(&self) -> Vec<(Rect, Color)> {
+        self.round_fills.borrow().clone()
     }
 
     /// Los rectángulos rellenados con `fill` (rectángulo y color), en orden.
@@ -1247,7 +1338,9 @@ impl Painter for RecordingPainter {
     fn fill(&self, r: Rect, c: Color) {
         self.fills.borrow_mut().push((r, c));
     }
-    fn round_fill(&self, _r: Rect, _radius: f32, _c: Color) {}
+    fn round_fill(&self, r: Rect, _radius: f32, c: Color) {
+        self.round_fills.borrow_mut().push((r, c));
+    }
     fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, _stroke: Option<(Color, f32)>) {
         self.paths.borrow_mut().push((pts.iter().map(|&(x, y, _)| (x, y)).collect(), closed, fill));
     }
@@ -1538,7 +1631,12 @@ impl WindowHost for FakeHost {
     }
 
     fn request_close(&self) {}
-    fn focus_main(&self) {}
+    // La ventana toma el foco: ninguna caja lo tiene.
+    fn focus_main(&self) {
+        for (_, _, focused) in self.text_boxes.borrow_mut().values_mut() {
+            *focused = false;
+        }
+    }
     fn focus_main_if_lost(&self) {}
     fn capture_mouse(&self) {}
     fn release_mouse(&self) {}

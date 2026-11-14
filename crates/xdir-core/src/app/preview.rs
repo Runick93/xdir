@@ -44,13 +44,15 @@ struct Fingerprint {
 }
 
 /// De quién es el lugar de la derecha (el de la columna de vista previa): de la vista previa, del
-/// panel de información o del de Renombrar varios. Hay uno solo a la vez: abrir uno cierra el otro y
+/// panel de información, del de Renombrar varios o del de comparar. Hay uno solo a la vez: abrir uno cierra el otro y
 /// al cerrar información o Renombrar varios vuelve la vista previa si estaba prendida.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum RightPanel {
     Preview,
     Info,
     RenameMany,
+    /// «Comparar contenido».
+    Compare,
 }
 
 /// Estado de la columna en la `App`.
@@ -188,6 +190,7 @@ impl App {
             RightPanel::Preview => {}
             RightPanel::Info => self.close_info(),
             RightPanel::RenameMany => self.close_rename_many(),
+            RightPanel::Compare => self.close_compare(),
         }
     }
 

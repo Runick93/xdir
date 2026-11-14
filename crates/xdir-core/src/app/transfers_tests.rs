@@ -232,6 +232,35 @@ fn eject_waits_for_cancelled_jobs() {
     assert!(!f.exists(&p("/app-usb/d/grande.bin")));
 }
 
+/// Ajustes 2: mientras espera a que limpien las operaciones canceladas, la barra lo dice; después,
+/// «Expulsando…» hasta que termina.
+#[test]
+fn eject_waiting_for_jobs_text() {
+    let f = fake();
+    f.set_volume(&p("/app-ejtx"), volume("app-ejtx"));
+    f.add_file(&p("/app-ejtx/s/grande.bin"), vec![1; 64 * 1024 * 20]);
+    f.add_dir(&p("/app-ejtx/d"));
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    f.set_slow(&p("/app-ejtx/s/grande.bin"), Some(Duration::from_millis(20)));
+    a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejtx/s/grande.bin")], dest: p("/app-ejtx/d") });
+    assert_eq!(a.eject_status(), None);
+    host.set_answer(Some(true));
+    assert!(a.eject_after_jobs(Path::new("/app-ejtx"), "USB (E:)", super::transfers::Verb::Eject, Box::new(|_: &mut App| {})));
+    assert_eq!(a.eject_status().as_deref(), Some("Esperando a que termine 1 operación para expulsar \"USB (E:)\"…"));
+    // En el indicador de actividad, sin los puntos suspensivos.
+    let now = Instant::now() + Duration::from_secs(1);
+    a.sync_activity(now);
+    assert_eq!(a.activity.tip(now).as_deref(), Some("Esperando a que termine 1 operación para expulsar \"USB (E:)\""));
+    wait(&mut a, idle);
+    assert_eq!(a.eject_status().as_deref(), Some("Expulsando \"USB (E:)\"…"));
+    a.eject_done(Path::new("/app-ejtx"));
+    assert_eq!(a.eject_status(), None);
+    assert_eq!(super::transfers::ejecting_text(super::transfers::Verb::Eject, "USB", 2), "Esperando a que terminen 2 operaciones para expulsar \"USB\"…");
+    assert_eq!(super::transfers::ejecting_text(super::transfers::Verb::Disconnect, "fotos", 0), "Desconectando \"fotos\"…");
+    assert_eq!(super::transfers::ejecting_text(super::transfers::Verb::Disconnect, "fotos", 1), "Esperando a que termine 1 operación para desconectar \"fotos\"…");
+}
+
 #[test]
 fn second_eject_does_not_drop_the_first() {
     let f = fake();
@@ -340,6 +369,33 @@ fn window_appears_after_one_second() {
     wait(&mut a, idle);
     // Sin trabajos se oculta sola.
     assert!(!host.aux_visible());
+}
+
+/// Ajustes 2: el clic en el indicador de actividad abre la ventana de copia solo si hay copias.
+#[test]
+fn activity_click_opens_copy_window_with_copies() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let t0 = Instant::now();
+    a.activity.begin(super::activity::ActivityKey::Connect(1), "Conectando con \"nas\"", t0);
+    crate::clock::set(Some(t0 + Duration::from_millis(400)));
+    a.paint();
+    let r = a.activity_rect.expect("el indicador");
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert!(host.aux_shows().is_empty(), "sin copias, nada");
+    let id = a.start_transfer(slow_copy(&f, "/app-act", 20));
+    a.paint();
+    // Con el indicador de copias a la vista, el de actividad se corre a su izquierda.
+    let r = a.activity_rect.expect("el indicador");
+    assert!(r.right <= a.transfers_button_rect().left);
+    let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(host.aux_shows().len(), 1);
+    a.cancel_job(id);
+    wait(&mut a, idle);
 }
 
 #[test]
@@ -565,6 +621,109 @@ fn drop_uses_engine() {
     wait(&mut a, idle);
     assert!(FakeFileOps::take_ops().is_empty(), "soltar no pasa por FileOps");
     assert!(f.exists(&p("/app-drop/d/a.txt")));
+}
+
+/// App con el árbol a la vista y `drives` como sus discos (rutas del disco falso).
+#[cfg(feature = "arbol")]
+fn app_with_tree_drives(drives: &[(&Path, &str)]) -> App {
+    crate::sys::testing::install_fakes();
+    crate::sys::testing::FakeFileSystem::set_drives(drives);
+    let (mut a, _host) = app_window();
+    crate::sys::testing::FakeFileSystem::set_drives(&[]);
+    a.tree.visible = true;
+    a.paint();
+    a
+}
+
+#[cfg(feature = "arbol")]
+fn drag(a: &mut App, kind: DragKind, point: (f32, f32), paths: &[PathBuf], ctrl: bool) -> Effect {
+    let mut ev = DragEvent { kind, point, ctrl, shift: false, paths: Some(paths), allowed: Effect::ALL, effect: Effect::NONE };
+    a.on_drag(&mut ev);
+    ev.effect
+}
+
+/// #56: soltar sobre una carpeta del árbol mueve (mismo disco) con el motor de copia, y la fila
+/// queda resaltada mientras se arrastra encima.
+#[cfg(feature = "arbol")]
+#[test]
+fn drop_on_tree_folder_moves_with_engine() {
+    let f = fake();
+    f.add_file(&p("/app-tdrop/s/a.txt"), b"a".to_vec());
+    f.add_dir(&p("/app-tdrop/d"));
+    let mut a = app_with_tree_drives(&[(Path::new("/app-tdrop/d"), "Destino")]);
+    FakeFileOps::take_ops();
+    let point = a.tree.row_point("Destino").expect("la fila del disco");
+    let paths = vec![p("/app-tdrop/s/a.txt")];
+    assert_eq!(drag(&mut a, DragKind::Enter, point, &paths, false), Effect::MOVE);
+    assert_eq!(a.tree.drop_target_path(), Some(p("/app-tdrop/d")), "la fila se resalta");
+    assert!(a.panes.iter().all(|p| p.tab().list.drop_target.is_none()));
+    // Ctrl (⌥ en la Mac) copia.
+    assert_eq!(drag(&mut a, DragKind::Over, point, &paths, true), Effect::COPY);
+    assert_eq!(drag(&mut a, DragKind::Drop, point, &paths, false), Effect::MOVE);
+    assert_eq!(a.tree.drop_target, None, "al soltar se apaga el resaltado");
+    wait(&mut a, idle);
+    assert!(FakeFileOps::take_ops().is_empty(), "soltar no pasa por FileOps");
+    assert!(f.exists(&p("/app-tdrop/d/a.txt")) && !f.exists(&p("/app-tdrop/s/a.txt")));
+}
+
+/// #56: lo que no es una carpeta (Este equipo, «Red»), soltar una carpeta en sí misma o un archivo
+/// en su propia carpeta y la Papelera no aceptan nada ni se resaltan; salir apaga el resaltado.
+#[cfg(feature = "arbol")]
+#[test]
+fn drop_on_tree_rejects_computer_network_and_self() {
+    let f = fake();
+    f.add_file(&p("/app-tdrop2/d/x.txt"), b"x".to_vec());
+    f.add_dir(&p("/app-tdrop2/t"));
+    let mut a = app_with_tree_drives(&[(Path::new("/app-tdrop2/d"), "Destino"), (Path::new("/app-tdrop2/t"), "Papelera")]);
+    let row = |a: &App, name: &str| a.tree.row_point(name).unwrap_or_else(|| panic!("fila {name}"));
+    let file = vec![p("/app-tdrop2/d/x.txt")];
+    for name in ["Este equipo", "Red", "Inicio", "xtree"] {
+        let at = row(&a, name);
+        assert_eq!(drag(&mut a, DragKind::Over, at, &file, false), Effect::NONE, "{name}");
+        assert_eq!(a.tree.drop_target, None, "{name}");
+    }
+    let at = row(&a, "Destino");
+    assert_eq!(drag(&mut a, DragKind::Over, at, &file, false), Effect::NONE, "a su misma carpeta");
+    assert_eq!(drag(&mut a, DragKind::Over, at, &[p("/app-tdrop2/d")], false), Effect::NONE, "en sí misma");
+    assert_eq!(a.tree.drop_target, None);
+    crate::sys::testing::FakeFileSystem::set_trash(Some(Path::new("/app-tdrop2/t")));
+    let trash = row(&a, "Papelera");
+    assert_eq!(drag(&mut a, DragKind::Over, trash, &file, false), Effect::NONE, "la Papelera");
+    crate::sys::testing::FakeFileSystem::set_trash(None);
+    assert_eq!(drag(&mut a, DragKind::Over, trash, &file, false), Effect::MOVE);
+    assert!(a.tree.drop_target.is_some());
+    assert_eq!(drag(&mut a, DragKind::Leave, (0.0, 0.0), &file, false), Effect::NONE);
+    assert_eq!(a.tree.drop_target, None, "al salir se apaga");
+    assert!(f.exists(&p("/app-tdrop2/d/x.txt")));
+}
+
+/// #56: arrastrando, quedarse sobre un disco plegado del árbol lo despliega (`DRAG_EXPAND`) y
+/// sus subcarpetas aparecen cuando llega la lectura.
+#[cfg(feature = "arbol")]
+#[test]
+fn drag_hover_expands_tree_folder() {
+    let dir = std::env::temp_dir().join(format!("xdir-tdrop3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("subcarpeta")).unwrap();
+    let mut a = app_with_tree_drives(&[(dir.as_path(), "Disco3")]);
+    let at = a.tree.row_point("Disco3").unwrap();
+    let paths = vec![p("/app-tdrop3/x.txt")];
+    drag(&mut a, DragKind::Enter, at, &paths, false);
+    assert!(a.tree.row_point("subcarpeta").is_none());
+    a.tree.age_drag_hover(crate::tree::DRAG_EXPAND);
+    drag(&mut a, DragKind::Over, at, &paths, false);
+    let t0 = std::time::Instant::now();
+    loop {
+        a.on_app_message(crate::tree::WM_APP_TREE, 0, 0);
+        a.paint();
+        if a.tree.row_point("subcarpeta").is_some() {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10), "no se desplegó");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drag(&mut a, DragKind::Leave, (0.0, 0.0), &paths, false);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

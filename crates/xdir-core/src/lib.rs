@@ -6,6 +6,7 @@
 
 pub mod a11y;
 pub mod app;
+pub mod clock;
 pub mod about;
 pub mod anim;
 pub mod archive;
@@ -13,6 +14,7 @@ pub mod archive_nav;
 pub mod changelog;
 pub mod changelog_draw;
 pub mod commands;
+pub mod compare;
 pub mod config;
 pub mod console;
 pub mod drop;
@@ -54,6 +56,7 @@ pub mod toml_edit;
 /// Árbol de carpetas lateral (solo con la feature `arbol`).
 #[cfg(feature = "arbol")]
 pub mod tree;
+pub mod typeahead;
 pub mod typed;
 /// `Suggest::draw`: el desplegable de rutas.
 mod typed_draw;

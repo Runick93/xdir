@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 xdir-core = { path = "../xdir-core" }
 xdir-archive = { path = "../xdir-archive" }
+xdir-hash = { path = "../xdir-hash" }
 
 # macOS: AppKit, Core Graphics y Core Text a través de los bindings de objc2.
 [target.'cfg(target_os = "macos")'.dependencies]

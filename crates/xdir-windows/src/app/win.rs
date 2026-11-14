@@ -38,7 +38,7 @@ pub(super) const EN_CHANGE_CODE: usize = 0x0300;
 // ---------- arranque ----------
 
 pub fn run() -> windows::core::Result<()> {
-    // `xdir --xtree-mft <unidad> <archivo> <pid>`: proceso elevado de xtree (tecla A). Lee la MFT, deja
+    // `xdir --xtree-mft <unidad> <archivo> <pid>`: proceso elevado de xtree (`xtree_permisos`). Lee la MFT, deja
     // el árbol en el archivo y sale, sin ventana, sesión ni configuración.
     let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     if args.first().is_some_and(|a| a == crate::fs::XTREE_HELPER_ARG) {

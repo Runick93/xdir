@@ -44,8 +44,9 @@ impl App {
             }
             VK_ESCAPE if self.rename_many.is_some() => self.close_rename_many(),
             VK_ESCAPE if self.info_open() && self.info.focused => self.close_info(),
+            VK_ESCAPE if self.compare.as_ref().is_some_and(|c| c.focused) => self.close_compare(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
-            _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift),
+            _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift, alt, meta),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
             // Lo último: si nada más tomó el Escape, corta la apertura desde un archivo comprimido.
             VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {
@@ -143,7 +144,12 @@ impl App {
             Command::Back => self.tab_mut().go_back(hwnd, &tx),
             Command::Forward => self.tab_mut().go_forward(hwnd, &tx),
             Command::Up => self.tab_mut().go_up(hwnd, &tx),
-            Command::Refresh => self.tab_mut().reload(hwnd, &tx, false),
+            Command::Refresh => {
+                if let Location::Path(dir) = self.panes[active].tab().location.clone() {
+                    self.sel_size.invalidate(&dir);
+                }
+                self.tab_mut().reload(hwnd, &tx, false)
+            }
             Command::EditAddress => self.begin_edit(active),
             Command::Filter => self.begin_filter(active),
             Command::GoComputer => self.tab_mut().navigate(hwnd, &tx, Location::Computer),
@@ -154,6 +160,15 @@ impl App {
                     if tab.list.show_hidden != self.show_hidden {
                         tab.list.toggle_hidden();
                     }
+                }
+                // El árbol relee lo que ya leyó (en otros hilos), sin tocar lo virtual ni la red.
+                #[cfg(feature = "arbol")]
+                {
+                    let current = match &self.panes[active].tab().location {
+                        Location::Path(p) => Some(p.clone()),
+                        _ => None,
+                    };
+                    self.tree.refresh_hidden(hwnd, self.show_hidden, current.as_deref());
                 }
             }
             Command::SelectAll => self.tab_mut().list.select_all(),
@@ -218,6 +233,7 @@ impl App {
             Command::Delete => self.delete_selection(false),
             Command::Rename => self.rename_command(active),
             Command::RenameMany => self.open_rename_many(active),
+            Command::CompareContents => self.compare_contents(),
             // El panel de información (lo de la selección, la carpeta o el disco enfocado).
             Command::Properties => self.toggle_info(),
             Command::Duplicate => self.duplicate_selection(),
@@ -281,6 +297,18 @@ impl App {
                 }
             }
             Command::Xtree => self.toggle_xtree(),
+            // Solo con la vista abierta (sus atajos no valen en los paneles).
+            Command::XtreeColors => {
+                if let Some(x) = self.xtree.as_mut().filter(|_| from_xtree) {
+                    x.toggle_colors();
+                }
+            }
+            Command::XtreeElevate => {
+                if let Some(x) = self.xtree.as_mut().filter(|_| from_xtree) {
+                    let action = x.elevate_scan();
+                    self.xtree_action(action);
+                }
+            }
             // Con xtree abierto la columna no se ve: el botón o el atajo cierran xtree y la muestran.
             Command::TogglePreview if from_xtree => self.show_preview(),
             Command::TogglePreview => self.toggle_preview(),
@@ -308,9 +336,10 @@ impl App {
     }
 
 
-    /// Tecla con la vista de xtree abierta: primero la vista (T, F5, Retroceso, Esc, A); después
-    /// solo los atajos de la ventana que no tocan los paneles tapados.
-    fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool) -> bool {
+    /// Tecla con la vista de xtree abierta: primero la vista (F5, Retroceso, Esc, A), después sus
+    /// atajos (`xtree_colores`) y, por último, solo los atajos de la ventana que no tocan los
+    /// paneles tapados.
+    pub(super) fn on_xtree_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
         if !ctrl {
             let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_key(vk));
             if action != xtree_view::Action::None {
@@ -318,8 +347,17 @@ impl App {
                 return true;
             }
         }
-        match self.config.keymap.lookup(vk, ctrl, shift, false, key_down(VK_LWIN)) {
-            Some(c @ (Command::Palette | Command::Xtree | Command::ToggleDarkMode | Command::About | Command::OpenConfig)) => {
+        if let Some(c) = self.config.keymap.lookup_xtree(vk, ctrl, shift, alt, meta) {
+            self.run_command(c);
+            return true;
+        }
+        match self.config.keymap.lookup(vk, ctrl, shift, false, meta) {
+            // «Buscar» (Ctrl+F / ⌘F) dentro de xtree busca en lo analizado.
+            Some(Command::Filter) => {
+                self.open_xtree_search();
+                true
+            }
+            Some(c) if crate::commands::live_in_xtree(c) => {
                 self.run_command(c);
                 true
             }
@@ -333,10 +371,19 @@ impl App {
         if self.xtree_open {
             self.close_xtree();
         } else {
-            if self.xtree.is_none() {
-                let root = self.xtree_root();
-                self.xtree_last = Some(root.clone());
-                self.xtree = Some(Xtree::new(self.hwnd, root, self.config.xtree_by_type));
+            // Una vista que no analizó nada se arma de nuevo con la raíz de ahora (`xtree_abrir`)
+            // y la opción de ahora; solo se conserva lo que se eligió a mano en el desplegable.
+            if self.xtree.as_ref().is_none_or(|x| !x.scanned()) {
+                let picked = self.xtree.as_ref().and_then(|x| x.user_pick());
+                let root = picked.unwrap_or_else(|| self.xtree_root());
+                // De fábrica no se analiza solo: la vista vacía con la raíz en el desplegable.
+                self.xtree = Some(if self.config.xtree_scan_on_open {
+                    self.xtree_last = Some(root.clone());
+                    Xtree::new(self.hwnd, root, self.config.xtree_by_type)
+                } else {
+                    Xtree::unscanned(self.hwnd, root, self.config.xtree_by_type)
+                });
+                self.setup_xtree_history();
             }
             // Lo que flota sobre los paneles se cierra: quedaría encima de la vista.
             self.close_quick_look();
@@ -351,6 +398,8 @@ impl App {
             if let Some(x) = &mut self.xtree {
                 x.mark_seen();
             }
+            // La búsqueda que quedó abierta vuelve con su caja.
+            self.sync_xtree_search();
         }
         self.hover = Hit::None;
         self.redraw();
@@ -379,10 +428,58 @@ impl App {
             x.close_menu();
         }
         self.hover = Hit::None;
+        self.sync_xtree_search();
+    }
+
+    /// La caja de la búsqueda de xtree sigue a la vista: está mientras la búsqueda está abierta y
+    /// xtree se ve (con lo escrito y el foco), y se va cuando se cierra cualquiera de las dos. Es la
+    /// caja de la paleta (`TextKind::Palette`): flechas, Enter y Esc llegan con `WM_APP_PALETTE_KEY`.
+    pub(super) fn sync_xtree_search(&mut self) {
+        let want = self.xtree_open && self.xtree.as_ref().is_some_and(|x| x.search_open());
+        match (want, self.xtree_search_box) {
+            (true, None) => {
+                let r = crate::xtree::view::search_box_rect(self.xtree_area());
+                let y = (r.top + r.bottom) / 2.0 - 10.0;
+                let query = self.xtree.as_ref().and_then(|x| x.search_query()).unwrap_or_default().to_string();
+                if let Some(b) = self.host.text_create(TextKind::Palette, geom::rect(r.left, y, r.right, y + 20.0), &query, &self.theme) {
+                    self.host.text_select(b, 0, -1);
+                    self.host.text_focus(b);
+                    self.xtree_search_box = Some(b);
+                }
+            }
+            (false, Some(b)) => {
+                self.xtree_search_box = None;
+                self.host.text_destroy(b);
+                self.host.focus_main_if_lost();
+            }
+            _ => {}
+        }
+    }
+
+    /// Abre la búsqueda de xtree (la lupa o el atajo de «Buscar»); si ya está abierta, le da el foco
+    /// a su caja.
+    pub(super) fn open_xtree_search(&mut self) {
+        let Some(x) = self.xtree.as_mut().filter(|_| self.xtree_open) else { return };
+        x.open_search();
+        self.sync_xtree_search();
+        if let Some(b) = self.xtree_search_box {
+            self.host.text_focus(b);
+        }
+        self.redraw();
+    }
+
+    /// Una tecla de la caja de búsqueda de xtree (o 0: perdió el foco; la búsqueda sigue abierta).
+    pub(super) fn on_xtree_search_key(&mut self, vk: Key) {
+        let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.search_key(vk));
+        self.xtree_action(action);
     }
 
     /// Lo que pide la vista de xtree después de un evento.
     pub(super) fn xtree_action(&mut self, action: xtree_view::Action) {
+        // La búsqueda pudo abrirse o cerrarse (la lupa, el ✕, Enter, Esc): su caja la sigue.
+        self.sync_xtree_search();
+        // El período de la tarjeta pudo cambiar: la App lo recuerda (#58).
+        self.sync_xtree_days();
         match action {
             xtree_view::Action::None => return,
             xtree_view::Action::Redraw => {}
@@ -503,6 +600,8 @@ fn keeps_xtree(c: Command) -> bool {
             | Command::JumpTo
             | Command::SaveGroup
             | Command::Xtree
+            | Command::XtreeColors
+            | Command::XtreeElevate
             | Command::ToggleDarkMode
             | Command::About
             | Command::OpenConfig
@@ -536,6 +635,7 @@ fn needs_folder(c: Command) -> bool {
             | Command::ShowOriginal
             | Command::Rename
             | Command::RenameMany
+            | Command::CompareContents
             | Command::Properties
             | Command::Duplicate
             | Command::Compress

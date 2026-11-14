@@ -339,13 +339,18 @@ fn info_drive_eject_button() {
     assert!(texts(&host).iter().any(|x| x == crate::info::draw::EJECT_TEXT), "{:?}", texts(&host));
     let before = crate::sys::testing::FakeShell::ejects().iter().filter(|p| **p == root).count();
     click(&mut a, InfoHit::Eject);
+    // Ajustes 2: mientras expulsa, el botón gira, dice «Expulsando…» y no se puede tocar.
+    a.paint();
+    let t = texts(&host);
+    assert!(t.iter().any(|x| x == crate::info::draw::EJECTING_TEXT) && !t.iter().any(|x| x == crate::info::draw::EJECT_TEXT), "{t:?}");
+    assert!(!a.info.layout.hits.iter().any(|(h, _)| *h == InfoHit::Eject));
     // Puede llegar antes otro trabajo (qué discos se expulsan): hasta el aviso de expulsar.
     while a.notice.is_none() {
         let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("expulsar termina");
         a.on_task_done(t);
     }
     assert_eq!(crate::sys::testing::FakeShell::ejects().iter().filter(|p| **p == root).count() - before, 1);
-    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"PENDRIVE\" con seguridad"));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"PENDRIVE\": ya lo podés quitar"));
     FakeFileSystem::set_drives(&[]);
     FakeDiskScan::set_volume(None, false);
 }
@@ -684,6 +689,6 @@ fn eject_stops_folder_size_on_volume() {
         let t = a.task_rx.recv_timeout(Duration::from_secs(10)).expect("expulsar termina");
         a.on_task_done(t);
     }
-    assert_eq!(a.notice.as_deref(), Some("Se puede quitar \"PENDRIVE\" con seguridad"));
+    assert_eq!(a.notice.as_deref(), Some("Se expulsó \"PENDRIVE\": ya lo podés quitar"));
     FakeFileSystem::set_drives(&[]);
 }

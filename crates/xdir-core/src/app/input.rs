@@ -73,6 +73,19 @@ impl App {
         if self.transfers_progress().is_some() && contains(&self.transfers_button_rect(), x, y) {
             return Hit::Transfers;
         }
+        // El indicador de actividad (donde quedó en el último cuadro).
+        if let Some(r) = self.activity_rect
+            && contains(&r, x, y)
+        {
+            return Hit::Activity;
+        }
+        // «calcular tamaño» de la barra de estado (donde quedó en el último cuadro).
+        if let Some(r) = self.size_link
+            && contains(&r, x, y)
+            && !self.xtree_open
+        {
+            return Hit::SizeLink;
+        }
         // «Ver novedades» del aviso de actualización (donde quedó en el último cuadro).
         if self.update_notice.is_some()
             && let Some(r) = self.update_link
@@ -85,7 +98,22 @@ impl App {
             if let Some(l) = ui::layout_at(w, h, x, y) {
                 return Hit::Layout(l);
             }
-            return if contains(&ui::xtree_area(w, h), x, y) { Hit::XtreeView } else { Hit::None };
+            if contains(&crate::xtree::view::back_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeBack;
+            }
+            if contains(&crate::xtree::view::colors_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeColors;
+            }
+            if contains(&crate::xtree::view::search_btn_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeSearch;
+            }
+            if !contains(&ui::xtree_area(w, h), x, y) {
+                return Hit::None;
+            }
+            if let Some(n) = self.xtree.as_ref().and_then(|v| v.mark_at_point(ui::xtree_area(w, h), x, y)) {
+                return Hit::XtreeMark(n);
+            }
+            return Hit::XtreeView;
         }
         if self.preview_edge_at(x, y) {
             return Hit::PreviewEdge;
@@ -95,6 +123,9 @@ impl App {
         }
         if let Some(h) = self.info_hit(x, y) {
             return Hit::Info(h);
+        }
+        if let Some(h) = self.compare_hit(x, y) {
+            return Hit::Compare(h);
         }
         #[cfg(feature = "arbol")]
         if self.tree.contains(x, y) {
@@ -143,6 +174,9 @@ impl App {
         // Grabando un atajo, un clic fuera de su fila deja de grabar (y sigue su curso).
         self.cancel_recording_unless(hit);
         self.info.focused = matches!(hit, Hit::Info(_));
+        if let Some(st) = &mut self.compare {
+            st.focused = matches!(hit, Hit::Compare(_));
+        }
         if self.about_open {
             match hit {
                 Hit::About(about::AboutHit::Report) => self.host.open_url(about::ISSUES_URL),
@@ -261,17 +295,40 @@ impl App {
             Hit::Xtree => self.toggle_xtree(),
             Hit::PreviewToggle => self.run_command(Command::TogglePreview),
             Hit::Transfers => self.show_transfers(),
+            Hit::Activity => self.activity_click(),
             Hit::RenamePanel(h) => {
                 self.rename_panel_click(h);
                 return;
             }
             Hit::Info(h) => self.info_click(h),
+            Hit::Compare(h) => self.compare_click(h),
             Hit::PreviewEdge => {
                 self.host.capture_mouse();
                 let grab = self.preview_column().map_or(0.0, |r| r.left - x);
                 self.drag = Drag::PreviewEdge(grab);
             }
-            Hit::XtreeView => {
+            Hit::XtreeBack => {
+                self.close_xtree();
+                self.redraw();
+            }
+            Hit::XtreeColors => {
+                if let Some(x) = &mut self.xtree {
+                    x.toggle_colors();
+                }
+                self.redraw();
+            }
+            Hit::XtreeSearch => {
+                if self.xtree.as_ref().is_some_and(|x| x.search_open()) {
+                    if let Some(x) = &mut self.xtree {
+                        x.close_search();
+                    }
+                    self.sync_xtree_search();
+                    self.redraw();
+                } else {
+                    self.open_xtree_search();
+                }
+            }
+            Hit::XtreeView | Hit::XtreeMark(_) => {
                 let area = self.xtree_area();
                 let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_click(area, x, y, double));
                 self.xtree_action(action);
@@ -310,6 +367,7 @@ impl App {
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
             Hit::Picker(ui::PickerHit::Changelog) => self.run_command(Command::Changelog),
             Hit::UpdateNotice => self.open_update_notice(),
+            Hit::SizeLink => self.request_sel_size(),
             Hit::Changelog(i) => {
                 self.set_active(i);
                 self.redraw();

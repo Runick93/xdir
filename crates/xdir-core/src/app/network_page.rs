@@ -242,7 +242,12 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         };
         p.text(FontId::Ui, &where_, rect(col_b, y + 12.0, right - 48.0, y + ROW), th.text_dim);
         let e = rect(right - 36.0, y + 8.0, right - 10.0, y + ROW - 8.0);
-        crate::list::draw_eject(p, e, hot(e));
+        // Desconectando: gira y no se puede tocar (`App::disconnect` no repite el pedido).
+        if app.is_ejecting(&c.local) {
+            crate::list::draw_eject_busy(p, e);
+        } else {
+            crate::list::draw_eject(p, e, hot(e));
+        }
         hits.push((e, PageHit::Eject(*i)));
         y += ROW + GAP;
     }

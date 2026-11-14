@@ -38,8 +38,15 @@ impl App {
                 }
             }
             crate::paint::WM_APP_ICONS => self.redraw(),
+            sel_size::WM_APP_SEL_SIZE => self.on_sel_size(),
+            compare::WM_APP_COMPARE => self.on_compare_message(wparam),
             WM_APP_CHANGED => {
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
+                // Cambió algo en la carpeta (un aviso de la navegación en curso): lo que pesan ella y
+                // las que la contienen ya no vale.
+                if let Some(Location::Path(dir)) = self.tab_by_id(wparam).filter(|t| t.nav_id() == lparam as u64).map(|t| t.location.clone()) {
+                    self.sel_size.changed_in(&dir);
+                }
                 if let Some(tab) = self.tab_by_id(wparam) {
                     tab.on_changed(hwnd, &tx, lparam as u64);
                 }
@@ -54,6 +61,7 @@ impl App {
             WM_APP_FIELD_TAB => self.on_field_tab(wparam == 1),
             tasks::WM_APP_TASK => self.on_tasks(),
             crate::net::WM_APP_NET_TICK => self.on_net_tick(),
+            activity::WM_APP_ACTIVITY => self.on_activity_tick(),
             crate::net::WM_APP_NET => self.on_net_hosts(),
             WM_APP_SUGGEST_KEY => self.on_suggest_key(Key(wparam as u16)),
             WM_APP_PALETTE_KEY => self.on_palette_key(Key(wparam as u16), lparam == 1),
@@ -85,6 +93,11 @@ impl App {
                     self.tree.request_quick(self.hwnd);
                 }
                 self.redraw();
+            }
+            crate::xtree::search::WM_APP_XTREE_FOUND => {
+                if self.xtree.as_mut().is_some_and(|x| x.on_found()) && self.xtree_open {
+                    self.redraw();
+                }
             }
             crate::xtree::scan::WM_APP_XTREE => {
                 // Con la vista cerrada también se repinta si cambió el indicador de la barra de
@@ -170,6 +183,15 @@ impl App {
         if self.rename_text_changed(id) || self.map_text_changed(id) {
             return;
         }
+        // «Comparar con…» de la suma de verificación: se compara mientras se escribe (y se decide el
+        // algoritmo al pegar, con Enter o al salir de la caja).
+        if let Some((b, info::EditKind::Expected)) = self.info.edit
+            && b.0 as isize == id
+        {
+            let text = self.host.text_get(b);
+            self.typed_expected(&text);
+            return;
+        }
         if let Some((edit, pane)) = self.filter_edit {
             if edit.0 as isize == id {
                 let text = self.host.text_get(edit);
@@ -178,6 +200,13 @@ impl App {
         }
         if self.palette.as_ref().is_some_and(|(_, e)| e.0 as isize == id) {
             self.refresh_palette();
+        }
+        if let Some(b) = self.xtree_search_box.filter(|b| b.0 as isize == id) {
+            let text = self.host.text_get(b);
+            if let Some(x) = &mut self.xtree {
+                x.set_query(&text);
+            }
+            self.redraw();
         }
         if let Some((edit, _)) = self.edit {
             if edit.0 as isize == id {
@@ -196,6 +225,11 @@ impl App {
         self.end_edit(false);
         self.end_filter(true);
         self.close_palette();
+        // La caja de la búsqueda de xtree va a su nuevo lugar (con lo escrito).
+        if let Some(b) = self.xtree_search_box.take() {
+            self.host.text_destroy(b);
+            self.sync_xtree_search();
+        }
         // El panel de Renombrar varios sigue: sus cajas van a su nuevo lugar.
         self.sync_rename_boxes();
     }
@@ -248,7 +282,7 @@ impl App {
         }
         // Clic derecho en la vista de xtree: sube a la carpeta superior (no hay menú).
         if self.xtree_open {
-            if self.hit(x, y) == Hit::XtreeView {
+            if matches!(self.hit(x, y), Hit::XtreeView | Hit::XtreeMark(_)) {
                 let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |v| v.on_right_click());
                 self.xtree_action(action);
             }
@@ -356,11 +390,32 @@ impl App {
         if std::mem::take(&mut self.swallow_space) && c == ' ' {
             return;
         }
-        if !c.is_control() && !key_down(VK_CONTROL) && !self.xtree_open {
-            let action = self.tab_mut().list.on_char(c);
-            self.apply(self.active, action);
-            self.quick_look_follow_list();
+        if c.is_control() || key_down(VK_CONTROL) {
+            return;
         }
+        // Con la búsqueda de xtree abierta y su caja sin el foco (un clic en el mapa), lo escrito
+        // va a la caja: vuelve el foco y se agrega al final.
+        if let Some(b) = self.xtree_search_box.filter(|_| self.xtree_open) {
+            let text = self.host.text_get(b) + &c.to_string();
+            self.host.text_set(b, &text);
+            let end = text.encode_utf16().count();
+            self.host.text_focus(b);
+            self.host.text_select(b, end, end as isize);
+            if let Some(x) = &mut self.xtree {
+                x.set_query(&text);
+            }
+            self.redraw();
+            return;
+        }
+        // Con xtree abierto, las letras van a su tabla (salto por letra, #57).
+        if self.xtree_open {
+            let action = self.xtree.as_mut().map_or(xtree_view::Action::None, |x| x.on_char(c));
+            self.xtree_action(action);
+            return;
+        }
+        let action = self.tab_mut().list.on_char(c);
+        self.apply(self.active, action);
+        self.quick_look_follow_list();
     }
 
     /// El mouse salió de la ventana.
@@ -384,7 +439,7 @@ impl App {
         self.dismiss_tooltip();
         // Con xtree abierto la rueda mueve su tabla; los paneles tapados no se mueven.
         if self.xtree_open {
-            if self.hit(x, y) == Hit::XtreeView {
+            if matches!(self.hit(x, y), Hit::XtreeView | Hit::XtreeMark(_)) {
                 let area = self.xtree_area();
                 if self.xtree.as_mut().is_some_and(|v| v.on_wheel(area, delta * lines)) {
                     self.redraw();
@@ -417,6 +472,10 @@ impl App {
             }
             Hit::Info(_) => {
                 self.info_wheel(delta * lines);
+                return;
+            }
+            Hit::Compare(_) => {
+                self.compare_wheel(delta * lines);
                 return;
             }
             Hit::Settings(i, _) => {
@@ -497,13 +556,18 @@ impl App {
         if let Some(v) = &mut self.xtree {
             v.cancel();
         }
+        self.sel_size.cancel();
         if self.probe.is_none() {
             self.autosave_group();
             self.sync_folder_views();
             self.folder_views.save_if_dirty();
             let _ = session::save(&self.session());
             let _ = self.history.save();
-            crate::archive_nav::temps::clean_at_exit();
+            // Las pruebas lo apagan (`Init::clean_temps_on_close`): la carpeta es una para todo el
+            // proceso y otras pruebas, en paralelo, están extrayendo ahí.
+            if self.clean_temps_on_close {
+                crate::archive_nav::temps::clean_at_exit();
+            }
         }
     }
 }

@@ -1,5 +1,5 @@
 //! xtree en macOS: listado de carpetas con `getattrlistbulk` (una llamada por bloque de
-//! entradas), discos de `/` y `/Volumes`, y el ajuste de Acceso total al disco (tecla A).
+//! entradas), discos de `/` y `/Volumes`, y el ajuste de Acceso total al disco (`xtree_permisos`).
 
 use std::cell::RefCell;
 use std::ffi::{CString, OsString, c_void};
@@ -361,16 +361,16 @@ pub fn xtree_default_root() -> PathBuf {
 }
 
 /// Aviso de la barra de datos cuando hay carpetas sin permiso; la vista cambia `{n}` por la
-/// cantidad (tecla A: abre el ajuste de Acceso total al disco). macOS le da el permiso al proceso
+/// cantidad (`xtree_permisos`: abre el ajuste de Acceso total al disco). macOS le da el permiso al proceso
 /// recién al volver a abrirlo: por eso se pide reabrir xdir.
-pub const XTREE_PERMISSION_HINT: &str = "{n} carpetas sin permiso: dale a xdir Acceso total al disco (tecla A) y reabrí xdir";
+pub const XTREE_PERMISSION_HINT: &str = "{n} carpetas sin permiso: dale a xdir Acceso total al disco ({teclas}) y reabrí xdir";
 
-/// Faltaron permisos (aviso de la barra de datos y tecla A): carpetas que no se pudieron leer.
+/// Faltaron permisos (aviso de la barra de datos y `xtree_permisos`): carpetas que no se pudieron leer.
 pub fn xtree_permission_issue(p: &Progress) -> bool {
     p.denied.load(Ordering::Relaxed) > 0
 }
 
-/// Texto de la barra de datos y de estado mientras se abre el ajuste de permisos (tecla A).
+/// Texto de la barra de datos y de estado mientras se abre el ajuste de permisos (`xtree_permisos`).
 pub const XTREE_ELEVATING_TEXT: &str = "Abriendo Ajustes > Acceso total al disco\u{2026}";
 
 #[cfg(test)]
@@ -560,7 +560,7 @@ mod tests {
     fn permission_hint_asks_to_reopen() {
         assert_eq!(
             XTREE_PERMISSION_HINT.replace("{n}", "3"),
-            "3 carpetas sin permiso: dale a xdir Acceso total al disco (tecla A) y reabrí xdir"
+            "3 carpetas sin permiso: dale a xdir Acceso total al disco ({teclas}) y reabrí xdir"
         );
     }
 

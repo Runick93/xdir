@@ -118,12 +118,30 @@ impl App {
             Hit::Pane(i, PaneHit::Terminal) if self.term_menu == Some(i) => return None,
             // El botón «xtree» dice qué hace; el cartel lleva el estado del escaneo, si lo hay.
             Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
+            Hit::XtreeBack => return Some("Volver a xdir (Esc)".to_string()),
+            // La ▲ de la tabla de xtree: cuánto creció la carpeta en el período.
+            Hit::XtreeMark(n) => return self.xtree.as_ref()?.mark_tip(n),
+            Hit::XtreeSearch => {
+                return Some(match self.config.keymap.label(Command::Filter) {
+                    keys if keys.is_empty() => "Buscar en xtree".to_string(),
+                    keys => format!("Buscar en xtree ({keys})"),
+                });
+            }
+            Hit::XtreeColors => {
+                let what = self.xtree.as_ref()?.colors_tip();
+                return Some(match self.config.keymap.label(Command::XtreeColors) {
+                    keys if keys.is_empty() => what.to_string(),
+                    keys => format!("{what} ({keys})"),
+                });
+            }
+            // El indicador de actividad: la lista de lo que está en curso.
+            Hit::Activity => return self.activity.tip(self.now()),
             // La entrada del árbol no dice qué es por sí sola cuando está en franja: sin escaneo,
             // «xtree».
             Hit::TreeXtree => return Some(self.xtree.as_ref().and_then(|x| x.badge_tip()).unwrap_or_else(|| "xtree".to_string())),
             // Renombrar varios: el motivo del choque de la fila bajo el mouse.
             Hit::Pane(i, PaneHit::List) if self.rename_many.as_ref().is_some_and(|r| r.pane == i) => return self.panes[i].tab().list.rename_clash_tip(),
-            Hit::RenamePanel(crate::rename_many_draw::PanelHit::Close) => return Some("Cerrar".to_string()),
+            Hit::RenamePanel(crate::rename_many_draw::PanelHit::Close) | Hit::Compare(crate::compare::draw::CompareHit::Close) => return Some("Cerrar".to_string()),
             _ => {}
         }
         let tab_path = |p: usize, t: usize| {

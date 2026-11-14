@@ -1,7 +1,7 @@
 //! Registro de servicios del sistema: lo que el núcleo necesita del sistema operativo, detrás de
 //! traits. Cada plataforma instala sus implementaciones una sola vez al arrancar (`install`), antes
 //! de crear la `App`, y el resto del código las pide con `waker()`, `env()`, `file_ops()`,
-//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()`, `preview()`, `info()` y `network()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
+//! `disk_scan()`, `shell()`, `file_system()`, `overlays()`, `metadata()`, `preview()`, `info()`, `network()` y `hashes()`. Los tests instalan implementaciones falsas con `testing::install_fakes()`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirEntry, Metadata as FsMetadata};
@@ -24,7 +24,9 @@ use crate::xtree::tree::Node;
 pub mod testing;
 mod copy;
 mod archives;
+mod hashes;
 
+pub use hashes::{HashAlgo, Hashes, Opened, Reader, io_error};
 pub use archives::{Archives, Pick, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
     CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
@@ -181,7 +183,7 @@ pub trait FileOps: Send + Sync {
 }
 
 /// Lo que el escáner y la vista de xtree necesitan del sistema: listar carpetas, el escaneo
-/// rápido de un volumen entero, el escaneo con permisos (tecla A), los discos y su espacio.
+/// rápido de un volumen entero, el escaneo con permisos (`xtree_permisos`), los discos y su espacio.
 pub trait DiskScan: Send + Sync {
     /// Listador de carpetas para un escaneo que empieza en `root` (cada sistema decide qué no
     /// recorrer: otros discos, enlaces...).
@@ -199,10 +201,11 @@ pub trait DiskScan: Send + Sync {
     fn whole_volume(&self, path: &Path) -> bool;
     /// Carpeta que se analiza al abrir xtree sin elegir nada (el disco del sistema).
     fn default_root(&self) -> PathBuf;
-    /// ¿Faltaron permisos en el escaneo? (aviso de la barra de datos y tecla A).
+    /// ¿Faltaron permisos en el escaneo? (aviso de la barra de datos y `xtree_permisos`).
     fn permission_issue(&self, p: &Progress) -> bool;
     /// Aviso de la barra de datos cuando faltan permisos; la vista cambia `{n}` por la cantidad
-    /// de carpetas sin permiso.
+    /// de carpetas sin permiso y `{teclas}` por el atajo en uso de `xtree_permisos` (sin atajo, se
+    /// quita « ({teclas})»).
     fn permission_hint(&self) -> &'static str;
     /// Texto de la barra de datos y de estado mientras corre `elevate`.
     fn elevating_text(&self) -> &'static str;
@@ -264,6 +267,11 @@ pub trait Shell: Send + Sync {
     fn unpin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String>;
     /// Modo de los menús nativos: `None` sigue al sistema, `Some(oscuro)` lo fuerza.
     fn set_menu_mode(&self, dark: Option<bool>);
+    /// ¿El menú del fondo de una carpeta ya trae «Nuevo» del sistema (Windows)? Si no, xdir pone
+    /// «Carpeta nueva» y «Archivo de texto nuevo».
+    fn menu_has_new(&self) -> bool {
+        false
+    }
     /// Volumen de una ruta, para decidir si arrastrar mueve o copia.
     fn volume_of(&self, path: &Path) -> Option<OsString>;
 }
@@ -356,6 +364,19 @@ pub trait FileSystem: Send + Sync {
     /// ¿El elemento está solo en la nube (iCloud, OneDrive, Dropbox)? Entonces no se lee su
     /// contenido ni se pide su imagen en macOS: abrirlo lo bajaría entero. No toca el contenido.
     fn cloud_only(&self, _path: &Path) -> bool {
+        false
+    }
+    /// El disco de una ruta, sin seguir enlaces (`st_dev` en macOS y Linux), para no cruzar a otro
+    /// disco montado adentro al sumar una carpeta. `None` si no se sabe: en Windows los discos
+    /// montados en una carpeta son puntos de reanálisis y ya no se recorren.
+    fn volume_id(&self, _path: &Path) -> Option<u64> {
+        None
+    }
+    /// ¿Este enlace (o punto de reanálisis) lleva a una carpeta? Sin seguirlo: en Windows, una
+    /// unión, un disco montado en una carpeta o un enlace a carpeta. La suma de una carpeta no
+    /// entra y lo marca como «al menos». Por defecto no (en macOS y Linux, lo que se monta adentro
+    /// lo dicen `volume_id` e `is_mount_point`).
+    fn is_dir_link(&self, _path: &Path) -> bool {
         false
     }
     /// Las reglas de nombres del sistema (`rename_many::NameRules::WINDOWS` o `UNIX`: en macOS
@@ -508,6 +529,8 @@ pub struct Services {
     pub info: Box<dyn Info>,
     /// Conexiones de red (`Network`).
     pub network: Box<dyn Network>,
+    /// Leer por bloques y sumas de verificación (la crate `xdir-hash`).
+    pub hashes: Box<dyn Hashes>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -582,4 +605,8 @@ pub fn info() -> &'static dyn Info {
 
 pub fn network() -> &'static dyn Network {
     &*services().network
+}
+
+pub fn hashes() -> &'static dyn Hashes {
+    &*services().hashes
 }

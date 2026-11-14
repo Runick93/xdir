@@ -4,7 +4,8 @@
 //!
 //! Recibe las coordenadas en DIPs de la ventana y dibuja con el `Painter` y el `Theme` de xdir; el
 //! mapa conserva su rueda de colores y sus categorías. Clic selecciona; doble clic entra en la
-//! carpeta; clic derecho o Retroceso suben; T cambia el color; F5 vuelve a analizar.
+//! carpeta; clic derecho o Retroceso suben; las letras van a la primera fila que empieza así; el
+//! botón «Colores» (o `xtree_colores`, Ctrl+T) cambia el color; F5 vuelve a analizar.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -12,11 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::growth::{self, CardState, HistState, StripHit};
 use super::colors::{CATS, file_color, fmt_size, lighten, position_color, text_on};
 use super::scan::{self, DriveEntry, Progress, Scan, WM_APP_XTREE};
+use super::search::{self, Found, WM_APP_XTREE_FOUND};
 use super::tree::{NO_PARENT, Node, node_path, rows_of};
 use super::treemap::{Cell, header_h, layout};
-use crate::keys::keys::{VK_BACK, VK_ESCAPE};
+use crate::keys::keys::{VK_BACK, VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_UP};
 use crate::geom::{Color, Rect, contains, rect};
 use crate::keys::Key;
 use crate::sys::Handle;
@@ -39,9 +42,18 @@ const MENU_W: f32 = 400.0;
 /// Ancho del estado del análisis, a la derecha de la barra superior («Análisis completado en
 /// 1:02:15»).
 const STATE_W: f32 = 220.0;
+/// Botón «← xdir», a la izquierda de todo en la barra superior.
+const BACK_W: f32 = 76.0;
+/// Botón «Colores: carpeta / tipo», que termina 40 antes del estado.
+const COLORS_W: f32 = 150.0;
+/// Lupa de la barra superior, 6 a la izquierda de «Colores».
+const SEARCH_W: f32 = 32.0;
+/// Búsqueda (en el lugar de la tabla): alto de la caja, dónde empiezan los resultados y alto de
+/// cada uno.
+const BOX_H: f32 = 30.0;
+const SEARCH_HEAD: f32 = 70.0;
+const RES_H: f32 = 44.0;
 
-const VK_A: Key = Key(0x41);
-const VK_T: Key = Key(0x54);
 const VK_F5: Key = Key(0x74);
 
 /// Colores fijos (no dependen del tema): carpeta dorada y tilde de «Análisis completado».
@@ -102,9 +114,15 @@ pub struct Ui {
     pub status: Rect,
     /// «Abrir en el panel», «Copiar ruta», «Explorar aquí».
     pub buttons: [Rect; 3],
-    /// Desplegable de discos y botón «Analizar», en la barra superior.
+    /// «← xdir» (vuelve a los paneles), desplegable de discos y botón «Analizar», en la barra
+    /// superior.
+    pub back: Rect,
     pub combo: Rect,
     pub scan_btn: Rect,
+    /// «Colores: carpeta / tipo», a la izquierda del estado del análisis.
+    pub colors_btn: Rect,
+    /// La lupa (abre la búsqueda), a la izquierda de «Colores».
+    pub search_btn: Rect,
 }
 
 /// Distribución de la vista en `area`. `legend_h` es 0 cuando no hay leyenda (color por carpeta):
@@ -125,9 +143,103 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
         buttons[i] = rect(x - widths[i], top, x, bottom);
         x -= widths[i] + 8.0;
     }
-    let combo = rect(l + MARGIN, t + 6.0, l + MARGIN + 250.0, t + TOP_H - 6.0);
+    let back = back_rect(area);
+    let combo = rect(back.right + 8.0, t + 6.0, back.right + 8.0 + 250.0, t + TOP_H - 6.0);
     let scan_btn = rect(combo.right + 8.0, t + 6.0, combo.right + 108.0, t + TOP_H - 6.0);
-    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, combo, scan_btn }
+    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area), search_btn: search_btn_rect(area) }
+}
+
+/// La lupa de la barra superior de la vista en `area` (ver `top_buttons`).
+pub fn search_btn_rect(area: Rect) -> Rect {
+    top_buttons(area).1
+}
+
+/// Recuadro de la caja de búsqueda: arriba de la columna de la tabla.
+fn search_frame(area: Rect) -> Rect {
+    let l = layout_ui(area, 0.0).list;
+    rect(l.left + 8.0, l.top + 8.0, l.right - 8.0, l.top + 8.0 + BOX_H)
+}
+
+/// Dónde va la caja de texto del sistema (la pone la `App`): dentro del recuadro, entre la lupa
+/// y el ✕.
+pub fn search_box_rect(area: Rect) -> Rect {
+    let f = search_frame(area);
+    rect(f.left + 28.0, f.top + 5.0, f.right - 30.0, f.bottom - 5.0)
+}
+
+/// El ✕ que cierra la búsqueda.
+fn search_close_rect(area: Rect) -> Rect {
+    let f = search_frame(area);
+    rect(f.right - 26.0, f.top + 4.0, f.right - 4.0, f.bottom - 4.0)
+}
+
+/// Lo que ocupan los resultados (debajo de la caja y de la cantidad).
+fn search_results_rect(area: Rect) -> Rect {
+    let l = layout_ui(area, 0.0).list;
+    rect(l.left, l.top + SEARCH_HEAD, l.right, l.bottom - 2.0)
+}
+
+/// Fila del resultado `i` con los resultados desplazados `scroll`.
+pub fn search_row_rect(area: Rect, i: usize, scroll: f32) -> Rect {
+    let r = search_results_rect(area);
+    let top = r.top + i as f32 * RES_H - scroll;
+    rect(r.left + 3.0, top, r.right - 3.0, top + RES_H)
+}
+
+/// Las filas de un nivel con sus nombres plegados, y de qué carpeta y árbol son (`(current,
+/// tree_gen)`).
+type LevelNames = ((u32, u64), Vec<(Option<u32>, String)>);
+
+/// La búsqueda abierta (#57): lo escrito, lo encontrado y la fila elegida.
+#[derive(Default)]
+struct SearchState {
+    query: String,
+    found: Option<Found>,
+    /// Hay una búsqueda en otro hilo.
+    pending: bool,
+    selected: usize,
+    hover: Option<usize>,
+    scroll: f32,
+    /// El próximo cuadro deja a la vista el elegido.
+    reveal: bool,
+    /// De qué árbol son los resultados (`Xtree::tree_gen`).
+    found_tree: u64,
+}
+
+/// La lupa y «Colores» de la barra superior en `area`: terminan 40 antes del estado del análisis
+/// y nunca pisan «Analizar». Si no entran, «Colores» queda solo con la muestra (del ancho de la
+/// lupa) y, si tampoco, no están (rectángulos vacíos: ningún punto cae adentro).
+fn top_buttons(area: Rect) -> (Rect, Rect) {
+    let (top, bottom) = (area.top + 6.0, area.top + TOP_H - 6.0);
+    let right = area.right - STATE_W - 40.0;
+    // «Analizar» termina en `back` (76) + 8 + combo (250) + 8 + 100.
+    let min_left = area.left + MARGIN + BACK_W + 8.0 + 250.0 + 8.0 + 100.0 + 8.0;
+    let colors_w = if right - COLORS_W - 6.0 - SEARCH_W >= min_left {
+        COLORS_W
+    } else if right - SEARCH_W - 6.0 - SEARCH_W >= min_left {
+        SEARCH_W
+    } else {
+        let none = rect(area.left, top, area.left, bottom);
+        return (none, none);
+    };
+    let colors = rect(right - colors_w, top, right, bottom);
+    (colors, rect(colors.left - 6.0 - SEARCH_W, top, colors.left - 6.0, bottom))
+}
+
+/// Botón «Colores: carpeta / tipo» de la vista en `area` (ver `top_buttons`).
+pub fn colors_rect(area: Rect) -> Rect {
+    top_buttons(area).0
+}
+
+/// ¿Es una tecla propia de la vista (sin modificadores)? Retroceso, Esc, F5, flechas, Re Pág /
+/// Av Pág y Enter: no se le pueden dar a un comando de xtree.
+pub fn is_view_key(k: Key) -> bool {
+    matches!(k, VK_BACK | VK_ESCAPE | VK_F5 | VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN)
+}
+
+/// Botón «← xdir» de la vista en `area`: a la izquierda de todo en la barra superior.
+pub fn back_rect(area: Rect) -> Rect {
+    rect(area.left + MARGIN, area.top + 6.0, area.left + MARGIN + BACK_W, area.top + TOP_H - 6.0)
 }
 
 /// Lista desplegable de discos (más la fila «Seleccionar carpeta…»), justo debajo del desplegable.
@@ -169,8 +281,7 @@ fn pct(v: u64, of: u64) -> String {
     format!("{:.1} %", v as f64 / of.max(1) as f64 * 100.0).replace('.', ",")
 }
 
-/// Escaneo vacío y ya cancelado: para una vista sin análisis (pruebas).
-#[cfg(test)]
+/// Escaneo vacío (ningún hilo): el de una vista que todavía no analizó nada.
 fn idle_scan() -> Scan {
     Scan {
         id: 0,
@@ -188,8 +299,8 @@ pub struct Xtree {
     scan: Scan,
     /// El escaneo sigue en curso: se dibuja el árbol en vivo (`scan.live`).
     scanning: bool,
-    /// Árbol terminado (vacío mientras se escanea).
-    arena: Vec<Node>,
+    /// Árbol terminado (vacío mientras se escanea). Compartido con el hilo de búsqueda.
+    arena: Arc<Vec<Node>>,
     current: u32,
     selected: Option<u32>,
     cells: Vec<Cell>,
@@ -198,8 +309,16 @@ pub struct Xtree {
     hover: Option<usize>,
     hover_row: Option<usize>,
     hover_btn: Option<usize>,
+    /// El mouse está sobre «← xdir».
+    hover_back: bool,
+    /// El mouse está sobre «Colores».
+    hover_colors: bool,
+    /// Atajos en uso de los colores y de analizar con permisos, para la ayuda y el aviso de la
+    /// barra de datos (los pone la `App`; vacíos si no hay).
+    keys_colors: String,
+    keys_elevate: String,
     scroll: f32,
-    /// Colorear por tipo de archivo en vez de por posición (tecla T).
+    /// Colorear por tipo de archivo en vez de por posición (botón «Colores» o `xtree_colores`).
     by_type: bool,
     /// Espacio del volumen que contiene la carpeta: (total, libre).
     vol: Option<(u64, u64)>,
@@ -213,7 +332,7 @@ pub struct Xtree {
     scan_elapsed: Option<Duration>,
     /// El escaneo se cortó antes de terminar (`cancel`).
     scan_stopped: bool,
-    /// Reescaneo con permisos (tecla A) después de un análisis terminado: cronómetro del análisis
+    /// Reescaneo con permisos (`xtree_permisos`) después de un análisis terminado: cronómetro del análisis
     /// anterior (inicio, duración, ya visto), para volver a él si el escaneo elevado no trae árbol.
     before_elevate: Option<(Option<Instant>, Option<Duration>, bool)>,
     /// Mayor porcentaje mostrado en este escaneo: no retrocede.
@@ -223,17 +342,41 @@ pub struct Xtree {
     drives: Vec<DriveEntry>,
     menu_open: bool,
     menu_hover: Option<usize>,
-    /// Hay un escaneo con permisos elevados en curso (tecla A).
+    /// Hay un escaneo con permisos elevados en curso (`xtree_permisos`).
     elevating: Arc<AtomicBool>,
     /// El resultado del último escaneo ya se vio en la vista: el indicador vuelve a `Idle`.
     seen: bool,
     /// Avisos del escaneo recibidos: fase del arco del indicador que gira.
     ticks: u8,
+    /// Historial de tamaños de la raíz (#58).
+    hist: HistState,
+    /// Búsqueda al teclear en la tabla (#57): lo escrito y cuándo.
+    typeahead: crate::typeahead::TypeAhead,
+    /// La búsqueda por nombre, si está abierta (#57).
+    search: Option<SearchState>,
+    /// Generación de la búsqueda: una que cambió corta la del hilo.
+    search_gen: Arc<AtomicUsize>,
+    /// Lo que deja el hilo de búsqueda (generación, árbol y resultados); se toma con `on_found`.
+    search_slot: Arc<std::sync::Mutex<Option<(usize, u64, Found)>>>,
+    /// Cambia cada vez que cambia el árbol (llegó el terminado, se analiza de nuevo): los ids de
+    /// unos resultados viejos son de otro árbol.
+    tree_gen: u64,
+    /// Desde cuántos nodos se busca en otro hilo (`search::THREAD_FROM`; las pruebas lo bajan).
+    search_thread_from: usize,
+    /// El mouse está sobre la lupa.
+    hover_search: bool,
+    /// El próximo cuadro deja a la vista la fila elegida (desplazando lo justo).
+    scroll_to_selected: bool,
+    /// Las filas del nivel con sus nombres ya plegados, para el salto por letra: de qué carpeta
+    /// y árbol son (se arman una vez por nivel, no en cada tecla).
+    level_names: Option<LevelNames>,
+    /// Cuántas veces se armaron (pruebas).
+    level_folds: usize,
 }
 
 impl Xtree {
     /// Abre la vista sobre `root` y empieza a analizarla; `by_type`: el mapa arranca coloreado por
-    /// tipo de archivo (`[opciones] xtree_por_tipo`; la tecla T lo sigue cambiando).
+    /// tipo de archivo (`[opciones] xtree_por_tipo`; el botón «Colores» lo sigue cambiando).
     pub fn new(hwnd: Handle, root: PathBuf, by_type: bool) -> Xtree {
         let id = NEXT_SCAN.fetch_add(1, Ordering::Relaxed);
         let scan = scan::start(hwnd, id, root.clone());
@@ -244,6 +387,43 @@ impl Xtree {
         x
     }
 
+    /// Abre la vista sobre `root` sin analizar (`[opciones] xtree_analizar_al_abrir` apagado): el
+    /// desplegable muestra la raíz y el análisis empieza con «Analizar». Solo se piden los datos
+    /// del disco (los de red, en otro hilo).
+    pub fn unscanned(hwnd: Handle, root: PathBuf, by_type: bool) -> Xtree {
+        let mut x = Xtree::with_scan(hwnd, root, idle_scan());
+        x.by_type = by_type;
+        x.read_volume();
+        x
+    }
+
+    /// Lo elegido en el desplegable.
+    pub fn pick(&self) -> &Path {
+        &self.pick
+    }
+
+    /// Lo elegido a mano en el desplegable, si no es la raíz con la que se abrió la vista.
+    pub fn user_pick(&self) -> Option<PathBuf> {
+        (self.pick != self.root && !self.pick.as_os_str().is_empty()).then(|| self.pick.clone())
+    }
+
+    /// Elige en el desplegable sin pasar por el menú (pruebas de `App`).
+    #[cfg(test)]
+    pub fn set_pick(&mut self, p: PathBuf) {
+        self.pick = p;
+    }
+
+    /// Nombre de lo elegido en la tabla o el mapa (pruebas de `App`).
+    #[cfg(test)]
+    pub fn selected_name(&self) -> Option<String> {
+        self.selected.and_then(|n| self.arena.get(n as usize)).map(|n| n.name.to_string())
+    }
+
+    /// ¿Empezó algún análisis en esta vista? (una abierta sin analizar, todavía no).
+    pub fn scanned(&self) -> bool {
+        self.scan_started.is_some()
+    }
+
     fn with_scan(hwnd: Handle, root: PathBuf, scan: Scan) -> Xtree {
         Xtree {
             hwnd,
@@ -251,7 +431,7 @@ impl Xtree {
             root,
             scan,
             scanning: false,
-            arena: Vec::new(),
+            arena: Arc::default(),
             current: 0,
             selected: None,
             cells: Vec::new(),
@@ -259,6 +439,10 @@ impl Xtree {
             hover: None,
             hover_row: None,
             hover_btn: None,
+            hover_back: false,
+            hover_colors: false,
+            keys_colors: String::new(),
+            keys_elevate: String::new(),
             scroll: 0.0,
             by_type: false,
             vol: None,
@@ -275,6 +459,17 @@ impl Xtree {
             elevating: Arc::new(AtomicBool::new(false)),
             seen: false,
             ticks: 0,
+            hist: HistState::default(),
+            typeahead: Default::default(),
+            scroll_to_selected: false,
+            level_names: None,
+            level_folds: 0,
+            search: None,
+            search_gen: Arc::new(AtomicUsize::new(0)),
+            search_slot: Default::default(),
+            search_thread_from: search::THREAD_FROM,
+            tree_gen: 0,
+            hover_search: false,
         }
     }
 
@@ -295,7 +490,8 @@ impl Xtree {
     /// Reemplaza el árbol por uno terminado (pruebas).
     #[cfg(test)]
     pub fn set_arena(&mut self, arena: Vec<Node>) {
-        self.arena = arena;
+        self.arena = Arc::new(arena);
+        self.tree_gen += 1;
         self.scanning = false;
         self.go(0);
     }
@@ -318,10 +514,94 @@ impl Xtree {
         Some(node.size)
     }
 
+    /// Historial de tamaños: `on` guarda una foto con cada análisis completo (`[opciones]
+    /// xtree_historial`), `days` es el período de la tarjeta y `dir` la carpeta del historial.
+    pub fn set_history(&mut self, on: bool, days: u16, dir: Option<PathBuf>) {
+        self.hist.on = on;
+        if super::growth::PERIODS.contains(&days) {
+            self.hist.days = days;
+        }
+        self.hist.dir = dir;
+    }
+
+    /// Carpeta del historial que recibió la vista (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_dir(&self) -> Option<&Path> {
+        self.hist.dir.as_deref()
+    }
+
+    /// ¿Guarda una foto con cada análisis? (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_on(&self) -> bool {
+        self.hist.on
+    }
+
+    /// Contador de «Borrar historial» de la App: con él, una foto en camino después de borrar no
+    /// se guarda.
+    pub fn set_history_clears(&mut self, clears: super::history::Clears) {
+        self.hist.clears = clears;
+    }
+
+    /// ¿Se recibieron las opciones del historial (`set_history`)? Antes, el período es el de
+    /// fábrica y no cuenta como elegido.
+    pub fn history_chosen(&self) -> bool {
+        self.hist.dir.is_some()
+    }
+
+    /// ¿Hay un hilo guardando o leyendo el historial? (para el indicador de actividad).
+    pub fn history_busy(&self) -> bool {
+        self.hist.busy()
+    }
+
+    /// Período elegido en la tarjeta (7, 30 o 90 días), para la sesión.
+    pub fn history_days(&self) -> u16 {
+        self.hist.days
+    }
+
+    /// Fija el día de hoy (días desde 1970): pruebas y gancho de pruebas. `None` vuelve al reloj.
+    pub fn set_today(&mut self, day: Option<i32>) {
+        self.hist.today_fix = day;
+    }
+
+    /// El historial que llegó del hilo (pruebas de `App`).
+    #[cfg(test)]
+    pub fn history_loaded(&self) -> Option<&super::history::Loaded> {
+        self.hist.loaded.as_deref()
+    }
+
+    /// Gancho de pruebas del historial (#58): `periodo <i>` toca el período `i`, `crecio <i>` la
+    /// fila `i` de «Más crecieron».
+    #[cfg(feature = "pruebas")]
+    pub fn history_test(&mut self, area: Rect, what: &str, i: usize) -> Action {
+        self.prepare(area);
+        let ui = self.ui(area);
+        let s = growth::strip(ui.card);
+        let at = match what {
+            "periodo" => s.periods.get(i).map(|r| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)),
+            "crecio" => Some((s.right.left + 40.0, s.right.top + 20.0 + (i as f32 + 0.5) * 19.0)),
+            _ => None,
+        };
+        let Some((x, y)) = at else { return Action::None };
+        self.on_mouse_move(area, x, y);
+        self.on_click(area, x, y, false)
+    }
+
+    /// Se borró el historial: la tarjeta deja de mostrar el que había.
+    pub fn clear_history(&mut self) {
+        self.hist.reset();
+        // Con un análisis a la vista, la tarjeta pasa a «sin historial» (no a «cargando»).
+        if !self.arena.is_empty() {
+            self.hist.loaded = Some(Default::default());
+        }
+    }
+
     /// Cierra el menú de discos (al cerrar la vista: no debe reaparecer abierto).
     pub fn close_menu(&mut self) {
         self.menu_open = false;
         self.menu_hover = None;
+        self.hover_back = false;
+        self.hover_colors = false;
+        self.hover_search = false;
     }
 
     /// Abre el menú de discos sin pasar por el clic. Lo usan las pruebas de `App` (app/tests.rs).
@@ -345,10 +625,27 @@ impl Xtree {
         }
     }
 
-    /// Carpeta analizada.
     /// ¿El mapa está coloreado por tipo de archivo?
     pub fn by_type(&self) -> bool {
         self.by_type
+    }
+
+    /// Cambia los colores del mapa: por carpeta o por tipo de archivo (botón «Colores» o
+    /// `xtree_colores`). No se guarda: el switch de la configuración decide cómo arranca.
+    pub fn toggle_colors(&mut self) {
+        self.by_type = !self.by_type;
+        self.cells_for = None;
+    }
+
+    /// Lo que hace el botón «Colores» ahora (para su cartel, sin el atajo).
+    pub fn colors_tip(&self) -> &'static str {
+        if self.by_type { "Colorear por carpeta" } else { "Colorear por tipo de archivo" }
+    }
+
+    /// Los atajos en uso de los colores y de analizar con permisos (para la barra de datos).
+    pub fn set_key_labels(&mut self, colors: String, elevate: String) {
+        self.keys_colors = colors;
+        self.keys_elevate = elevate;
     }
 
     pub fn root(&self) -> &Path {
@@ -429,7 +726,9 @@ impl Xtree {
     /// «Análisis completado en 1:23» o «Detenido a los 0:37».
     fn state_text(&self) -> String {
         let t = fmt_elapsed(self.elapsed());
-        if self.scan_stopped {
+        if !self.scanned() && !self.elevating.load(Ordering::Relaxed) {
+            "Sin analizar".to_string()
+        } else if self.scan_stopped {
             format!("Detenido a los {t}")
         } else if self.elevated_pending() || (self.scanning && self.elevating.load(Ordering::Relaxed)) {
             // El ayudante elevado no informa bytes leídos: solo el cronómetro (como el indicador,
@@ -510,13 +809,15 @@ impl Xtree {
         self.whole = !crate::sys::network().is_remote(&self.root) && disk_scan().whole_volume(&self.root);
     }
 
-    /// Aviso de la barra de datos: escaneo elevado en curso o permisos que faltan (tecla A).
+    /// Aviso de la barra de datos: escaneo elevado en curso o permisos que faltan (`xtree_permisos`).
     fn data_hint(&self) -> String {
         let progress = self.progress();
         if self.elevating.load(Ordering::Relaxed) {
             disk_scan().elevating_text().to_string()
         } else if disk_scan().permission_issue(progress) {
-            disk_scan().permission_hint().replace("{n}", &fmt_count(progress.denied.load(Ordering::Relaxed)))
+            let hint = disk_scan().permission_hint().replace("{n}", &fmt_count(progress.denied.load(Ordering::Relaxed)));
+            // El atajo en uso de `xtree_permisos`; sin atajo, sin el paréntesis.
+            if self.keys_elevate.is_empty() { hint.replace(" ({teclas})", "") } else { hint.replace("{teclas}", &self.keys_elevate) }
         } else {
             String::new()
         }
@@ -551,7 +852,8 @@ impl Xtree {
         self.cancel();
         let id = NEXT_SCAN.fetch_add(1, Ordering::Relaxed);
         self.scan = scan::start(self.hwnd, id, self.root.clone());
-        self.arena.clear();
+        self.arena = Arc::default();
+        self.tree_gen += 1;
         self.cells.clear();
         self.cells_for = None;
         self.current = 0;
@@ -561,13 +863,16 @@ impl Xtree {
         self.selected = None;
         self.scroll = 0.0;
         self.scanning = true;
+        self.hist.reset();
         self.start_clock();
+        self.refresh_search();
     }
 
     /// Toma el árbol terminado, si ya llegó. Devuelve si cambió algo.
     fn take_result(&mut self) -> bool {
         let Some(arena) = self.scan.result.lock().unwrap().take() else { return false };
-        self.arena = arena;
+        self.arena = Arc::new(arena);
+        self.tree_gen += 1;
         // El espacio libre cambió mientras se escaneaba.
         self.read_volume();
         // Primer árbol de este escaneo: queda fijo el tiempo total. Un árbol elevado que llega
@@ -580,7 +885,26 @@ impl Xtree {
         // Resultado nuevo: el indicador lo muestra hasta que se abra la vista.
         self.seen = false;
         self.go(0);
+        // Una raíz que no se pudo leer no deja foto (se lee lo que había).
+        let complete = !self.progress().root_failed.load(Ordering::Relaxed);
+        // Las carpetas sin leer (permisos): su tamaño y el de las de arriba es «al menos».
+        let denied = self.progress().denied_nodes.lock().map(|v| v.clone()).unwrap_or_default();
+        let overflow = self.progress().denied_overflow.load(Ordering::Relaxed);
+        self.hist.set_partial_now(&self.arena, &denied, overflow);
+        self.hist.after_scan(self.hwnd, self.scan.id, &self.root, &self.arena, complete);
+        // Los nodos son otros: la búsqueda abierta se repite sobre el árbol terminado.
+        self.refresh_search();
         true
+    }
+
+    /// `take_result` con el historial guardado con una generación de borrado vieja (pruebas).
+    #[cfg(test)]
+    pub fn take_result_with_generation(&mut self, generation: u64) {
+        let Some(arena) = self.scan.result.lock().unwrap().take() else { return };
+        self.arena = Arc::new(arena);
+        self.scanning = false;
+        self.go(0);
+        self.hist.after_scan_at(self.hwnd, self.scan.id, &self.root, &self.arena, true, Some(generation));
     }
 
     /// Aviso del escáner (`WM_APP_XTREE`). Devuelve si hay que repintar.
@@ -614,9 +938,9 @@ impl Xtree {
         true
     }
 
-    /// Tecla A: vuelve a analizar con permisos (administrador en Windows; en macOS abre el ajuste
-    /// de Acceso total al disco). Solo si faltaron permisos.
-    fn elevate(&mut self) -> Action {
+    /// `xtree_permisos` (Ctrl+Shift+A): vuelve a analizar con permisos (administrador en Windows;
+    /// en macOS abre el ajuste de Acceso total al disco). Solo si faltaron permisos.
+    pub fn elevate_scan(&mut self) -> Action {
         let hwnd = self.hwnd;
         self.elevate_with(move |root, progress, cancel| disk_scan().elevate(hwnd, root, progress, cancel))
     }
@@ -651,15 +975,191 @@ impl Xtree {
             let tree = run(&root, &progress, &cancel);
             let delivered = tree.is_some_and(|arena| scan::deliver(&result, &cancel, arena, true));
             if delivered {
-                // Ya no faltan permisos: se apagan el aviso y la tecla A.
+                // Ya no faltan permisos: se apagan el aviso y `xtree_permisos`.
                 progress.need_admin.store(false, Ordering::Relaxed);
-                progress.denied.store(0, Ordering::Relaxed);
+                progress.clear_denied();
+                // El árbol elevado leyó la raíz: cuenta como análisis completo.
+                progress.root_failed.store(false, Ordering::Relaxed);
             }
             elevating.store(false, Ordering::Relaxed);
             // Siempre se avisa: el escaneo normal pudo haber terminado y ya no hay quien repinte.
             hwnd.post(WM_APP_XTREE, id, delivered as isize);
         });
         Action::Redraw
+    }
+
+    // ---------- búsqueda (#57) ----------
+
+    /// ¿Está abierta la búsqueda (en el lugar de la tabla)?
+    pub fn search_open(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Lo escrito en la búsqueda abierta.
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.query.as_str())
+    }
+
+    /// Lo encontrado para lo escrito (todavía nada si se está buscando en otro hilo).
+    pub fn search_found(&self) -> Option<&Found> {
+        self.search.as_ref().and_then(|s| s.found.as_ref())
+    }
+
+    /// ¿Hay una búsqueda en otro hilo?
+    pub fn search_pending(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.pending)
+    }
+
+    /// Abre la búsqueda (la caja de texto la pone la `App`).
+    pub fn open_search(&mut self) {
+        self.menu_open = false;
+        self.menu_hover = None;
+        if self.search.is_none() {
+            self.search = Some(SearchState::default());
+        }
+    }
+
+    /// Cierra la búsqueda; si había una en otro hilo, se corta.
+    pub fn close_search(&mut self) {
+        self.search = None;
+        self.search_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Lo escrito en la caja: busca en todo lo analizado. Con un árbol chico, en el momento; con
+    /// uno grande (o el árbol en vivo, mientras se analiza), en otro hilo, que avisa con
+    /// `WM_APP_XTREE_FOUND` y se corta si se escribe otra cosa.
+    pub fn set_query(&mut self, query: &str) {
+        let Some(st) = &mut self.search else { return };
+        st.query = query.to_string();
+        st.selected = 0;
+        st.scroll = 0.0;
+        st.hover = None;
+        let generation = self.search_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        if query.trim().is_empty() {
+            st.found = None;
+            st.pending = false;
+            return;
+        }
+        if !self.scanning && self.arena.len() < self.search_thread_from {
+            st.found = search::search(&self.arena, query, &|| false);
+            st.found_tree = self.tree_gen;
+            st.pending = false;
+            return;
+        }
+        st.pending = true;
+        let (gen_now, slot, hwnd, query, tree) = (self.search_gen.clone(), self.search_slot.clone(), self.hwnd, query.to_string(), self.tree_gen);
+        let (live, arena) = if self.scanning { (Some(self.scan.live.clone()), None) } else { (None, Some(self.arena.clone())) };
+        let _ = std::thread::Builder::new().name("xdir-xtree-buscar".into()).spawn(move || {
+            let stop = || gen_now.load(Ordering::Relaxed) != generation;
+            let found = match (live, arena) {
+                (Some(live), _) => search::search_live(&live, &query, &stop),
+                (_, Some(arena)) => search::search(&arena, &query, &stop),
+                _ => None,
+            };
+            let Some(found) = found.filter(|_| !stop()) else { return };
+            if let Ok(mut s) = slot.lock() {
+                // Una búsqueda vieja que termina tarde no pisa a una más nueva.
+                if s.as_ref().is_none_or(|(g, _, _)| *g < generation) {
+                    *s = Some((generation, tree, found));
+                }
+            }
+            hwnd.post(WM_APP_XTREE_FOUND, 0, 0);
+        });
+    }
+
+    /// Vuelve a buscar lo escrito (cambió el árbol: llegó el terminado o se analiza de nuevo).
+    fn refresh_search(&mut self) {
+        if let Some(q) = self.search_query().map(str::to_string) {
+            self.set_query(&q);
+        }
+    }
+
+    /// Llegó lo de una búsqueda en otro hilo (`WM_APP_XTREE_FOUND`). Devuelve si hay que repintar
+    /// (era la búsqueda de lo que está escrito ahora).
+    pub fn on_found(&mut self) -> bool {
+        let Some((generation, tree, found)) = self.search_slot.lock().ok().and_then(|mut s| s.take()) else { return false };
+        let current = self.search_gen.load(Ordering::Relaxed);
+        match &mut self.search {
+            Some(st) if generation == current && found.query == st.query && tree == self.tree_gen => {
+                st.found = Some(found);
+                st.found_tree = tree;
+                st.pending = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Una tecla de la caja de búsqueda: flechas y Re Pág / Av Pág eligen, Enter entra, Esc cierra.
+    pub fn search_key(&mut self, k: Key) -> Action {
+        let Some(st) = &mut self.search else { return Action::None };
+        let n = st.found.as_ref().map_or(0, |f| f.hits.len());
+        let step: i64 = match k {
+            VK_UP => -1,
+            VK_DOWN => 1,
+            VK_PRIOR => -10,
+            VK_NEXT => 10,
+            VK_RETURN => {
+                let i = st.selected;
+                return self.open_result(i);
+            }
+            VK_ESCAPE => {
+                self.close_search();
+                return Action::Redraw;
+            }
+            _ => return Action::None,
+        };
+        if n == 0 {
+            return Action::None;
+        }
+        let to = (st.selected as i64 + step).clamp(0, n as i64 - 1) as usize;
+        if to == st.selected {
+            return Action::None;
+        }
+        st.selected = to;
+        st.reveal = true;
+        Action::Redraw
+    }
+
+    /// ¿Los resultados a la vista se pueden abrir? No mientras se busca otra cosa ni si son de
+    /// otro árbol (sus ids serían de otros nodos).
+    fn results_usable(&self) -> bool {
+        self.search.as_ref().is_some_and(|st| !st.pending && st.found_tree == self.tree_gen)
+    }
+
+    /// Entra en el resultado `i`: en la carpeta o, si es un archivo, en la suya con el archivo
+    /// marcado. Cierra la búsqueda. No con resultados viejos (`results_usable`).
+    fn open_result(&mut self, i: usize) -> Action {
+        if !self.results_usable() {
+            return Action::None;
+        }
+        let Some(hit) = self.search_found().and_then(|f| f.hits.get(i)).cloned() else { return Action::None };
+        // El nodo tiene que seguir siendo el mismo (mientras se analiza, el árbol en vivo).
+        let live = self.scan.live.clone();
+        let guard = if self.scanning { live.read().ok() } else { None };
+        let arena: &[Node] = guard.as_deref().map_or(self.arena.as_slice(), |g| g.as_slice());
+        let Some(parent) = arena.get(hit.node as usize).filter(|n| *n.name == *hit.name).map(|n| n.parent) else { return Action::None };
+        drop(guard);
+        self.close_search();
+        if hit.is_dir {
+            self.go(hit.node);
+        } else {
+            self.go(parent);
+            self.selected = Some(hit.node);
+            self.scroll_to_selected = true;
+        }
+        Action::Redraw
+    }
+
+    /// Resultado bajo el punto (con la búsqueda abierta).
+    fn result_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
+        let st = self.search.as_ref()?;
+        let n = st.found.as_ref().map_or(0, |f| f.hits.len());
+        if !contains(&search_results_rect(area), x, y) {
+            return None;
+        }
+        let i = ((y - search_results_rect(area).top + st.scroll) / RES_H) as usize;
+        (i < n).then_some(i)
     }
 
     // ---------- navegación ----------
@@ -673,6 +1173,7 @@ impl Xtree {
         self.hover_row = None;
         self.selected = None;
         self.scroll = 0.0;
+        self.typeahead.clear();
     }
 
     fn go_up(&mut self) -> bool {
@@ -699,6 +1200,10 @@ impl Xtree {
     // ---------- hit-tests ----------
 
     fn row_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
+        // Con la búsqueda abierta la tabla no se ve.
+        if self.search.is_some() {
+            return None;
+        }
         let ui = layout_ui(area, self.legend_h());
         let top = ui.list.top + TABLE_H;
         if !contains(&ui.list, x, y) || y < top {
@@ -713,7 +1218,105 @@ impl Xtree {
     }
 
     fn button_at(&self, area: Rect, x: f32, y: f32) -> Option<usize> {
-        layout_ui(area, self.legend_h()).buttons.iter().position(|b| contains(b, x, y))
+        self.ui(area).buttons.iter().position(|b| contains(b, x, y))
+    }
+
+    /// Distribución de la vista con la franja de historial (#58) en la tarjeta, si entra: la
+    /// tarjeta crece hacia arriba y el mapa se achica.
+    fn ui(&self, area: Rect) -> Ui {
+        let mut ui = layout_ui(area, self.legend_h());
+        if (self.scanning || !self.arena.is_empty()) && self.hist.visible(&self.root) && ui.map.bottom - ui.map.top - growth::STRIP_H >= growth::MIN_MAP_H {
+            ui.card.top -= growth::STRIP_H;
+            ui.map.bottom -= growth::STRIP_H;
+            for b in &mut ui.buttons {
+                b.top -= growth::STRIP_H;
+                b.bottom -= growth::STRIP_H;
+            }
+        }
+        ui
+    }
+
+    /// ¿La tarjeta tiene la franja de historial?
+    fn has_strip(ui: &Ui) -> bool {
+        ui.card.bottom - ui.card.top > CARD_H + 1.0
+    }
+
+    /// Parte de la franja de historial en `(x, y)` (con el árbol terminado y datos que mostrar) y,
+    /// si es una de «Más crecieron», su nodo.
+    fn strip_hit_at(&mut self, area: Rect, x: f32, y: f32) -> Option<(StripHit, Option<u32>)> {
+        let ui = self.ui(area);
+        if self.scanning || self.arena.is_empty() || !Self::has_strip(&ui) || !contains(&ui.card, x, y) {
+            return None;
+        }
+        // Con el mouse en la tarjeta, muestra la elegida (o la carpeta actual).
+        let id = self.selected.filter(|&n| (n as usize) < self.arena.len()).unwrap_or(self.current);
+        let today = self.hist.today();
+        if !matches!(growth::card_state(&self.hist, &self.arena, id, today), CardState::Data(_)) {
+            return None;
+        }
+        let growers = self.hist.top_growers(&self.arena, id, today);
+        let hit = growth::strip_hit(ui.card, x, y, growers.len())?;
+        let node = match hit {
+            StripHit::Grower(i) => growers.get(i).map(|g| g.0),
+            StripHit::Period(_) => None,
+        };
+        Some((hit, node))
+    }
+
+    /// La carpeta de la fila `row` si el mouse (en `x`) está sobre su tamaño y lleva la ▲.
+    fn mark_at(&self, area: Rect, row: Option<usize>, x: f32) -> Option<u32> {
+        let l = self.ui(area).list;
+        let id = self.rows().get(row?).copied().flatten()?;
+        if !(l.right - 214.0..=l.right - 124.0).contains(&x) {
+            return None;
+        }
+        growth::row_mark(&self.hist, &self.arena, id, self.hist.today()).map(|_| id)
+    }
+
+    /// La carpeta con ▲ cuyo tamaño está en `(x, y)`: el cartel de ayuda de xdir lo pide
+    /// (`Hit::XtreeMark`).
+    pub fn mark_at_point(&self, area: Rect, x: f32, y: f32) -> Option<u32> {
+        if self.scanning || self.menu_open {
+            return None;
+        }
+        self.mark_at(area, self.row_at(area, x, y), x)
+    }
+
+    /// Texto del cartel de la ▲ de la carpeta `id`: «+3,4 GB en 7 días».
+    pub fn mark_tip(&self, id: u32) -> Option<String> {
+        // Con la tabla tapada (búsqueda) o cambiando, el cartel que quedaba se va.
+        if self.scanning || self.search.is_some() {
+            return None;
+        }
+        growth::row_mark(&self.hist, &self.arena, id, self.hist.today())
+    }
+
+    /// Termina un análisis con `arena` sin escáner (pruebas de `App`).
+    #[cfg(test)]
+    pub fn finish_for_tests(&mut self, arena: Vec<Node>) {
+        *self.scan.result.lock().unwrap() = Some(arena);
+        self.scanning = true;
+        self.take_result();
+    }
+
+    /// Centro de la celda del tamaño de la fila `row` de la tabla (pruebas).
+    #[cfg(any(test, feature = "pruebas"))]
+    pub fn size_cell_center(&self, area: Rect, row: usize) -> (f32, f32) {
+        let l = self.ui(area).list;
+        (l.right - 150.0, l.top + TABLE_H + (row as f32 + 0.5) * ROW_H - self.scroll)
+    }
+
+    /// Centro del período `i` del selector de la franja (pruebas de `App`).
+    #[cfg(test)]
+    pub fn period_center(&self, area: Rect, i: usize) -> (f32, f32) {
+        let r = growth::strip(self.ui(area).card).periods[i];
+        ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
+    }
+
+    /// La fila o el bloque elegido (pruebas de `App`).
+    #[cfg(test)]
+    pub fn selected_for_tests(&self) -> Option<u32> {
+        self.selected
     }
 
     /// Fila del menú de discos bajo el cursor.
@@ -765,11 +1368,25 @@ impl Xtree {
             self.menu_hover = row;
             return changed;
         }
+        let back = contains(&back_rect(area), x, y);
+        let colors = contains(&colors_rect(area), x, y);
+        let lens = contains(&search_btn_rect(area), x, y);
+        let result = self.result_at(area, x, y);
+        let mut back_changed = back != self.hover_back || colors != self.hover_colors || lens != self.hover_search;
+        self.hover_back = back;
+        self.hover_colors = colors;
+        self.hover_search = lens;
+        if let Some(st) = &mut self.search {
+            back_changed |= st.hover != result;
+            st.hover = result;
+        }
         if self.scanning {
-            return false; // mientras se escanea el mapa es solo de lectura
+            return back_changed; // mientras se escanea el mapa es solo de lectura
         }
         let (row, cell, btn) = (self.row_at(area, x, y), self.cell_at(x, y), self.button_at(area, x, y));
-        let changed = row != self.hover_row || cell != self.hover || btn != self.hover_btn;
+        let strip = self.strip_hit_at(area, x, y).map(|h| h.0);
+        let changed = back_changed || row != self.hover_row || cell != self.hover || btn != self.hover_btn || strip != self.hist.hover;
+        self.hist.hover = strip;
         self.hover_row = row;
         self.hover = cell;
         self.hover_btn = btn;
@@ -778,6 +1395,16 @@ impl Xtree {
 
     /// Rueda sobre la tabla: `lines` filas (positivo: hacia arriba).
     pub fn on_wheel(&mut self, area: Rect, lines: f32) -> bool {
+        // Con la búsqueda abierta se mueven los resultados.
+        if let Some(st) = &mut self.search {
+            let r = search_results_rect(area);
+            let n = st.found.as_ref().map_or(0, |f| f.hits.len() + usize::from(f.total > f.hits.len()));
+            let max = (n as f32 * RES_H - (r.bottom - r.top)).max(0.0);
+            let scroll = (st.scroll - lines * RES_H).clamp(0.0, max);
+            let changed = scroll != st.scroll;
+            st.scroll = scroll;
+            return changed;
+        }
         let ui = layout_ui(area, self.legend_h());
         let visible = ui.list.bottom - ui.list.top - TABLE_H;
         let max = (self.rows().len() as f32 * ROW_H - visible).max(0.0);
@@ -802,7 +1429,10 @@ impl Xtree {
             }
             return Action::Redraw;
         }
-        let ui = layout_ui(area, self.legend_h());
+        let ui = self.ui(area);
+        if contains(&ui.back, x, y) {
+            return Action::Close;
+        }
         if contains(&ui.combo, x, y) {
             self.drives = disk_scan().drives();
             self.menu_open = true;
@@ -812,8 +1442,43 @@ impl Xtree {
             self.scan_pick();
             return Action::Redraw;
         }
+        if contains(&ui.colors_btn, x, y) {
+            self.toggle_colors();
+            return Action::Redraw;
+        }
+        if contains(&ui.search_btn, x, y) {
+            if self.search.is_some() {
+                self.close_search();
+            } else {
+                self.open_search();
+            }
+            return Action::Redraw;
+        }
+        // La búsqueda abierta (también mientras se analiza): el ✕ la cierra y un resultado entra.
+        if self.search.is_some() && contains(&ui.list, x, y) {
+            if contains(&search_close_rect(area), x, y) {
+                self.close_search();
+                return Action::Redraw;
+            }
+            return match self.result_at(area, x, y) {
+                Some(i) => self.open_result(i),
+                None => Action::None,
+            };
+        }
         if self.arena.is_empty() || self.scanning {
             return Action::None;
+        }
+        if let Some((hit, node)) = self.strip_hit_at(area, x, y) {
+            match hit {
+                StripHit::Period(i) => self.hist.days = growth::PERIODS[i],
+                StripHit::Grower(_) => {
+                    if let Some(n) = node {
+                        self.go(n);
+                    }
+                }
+            }
+            self.hist.hover = None;
+            return Action::Redraw;
         }
         if let Some(b) = self.button_at(area, x, y) {
             let t = self.target();
@@ -855,7 +1520,7 @@ impl Xtree {
     }
 
     fn on_double_click(&mut self, area: Rect, x: f32, y: f32) -> Action {
-        if self.scanning || self.menu_open {
+        if self.scanning || self.menu_open || (self.search.is_some() && contains(&layout_ui(area, self.legend_h()).list, x, y)) {
             return Action::None;
         }
         let node = if let Some(i) = self.row_at(area, x, y) {
@@ -872,12 +1537,48 @@ impl Xtree {
         }
     }
 
+    /// Una letra escrita con la tabla a la vista (#57): marca la primera fila del nivel actual
+    /// cuyo nombre empieza con lo escrito (sin mayúsculas ni tildes), como la búsqueda al teclear
+    /// de la lista. Mientras se escanea no hace nada (la tabla es solo de lectura).
+    pub fn on_char(&mut self, c: char) -> Action {
+        self.on_char_at(c, Instant::now())
+    }
+
+    /// `on_char` a la hora `now` (las pruebas pasan los tiempos).
+    pub fn on_char_at(&mut self, c: char, now: Instant) -> Action {
+        if c.is_control() || self.scanning || self.menu_open || self.search.is_some() || self.arena.is_empty() {
+            return Action::None;
+        }
+        let key = (self.current, self.tree_gen);
+        if self.level_names.as_ref().is_none_or(|(k, _)| *k != key) {
+            let names = self.rows().into_iter().map(|r| (r, r.and_then(|id| self.arena.get(id as usize)).map_or(String::new(), |n| crate::palette::fold(&n.name)))).collect();
+            self.level_names = Some((key, names));
+            self.level_folds += 1;
+        }
+        let Some((_, rows)) = &self.level_names else { return Action::None };
+        let step = self.typeahead.push(c, now);
+        let prefix = crate::palette::fold(&step.prefix);
+        let at = self.selected.and_then(|sel| rows.iter().position(|(r, _)| *r == Some(sel)));
+        let start = match (step.next, at) {
+            (true, Some(i)) => i + 1,
+            (false, Some(i)) => i,
+            _ => 0,
+        };
+        let found = crate::typeahead::find_from(rows.len(), start, |i| rows[i].0.is_some() && rows[i].1.starts_with(&prefix));
+        let Some(id) = found.and_then(|i| rows[i].0) else { return Action::None };
+        self.selected = Some(id);
+        self.scroll_to_selected = true;
+        Action::Redraw
+    }
+
     /// Clic derecho: sube a la carpeta superior.
     pub fn on_right_click(&mut self) -> Action {
         if self.go_up() { Action::Redraw } else { Action::None }
     }
 
-    /// Teclas de la vista: Retroceso, Esc, T, F5 y A.
+    /// Teclas de la vista: Retroceso, Esc y F5 (y las de la búsqueda abierta). Ninguna letra sola:
+    /// son del salto por letra; los colores y los permisos van por `xtree_colores` y
+    /// `xtree_permisos`, que resuelve la `App` con el `Keymap`.
     pub fn on_key(&mut self, k: Key) -> Action {
         match k {
             VK_BACK => self.on_right_click(),
@@ -886,17 +1587,24 @@ impl Xtree {
                 self.menu_hover = None;
                 Action::Redraw
             }
+            // Esc cierra la búsqueda; el siguiente, xtree.
+            VK_ESCAPE if self.search.is_some() => {
+                self.close_search();
+                Action::Redraw
+            }
+            // Con la caja sin el foco (se hizo clic en otro lado), las flechas y Enter siguen
+            // siendo de los resultados.
+            VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_RETURN if self.search.is_some() => self.search_key(k),
             VK_ESCAPE => Action::Close,
-            VK_T => {
-                self.by_type = !self.by_type;
-                self.cells_for = None;
+            // Sin análisis todavía, F5 es «Analizar»: lo elegido en el desplegable.
+            VK_F5 if !self.scanned() => {
+                self.scan_pick();
                 Action::Redraw
             }
             VK_F5 => {
                 self.rescan();
                 Action::Redraw
             }
-            VK_A => self.elevate(),
             _ => Action::None,
         }
     }
@@ -910,7 +1618,8 @@ impl Xtree {
         if self.scanning {
             self.take_result();
         }
-        let ui = layout_ui(area, self.legend_h());
+        self.hist.take(&self.root);
+        let ui = self.ui(area);
         let live = self.scan.live.clone();
         let guard = if self.scanning { Some(live.read().unwrap()) } else { None };
         let arena: &[Node] = match &guard {
@@ -927,13 +1636,113 @@ impl Xtree {
             self.hover = None;
         }
         let visible = (ui.list.bottom - ui.list.top - TABLE_H).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, (rows_of(arena, self.current).len() as f32 * ROW_H - visible).max(0.0));
+        let rows = rows_of(arena, self.current);
+        // La fila elegida al teclear: se desplaza lo justo para que se vea entera.
+        if std::mem::take(&mut self.scroll_to_selected)
+            && let Some(i) = self.selected.and_then(|sel| rows.iter().position(|r| *r == Some(sel)))
+        {
+            let top = i as f32 * ROW_H;
+            if top < self.scroll {
+                self.scroll = top;
+            } else if top + ROW_H > self.scroll + visible {
+                self.scroll = top + ROW_H - visible;
+            }
+        }
+        self.scroll = self.scroll.clamp(0.0, (rows.len() as f32 * ROW_H - visible).max(0.0));
+        // Los resultados de la búsqueda: el elegido a la vista y el desplazamiento dentro del total.
+        if let Some(st) = &mut self.search {
+            let r = search_results_rect(area);
+            let h = (r.bottom - r.top).max(0.0);
+            if std::mem::take(&mut st.reveal) {
+                let top = st.selected as f32 * RES_H;
+                if top < st.scroll {
+                    st.scroll = top;
+                } else if top + RES_H > st.scroll + h {
+                    st.scroll = top + RES_H - h;
+                }
+            }
+            let n = st.found.as_ref().map_or(0, |f| f.hits.len() + usize::from(f.total > f.hits.len()));
+            st.scroll = st.scroll.clamp(0.0, (n as f32 * RES_H - h).max(0.0));
+        }
+    }
+
+    /// La búsqueda abierta, sobre la columna de la tabla: el recuadro de la caja (el texto lo
+    /// escribe la caja del sistema), la cantidad, los resultados y «y N más».
+    fn paint_search(&self, p: &dyn Painter, area: Rect, st: &SearchState) {
+        let th = p.theme();
+        let l = layout_ui(area, self.legend_h()).list;
+        p.round_fill(l, 8.0, th.surface);
+        p.round_stroke_w(l, 8.0, th.border, 1.0);
+        let f = search_frame(area);
+        p.round_fill(f, 6.0, th.background);
+        p.round_stroke_w(f, 6.0, th.accent, 1.0);
+        p.text(FontId::GlyphsSmall, "\u{E721}", rect(f.left + 4.0, f.top, f.left + 26.0, f.bottom), th.text_dim);
+        let x = search_close_rect(area);
+        p.text(FontId::GlyphsSmall, "\u{E711}", rect(x.left, x.top + 4.0, x.right, x.bottom - 4.0), th.text_dim);
+        let head = rect(l.left + 12.0, f.bottom + 6.0, l.right - 12.0, l.top + SEARCH_HEAD - 4.0);
+        // Sin nada analizado no hay dónde buscar.
+        if !self.scanning && self.arena.is_empty() {
+            p.text(FontId::Small, "Analizá un disco o una carpeta para buscar", head, th.text_dim);
+            return;
+        }
+        let Some(found) = &st.found else {
+            let msg = if st.pending { "Buscando\u{2026}" } else { "Escribí parte de un nombre" };
+            p.text(FontId::Small, msg, head, th.text_dim);
+            return;
+        };
+        if found.total == 0 {
+            p.text(FontId::UiCenter, &format!("Nada coincide con «{}»", found.query.trim()), rect(l.left + 8.0, l.top + SEARCH_HEAD, l.right - 8.0, l.top + SEARCH_HEAD + 60.0), th.text_dim);
+            return;
+        }
+        let mut count = if found.total == 1 { "1 resultado".to_string() } else { format!("{} resultados", fmt_count(found.total as u64)) };
+        if st.pending {
+            count.push_str(" \u{B7} buscando\u{2026}");
+        }
+        p.text(FontId::Small, &count, head, th.text_dim);
+        let file_icon = if th.dark { hex(0xD9E0ED) } else { hex(0x9AA5B3) };
+        // Los resultados viejos (se busca otra cosa) se ven atenuados: no se pueden abrir.
+        let usable = self.results_usable();
+        let text = if usable { th.text } else { alpha(th.text, 0.5) };
+        let rows = search_results_rect(area);
+        p.clip(rows, &mut || {
+            for (i, hit) in found.hits.iter().enumerate() {
+                let r = search_row_rect(area, i, st.scroll);
+                if r.bottom < rows.top || r.top > rows.bottom {
+                    continue;
+                }
+                let band = rect(r.left, r.top + 1.0, r.right, r.bottom - 1.0);
+                if i == st.selected {
+                    p.round_fill(band, 5.0, th.selection);
+                    p.round_stroke_w(band, 5.0, th.accent, 1.0);
+                } else if st.hover == Some(i) && usable {
+                    p.round_fill(band, 5.0, th.hover);
+                }
+                let (ix, iy) = (r.left + 9.0, r.top + 7.0);
+                if hit.is_dir {
+                    p.round_fill(rect(ix, iy + 3.0, ix + 7.0, iy + 7.0), 1.5, rgb(FOLDER_ICON));
+                    p.round_fill(rect(ix, iy + 5.0, ix + 16.0, iy + 15.0), 2.0, rgb(FOLDER_ICON));
+                } else {
+                    p.round_fill(rect(ix + 2.0, iy, ix + 14.0, iy + 16.0), 2.0, file_icon);
+                }
+                let text_l = r.left + 33.0;
+                p.text(FontId::Ui, &hit.name, rect(text_l, r.top + 3.0, r.right - 100.0, r.top + 23.0), text);
+                p.text(FontId::UiRight, &fmt_size(hit.size), rect(r.right - 100.0, r.top + 3.0, r.right - 9.0, r.top + 23.0), text);
+                // La carpeta que lo contiene, relativa a lo analizado.
+                let rel = if hit.rel.as_os_str().is_empty() { "en la raíz".to_string() } else { hit.rel.display().to_string() };
+                p.text(FontId::Small, &rel, rect(text_l, r.top + 22.0, r.right - 9.0, r.top + 40.0), th.text_dim);
+            }
+            if found.total > found.hits.len() {
+                let r = search_row_rect(area, found.hits.len(), st.scroll);
+                let more = format!("y {} más", fmt_count((found.total - found.hits.len()) as u64));
+                p.text(FontId::UiCenter, &more, rect(r.left, r.top, r.right, r.top + 32.0), th.text_dim);
+            }
+        });
     }
 
     pub fn paint(&mut self, p: &dyn Painter, area: Rect) {
         self.prepare(area);
         let th = p.theme();
-        let ui = layout_ui(area, self.legend_h());
+        let ui = self.ui(area);
         let (l0, t0, r0, b0) = (area.left, area.top, area.right, area.bottom);
         let white = color(1.0, 1.0, 1.0);
         let warning = if th.dark { rgb(FOLDER_ICON) } else { hex(0xB7791F) };
@@ -965,7 +1774,10 @@ impl Xtree {
         let done = !self.scanning && !arena.is_empty();
 
         // ----- barra superior: disco y total a la izquierda, estado del análisis a la derecha -----
-        let top_text = if done {
+        let unscanned = !self.scanned() && arena.is_empty();
+        let top_text = if unscanned {
+            self.root.display().to_string()
+        } else if done {
             format!("{}  \u{B7}  {} analizados", self.name_of(arena, 0), fmt_size(arena[0].size))
         } else {
             format!(
@@ -975,7 +1787,11 @@ impl Xtree {
                 fmt_size(progress.bytes.load(Ordering::Relaxed))
             )
         };
-        p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, r0 - STATE_W - 60.0, t0 + TOP_H), th.text);
+        // El texto hasta la lupa (o, sin ella, hasta antes del estado); si no queda lugar, no va.
+        let text_end = if ui.search_btn.right > ui.search_btn.left { ui.search_btn.left - 12.0 } else { r0 - STATE_W - 60.0 };
+        if text_end > ui.scan_btn.right + 60.0 {
+            p.text(FontId::Title, &top_text, rect(ui.scan_btn.right + 18.0, t0, text_end, t0 + TOP_H), th.text);
+        }
         // Barra de avance (volumen entero) sobre el borde inferior de la barra superior.
         if self.scanning && !self.scan_stopped
             && let Some(pc) = self.percent()
@@ -984,6 +1800,10 @@ impl Xtree {
             p.fill(rect(l0, y0, r0, y1), th.border);
             p.fill(rect(l0, y0, l0 + (r0 - l0) * pc as f32 / 100.0, y1), th.accent);
         }
+        let bb = ui.back;
+        p.round_fill(bb, 6.0, if self.hover_back { th.hover } else { th.surface_alt });
+        p.round_stroke_w(bb, 6.0, th.border, 1.0);
+        p.text(FontId::UiCenter, "\u{2190} xdir", bb, th.text);
         let cb = ui.combo;
         p.round_fill(cb, 6.0, th.surface_alt);
         p.round_stroke_w(cb, 6.0, if self.menu_open { th.accent } else { th.border }, 1.0);
@@ -991,15 +1811,48 @@ impl Xtree {
         p.text(FontId::GlyphsSmall, "\u{E70D}", rect(cb.right - 26.0, cb.top, cb.right - 6.0, cb.bottom), th.text_dim);
         p.round_fill(ui.scan_btn, 6.0, th.accent);
         p.text(FontId::UiCenter, "Analizar", ui.scan_btn, white);
+        // «Colores: carpeta / tipo», con una muestra de 2×2 de los colores de cada modo (angosta:
+        // solo la muestra; sin lugar, ni este ni la lupa).
+        let cbtn = ui.colors_btn;
+        if cbtn.right > cbtn.left {
+            p.round_fill(cbtn, 6.0, if self.hover_colors { th.hover } else { th.surface_alt });
+            p.round_stroke_w(cbtn, 6.0, th.border, 1.0);
+            let compact = cbtn.right - cbtn.left < COLORS_W;
+            let sx0 = if compact { (cbtn.left + cbtn.right) / 2.0 - 6.0 } else { cbtn.left + 10.0 };
+            let sy = (cbtn.top + cbtn.bottom) / 2.0 - 6.0;
+            for (i, cat) in CATS.iter().take(4).enumerate() {
+                let c = if self.by_type { rgb(cat.1) } else { position_color(i as f32 * 0.25, 1, false) };
+                let (sx, dy) = (sx0 + (i % 2) as f32 * 7.0, (i / 2) as f32 * 7.0);
+                p.round_fill(rect(sx, sy + dy, sx + 5.0, sy + dy + 5.0), 1.0, c);
+            }
+            if !compact {
+                let label = if self.by_type { "Colores: tipo" } else { "Colores: carpeta" };
+                p.text(FontId::Ui, label, rect(cbtn.left + 30.0, cbtn.top, cbtn.right - 6.0, cbtn.bottom), th.text);
+            }
+        }
+        // La lupa: borde de acento con la búsqueda abierta.
+        let sbtn = ui.search_btn;
+        if sbtn.right > sbtn.left {
+            p.round_fill(sbtn, 6.0, if self.hover_search { th.hover } else { th.surface_alt });
+            p.round_stroke_w(sbtn, 6.0, if self.search.is_some() { th.accent } else { th.border }, 1.0);
+            p.text(FontId::GlyphsSmall, "\u{E721}", sbtn, th.text);
+        }
+        // El estado (y su punto) después de «Analizar» si la ventana es angosta: lo recorta.
+        let state_l = (r0 - STATE_W).max(ui.scan_btn.right + 36.0);
         let state = self.state_text();
         // Con el reescaneo con permisos en curso el árbol anterior se sigue viendo, pero el estado
         // es de escaneo.
         let done_state = done && !self.elevated_pending();
-        p.circle(r0 - STATE_W - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
-        if done_state {
-            p.text(FontId::UiCenter, "\u{2713}", rect(r0 - STATE_W - 27.0, t0, r0 - STATE_W - 9.0, t0 + TOP_H), white);
+        if unscanned {
+            // Sin análisis: sin punto de estado, el texto apagado.
+            p.text(FontId::Ui, &state, rect(state_l, t0, r0 - MARGIN, t0 + TOP_H), th.text_dim);
+        } else {
+            p.circle(state_l - 18.0, t0 + TOP_H / 2.0, 9.0, if done_state { rgb(GREEN) } else { warning });
+            if done_state {
+                p.text(FontId::UiCenter, "\u{2713}", rect(state_l - 27.0, t0, state_l - 9.0, t0 + TOP_H), white);
+            }
+            p.text(FontId::Ui, &state, rect(state_l, t0, r0 - MARGIN, t0 + TOP_H), th.text);
         }
-        p.text(FontId::Ui, &state, rect(r0 - STATE_W, t0, r0 - MARGIN, t0 + TOP_H), th.text);
 
         if arena.is_empty() {
             p.round_fill(ui.map, 8.0, th.surface);
@@ -1013,6 +1866,7 @@ impl Xtree {
                     format!("Leyendo la tabla de archivos (MFT)\u{2026} {pct} %")
                 }
                 2 => "Armando el árbol de carpetas\u{2026}".to_string(),
+                _ if unscanned => "Elegí un disco o una carpeta y tocá Analizar".to_string(),
                 _ if self.scan_stopped => self.state_text(),
                 _ if self.scanning => "Escaneando el disco\u{2026}".to_string(),
                 _ => "No hay nada que mostrar".to_string(),
@@ -1033,49 +1887,57 @@ impl Xtree {
                 .map(|c| c.top)
                 .or_else(|| self.hover_row.and_then(|i| rows.get(i).copied().flatten()));
 
-            // ----- tabla -----
-            let l = ui.list;
-            p.round_fill(l, 8.0, th.surface);
-            p.round_stroke_w(l, 8.0, th.border, 1.0);
-            let (hy0, hy1) = (l.top, l.top + TABLE_H);
-            p.text(FontId::Ui, "Nombre", rect(l.left + 36.0, hy0, l.right - 214.0, hy1), th.text_dim);
-            p.text(FontId::UiRight, "Tamaño", rect(l.right - 214.0, hy0, l.right - 124.0, hy1), th.text_dim);
-            p.text(FontId::UiRight, "%", rect(l.right - 124.0, hy0, l.right - 72.0, hy1), th.text_dim);
-            p.fill(rect(l.left + 1.0, l.top + TABLE_H - 1.0, l.right - 1.0, l.top + TABLE_H), th.border);
-            p.clip(rect(l.left, l.top + TABLE_H, l.right, l.bottom - 2.0), &mut || {
-                for (i, row) in rows.iter().enumerate() {
-                    let top = l.top + TABLE_H + i as f32 * ROW_H - self.scroll;
-                    if top + ROW_H < l.top + TABLE_H || top > l.bottom {
-                        continue;
-                    }
-                    let band = rect(l.left + 3.0, top + 1.0, l.right - 3.0, top + ROW_H - 1.0);
-                    let is_sel = row.is_some() && *row == self.selected;
-                    let is_hot = self.hover_row == Some(i) || (row.is_some() && *row == hot_top);
-                    if is_sel {
-                        p.round_fill(band, 5.0, th.selection);
-                        p.round_stroke_w(band, 5.0, th.accent, 1.0);
-                    } else if is_hot {
-                        p.round_fill(band, 5.0, th.hover);
-                    }
-                    match row {
-                        None => p.text(FontId::Ui, "\u{2191}  Subir", rect(l.left + 12.0, top, l.right - 8.0, top + ROW_H), th.text_dim),
-                        Some(id) => {
-                            let n = &arena[*id as usize];
-                            let frac = if cur.size > 0 { n.size as f32 / cur.size as f32 } else { 0.0 };
-                            let ic = if n.is_dir { rgb(FOLDER_ICON) } else { file_icon };
-                            icon(l.left + 12.0, top + (ROW_H - 16.0) / 2.0, n.is_dir, ic);
-                            p.text(FontId::Ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
-                            p.text(FontId::UiRight, &fmt_size(n.size), rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
-                            let pc = format!("{:.1} %", frac * 100.0).replace('.', ",");
-                            p.text(FontId::UiRight, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
-                            let track = rect(l.right - 62.0, top + ROW_H / 2.0 - 4.0, l.right - 12.0, top + ROW_H / 2.0 + 4.0);
-                            p.round_fill(track, 4.0, th.border);
-                            let bar_w = ((track.right - track.left) * frac).max(3.0);
-                            p.round_fill(rect(track.left, track.top, track.left + bar_w, track.bottom), 4.0, th.accent);
+            // ----- tabla (con la búsqueda abierta va la búsqueda) -----
+            let today = self.hist.today();
+            if self.search.is_none() {
+                let l = ui.list;
+                p.round_fill(l, 8.0, th.surface);
+                p.round_stroke_w(l, 8.0, th.border, 1.0);
+                let (hy0, hy1) = (l.top, l.top + TABLE_H);
+                p.text(FontId::Ui, "Nombre", rect(l.left + 36.0, hy0, l.right - 214.0, hy1), th.text_dim);
+                p.text(FontId::UiRight, "Tamaño", rect(l.right - 214.0, hy0, l.right - 124.0, hy1), th.text_dim);
+                p.text(FontId::UiRight, "%", rect(l.right - 124.0, hy0, l.right - 72.0, hy1), th.text_dim);
+                p.fill(rect(l.left + 1.0, l.top + TABLE_H - 1.0, l.right - 1.0, l.top + TABLE_H), th.border);
+                p.clip(rect(l.left, l.top + TABLE_H, l.right, l.bottom - 2.0), &mut || {
+                    for (i, row) in rows.iter().enumerate() {
+                        let top = l.top + TABLE_H + i as f32 * ROW_H - self.scroll;
+                        if top + ROW_H < l.top + TABLE_H || top > l.bottom {
+                            continue;
+                        }
+                        let band = rect(l.left + 3.0, top + 1.0, l.right - 3.0, top + ROW_H - 1.0);
+                        let is_sel = row.is_some() && *row == self.selected;
+                        let is_hot = self.hover_row == Some(i) || (row.is_some() && *row == hot_top);
+                        if is_sel {
+                            p.round_fill(band, 5.0, th.selection);
+                            p.round_stroke_w(band, 5.0, th.accent, 1.0);
+                        } else if is_hot {
+                            p.round_fill(band, 5.0, th.hover);
+                        }
+                        match row {
+                            None => p.text(FontId::Ui, "\u{2191}  Subir", rect(l.left + 12.0, top, l.right - 8.0, top + ROW_H), th.text_dim),
+                            Some(id) => {
+                                let n = &arena[*id as usize];
+                                let frac = if cur.size > 0 { n.size as f32 / cur.size as f32 } else { 0.0 };
+                                let ic = if n.is_dir { rgb(FOLDER_ICON) } else { file_icon };
+                                icon(l.left + 12.0, top + (ROW_H - 16.0) / 2.0, n.is_dir, ic);
+                                p.text(FontId::Ui, &n.name, rect(l.left + 36.0, top, l.right - 214.0, top + ROW_H), th.text);
+                                let size = fmt_size(n.size);
+                                p.text(FontId::UiRight, &size, rect(l.right - 214.0, top, l.right - 124.0, top + ROW_H), th.text);
+                                // Creció mucho en el período: ▲ junto al tamaño.
+                                if done && growth::row_mark(&self.hist, arena, *id, today).is_some() {
+                                    growth::draw_mark(p, l.right - 124.0, p.measure(FontId::Ui, &size), top, top + ROW_H);
+                                }
+                                let pc = format!("{:.1} %", frac * 100.0).replace('.', ",");
+                                p.text(FontId::UiRight, &pc, rect(l.right - 124.0, top, l.right - 72.0, top + ROW_H), th.text_dim);
+                                let track = rect(l.right - 62.0, top + ROW_H / 2.0 - 4.0, l.right - 12.0, top + ROW_H / 2.0 + 4.0);
+                                p.round_fill(track, 4.0, th.border);
+                                let bar_w = ((track.right - track.left) * frac).max(3.0);
+                                p.round_fill(rect(track.left, track.top, track.left + bar_w, track.bottom), 4.0, th.accent);
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
 
             // ----- mapa -----
             p.round_fill(ui.map, 8.0, th.surface);
@@ -1137,7 +1999,7 @@ impl Xtree {
             let cd = ui.card;
             p.round_fill(cd, 8.0, th.surface);
             p.round_stroke_w(cd, 8.0, th.border, 1.0);
-            let cy = (cd.top + cd.bottom) / 2.0;
+            let cy = cd.top + CARD_H / 2.0;
             if n.is_dir {
                 p.round_fill(rect(cd.left + 18.0, cy - 12.0, cd.left + 30.0, cy - 6.0), 2.0, rgb(FOLDER_ICON));
                 p.round_fill(rect(cd.left + 18.0, cy - 8.0, cd.left + 46.0, cy + 12.0), 3.0, rgb(FOLDER_ICON));
@@ -1166,6 +2028,9 @@ impl Xtree {
                 p.text(FontId::Glyphs, glyph, rect(b.left + 10.0, b.top, b.left + 30.0, b.bottom), tc);
                 p.text(FontId::Ui, label, rect(b.left + 40.0, b.top, b.right - 6.0, b.bottom), tc);
             }
+            if Self::has_strip(&ui) {
+                growth::paint_strip(p, cd, &mut self.hist, arena, shown, self.scanning);
+            }
 
             // ----- leyenda (solo al colorear por tipo; por carpeta el color no necesita explicación) -----
             if self.by_type {
@@ -1193,7 +2058,7 @@ impl Xtree {
             let cur = &arena[self.current as usize];
             let count = cur.children.iter().filter(|&&c| arena.get(c as usize).is_some_and(|n| n.size > 0)).count();
             cols.push(("Carpeta actual", format!("{} \u{B7} {} elementos", fmt_size(cur.size), count)));
-        } else {
+        } else if !unscanned {
             cols.push(("Analizado", fmt_size(progress.bytes.load(Ordering::Relaxed))));
         }
         if let Some((total, free)) = self.volume() {
@@ -1217,7 +2082,7 @@ impl Xtree {
             let fillc = if frac > 0.9 { rgb(RED) } else { th.accent };
             p.round_fill(rect(track.left, track.top, track.left + (track.right - track.left) * frac, track.bottom), 2.0, fillc);
         }
-        // Aviso de permisos: administrador en Windows, Acceso total al disco en macOS (tecla A).
+        // Aviso de permisos: administrador en Windows, Acceso total al disco en macOS (`xtree_permisos`).
         let hint = self.data_hint();
         // Con el aviso, las columnas se achican para que entre el texto.
         let widths: [f32; 5] = if hint.is_empty() { [250.0, 120.0, 190.0, 180.0, 190.0] } else { [220.0, 110.0, 170.0, 150.0, 170.0] };
@@ -1230,9 +2095,15 @@ impl Xtree {
         }
         if !hint.is_empty() {
             p.text(FontId::UiRight, &hint, rect((x + 10.0).max(bar.right - 480.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), warning);
-        } else if done {
-            let help = if self.by_type { "T: color por carpeta" } else { "T: color por tipo de archivo" };
-            p.text(FontId::UiRight, help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
+        } else if done && !self.keys_colors.is_empty() {
+            let what = if self.by_type { "color por carpeta" } else { "color por tipo de archivo" };
+            let help = format!("{}: {what}", self.keys_colors);
+            p.text(FontId::UiRight, &help, rect((x + 10.0).max(bar.right - 300.0), bar.top + 10.0, bar.right - 16.0, bar.top + 30.0), th.text_dim);
+        }
+
+        // ----- búsqueda: en el lugar de la tabla -----
+        if let Some(st) = &self.search {
+            self.paint_search(p, area, st);
         }
 
         // ----- lista de discos: va al final para quedar por encima de todo -----
@@ -1261,7 +2132,7 @@ impl Xtree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::keys::{VK_BACK, VK_ESCAPE};
+    use crate::keys::keys::{VK_BACK, VK_DOWN, VK_ESCAPE, VK_RETURN};
     use crate::geom::rect;
     use crate::xtree::tree::{NO_PARENT, Node};
     use std::time::{Duration, Instant};
@@ -1270,11 +2141,396 @@ mod tests {
         Node { name: name.into(), parent, size, is_dir, small: false, children }
     }
 
+    /// Raíz con estos hijos (nombre, tamaño, carpeta), en ese orden de tamaño.
+    fn level(kids: &[(&str, u64, bool)]) -> Vec<Node> {
+        let total = kids.iter().map(|k| k.1).sum();
+        let mut a = vec![node("raiz", NO_PARENT, total, true, (1..=kids.len() as u32).collect())];
+        a.extend(kids.iter().map(|&(n, size, dir)| node(n, 0, size, dir, vec![])));
+        a
+    }
+
+    fn selected_name(x: &Xtree) -> Option<String> {
+        x.selected.map(|n| x.arena[n as usize].name.to_string())
+    }
+
+    /// #57: letras con la tabla a la vista van a la primera fila del nivel que empieza así, sin
+    /// mayúsculas ni tildes; seguidas se juntan; la misma letra repetida pasa a la siguiente.
+    #[test]
+    fn xtree_type_to_find_jumps_and_cycles() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(level(&[
+            ("Users", 900, true),
+            ("Program Files", 800, true),
+            ("Program Files (x86)", 700, true),
+            ("pagefile.sys", 600, false),
+            ("Árbol", 500, true),
+            ("temp", 400, true),
+            ("Tests", 300, true),
+        ]));
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        assert_eq!(x.on_char_at('p', t0), Action::Redraw);
+        assert_eq!(selected_name(&x).as_deref(), Some("Program Files"));
+        assert_eq!(x.on_char_at('A', ms(200)), Action::Redraw, "«pa»");
+        assert_eq!(selected_name(&x).as_deref(), Some("pagefile.sys"));
+        // La misma letra repetida recorre los que empiezan con «t».
+        x.on_char_at('t', ms(2000));
+        assert_eq!(selected_name(&x).as_deref(), Some("temp"));
+        x.on_char_at('t', ms(2100));
+        assert_eq!(selected_name(&x).as_deref(), Some("Tests"));
+        x.on_char_at('t', ms(2200));
+        assert_eq!(selected_name(&x).as_deref(), Some("temp"), "da la vuelta");
+        // Sin tildes: «a» encuentra «Árbol».
+        x.on_char_at('a', ms(4000));
+        assert_eq!(selected_name(&x).as_deref(), Some("Árbol"));
+        // Nada empieza con «z»: queda como estaba.
+        assert_eq!(x.on_char_at('z', ms(6000)), Action::None);
+        assert_eq!(selected_name(&x).as_deref(), Some("Árbol"));
+    }
+
+    /// #57: la fila encontrada queda a la vista (la tabla se desplaza) y la búsqueda es del nivel
+    /// actual (no baja a las subcarpetas); sin árbol o escaneando no hace nada.
+    #[test]
+    fn xtree_type_to_find_scrolls_and_stays_in_level() {
+        let area = rect(0.0, 0.0, 1400.0, 500.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        assert_eq!(x.on_char_at('a', Instant::now()), Action::None, "sin árbol");
+        let names: Vec<String> = (0..40).map(|i| format!("carpeta{i:02}")).collect();
+        let mut kids: Vec<(&str, u64, bool)> = names.iter().enumerate().map(|(i, n)| (n.as_str(), 1000 - i as u64, true)).collect();
+        kids.push(("zeta", 10, true));
+        let mut arena = level(&kids);
+        // «zorro» vive dentro de «carpeta00»: no se encuentra desde la raíz.
+        arena[1].children = vec![arena.len() as u32];
+        arena.push(node("zorro", 1, 5, false, vec![]));
+        x.set_arena(arena);
+        x.prepare(area);
+        assert_eq!(x.scroll, 0.0);
+        x.on_char_at('z', Instant::now());
+        assert_eq!(selected_name(&x).as_deref(), Some("zeta"));
+        x.prepare(area);
+        assert!(x.scroll > 0.0, "la tabla se desplazó hasta la fila");
+        x.scanning = true;
+        assert_eq!(x.on_char_at('c', Instant::now() + Duration::from_secs(5)), Action::None, "escaneando");
+    }
+
+    /// M1: en una ventana angosta los botones nuevos nunca pisan «Analizar» ni el desplegable:
+    /// primero «Colores» queda solo con la muestra, y si tampoco entra, no están.
+    #[test]
+    fn top_buttons_never_overlap_analizar() {
+        let overlap = |a: Rect, b: Rect| a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+        for w in [560.0, 640.0, 700.0, 760.0, 800.0, 860.0, 900.0, 1000.0, 1400.0] {
+            let area = rect(0.0, 0.0, w, 790.0);
+            let ui = layout_ui(area, 0.0);
+            for b in [ui.colors_btn, ui.search_btn] {
+                for other in [ui.scan_btn, ui.combo, ui.back] {
+                    assert!(!overlap(b, other), "ancho {w}: {b:?} pisa {other:?}");
+                }
+                assert!(b.right - b.left <= 0.0 || b.left >= ui.scan_btn.right + 8.0, "ancho {w}");
+            }
+        }
+        let wide = layout_ui(rect(0.0, 0.0, 1400.0, 790.0), 0.0);
+        assert_eq!(wide.colors_btn.right - wide.colors_btn.left, COLORS_W, "ancha: con el texto");
+        let mid = layout_ui(rect(0.0, 0.0, 800.0, 790.0), 0.0);
+        assert_eq!(mid.colors_btn.right - mid.colors_btn.left, SEARCH_W, "angosta: solo la muestra");
+        let narrow = layout_ui(rect(0.0, 0.0, 560.0, 790.0), 0.0);
+        assert!(narrow.colors_btn.right <= narrow.colors_btn.left && narrow.search_btn.right <= narrow.search_btn.left, "sin lugar: no están");
+        // El estado del análisis tampoco pisa «Analizar» (empieza después de él y de su punto).
+        for w in [560.0, 640.0] {
+            let area = rect(0.0, 0.0, w, 790.0);
+            let mut x = Xtree::idle(PathBuf::from("raiz"));
+            x.set_arena(vec![node("raiz", NO_PARENT, 5, true, vec![])]);
+            x.scan_started = Some(Instant::now());
+            x.scan_elapsed = Some(Duration::from_secs(1));
+            let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+            x.paint(&p, area);
+            let s = layout_ui(area, 0.0).scan_btn;
+            let want = x.state_text();
+            let st = p.texts().into_iter().find(|(_, t, _)| *t == want).expect("estado").2;
+            assert!(st.left >= s.right + 30.0, "ancho {w}: el estado en {st:?} pisa «Analizar» ({s:?})");
+        }
+        // Un clic donde no están no hace nada con ellos.
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let a = rect(0.0, 0.0, 560.0, 790.0);
+        let s = layout_ui(a, 0.0).scan_btn;
+        assert!(!contains(&colors_rect(a), s.right - 2.0, (s.top + s.bottom) / 2.0));
+        let _ = x.on_click(a, s.right - 2.0, (s.top + s.bottom) / 2.0, false);
+        assert!(!x.by_type());
+    }
+
+    /// #57: la T ya no cambia los colores (es una letra para el salto); el botón «Colores» sí,
+    /// también mientras se escanea, y dice el modo; la ayuda de la barra de datos usa el atajo.
+    #[test]
+    fn colors_button_toggles_and_t_no_longer_does() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(level(&[("Temp", 10, true), ("datos", 5, true)]));
+        assert_eq!(x.on_key(Key(0x54)), Action::None, "la T no hace nada como tecla");
+        assert!(!x.by_type());
+        let ui = layout_ui(area, x.legend_h());
+        assert!(ui.colors_btn.left > ui.scan_btn.right && ui.colors_btn.right <= area.right - STATE_W - 20.0);
+        let (cx, cy) = ((ui.colors_btn.left + ui.colors_btn.right) / 2.0, (ui.colors_btn.top + ui.colors_btn.bottom) / 2.0);
+        assert!(contains(&colors_rect(area), cx, cy));
+        assert!(x.on_mouse_move(area, cx, cy), "resalta");
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Redraw);
+        assert!(x.by_type());
+        x.scanning = true;
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Redraw);
+        assert!(!x.by_type(), "también escaneando");
+        x.scanning = false;
+        x.set_key_labels("Ctrl+T".into(), String::new());
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        assert!(texts.iter().any(|t| t == "Colores: carpeta"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Ctrl+T: color por tipo de archivo"), "{texts:?}");
+        x.toggle_colors();
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        assert!(texts.iter().any(|t| t == "Colores: tipo"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Ctrl+T: color por carpeta"), "{texts:?}");
+        assert_eq!(x.colors_tip(), "Colorear por carpeta");
+    }
+
+    /// raiz › Documentos (600) › Facturas (300) › factura-1.pdf (200); raiz › facturas.zip (350).
+    fn search_sample() -> Vec<Node> {
+        vec![
+            node("raiz", NO_PARENT, 1000, true, vec![1, 4]),
+            node("Documentos", 0, 600, true, vec![2]),
+            node("Facturas", 1, 300, true, vec![3]),
+            node("factura-1.pdf", 2, 200, false, vec![]),
+            node("facturas.zip", 0, 350, false, vec![]),
+        ]
+    }
+
+    fn hit_names(x: &Xtree) -> Vec<String> {
+        x.search_found().map(|f| f.hits.iter().map(|h| h.name.clone()).collect()).unwrap_or_default()
+    }
+
+    /// Espera (con tiempo límite) a que llegue la búsqueda del hilo y la aplica.
+    fn wait_found(x: &mut Xtree, query: &str) {
+        let t0 = Instant::now();
+        while x.search_pending() || x.search_found().is_none_or(|f| f.query != query) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "la búsqueda «{query}» no llegó");
+            std::thread::sleep(Duration::from_millis(2));
+            x.on_found();
+        }
+    }
+
+    /// #57: con un árbol chico la búsqueda es en el momento; flechas y Enter entran en la carpeta
+    /// (o en la del archivo, con el archivo marcado) y cierran la búsqueda; Esc la cierra y un
+    /// segundo Esc cierra xtree.
+    #[test]
+    fn xtree_search_small_tree_and_keys() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(search_sample());
+        assert!(!x.search_open());
+        x.open_search();
+        assert!(x.search_open());
+        x.set_query("FACT");
+        assert_eq!(hit_names(&x), ["Facturas", "facturas.zip", "factura-1.pdf"]);
+        assert_eq!(x.on_char_at('d', Instant::now()), Action::None, "las letras son de la caja");
+        assert_eq!(x.search_key(VK_DOWN), Action::Redraw);
+        assert_eq!(x.on_key(VK_DOWN), Action::Redraw, "también sin el foco en la caja");
+        assert_eq!(x.search_key(VK_DOWN), Action::None, "ya está en el último");
+        assert_eq!(x.search_key(VK_RETURN), Action::Redraw);
+        assert!(!x.search_open());
+        assert_eq!(x.current, 2, "la carpeta del archivo");
+        assert_eq!(selected_name(&x).as_deref(), Some("factura-1.pdf"));
+        x.open_search();
+        x.set_query("docu");
+        assert_eq!(x.search_key(VK_RETURN), Action::Redraw);
+        assert_eq!((x.current, x.selected), (1, None), "entra en la carpeta");
+        x.open_search();
+        x.set_query("");
+        assert!(x.search_found().is_none(), "sin texto no hay resultados");
+        assert_eq!(x.search_key(VK_RETURN), Action::None);
+        assert_eq!(x.on_key(VK_ESCAPE), Action::Redraw);
+        assert!(!x.search_open());
+        assert_eq!(x.on_key(VK_ESCAPE), Action::Close);
+    }
+
+    /// #57: con un árbol grande la búsqueda va en otro hilo; lo que llega de una búsqueda vieja
+    /// (cambió lo escrito) no se muestra.
+    #[test]
+    fn xtree_search_big_tree_uses_thread() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let mut arena = vec![node("raiz", NO_PARENT, 0, true, vec![])];
+        arena.extend((0..5000).map(|i| node(&format!("carpeta-{i}"), 0, i, true, vec![])));
+        arena[0].children = (1..=5000).collect();
+        x.set_arena(arena);
+        x.search_thread_from = 100;
+        x.open_search();
+        x.set_query("carpeta-49");
+        assert!(x.search_pending(), "en otro hilo");
+        x.set_query("carpeta-499");
+        wait_found(&mut x, "carpeta-499");
+        assert!(!x.search_pending());
+        assert_eq!(x.search_found().unwrap().total, 11);
+        assert_eq!(hit_names(&x)[0], "carpeta-4999");
+        // Una respuesta vieja que llega tarde no pisa la nueva.
+        for _ in 0..50 {
+            x.on_found();
+        }
+        assert_eq!(x.search_found().unwrap().query, "carpeta-499");
+    }
+
+    /// I2: mientras se busca otra cosa (o el árbol cambió y se está buscando de nuevo), los
+    /// resultados viejos se ven pero Enter y el clic no los abren: podrían ser de otro texto o de
+    /// otro árbol (un nodo con el mismo nombre en otro lugar).
+    #[test]
+    fn xtree_search_stale_results_do_not_open() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        // raiz › a › src y raiz › b › src: el árbol nuevo tiene los mismos nombres con otros ids.
+        let tree = |swap: bool| {
+            let (a, b) = if swap { ("b", "a") } else { ("a", "b") };
+            vec![
+                node("raiz", NO_PARENT, 30, true, vec![1, 2]),
+                node(a, 0, 20, true, vec![3]),
+                node(b, 0, 10, true, vec![4]),
+                node("src", 1, 20, true, vec![]),
+                node("src", 2, 10, true, vec![]),
+            ]
+        };
+        x.set_arena(tree(false));
+        x.search_thread_from = 0;
+        x.open_search();
+        x.set_query("src");
+        wait_found(&mut x, "src");
+        // Se escribe otra cosa: hasta que llegue, Enter y el clic no hacen nada.
+        x.set_query("sr");
+        assert!(x.search_pending());
+        assert_eq!(x.search_key(VK_RETURN), Action::None);
+        let r = search_row_rect(area, 0, 0.0);
+        assert_eq!(x.on_click(area, r.left + 40.0, (r.top + r.bottom) / 2.0, false), Action::None);
+        assert!(x.search_open() && x.current == 0);
+        wait_found(&mut x, "sr");
+        // Llega otro árbol (un reescaneo): la búsqueda se repite; mientras, los viejos no abren.
+        x.scanning = true;
+        *x.scan.result.lock().unwrap() = Some(tree(true));
+        assert!(x.take_result());
+        assert!(x.search_pending());
+        assert_eq!(x.search_key(VK_RETURN), Action::None);
+        assert_eq!(x.current, 0);
+        wait_found(&mut x, "sr");
+        assert_eq!(x.search_key(VK_RETURN), Action::Redraw, "los nuevos sí");
+        assert_eq!(x.current, 3, "la «src» más grande del árbol nuevo (bajo «b»)");
+    }
+
+    /// M8: un resultado que está en la raíz dice «en la raíz» (no la ruta analizada entera); el
+    /// resto, la carpeta relativa a lo analizado.
+    #[test]
+    fn xtree_search_root_results_say_root() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz-larga"));
+        x.set_arena(search_sample());
+        x.open_search();
+        x.set_query("fact");
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        // Cada resultado: nombre, tamaño y la segunda línea.
+        let zip = texts.iter().rposition(|t| t == "facturas.zip").unwrap();
+        assert_eq!(texts[zip + 2], "en la raíz", "{texts:?}");
+    }
+
+    /// M8: el salto por letra pliega los nombres del nivel una vez (no en cada tecla); al cambiar
+    /// de nivel o de árbol se vuelven a armar.
+    #[test]
+    fn xtree_type_to_find_folds_level_once() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(search_sample());
+        let t0 = Instant::now();
+        for (i, c) in "dfd".chars().enumerate() {
+            x.on_char_at(c, t0 + Duration::from_secs(2 * i as u64));
+        }
+        assert_eq!(x.level_folds, 1);
+        x.go(1);
+        x.on_char_at('f', t0 + Duration::from_secs(10));
+        assert_eq!(selected_name(&x).as_deref(), Some("Facturas"));
+        assert_eq!(x.level_folds, 2);
+    }
+
+    /// #57: mientras se analiza, busca en lo que ya se leyó (el árbol en vivo, en otro hilo); al
+    /// llegar el árbol terminado la búsqueda se repite sobre él.
+    #[test]
+    fn xtree_search_while_scanning_reads_live() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.scanning = true;
+        *x.scan.live.write().unwrap() = search_sample();
+        x.open_search();
+        x.set_query("fact");
+        wait_found(&mut x, "fact");
+        assert_eq!(hit_names(&x), ["Facturas", "facturas.zip", "factura-1.pdf"]);
+        let mut done = search_sample();
+        done.push(node("factura-2.pdf", 2, 50, false, vec![]));
+        done[2].children.push(5);
+        *x.scan.result.lock().unwrap() = Some(done);
+        assert!(x.take_result());
+        assert!(x.search_open());
+        // Árbol chico: la búsqueda nueva ya está.
+        assert_eq!(hit_names(&x).len(), 4);
+    }
+
+    /// #57: con la búsqueda abierta la columna muestra la cantidad, los resultados con su ruta
+    /// relativa y «y N más»; la lupa la abre y la cierra; un clic en un resultado entra.
+    #[test]
+    fn xtree_search_paints_and_clicks() {
+        crate::sys::testing::install_fakes();
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let mut arena = search_sample();
+        for i in 0..(super::super::search::MAX_RESULTS + 5) {
+            let n = arena.len() as u32;
+            arena[0].children.push(n);
+            arena.push(node(&format!("fact-{i}.txt"), 0, 1, false, vec![]));
+        }
+        x.set_arena(arena);
+        let ui = layout_ui(area, x.legend_h());
+        assert!(ui.search_btn.right <= ui.colors_btn.left && ui.search_btn.left > ui.scan_btn.right);
+        let (lx, ly) = ((ui.search_btn.left + ui.search_btn.right) / 2.0, (ui.search_btn.top + ui.search_btn.bottom) / 2.0);
+        assert_eq!(x.on_click(area, lx, ly, false), Action::Redraw);
+        assert!(x.search_open(), "la lupa la abre");
+        x.set_query("fact");
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        let total = super::super::search::MAX_RESULTS + 5 + 3;
+        assert!(texts.contains(&format!("{total} resultados")), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Facturas"));
+        assert!(texts.iter().any(|t| *t == PathBuf::from("Documentos").display().to_string()), "ruta relativa: {texts:?}");
+        assert!(!texts.iter().any(|t| t == "Nombre"), "sin el encabezado de la tabla");
+        // La caja (la pone la App) va dentro de la columna, arriba.
+        let b = search_box_rect(area);
+        assert!(b.left > ui.list.left && b.right < ui.list.right && b.top > ui.list.top && b.bottom < ui.list.top + 50.0);
+        // Al final de la lista, «y N más».
+        for _ in 0..40 {
+            x.on_wheel(area, -10.0);
+        }
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        assert!(p.texts().iter().any(|(_, t, _)| t == &format!("y {} más", total - super::super::search::MAX_RESULTS)));
+        // Un clic en el primer resultado (arriba de todo otra vez) entra en «Facturas».
+        for _ in 0..40 {
+            x.on_wheel(area, 10.0);
+        }
+        let r = search_row_rect(area, 0, 0.0);
+        assert_eq!(x.on_click(area, r.left + 40.0, (r.top + r.bottom) / 2.0, false), Action::Redraw);
+        assert!(!x.search_open());
+        assert_eq!(x.current, 2);
+        // La lupa con la búsqueda abierta la cierra.
+        x.on_click(area, lx, ly, false);
+        assert!(x.search_open());
+        x.on_click(area, lx, ly, false);
+        assert!(!x.search_open());
+    }
+
     /// Recorre la vista entera con hit-tests y clics: nada debe entrar en pánico.
     fn poke(x: &mut Xtree, area: Rect) {
         x.prepare(area);
         let ui = layout_ui(area, x.legend_h());
-        for r in [ui.list, ui.map, ui.card, ui.legend, ui.status, ui.combo, ui.scan_btn, ui.buttons[0], ui.buttons[1], ui.buttons[2]] {
+        for r in [ui.list, ui.map, ui.card, ui.legend, ui.status, ui.back, ui.combo, ui.scan_btn, ui.buttons[0], ui.buttons[1], ui.buttons[2]] {
             let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
             assert_eq!(x.row_at(area, cx, cy), None);
             let _ = x.cell_at(cx, cy);
@@ -1289,6 +2545,73 @@ mod tests {
         let _ = x.on_right_click();
         let _ = x.on_key(VK_BACK);
         x.prepare(area);
+    }
+
+    /// «← xdir» va a la izquierda de todo en la barra superior; el desplegable y «Analizar» se
+    /// corren a su derecha.
+    #[test]
+    fn back_button_left_of_combo() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let ui = layout_ui(area, 0.0);
+        assert_eq!(ui.back, back_rect(area));
+        assert_eq!((ui.back.left, ui.back.right - ui.back.left), (MARGIN, 76.0));
+        assert_eq!(ui.combo.left, ui.back.right + 8.0);
+        assert!(ui.scan_btn.left > ui.combo.right);
+        assert_eq!((ui.back.top, ui.back.bottom), (ui.combo.top, ui.combo.bottom));
+    }
+
+    /// El clic en «← xdir» cierra la vista (también con el menú de discos cerrado y mientras se
+    /// escanea); el mouse encima lo resalta.
+    #[test]
+    fn back_button_closes_view() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        let b = layout_ui(area, 0.0).back;
+        let (cx, cy) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+        assert!(x.on_mouse_move(area, cx, cy), "resalta");
+        assert!(!x.on_mouse_move(area, cx + 1.0, cy), "sigue resaltado");
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Close);
+        x.scanning = true;
+        assert_eq!(x.on_click(area, cx, cy, false), Action::Close);
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.scanning = false;
+        x.paint(&p, area);
+        assert!(p.texts().iter().any(|(_, t, _)| t == "\u{2190} xdir"));
+    }
+
+    /// Vista abierta sin analizar: no escanea, el indicador queda quieto, el desplegable muestra la
+    /// raíz y el mapa dice qué hacer.
+    #[test]
+    fn unscanned_view_shows_hint() {
+        crate::sys::testing::install_fakes();
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let root = std::env::temp_dir().join("xdir-xtree-sin-analizar");
+        let mut x = Xtree::unscanned(Handle::default(), root.clone(), true);
+        assert!(!x.scanned() && !x.scanning && x.by_type());
+        assert_eq!(x.badge(), XtreeBadge::Idle);
+        assert_eq!(x.status_text(), format!("xtree \u{B7} {}", root.display()));
+        assert_eq!(x.pick_label(), root.display().to_string());
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        let texts: Vec<String> = p.texts().into_iter().map(|(_, t, _)| t).collect();
+        assert!(texts.iter().any(|t| t == "Elegí un disco o una carpeta y tocá Analizar"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Sin analizar"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.starts_with("Escaneando")), "{texts:?}");
+        poke(&mut x, area);
+    }
+
+    /// F5 en una vista sin analizar analiza lo elegido en el desplegable (como «Analizar»).
+    #[test]
+    fn f5_unscanned_scans_the_pick() {
+        crate::sys::testing::install_fakes();
+        let root = std::env::temp_dir().join("xdir-xtree-f5-raiz");
+        let other = std::env::temp_dir().join("xdir-xtree-f5-elegida");
+        let mut x = Xtree::unscanned(Handle::default(), root, false);
+        x.pick = other.clone();
+        assert_eq!(x.on_key(VK_F5), Action::Redraw);
+        assert!(x.scanned());
+        assert_eq!(x.root(), other.as_path());
+        x.cancel();
     }
 
     #[test]
@@ -1334,7 +2657,7 @@ mod tests {
         x.prepare(area);
     }
 
-    /// Espera a que termine el hilo de la tecla A.
+    /// Espera a que termine el hilo de `xtree_permisos`.
     fn wait_elevated(x: &Xtree) {
         let t0 = std::time::Instant::now();
         while x.elevating.load(Ordering::Relaxed) {
@@ -1346,6 +2669,31 @@ mod tests {
     fn lacking_permissions(x: &Xtree) {
         x.scan.progress.need_admin.store(true, Ordering::Relaxed);
         x.scan.progress.denied.store(1, Ordering::Relaxed);
+    }
+
+    /// #57: ninguna letra sola hace algo en la tabla más que el salto por letra (la A ya no pide
+    /// permisos: eso es `xtree_permisos`, Ctrl+Shift+A); el aviso de permisos dice el atajo en uso.
+    #[test]
+    fn bare_letters_do_not_act() {
+        let mut x = Xtree::idle(PathBuf::from("raiz"));
+        x.set_arena(vec![node("raiz", NO_PARENT, 5, true, vec![])]);
+        lacking_permissions(&x);
+        for c in b'A'..=b'Z' {
+            assert_eq!(x.on_key(Key(c as u16)), Action::None, "{}", c as char);
+        }
+        assert!(!x.elevating.load(Ordering::Relaxed), "la A no pide permisos");
+        x.set_key_labels(String::new(), "Ctrl+Shift+A".into());
+        assert_eq!(x.data_hint(), "1 carpetas sin permiso (Ctrl+Shift+A)");
+        x.set_key_labels(String::new(), String::new());
+        assert_eq!(x.data_hint(), "1 carpetas sin permiso", "sin atajo, sin paréntesis");
+        // Por el comando, sí.
+        assert_eq!(x.elevate_scan(), Action::Redraw);
+        assert!(x.elevating.load(Ordering::Relaxed) || disk_scan().permission_issue(&x.scan.progress));
+        let t0 = Instant::now();
+        while x.elevating.load(Ordering::Relaxed) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "el hilo elevado no terminó");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Tecla A: el árbol elevado le gana al del escaneo normal aunque este termine después.
@@ -1362,7 +2710,7 @@ mod tests {
         assert!(!scan::deliver(&x.scan.result, &x.scan.cancel, normal, false));
         assert!(x.take_result());
         assert_eq!(x.arena[0].size, 99);
-        // Ya no faltan permisos: sin aviso y la tecla A no vuelve a lanzar nada.
+        // Ya no faltan permisos: sin aviso y `xtree_permisos` no vuelve a lanzar nada.
         assert!(!disk_scan().permission_issue(&x.scan.progress));
         assert_eq!(x.data_hint(), "");
         assert_eq!(x.elevate_with(|_, _, _| panic!("no debe relanzar")), Action::None);
@@ -1382,7 +2730,7 @@ mod tests {
         tx.send(()).unwrap();
         wait_elevated(&x);
         assert!(disk_scan().permission_issue(&x.scan.progress));
-        assert!(x.data_hint().contains("(tecla A)"));
+        assert!(x.data_hint().contains("carpetas sin permiso"));
         assert!(!x.status_text().contains(disk_scan().elevating_text()));
         // El aviso del hilo elevado (sin árbol) repinta aunque el escaneo normal ya haya terminado.
         assert!(x.on_message(x.scan.id, 0));
@@ -1622,7 +2970,7 @@ mod tests {
         crate::sys::testing::FakeDiskScan::set_volume(None, false);
     }
 
-    /// Reescaneo con permisos (tecla A) después de terminar: giro, no porcentaje.
+    /// Reescaneo con permisos (`xtree_permisos`) después de terminar: giro, no porcentaje.
     #[test]
     fn badge_spins_while_elevating() {
         crate::sys::testing::install_fakes();
@@ -1742,3 +3090,7 @@ mod tests {
         crate::sys::testing::FakeDiskScan::set_volume(None, false);
     }
 }
+
+#[cfg(test)]
+#[path = "growth_tests.rs"]
+mod growth_tests;

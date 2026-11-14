@@ -360,6 +360,8 @@ fn crumb_icon_and_loading_drawn() {
     // Una carga en curso (sin respuesta todavía): «Cargando…».
     let (hwnd, tx) = (a.hwnd, a.tx.clone());
     a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Archive { file: zip.clone(), nested: vec![], inner: "d".into() });
+    // Ajustes 2: como cualquier carpeta, desde los 0,5 s.
+    a.panes[0].tab_mut().set_loading_since(Some(std::time::Instant::now() - std::time::Duration::from_millis(600)));
     a.paint();
     let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
     assert!(texts.iter().any(|t| t == "Cargando…"), "{texts:?}");
@@ -456,6 +458,15 @@ fn extract_commands_inside_archive_extract_selection() {
     assert_eq!(a.take_started(), [JobSpec::ExtractEntries { archive: zip, entries: vec!["d/a.txt".into()], dest: other }]);
 }
 
+/// M4: la app de verdad borra la carpeta temporal al cerrar; las de prueba no (es una para todo
+/// el proceso y otras pruebas la usan a la vez).
+#[test]
+fn temps_cleanup_on_close_is_a_flag() {
+    assert!(!App::new(Init::blank(), FakeHost::new()).clean_temps_on_close);
+    let init = Init { clean_temps_on_close: true, ..Init::blank() };
+    assert!(App::new(init, FakeHost::new()).clean_temps_on_close);
+}
+
 /// Alt/⌥ + doble clic en un zip anidado: se extrae y se abre con el sistema (no se entra).
 #[test]
 fn alt_double_click_nested_opens_with_system() {
@@ -467,9 +478,12 @@ fn alt_double_click_nested_opens_with_system() {
     a.apply(0, Action::Open(i));
     FakeEnv::hold_keys(&[]);
     assert_eq!(a.panes[0].tab().location, root(&zip));
-    task(&mut a);
+    // Se procesan los trabajos en el orden en que lleguen hasta que se resuelva esta apertura
+    // (puede llegar otro antes).
+    tasks_until(&mut a, |a| a.archive.opening.is_none());
     let temp = crate::archive_nav::temps::global().entry_path(&zip, &[], "viejo.zip").unwrap();
-    assert!(FakeShell::take_calls().contains(&ShellCall::OpenFile(temp.clone(), temp.parent().map(Path::to_path_buf))));
+    let calls = FakeShell::take_calls();
+    assert!(calls.contains(&ShellCall::OpenFile(temp.clone(), temp.parent().map(Path::to_path_buf))), "{calls:?} · aviso: {:?}", a.notice);
 }
 
 /// Lo listo para la vista previa se olvida cuando el archivo se vuelve a leer (pudo cambiar y
@@ -565,6 +579,20 @@ fn cancelled_preview_for_refocused_item_is_requested_again() {
     a.archive.pending.insert(path.clone());
     a.archive.prefetch_last = Some(path.clone());
     a.on_task_done(tasks::TaskDone::ArchivePrepared { path: path.clone(), ok: false, cancelled: true });
-    task(&mut a);
-    assert!(a.archive.ready.contains(&path));
+    // Puede haber otra extracción en camino (la que pidió el foco al entrar): la que llegue
+    // primero puede venir cortada por la nueva. Se espera a que el elemento quede listo, sin
+    // suponer en qué orden llegan.
+    tasks_until(&mut a, |a| a.archive.ready.contains(&path));
+}
+
+/// Procesa los trabajos sueltos que lleguen hasta que se cumpla `done` (o 10 s), en el orden que
+/// lleguen.
+fn tasks_until(a: &mut App, done: impl Fn(&App) -> bool) {
+    let t0 = std::time::Instant::now();
+    while !done(a) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "no se cumplió a tiempo");
+        if let Ok(t) = a.task_rx.recv_timeout(Duration::from_millis(50)) {
+            a.on_task_done(t);
+        }
+    }
 }

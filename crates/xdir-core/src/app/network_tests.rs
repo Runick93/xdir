@@ -239,8 +239,12 @@ fn cancel_discards_late_result() {
     let (mut a, _h) = open_with("smb://nas-n4late/x");
     let tabs = a.panes[a.active].tabs.len();
     a.connect_dialog_click(Some(DialogHit::Connect), false);
+    let g = a.net.dialog.as_ref().and_then(|d| d.busy).expect("intento en curso");
+    assert!(a.activity.contains(&super::activity::ActivityKey::Connect(g)));
     a.connect_dialog_click(Some(DialogHit::Cancel), false);
     assert!(a.net.dialog.as_ref().is_some_and(|d| d.busy.is_none()), "Cancelar con un intento en curso lo descarta y el panel queda");
+    // Ajustes 2 (ronda 1): cancelada, sale del indicador de actividad enseguida.
+    assert!(!a.activity.contains(&super::activity::ActivityKey::Connect(g)));
     wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
     assert!(a.net.dialog.is_some());
     assert_eq!(a.panes[a.active].tabs.len(), tabs);
@@ -393,6 +397,10 @@ fn pump_pane(a: &mut App, pane: usize) {
 #[test]
 fn remote_navigation_no_ui_io() {
     let root = remote_dir("n5-nav");
+    std::fs::write(root.join("b.txt"), "x").unwrap();
+    // Un comprimido en la carpeta de red (la lista lo ve en el disco; lo de adentro, el falso).
+    std::fs::write(root.join("z.zip"), b"zip").unwrap();
+    crate::sys::testing::FakeArchives::shared().add_archive(&root.join("z.zip"), &[("x.txt", b"hola"), ("y.txt", b"hola")], 30);
     let mut init = Init::blank();
     init.session.panes = vec![crate::session::PaneState { tabs: vec![Location::Path(root.join("sub"))], active: 0 }];
     FakeNetwork::mark_ui_thread();
@@ -434,16 +442,135 @@ fn remote_navigation_no_ui_io() {
     a.apply_group(gi);
     pump_pane(&mut a, 0);
     a.paint();
+    // Ajustes 1: elegir una carpeta de red. El tamaño espera «calcular tamaño» y, al tocarlo, se
+    // suma en otro hilo (nada del disco en este).
+    let i = a.panes[0].tab().list.entries.iter().position(|e| e.name == "sub").expect("la lista tiene «sub»");
+    a.panes[0].tab_mut().list.select_index(i);
+    a.paint();
+    assert_eq!(a.sel_size.total(), crate::tab::SelTotal::NeedsClick);
+    a.request_sel_size();
+    a.paint();
+    let t0 = Instant::now();
+    while a.sel_size.total() == crate::tab::SelTotal::Computing {
+        assert!(t0.elapsed() < Duration::from_secs(10), "el tamaño no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_sel_size();
+    }
+    a.paint();
     // Ronda 1: la flecha de las migas, arrastrar, xtree y el desplegable de la barra.
     let k = (0..10).find(|&k| a.panes[0].chevron(k).is_some_and(|(_, l)| l == Location::Path(root.clone()))).expect("la flecha de la carpeta de red");
     a.show_subfolder_menu(0, k);
     let roots = vec![root.clone()];
     let _ = super::fileops::drop_effect(&[root.join("a.txt")], &root.join("sub"), false, false, crate::drop::Effect::ALL, &roots);
-    let _x = crate::xtree::view::Xtree::new(a.hwnd, root.clone(), false);
+    let mut x = crate::xtree::view::Xtree::new(a.hwnd, root.clone(), false);
+    // #57: buscar en xtree es en memoria (el árbol en vivo, en otro hilo).
+    x.open_search();
+    x.set_query("sub");
+    x.on_found();
+    x.cancel();
     let mut sug = crate::typed::Suggest::new(crate::geom::Rect::default(), "");
     sug.set_query(&format!("{}{}s", root.display(), std::path::MAIN_SEPARATOR));
     assert!(sug.items.iter().all(|i| !i.ends_with("sub")), "{:?}", sug.items);
+    // #56: arrastrar sobre una conexión de red del árbol (resaltar, desplegar al quedarse encima y
+    // soltar) no le pregunta nada al servidor desde este hilo.
+    #[cfg(feature = "arbol")]
+    {
+        use crate::drop::{DragEvent, DragKind, Effect};
+        a.tree.visible = true;
+        a.tree.set_network(Vec::new(), vec![("n5 (nas)".into(), root.clone(), "smb://nas/n5".into())], Vec::new());
+        a.tree.expand_network(a.hwnd, true);
+        a.paint();
+        let point = a.tree.row_point("n5 (nas)").expect("la conexión en el árbol");
+        let paths = vec![root.join("sub").join("x.txt")];
+        let drag = |a: &mut App, kind| {
+            let mut ev = DragEvent { kind, point, ctrl: false, shift: false, paths: Some(&paths), allowed: Effect::ALL, effect: Effect::NONE };
+            a.on_drag(&mut ev);
+            ev.effect
+        };
+        assert_ne!(drag(&mut a, DragKind::Enter), Effect::NONE);
+        a.tree.age_drag_hover(crate::tree::DRAG_EXPAND);
+        drag(&mut a, DragKind::Over);
+        drag(&mut a, DragKind::Leave);
+        // «Mostrar archivos ocultos» con el árbol y una conexión de red desplegada: el árbol no
+        // relee lo de red (y lo local, en otro hilo).
+        a.run_command(Command::ToggleHidden);
+        a.run_command(Command::ToggleHidden);
+        a.paint();
+    }
+    // #59: comparar dos archivos de red y la suma de uno, en el panel de comparar: se abren y se
+    // leen en otro hilo (nada del disco en este).
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        let name = list.entries[list.entry_of_pos(p).unwrap()].name.clone();
+        list.set_selected_pos(p, name == "a.txt" || name == "b.txt");
+    }
+    a.run_command(Command::CompareContents);
+    a.paint();
+    let t0 = Instant::now();
+    while a.compare.as_ref().is_some_and(|c| c.job.is_some() || c.status == super::compare::Status::Running) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la comparación no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert_eq!(a.compare.as_ref().unwrap().status, super::compare::Status::Done(crate::compare::Verdict::Same));
+    a.compare_hash(0);
+    while a.compare.as_ref().is_some_and(|c| c.hashes[0].job.is_some()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert!(matches!(a.compare.as_ref().unwrap().hashes[0].result, Some(Ok(_))));
+    a.paint();
     assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+    // Dos de adentro de un comprimido en la carpeta de red: se extraen y se comparan en otro hilo.
+    a.go_to_text(0, &root.join("z.zip").to_string_lossy());
+    pump_pane(&mut a, 0);
+    assert!(a.panes[0].tab().location.is_archive());
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        list.set_selected_pos(p, true);
+    }
+    a.run_command(Command::CompareContents);
+    a.paint();
+    while a.compare.as_ref().is_some_and(|c| c.job.is_some()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la comparación en el comprimido no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert_eq!(a.compare.as_ref().unwrap().status, super::compare::Status::Done(crate::compare::Verdict::Same));
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls(), Vec::<String>::new());
+    a.go_to_text(0, &root.to_string_lossy());
+    pump_pane(&mut a, 0);
+    // La suma de verificación del panel de información, con «Comparar con…». (El `FakeInfo`
+    // responde en este hilo: lo que lee al abrir el panel es del falso y no cuenta.)
+    let list = &mut a.panes[0].tab_mut().list;
+    for p in 0..list.count() {
+        let name = list.entries[list.entry_of_pos(p).unwrap()].name.clone();
+        list.set_selected_pos(p, name == "a.txt");
+    }
+    a.run_command(Command::Properties);
+    a.paint();
+    a.flush_info();
+    a.on_app_message(crate::info::WM_APP_INFO, 0, 0);
+    a.paint();
+    let seen = FakeNetwork::ui_io_calls().len();
+    a.set_expected("d41d8cd98f00b204e9800998ecf8427e");
+    while a.info.sum.job.is_some() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "la suma del panel no llegó");
+        std::thread::sleep(Duration::from_millis(5));
+        a.on_compare_message(0);
+    }
+    assert!(a.info.sum.results.iter().any(|(_, r)| r.is_ok()), "{:?}", a.info.sum.results);
+    a.paint();
+    assert_eq!(FakeNetwork::ui_io_calls()[seen..], Vec::<String>::new());
+    // Ajustes 2: desconectar y dibujar mientras tanto (⏏ girando, «Desconectando…», indicador).
+    a.net.connections = vec![conn("smb://nas-n5nav/fotos", &root.to_string_lossy())];
+    a.eject(root.clone());
+    crate::clock::set(Some(Instant::now() + Duration::from_secs(1)));
+    a.paint();
+    assert!(a.activity_rect.is_some());
+    assert_eq!(FakeNetwork::ui_io_calls()[seen..], Vec::<String>::new());
 }
 
 #[test]
@@ -485,6 +612,151 @@ fn slow_state_thresholds() {
     // Con un lote ya no es lenta.
     wait_until(&mut a, |a| !a.panes[0].tab().loading);
     assert_eq!(a.panes[0].tab().slow_state(t0 + Duration::from_secs(21)), Slow::No);
+}
+
+/// Ajustes 2: cualquier carpeta que tarda más de 0,5 s en leerse muestra «Cargando…» (la de X70);
+/// antes, nada. Con elementos ya llegados, el cuadro va encima de la lista.
+#[test]
+fn local_slow_load_shows_loading_after_half_second() {
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    let local = tmp_dir("a2-cargando");
+    std::fs::write(local.join("ya-llego.txt"), "x").unwrap();
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local.clone()));
+    let texts = |h: &FakeHost| h.drawn_texts().into_iter().map(|t| t.1).collect::<Vec<_>>();
+    // La carga sigue (sus mensajes no se entregaron): el inicio se fija para no depender del reloj.
+    let now = Instant::now();
+    a.panes[0].tab_mut().set_loading_since(Some(now - Duration::from_millis(300)));
+    assert!(!a.panes[0].tab().shows_loading(now));
+    a.paint();
+    assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
+    a.panes[0].tab_mut().set_loading_since(Some(now - Duration::from_millis(600)));
+    assert!(a.panes[0].tab().shows_loading(now));
+    a.paint();
+    assert!(texts(&host).iter().any(|t| t == "Cargando…"), "{:?}", texts(&host));
+    // Lo que ya llegó se ve debajo del cuadro.
+    a.panes[0].tab_mut().list.append(vec![super::tests::file_entry("ya-llego.txt")]);
+    a.paint();
+    let t = texts(&host);
+    assert!(t.iter().any(|t| t == "Cargando…") && t.iter().any(|t| t == "ya-llego.txt"), "{t:?}");
+    // Ronda 1: la tarjeta frena los clics (no elige la fila tapada) y, sin encabezado (Íconos),
+    // va a 50 del borde de arriba de la lista.
+    let card = a.panes[0].loading_card.expect("la tarjeta");
+    let list = a.panes[0].list;
+    assert_eq!(card.top, list.top + crate::list::HEADER_H + 50.0);
+    let (x, y) = ((card.left + card.right) / 2.0, (card.top + card.bottom) / 2.0);
+    assert_eq!(a.panes[0].hit(x, y), crate::pane::PaneHit::None);
+    a.on_left_down(x, y, false);
+    a.on_left_up(x, y);
+    assert_eq!(a.panes[0].tab().list.selected_indices().count(), 0);
+    a.set_view(0, crate::list::View::Icons);
+    a.paint();
+    let card = a.panes[0].loading_card.expect("la tarjeta en Íconos");
+    assert_eq!(card.top, a.panes[0].list.top + 50.0);
+    pump_pane(&mut a, 0);
+    a.paint();
+    assert!(!texts(&host).iter().any(|t| t == "Cargando…"));
+    assert_eq!(a.panes[0].loading_card, None);
+    assert!(!a.panes[0].tab().shows_loading(Instant::now() + Duration::from_secs(5)));
+}
+
+/// Ajustes 2: la conexión en curso está en el indicador de actividad hasta que vuelve.
+#[test]
+fn connecting_in_activity_until_it_returns() {
+    FakeNetwork::hang("nas-a2act", Duration::from_millis(100));
+    let mut a = net_app();
+    let g = a.spawn_connect(0, None, Address::parse("smb://nas-a2act/fotos").unwrap(), Default::default());
+    let key = super::activity::ActivityKey::Connect(g);
+    assert!(a.activity.contains(&key));
+    let now = Instant::now() + Duration::from_secs(1);
+    assert_eq!(a.activity.tip(now).as_deref(), Some("Conectando con \"nas-a2act\""));
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { .. }));
+    assert!(!a.activity.contains(&key));
+}
+
+/// Ronda 1: una carpeta de red que «no responde» no es «Cargando»: el cartel dice que no responde
+/// y, ya quieto el aviso, no hay temporizador de 100 ms.
+#[test]
+fn not_responding_is_still_in_activity() {
+    let root = remote_dir("a2-no-responde");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(3));
+    let mut a = net_app();
+    // Los otros paneles terminan de leer (si no, también estarían en curso).
+    a.sync_visibility();
+    let t = Instant::now();
+    while a.panes.iter().any(|p| p.tab().loading) {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        if let Ok(ev) = a.rx.recv_timeout(Duration::from_millis(20)) {
+            a.on_load_event(ev);
+        }
+    }
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let t0 = Instant::now();
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    a.panes[0].tab_mut().set_loading_since(Some(t0));
+    let host = crate::tab::remote_host(&root);
+    // Conectando: gira.
+    crate::clock::set(Some(t0 + Duration::from_secs(2)));
+    a.paint();
+    assert_eq!(a.activity.next_tick(t0 + Duration::from_secs(2)), Some(super::activity::FRAME));
+    assert!(!a.activity.all_still(t0 + Duration::from_secs(2)));
+    // No responde: el cartel lo dice y nada se redibuja solo.
+    let now = t0 + Duration::from_secs(21);
+    crate::clock::set(Some(now));
+    a.paint();
+    assert_eq!(a.tooltip_text(super::Hit::Activity), Some(format!("\"{host}\" no responde")));
+    assert_eq!(a.activity.next_tick(now), None);
+    // Ronda 2: en lugar del giro congelado, el aviso quieto (como el de xtree).
+    assert!(a.activity.all_still(now));
+}
+
+/// Ronda 1: el redibujo de los 0,5 s de una lectura que ya terminó no repinta nada.
+#[test]
+fn net_tick_after_fast_load_does_not_repaint() {
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    a.sync_visibility();
+    let local = tmp_dir("a2-rapida");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(local));
+    let t = Instant::now();
+    while a.panes.iter().any(|p| p.tab().loading) {
+        assert!(t.elapsed() < Duration::from_secs(10));
+        if let Ok(ev) = a.rx.recv_timeout(Duration::from_millis(20)) {
+            a.on_load_event(ev);
+        }
+    }
+    let before = host.invalidations();
+    a.on_net_tick();
+    assert_eq!(host.invalidations(), before, "nada que mostrar: sin repintado");
+}
+
+/// Ronda 2: si el trabajo de conectar falla por dentro, vuelve el error (y sale del indicador).
+#[test]
+fn connect_task_panic_returns_error() {
+    let mut a = net_app();
+    a.net.panic_connect = true;
+    let g = a.spawn_connect(0, None, Address::parse("smb://nas-a2panico/fotos").unwrap(), Default::default());
+    wait_task(&mut a, |t| matches!(t, TaskDone::Connected { result: Err(_), .. }));
+    assert!(!a.activity.contains(&super::activity::ActivityKey::Connect(g)));
+}
+
+/// En red el aviso de espera no cambia: «Conectando con…» en lugar de «Cargando…».
+#[test]
+fn remote_wait_box_instead_of_loading() {
+    let root = remote_dir("a2-red-espera");
+    FakeNetwork::hang(&root.to_string_lossy(), Duration::from_secs(2));
+    let host = FakeHost::new();
+    let mut a = net_app_with(host.clone());
+    a.new_tab(0, Location::Path(root.clone()), true);
+    let t0 = Instant::now() - Duration::from_millis(700);
+    a.panes[0].tab_mut().set_load_started(Some(t0));
+    a.panes[0].tab_mut().set_loading_since(Some(t0));
+    a.paint();
+    let texts: Vec<String> = host.drawn_texts().into_iter().map(|t| t.1).collect();
+    assert!(texts.iter().any(|t| t.starts_with("Conectando con")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "Cargando…"), "{texts:?}");
 }
 
 #[test]
@@ -1067,6 +1339,29 @@ mod red_page {
         assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
     }
 
+    /// Ajustes 2: el ⏏ de la conexión gira mientras se desconecta (sin el símbolo), la barra dice
+    /// «Desconectando…» y otro clic no hace nada.
+    #[test]
+    fn red_page_eject_spins_while_disconnecting() {
+        let mut a = page_app(FakeHost::new());
+        let root = PathBuf::from("/net-n8gira/fotos");
+        a.net.connections = vec![conn("smb://nas-n8gira/fotos", "/net-n8gira/fotos")];
+        let texts = draw(&mut a);
+        assert!(texts.iter().any(|t| t == crate::list::EJECT_GLYPH));
+        click(&mut a, PageHit::Eject(0));
+        assert_eq!(a.eject_status().as_deref(), Some("Desconectando \"fotos\"…"));
+        let texts = draw(&mut a);
+        assert!(!texts.iter().any(|t| t == crate::list::EJECT_GLYPH), "{texts:?}");
+        click(&mut a, PageHit::Eject(0));
+        wait_task(&mut a, |t| matches!(t, TaskDone::Disconnected { .. }));
+        // Después llegan otras (la lista de conexiones), pero ninguna otra desconexión.
+        while let Ok(t) = a.task_rx.recv_timeout(Duration::from_millis(200)) {
+            assert!(!matches!(t, TaskDone::Disconnected { .. }), "un solo pedido");
+        }
+        assert_eq!(FakeNetwork::disconnects(&root), vec![(root.clone(), false)]);
+        assert_eq!(a.eject_status(), None);
+    }
+
     #[test]
     fn red_page_password_text() {
         assert_eq!(password_text(KeyStyle::Mac, true), "xdir no guarda contraseñas: las guarda el sistema (Llavero)");
@@ -1320,6 +1615,28 @@ fn xtree_remote_volume_off_thread() {
     let _x = crate::xtree::view::Xtree::new(a.hwnd, root.clone(), false);
     std::thread::sleep(Duration::from_millis(50));
     assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("volume_space")), "{:?}", FakeNetwork::ui_io_calls());
+}
+
+/// I4 (#58): el historial de xtree se guarda y se lee en otro hilo al terminar el análisis; el
+/// de la ventana nunca toca `xtree-historial`.
+#[test]
+fn xtree_history_off_ui_thread() {
+    install_fakes();
+    let root = crate::sys::testing::FakeDiskScan::root();
+    FakeNetwork::mark_ui_thread();
+    let mut a = net_app();
+    a.config.xtree_scan_on_open = true;
+    a.run_command(Command::Xtree);
+    assert_eq!(a.xtree.as_ref().unwrap().root(), root.as_path());
+    let t0 = Instant::now();
+    while a.xtree.as_ref().is_none_or(|x| x.history_loaded().is_none()) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "el historial no llegó");
+        a.paint();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(a.xtree.as_ref().unwrap().history_loaded().unwrap().days.len(), 1);
+    assert!(FakeNetwork::ui_io_calls().iter().all(|c| !c.starts_with("historial")), "{:?}", FakeNetwork::ui_io_calls());
+    a.on_closing();
 }
 
 /// I5: soltar el guardián de una carpeta de red colgada no espera en el hilo de la ventana.

@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+## 0.2.1 — 2026-11-14
+
 ### Nuevo
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).

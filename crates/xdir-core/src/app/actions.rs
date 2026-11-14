@@ -161,6 +161,15 @@ impl App {
                         tab.list.toggle_hidden();
                     }
                 }
+                // El árbol relee lo que ya leyó (en otros hilos), sin tocar lo virtual ni la red.
+                #[cfg(feature = "arbol")]
+                {
+                    let current = match &self.panes[active].tab().location {
+                        Location::Path(p) => Some(p.clone()),
+                        _ => None,
+                    };
+                    self.tree.refresh_hidden(hwnd, self.show_hidden, current.as_deref());
+                }
             }
             Command::SelectAll => self.tab_mut().list.select_all(),
             Command::InvertSelection => self.tab_mut().list.invert_selection(),

@@ -491,6 +491,11 @@ fn remote_navigation_no_ui_io() {
         a.tree.age_drag_hover(crate::tree::DRAG_EXPAND);
         drag(&mut a, DragKind::Over);
         drag(&mut a, DragKind::Leave);
+        // «Mostrar archivos ocultos» con el árbol y una conexión de red desplegada: el árbol no
+        // relee lo de red (y lo local, en otro hilo).
+        a.run_command(Command::ToggleHidden);
+        a.run_command(Command::ToggleHidden);
+        a.paint();
     }
     // #59: comparar dos archivos de red y la suma de uno, en el panel de comparar: se abren y se
     // leen en otro hilo (nada del disco en este).

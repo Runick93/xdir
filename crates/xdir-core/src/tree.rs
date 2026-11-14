@@ -286,6 +286,15 @@ pub struct Tree {
     drag_hover: Option<(usize, std::time::Instant)>,
     /// Hora del evento de arrastre anterior (para desplazar según el tiempo).
     drag_last: Option<std::time::Instant>,
+    /// Relecturas en curso por «Mostrar archivos ocultos» (nodo, cuántas faltan).
+    rereads: std::collections::HashMap<usize, usize>,
+    /// Lecturas que ya iban cuando cambió «Mostrar archivos ocultos»: al llegar se piden de nuevo.
+    stale: std::collections::HashMap<usize, (Handle, bool)>,
+    /// Carpeta del panel al cambiar «Mostrar archivos ocultos» y las rutas que dejaron de verse.
+    reread_current: Option<PathBuf>,
+    reread_removed: Vec<PathBuf>,
+    /// Carpeta del panel que pasó a estar oculta y la carpeta visible más cercana, que se resalta.
+    fallback_hl: Option<(PathBuf, PathBuf)>,
 }
 
 /// Revelación pendiente (`Tree::reveal`).
@@ -346,6 +355,11 @@ impl Tree {
             drop_target: None,
             drag_hover: None,
             drag_last: None,
+            rereads: Default::default(),
+            stale: Default::default(),
+            reread_current: None,
+            reread_removed: Vec::new(),
+            fallback_hl: None,
         };
         // Inicio (lleva a "Este equipo") y OneDrive.
         t.add_root(Kind::Home, PathBuf::new(), "Inicio".to_string(), 0);
@@ -816,6 +830,14 @@ impl Tree {
     /// Aplica las lecturas terminadas.
     pub fn on_loaded(&mut self) {
         while let Ok((id, dirs)) = self.rx.try_recv() {
+            if let Some(left) = self.rereads.get_mut(&id) {
+                *left -= 1;
+                if *left == 0 {
+                    self.rereads.remove(&id);
+                }
+                self.merge_children(id, dirs);
+                continue;
+            }
             let depth = self.nodes[id].depth + 1;
             let kind = if matches!(self.nodes[id].kind, Kind::Network | Kind::Linux) { Kind::ShellItem } else { Kind::Folder };
             let mut ids = Vec::with_capacity(dirs.len());
@@ -832,8 +854,126 @@ impl Tree {
             let n = &mut self.nodes[id];
             n.children = Some(ids);
             n.loading = false;
+            // Se leyó con el valor anterior de «Mostrar archivos ocultos»: de nuevo con el actual.
+            if let Some((hwnd, show_hidden)) = self.stale.remove(&id) {
+                self.reread(hwnd, id, show_hidden);
+            }
         }
+        self.finish_rereads();
         self.advance_reveal();
+    }
+
+    // ---------- «Mostrar archivos ocultos» ----------
+
+    /// ¿Hay lecturas del árbol en curso?
+    #[cfg(test)]
+    fn reading(&self) -> bool {
+        !self.rereads.is_empty() || !self.stale.is_empty() || self.nodes.iter().any(|n| n.loading)
+    }
+
+    /// Cambió «Mostrar archivos ocultos»: vuelve a leer, en otros hilos, las carpetas que el árbol
+    /// ya tiene leídas. Lo desplegado, el desplazamiento y lo resaltado quedan como están; las
+    /// ocultas desaparecen (o aparecen). `current`: carpeta del panel activo. No toca lo virtual
+    /// (Red, Linux, lo que lista el Shell) ni lo que está en una conexión de red.
+    pub fn refresh_hidden(&mut self, hwnd: Handle, show_hidden: bool, current: Option<&Path>) {
+        self.fallback_hl = None;
+        self.reread_removed.clear();
+        self.reread_current = if show_hidden { None } else { current.map(Path::to_path_buf) };
+        let mut ids = Vec::new();
+        let mut stack = self.roots.clone();
+        while let Some(id) = stack.pop() {
+            let n = &self.nodes[id];
+            let local = !matches!(n.kind, Kind::Network | Kind::Linux | Kind::ShellItem | Kind::NetFavorite | Kind::NetHost | Kind::NetConnected)
+                && (n.path.as_os_str().is_empty() || !crate::sys::network().is_remote(&n.path));
+            if !local {
+                continue;
+            }
+            if matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive) {
+                if n.children.is_some() {
+                    ids.push(id);
+                } else if n.loading {
+                    self.stale.insert(id, (hwnd, show_hidden));
+                }
+            }
+            stack.extend(n.children.iter().flatten());
+        }
+        for id in ids {
+            self.reread(hwnd, id, show_hidden);
+        }
+        self.finish_rereads();
+    }
+
+    fn reread(&mut self, hwnd: Handle, id: usize, show_hidden: bool) {
+        *self.rereads.entry(id).or_insert(0) += 1;
+        let (tx, path) = (self.tx.clone(), self.nodes[id].path.clone());
+        std::thread::spawn(move || {
+            if tx.send((id, subfolders(&path, show_hidden))).is_ok() {
+                hwnd.post(WM_APP_TREE, 0, 0);
+            }
+        });
+    }
+
+    /// Pone las subcarpetas releídas de `id`: las que siguen conservan su nodo (y lo que tienen
+    /// adentro); las que ya no están se van y las nuevas se agregan.
+    fn merge_children(&mut self, id: usize, dirs: Vec<(String, PathBuf)>) {
+        let old = self.nodes[id].children.take().unwrap_or_default();
+        let depth = self.nodes[id].depth + 1;
+        let mut ids = Vec::with_capacity(dirs.len());
+        for (name, path) in dirs {
+            match old.iter().copied().find(|&o| self.nodes[o].path == path) {
+                Some(o) => ids.push(o),
+                None => {
+                    self.nodes.push(Node::new(Kind::Folder, path, name, depth));
+                    ids.push(self.nodes.len() - 1);
+                }
+            }
+        }
+        let gone: Vec<usize> = old.into_iter().filter(|o| !ids.contains(o)).collect();
+        if !gone.is_empty() {
+            self.reread_removed.extend(gone.iter().map(|&g| self.nodes[g].path.clone()));
+            self.hover = None;
+            self.pin_hover = None;
+            self.drop_target = None;
+            self.drag_hover = None;
+            self.scroll_to = None;
+        }
+        self.nodes[id].children = Some(ids);
+    }
+
+    /// Con todas las relecturas hechas: si la carpeta del panel quedó oculta, se resalta la
+    /// carpeta visible más cercana de las que están en el árbol.
+    fn finish_rereads(&mut self) {
+        if !self.rereads.is_empty() || !self.stale.is_empty() {
+            return;
+        }
+        let removed = std::mem::take(&mut self.reread_removed);
+        let Some(cur) = self.reread_current.take() else { return };
+        if !removed.iter().any(|r| is_under(r, &cur)) {
+            return;
+        }
+        let mut best: Option<&Path> = None;
+        let mut stack = self.roots.clone();
+        while let Some(id) = stack.pop() {
+            let n = &self.nodes[id];
+            if matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive)
+                && !n.path.as_os_str().is_empty()
+                && is_under(&n.path, &cur)
+                && best.is_none_or(|b| n.path.components().count() > b.components().count())
+            {
+                best = Some(&n.path);
+            }
+            stack.extend(n.children.iter().flatten());
+        }
+        self.fallback_hl = best.map(|b| (cur, b.to_path_buf()));
+    }
+
+    /// La carpeta que se resalta para `current`: ella misma o, si pasó a estar oculta, la carpeta
+    /// visible más cercana.
+    pub fn highlighted<'a>(&'a self, current: Option<&'a Path>) -> Option<&'a Path> {
+        match (&self.fallback_hl, current) {
+            (Some((hidden, near)), Some(c)) if c == hidden => Some(near),
+            _ => current,
+        }
     }
 
     // ---------- seguir al panel ----------
@@ -1264,6 +1404,8 @@ impl Tree {
     /// `current`: carpeta del panel activo, resaltada si está a la vista. `xtree`: indicador del
     /// escaneo de xtree, a la derecha de su entrada.
     pub fn draw(&mut self, p: &dyn Painter, area: Rect, current: Option<&Path>, xtree: XtreeBadge) {
+        let shown = self.highlighted(current).map(Path::to_path_buf);
+        let shown = shown.as_deref();
         self.area = area;
         let th = p.theme();
         let e = (self.expand.value / 100.0).clamp(0.0, 1.0);
@@ -1344,7 +1486,7 @@ impl Tree {
                     continue;
                 }
                 let row = rect(area.left + SIDE, y + 1.0, area.left + view_w - SIDE, y + ROW_H - 1.0);
-                let is_current = self.is_current(n, current);
+                let is_current = self.is_current(n, shown);
                 // Destino de un arrastre: como la carpeta destino de la lista.
                 if self.drop_target == Some(id) {
                     p.round_fill(row, 5.0, th.selection);
@@ -1596,6 +1738,81 @@ mod tests {
         t.reveal(Handle(0), &root.join("alfa"), false);
         assert!(t.revealing().is_none());
         assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Aplica las lecturas del árbol hasta que no quede ninguna pendiente.
+    fn finish_reloads(t: &mut Tree) {
+        let start = std::time::Instant::now();
+        while t.reading() {
+            assert!(start.elapsed().as_secs() < 10, "la relectura no terminó");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            t.on_loaded();
+        }
+    }
+
+    fn child_names(t: &Tree, path: &Path) -> Vec<String> {
+        let n = t.nodes.iter().find(|n| matches!(n.kind, Kind::Folder | Kind::Drive) && n.path == path).expect("el nodo está");
+        n.children.as_ref().unwrap().iter().map(|&c| t.nodes[c].name.clone()).collect()
+    }
+
+    /// Al cambiar «Mostrar archivos ocultos» el árbol relee lo que ya leyó: las carpetas ocultas
+    /// desaparecen (o aparecen), lo desplegado sigue desplegado y el resaltado de una carpeta que
+    /// pasa a estar oculta se mueve a la carpeta visible más cercana.
+    #[test]
+    fn tree_rereads_loaded_folders_when_hidden_changes() {
+        install_fakes();
+        let root = temp_root("ocultas");
+        let docs = root.join("docs");
+        let oculta = docs.join(".oculta");
+        std::fs::create_dir_all(oculta.join("dentro")).unwrap();
+        std::fs::create_dir_all(docs.join("visible")).unwrap();
+        std::fs::create_dir_all(root.join("otra").join("hija")).unwrap();
+        let mut t = tree_with_drive(&root);
+        // Con las ocultas a la vista: se despliega «docs» y «otra».
+        t.reveal(Handle(0), &oculta.join("dentro"), true);
+        finish_reveal(&mut t);
+        t.reveal(Handle(0), &root.join("otra").join("hija"), true);
+        finish_reveal(&mut t);
+        assert_eq!(child_names(&t, &docs), [".oculta", "visible"]);
+        assert!(node_by_path(&t, &docs).unwrap().expanded && node_by_path(&t, &root.join("otra")).unwrap().expanded);
+
+        // Se apagan: sin «.oculta»; «docs» y «otra» siguen desplegadas.
+        t.refresh_hidden(Handle(0), false, Some(&oculta));
+        finish_reloads(&mut t);
+        assert_eq!(child_names(&t, &docs), ["visible"]);
+        assert!(node_by_path(&t, &docs).unwrap().expanded && node_by_path(&t, &root.join("otra")).unwrap().expanded);
+        assert_eq!(child_names(&t, &root.join("otra")), ["hija"]);
+        // La carpeta del panel pasó a estar oculta: se resalta «docs».
+        assert_eq!(t.highlighted(Some(&oculta)), Some(docs.as_path()));
+        assert_eq!(t.highlighted(Some(&docs.join("visible"))), Some(docs.join("visible").as_path()));
+
+        // Se vuelven a encender: reaparece y el resaltado vuelve a ser el de siempre.
+        t.refresh_hidden(Handle(0), true, Some(&oculta));
+        finish_reloads(&mut t);
+        assert_eq!(child_names(&t, &docs), [".oculta", "visible"]);
+        assert!(node_by_path(&t, &docs).unwrap().expanded);
+        assert_eq!(t.highlighted(Some(&oculta)), Some(oculta.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Una carpeta oculta que estaba desplegada se lleva sus hijos; las demás conservan lo suyo.
+    #[test]
+    fn tree_hidden_change_keeps_expansion_of_surviving_nodes() {
+        install_fakes();
+        let root = temp_root("ocultas-sub");
+        let hondo = root.join("a").join("b");
+        std::fs::create_dir_all(hondo.join("c")).unwrap();
+        std::fs::create_dir_all(root.join(".z").join("y")).unwrap();
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &hondo.join("c"), true);
+        finish_reveal(&mut t);
+        let before = node_by_path(&t, &hondo).unwrap().expanded;
+        t.refresh_hidden(Handle(0), false, Some(&hondo));
+        finish_reloads(&mut t);
+        assert!(before && node_by_path(&t, &hondo).unwrap().expanded);
+        assert_eq!(child_names(&t, &root), ["a"]);
+        assert_eq!(t.highlighted(Some(&hondo)), Some(hondo.as_path()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

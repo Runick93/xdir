@@ -237,7 +237,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),
     spec(Command::ToggleFavorite, "favorito", "Agregar o quitar de favoritos", &["Ctrl+Shift+D"]),
     spec(Command::ToggleFavBar, "barra_favoritos", "Mostrar u ocultar la barra de favoritos", &["Ctrl+Shift+B"]),
-    spec(Command::PowerShell, "powershell", "Abrir PowerShell en la carpeta", &[]),
+    spec(Command::PowerShell, "powershell", "Abrir la terminal en la carpeta", &[]),
     spec(Command::Cmd, "cmd", "Abrir CMD en la carpeta", &[]),
     spec(Command::ToggleDarkMode, "modo_oscuro", "Cambiar entre modo claro y oscuro", &[]),
     spec(Command::SaveGroup, "guardar_grupo", "Guardar paneles y carpetas como grupo…", &[]),

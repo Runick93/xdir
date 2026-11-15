@@ -44,7 +44,7 @@ impl App {
             return h;
         }
         if let Some(pane) = self.term_menu {
-            if let Some(c) = ui::terminal_menu_at(self.panes[pane].terminal_rect(), w, x, y) {
+            if let Some(c) = ui::terminal_menu_at(self.panes[pane].terminal_rect(), w, &self.consoles(), x, y) {
                 return Hit::TermMenu(c);
             }
         }

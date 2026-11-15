@@ -59,10 +59,12 @@ pub trait Waker: Send + Sync {
 }
 
 /// Una consola que ofrece el sistema (PowerShell, CMD, Terminal…). `id` lo entiende solo la
-/// plataforma que la listó.
+/// plataforma que la listó; `key` es fija y es la que se guarda en `config.toml` como terminal
+/// por defecto (`"iterm"`, `"wt"`…).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ConsoleInfo {
     pub id: u8,
+    pub key: &'static str,
     pub label: &'static str,
 }
 
@@ -137,6 +139,12 @@ pub trait SystemEnv: Send + Sync {
     /// Abre la consola `id` con `dir` como carpeta de trabajo. `verb`: "open" o uno de
     /// `console_alt_verbs`.
     fn open_console(&self, owner: Handle, id: u8, dir: &Path, verb: &str) -> bool;
+    /// Abre la terminal propia de `config.toml` (`terminal_propia`: un programa, o en macOS
+    /// también una app) con `dir` como carpeta de trabajo. Por defecto lanza el programa sin
+    /// esperarlo; un hilo lo recoge al terminar para no dejar procesos zombis.
+    fn open_custom_console(&self, _owner: Handle, program: &str, dir: &Path, _verb: &str) -> bool {
+        spawn_detached(std::process::Command::new(program).current_dir(dir))
+    }
     /// Cómo se muestran los atajos. Por defecto, al estilo de Windows.
     fn key_style(&self) -> KeyStyle {
         KeyStyle::Windows
@@ -609,4 +617,15 @@ pub fn network() -> &'static dyn Network {
 
 pub fn hashes() -> &'static dyn Hashes {
     &*services().hashes
+}
+
+/// Lanza un programa sin esperarlo; un hilo lo recoge al terminar para no dejar procesos zombis.
+pub fn spawn_detached(cmd: &mut std::process::Command) -> bool {
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+            true
+        }
+        Err(_) => false,
+    }
 }

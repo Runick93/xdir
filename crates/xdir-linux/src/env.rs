@@ -116,14 +116,17 @@ impl SystemEnv for LinuxEnv {
         let _ = std::fs::write(file, list.join("\n") + "\n");
     }
 
-    /// La terminal por defecto: la primera de `TERMINALS` que esté en el PATH. Se busca una sola
-    /// vez por proceso: el menú de consolas la pide en cada pintado.
+    /// Las terminales de `TERMINALS` que estén en el PATH, en ese orden (la primera es la de
+    /// fábrica). Se buscan una sola vez por proceso: el menú de consolas las pide en cada pintado.
     fn consoles(&self) -> Vec<ConsoleInfo> {
         static DETECTED: OnceLock<Vec<ConsoleInfo>> = OnceLock::new();
         DETECTED
             .get_or_init(|| {
                 let path = std::env::var_os("PATH");
-                linux_terminal(path.as_deref(), &|p| p.is_file()).map(|t| vec![t.info()]).unwrap_or_default()
+                // El núcleo espera al menos una: sin ninguna, la del sistema (avisa que no se pudo
+                // abrir).
+                let found = linux_terminals(path.as_deref(), &|p| p.is_file());
+                if found.is_empty() { vec![TERMINALS[0].info()] } else { found.into_iter().map(Terminal::info).collect() }
             })
             .clone()
     }
@@ -136,13 +139,7 @@ impl SystemEnv for LinuxEnv {
     /// espera a que se cierre: un hilo la recoge al terminar para no dejar procesos zombis.
     fn open_console(&self, _owner: Handle, id: u8, dir: &Path, _verb: &str) -> bool {
         let Some(t) = TERMINALS.get(usize::from(id)) else { return false };
-        match std::process::Command::new(t.program).current_dir(dir).spawn() {
-            Ok(mut child) => {
-                std::thread::spawn(move || child.wait());
-                true
-            }
-            Err(_) => false,
-        }
+        xdir_core::sys::spawn_detached(std::process::Command::new(t.program).current_dir(dir))
     }
 }
 
@@ -150,32 +147,38 @@ impl SystemEnv for LinuxEnv {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Terminal {
     id: u8,
+    /// Clave de `config.toml` (`[opciones] terminal`).
+    pub key: &'static str,
     pub program: &'static str,
     pub label: &'static str,
 }
 
 impl Terminal {
     fn info(self) -> ConsoleInfo {
-        ConsoleInfo { id: self.id, label: self.label }
+        ConsoleInfo { id: self.id, key: self.key, label: self.label }
     }
 }
 
 /// Terminales en orden de preferencia; `id` es la posición en la tabla. `x-terminal-emulator` es
 /// la elegida por el sistema (Debian y derivadas).
-const TERMINALS: [Terminal; 5] = [
-    Terminal { id: 0, program: "x-terminal-emulator", label: "Terminal" },
-    Terminal { id: 1, program: "gnome-terminal", label: "GNOME Terminal" },
-    Terminal { id: 2, program: "konsole", label: "Konsole" },
-    Terminal { id: 3, program: "xfce4-terminal", label: "Xfce Terminal" },
-    Terminal { id: 4, program: "xterm", label: "XTerm" },
+const TERMINALS: [Terminal; 8] = [
+    Terminal { id: 0, key: "sistema", program: "x-terminal-emulator", label: "Terminal" },
+    Terminal { id: 1, key: "gnome_terminal", program: "gnome-terminal", label: "GNOME Terminal" },
+    Terminal { id: 2, key: "konsole", program: "konsole", label: "Konsole" },
+    Terminal { id: 3, key: "xfce4_terminal", program: "xfce4-terminal", label: "Xfce Terminal" },
+    Terminal { id: 4, key: "kitty", program: "kitty", label: "kitty" },
+    Terminal { id: 5, key: "alacritty", program: "alacritty", label: "Alacritty" },
+    Terminal { id: 6, key: "wezterm", program: "wezterm", label: "WezTerm" },
+    Terminal { id: 7, key: "xterm", program: "xterm", label: "XTerm" },
 ];
 
-/// La primera terminal de `TERMINALS` que esté en alguna carpeta del PATH. Recibe el PATH y
-/// `exists` (¿existe el archivo?) en vez de mirar el sistema, así se prueba sin depender de lo
-/// instalado.
-pub fn linux_terminal(path: Option<&OsStr>, exists: &dyn Fn(&Path) -> bool) -> Option<Terminal> {
-    let dirs: Vec<PathBuf> = std::env::split_paths(path?).filter(|d| !d.as_os_str().is_empty()).collect();
-    TERMINALS.into_iter().find(|t| dirs.iter().any(|d| exists(&d.join(t.program))))
+/// Las terminales de `TERMINALS` que estén en alguna carpeta del PATH, en orden de preferencia.
+/// Recibe el PATH y `exists` (¿existe el archivo?) en vez de mirar el sistema, así se prueba sin
+/// depender de lo instalado.
+pub fn linux_terminals(path: Option<&OsStr>, exists: &dyn Fn(&Path) -> bool) -> Vec<Terminal> {
+    let Some(path) = path else { return Vec::new() };
+    let dirs: Vec<PathBuf> = std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).collect();
+    TERMINALS.into_iter().filter(|t| dirs.iter().any(|d| exists(&d.join(t.program)))).collect()
 }
 
 #[cfg(test)]
@@ -183,7 +186,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use super::{config_dir_from, linux_terminal};
+    use super::{config_dir_from, linux_terminals};
     use xdir_core::format::date_time_text;
 
     fn os(s: &str) -> Option<OsString> {
@@ -221,20 +224,22 @@ mod tests {
         assert_eq!(config_dir_from(None, None), None);
     }
 
-    /// La primera terminal que exista en el PATH, en el orden de preferencia.
+    /// Las terminales que existan en el PATH, en el orden de preferencia.
     #[test]
-    fn linux_terminal_prefers_x_terminal_emulator() {
+    fn linux_terminals_in_order() {
         use std::path::Path;
         let path = OsString::from("/usr/local/bin:/usr/bin");
+        let labels = |exists: &dyn Fn(&Path) -> bool| linux_terminals(Some(&path), exists).iter().map(|t| t.label).collect::<Vec<_>>();
         let all = |p: &Path| p.parent() == Some(Path::new("/usr/bin"));
-        let t = linux_terminal(Some(&path), &all).unwrap();
-        assert_eq!((t.label, t.program), ("Terminal", "x-terminal-emulator"));
+        let t = linux_terminals(Some(&path), &all);
+        assert_eq!((t[0].label, t[0].program, t[0].key), ("Terminal", "x-terminal-emulator", "sistema"));
+        assert_eq!(t.len(), 8);
         let only = |name: &'static str| move |p: &Path| p == Path::new("/usr/bin").join(name);
-        assert_eq!(linux_terminal(Some(&path), &only("konsole")).unwrap().label, "Konsole");
-        assert_eq!(linux_terminal(Some(&path), &only("xterm")).unwrap().label, "XTerm");
-        let gk = |p: &Path| p.ends_with("gnome-terminal") || p.ends_with("konsole");
-        assert_eq!(linux_terminal(Some(&path), &gk).unwrap().label, "GNOME Terminal");
-        assert!(linux_terminal(Some(&path), &|_| false).is_none());
-        assert!(linux_terminal(None, &all).is_none());
+        assert_eq!(labels(&only("konsole")), ["Konsole"]);
+        assert_eq!(labels(&only("xterm")), ["XTerm"]);
+        let gk = |p: &Path| p.ends_with("gnome-terminal") || p.ends_with("kitty");
+        assert_eq!(labels(&gk), ["GNOME Terminal", "kitty"]);
+        assert!(labels(&|_| false).is_empty());
+        assert!(linux_terminals(None, &all).is_empty());
     }
 }

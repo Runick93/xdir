@@ -41,6 +41,7 @@ pub const OPTIONS: &[OptionSpec] = &[
     opt("xtree_historial", Section::Xtree, "Guardar historial de tamaños", "Una foto de cada análisis para ver cuánto creció cada carpeta", &["xtree", "historial", "crecimiento", "tamaño", "foto"]),
     opt("xtree_borrar_historial", Section::Xtree, "Historial guardado", "Las fotos de tamaños de todas las carpetas analizadas", &["xtree", "historial", "borrar", "limpiar", "fotos"]),
     opt("xtree_teclas", Section::Xtree, "Teclas de xtree", "Solo para ver: se cambian en Atajos de teclado", &["xtree", "teclas", "atajos"]),
+    opt("terminal", Section::Advanced, "Terminal", "La que abre «Abrir la terminal en la carpeta»; las demás siguen en el botón >_", &["terminal", "consola", "iterm", "powershell", "shell", "warp", "ghostty", "defecto"]),
     opt("abrir_config", Section::Advanced, "config.toml", "Atajos, colores y opciones escritos a mano", &["config", "toml", "abrir", "editor", "archivo"]),
     opt("carpeta_config", Section::Advanced, "Carpeta de configuración", "Donde xdir guarda sus archivos", &["carpeta", "configuracion", "archivos", "finder", "explorador"]),
     opt("archivos", Section::Advanced, "Dónde están los archivos", "Qué guarda cada archivo de la carpeta", &["archivos", "sesion", "favoritos", "grupos", "historial"]),

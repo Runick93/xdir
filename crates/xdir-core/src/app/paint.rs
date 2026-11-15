@@ -336,7 +336,7 @@ impl App {
                     Hit::TermMenu(c) => c,
                     _ => None,
                 };
-                ui::draw_terminal_menu(p, self.panes[pane].terminal_rect(), w, term_hover);
+                ui::draw_terminal_menu(p, self.panes[pane].terminal_rect(), w, &self.consoles(), self.default_console(), term_hover);
             }
             if picker_open {
                 let picker_hover = match hover {

@@ -14,7 +14,7 @@ use xdir_core::commands::Command;
 use xdir_core::keys::Key;
 use std::sync::mpsc::Sender;
 use xdir_core::ops::{Op, OpResult};
-use xdir_core::sys::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use xdir_core::sys::{spawn_detached, ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, KeyStyle, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use xdir_core::xtree::scan::{DriveEntry, FastScan, Lister, Progress};
 use xdir_core::xtree::tree::Node;
 use xdir_core::fs::{Entry as FsEntry, LoadEvent, Location, MetadataRequest, OverlayRequest, QuickItem};
@@ -109,7 +109,6 @@ const KEYS: &[(Command, &[&str])] = &[
 
 /// macOS: nombres distintos a los de Windows.
 const NAMES: &[(Command, &str)] = &[
-    (Command::PowerShell, "Abrir Terminal en la carpeta"),
     (Command::Recycle, "Trasladar a la Papelera"),
     (Command::Properties, "Obtener información"),
 ];
@@ -206,7 +205,7 @@ impl SystemEnv for MacEnv {
         let _ = std::fs::write(file, list.join("\n") + "\n");
     }
 
-    /// Terminal, y iTerm si está instalada.
+    /// Terminal y las otras terminales conocidas que estén instaladas (ver `TERMINALS`).
     /// Se busca una sola vez por proceso: el menú de consolas la pide en cada pintado.
     fn consoles(&self) -> Vec<ConsoleInfo> {
         static DETECTED: OnceLock<Vec<ConsoleInfo>> = OnceLock::new();
@@ -240,28 +239,93 @@ impl SystemEnv for MacEnv {
         !matches!(c, Command::Cmd | Command::ToggleQuickPin | Command::MapNetworkDrive | Command::DisconnectNetworkDrive)
     }
 
-    /// Abre Terminal o iTerm en la carpeta con `open -a` (el verbo no aplica).
+    /// Abre la terminal en la carpeta (el verbo no aplica): con `open -a` las que reciben una
+    /// carpeta así; con su programa y la opción de carpeta de trabajo las demás.
     fn open_console(&self, _owner: Handle, id: u8, dir: &Path, _verb: &str) -> bool {
-        let app = if id == ITERM { "iTerm" } else { "Terminal" };
-        std::process::Command::new("open").args(["-a", app]).arg(dir).status().is_ok_and(|s| s.success())
+        let Some(t) = TERMINALS.get(usize::from(id)) else { return false };
+        match t.open {
+            MacOpen::App => open_app(t.app, dir),
+            MacOpen::Cli(bin, args) => {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let Some(app) = app_path(t, home.as_deref(), &|p| p.exists()) else { return false };
+                spawn_detached(std::process::Command::new(app.join("Contents/MacOS").join(bin)).args(args).arg(dir).current_dir(dir))
+            }
+        }
+    }
+
+    /// La terminal propia: una app (`Hyper`, `/Applications/Hyper.app`) se abre con `open -a`;
+    /// cualquier otra ruta es un programa que se lanza con la carpeta como carpeta de trabajo.
+    fn open_custom_console(&self, _owner: Handle, program: &str, dir: &Path, _verb: &str) -> bool {
+        if is_app(program) {
+            open_app(program, dir)
+        } else {
+            spawn_detached(std::process::Command::new(program).current_dir(dir))
+        }
     }
 }
 
-/// Consolas de macOS: Terminal siempre; iTerm si existe.
-const TERMINAL: u8 = 0;
-const ITERM: u8 = 1;
+/// ¿`terminal_propia` es una app (un nombre suelto o una ruta a un `.app`)?
+pub(super) fn is_app(program: &str) -> bool {
+    !program.contains('/') || program.trim_end_matches('/').to_lowercase().ends_with(".app")
+}
 
-/// Consolas en el orden del menú: Terminal, y después iTerm si está en `/Applications` o en
-/// `~/Applications`. `exists` dice si una ruta existe (el sistema de archivos real, o uno
-/// simulado en las pruebas).
-pub(super) fn mac_consoles(home: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Vec<ConsoleInfo> {
-    let mut list = vec![ConsoleInfo { id: TERMINAL, label: "Terminal" }];
-    let system = PathBuf::from("/Applications/iTerm.app");
-    let user = home.map(|h| h.join("Applications/iTerm.app"));
-    if exists(&system) || user.is_some_and(|u| exists(&u)) {
-        list.push(ConsoleInfo { id: ITERM, label: "iTerm" });
+/// `open -a <app> <carpeta>`: la app abre una ventana en la carpeta.
+fn open_app(app: &str, dir: &Path) -> bool {
+    std::process::Command::new("open").args(["-a", app]).arg(dir).status().is_ok_and(|s| s.success())
+}
+
+/// Cómo se abre una terminal de macOS en una carpeta.
+#[derive(Clone, Copy, Debug)]
+enum MacOpen {
+    /// `open -a <app> <carpeta>`.
+    App,
+    /// El programa de `Contents/MacOS` con estos argumentos y la carpeta al final.
+    Cli(&'static str, &'static [&'static str]),
+}
+
+/// Una terminal de macOS: clave de `config.toml`, nombre del menú, nombre del `.app` y cómo se
+/// abre. `id` es la posición en `TERMINALS`.
+#[derive(Debug)]
+pub(super) struct MacTerminal {
+    pub(super) key: &'static str,
+    pub(super) label: &'static str,
+    app: &'static str,
+    open: MacOpen,
+}
+
+/// Terminales conocidas en el orden del menú. Terminal viene con el sistema; las demás se
+/// buscan en `/Applications` y `~/Applications`.
+pub(super) const TERMINALS: [MacTerminal; 9] = [
+    MacTerminal { key: "terminal", label: "Terminal", app: "Terminal", open: MacOpen::App },
+    MacTerminal { key: "iterm", label: "iTerm", app: "iTerm", open: MacOpen::App },
+    MacTerminal { key: "ghostty", label: "Ghostty", app: "Ghostty", open: MacOpen::App },
+    MacTerminal { key: "warp", label: "Warp", app: "Warp", open: MacOpen::App },
+    MacTerminal { key: "wezterm", label: "WezTerm", app: "WezTerm", open: MacOpen::Cli("wezterm", &["start", "--cwd"]) },
+    MacTerminal { key: "alacritty", label: "Alacritty", app: "Alacritty", open: MacOpen::Cli("alacritty", &["--working-directory"]) },
+    MacTerminal { key: "kitty", label: "kitty", app: "kitty", open: MacOpen::Cli("kitty", &["--directory"]) },
+    MacTerminal { key: "hyper", label: "Hyper", app: "Hyper", open: MacOpen::App },
+    MacTerminal { key: "tabby", label: "Tabby", app: "Tabby", open: MacOpen::App },
+];
+
+/// Dónde está instalada: Terminal en el sistema; las demás en `/Applications` o `~/Applications`.
+fn app_path(t: &MacTerminal, home: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    if t.key == "terminal" {
+        return Some(PathBuf::from("/System/Applications/Utilities/Terminal.app"));
     }
-    list
+    let name = format!("{}.app", t.app);
+    std::iter::once(Path::new("/Applications").join(&name)).chain(home.map(|h| h.join("Applications").join(&name))).find(|p| exists(p))
+}
+
+/// Consolas en el orden del menú: Terminal siempre, y después las de `TERMINALS` que estén en
+/// `/Applications` o en `~/Applications`. `exists` dice si una ruta existe (el sistema de
+/// archivos real, o uno simulado en las pruebas).
+pub(super) fn mac_consoles(home: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Vec<ConsoleInfo> {
+    TERMINALS
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| app_path(t, home, exists).is_some())
+        .map(|(i, t)| ConsoleInfo { id: i as u8, key: t.key, label: t.label })
+        .collect()
 }
 
 /// El entorno real de macOS (lo que instala `install`).

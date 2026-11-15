@@ -47,10 +47,12 @@ impl Waker for Win32Waker {
 /// la más antigua, hasta 25), así una ruta escrita en uno aparece en el otro.
 const TYPED_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\TypedPaths");
 
-/// Consolas: PowerShell (7 si está instalado), CMD y Windows Terminal (si está instalada).
+/// Consolas: PowerShell (7 si está instalado), CMD, Windows Terminal y Git Bash (si están
+/// instalados).
 const POWERSHELL: u8 = 0;
 const CMD: u8 = 1;
 const WINDOWS_TERMINAL: u8 = 2;
+const GIT_BASH: u8 = 3;
 
 /// Entorno de Windows: registro, configuración regional del usuario y el Shell.
 struct Win32Env;
@@ -176,7 +178,7 @@ impl SystemEnv for Win32Env {
     }
 
     fn consoles(&self) -> Vec<ConsoleInfo> {
-        detected_consoles().0.clone()
+        detected_consoles().list.clone()
     }
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {
@@ -187,45 +189,95 @@ impl SystemEnv for Win32Env {
     /// (administrador, pide confirmación de UAC) o `runasuser` (pide usuario y contraseña de otra
     /// cuenta). Si la terminal predeterminada de Windows es Windows Terminal, PowerShell y CMD se
     /// abren ahí. Windows Terminal se abre con `wt.exe -d "<carpeta>"` y los mismos verbos (con
-    /// `runas`, la carpeta va en `-d` porque un proceso elevado no hereda la de trabajo).
+    /// `runas`, la carpeta va en `-d` porque un proceso elevado no hereda la de trabajo). Git
+    /// Bash, igual con `--cd=`.
     fn open_console(&self, owner: Handle, id: u8, dir: &Path, verb: &str) -> bool {
-        let hwnd = owner.hwnd();
-        let (program, params) = if id == WINDOWS_TERMINAL {
-            let wt = detected_consoles().1.clone().unwrap_or_else(|| PathBuf::from("wt.exe"));
-            (wt, Some(HSTRING::from(wt_params(dir))))
-        } else {
-            (console_program(id), None)
+        let detected = detected_consoles();
+        let (program, params) = match id {
+            WINDOWS_TERMINAL => (detected.wt.clone().unwrap_or_else(|| PathBuf::from("wt.exe")), Some(wt_params(dir))),
+            GIT_BASH => match detected.git_bash.clone() {
+                Some(p) => (p, Some(git_bash_params(dir))),
+                None => return false,
+            },
+            _ => (console_program(id), None),
         };
-        let program = HSTRING::from(program.as_os_str());
-        let params = params.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr()));
-        let verb = HSTRING::from(verb);
-        let dir = wide_path(dir);
-        let r = unsafe { ShellExecuteW(Some(hwnd), &verb, &program, params, PCWSTR(dir.as_ptr()), SW_SHOWNORMAL) };
-        // ShellExecute devuelve un valor mayor que 32 si salió bien.
-        r.0 as usize > 32
+        shell_execute(owner, &program, params.as_deref(), dir, verb)
+    }
+
+    /// La terminal propia: el programa con la carpeta como carpeta de trabajo, con los mismos
+    /// verbos que las demás (administrador, otro usuario).
+    fn open_custom_console(&self, owner: Handle, program: &str, dir: &Path, verb: &str) -> bool {
+        shell_execute(owner, Path::new(program), None, dir, verb)
     }
 }
 
-/// Las consolas del sistema y la ruta de `wt.exe`, buscadas una sola vez por proceso: el menú de
-/// consolas las pide en cada pintado y la búsqueda recorre el disco.
-fn detected_consoles() -> &'static (Vec<ConsoleInfo>, Option<PathBuf>) {
-    static DETECTED: OnceLock<(Vec<ConsoleInfo>, Option<PathBuf>)> = OnceLock::new();
+/// `ShellExecuteW` de `program` con `params`, `dir` como carpeta de trabajo y el verbo dado.
+fn shell_execute(owner: Handle, program: &Path, params: Option<&str>, dir: &Path, verb: &str) -> bool {
+    let hwnd = owner.hwnd();
+    let params = params.map(HSTRING::from);
+    let program = HSTRING::from(program.as_os_str());
+    let params = params.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr()));
+    let verb = HSTRING::from(verb);
+    let dir = wide_path(dir);
+    let r = unsafe { ShellExecuteW(Some(hwnd), &verb, &program, params, PCWSTR(dir.as_ptr()), SW_SHOWNORMAL) };
+    // ShellExecute devuelve un valor mayor que 32 si salió bien.
+    r.0 as usize > 32
+}
+
+/// Las consolas del sistema y dónde están `wt.exe` y `git-bash.exe`.
+struct Detected {
+    list: Vec<ConsoleInfo>,
+    wt: Option<PathBuf>,
+    git_bash: Option<PathBuf>,
+}
+
+/// Las consolas, buscadas una sola vez por proceso: el menú de consolas las pide en cada pintado
+/// y la búsqueda recorre el disco.
+fn detected_consoles() -> &'static Detected {
+    static DETECTED: OnceLock<Detected> = OnceLock::new();
     DETECTED.get_or_init(|| {
         let (path, local) = (std::env::var_os("PATH"), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
+        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
         let wt = find_wt(path.as_deref(), local.as_deref(), &|p| p.exists());
-        (windows_consoles(path.as_deref(), local.as_deref(), &|p| wt.as_deref() == Some(p)), wt)
+        let git_bash = find_git_bash(program_files.as_deref(), local.as_deref(), &|p| p.exists());
+        let found = |p: &Path| wt.as_deref() == Some(p) || git_bash.as_deref() == Some(p);
+        let list = windows_consoles(path.as_deref(), local.as_deref(), program_files.as_deref(), &found);
+        Detected { list, wt, git_bash }
     })
 }
 
-/// Consolas en el orden del menú: PowerShell, CMD y, si se encuentra `wt.exe`, Windows Terminal.
-/// Recibe el PATH, `%LOCALAPPDATA%` y `exists` (¿existe el archivo?) en vez de mirar el sistema,
-/// así se prueba sin depender de lo instalado.
-pub(super) fn windows_consoles(path: Option<&OsStr>, local_app_data: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Vec<ConsoleInfo> {
-    let mut list = vec![ConsoleInfo { id: POWERSHELL, label: "PowerShell" }, ConsoleInfo { id: CMD, label: "CMD" }];
+/// Consolas en el orden del menú: PowerShell, CMD y, si se encuentran, Windows Terminal y Git
+/// Bash. Recibe el PATH, `%LOCALAPPDATA%`, `%ProgramFiles%` y `exists` (¿existe el archivo?) en
+/// vez de mirar el sistema, así se prueba sin depender de lo instalado.
+pub(super) fn windows_consoles(path: Option<&OsStr>, local_app_data: Option<&Path>, program_files: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Vec<ConsoleInfo> {
+    let mut list = vec![ConsoleInfo { id: POWERSHELL, key: "powershell", label: "PowerShell" }, ConsoleInfo { id: CMD, key: "cmd", label: "CMD" }];
     if find_wt(path, local_app_data, exists).is_some() {
-        list.push(ConsoleInfo { id: WINDOWS_TERMINAL, label: "Windows Terminal" });
+        list.push(ConsoleInfo { id: WINDOWS_TERMINAL, key: "wt", label: "Windows Terminal" });
+    }
+    if find_git_bash(program_files, local_app_data, exists).is_some() {
+        list.push(ConsoleInfo { id: GIT_BASH, key: "git_bash", label: "Git Bash" });
     }
     list
+}
+
+/// `git-bash.exe`: el de `%ProgramFiles%\Git` (instalación para todos), si no el de
+/// `%LOCALAPPDATA%\Programs\Git` (solo para el usuario).
+pub(super) fn find_git_bash(program_files: Option<&Path>, local_app_data: Option<&Path>, exists: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    let all = program_files.map(|p| p.join(r"Git\git-bash.exe"));
+    let user = local_app_data.map(|l| l.join(r"Programs\Git\git-bash.exe"));
+    all.into_iter().chain(user).find(|p| exists(p))
+}
+
+/// Parámetros de `git-bash.exe` para abrir en `dir`: `--cd="<dir>"` (con la barra final
+/// duplicada, como en `wt_params`).
+pub(super) fn git_bash_params(dir: &Path) -> String {
+    format!("--cd={}", quoted(&dir.to_string_lossy()))
+}
+
+/// `"<texto>"` con las barras del final duplicadas para que no escapen la comilla de cierre.
+fn quoted(d: &str) -> String {
+    let trailing = d.len() - d.trim_end_matches('\\').len();
+    format!("\"{d}{}\"", "\\".repeat(trailing))
 }
 
 /// `wt.exe`: el primero de las carpetas del PATH, si no el alias de la Tienda en
@@ -240,9 +292,7 @@ pub(super) fn find_wt(path: Option<&OsStr>, local_app_data: Option<&Path>, exist
 /// (`C:\` → `"C:\\"`) para que no escapen la comilla de cierre al separar los argumentos, y
 /// los `;` se escriben `\;` porque para wt separan comandos.
 pub(super) fn wt_params(dir: &Path) -> String {
-    let d = dir.to_string_lossy().replace(';', "\\;");
-    let trailing = d.len() - d.trim_end_matches('\\').len();
-    format!("-d \"{d}{}\"", "\\".repeat(trailing))
+    format!("-d {}", quoted(&dir.to_string_lossy().replace(';', "\\;")))
 }
 
 /// Ejecutable de la consola: PowerShell 7 si está instalado, si no el de Windows.

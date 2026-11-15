@@ -102,6 +102,12 @@ pub struct Config {
     /// `[opciones] xtree_historial`: xtree guarda una foto de los tamaños con cada análisis
     /// completo (de fábrica, sí).
     pub xtree_history: bool,
+    /// `[opciones] terminal`: la clave de la terminal por defecto (`"iterm"`, `"wt"`, `"propia"`…).
+    /// Sin la opción (o si no está instalada), la primera del sistema.
+    pub terminal: Option<String>,
+    /// `[opciones] terminal_propia`: una terminal que no se detecta sola (un programa, o en macOS
+    /// también una app). Se suma al final del menú de terminales.
+    pub custom_terminal: Option<String>,
     /// Problemas al leer el archivo, para avisar en la barra de estado.
     pub errors: Vec<String>,
     /// Los problemas de `[atajos]`, como se muestran arriba de la página Atajos
@@ -118,7 +124,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_scan_on_open: false, xtree_history: true, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_scan_on_open: false, xtree_history: true, terminal: None, custom_terminal: None, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
     }
 }
 
@@ -318,6 +324,14 @@ impl Config {
                                 Some(o) => c.xtree_open = o,
                                 None => c.errors.push(format!("línea {}: xtree_abrir va como \"sistema\", \"panel\" o \"ultimo\"", e.line)),
                             },
+                            ("terminal", _) => match e.value.as_str() {
+                                Some(k) if !k.trim().is_empty() => c.terminal = Some(k.trim().to_string()),
+                                _ => c.errors.push(format!("línea {}: terminal va entre comillas, como \"iterm\"", e.line)),
+                            },
+                            ("terminal_propia", _) => match e.value.as_str() {
+                                Some(p) if !p.trim().is_empty() => c.custom_terminal = Some(p.trim().to_string()),
+                                _ => c.errors.push(format!("línea {}: terminal_propia va entre comillas: el programa o la app", e.line)),
+                            },
                             (other, _) => c.errors.push(format!("línea {}: opción desconocida «{other}»", e.line)),
                         }
                     }
@@ -469,7 +483,15 @@ pub fn template() -> String {
             # xtree_analizar_al_abrir = false\n\
             # xtree guarda una foto de los tamaños con cada análisis, para ver cuánto creció cada\n\
             # carpeta (false lo apaga).\n\
-            # xtree_historial = true\n";
+            # xtree_historial = true\n\
+            # Terminal que abre «Abrir la terminal en la carpeta»: la clave de una de las detectadas\n\
+            # (Windows: \"powershell\", \"cmd\", \"wt\", \"git_bash\"; macOS: \"terminal\", \"iterm\",\n\
+            # \"ghostty\", \"warp\", \"wezterm\", \"alacritty\", \"kitty\", \"hyper\", \"tabby\"; Linux:\n\
+            # \"sistema\", \"gnome_terminal\", \"konsole\"…) o \"propia\". Sin la opción, la primera.\n\
+            # terminal = \"iterm\"\n\
+            # Una terminal que no aparece sola: el programa (o en macOS también una app, como\n\
+            # \"Hyper\" o \"/Applications/Hyper.app\"). Se abre con la carpeta como carpeta de trabajo.\n\
+            # terminal_propia = \"/usr/local/bin/foot\"\n";
     out
 }
 
@@ -726,5 +748,19 @@ mod tests {
         // Sin comodines el nombre tiene que ser exacto.
         assert_eq!(color_for(&c.colors, "datos.csv", false, 0).map(|c| c.g), Some(1.0));
         assert_eq!(color_for(&c.colors, "datos.csv.bak", false, 0), None);
+    }
+
+    #[test]
+    fn terminal_options() {
+        let c = Config::parse("[opciones]\nterminal = \" iterm \"\nterminal_propia = \"/Applications/Hyper.app\"\n");
+        assert_eq!(c.terminal.as_deref(), Some("iterm"));
+        assert_eq!(c.custom_terminal.as_deref(), Some("/Applications/Hyper.app"));
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        let d = Config::parse("");
+        assert_eq!((d.terminal, d.custom_terminal), (None, None));
+        let bad = Config::parse("[opciones]\nterminal = true\nterminal_propia = \"\"\n");
+        assert_eq!((bad.terminal, bad.custom_terminal), (None, None));
+        assert_eq!(bad.errors.len(), 2);
+        assert!(template().contains("\n# terminal = \"iterm\"\n"));
     }
 }

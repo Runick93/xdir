@@ -625,6 +625,30 @@ fn xtree_switch_writes_option() {
     assert_eq!(page(&a), PageId::Builtin(Section::Keys));
 }
 
+/// La fila «Terminal» de Avanzado: muestra la de ahora, el desplegable la cambia y la guarda en
+/// `config.toml`; elegir la primera quita la línea. Si la elegida no está, lo avisa.
+#[test]
+fn terminal_dropdown() {
+    fresh_config();
+    let (mut a, host) = settings_app(Section::Advanced);
+    let items = a.settings_items(Section::Advanced);
+    assert_eq!(row_of(&items, "terminal").control, Control::Dropdown("Terminal".into()));
+    host.set_menu_choice(Some(2));
+    click(&mut a, "terminal", 0);
+    wait_config(&mut a);
+    assert_eq!(a.config.terminal.as_deref(), Some("otra"));
+    assert!(config_text().contains("\nterminal = \"otra\"\n"));
+    assert_eq!(row_of(&a.settings_items(Section::Advanced), "terminal").control, Control::Dropdown("Otra".into()));
+    host.set_menu_choice(Some(1));
+    click(&mut a, "terminal", 0);
+    wait_config(&mut a);
+    assert_eq!(a.config.terminal, None);
+    assert!(!config_text().contains("\nterminal = "));
+    a.config.terminal = Some("iterm".into());
+    let row = row_of(&a.settings_items(Section::Advanced), "terminal");
+    assert_eq!(row.desc, "«iterm» no está: se usa Terminal");
+}
+
 fn row_of(items: &[Item], id: &str) -> Row {
     items.iter().find_map(|i| match i {
         Item::Row(r) if r.id == id => Some(r.clone()),

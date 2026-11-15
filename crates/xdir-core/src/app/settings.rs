@@ -216,6 +216,16 @@ impl App {
                 );
                 vec![Item::Row(row(Control::Table(rows))), Item::Action("ver_atajos", "Ver los atajos".to_string())]
             }
+            "terminal" => {
+                let now = self.default_console();
+                let mut desc = row(Control::None).desc;
+                if let Some(k) = self.config.terminal.as_deref().filter(|k| *k != now.key()) {
+                    desc = format!("«{k}» no está: se usa {}", now.label());
+                } else if self.config.custom_terminal.is_none() {
+                    desc += " · Otra se agrega con terminal_propia en config.toml";
+                }
+                one(Row { desc, ..row(Control::Dropdown(now.label().to_string())) })
+            }
             "abrir_config" => {
                 let path = config::file_path().map(|p| p.display().to_string()).unwrap_or_default();
                 one(Row { desc: path, ..row(Control::Buttons(vec![("Abrir config.toml".to_string(), true)])) })
@@ -381,6 +391,7 @@ impl App {
             ("colores_tipo", _) => self.file_colors = !self.file_colors,
             ("reglas_color", _) | ("error_config", _) => self.run_command(Command::OpenConfig),
             ("vista_defecto", _) => self.default_view_menu(pane),
+            ("terminal", _) => self.default_terminal_menu(pane),
             ("vistas_carpetas", 0) => {
                 if let Some(id) = self.settings_from_tab().map(|t| t.id) {
                     self.apply_view_of_tab_to_all(id);
@@ -515,6 +526,19 @@ impl App {
             Err(e) => e,
         });
         self.redraw();
+    }
+
+    /// El desplegable de la terminal por defecto.
+    fn default_terminal_menu(&mut self, pane: usize) {
+        let (consoles, current) = (self.consoles(), self.default_console());
+        let entries: Vec<shell::Entry> =
+            consoles.iter().enumerate().map(|(i, c)| shell::Entry::Item { id: i as u32 + 1, label: c.label().to_string(), enabled: true, checked: *c == current }).collect();
+        let at = self.part_rect(pane, "terminal", 0).map_or(MenuPos::Cursor, |r| MenuPos::At(r.left, r.bottom + 2.0));
+        if let Some(i) = self.host.popup_menu(&entries, at, None, None).and_then(|c| (c as usize).checked_sub(1))
+            && let Some(c) = consoles.get(i)
+        {
+            self.set_default_terminal(*c);
+        }
     }
 
     /// El desplegable de la vista por defecto.

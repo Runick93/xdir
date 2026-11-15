@@ -357,12 +357,8 @@ pub fn context_menu(
         }
         // «Obtener información» abre el panel de información de xdir.
         c if c == Act::Info as u32 => "properties",
-        c if c == Act::Terminal as u32 => {
-            if let Some(dir) = folder.target() {
-                let _ = std::process::Command::new("open").args(["-a", "Terminal"]).arg(dir).spawn();
-            }
-            "shell"
-        }
+        // La abre el núcleo: la terminal por defecto de la configuración, en la carpeta del panel.
+        c if c == Act::Terminal as u32 => "terminal",
         c if c == Act::Compress as u32 => {
             compress(items);
             "shell"
@@ -381,7 +377,7 @@ fn menu_entries(items: &[Item], own: &[Entry], apps: &[PathBuf]) -> Vec<Entry> {
     if items.is_empty() {
         entries.extend(offset_own(own));
         entries.push(Entry::Sep);
-        entries.push(item(Act::Terminal, "Abrir en Terminal"));
+        entries.push(item(Act::Terminal, "Abrir en la terminal"));
         entries.push(item(Act::Reveal, "Mostrar en el Finder"));
         entries.push(item(Act::Info, "Obtener información"));
         return entries;

@@ -3142,3 +3142,20 @@ fn terminal_menu_use_by_default() {
     assert_eq!(a.default_console(), otra);
     assert!(std::fs::read_to_string(config::file_path().unwrap()).unwrap().contains("\nterminal = \"otra\"\n"));
 }
+
+/// «Abrir en la terminal» del menú contextual (macOS) abre la terminal por defecto, no una fija.
+#[test]
+fn context_menu_terminal_opens_the_default() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    let dir = std::env::temp_dir();
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    a.config.terminal = Some("otra".into());
+    let _ = crate::sys::testing::opened_consoles();
+    FakeShell::choose(Some("terminal"));
+    a.on_context_menu(Some((10.0, 20.0)));
+    FakeShell::choose(None);
+    let opened = crate::sys::testing::opened_consoles();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!((opened[0].0.as_str(), opened[0].1 == dir), ("Otra", true));
+}

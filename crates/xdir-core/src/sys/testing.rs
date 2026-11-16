@@ -1386,7 +1386,7 @@ impl Painter for RecordingPainter {
         self.forgotten.borrow_mut().push(src.clone());
     }
 
-    fn logo(&self, _r: Rect) {}
+    fn logo(&self, _r: Rect, _frame: usize) {}
 
     fn thumb_px(&self, dips: f32) -> u32 {
         dips.round() as u32

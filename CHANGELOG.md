@@ -3,6 +3,8 @@
 ## Sin publicar
 
 ### Nuevo
+- El logo de Runick de «Acerca de xdir» ahora está animado.
+- El instalador de Windows suma el logo de Runick en el panel de la bienvenida y el ícono de xdir junto al título y arriba a la derecha en las demás pantallas.
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».

@@ -15,6 +15,33 @@ impl App {
         self.redraw();
     }
 
+    /// Las consolas del menú `>_`: las del sistema y la propia de `config.toml`.
+    pub(super) fn consoles(&self) -> Vec<Console> {
+        Console::all(self.config.custom_terminal.as_deref())
+    }
+
+    /// La terminal que abre «Abrir la terminal en la carpeta»: la de `[opciones] terminal` si
+    /// está, si no la primera del sistema.
+    pub(super) fn default_console(&self) -> Console {
+        Console::preferred(self.config.terminal.as_deref(), self.config.custom_terminal.as_deref())
+    }
+
+    /// Elige la terminal por defecto y la guarda en `config.toml`. La primera del sistema es la
+    /// de fábrica: elegirla quita la línea.
+    pub(super) fn set_default_terminal(&mut self, console: Console) {
+        let first = Console::all(None).first().copied();
+        let key = "terminal".to_string();
+        let edit = if first == Some(console) {
+            self.config.terminal = None;
+            config::ConfigEdit::Remove { section: "opciones", key }
+        } else {
+            self.config.terminal = Some(console.key().to_string());
+            config::ConfigEdit::Set { section: "opciones", key, value: crate::toml::quote(console.key()) }
+        };
+        self.edit_config(vec![edit]);
+        self.redraw();
+    }
+
     // ---------- color de acento ----------
 
     pub fn set_accent(&mut self, accent: Accent) {

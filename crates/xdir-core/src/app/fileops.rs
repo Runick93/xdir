@@ -601,6 +601,8 @@ impl App {
             Some("paste") => self.paste(),
             // «Propiedades» / «Obtener información» del menú: el panel de información.
             Some("properties") => self.open_info(),
+            // «Abrir en la terminal» del menú del fondo (macOS): la terminal por defecto.
+            Some("terminal") => self.open_console(pane, self.default_console()),
             _ => {}
         }
         self.redraw();

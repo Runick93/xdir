@@ -79,6 +79,8 @@ impl Waker for FakeWaker {
 }
 
 thread_local! {
+    /// Consolas abiertas en este hilo: (nombre o programa, carpeta, verbo).
+    static OPENED: RefCell<Vec<(String, PathBuf, String)>> = const { RefCell::new(Vec::new()) };
     /// Historial de rutas escritas del falso: en memoria y por hilo, para que los tests no se
     /// pisen.
     static TYPED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -187,14 +189,22 @@ impl SystemEnv for FakeEnv {
     }
 
     fn consoles(&self) -> Vec<ConsoleInfo> {
-        vec![ConsoleInfo { id: 0, label: "Terminal" }]
+        vec![ConsoleInfo { id: 0, key: "terminal", label: "Terminal" }, ConsoleInfo { id: 1, key: "otra", label: "Otra" }]
     }
 
     fn console_alt_verbs(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
 
-    fn open_console(&self, _owner: Handle, _id: u8, _dir: &Path, _verb: &str) -> bool {
+    /// Anota lo que se abrió (ver `opened_consoles`) y dice que no se pudo.
+    fn open_console(&self, _owner: Handle, id: u8, dir: &Path, verb: &str) -> bool {
+        let label = self.consoles().into_iter().find(|c| c.id == id).map_or("?", |c| c.label);
+        OPENED.with(|o| o.borrow_mut().push((label.to_string(), dir.to_path_buf(), verb.to_string())));
+        false
+    }
+
+    fn open_custom_console(&self, _owner: Handle, program: &str, dir: &Path, verb: &str) -> bool {
+        OPENED.with(|o| o.borrow_mut().push((program.to_string(), dir.to_path_buf(), verb.to_string())));
         false
     }
 
@@ -1376,7 +1386,7 @@ impl Painter for RecordingPainter {
         self.forgotten.borrow_mut().push(src.clone());
     }
 
-    fn logo(&self, _r: Rect) {}
+    fn logo(&self, _r: Rect, _frame: usize) {}
 
     fn thumb_px(&self, dips: f32) -> u32 {
         dips.round() as u32
@@ -1928,4 +1938,10 @@ impl crate::a11y::A11yView for FakeA11y {
         let pos = ((y - A11Y_LIST_TOP) / A11Y_ROW_H).floor();
         (pos >= 0.0 && (pos as usize) < self.item_count(pane)).then_some(pos as usize)
     }
+}
+
+/// Las consolas que se abrieron en este hilo (y se olvidan): (nombre o programa propio, carpeta,
+/// verbo).
+pub fn opened_consoles() -> Vec<(String, PathBuf, String)> {
+    OPENED.with(|o| std::mem::take(&mut *o.borrow_mut()))
 }

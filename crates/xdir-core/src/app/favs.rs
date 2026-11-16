@@ -138,21 +138,24 @@ impl App {
         }
     }
 
-    /// Clic derecho en PowerShell o CMD del menú de terminales: abrirla como administrador o con
-    /// las credenciales de otro usuario.
+    /// Clic derecho en una terminal del menú: usarla por defecto y, si el sistema las ofrece,
+    /// abrirla como administrador o con las credenciales de otro usuario.
     pub(super) fn console_context_menu(&mut self, pane: usize, console: Console) {
+        const DEFAULT: u32 = 1000;
+        let is_default = self.default_console() == console;
+        let mut entries = vec![shell::Entry::Item { id: DEFAULT, label: "Usar por defecto".to_string(), enabled: !is_default, checked: is_default }];
         // Las variantes que ofrece el sistema (en Windows: administrador y otro usuario).
         let verbs = Console::alt_verbs();
-        if verbs.is_empty() {
+        if !verbs.is_empty() {
+            entries.push(shell::Entry::Sep);
+            entries.extend(verbs.iter().enumerate().map(|(i, (_, label))| shell::Entry::Item { id: i as u32 + 1, label: label.to_string(), enabled: true, checked: false }));
+        }
+        let Some(cmd) = self.host.popup_menu(&entries, MenuPos::Cursor, None, None) else { return };
+        if cmd == DEFAULT {
+            self.set_default_terminal(console);
             return;
         }
-        let entries: Vec<shell::Entry> = verbs
-            .iter()
-            .enumerate()
-            .map(|(i, (_, label))| shell::Entry::Item { id: i as u32 + 1, label: label.to_string(), enabled: true, checked: false })
-            .collect();
-        let Some(cmd) = self.host.popup_menu(&entries, MenuPos::Cursor, None, None) else { return };
-        let Some(&(verb, _)) = verbs.get(cmd as usize - 1) else { return };
+        let Some(&(verb, _)) = (cmd as usize).checked_sub(1).and_then(|i| verbs.get(i)) else { return };
         self.term_menu = None;
         if let Location::Path(dir) = self.panes[pane].tab().location.clone() {
             if !console.open_as(self.hwnd, &dir, verb) {

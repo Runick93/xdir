@@ -78,8 +78,8 @@ pub trait Painter {
     /// Olvida las imágenes grandes de `src` (el archivo cambió): la próxima `big_image` la vuelve
     /// a pedir. Donde no hay caché, no hace nada.
     fn forget_big(&self, _src: &thumbs::Source) {}
-    /// Logo de Runick centrado en `r` sin deformarlo.
-    fn logo(&self, r: Rect);
+    /// Cuadro `frame` del logo de Runick centrado en `r` sin deformarlo.
+    fn logo(&self, r: Rect, frame: usize);
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
     fn thumb_px(&self, dips: f32) -> u32;
     /// Dibuja lo que haga `f` recortado a `r`. Si hace falta un resultado, `f` lo deja en una

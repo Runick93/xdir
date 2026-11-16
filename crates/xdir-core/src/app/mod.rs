@@ -470,6 +470,9 @@ pub struct App {
     picker_open: bool,
     /// Diálogo "Acerca de" abierto.
     about_open: bool,
+    /// Desde cuándo se ve el diálogo (para animar el logo) y si ya hay un cuadro pedido.
+    about_t0: Option<Instant>,
+    about_tick: bool,
     /// Campo de texto abierto por una página extra de la configuración (Red): su `field_done`
     /// recibe esta caja al terminar.
     settings_field: Option<TextBox>,
@@ -722,6 +725,8 @@ impl App {
             dark_mode: session.dark_mode,
             picker_open: false,
             about_open: false,
+            about_t0: None,
+            about_tick: false,
             settings_field: None,
             config_saving: false,
             config_pending: Vec::new(),

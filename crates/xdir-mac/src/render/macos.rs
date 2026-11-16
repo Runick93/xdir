@@ -60,7 +60,8 @@ struct Images {
     big: thumbs::BigCache<CFRetained<CGImage>>,
     /// Imágenes grandes que fallaron hace poco (no se vuelven a pedir hasta `BIG_RETRY`).
     big_failed: thumbs::BigFailures,
-    logo: Option<CFRetained<CGImage>>,
+    /// Cuadros del logo del diálogo "Acerca de", creados la primera vez que se muestran.
+    logo: Vec<Option<CFRetained<CGImage>>>,
     /// SF Symbols por (glifo, tamaño, color).
     symbols: HashMap<(char, u32, [u8; 4]), Option<Retained<NSImage>>>,
     handle: Handle,
@@ -378,13 +379,16 @@ impl paint::Painter for Painter<'_> {
     }
 
     /// Logo de Runick centrado en `r` sin deformarlo.
-    fn logo(&self, r: Rect) {
+    fn logo(&self, r: Rect, frame: usize) {
         let image = {
             let mut images = self.images.borrow_mut();
-            if images.logo.is_none() {
-                images.logo = xdir_core::about::logo_pixels().and_then(|px| cgimage_from(&px));
+            if images.logo.len() <= frame {
+                images.logo.resize(frame + 1, None);
             }
-            images.logo.clone()
+            if images.logo[frame].is_none() {
+                images.logo[frame] = xdir_core::about::logo_pixels(frame).and_then(|px| cgimage_from(&px));
+            }
+            images.logo[frame].clone()
         };
         let Some(image) = image else { return };
         let (bw, bh) = (CGImage::width(Some(&image)) as f32, CGImage::height(Some(&image)) as f32);

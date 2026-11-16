@@ -279,7 +279,8 @@ impl App {
     /// `WM_APP_ACTIVITY`: otro cuadro.
     pub(super) fn on_activity_tick(&mut self) {
         self.activity.tick_due = None;
-        if !self.activity.is_empty() {
+        self.about_tick = false;
+        if !self.activity.is_empty() || self.about_open {
             self.redraw();
         }
     }

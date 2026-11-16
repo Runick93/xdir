@@ -35,6 +35,11 @@ OutputBaseFilename=xdir-{#AppVersion}-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; Imágenes del asistente (una por escala de pantalla; las genera scripts\make-installer-images.py).
+; Inno 6 oculta por defecto la página de bienvenida, que es donde va el panel lateral.
+DisableWelcomePage=no
+WizardImageFile=wizard-164.bmp,wizard-192.bmp,wizard-246.bmp,wizard-273.bmp,wizard-328.bmp,wizard-355.bmp
+WizardSmallImageFile=wizard-small-55.bmp,wizard-small-64.bmp,wizard-small-73.bmp,wizard-small-82.bmp,wizard-small-92.bmp,wizard-small-110.bmp
 UninstallDisplayIcon={app}\xdir.exe
 ; Nombre en "Aplicaciones instaladas" (sin la versión, que va en su propia columna).
 UninstallDisplayName=xdir
@@ -51,6 +56,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; El exe compilado se llama xdir-windows.exe; se instala con el nombre de siempre.
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "xdir.exe"; Flags: ignoreversion
+; Ícono que InitializeWizard pone a la izquierda del título de la bienvenida (solo se usa durante la instalación).
+Source: "wizard-title-icon.bmp"; Flags: dontcopy
 
 [InstallDelete]
 ; xtree ahora es parte de xdir: se borra el programa aparte que dejaron las versiones anteriores.
@@ -104,4 +111,21 @@ function InitializeUninstall(): Boolean;
 begin
   CloseXdir();
   Result := True;
+end;
+
+// Ícono de xdir a la izquierda del título de la bienvenida: el título se corre a la derecha para dejarle lugar.
+procedure InitializeWizard();
+var
+  Icon: TBitmapImage;
+  Gap: Integer;
+begin
+  ExtractTemporaryFile('wizard-title-icon.bmp');
+  Gap := ScaleX(48) + ScaleX(12);
+  Icon := TBitmapImage.Create(WizardForm);
+  Icon.Parent := WizardForm.WelcomePage;
+  Icon.Stretch := True;
+  Icon.Bitmap.LoadFromFile(ExpandConstant('{tmp}\wizard-title-icon.bmp'));
+  Icon.SetBounds(WizardForm.WelcomeLabel1.Left, WizardForm.WelcomeLabel1.Top, ScaleX(48), ScaleY(48));
+  WizardForm.WelcomeLabel1.Left := WizardForm.WelcomeLabel1.Left + Gap;
+  WizardForm.WelcomeLabel1.Width := WizardForm.WelcomeLabel1.Width - Gap;
 end;

@@ -248,7 +248,7 @@ impl Renderer {
         self.icons.borrow_mut().bitmaps.clear();
         self.icons.borrow_mut().thumbs.clear();
         self.icons.borrow_mut().big.clear();
-        self.icons.borrow_mut().logo = None;
+        self.icons.borrow_mut().logo.clear();
     }
 }
 
@@ -463,12 +463,15 @@ impl paint::Painter for Painter<'_> {
     }
 
     /// Logo de Runick centrado en `r` sin deformarlo (ni agrandarlo más que su tamaño de origen).
-    fn logo(&self, r: Rect) {
+    fn logo(&self, r: Rect, frame: usize) {
         let mut icons = self.icons.borrow_mut();
-        if icons.logo.is_none() {
-            icons.logo = xdir_core::about::logo_pixels().and_then(|px| bitmap_from(self.ctx, &px));
+        if icons.logo.len() <= frame {
+            icons.logo.resize(frame + 1, None);
         }
-        let Some(bitmap) = icons.logo.clone() else { return };
+        if icons.logo[frame].is_none() {
+            icons.logo[frame] = xdir_core::about::logo_pixels(frame).and_then(|px| bitmap_from(self.ctx, &px));
+        }
+        let Some(bitmap) = icons.logo[frame].clone() else { return };
         drop(icons);
         let size = unsafe { bitmap.GetPixelSize() };
         let (bw, bh) = (size.width as f32, size.height as f32);
@@ -626,8 +629,8 @@ struct Icons {
     big: thumbs::BigCache<ID2D1Bitmap1>,
     /// Imágenes grandes que fallaron hace poco (no se vuelven a pedir hasta `BIG_RETRY`).
     big_failed: thumbs::BigFailures,
-    /// Logo del diálogo "Acerca de", creado la primera vez que se muestra.
-    logo: Option<ID2D1Bitmap1>,
+    /// Cuadros del logo del diálogo "Acerca de", creados la primera vez que se muestran.
+    logo: Vec<Option<ID2D1Bitmap1>>,
 }
 
 /// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
@@ -645,7 +648,7 @@ impl Icons {
             thumbs: HashMap::new(),
             big: thumbs::BigCache::default(),
             big_failed: thumbs::BigFailures::default(),
-            logo: None,
+            logo: Vec::new(),
         }
     }
 

@@ -891,48 +891,57 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
 // ---------- menú de consola ----------
 
 const TERM_ROW_H: f32 = 34.0;
-const TERM_MENU_W: f32 = 210.0;
+const TERM_MENU_W: f32 = 240.0;
 
-/// Menú desplegable debajo del botón `>_`: una fila por consola.
-fn terminal_menu_rows(anchor: Rect, w: f32) -> Vec<(Console, Rect)> {
+/// Menú desplegable debajo del botón `>_`: una fila por consola (`consoles`, la lista del sistema
+/// más la propia).
+fn terminal_menu_rows(anchor: Rect, w: f32, consoles: &[Console]) -> Vec<(Console, Rect)> {
     let left = (anchor.left - 8.0).min(w - GAP - TERM_MENU_W);
     let top = anchor.bottom + 6.0;
-    Console::all()
-        .into_iter()
+    consoles
+        .iter()
         .enumerate()
         .map(|(i, c)| {
             let y = top + 6.0 + i as f32 * TERM_ROW_H;
-            (c, rect(left + 6.0, y, left + TERM_MENU_W - 6.0, y + TERM_ROW_H))
+            (*c, rect(left + 6.0, y, left + TERM_MENU_W - 6.0, y + TERM_ROW_H))
         })
         .collect()
 }
 
-fn terminal_menu_rect(anchor: Rect, w: f32) -> Rect {
-    let rows = terminal_menu_rows(anchor, w);
-    let (first, last) = (rows[0].1, rows[rows.len() - 1].1);
-    rect(first.left - 6.0, first.top - 6.0, first.right + 6.0, last.bottom + 6.0)
+fn terminal_menu_rect(anchor: Rect, w: f32, consoles: &[Console]) -> Rect {
+    let rows = terminal_menu_rows(anchor, w, consoles);
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else { return rect(0.0, 0.0, 0.0, 0.0) };
+    rect(first.1.left - 6.0, first.1.top - 6.0, first.1.right + 6.0, last.1.bottom + 6.0)
 }
 
 /// `Some(None)`: dentro del menú pero sobre nada.
-pub fn terminal_menu_at(anchor: Rect, w: f32, x: f32, y: f32) -> Option<Option<Console>> {
-    if !contains(&terminal_menu_rect(anchor, w), x, y) {
+pub fn terminal_menu_at(anchor: Rect, w: f32, consoles: &[Console], x: f32, y: f32) -> Option<Option<Console>> {
+    if !contains(&terminal_menu_rect(anchor, w, consoles), x, y) {
         return None;
     }
-    Some(terminal_menu_rows(anchor, w).into_iter().find(|(_, r)| contains(r, x, y)).map(|(c, _)| c))
+    Some(terminal_menu_rows(anchor, w, consoles).into_iter().find(|(_, r)| contains(r, x, y)).map(|(c, _)| c))
 }
 
-pub fn draw_terminal_menu(p: &dyn Painter, anchor: Rect, w: f32, hover: Option<Console>) {
+/// El menú de terminales; la de `default` (la que abre el comando) lleva «Por defecto» a la derecha.
+pub fn draw_terminal_menu(p: &dyn Painter, anchor: Rect, w: f32, consoles: &[Console], default: Console, hover: Option<Console>) {
     let th = p.theme();
-    let panel = terminal_menu_rect(anchor, w);
+    let panel = terminal_menu_rect(anchor, w, consoles);
     p.round_fill(rect(panel.left - 2.0, panel.top, panel.right + 2.0, panel.bottom + 4.0), 10.0, alpha(th.background, 0.5));
     p.round_fill(panel, 8.0, th.surface_alt);
     p.round_stroke(panel, 8.0, th.border);
-    for (c, r) in terminal_menu_rows(anchor, w) {
+    for (c, r) in terminal_menu_rows(anchor, w, consoles) {
         if hover == Some(c) {
             p.round_fill(r, 6.0, th.hover);
         }
         p.text(FontId::UiBold, ">_", rect(r.left + 8.0, r.top, r.left + 34.0, r.bottom), th.accent);
-        p.text(FontId::Ui, c.label(), rect(r.left + 40.0, r.top, r.right - 8.0, r.bottom), th.text);
+        let mut label_right = r.right - 8.0;
+        if c == default {
+            // Small va alineado a la izquierda: se pega a la derecha con su ancho.
+            let tw = p.measure(FontId::Small, "Por defecto");
+            label_right = r.right - 16.0 - tw;
+            p.text(FontId::Small, "Por defecto", rect(r.right - 8.0 - tw, r.top, r.right - 4.0, r.bottom), th.text_dim);
+        }
+        p.text(FontId::Ui, c.label(), rect(r.left + 40.0, r.top, label_right, r.bottom), th.text);
     }
 }
 

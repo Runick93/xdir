@@ -5,6 +5,8 @@
 ## 0.2.1 — 2026-11-14
 
 ### Nuevo
+- El logo de Runick de «Acerca de xdir» ahora está animado.
+- El instalador de Windows suma el logo de Runick en el panel de la bienvenida y el ícono de xdir junto al título y arriba a la derecha en las demás pantallas.
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
 - Botón «← xdir» en la barra de xtree para volver a los paneles (lo mismo que Esc).
 - La barra de estado suma también lo que pesan las carpetas elegidas: «calculando…» y después el total, sin trabar la ventana. En carpetas de red se calcula al tocar «calcular tamaño».
@@ -14,8 +16,10 @@
 - Expulsar un disco o desconectar una conexión da señal mientras dura: la barra de estado dice «Expulsando "Pendrive"…» (o que espera a que terminen las copias o las lecturas en curso) y su ⏏ gira en el árbol, en «Este equipo», en el panel de información y en Configuración ▸ Red; un segundo clic no hace nada. Al terminar, «Se expulsó "Pendrive": ya lo podés quitar» (o «Se desconectó "srv"»).
 - Indicador de actividad en la barra de estado: un círculo girando mientras haya algo en segundo plano (conexiones, expulsar, tamaño de lo elegido, comparar contenido, sumas de verificación, búsquedas, carpetas que tardan, xtree, extracciones). Al pasar el mouse dice qué está en curso; con copias, un clic abre su ventana. No aparece por lo que dura menos de 0,3 s.
 - **Historial de crecimiento en xtree**: cada análisis guarda una foto de los tamaños, y la tarjeta de la carpeta muestra cuánto creció en 7, 30 o 90 días, un gráfico y las 5 subcarpetas que más crecieron (clic para entrar). En la tabla, una ▲ marca las carpetas que crecieron mucho. Se apaga o se borra en Configuración ▸ xtree; los discos de red no guardan historial.
+- **Terminal por defecto**: elegí qué terminal abre «Abrir la terminal en la carpeta» en Configuración ▸ Avanzado ▸ Terminal, o con clic derecho sobre una del menú `>_` → «Usar por defecto» (la elegida dice «Por defecto»). Se detectan más terminales: en la Mac Ghostty, Warp, WezTerm, Alacritty, kitty, Hyper y Tabby además de Terminal e iTerm; en Windows también Git Bash; en Linux todas las que estén instaladas. Otra cualquiera se agrega con `terminal_propia` en config.toml.
 
 ### Cambios
+- El comando «Abrir PowerShell en la carpeta» (en la Mac, «Abrir Terminal en la carpeta») pasa a llamarse «Abrir la terminal en la carpeta» y abre la terminal por defecto; «Abrir CMD en la carpeta» sigue abriendo CMD.
 - Cualquier carpeta que tarda más de medio segundo en leerse (local, de red o comprimida) muestra «Cargando…» con el indicador girando, encima de lo que ya llegó. En red sigue el aviso «Conectando…» / «no responde».
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
 - Los botones del pie del panel (carpeta nueva y vista) son más grandes.

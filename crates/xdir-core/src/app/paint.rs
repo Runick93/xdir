@@ -181,6 +181,24 @@ impl App {
         let (show_favorites, fav_drop) = (self.show_favorites, self.fav_drop);
         let (picker_open, accent) = (self.picker_open, self.accent);
         let about_open = self.about_open;
+        // Logo animado: el cuadro que toca y, si falta para el siguiente, un cuadro pedido a tiempo.
+        let mut about_frame = 0;
+        if about_open {
+            let t0 = *self.about_t0.get_or_insert_with(Instant::now);
+            let (frame, wait) = about::logo_frame_at(t0.elapsed().as_millis() as u64);
+            about_frame = frame;
+            if !self.about_tick {
+                self.about_tick = true;
+                let hwnd = self.hwnd;
+                let wait = std::time::Duration::from_millis(wait.max(1));
+                std::thread::spawn(move || {
+                    std::thread::sleep(wait);
+                    hwnd.post(super::activity::WM_APP_ACTIVITY, 0, 0);
+                });
+            }
+        } else {
+            self.about_t0 = None;
+        }
         let term_menu = self.term_menu;
         let tab_drop = self.tab_drop;
         let filter_pane = self.filter_edit.map(|(_, p)| p);
@@ -336,7 +354,7 @@ impl App {
                     Hit::TermMenu(c) => c,
                     _ => None,
                 };
-                ui::draw_terminal_menu(p, self.panes[pane].terminal_rect(), w, term_hover);
+                ui::draw_terminal_menu(p, self.panes[pane].terminal_rect(), w, &self.consoles(), self.default_console(), term_hover);
             }
             if picker_open {
                 let picker_hover = match hover {
@@ -360,7 +378,7 @@ impl App {
                     Hit::About(k) => Some(k),
                     _ => None,
                 };
-                about::draw(p, w, h, about_hover);
+                about::draw(p, w, h, about_hover, about_frame);
             }
             if let (Some(d), Some((style, example, dates, fav))) = (&self.net.dialog, &connect_extra) {
                 let places = &self.net.places;

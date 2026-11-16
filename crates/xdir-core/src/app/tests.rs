@@ -28,8 +28,8 @@ fn test_app_uses_the_fake_env() {
     let _a = app();
     let name = format!("{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], "");
     assert_eq!(crate::session::config_dir(), Some(std::env::temp_dir().join("xdir-tests").join(name)));
-    let labels: Vec<_> = Console::all().iter().map(|c| c.label()).collect();
-    assert_eq!(labels, ["Terminal"]);
+    let labels: Vec<_> = Console::all(None).iter().map(|c| c.label()).collect();
+    assert_eq!(labels, ["Terminal", "Otra"]);
     assert_eq!(crate::format::date(116_444_736_000_000_000), "1970-01-01");
     assert_eq!(crate::format::size_kb(2048), "2 KB");
 }
@@ -3098,4 +3098,64 @@ fn refresh_keeps_trash_search() {
     pump(&mut a, 0);
     assert_eq!(shown_names(&a, 0), ["foto nueva.png", "foto.jpg"]);
     assert_eq!(a.panes[0].tab().status(), "Búsqueda «foto»: 2 encontrados");
+}
+
+/// «Abrir la terminal en la carpeta» abre la de `[opciones] terminal`; si no está instalada, la
+/// primera; con `terminal = "propia"`, el programa de `terminal_propia`.
+#[test]
+fn terminal_command_opens_the_default() {
+    let mut a = app();
+    let dir = std::env::temp_dir();
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    let opened = || crate::sys::testing::opened_consoles().into_iter().map(|(n, d, v)| (n, d == dir, v)).collect::<Vec<_>>();
+    let _ = crate::sys::testing::opened_consoles();
+    a.run_command(Command::PowerShell);
+    assert_eq!(opened(), [("Terminal".to_string(), true, "open".to_string())]);
+    a.config.terminal = Some("otra".into());
+    a.run_command(Command::PowerShell);
+    assert_eq!(opened(), [("Otra".to_string(), true, "open".to_string())]);
+    a.config.terminal = Some("no-instalada".into());
+    a.run_command(Command::PowerShell);
+    assert_eq!(opened()[0].0, "Terminal");
+    a.config.terminal = Some(crate::console::CUSTOM_KEY.into());
+    a.config.custom_terminal = Some("/opt/foot".into());
+    a.run_command(Command::PowerShell);
+    assert_eq!(opened(), [("/opt/foot".to_string(), true, "open".to_string())]);
+    // La propia va al final del menú `>_`.
+    assert_eq!(a.consoles().iter().map(|c| c.label()).collect::<Vec<_>>(), ["Terminal", "Otra", "foot"]);
+}
+
+/// Clic derecho en una terminal del menú `>_` → «Usar por defecto» la guarda en `config.toml`.
+#[test]
+fn terminal_menu_use_by_default() {
+    crate::sys::testing::install_fakes();
+    let _ = std::fs::remove_file(config::file_path().unwrap());
+    let host = FakeHost::new();
+    let mut a = App::new(Init::blank(), host.clone());
+    let otra = a.consoles()[1];
+    host.set_menu_choice(Some(1000));
+    a.console_context_menu(0, otra);
+    while a.config_saving {
+        let t = a.task_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la escritura termina");
+        a.on_task_done(t);
+    }
+    assert_eq!(a.default_console(), otra);
+    assert!(std::fs::read_to_string(config::file_path().unwrap()).unwrap().contains("\nterminal = \"otra\"\n"));
+}
+
+/// «Abrir en la terminal» del menú contextual (macOS) abre la terminal por defecto, no una fija.
+#[test]
+fn context_menu_terminal_opens_the_default() {
+    use crate::sys::testing::FakeShell;
+    let mut a = app();
+    let dir = std::env::temp_dir();
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    a.config.terminal = Some("otra".into());
+    let _ = crate::sys::testing::opened_consoles();
+    FakeShell::choose(Some("terminal"));
+    a.on_context_menu(Some((10.0, 20.0)));
+    FakeShell::choose(None);
+    let opened = crate::sys::testing::opened_consoles();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!((opened[0].0.as_str(), opened[0].1 == dir), ("Otra", true));
 }

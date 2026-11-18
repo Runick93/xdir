@@ -5,7 +5,7 @@ use super::*;
 use crate::keys::keys::VK_DOWN as KEY_DOWN;
 use crate::sys::testing::{FakeCopyPrims, FakeFileOps, FakeHost};
 use crate::sys::{ErrKind, VolumeInfo};
-use crate::transfer::{Answer, Choice, JobSpec, JobState};
+use crate::transfer::{Answer, Choice, JobId, JobSpec, JobState};
 use std::path::Path;
 use std::time::Duration;
 
@@ -292,7 +292,7 @@ fn second_eject_does_not_drop_the_first() {
 
 // ---------- ventana de copia ----------
 
-use crate::host::{AuxMouse, AuxWindow};
+use crate::host::{AuxMouse, AuxProgress, AuxWindow};
 use crate::sys::testing::FakeShell;
 use crate::transfer::view::{self, ViewHit};
 
@@ -312,6 +312,90 @@ fn slow_copy(f: &FakeCopyPrims, root: &str, delay: u64) -> JobSpec {
     f.add_dir(&p(&format!("{root}/d")));
     f.set_slow(&src, Some(Duration::from_millis(delay)));
     JobSpec::Copy { sources: vec![src], dest: p(&format!("{root}/d")) }
+}
+
+/// Dos copias lentas, con raíces distintas pero sobre el mismo disco falso. Con `first_runs` la
+/// segunda se lanza recién cuando la primera ya corre (si no, los dos hilos compiten por anotarse).
+fn two_same_disk_copies(a: &mut App, f: &FakeCopyPrims, tag: &str, first_runs: bool) -> (JobId, JobId) {
+    let (r1, r2) = (format!("/{tag}-1"), format!("/{tag}-2"));
+    let s1 = slow_copy(f, &r1, 20);
+    let s2 = slow_copy(f, &r2, 20);
+    f.set_volume(&p(&r1), volume(tag));
+    f.set_volume(&p(&r2), volume(tag));
+    let i1 = a.start_transfer(s1);
+    if first_runs {
+        wait(a, |a| a.jobs().iter().any(|j| j.id == i1 && j.state == JobState::Running));
+    }
+    (i1, a.start_transfer(s2))
+}
+
+/// De fábrica las copias sobre el mismo disco corren a la vez: ninguna pasa por «en cola».
+#[test]
+fn same_disk_jobs_run_together_by_default() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-par", false);
+    let waited = std::cell::Cell::new(false);
+    wait(&mut a, |a| {
+        if a.jobs().iter().any(|j| j.state == JobState::Waiting) {
+            waited.set(true);
+        }
+        [i1, i2].iter().all(|id| a.jobs().iter().any(|j| j.id == *id && j.state == JobState::Running))
+    });
+    assert!(!waited.get());
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// Con `cola_por_disco` el segundo trabajo sobre el mismo disco espera su turno.
+#[test]
+fn queue_by_disk_makes_second_wait() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-cola", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// «Empezar ahora» saca de la cola a un trabajo que espera su turno, con el primero todavía corriendo.
+#[test]
+fn start_now_runs_queued_job() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-ahora", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    click_aux(&mut a, ViewHit::StartNow(i2));
+    wait(&mut a, |a| {
+        let st = |id| a.jobs().iter().find(|j| j.id == id).map(|j| j.state);
+        st(i2) == Some(JobState::Running) && st(i1) == Some(JobState::Running)
+    });
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// Apagar «Copias en cola por disco» con un trabajo esperando lo libera, con el primero corriendo.
+#[test]
+fn turning_queue_off_releases_waiting_job() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-apaga", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    a.toggle_queue_by_disk();
+    assert!(!a.config.queue_by_disk);
+    wait(&mut a, |a| {
+        let st = |id| a.jobs().iter().find(|j| j.id == id).map(|j| j.state);
+        st(i2) == Some(JobState::Running) && st(i1) == Some(JobState::Running)
+    });
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
 }
 
 /// Clic en el control `h` de la ventana de copia (lo busca recorriendo el área).
@@ -486,20 +570,25 @@ fn dismiss_errors_hides_window() {
     let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wd/s/b.txt")], dest: p("/app-wd/d") });
     wait(&mut a, idle);
     assert!(host.aux_visible());
+    // Con errores, el avance va en rojo.
+    assert!(host.aux_progresses().contains(&AuxProgress::Error(1.0)), "{:?}", host.aux_progresses());
     click_aux(&mut a, ViewHit::Dismiss(id));
     assert!(a.jobs().is_empty());
     assert!(!host.aux_visible());
+    assert_eq!(host.aux_progresses().last(), Some(&AuxProgress::None));
 }
 
 #[test]
 fn pause_resume_cancel_buttons() {
     let f = fake();
-    let (mut a, _host) = app_window();
+    let (mut a, host) = app_window();
     let id = a.start_transfer(slow_copy(&f, "/app-wp", 20));
     wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
     a.on_transfer_due(id);
     click_aux(&mut a, ViewHit::Pause(id));
     assert!(a.jobs()[0].paused);
+    // En pausa, el avance va en amarillo.
+    assert!(matches!(host.aux_progresses().last(), Some(AuxProgress::Paused(_))), "{:?}", host.aux_progresses());
     assert!(aux_texts(&mut a).iter().any(|t| t == "Reanudar"));
     click_aux(&mut a, ViewHit::Resume(id));
     assert!(!a.jobs()[0].paused);
@@ -545,6 +634,22 @@ fn indicator_click_reopens() {
     assert_eq!(host.aux_shows().len(), 2);
     a.cancel_job(id);
     wait(&mut a, idle);
+}
+
+#[test]
+fn copy_window_reports_taskbar_progress() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wtb", 5));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    let reported = host.aux_progresses();
+    assert!(matches!(reported.last(), Some(AuxProgress::Normal(x)) if (0.0..=1.0).contains(x)), "{reported:?}");
+    // En milésimas: no se manda un avance por cada bloque copiado.
+    assert!(matches!(reported.last(), Some(AuxProgress::Normal(x)) if ((x * 1000.0).round() - x * 1000.0).abs() < 1e-3), "{reported:?}");
+    f.set_slow(&p("/app-wtb/s/grande.bin"), None);
+    wait(&mut a, idle);
+    assert_eq!(host.aux_progresses().last(), Some(&AuxProgress::None));
 }
 
 #[test]

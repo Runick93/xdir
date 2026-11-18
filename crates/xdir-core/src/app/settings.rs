@@ -186,6 +186,7 @@ impl App {
             "xtree_por_tipo" => one(row(Control::Switch(self.config.xtree_by_type))),
             "xtree_abrir" => one(row(Control::Dropdown(self.config.xtree_open.title().to_string()))),
             "xtree_historial" => one(row(Control::Switch(self.config.xtree_history))),
+            "cola_por_disco" => one(row(Control::Switch(self.config.queue_by_disk))),
             "xtree_borrar_historial" => {
                 let desc = self.xtree_history_msg.clone().map_or_else(|| row(Control::None).desc, |m| format!("{} \u{B7} {m}", row(Control::None).desc));
                 one(Row { desc, ..row(Control::Buttons(vec![("Borrar historial".to_string(), true)])) })
@@ -434,6 +435,7 @@ impl App {
             }
             ("xtree_abrir", _) => self.xtree_open_menu(pane),
             ("xtree_historial", _) => self.toggle_xtree_history(),
+            ("cola_por_disco", _) => self.toggle_queue_by_disk(),
             ("xtree_borrar_historial", _) => self.clear_xtree_history(),
             ("ver_atajos", _) => self.open_settings(Some(PageId::Builtin(Section::Keys))),
             ("abrir_config", _) => self.run_command(Command::OpenConfig),

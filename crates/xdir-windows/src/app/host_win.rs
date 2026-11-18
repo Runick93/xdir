@@ -756,6 +756,10 @@ impl WindowHost for Win32Host {
     fn aux_hide(&self, w: xdir_core::host::AuxWindow) {
         crate::auxwin::hide(w);
     }
+
+    fn aux_progress(&self, w: xdir_core::host::AuxWindow, p: xdir_core::host::AuxProgress) {
+        crate::auxwin::set_progress(w, p);
+    }
 }
 
 /// Los lectores de pantalla de Windows: UI Automation (ver `uia.rs`).

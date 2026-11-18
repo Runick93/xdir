@@ -599,7 +599,9 @@ impl App {
     /// Le pasa al host el avance de la cola, solo si cambió desde la última vez.
     fn sync_transfers_progress(&mut self) {
         let jobs = &self.transfers.jobs;
-        let value = self.transfers_progress().unwrap_or(0.0);
+        // En milésimas (lo que distingue la barra de tareas): así «solo si cambió» no manda un
+        // avance por cada bloque copiado.
+        let value = (self.transfers_progress().unwrap_or(0.0) * 1000.0).round() / 1000.0;
         let open: Vec<&JobView> = jobs.iter().filter(|j| j.state != JobState::Done).collect();
         let p = if self.transfers_failed() {
             AuxProgress::Error(value)

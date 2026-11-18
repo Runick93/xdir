@@ -4,9 +4,9 @@
 //! ícono de xdir y el avance de la cola encima: `set_progress`), sin redimensionar (el alto lo
 //! pone el contenido con `aux_resize`), centrada sobre la ventana de xdir la primera vez (sin
 //! salirse del área de trabajo de su monitor) y después donde la dejó el usuario (mientras dure
-//! la sesión). Dibuja con un `Renderer` propio llamando a `App::paint_aux`; el mouse y las teclas van a `App::aux_mouse` / `App::aux_key`; minimizarla
-//! la deja en la barra de tareas; cerrarla la oculta (`App::aux_closed`, sin botón en la barra) y
-//! los trabajos siguen.
+//! la sesión). Dibuja con un `Renderer` propio llamando a `App::paint_aux`; el mouse y las teclas
+//! van a `App::aux_mouse` / `App::aux_key`; minimizarla la deja en la barra de tareas; cerrarla la
+//! oculta (`App::aux_closed`, sin botón en la barra) y los trabajos siguen.
 //!
 //! Sigue el modelo de `quicklook/window.rs`: estado en un `thread_local` del hilo de interfaz que
 //! nunca queda prestado mientras se llama a algo que mande mensajes a la ventana.
@@ -15,7 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::sync::{Once, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
-use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
 };
@@ -90,6 +90,17 @@ pub fn resized_rect(old: RECT, size: SIZE, work: RECT) -> RECT {
         top = (work.bottom - MARGIN - size.cy).max(work.top);
     }
     RECT { left: old.left, top, right: old.left + size.cx, bottom: top + size.cy }
+}
+
+/// El rectángulo de restaurada (`rcNormalPosition`, en coordenadas del área de trabajo) con el
+/// tamaño nuevo: queda la esquina de arriba a la izquierda (cambiar el alto minimizada).
+pub fn normal_resized(normal: RECT, size: SIZE) -> RECT {
+    RECT { left: normal.left, top: normal.top, right: normal.left + size.cx, bottom: normal.top + size.cy }
+}
+
+/// ¿`WM_SHOWWINDOW` avisa que Windows la oculta porque se minimizó la principal (su dueña)?
+pub fn is_parent_closing(wparam: usize, lparam: isize) -> bool {
+    wparam == 0 && lparam == SW_PARENTCLOSING.0 as isize
 }
 
 /// Tamaño de la ventana para un área de `client` píxeles; `border` es lo que da
@@ -225,6 +236,15 @@ fn apply_dark(hwnd: HWND, dark: bool) {
     }
 }
 
+/// Encubierta, DWM no la muestra aunque esté visible: para restaurarla y moverla sin que se vea
+/// un instante en el lugar viejo.
+fn cloak(hwnd: HWND, on: bool) {
+    let on = BOOL::from(on);
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &on as *const _ as *const std::ffi::c_void, size_of::<BOOL>() as u32);
+    }
+}
+
 fn invalidate(hwnd: HWND) {
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -295,8 +315,9 @@ pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &The
     unsafe {
         let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
         if visible {
+            // Minimizada (un conflicto o un error): se restaura sin sacarle el foco a la principal.
             if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, ws.cx, ws.cy, SWP_NOMOVE | SWP_NOACTIVATE);
         } else {
@@ -321,8 +342,18 @@ pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &The
                     initial_rect(owner, work, window_size_at(dpi_of(main), size))
                 }
             };
-            let _ = SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            if IsIconic(hwnd).as_bool() {
+                // Se ocultó minimizada (cerrada desde la barra de tareas o con la cola vacía):
+                // mostrarla la restaura a su rectángulo viejo, así que primero se restaura
+                // (encubierta) y después se ubica.
+                cloak(hwnd, true);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let _ = SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE);
+                cloak(hwnd, false);
+            } else {
+                let _ = SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
         }
     }
     // Ocultarla le sacó el avance al botón; si el botón es nuevo, lo pone `TaskbarButtonCreated`.
@@ -384,6 +415,21 @@ pub fn resize(w: AuxWindow, size: (f32, f32)) {
     };
     let ws = window_size(hwnd, size);
     unsafe {
+        // Minimizada, `SetWindowPos` no toca el tamaño de restaurada (y la `App` no lo repite):
+        // se cambia en su `WINDOWPLACEMENT`, sin restaurarla ni activarla. Oculta minimizada no
+        // hace falta (y `SW_SHOWMINNOACTIVE` la mostraría): `show` la ubica de nuevo.
+        if IsIconic(hwnd).as_bool() {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return;
+            }
+            let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            if GetWindowPlacement(hwnd, &mut wp).is_ok() {
+                wp.rcNormalPosition = normal_resized(wp.rcNormalPosition, ws);
+                wp.showCmd = SW_SHOWMINNOACTIVE.0 as u32;
+                let _ = SetWindowPlacement(hwnd, &wp);
+            }
+            return;
+        }
         let mut old = RECT::default();
         let _ = GetWindowRect(hwnd, &mut old);
         let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -554,6 +600,12 @@ unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             // Minimizar la deja en la barra de tareas (`DefWindowProcW`), con su botón propio.
             // Con la `App` ocupada en un diálogo, cerrar espera (no se le puede avisar ahora).
             WM_CLOSE if with(|a| a.main).is_some_and(|m| !input_ok(m)) => LRESULT(0),
+            // La principal se minimizó y Windows la oculta con ella: se recuerda dónde estaba
+            // (todavía visible).
+            WM_SHOWWINDOW if is_parent_closing(wparam.0, lparam.0) => {
+                remember(hwnd);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_CLOSE => {
                 remember(hwnd);
                 apply_state(hwnd, (TBPF_NOPROGRESS, None));
@@ -621,6 +673,24 @@ mod tests {
         // Fuera de rango, al borde.
         assert_eq!(taskbar_state(AuxProgress::Normal(1.7)).1, Some(1000));
         assert_eq!(taskbar_state(AuxProgress::Normal(-0.2)).1, Some(0));
+    }
+
+    #[test]
+    fn resized_while_minimized_keeps_the_corner() {
+        // Cambia ancho y alto de restaurada; la esquina (área de trabajo) queda.
+        let r = normal_resized(RECT { left: 40, top: 30, right: 616, bottom: 480 }, SIZE { cx: 576, cy: 300 });
+        assert_eq!((r.left, r.top, r.right, r.bottom), (40, 30, 616, 330));
+        let r = normal_resized(RECT { left: -900, top: 10, right: -324, bottom: 200 }, SIZE { cx: 600, cy: 500 });
+        assert_eq!((r.left, r.top, r.right, r.bottom), (-900, 10, -300, 510));
+    }
+
+    #[test]
+    fn owner_minimized_is_noticed() {
+        assert!(is_parent_closing(0, SW_PARENTCLOSING.0 as isize));
+        // Mostrarse de nuevo con la principal, o un `ShowWindow` común: no.
+        assert!(!is_parent_closing(1, SW_PARENTOPENING.0 as isize));
+        assert!(!is_parent_closing(0, 0));
+        assert!(!is_parent_closing(1, 0));
     }
 
     #[test]

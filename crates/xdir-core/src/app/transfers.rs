@@ -45,6 +45,9 @@ struct JobMeta {
     volumes: Vec<OsString>,
     /// Comprimir y extraer: «Reintentar» vuelve a correr el mismo trabajo entero.
     rerun: Option<JobSpec>,
+    /// Es un eliminar (con `recycle`: a la Papelera): «Reintentar» vuelve a eliminar lo que
+    /// falló, nunca lo copia sobre sí mismo.
+    delete: Option<bool>,
 }
 
 /// Estado de los trabajos de copia de la `App`.
@@ -232,6 +235,19 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
     }
 }
 
+/// Lo elegido (`roots`) que contiene cada origen que falló, sin repetir; si ninguno lo contiene,
+/// el origen mismo.
+fn chosen_roots(roots: &[PathBuf], pairs: Vec<(PathBuf, PathBuf)>) -> Vec<PathBuf> {
+    let mut items: Vec<PathBuf> = Vec::new();
+    for (src, _) in pairs {
+        let top = roots.iter().find(|r| src.starts_with(r)).cloned().unwrap_or(src);
+        if !items.contains(&top) {
+            items.push(top);
+        }
+    }
+    items
+}
+
 /// Discos que toca un trabajo (lee el disco: corre en el hilo del trabajo).
 fn volumes(prims: &dyn CopyPrims, paths: &[PathBuf]) -> Vec<OsString> {
     let mut out: Vec<OsString> = Vec::new();
@@ -389,7 +405,11 @@ impl App {
         });
         let restore = matches!(spec, JobSpec::Restore { .. });
         let rerun = matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }).then(|| spec.clone());
-        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun });
+        let delete = match spec {
+            JobSpec::Delete { recycle, .. } => Some(recycle),
+            _ => None,
+        };
+        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun, delete });
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
@@ -929,6 +949,7 @@ impl App {
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
         let restore = self.transfers.meta.get(&id).is_some_and(|m| m.restore);
         let rerun = self.transfers.meta.get(&id).and_then(|m| m.rerun.clone());
+        let delete = self.transfers.meta.get(&id).and_then(|m| m.delete);
         let roots = v.route.sources.clone();
         self.forget_job(id);
         let spec = if let Some(spec) = rerun {
@@ -941,14 +962,11 @@ impl App {
         } else if restore {
             // Lo de adentro de una carpeta devuelta no tiene lugar original propio: se devuelve
             // otra vez esa carpeta (lo elegido en la Papelera que la contiene).
-            let mut items: Vec<PathBuf> = Vec::new();
-            for (src, _) in pairs {
-                let top = roots.iter().find(|r| src.starts_with(r)).cloned().unwrap_or(src);
-                if !items.contains(&top) {
-                    items.push(top);
-                }
-            }
-            JobSpec::Restore { items }
+            JobSpec::Restore { items: chosen_roots(&roots, pairs) }
+        } else if let Some(recycle) = delete {
+            // Lo que falló adentro de una carpeta elegida: se vuelve a eliminar esa carpeta (con
+            // lo que quedó adentro), que si no quedaría vacía.
+            JobSpec::Delete { paths: chosen_roots(&roots, pairs), recycle }
         } else {
             JobSpec::Retry { moving, pairs }
         };

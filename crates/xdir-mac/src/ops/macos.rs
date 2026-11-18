@@ -1,7 +1,7 @@
 //! macOS: operaciones de archivos con `copyfile` (clona en APFS y conserva metadatos), `rename`
 //! y la Papelera de `NSFileManager`. Los nombres repetidos se resuelven como el Finder
 //! ("informe copia.txt", "informe copia 2.txt"). Cada operación anota cómo deshacerla. Copiar,
-//! mover y devolver de la Papelera son del motor de copia (`prims`).
+//! mover, eliminar y devolver de la Papelera son del motor de copia (`prims`).
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use objc2::rc::Retained;
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle};
-use objc2_foundation::{MainThreadMarker, NSFileManager, NSString, NSURL};
+use objc2_foundation::{NSFileManager, NSString, NSURL};
 
 use super::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use xdir_core::names;
@@ -19,34 +18,12 @@ use crate::platform::Handle;
 type Result<T> = std::result::Result<T, String>;
 
 pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
-    // Borrar sin pasar por la Papelera no se puede deshacer: se confirma antes (en el hilo de la
-    // ventana), como el Finder.
-    if let Op::Delete { paths, recycle: false } = &op {
-        if !confirm_delete(paths) {
-            return;
-        }
-    }
     std::thread::spawn(move || {
         let result = run(op).unwrap_or_else(|e| OpResult { error: Some(e), ..Default::default() });
         if tx.send(result).is_ok() {
             owner.post(WM_APP_OP_DONE, 0, 0);
         }
     });
-}
-
-fn confirm_delete(paths: &[PathBuf]) -> bool {
-    let Some(mtm) = MainThreadMarker::new() else { return false };
-    let alert = NSAlert::new(mtm);
-    let what = match paths {
-        [one] => format!("«{}»", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-        _ => format!("{} elementos", paths.len()),
-    };
-    alert.setMessageText(&NSString::from_str(&format!("¿Eliminar {what} definitivamente?")));
-    alert.setInformativeText(&NSString::from_str("No pasa por la Papelera y no se puede deshacer."));
-    alert.setAlertStyle(NSAlertStyle::Warning);
-    alert.addButtonWithTitle(&NSString::from_str("Eliminar"));
-    alert.addButtonWithTitle(&NSString::from_str("Cancelar"));
-    alert.runModal() == NSAlertFirstButtonReturn
 }
 
 fn ok(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, errors: Vec<String>) -> Result<OpResult> {

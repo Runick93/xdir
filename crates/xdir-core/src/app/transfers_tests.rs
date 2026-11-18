@@ -838,6 +838,46 @@ fn retry_of_a_restore_is_a_restore() {
 }
 
 #[test]
+fn delete_retry_deletes_again() {
+    // «Reintentar» de un eliminar vuelve a eliminar lo que falló (nunca copiarlo sobre sí mismo).
+    let f = fake();
+    f.add_file(&p("/app-dr/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-dr/b.txt"), b"b".to_vec());
+    f.fail(&p("/app-dr/a.txt"), ErrKind::Denied, 1);
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(JobSpec::Delete { paths: vec![p("/app-dr/a.txt"), p("/app-dr/b.txt")], recycle: false });
+    wait(&mut a, idle);
+    assert_eq!(a.jobs()[0].errors.len(), 1, "{:?}", a.jobs()[0].errors);
+    assert!(f.exists(&p("/app-dr/a.txt")) && !f.exists(&p("/app-dr/b.txt")));
+    a.take_started();
+    a.retry_job(id).expect("se reintenta");
+    assert_eq!(a.take_started(), vec![JobSpec::Delete { paths: vec![p("/app-dr/a.txt")], recycle: false }]);
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-dr/a.txt")));
+    assert!(f.list_all(&p("/app-dr")).is_empty(), "no se copió nada: {:?}", f.list_all(&p("/app-dr")));
+    assert!(a.jobs().is_empty());
+}
+
+#[test]
+fn delete_retry_of_a_folder_child_deletes_its_folder() {
+    // Lo que falló adentro de una carpeta elegida: se vuelve a eliminar esa carpeta (si no, quedaría
+    // vacía), a la Papelera si era a la Papelera.
+    let f = fake();
+    f.add_file(&p("/app-drf/Dir/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-drf/Dir/b.txt"), b"b".to_vec());
+    f.fail(&p("/app-drf/Dir/b.txt"), ErrKind::Denied, 1);
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(JobSpec::Delete { paths: vec![p("/app-drf/Dir")], recycle: false });
+    wait(&mut a, idle);
+    assert_eq!(a.jobs()[0].errors.len(), 1, "{:?}", a.jobs()[0].errors);
+    a.take_started();
+    a.retry_job(id).expect("se reintenta");
+    assert_eq!(a.take_started(), vec![JobSpec::Delete { paths: vec![p("/app-drf/Dir")], recycle: false }]);
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-drf/Dir")));
+}
+
+#[test]
 fn no_new_copies_onto_a_disk_being_ejected() {
     // Revisión del cableado (M1): mientras se espera para expulsar un disco, no empiezan copias
     // nuevas que lo usen.

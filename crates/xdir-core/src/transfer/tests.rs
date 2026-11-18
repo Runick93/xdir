@@ -270,3 +270,19 @@ fn too_long_tells_name_from_path() {
     let deep: String = (0..60).map(|_| "/carpeta").collect();
     assert_eq!(crate::sys::too_long(Path::new(&deep)), ErrKind::PathTooLong);
 }
+
+/// Los errores de E/S de Rust (sin la plataforma a mano): por su tipo.
+#[test]
+fn io_kind_by_error_kind() {
+    use std::io::{Error, ErrorKind as K};
+    let k = |kind| crate::sys::io_kind(&Error::from(kind));
+    assert_eq!(k(K::PermissionDenied), ErrKind::Denied);
+    assert_eq!(k(K::NotFound), ErrKind::NotFound);
+    assert_eq!(k(K::AlreadyExists), ErrKind::Exists);
+    assert_eq!(k(K::StorageFull), ErrKind::DiskFull);
+    assert_eq!(k(K::ResourceBusy), ErrKind::InUse);
+    assert_eq!(k(K::ReadOnlyFilesystem), ErrKind::ReadOnly);
+    assert_eq!(k(K::TimedOut), ErrKind::Offline);
+    assert_eq!(k(K::CrossesDevices), ErrKind::CrossDevice);
+    assert!(matches!(k(K::Other), ErrKind::Other(t) if t.starts_with("Error inesperado del sistema")));
+}

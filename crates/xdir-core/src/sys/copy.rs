@@ -149,6 +149,39 @@ pub fn io_unexpected(e: &std::io::Error) -> ErrKind {
     }
 }
 
+/// Un error de E/S de Rust, sin la plataforma a mano (lo usan el núcleo y los comprimidos): por su
+/// tipo y, en Windows, por los códigos que Rust no distingue. Lo que no se reconoce, con el texto y
+/// el código (`io_unexpected`).
+pub fn io_kind(e: &std::io::Error) -> ErrKind {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::PermissionDenied => ErrKind::Denied,
+        K::NotFound => ErrKind::NotFound,
+        K::AlreadyExists => ErrKind::Exists,
+        K::StorageFull | K::QuotaExceeded => ErrKind::DiskFull,
+        K::FileTooLarge => ErrKind::TooBig,
+        K::ResourceBusy | K::ExecutableFileBusy => ErrKind::InUse,
+        K::ReadOnlyFilesystem => ErrKind::ReadOnly,
+        K::CrossesDevices => ErrKind::CrossDevice,
+        K::NetworkDown | K::NetworkUnreachable | K::HostUnreachable | K::TimedOut | K::NotConnected | K::StaleNetworkFileHandle => ErrKind::Offline,
+        // Rust junta ahí «nombre demasiado largo» (ENAMETOOLONG, ERROR_FILENAME_EXCED_RANGE) y
+        // «nombre no válido».
+        K::InvalidFilename if e.raw_os_error() == Some(NAME_TOO_LONG) => ErrKind::NameTooLong,
+        K::InvalidFilename => ErrKind::InvalidName,
+        _ => match e.raw_os_error() {
+            // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_HANDLE_DISK_FULL,
+            // ERROR_WRITE_PROTECT.
+            Some(32 | 33) if cfg!(windows) => ErrKind::InUse,
+            Some(39 | 112) if cfg!(windows) => ErrKind::DiskFull,
+            Some(19) if cfg!(windows) => ErrKind::ReadOnly,
+            _ => io_unexpected(e),
+        },
+    }
+}
+
+/// El código de «nombre demasiado largo» (ENAMETOOLONG, ERROR_FILENAME_EXCED_RANGE).
+const NAME_TOO_LONG: i32 = if cfg!(windows) { 206 } else if cfg!(target_os = "linux") { 36 } else { 63 };
+
 /// El nombre del sistema para los códigos de error.
 const SYSTEM: &str = if cfg!(windows) { "Windows" } else if cfg!(target_os = "macos") { "macOS" } else { "Linux" };
 

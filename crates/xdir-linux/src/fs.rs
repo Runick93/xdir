@@ -244,7 +244,7 @@ mod rename_tests {
         for (n, body) in [("a.txt", "A"), ("b.txt", "B"), ("foto.jpg", "F")] {
             std::fs::write(dir.join(n), body).unwrap();
         }
-        assert!(Real.rename_noreplace(&dir.join("a.txt"), &dir.join("b.txt")).unwrap_err().contains("Ya existe"));
+        assert!(Real.rename_noreplace(&dir.join("a.txt"), &dir.join("b.txt")).unwrap_err().contains("ya hay otro elemento llamado «b.txt»"));
         let pairs: Vec<(PathBuf, String)> =
             vec![(dir.join("a.txt"), "b.txt".into()), (dir.join("b.txt"), "a.txt".into()), (dir.join("foto.jpg"), "FOTO.jpg".into())];
         let Undo::Renames(back) = rename_all(&Real, &pairs).unwrap() else { panic!("se esperaba Renames") };

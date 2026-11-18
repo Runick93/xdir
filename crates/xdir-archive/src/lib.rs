@@ -26,32 +26,9 @@ pub(crate) fn other(msg: &str, path: &Path) -> Error {
     Error::new(ErrKind::Other(msg.to_string()), path)
 }
 
-/// El código de «nombre demasiado largo» (ENAMETOOLONG, ERROR_FILENAME_EXCED_RANGE).
-const NAME_TOO_LONG: i32 = if cfg!(windows) { 206 } else if cfg!(target_os = "linux") { 36 } else { 63 };
-
 /// Mismo mapeo que las primitivas de copia.
 pub fn kind_of(e: &io::Error) -> ErrKind {
-    match e.kind() {
-        io::ErrorKind::PermissionDenied => ErrKind::Denied,
-        io::ErrorKind::NotFound => ErrKind::NotFound,
-        io::ErrorKind::AlreadyExists => ErrKind::Exists,
-        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => ErrKind::DiskFull,
-        io::ErrorKind::FileTooLarge => ErrKind::TooBig,
-        io::ErrorKind::ResourceBusy => ErrKind::InUse,
-        io::ErrorKind::ReadOnlyFilesystem => ErrKind::ReadOnly,
-        // Rust junta ahí «nombre demasiado largo» (ENAMETOOLONG, ERROR_FILENAME_EXCED_RANGE) y
-        // «nombre no válido».
-        io::ErrorKind::InvalidFilename if e.raw_os_error() == Some(NAME_TOO_LONG) => ErrKind::NameTooLong,
-        io::ErrorKind::InvalidFilename => ErrKind::InvalidName,
-        io::ErrorKind::NetworkDown | io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable | io::ErrorKind::TimedOut => ErrKind::Offline,
-        _ => match e.raw_os_error() {
-            #[cfg(windows)]
-            Some(32) | Some(33) => ErrKind::InUse,
-            #[cfg(windows)]
-            Some(112) => ErrKind::DiskFull,
-            _ => xdir_core::sys::io_unexpected(e),
-        },
-    }
+    xdir_core::sys::io_kind(e)
 }
 
 /// Marca de una lectura cortada porque el llamador pidió cancelar.

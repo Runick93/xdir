@@ -29,6 +29,7 @@
 - La ventana de copia muestra los detalles y el gráfico de todas las copias en curso a la vez (cada una se pliega por separado) y, si no entran, se desplaza con la rueda o la barra de la derecha.
 
 ### Arreglos
+- En la Mac, mover archivos a una carpeta de red (SMB) ya no falla con «No tenés permiso»: la copia se aseguraba en el disco de una forma que esos servidores rechazan.
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.
 - El árbol de carpetas ya muestra u oculta las carpetas ocultas al cambiar «Mostrar archivos ocultos», sin tener que plegarlo y desplegarlo de nuevo; lo desplegado queda como estaba.

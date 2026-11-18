@@ -254,9 +254,14 @@ impl CopyPrims for MacCopyPrims {
     /// original al mover.
     fn sync(&self, p: &Path) -> Result<(), CopyError> {
         let f = std::fs::File::open(p).map_err(|e| err(e, p))?;
-        if unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&f), libc::F_FULLFSYNC) } == -1 {
-            // Discos que no lo tienen (red, FAT): lo que haya.
-            f.sync_all().map_err(|e| err(e, p))?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&f);
+        if unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) } == -1 {
+            // Discos que no lo tienen (FAT) o que no lo aceptan con el archivo abierto solo para
+            // leer (SMB da EACCES, issue #76): `fsync` común. No `sync_all`, que en macOS vuelve a
+            // pedir `F_FULLFSYNC`.
+            if unsafe { libc::fsync(fd) } == -1 {
+                return Err(last(p));
+            }
         }
         Ok(())
     }
@@ -494,6 +499,22 @@ mod tests {
         let dir = tmp("sync-carpeta");
         MacCopyPrims.sync_dir(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #76: en una carpeta SMB, `F_FULLFSYNC` sobre un archivo abierto solo para leer da
+    /// EACCES (y `sync_all` de Rust usa lo mismo); mover a la red fallaba con «No tenés permiso».
+    /// Necesita una carpeta de red montada: `XDIR_SMB_DIR=/Volumes/Public/algo cargo test -p xdir-mac
+    /// -- --ignored sync_on_smb`.
+    #[test]
+    #[ignore]
+    fn sync_on_smb_file_and_dir() {
+        let Some(dir) = std::env::var_os("XDIR_SMB_DIR").map(PathBuf::from) else { return };
+        let f = dir.join(format!("xdir-sync-{}.txt", std::process::id()));
+        std::fs::write(&f, b"hola").unwrap();
+        let r = MacCopyPrims.sync(&f);
+        let _ = std::fs::remove_file(&f);
+        r.unwrap();
+        MacCopyPrims.sync_dir(&dir).unwrap();
     }
 
     /// Ronda 3: cerrar una carpeta (permisos, fechas, atributos) nunca sigue un enlace: si en su

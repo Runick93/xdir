@@ -186,6 +186,9 @@ pub struct JobOutcome {
     pub errors: Vec<JobError>,
     /// Se detuvo sin terminar (o no empezó): el motivo.
     pub stopped: Option<String>,
+    /// El aviso de la barra de estado cuando el motivo pide algo más que `stopped` (lo bloqueado
+    /// por el acceso controlado a carpetas: dónde y cómo permitirlo) y su explicación entera.
+    pub stop_notice: Option<(String, Option<String>)>,
     pub cancelled: bool,
     /// Lo que no se llevó porque ya existía y se eligió «Omitir» (los de origen).
     pub skipped: Vec<PathBuf>,

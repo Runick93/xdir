@@ -211,49 +211,94 @@ fn control_answer_and_cancel_while_waiting() {
 #[test]
 fn copy_error_messages() {
     let e = |kind| CopyError::new(kind, Path::new("/x")).message();
-    assert_eq!(e(ErrKind::InUse), "Lo está usando otro programa: cerralo y reintentá");
-    assert_eq!(e(ErrKind::Denied), "No tenés permiso: pedí acceso a quien administra esa carpeta");
+    assert_eq!(e(ErrKind::InUse), "Lo está usando otro programa");
+    assert_eq!(e(ErrKind::Denied), "No tenés permiso");
     assert_eq!(e(ErrKind::NotFound), "Ya no existe");
-    assert_eq!(e(ErrKind::DiskFull), "El disco está lleno: liberá espacio y reintentá");
-    assert_eq!(e(ErrKind::TooBig), "Es demasiado grande para el formato del disco de destino (FAT32)");
+    assert_eq!(e(ErrKind::DiskFull), "El disco está lleno");
+    assert_eq!(e(ErrKind::TooBig), "Es demasiado grande para FAT32");
     assert_eq!(e(ErrKind::Exists), "Ya existe");
     assert_eq!(e(ErrKind::Cancelled), "Cancelado");
-    assert_eq!(e(ErrKind::NameTooLong), "El nombre es demasiado largo para ese disco: acortalo");
-    assert_eq!(e(ErrKind::PathTooLong), "La ruta es demasiado larga: acortá el nombre de alguna carpeta o llevalo más arriba");
-    assert_eq!(e(ErrKind::InvalidName), "El nombre tiene caracteres que ese disco no acepta o es un nombre reservado (como CON o NUL): cambialo");
-    assert_eq!(e(ErrKind::ReadOnly), "El disco es de solo lectura: quitale la protección contra escritura o usá otro disco");
-    assert_eq!(e(ErrKind::Offline), "El disco o la red no responde: revisá la conexión y reintentá");
+    assert_eq!(e(ErrKind::NameTooLong), "El nombre es demasiado largo");
+    assert_eq!(e(ErrKind::PathTooLong), "La ruta es demasiado larga");
+    assert_eq!(e(ErrKind::InvalidName), "Nombre no válido para ese disco");
+    assert_eq!(e(ErrKind::ReadOnly), "El disco es de solo lectura");
+    assert_eq!(e(ErrKind::Offline), "El disco o la red no responde");
+    assert_eq!(e(ErrKind::Locked), "Está bloqueado");
+    assert_eq!(e(ErrKind::Blocked { sure: true }), "Bloqueado: acceso controlado");
+    assert_eq!(e(ErrKind::Blocked { sure: false }), "¿Acceso controlado de Windows?");
+    assert_eq!(e(ErrKind::Privacy { sure: true }), "Falta permiso de Privacidad");
+    assert_eq!(e(ErrKind::Privacy { sure: false }), "¿Falta permiso de Privacidad?");
     assert_eq!(e(ErrKind::Other("raro".into())), "raro");
 }
 
-/// Lo bloqueado por la protección del sistema dice cuál, con el nombre, y cómo permitirlo.
+/// Las filas de la ventana de copia dejan ~220 px al motivo: los de siempre entran enteros (con
+/// la medida del pintor de pruebas, 7 px por carácter).
 #[test]
-fn blocked_and_privacy_messages_name_the_item() {
-    let blocked = CopyError::new(ErrKind::Blocked, Path::new("/Documentos/d27523/Github")).message();
-    assert_eq!(
-        blocked,
-        "Windows bloqueó a xdir: el acceso controlado a carpetas (protección contra ransomware) no lo deja escribir en «Github». \
-         Permití xdir en Seguridad de Windows ▸ Protección contra virus y amenazas ▸ Protección contra ransomware ▸ \
-         Permitir una aplicación a través del acceso controlado a carpetas (en una PC de empresa, lo hace sistemas)."
-    );
-    let privacy = CopyError::new(ErrKind::Privacy, Path::new("/Users/ana/Documents")).message();
-    assert_eq!(
-        privacy,
-        "macOS no deja que xdir use «Documents»: dale permiso en Configuración del Sistema ▸ Privacidad y seguridad ▸ \
-         Archivos y carpetas (o Acceso total al disco) y reintentá"
-    );
+fn copy_error_rows_fit() {
+    use crate::paint::{FontId, Painter};
+    let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+    let kinds = [
+        ErrKind::InUse, ErrKind::Denied, ErrKind::NotFound, ErrKind::DiskFull, ErrKind::TooBig, ErrKind::Exists, ErrKind::CrossDevice,
+        ErrKind::NameTooLong, ErrKind::PathTooLong, ErrKind::InvalidName, ErrKind::ReadOnly, ErrKind::Offline, ErrKind::Locked,
+        ErrKind::Blocked { sure: true }, ErrKind::Blocked { sure: false }, ErrKind::Privacy { sure: true }, ErrKind::Privacy { sure: false },
+    ];
+    for k in kinds {
+        let m = CopyError::new(k, Path::new("/x")).message();
+        assert!(p.measure(FontId::Ui, &m) <= 220.0, "{m}");
+    }
 }
 
-/// El aviso suelto (sin la lista de errores al lado): qué no se pudo hacer y por qué.
+/// Lo bloqueado por la protección del sistema: el aviso corto dice dónde y cómo permitirlo; el
+/// detalle (el cartel al pasar el mouse) lo explica entero.
+#[test]
+fn blocked_and_privacy_notices() {
+    let at = Path::new("/Documentos/d27523/Github");
+    let sure = CopyError::new(ErrKind::Blocked { sure: true }, at);
+    assert_eq!(
+        sure.notice("crear la carpeta nueva en «Github»"),
+        "Windows bloqueó a xdir en «Github» (acceso controlado a carpetas): permitilo en Seguridad de Windows ▸ Protección contra ransomware."
+    );
+    assert_eq!(
+        sure.detail("crear la carpeta nueva en «Github»").as_deref(),
+        Some(
+            "Windows bloqueó a xdir: el acceso controlado a carpetas (protección contra ransomware) no lo deja escribir en «Github». \
+             Permití xdir en Seguridad de Windows ▸ Protección contra virus y amenazas ▸ Protección contra ransomware ▸ \
+             Permitir una aplicación a través del acceso controlado a carpetas (en una PC de empresa, lo hace sistemas)."
+        )
+    );
+    let maybe = CopyError::new(ErrKind::Blocked { sure: false }, at);
+    assert_eq!(
+        maybe.notice("crear la carpeta nueva en «Github»"),
+        "No se pudo crear la carpeta nueva en «Github»: puede que lo haya bloqueado el acceso controlado a carpetas de Windows. \
+         Si es así, permití xdir en Seguridad de Windows ▸ Protección contra ransomware."
+    );
+    assert!(maybe.detail("x").is_some_and(|d| d.starts_with("Puede que el acceso controlado a carpetas")));
+    let docs = Path::new("/Users/ana/Documents");
+    assert_eq!(
+        CopyError::new(ErrKind::Privacy { sure: true }, docs).notice("abrir «Documents»"),
+        "macOS no deja que xdir use «Documents»: dale permiso en Configuración del Sistema ▸ Privacidad y seguridad."
+    );
+    assert_eq!(
+        CopyError::new(ErrKind::Privacy { sure: false }, docs).notice("crear la carpeta nueva en «Documents»"),
+        "No se pudo crear la carpeta nueva en «Documents»: puede que macOS no deje a xdir usar esa carpeta. \
+         Si es así, dale permiso en Configuración del Sistema ▸ Privacidad y seguridad."
+    );
+    assert!(CopyError::new(ErrKind::Privacy { sure: true }, docs).detail("x").is_some_and(|d| d.contains("Archivos y carpetas (o Acceso total al disco)")));
+    // Los demás no tienen más que decir.
+    assert_eq!(CopyError::new(ErrKind::InUse, docs).detail("x"), None);
+}
+
+/// El aviso suelto (sin la lista de errores al lado): qué no se pudo hacer, por qué y qué hacer.
 #[test]
 fn notice_says_what_failed_and_why() {
     let e = CopyError::new(ErrKind::InUse, Path::new("/d/a.txt"));
     assert_eq!(e.notice("renombrar «a.txt»"), "No se pudo renombrar «a.txt»: lo está usando otro programa. Cerralo y reintentá.");
     let e = CopyError::new(ErrKind::Denied, Path::new("/d"));
     assert_eq!(e.notice("crear la carpeta en «d»"), "No se pudo crear la carpeta en «d»: no tenés permiso. Pedí acceso a quien administra esa carpeta.");
-    // Lo bloqueado ya es una frase completa: va tal cual.
-    let e = CopyError::new(ErrKind::Blocked, Path::new("/d/Github"));
-    assert_eq!(e.notice("crear la carpeta en «Github»"), e.message());
+    let e = CopyError::new(ErrKind::DiskFull, Path::new("/d"));
+    assert_eq!(e.notice("copiar «a.txt»"), "No se pudo copiar «a.txt»: el disco está lleno. Liberá espacio y reintentá.");
+    let e = CopyError::new(ErrKind::Locked, Path::new("/d/a.txt"));
+    assert_eq!(e.notice("renombrar «a.txt»"), "No se pudo renombrar «a.txt»: está bloqueado. Desbloquealo en Obtener información ▸ Bloqueado.");
     let e = CopyError::new(ErrKind::NotFound, Path::new("/d/a.txt"));
     assert_eq!(e.notice("abrir «a.txt»"), "No se pudo abrir «a.txt»: ya no existe.");
     // Lo inesperado: una frase propia y el texto y el código del sistema entre paréntesis.

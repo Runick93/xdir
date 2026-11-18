@@ -101,11 +101,15 @@ pub enum ErrKind {
     ReadOnly,
     /// El disco o la red no responde (desconectado, se cortó la red, no está listo).
     Offline,
+    /// macOS: el elemento está bloqueado (Obtener información ▸ Bloqueado, `uchg`).
+    Locked,
     /// Windows: el acceso controlado a carpetas (protección contra ransomware) no deja a xdir
-    /// escribir ahí.
-    Blocked,
-    /// macOS: la privacidad del sistema (TCC) no le dio permiso a xdir para esa carpeta.
-    Privacy,
+    /// escribir ahí. `sure`: se pudo leer que xdir no está permitido (si no, se dice con «puede
+    /// que»).
+    Blocked { sure: bool },
+    /// macOS: la privacidad del sistema (TCC) no le dio permiso a xdir para esa carpeta. `sure`:
+    /// al leer una carpeta (al escribir, `EPERM` también puede ser otra cosa: «puede que»).
+    Privacy { sure: bool },
     Other(String),
 }
 
@@ -217,57 +221,64 @@ impl CopyError {
         CopyError { kind, path: path.to_path_buf() }
     }
 
-    /// Por qué falló y, si hay algo concreto, qué hacer. `None` en lo que ya es una frase
-    /// completa con el nombre (lo bloqueado por el sistema).
-    fn parts(&self) -> Option<(String, Option<&'static str>)> {
+    /// El motivo corto (para la fila de la lista de errores, ~30 caracteres) y, si hay algo
+    /// concreto, qué hacer (solo en el aviso).
+    fn parts(&self) -> (String, Option<&'static str>) {
         let (why, todo): (&str, Option<&'static str>) = match &self.kind {
             ErrKind::InUse => ("Lo está usando otro programa", Some("cerralo y reintentá")),
             ErrKind::Denied => ("No tenés permiso", Some("pedí acceso a quien administra esa carpeta")),
             ErrKind::NotFound => ("Ya no existe", None),
             ErrKind::DiskFull => ("El disco está lleno", Some("liberá espacio y reintentá")),
-            ErrKind::TooBig => ("Es demasiado grande para el formato del disco de destino (FAT32)", None),
+            ErrKind::TooBig => ("Es demasiado grande para FAT32", Some("ese formato admite hasta 4 GB por archivo: usá otro disco")),
             ErrKind::Exists => ("Ya existe", None),
             ErrKind::Cancelled => ("Cancelado", None),
             ErrKind::CrossDevice => ("Está en otro disco", None),
-            ErrKind::NameTooLong => ("El nombre es demasiado largo para ese disco", Some("acortalo")),
+            ErrKind::NameTooLong => ("El nombre es demasiado largo", Some("acortalo")),
             ErrKind::PathTooLong => ("La ruta es demasiado larga", Some("acortá el nombre de alguna carpeta o llevalo más arriba")),
             ErrKind::InvalidName => {
-                ("El nombre tiene caracteres que ese disco no acepta o es un nombre reservado (como CON o NUL)", Some("cambialo"))
+                ("Nombre no válido para ese disco", Some("sacale caracteres como : * ? \" < > | o no uses nombres reservados como CON o NUL"))
             }
             ErrKind::ReadOnly => ("El disco es de solo lectura", Some("quitale la protección contra escritura o usá otro disco")),
             ErrKind::Offline => ("El disco o la red no responde", Some("revisá la conexión y reintentá")),
-            ErrKind::Blocked | ErrKind::Privacy => return None,
-            ErrKind::Other(text) => return Some((text.clone(), None)),
+            ErrKind::Locked => ("Está bloqueado", Some("desbloquealo en Obtener información ▸ Bloqueado")),
+            ErrKind::Blocked { sure: true } => ("Bloqueado: acceso controlado", None),
+            ErrKind::Blocked { sure: false } => ("¿Acceso controlado de Windows?", None),
+            ErrKind::Privacy { sure: true } => ("Falta permiso de Privacidad", None),
+            ErrKind::Privacy { sure: false } => ("¿Falta permiso de Privacidad?", None),
+            ErrKind::Other(text) => return (text.clone(), None),
         };
-        Some((why.to_string(), todo))
+        (why.to_string(), todo)
     }
 
-    /// El motivo en castellano, para la lista de errores (el nombre va al lado): «Lo está usando
-    /// otro programa: cerralo y reintentá».
+    /// El motivo corto, para la fila de la lista de errores (el nombre va al lado): «Lo está
+    /// usando otro programa». Qué hacer va en `notice`.
     pub fn message(&self) -> String {
-        let name = shown_name(&self.path);
-        match (&self.kind, self.parts()) {
-            (_, Some((why, Some(todo)))) => format!("{why}: {todo}"),
-            (_, Some((why, None))) => why,
-            (ErrKind::Blocked, None) => format!(
-                "Windows bloqueó a xdir: el acceso controlado a carpetas (protección contra ransomware) no lo deja escribir en «{name}». \
-                 Permití xdir en Seguridad de Windows ▸ Protección contra virus y amenazas ▸ Protección contra ransomware ▸ \
-                 Permitir una aplicación a través del acceso controlado a carpetas (en una PC de empresa, lo hace sistemas)."
-            ),
-            (_, None) => format!(
-                "macOS no deja que xdir use «{name}»: dale permiso en Configuración del Sistema ▸ Privacidad y seguridad ▸ \
-                 Archivos y carpetas (o Acceso total al disco) y reintentá"
-            ),
-        }
+        self.parts().0
     }
 
-    /// El aviso suelto, sin la lista de errores al lado: qué no se pudo hacer (`what`, con el
-    /// nombre: «crear la carpeta en «Docs»»), por qué y qué hacer. «No se pudo renombrar
-    /// «a.txt»: lo está usando otro programa. Cerralo y reintentá.»
+    /// El aviso de la barra de estado: qué no se pudo hacer (`what`, con el nombre: «crear la
+    /// carpeta nueva en «Docs»»), por qué y qué hacer, corto. «No se pudo renombrar «a.txt»: lo
+    /// está usando otro programa. Cerralo y reintentá.» Lo bloqueado por el sistema dice dónde y
+    /// cómo permitirlo; la explicación entera está en `detail`.
     pub fn notice(&self, what: &str) -> String {
-        match self.parts() {
-            None => self.message(),
-            Some((why, todo)) => {
+        let name = shown_name(&self.path);
+        match &self.kind {
+            ErrKind::Blocked { sure: true } => format!(
+                "Windows bloqueó a xdir en «{name}» (acceso controlado a carpetas): permitilo en Seguridad de Windows ▸ Protección contra ransomware."
+            ),
+            ErrKind::Blocked { sure: false } => format!(
+                "No se pudo {what}: puede que lo haya bloqueado el acceso controlado a carpetas de Windows. \
+                 Si es así, permití xdir en Seguridad de Windows ▸ Protección contra ransomware."
+            ),
+            ErrKind::Privacy { sure: true } => {
+                format!("macOS no deja que xdir use «{name}»: dale permiso en Configuración del Sistema ▸ Privacidad y seguridad.")
+            }
+            ErrKind::Privacy { sure: false } => format!(
+                "No se pudo {what}: puede que macOS no deje a xdir usar esa carpeta. \
+                 Si es así, dale permiso en Configuración del Sistema ▸ Privacidad y seguridad."
+            ),
+            _ => {
+                let (why, todo) = self.parts();
                 let why = lower_first(why.trim_end_matches('.'));
                 match todo {
                     Some(todo) => {
@@ -279,6 +290,31 @@ impl CopyError {
                 }
             }
         }
+    }
+
+    /// La explicación entera, para el cartel al pasar el mouse sobre el aviso (lo bloqueado por
+    /// el sistema: dónde se permite xdir paso a paso). `None` si el aviso ya lo dice todo.
+    pub fn detail(&self, what: &str) -> Option<String> {
+        let name = shown_name(&self.path);
+        const CFA_STEPS: &str = "Permití xdir en Seguridad de Windows ▸ Protección contra virus y amenazas ▸ Protección contra ransomware ▸ \
+                                 Permitir una aplicación a través del acceso controlado a carpetas (en una PC de empresa, lo hace sistemas).";
+        const TCC_STEPS: &str = "Configuración del Sistema ▸ Privacidad y seguridad ▸ Archivos y carpetas (o Acceso total al disco)";
+        Some(match &self.kind {
+            ErrKind::Blocked { sure: true } => format!(
+                "Windows bloqueó a xdir: el acceso controlado a carpetas (protección contra ransomware) no lo deja escribir en «{name}». {CFA_STEPS}"
+            ),
+            ErrKind::Blocked { sure: false } => format!(
+                "Puede que el acceso controlado a carpetas (protección contra ransomware) no deje a xdir escribir en «{name}»: \
+                 no se pudo {what}. Si es así, {}{}",
+                CFA_STEPS[..1].to_lowercase(),
+                &CFA_STEPS[1..]
+            ),
+            ErrKind::Privacy { sure: true } => format!("macOS no deja que xdir use «{name}». Dale permiso en {TCC_STEPS} y reintentá."),
+            ErrKind::Privacy { sure: false } => format!(
+                "No se pudo {what}: puede que macOS no deje a xdir usar «{name}». Si es así, dale permiso en {TCC_STEPS} y reintentá."
+            ),
+            _ => return None,
+        })
     }
 }
 

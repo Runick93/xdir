@@ -422,8 +422,9 @@ impl App {
                 }
             }
             (Ok(_), Some(_)) => self.notice = None,
-            // Los de las plataformas ya son frases enteras (`rename_many::io_message`).
-            (Err(e), None) if e.starts_with("No se pudo") => self.notice = Some(e),
+            // Los de las plataformas ya son frases enteras, con su punto (`rename_many::io_message`,
+            // lo bloqueado por el acceso controlado a carpetas).
+            (Err(e), None) if e.ends_with('.') => self.notice = Some(e),
             (Err(e), None) => self.notice = Some(format!("No se pudo renombrar: {e}")),
             // El deshacer que falló vuelve a la pila (`rename_all` dejó todo como estaba o dice qué no).
             (Err(e), Some(renames)) => {

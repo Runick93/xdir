@@ -239,8 +239,9 @@ impl App {
     }
 
     pub(super) fn on_op_done(&mut self, result: OpResult) {
-        // Las plataformas mandan frases completas (`ops::failure`): van tal cual.
-        self.notice = result.error;
+        // Las plataformas mandan frases completas (`ops::failure`): van tal cual, con su
+        // explicación entera para el cartel (`ops::failure_detail`).
+        self.set_notice(result.error, result.error_detail);
         if let Some(undo) = result.undo {
             self.undo.push(undo);
             if self.undo.len() > UNDO_MAX {

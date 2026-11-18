@@ -68,6 +68,9 @@ pub struct OpResult {
     pub rename_after: bool,
     /// Lo que salió mal, como lo ve el usuario (frases completas: `failure`); varios, con «; ».
     pub error: Option<String>,
+    /// La explicación entera del error, si el aviso la acorta (`failure_detail`): el cartel al
+    /// pasar el mouse por el aviso.
+    pub error_detail: Option<String>,
     /// Elementos que quedan seleccionados al recargar (las copias de Duplicar…).
     pub select: Vec<PathBuf>,
 }
@@ -93,6 +96,12 @@ pub fn failure(op: &Op, e: &CopyError) -> String {
     e.notice(&doing(op, &e.path))
 }
 
+/// La explicación entera del error de `op`, si el aviso de `failure` la acorta (lo bloqueado por
+/// el sistema).
+pub fn failure_detail(op: &Op, e: &CopyError) -> Option<String> {
+    e.detail(&doing(op, &e.path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,14 +120,17 @@ mod tests {
         let a = d.join("a.txt");
         assert_eq!(
             f(&Op::Rename { path: a.clone(), new_name: "CON".into() }, ErrKind::InvalidName, &a),
-            "No se pudo renombrar «a.txt» como «CON»: el nombre tiene caracteres que ese disco no acepta o es un nombre reservado (como CON o NUL). Cambialo."
+            "No se pudo renombrar «a.txt» como «CON»: nombre no válido para ese disco. Sacale caracteres como : * ? \" < > | o no uses nombres reservados como CON o NUL."
         );
         assert_eq!(f(&Op::Delete { paths: vec![a.clone()], recycle: true }, ErrKind::InUse, &a), "No se pudo mandar a la Papelera «a.txt»: lo está usando otro programa. Cerralo y reintentá.");
         assert_eq!(f(&Op::Delete { paths: vec![a.clone()], recycle: false }, ErrKind::NotFound, &a), "No se pudo eliminar «a.txt»: ya no existe.");
         assert_eq!(f(&Op::Shortcuts { targets: vec![a.clone()] }, ErrKind::DiskFull, &a), "No se pudo crear el acceso directo a «a.txt»: el disco está lleno. Liberá espacio y reintentá.");
         assert_eq!(f(&Op::Undo(Undo::Created(vec![a.clone()])), ErrKind::Offline, &a), "No se pudo deshacer lo hecho con «a.txt»: el disco o la red no responde. Revisá la conexión y reintentá.");
         // Bloqueado por Windows: la frase completa, con el nombre de la carpeta.
-        let blocked = f(&Op::NewFolder { parent: d.clone() }, ErrKind::Blocked, &d);
-        assert!(blocked.starts_with("Windows bloqueó a xdir") && blocked.contains("«Docs»"), "{blocked}");
+        let blocked = f(&Op::NewFolder { parent: d.clone() }, ErrKind::Blocked { sure: true }, &d);
+        assert!(blocked.starts_with("Windows bloqueó a xdir en «Docs»"), "{blocked}");
+        let e = CopyError::new(ErrKind::Blocked { sure: true }, &d);
+        assert!(failure_detail(&Op::NewFolder { parent: d.clone() }, &e).is_some_and(|t| t.contains("Permitir una aplicación")));
+        assert_eq!(failure_detail(&Op::NewFolder { parent: d.clone() }, &CopyError::new(ErrKind::InUse, &d)), None);
     }
 }

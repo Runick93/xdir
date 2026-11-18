@@ -262,7 +262,10 @@ fn op_path(op: &Op) -> PathBuf {
 impl FileOps for FakeFileOps {
     fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op) {
         let result = match FAIL.with(|f| f.borrow().clone()) {
-            Some(kind) => OpResult { error: Some(crate::ops::failure(&op, &CopyError::new(kind, &op_path(&op)))), ..OpResult::default() },
+            Some(kind) => {
+                let e = CopyError::new(kind, &op_path(&op));
+                OpResult { error: Some(crate::ops::failure(&op, &e)), error_detail: crate::ops::failure_detail(&op, &e), ..OpResult::default() }
+            }
             None => RESPONSE.with(|r| r.borrow().clone()),
         };
         OPS.with(|o| o.borrow_mut().push(op));

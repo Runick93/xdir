@@ -196,7 +196,7 @@ fn move_cross_volume_keeps_failed_sources() {
     assert_eq!(fake.contents(&p("/v2/dst/Dir/sub/ok2.txt")).unwrap(), b"2");
     assert!(!fake.exists(&p("/v2/dst/Dir/abierto.txt")));
     assert_eq!(r.out.errors.len(), 1);
-    assert_eq!(r.out.errors[0].message, "Lo está usando otro programa: cerralo y reintentá");
+    assert_eq!(r.out.errors[0].message, "Lo está usando otro programa");
     assert_eq!(r.out.errors[0].src, p("/v1/a/Dir/abierto.txt"));
     assert_eq!(r.out.errors[0].dst, p("/v2/dst/Dir/abierto.txt"));
 }
@@ -338,7 +338,7 @@ fn replace_disk_full_keeps_original() {
     fake.add_file(&p("/k/dst/informe.pdf"), b"viejo".to_vec());
     fake.fail_after(&p("/k/src/informe.pdf"), 4000, ErrKind::DiskFull);
     let r = go(&fake, copy_informe(), &[answer(Choice::Replace)]);
-    assert_eq!(r.out.stopped.as_deref(), Some("El disco está lleno: liberá espacio y reintentá"));
+    assert_eq!(r.out.stopped.as_deref(), Some("El disco está lleno"));
     assert_eq!(fake.contents(&p("/k/dst/informe.pdf")).unwrap(), b"viejo");
     assert!(fake.trashed().is_empty());
     no_tmp_left(&fake, &p("/k/dst"));
@@ -462,7 +462,7 @@ fn errors_collected_and_continue() {
     assert!(fake.exists(&p("/e/d/1.txt")) && fake.exists(&p("/e/d/3.txt")) && !fake.exists(&p("/e/d/2.txt")));
     assert_eq!(r.out.errors.len(), 1);
     assert_eq!((r.out.errors[0].src.clone(), r.out.errors[0].dst.clone()), (files[1].clone(), p("/e/d/2.txt")));
-    assert_eq!(r.out.errors[0].message, "No tenés permiso: pedí acceso a quien administra esa carpeta");
+    assert_eq!(r.out.errors[0].message, "No tenés permiso");
     assert!(r.out.stopped.is_none());
     assert_eq!(r.out.result.select, vec![p("/e/d/1.txt"), p("/e/d/3.txt")]);
 }
@@ -487,9 +487,24 @@ fn disk_full_stops() {
     let files = three_files(&fake, "/df");
     fake.fail_after(&files[1], 300, ErrKind::DiskFull);
     let r = go(&fake, JobSpec::Copy { sources: files, dest: p("/df/d") }, &[]);
-    assert_eq!(r.out.stopped.as_deref(), Some("El disco está lleno: liberá espacio y reintentá"));
+    assert_eq!(r.out.stopped.as_deref(), Some("El disco está lleno"));
     assert_eq!(fake.list_all(&p("/df/d")), vec![p("/df/d/1.txt")]);
     assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/df/d/1.txt")])])));
+}
+
+/// Lo bloqueado por el acceso controlado a carpetas tampoco deja seguir (fallaría todo lo demás):
+/// se detiene, con el aviso corto y su explicación para el cartel.
+#[test]
+fn blocked_stops_with_notice() {
+    let fake = FakeCopyPrims::new();
+    let files = three_files(&fake, "/bk");
+    fake.fail_after(&files[1], 0, ErrKind::Blocked { sure: true });
+    let r = go(&fake, JobSpec::Copy { sources: files, dest: p("/bk/d") }, &[]);
+    assert_eq!(r.out.stopped.as_deref(), Some("Bloqueado: acceso controlado"));
+    let (notice, detail) = r.out.stop_notice.clone().expect("aviso del bloqueo");
+    assert!(notice.starts_with("Windows bloqueó a xdir en «"), "{notice}");
+    assert!(detail.is_some_and(|d| d.contains("Permitir una aplicación")));
+    assert_eq!(fake.list_all(&p("/bk/d")), vec![p("/bk/d/1.txt")]);
 }
 
 #[test]
@@ -524,7 +539,7 @@ fn fat32_big_file_error_upfront() {
     fake.add_file(&p("/f32/s/chico.txt"), b"c".to_vec());
     fake.add_dir(&p("/fat/d"));
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/f32/s/peli.mkv"), p("/f32/s/chico.txt")], dest: p("/fat/d") }, &[]);
-    assert_eq!(r.messages(), vec!["Es demasiado grande para el formato del disco de destino (FAT32)".to_string()]);
+    assert_eq!(r.messages(), vec!["Es demasiado grande para FAT32".to_string()]);
     assert_eq!(fake.reads(&p("/f32/s/peli.mkv")), 0);
     assert!(fake.exists(&p("/fat/d/chico.txt")) && !fake.exists(&p("/fat/d/peli.mkv")));
     // El error figura de entrada, antes de copiar nada.
@@ -624,7 +639,7 @@ fn new_folder_with_nothing_moved_removes_folder() {
     assert_eq!(fake.list_all(&p("/nf0")), vec![p("/nf0/a.txt")]);
     assert_eq!(r.out.result.undo, None);
     assert!(!r.out.result.rename_after);
-    assert_eq!(r.messages(), vec!["Lo está usando otro programa: cerralo y reintentá".to_string()]);
+    assert_eq!(r.messages(), vec!["Lo está usando otro programa".to_string()]);
 }
 
 #[test]
@@ -950,7 +965,7 @@ fn unreadable_subfolder_does_not_stop_the_rest() {
     assert_eq!(fake.contents(&p("/ur/d/D/ok.txt")).unwrap(), b"ok");
     assert_eq!(r.out.errors.len(), 1);
     assert_eq!((r.out.errors[0].src.clone(), r.out.errors[0].dst.clone()), (p("/ur/s/D/cerrada"), p("/ur/d/D/cerrada")));
-    assert_eq!(r.out.errors[0].message, "No tenés permiso: pedí acceso a quien administra esa carpeta");
+    assert_eq!(r.out.errors[0].message, "No tenés permiso");
 }
 
 #[test]
@@ -992,7 +1007,7 @@ fn replace_folder_with_unreadable_part_restores_old() {
     fake.add_file(&p("/rw/d/C/v.txt"), b"v".to_vec());
     fake.fail(&p("/rw/s/C/cerrada"), ErrKind::Denied, 1);
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/rw/s/C")], dest: p("/rw/d") }, &[answer(Choice::Replace)]);
-    assert_eq!(r.messages(), vec!["No tenés permiso: pedí acceso a quien administra esa carpeta".to_string()]);
+    assert_eq!(r.messages(), vec!["No tenés permiso".to_string()]);
     assert_eq!(fake.list_all(&p("/rw/d")), vec![p("/rw/d/C"), p("/rw/d/C/v.txt")]);
     assert!(fake.trashed().is_empty());
     assert_eq!(r.out.result.undo, None);
@@ -1305,7 +1320,7 @@ fn busy_retries_cover_replace_and_set_aside_but_not_denied() {
     fake.add_file(&p("/br/s/b.txt"), b"b".to_vec());
     fake.fail(&p("/br/d/b.txt"), ErrKind::Denied, 1);
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/br/s/b.txt")], dest: p("/br/d") }, &[]);
-    assert_eq!(r.messages(), vec!["No tenés permiso: pedí acceso a quien administra esa carpeta".to_string()]);
+    assert_eq!(r.messages(), vec!["No tenés permiso".to_string()]);
     no_tmp_left(&fake, &p("/br/d"));
 }
 

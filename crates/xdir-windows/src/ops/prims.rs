@@ -46,7 +46,10 @@ pub(crate) fn err_kind(code: u32) -> ErrKind {
         c if c == ERROR_DISK_FULL.0 || c == ERROR_HANDLE_DISK_FULL.0 => ErrKind::DiskFull,
         c if c == ERROR_FILE_TOO_LARGE.0 => ErrKind::TooBig,
         c if c == ERROR_FILE_EXISTS.0 || c == ERROR_ALREADY_EXISTS.0 => ErrKind::Exists,
-        c if c == ERROR_REQUEST_ABORTED.0 || c == ERROR_CANCELLED.0 => ErrKind::Cancelled,
+        c if c == ERROR_REQUEST_ABORTED.0 => ErrKind::Cancelled,
+        // ERROR_CANCELLED sin que nadie lo haya pedido (lo que el usuario cancela en un aviso del
+        // Shell lo atienden `trash` y las operaciones aparte): no corta el trabajo entero.
+        c if c == ERROR_CANCELLED.0 => ErrKind::Other("Windows canceló la operación".into()),
         c if c == ERROR_NOT_SAME_DEVICE.0 => ErrKind::CrossDevice,
         c if c == ERROR_FILENAME_EXCED_RANGE.0 => ErrKind::NameTooLong,
         // ERROR_WRITE_PROTECT.
@@ -80,8 +83,13 @@ fn werr(e: windows::core::Error, p: &Path, present: &dyn Fn() -> bool) -> CopyEr
 }
 
 /// `werr` de algo que se crea en `dst`: «no se encuentra» con su carpeta presente es sospechoso.
+/// Si fue el acceso controlado a carpetas, el aviso nombra la carpeta (lo nuevo no llegó a estar).
 fn werr_new(e: windows::core::Error, dst: &Path) -> CopyError {
-    werr(e, dst, &|| dst.parent().is_some_and(super::errors::exists))
+    let failed = werr(e, dst, &|| dst.parent().is_some_and(super::errors::exists));
+    match (&failed.kind, dst.parent()) {
+        (ErrKind::Blocked { .. }, Some(parent)) => CopyError::new(failed.kind, parent),
+        _ => failed,
+    }
 }
 
 /// `werr` de algo que ya está en `p` (renombrarlo, borrarlo, ponerle fechas).
@@ -402,7 +410,7 @@ impl CopyPrims for WinCopyPrims {
     /// también es «por un momento». Lo que parece del acceso controlado a carpetas también se
     /// reintenta: si en realidad era eso, después de un rato igual sale el aviso.
     fn transient(&self, kind: &ErrKind) -> bool {
-        matches!(kind, ErrKind::InUse | ErrKind::Denied | ErrKind::Blocked)
+        matches!(kind, ErrKind::InUse | ErrKind::Denied | ErrKind::Blocked { .. })
     }
 
     fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
@@ -415,7 +423,7 @@ impl CopyPrims for WinCopyPrims {
             // llevarlo a una: se mira el origen y, si no, el destino.
             let at_from = werr_at(e.clone(), from);
             match werr_new(e, to) {
-                to_blocked if at_from.kind != ErrKind::Blocked && to_blocked.kind == ErrKind::Blocked => to_blocked,
+                to_blocked if !matches!(at_from.kind, ErrKind::Blocked { .. }) && matches!(to_blocked.kind, ErrKind::Blocked { .. }) => to_blocked,
                 _ => at_from,
             }
         })
@@ -665,7 +673,7 @@ mod tests {
         }
         assert_eq!(err_kind(123), ErrKind::InvalidName);
         assert_eq!(err_kind(161), ErrKind::InvalidName);
-        assert_eq!(err_kind(1223), ErrKind::Cancelled);
+        assert_eq!(err_kind(1223), ErrKind::Other("Windows canceló la operación".into()));
         // Lo que no tiene explicación: frase propia, texto y código (el HRESULT).
         let ErrKind::Other(text) = err_kind(1117) else { panic!("1117 es Other") };
         assert!(text.starts_with("Error inesperado del sistema (") && text.ends_with("; Windows: 0x8007045D)"), "{text}");
@@ -855,7 +863,7 @@ mod tests {
         assert_eq!(std::fs::read(other.join("Dir").join("sub").join("b.txt")).unwrap(), b"b");
         assert!(!src.join("Dir").join("a.txt").exists());
         assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
-        assert_eq!(out.errors[0].message, "Lo está usando otro programa: cerralo y reintentá");
+        assert_eq!(out.errors[0].message, "Lo está usando otro programa");
         assert_eq!(std::fs::read(&busy).unwrap(), b"c");
         assert!(!other.join("Dir").join("sub").join("abierto.txt").exists());
     }

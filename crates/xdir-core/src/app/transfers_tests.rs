@@ -164,7 +164,7 @@ fn errors_stay_for_retry() {
     let mut a = app();
     let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-retry/s/a.txt"), p("/app-retry/s/b.txt")], dest: p("/app-retry/d") });
     wait(&mut a, idle);
-    assert_eq!(a.notice.as_deref(), Some("Copiar terminó con 1 error («b.txt»: Lo está usando otro programa: cerralo y reintentá)"));
+    assert_eq!(a.notice.as_deref(), Some("Copiar terminó con 1 error («b.txt»: lo está usando otro programa)"));
     let view = &a.jobs()[0];
     assert_eq!((view.id, view.state, view.errors.len()), (id, JobState::Done, 1));
     let again = a.retry_job(id).unwrap();
@@ -564,7 +564,7 @@ fn errors_view_and_retry_from_window() {
     assert_eq!(host.aux_shows().len(), 1);
     let t = aux_texts(&mut a);
     assert!(t.iter().any(|s| s == "Terminó con 1 error"), "{t:?}");
-    assert!(t.iter().any(|s| s == "Lo está usando otro programa: cerralo y reintentá"), "{t:?}");
+    assert!(t.iter().any(|s| s == "Lo está usando otro programa"), "{t:?}");
     click_aux(&mut a, ViewHit::Retry(id));
     wait(&mut a, |a| a.jobs().is_empty());
     assert!(f.exists(&p("/app-we/d/b.txt")));

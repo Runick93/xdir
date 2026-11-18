@@ -676,8 +676,12 @@ impl FileSystem for Win32FileSystem {
             Ok(()) => Ok(()),
             Err(e) => {
                 let io = std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF);
-                let at = if io.kind() == std::io::ErrorKind::AlreadyExists { to } else { from };
-                Err(xdir_core::rename_many::io_message(&io, at))
+                if io.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(xdir_core::rename_many::io_message(&io, to));
+                }
+                // Como renombrar uno: también el acceso controlado a carpetas.
+                let failed = crate::ops::write_error(e.code().0 as u32, &e.message(), from, &|| crate::ops::exists(from));
+                Err(failed.notice(&format!("renombrar «{}»", xdir_core::sys::shown_name(from))))
             }
         }
     }

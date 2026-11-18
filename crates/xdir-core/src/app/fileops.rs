@@ -80,6 +80,15 @@ impl App {
         }
     }
 
+    /// Esc después de cortar: si el portapapeles sigue con lo cortado, se vacía (lo copiado, o lo
+    /// que puso otro programa, no se toca) y los íconos vuelven a verse normales.
+    pub(super) fn cancel_cut(&mut self) {
+        if matches!(sys::shell().clipboard_files(), Some((_, true))) {
+            sys::shell().clear_clipboard();
+        }
+        self.refresh_cut();
+    }
+
     /// Copia texto al portapapeles del sistema. Reemplaza lo copiado o cortado: se relee lo
     /// cortado (en macOS no llega ningún aviso mientras xdir está al frente).
     pub(super) fn copy_text(&mut self, text: &str) {

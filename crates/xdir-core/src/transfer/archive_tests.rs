@@ -137,7 +137,7 @@ fn compress_error_is_listed_for_retry() {
     disk.add_file(&p("/z4/a.txt"), b"a".to_vec());
     disk.fail(&p("/z4/a.txt"), crate::sys::ErrKind::InUse, 1);
     let r = simple(&disk, &arch, JobSpec::Compress { sources: vec![p("/z4/a.txt")] });
-    assert_eq!(r.messages(), ["Lo está usando otro programa"]);
+    assert_eq!(r.messages(), ["Lo está usando otro programa: cerralo y reintentá"]);
     assert!(r.out.errors[0].retry);
     assert_eq!(disk.list_all(&p("/z4")), vec![p("/z4/a.txt")]);
 }
@@ -389,7 +389,7 @@ fn compress_walk_errors_abort_without_zip() {
     disk.add_file(&p("/z5/F/b.txt"), b"b".to_vec());
     disk.fail(&p("/z5/F/sub"), crate::sys::ErrKind::Denied, 1);
     let r = simple(&disk, &arch, JobSpec::Compress { sources: vec![p("/z5/F")] });
-    assert_eq!(r.messages(), ["No tenés permiso"]);
+    assert_eq!(r.messages(), ["No tenés permiso: pedí acceso a quien administra esa carpeta"]);
     assert!(r.out.errors[0].retry);
     assert!(!disk.exists(&p("/z5/F.zip")));
     no_tmp_left(&disk, &p("/z5"));
@@ -462,7 +462,7 @@ fn extract_here_unreadable_arrival_is_reported_not_deleted() {
     // Ya en su lugar, no se puede listar.
     disk.fail_list(&p("/w2/in/d"), crate::sys::ErrKind::InUse, 1);
     let r = simple(&disk, &arch, JobSpec::Extract { archive: p("/w2/in/m.zip"), into_folder: false });
-    assert!(r.out.errors.iter().any(|e| e.entry.as_deref() == Some("d") && e.message == "Lo está usando otro programa"), "{:?}", r.out.errors);
+    assert!(r.out.errors.iter().any(|e| e.entry.as_deref() == Some("d") && e.message == "Lo está usando otro programa: cerralo y reintentá"), "{:?}", r.out.errors);
     // Lo que no se pudo mirar no se borra a ciegas (y se avisa).
     assert!(disk.exists(&p("/w2/in/d/z")));
     assert!(!r.messages().contains(&NOT_ALLOWED.to_string()));

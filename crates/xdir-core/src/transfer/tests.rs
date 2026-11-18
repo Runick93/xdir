@@ -211,12 +211,62 @@ fn control_answer_and_cancel_while_waiting() {
 #[test]
 fn copy_error_messages() {
     let e = |kind| CopyError::new(kind, Path::new("/x")).message();
-    assert_eq!(e(ErrKind::InUse), "Lo está usando otro programa");
-    assert_eq!(e(ErrKind::Denied), "No tenés permiso");
+    assert_eq!(e(ErrKind::InUse), "Lo está usando otro programa: cerralo y reintentá");
+    assert_eq!(e(ErrKind::Denied), "No tenés permiso: pedí acceso a quien administra esa carpeta");
     assert_eq!(e(ErrKind::NotFound), "Ya no existe");
-    assert_eq!(e(ErrKind::DiskFull), "El disco está lleno");
+    assert_eq!(e(ErrKind::DiskFull), "El disco está lleno: liberá espacio y reintentá");
     assert_eq!(e(ErrKind::TooBig), "Es demasiado grande para el formato del disco de destino (FAT32)");
     assert_eq!(e(ErrKind::Exists), "Ya existe");
     assert_eq!(e(ErrKind::Cancelled), "Cancelado");
+    assert_eq!(e(ErrKind::NameTooLong), "El nombre es demasiado largo para ese disco: acortalo");
+    assert_eq!(e(ErrKind::PathTooLong), "La ruta es demasiado larga: acortá el nombre de alguna carpeta o llevalo más arriba");
+    assert_eq!(e(ErrKind::InvalidName), "El nombre tiene caracteres que ese disco no acepta o es un nombre reservado (como CON o NUL): cambialo");
+    assert_eq!(e(ErrKind::ReadOnly), "El disco es de solo lectura: quitale la protección contra escritura o usá otro disco");
+    assert_eq!(e(ErrKind::Offline), "El disco o la red no responde: revisá la conexión y reintentá");
     assert_eq!(e(ErrKind::Other("raro".into())), "raro");
+}
+
+/// Lo bloqueado por la protección del sistema dice cuál, con el nombre, y cómo permitirlo.
+#[test]
+fn blocked_and_privacy_messages_name_the_item() {
+    let blocked = CopyError::new(ErrKind::Blocked, Path::new("/Documentos/d27523/Github")).message();
+    assert_eq!(
+        blocked,
+        "Windows bloqueó a xdir: el acceso controlado a carpetas (protección contra ransomware) no lo deja escribir en «Github». \
+         Permití xdir en Seguridad de Windows ▸ Protección contra virus y amenazas ▸ Protección contra ransomware ▸ \
+         Permitir una aplicación a través del acceso controlado a carpetas (en una PC de empresa, lo hace sistemas)."
+    );
+    let privacy = CopyError::new(ErrKind::Privacy, Path::new("/Users/ana/Documents")).message();
+    assert_eq!(
+        privacy,
+        "macOS no deja que xdir use «Documents»: dale permiso en Configuración del Sistema ▸ Privacidad y seguridad ▸ \
+         Archivos y carpetas (o Acceso total al disco) y reintentá"
+    );
+}
+
+/// El aviso suelto (sin la lista de errores al lado): qué no se pudo hacer y por qué.
+#[test]
+fn notice_says_what_failed_and_why() {
+    let e = CopyError::new(ErrKind::InUse, Path::new("/d/a.txt"));
+    assert_eq!(e.notice("renombrar «a.txt»"), "No se pudo renombrar «a.txt»: lo está usando otro programa. Cerralo y reintentá.");
+    let e = CopyError::new(ErrKind::Denied, Path::new("/d"));
+    assert_eq!(e.notice("crear la carpeta en «d»"), "No se pudo crear la carpeta en «d»: no tenés permiso. Pedí acceso a quien administra esa carpeta.");
+    // Lo bloqueado ya es una frase completa: va tal cual.
+    let e = CopyError::new(ErrKind::Blocked, Path::new("/d/Github"));
+    assert_eq!(e.notice("crear la carpeta en «Github»"), e.message());
+    let e = CopyError::new(ErrKind::NotFound, Path::new("/d/a.txt"));
+    assert_eq!(e.notice("abrir «a.txt»"), "No se pudo abrir «a.txt»: ya no existe.");
+    // Lo inesperado: una frase propia y el texto y el código del sistema entre paréntesis.
+    let e = CopyError::new(crate::sys::unexpected("Windows", "El dispositivo no está listo.", "0x80070015"), Path::new("/d"));
+    assert_eq!(e.message(), "Error inesperado del sistema (El dispositivo no está listo; Windows: 0x80070015)");
+    assert_eq!(e.notice("abrir «d»"), "No se pudo abrir «d»: error inesperado del sistema (El dispositivo no está listo; Windows: 0x80070015).");
+}
+
+/// Nombre largo o ruta larga: depende de si algún tramo pasa de 255 caracteres.
+#[test]
+fn too_long_tells_name_from_path() {
+    let long_name = format!("/d/{}", "a".repeat(256));
+    assert_eq!(crate::sys::too_long(Path::new(&long_name)), ErrKind::NameTooLong);
+    let deep: String = (0..60).map(|_| "/carpeta").collect();
+    assert_eq!(crate::sys::too_long(Path::new(&deep)), ErrKind::PathTooLong);
 }

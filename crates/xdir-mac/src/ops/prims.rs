@@ -1001,7 +1001,7 @@ mod tests {
         assert!(!src.join("Dir/a.txt").exists() && !src.join("Dir/sub/b.txt").exists());
         // El que no se pudo leer queda en el origen, con su carpeta.
         assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
-        assert_eq!(out.errors[0].message, "No tenés permiso");
+        assert_eq!(out.errors[0].message, "No tenés permiso: pedí acceso a quien administra esa carpeta");
         assert!(std::fs::symlink_metadata(src.join("Dir/sub/cerrado.txt")).is_ok());
         assert!(std::fs::symlink_metadata(other.join("Dir/sub/cerrado.txt")).is_err());
         let _ = std::fs::set_permissions(src.join("Dir/sub/cerrado.txt"), std::fs::Permissions::from_mode(0o644));

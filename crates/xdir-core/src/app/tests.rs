@@ -754,8 +754,8 @@ fn result(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, error:
 #[test]
 fn op_done_reports_errors_and_clears_the_notice() {
     let mut a = app();
-    a.on_op_done(result(None, None, false, Some("sin permiso")));
-    assert_eq!(a.notice.as_deref(), Some("Error: sin permiso"));
+    a.on_op_done(result(None, None, false, Some("No se pudo renombrar «a.txt»: ya no existe.")));
+    assert_eq!(a.notice.as_deref(), Some("No se pudo renombrar «a.txt»: ya no existe."));
     a.on_op_done(result(None, None, false, None));
     assert_eq!(a.notice, None);
 }
@@ -822,6 +822,25 @@ fn undo_after_new_folder_sends_undo() {
     a.run_command(Command::Undo);
     assert_eq!(FakeFileOps::take_ops(), [Op::Undo(Undo::Created(created))]);
     assert!(a.undo.is_empty());
+}
+
+/// Crear una carpeta que el acceso controlado a carpetas de Windows bloquea (issue #72): el aviso
+/// lo dice, con el nombre de la carpeta, en vez de «no se encuentra».
+#[test]
+fn new_folder_blocked_says_controlled_folder_access() {
+    use crate::sys::testing::FakeFileOps;
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp.clone()), true);
+    FakeFileOps::take_ops();
+    FakeFileOps::fail_with(sys::ErrKind::Blocked);
+    a.run_command(Command::NewFolder);
+    drain_op_results(&mut a);
+    FakeFileOps::respond_with(OpResult::default());
+    let notice = a.notice.clone().unwrap_or_default();
+    assert!(notice.contains("acceso controlado a carpetas"), "{notice}");
+    assert!(notice.contains(&format!("«{}»", sys::shown_name(&tmp))), "{notice}");
+    assert!(!notice.starts_with("Error"), "{notice}");
 }
 
 /// «Archivo de texto nuevo» manda `Op::NewFile` con la carpeta del panel; en «Este equipo» no

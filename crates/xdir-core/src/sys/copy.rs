@@ -91,8 +91,21 @@ pub enum ErrKind {
     Cancelled,
     /// Renombrar no puede llevarlo a otro disco (hay que copiar).
     CrossDevice,
-    /// El nombre (o la ruta) es más largo de lo que acepta el disco.
+    /// Un tramo de la ruta (el nombre) es más largo de lo que acepta el disco.
     NameTooLong,
+    /// La ruta entera es más larga de lo que acepta el sistema (cada nombre entra).
+    PathTooLong,
+    /// El nombre tiene caracteres que el disco no acepta o es reservado (CON, NUL…).
+    InvalidName,
+    /// El disco es de solo lectura (protegido contra escritura, un CD, montado así).
+    ReadOnly,
+    /// El disco o la red no responde (desconectado, se cortó la red, no está listo).
+    Offline,
+    /// Windows: el acceso controlado a carpetas (protección contra ransomware) no deja a xdir
+    /// escribir ahí.
+    Blocked,
+    /// macOS: la privacidad del sistema (TCC) no le dio permiso a xdir para esa carpeta.
+    Privacy,
     Other(String),
 }
 
@@ -103,24 +116,135 @@ pub struct CopyError {
     pub path: PathBuf,
 }
 
+/// El nombre que se muestra de una ruta: el último tramo (o la ruta entera si no tiene, como
+/// `C:\` o `/`).
+pub fn shown_name(p: &Path) -> String {
+    match p.file_name() {
+        Some(n) => n.to_string_lossy().into_owned(),
+        None => p.display().to_string(),
+    }
+}
+
+/// Un error que el sistema no explica mejor: una frase propia y, entre paréntesis, el texto del
+/// sistema y su código («Error inesperado del sistema (El dispositivo no está listo; Windows:
+/// 0x80070015)»), para poder diagnosticarlo.
+pub fn unexpected(system: &str, text: &str, code: &str) -> ErrKind {
+    let text = text.trim().trim_end_matches('.').trim();
+    if text.is_empty() {
+        ErrKind::Other(format!("Error inesperado del sistema ({system}: {code})"))
+    } else {
+        ErrKind::Other(format!("Error inesperado del sistema ({text}; {system}: {code})"))
+    }
+}
+
+/// Un error de E/S del sistema que no tiene una explicación mejor (`unexpected` con el texto y
+/// el código: `Windows: 0x80070015` en Windows, `macOS: errno 5` o `Linux: errno 5` en los demás).
+pub fn io_unexpected(e: &std::io::Error) -> ErrKind {
+    let text = e.to_string();
+    // Sin el «(os error N)» que agrega Rust: el código va aparte.
+    let text = text.split(" (os error").next().unwrap_or(&text);
+    match e.raw_os_error() {
+        Some(n) => unexpected(SYSTEM, text, &os_code(n)),
+        None => unexpected(SYSTEM, text, "sin código"),
+    }
+}
+
+/// El nombre del sistema para los códigos de error.
+const SYSTEM: &str = if cfg!(windows) { "Windows" } else if cfg!(target_os = "macos") { "macOS" } else { "Linux" };
+
+/// El código de un error del sistema como se busca: el HRESULT en Windows, el `errno` en los demás.
+fn os_code(n: i32) -> String {
+    if cfg!(windows) { format!("0x{:08X}", 0x8007_0000u32 | (n as u32 & 0xFFFF)) } else { format!("errno {n}") }
+}
+
+/// «Demasiado largo»: el nombre (algún tramo pasa de 255 caracteres, el máximo de casi todos los
+/// discos) o la ruta entera.
+pub fn too_long(p: &Path) -> ErrKind {
+    if p.components().any(|c| c.as_os_str().to_string_lossy().chars().count() > 255) {
+        ErrKind::NameTooLong
+    } else {
+        ErrKind::PathTooLong
+    }
+}
+
+/// La primera letra en minúscula, salvo que la primera palabra sea un nombre propio («Windows»,
+/// «macOS») o una sigla.
+fn lower_first(text: &str) -> String {
+    let word = text.split([' ', ':', ',']).next().unwrap_or("");
+    let proper = ["Windows", "macOS", "Linux", "Mac", "xdir"].contains(&word) || word.chars().skip(1).any(char::is_uppercase);
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if !proper => c.to_lowercase().chain(chars).collect(),
+        _ => text.to_string(),
+    }
+}
+
 impl CopyError {
     pub fn new(kind: ErrKind, path: &Path) -> CopyError {
         CopyError { kind, path: path.to_path_buf() }
     }
 
-    /// El motivo en castellano, para la lista de errores.
+    /// Por qué falló y, si hay algo concreto, qué hacer. `None` en lo que ya es una frase
+    /// completa con el nombre (lo bloqueado por el sistema).
+    fn parts(&self) -> Option<(String, Option<&'static str>)> {
+        let (why, todo): (&str, Option<&'static str>) = match &self.kind {
+            ErrKind::InUse => ("Lo está usando otro programa", Some("cerralo y reintentá")),
+            ErrKind::Denied => ("No tenés permiso", Some("pedí acceso a quien administra esa carpeta")),
+            ErrKind::NotFound => ("Ya no existe", None),
+            ErrKind::DiskFull => ("El disco está lleno", Some("liberá espacio y reintentá")),
+            ErrKind::TooBig => ("Es demasiado grande para el formato del disco de destino (FAT32)", None),
+            ErrKind::Exists => ("Ya existe", None),
+            ErrKind::Cancelled => ("Cancelado", None),
+            ErrKind::CrossDevice => ("Está en otro disco", None),
+            ErrKind::NameTooLong => ("El nombre es demasiado largo para ese disco", Some("acortalo")),
+            ErrKind::PathTooLong => ("La ruta es demasiado larga", Some("acortá el nombre de alguna carpeta o llevalo más arriba")),
+            ErrKind::InvalidName => {
+                ("El nombre tiene caracteres que ese disco no acepta o es un nombre reservado (como CON o NUL)", Some("cambialo"))
+            }
+            ErrKind::ReadOnly => ("El disco es de solo lectura", Some("quitale la protección contra escritura o usá otro disco")),
+            ErrKind::Offline => ("El disco o la red no responde", Some("revisá la conexión y reintentá")),
+            ErrKind::Blocked | ErrKind::Privacy => return None,
+            ErrKind::Other(text) => return Some((text.clone(), None)),
+        };
+        Some((why.to_string(), todo))
+    }
+
+    /// El motivo en castellano, para la lista de errores (el nombre va al lado): «Lo está usando
+    /// otro programa: cerralo y reintentá».
     pub fn message(&self) -> String {
-        match &self.kind {
-            ErrKind::InUse => "Lo está usando otro programa".into(),
-            ErrKind::Denied => "No tenés permiso".into(),
-            ErrKind::NotFound => "Ya no existe".into(),
-            ErrKind::DiskFull => "El disco está lleno".into(),
-            ErrKind::TooBig => "Es demasiado grande para el formato del disco de destino (FAT32)".into(),
-            ErrKind::Exists => "Ya existe".into(),
-            ErrKind::Cancelled => "Cancelado".into(),
-            ErrKind::CrossDevice => "Está en otro disco".into(),
-            ErrKind::NameTooLong => "El nombre es demasiado largo para ese disco".into(),
-            ErrKind::Other(text) => text.clone(),
+        let name = shown_name(&self.path);
+        match (&self.kind, self.parts()) {
+            (_, Some((why, Some(todo)))) => format!("{why}: {todo}"),
+            (_, Some((why, None))) => why,
+            (ErrKind::Blocked, None) => format!(
+                "Windows bloqueó a xdir: el acceso controlado a carpetas (protección contra ransomware) no lo deja escribir en «{name}». \
+                 Permití xdir en Seguridad de Windows ▸ Protección contra virus y amenazas ▸ Protección contra ransomware ▸ \
+                 Permitir una aplicación a través del acceso controlado a carpetas (en una PC de empresa, lo hace sistemas)."
+            ),
+            (_, None) => format!(
+                "macOS no deja que xdir use «{name}»: dale permiso en Configuración del Sistema ▸ Privacidad y seguridad ▸ \
+                 Archivos y carpetas (o Acceso total al disco) y reintentá"
+            ),
+        }
+    }
+
+    /// El aviso suelto, sin la lista de errores al lado: qué no se pudo hacer (`what`, con el
+    /// nombre: «crear la carpeta en «Docs»»), por qué y qué hacer. «No se pudo renombrar
+    /// «a.txt»: lo está usando otro programa. Cerralo y reintentá.»
+    pub fn notice(&self, what: &str) -> String {
+        match self.parts() {
+            None => self.message(),
+            Some((why, todo)) => {
+                let why = lower_first(why.trim_end_matches('.'));
+                match todo {
+                    Some(todo) => {
+                        let mut todo = todo.chars();
+                        let first: String = todo.next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                        format!("No se pudo {what}: {why}. {first}{}.", todo.as_str())
+                    }
+                    None => format!("No se pudo {what}: {why}."),
+                }
+            }
         }
     }
 }

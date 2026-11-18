@@ -467,7 +467,7 @@ fn error_messages_and_kinds() {
     assert_eq!(kind_of(&io::Error::from(io::ErrorKind::NotFound)), ErrKind::NotFound);
     assert_eq!(kind_of(&io::Error::from(io::ErrorKind::StorageFull)), ErrKind::DiskFull);
     assert_eq!(other("x", Path::new("a")).message(), "x");
-    assert_eq!(Error { kind: ErrKind::DiskFull, path: PathBuf::new() }.message(), "El disco está lleno");
+    assert_eq!(Error { kind: ErrKind::DiskFull, path: PathBuf::new() }.message(), "El disco está lleno: liberá espacio y reintentá");
 }
 
 // ---- Ronda de arreglos 1: regresiones de seguridad ----

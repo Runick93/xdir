@@ -239,7 +239,8 @@ impl App {
     }
 
     pub(super) fn on_op_done(&mut self, result: OpResult) {
-        self.notice = result.error.map(|e| format!("Error: {e}"));
+        // Las plataformas mandan frases completas (`ops::failure`): van tal cual.
+        self.notice = result.error;
         if let Some(undo) = result.undo {
             self.undo.push(undo);
             if self.undo.len() > UNDO_MAX {

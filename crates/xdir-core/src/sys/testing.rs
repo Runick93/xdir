@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, CopyError, DiskScan, ErrKind, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use crate::info::{InfoChange, InfoReply, InfoRequest, ItemInfo};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
@@ -220,6 +220,7 @@ thread_local! {
     /// (que corren en paralelo, cada uno en su hilo) no se vean entre sí.
     static OPS: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
     static RESPONSE: RefCell<OpResult> = RefCell::new(OpResult::default());
+    static FAIL: RefCell<Option<ErrKind>> = const { RefCell::new(None) };
 }
 
 /// `FileOps` falso: no toca el disco; anota cada `Op` recibida y responde por el canal, en el
@@ -236,13 +237,36 @@ impl FakeFileOps {
     /// Respuesta de las próximas operaciones de este hilo.
     pub fn respond_with(result: OpResult) {
         RESPONSE.with(|r| *r.borrow_mut() = result);
+        FAIL.with(|f| *f.borrow_mut() = None);
+    }
+
+    /// Las próximas operaciones de este hilo fallan con `kind` en su elemento (la carpeta donde
+    /// se crea, lo que se renombra o borra), con el aviso que arman las plataformas
+    /// (`ops::failure`). `respond_with` lo deshace.
+    pub fn fail_with(kind: ErrKind) {
+        FAIL.with(|f| *f.borrow_mut() = Some(kind));
+    }
+}
+
+/// El elemento de una operación con el que se arma su error.
+fn op_path(op: &Op) -> PathBuf {
+    match op {
+        Op::Delete { paths, .. } => paths.first().cloned().unwrap_or_default(),
+        Op::Rename { path, .. } => path.clone(),
+        Op::NewFolder { parent } | Op::NewFile { parent } => parent.clone(),
+        Op::Shortcuts { targets } => targets.first().cloned().unwrap_or_default(),
+        Op::Undo(_) => PathBuf::new(),
     }
 }
 
 impl FileOps for FakeFileOps {
     fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op) {
+        let result = match FAIL.with(|f| f.borrow().clone()) {
+            Some(kind) => OpResult { error: Some(crate::ops::failure(&op, &CopyError::new(kind, &op_path(&op)))), ..OpResult::default() },
+            None => RESPONSE.with(|r| r.borrow().clone()),
+        };
         OPS.with(|o| o.borrow_mut().push(op));
-        let _ = tx.send(RESPONSE.with(|r| r.borrow().clone()));
+        let _ = tx.send(result);
         owner.post(WM_APP_OP_DONE, 0, 0);
     }
 }

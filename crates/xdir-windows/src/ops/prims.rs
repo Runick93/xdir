@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(std::fs::read(other.join("Dir").join("sub").join("b.txt")).unwrap(), b"b");
         assert!(!src.join("Dir").join("a.txt").exists());
         assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
-        assert_eq!(out.errors[0].message, "Lo está usando otro programa");
+        assert_eq!(out.errors[0].message, "Lo está usando otro programa: cerralo y reintentá");
         assert_eq!(std::fs::read(&busy).unwrap(), b"c");
         assert!(!other.join("Dir").join("sub").join("abierto.txt").exists());
     }

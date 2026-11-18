@@ -754,7 +754,7 @@ mod tests {
             assert!(!src.join("Dir").exists());
         } else {
             assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
-            assert_eq!(out.errors[0].message, "No tenés permiso");
+            assert_eq!(out.errors[0].message, "No tenés permiso: pedí acceso a quien administra esa carpeta");
             assert!(src.join("Dir/sub/cerrado.txt").exists());
             assert!(!other.join("Dir/sub/cerrado.txt").exists());
         }

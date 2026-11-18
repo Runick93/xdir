@@ -19,10 +19,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use super::App;
+use crate::config::ConfigEdit;
 use crate::geom::rect;
 use crate::host::{AuxMouse, AuxWindow};
 use crate::keys::{Key, keys::VK_ESCAPE};
-use crate::config::ConfigEdit;
 use crate::ops::Undo;
 use crate::paint::Painter;
 use crate::transfer::view::{self, ViewHit};
@@ -679,6 +679,12 @@ impl App {
             ViewHit::Pause(id) => self.pause_job(id),
             ViewHit::Resume(id) => self.resume_job(id),
             ViewHit::Cancel(id) | ViewHit::Dismiss(id) => self.cancel_job(id),
+            ViewHit::StartNow(id) => {
+                // `force` se pierde si el trabajo todavía no se anotó: solo para los que esperan.
+                if self.transfers.jobs.iter().any(|j| j.id == id && j.state == JobState::Waiting) {
+                    self.transfers.sched.force(id);
+                }
+            }
             ViewHit::Expand(id) => {
                 let w = &mut self.transfers.window;
                 if !w.collapsed && self.transfers_expanded() == Some(id) {
@@ -725,7 +731,7 @@ impl App {
 
     /// Comandos de prueba (feature `pruebas`): `copiar <destino>|<origen>|…` y `mover …` lanzan un
     /// trabajo; `ventana <control>` hace clic en la ventana de copia sobre el control del primer
-    /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `detalles`, `reemplazar`, `ambos`,
+    /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `ahora`, `detalles`, `reemplazar`, `ambos`,
     /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`). `comprimir <a>|<b>…`, `extraer_aqui
     /// <archivo>` y `extraer_en <archivo>` lanzan esos trabajos.
     #[cfg(feature = "pruebas")]
@@ -750,6 +756,7 @@ impl App {
                         "pausa" => ViewHit::Pause(id),
                         "reanudar" => ViewHit::Resume(id),
                         "cancelar" => ViewHit::Cancel(id),
+                        "ahora" => ViewHit::StartNow(id),
                         "detalles" => ViewHit::Expand(id),
                         "reemplazar" => ViewHit::Choose(id, Choice::Replace),
                         "ambos" => ViewHit::Choose(id, Choice::KeepBoth),

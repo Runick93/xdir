@@ -315,7 +315,7 @@ fn slow_copy(f: &FakeCopyPrims, root: &str, delay: u64) -> JobSpec {
 }
 
 /// Dos copias lentas, con raíces distintas pero sobre el mismo disco falso. Con `first_runs` la
-/// segunda se lanza recién cuando la primera ya corre (si no, las dos hilos compiten por anotarse).
+/// segunda se lanza recién cuando la primera ya corre (si no, los dos hilos compiten por anotarse).
 fn two_same_disk_copies(a: &mut App, f: &FakeCopyPrims, tag: &str, first_runs: bool) -> (JobId, JobId) {
     let (r1, r2) = (format!("/{tag}-1"), format!("/{tag}-2"));
     let s1 = slow_copy(f, &r1, 20);
@@ -356,6 +356,24 @@ fn queue_by_disk_makes_second_wait() {
     a.config.queue_by_disk = true;
     let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-cola", true);
     wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// «Empezar ahora» saca de la cola a un trabajo que espera su turno, con el primero todavía corriendo.
+#[test]
+fn start_now_runs_queued_job() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-ahora", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    click_aux(&mut a, ViewHit::StartNow(i2));
+    wait(&mut a, |a| {
+        let st = |id| a.jobs().iter().find(|j| j.id == id).map(|j| j.state);
+        st(i2) == Some(JobState::Running) && st(i1) == Some(JobState::Running)
+    });
     a.cancel_job(i1);
     a.cancel_job(i2);
     wait(&mut a, idle);

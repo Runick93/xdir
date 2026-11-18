@@ -306,3 +306,11 @@ fn window_title_counts_waiting_conflicts() {
     assert_eq!(view::window_title(&[conflict(1, false), running(2)]), "Copiando: un conflicto");
     assert_eq!(view::window_title(&[conflict(1, false), conflict(2, true)]), "Copiando: 2 conflictos");
 }
+
+#[test]
+fn queued_row_has_start_now() {
+    let jobs = [running(1), job(2, JobState::Waiting)];
+    assert!(center_of(&jobs, None, ViewHit::StartNow(2)).is_some());
+    assert!(center_of(&jobs, None, ViewHit::StartNow(1)).is_none());
+    assert!(has(&texts(&jobs, None), "Empezar ahora"));
+}

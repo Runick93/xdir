@@ -74,8 +74,9 @@ fn places_move_toggle_add_remove() {
     p.toggle(6);
     assert!(p.hidden.is_empty());
     p.toggle(99);
-    p.add_folder(PathBuf::from("/tmp/proy"));
-    p.add_folder(PathBuf::from("/tmp/proy"));
+    let proy = std::env::temp_dir().join("proy");
+    p.add_folder(proy.clone());
+    p.add_folder(proy);
     assert_eq!(p.order.len(), 9);
     p.remove(0);
     assert_eq!(p.order.len(), 9);
@@ -85,4 +86,12 @@ fn places_move_toggle_add_remove() {
     assert_eq!(p.order, builtins());
     assert!(p.hidden.is_empty());
     p.remove(99);
+}
+
+#[test]
+fn places_add_folder_ignores_relative() {
+    install_fakes();
+    let mut p = Places::default();
+    p.add_folder(PathBuf::from("papelera"));
+    assert_eq!(p.order, builtins());
 }

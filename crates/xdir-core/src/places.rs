@@ -133,7 +133,9 @@ impl Places {
         std::fs::create_dir_all(dir)?;
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = dir.join(format!("{FILE_NAME}.{}.{n}.tmp", std::process::id()));
-        std::fs::write(&tmp, self.to_toml())?;
+        std::fs::write(&tmp, self.to_toml()).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
         std::fs::rename(&tmp, dir.join(FILE_NAME)).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })
@@ -167,7 +169,11 @@ impl Places {
     }
 
     /// Al final, sin repetir una carpeta propia que ya está (compara con `same_path` del sistema).
+    /// Solo rutas absolutas: una relativa como «papelera» se leería después como un lugar fijo.
     pub fn add_folder(&mut self, path: PathBuf) {
+        if !path.is_absolute() {
+            return;
+        }
         let fs = crate::sys::file_system();
         if self.order.iter().any(|p| matches!(p, Place::Folder(q) if fs.same_path(q, &path))) {
             return;

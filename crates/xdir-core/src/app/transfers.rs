@@ -19,6 +19,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use super::App;
+use crate::config::ConfigEdit;
 use crate::geom::rect;
 use crate::host::{AuxMouse, AuxWindow};
 use crate::keys::{Key, keys::VK_ESCAPE};
@@ -387,6 +388,7 @@ impl App {
         let rerun = matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }).then(|| spec.clone());
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun });
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
+        t.sched.set_queue_by_disk(self.config.queue_by_disk);
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
             let send = |u: Update| {
@@ -407,6 +409,7 @@ impl App {
                 send(Update::Finished(JobOutcome { stopped: Some(format!("Se está expulsando \"{label}\"")), ..Default::default() }));
                 return;
             }
+            // Se anota con sus discos siempre: si la cola por disco está apagada no espera a nadie.
             if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
                 send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
                 return;
@@ -421,6 +424,20 @@ impl App {
         });
         post_due(self.hwnd, id);
         id
+    }
+
+    /// Switch «Copias en cola por disco»: `cola_por_disco = true` en `config.toml` (apagado es lo
+    /// de fábrica: se quita la línea). Rige en vivo: al apagarlo, lo que esperaba en la cola sigue de inmediato.
+    pub(super) fn toggle_queue_by_disk(&mut self) {
+        let on = !self.config.queue_by_disk;
+        self.config.queue_by_disk = on;
+        self.transfers.sched.set_queue_by_disk(on);
+        let key = "cola_por_disco".to_string();
+        self.edit_config(vec![if on {
+            ConfigEdit::Set { section: "opciones", key, value: "true".into() }
+        } else {
+            ConfigEdit::Remove { section: "opciones", key }
+        }]);
     }
 
     /// Vacía el canal de los trabajos (`WM_APP_TRANSFER`).
@@ -662,6 +679,12 @@ impl App {
             ViewHit::Pause(id) => self.pause_job(id),
             ViewHit::Resume(id) => self.resume_job(id),
             ViewHit::Cancel(id) | ViewHit::Dismiss(id) => self.cancel_job(id),
+            ViewHit::StartNow(id) => {
+                // `force` se pierde si el trabajo todavía no se anotó: solo para los que esperan.
+                if self.transfers.jobs.iter().any(|j| j.id == id && j.state == JobState::Waiting) {
+                    self.transfers.sched.force(id);
+                }
+            }
             ViewHit::Expand(id) => {
                 let w = &mut self.transfers.window;
                 if !w.collapsed && self.transfers_expanded() == Some(id) {
@@ -708,7 +731,7 @@ impl App {
 
     /// Comandos de prueba (feature `pruebas`): `copiar <destino>|<origen>|…` y `mover …` lanzan un
     /// trabajo; `ventana <control>` hace clic en la ventana de copia sobre el control del primer
-    /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `detalles`, `reemplazar`, `ambos`,
+    /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `ahora`, `detalles`, `reemplazar`, `ambos`,
     /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`). `comprimir <a>|<b>…`, `extraer_aqui
     /// <archivo>` y `extraer_en <archivo>` lanzan esos trabajos.
     #[cfg(feature = "pruebas")]
@@ -733,6 +756,7 @@ impl App {
                         "pausa" => ViewHit::Pause(id),
                         "reanudar" => ViewHit::Resume(id),
                         "cancelar" => ViewHit::Cancel(id),
+                        "ahora" => ViewHit::StartNow(id),
                         "detalles" => ViewHit::Expand(id),
                         "reemplazar" => ViewHit::Choose(id, Choice::Replace),
                         "ambos" => ViewHit::Choose(id, Choice::KeepBoth),

@@ -17,6 +17,7 @@
 - **Terminal por defecto**: elegí qué terminal abre «Abrir la terminal en la carpeta» en Configuración ▸ Avanzado ▸ Terminal, o con clic derecho sobre una del menú `>_` → «Usar por defecto» (la elegida dice «Por defecto»). Se detectan más terminales: en la Mac Ghostty, Warp, WezTerm, Alacritty, kitty, Hyper y Tabby además de Terminal e iTerm; en Windows también Git Bash; en Linux todas las que estén instaladas. Otra cualquiera se agrega con `terminal_propia` en config.toml.
 
 ### Cambios
+- Las copias, movimientos y extracciones corren a la vez aunque usen el mismo disco. Para que esperen en cola como antes, encendé Configuración ▸ Avanzado ▸ «Copias en cola por disco»; cada una en cola tiene el botón «Empezar ahora».
 - El comando «Abrir PowerShell en la carpeta» (en la Mac, «Abrir Terminal en la carpeta») pasa a llamarse «Abrir la terminal en la carpeta» y abre la terminal por defecto; «Abrir CMD en la carpeta» sigue abriendo CMD.
 - Cualquier carpeta que tarda más de medio segundo en leerse (local, de red o comprimida) muestra «Cargando…» con el indicador girando, encima de lo que ya llegó. En red sigue el aviso «Conectando…» / «no responde».
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.

@@ -306,3 +306,20 @@ fn window_title_counts_waiting_conflicts() {
     assert_eq!(view::window_title(&[conflict(1, false), running(2)]), "Copiando: un conflicto");
     assert_eq!(view::window_title(&[conflict(1, false), conflict(2, true)]), "Copiando: 2 conflictos");
 }
+
+#[test]
+fn queued_row_has_start_now() {
+    let jobs = [running(1), job(2, JobState::Waiting)];
+    assert!(center_of(&jobs, None, ViewHit::StartNow(2)).is_some());
+    assert!(center_of(&jobs, None, ViewHit::StartNow(1)).is_none());
+    assert!(has(&texts(&jobs, None), "Empezar ahora"));
+    // Alto de un botón de texto (BTN_H), adentro de la fila en cola.
+    let r = rect(0.0, 0.0, view::WIDTH, view::content_height(&jobs, None));
+    let ys: Vec<f32> = (0..(r.bottom as i32 * 2))
+        .map(|i| i as f32 / 2.0)
+        .filter(|y| view::hit(r, &jobs, None, r.right - 60.0, *y) == Some(ViewHit::StartNow(2)))
+        .collect();
+    assert!(!ys.is_empty());
+    let h = ys.last().unwrap() - ys.first().unwrap();
+    assert!((h - 28.0).abs() <= 1.0, "alto {h}");
+}

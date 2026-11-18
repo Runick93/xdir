@@ -28,6 +28,7 @@
 - Eliminar muestra su avance en la ventana de copia de xdir (con Pausa y Cancelar) en vez del diálogo de Windows, y en un disco sin Papelera avisa antes de eliminar definitivamente.
 
 ### Arreglos
+- En la Mac, mover archivos a una carpeta de red (SMB) ya no falla con «No tenés permiso»: la copia se aseguraba en el disco de una forma que esos servidores rechazan.
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.
 - El árbol de carpetas ya muestra u oculta las carpetas ocultas al cambiar «Mostrar archivos ocultos», sin tener que plegarlo y desplegarlo de nuevo; lo desplegado queda como estaba.

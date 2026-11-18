@@ -114,6 +114,8 @@ pub fn run() -> windows::core::Result<()> {
         // Las carpetas visibles empiezan a leerse antes de mostrar la ventana.
         (*app).sync_visibility();
         host.register_drop_target();
+        // Avisos de cambios del portapapeles (`WM_CLIPBOARDUPDATE`): lo cortado se ve atenuado.
+        let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener((*app).window().hwnd());
         #[cfg(feature = "arbol")]
         (*app).start_quick_access();
         (*app).mark("ventana creada");

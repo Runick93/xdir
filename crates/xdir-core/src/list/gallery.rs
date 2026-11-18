@@ -264,13 +264,15 @@ impl FileList {
             let pic = rect(img.left, img.top, img.right, (img.bottom - CAPTION_H).max(img.top));
             let (w, h) = (pic.right - pic.left, pic.bottom - pic.top);
             if h >= 1.0 {
-                let drawn = !e.is_dir
-                    && self.thumb_source(e).is_some_and(|src| p.big_image(&(src, thumbs::big_side(p.thumb_px(w.max(h)))), pic));
-                if !drawn {
-                    let size = BIG_ICON.min(w).min(h);
-                    let (cx, cy) = ((pic.left + pic.right) / 2.0, (pic.top + pic.bottom) / 2.0);
-                    p.shell_icon(e.icon, e.overlay, cx - size / 2.0, cy - size / 2.0, size);
-                }
+                super::dim_if(p, self.is_cut(e), &mut || {
+                    let drawn = !e.is_dir
+                        && self.thumb_source(e).is_some_and(|src| p.big_image(&(src, thumbs::big_side(p.thumb_px(w.max(h)))), pic));
+                    if !drawn {
+                        let size = BIG_ICON.min(w).min(h);
+                        let (cx, cy) = ((pic.left + pic.right) / 2.0, (pic.top + pic.bottom) / 2.0);
+                        p.shell_icon(e.icon, e.overlay, cx - size / 2.0, cy - size / 2.0, size);
+                    }
+                });
             }
             self.draw_caption(p, e, caption);
         }
@@ -357,11 +359,13 @@ impl FileList {
             }
         }
         let thumb = rect(r.left + THUMB_INSET, r.top + THUMB_INSET, r.right - THUMB_INSET, r.top + THUMB_INSET + STRIP_THUMB);
-        let drawn = !e.is_dir && self.thumb_source(e).is_some_and(|src| p.thumbnail(&(src, p.thumb_px(STRIP_THUMB)), thumb));
-        if !drawn {
-            let (cx, cy) = ((thumb.left + thumb.right) / 2.0, (thumb.top + thumb.bottom) / 2.0);
-            p.shell_icon(e.icon, e.overlay, cx - STRIP_ICON / 2.0, cy - STRIP_ICON / 2.0, STRIP_ICON);
-        }
+        super::dim_if(p, self.is_cut(e), &mut || {
+            let drawn = !e.is_dir && self.thumb_source(e).is_some_and(|src| p.thumbnail(&(src, p.thumb_px(STRIP_THUMB)), thumb));
+            if !drawn {
+                let (cx, cy) = ((thumb.left + thumb.right) / 2.0, (thumb.top + thumb.bottom) / 2.0);
+                p.shell_icon(e.icon, e.overlay, cx - STRIP_ICON / 2.0, cy - STRIP_ICON / 2.0, STRIP_ICON);
+            }
+        });
         // El nombre, centrado y cortado al ancho de la celda.
         let color = if matches!(state, CellState::Selected | CellState::SelectedFocus | CellState::Focus) { th.text } else { th.text_dim };
         let max = CELL - 2.0 * CELL_NAME_PAD;

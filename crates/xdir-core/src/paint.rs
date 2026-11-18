@@ -82,6 +82,9 @@ pub trait Painter {
     fn logo(&self, r: Rect, frame: usize);
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
     fn thumb_px(&self, dips: f32) -> u32;
+    /// Dibuja lo que haga `f` con los íconos, miniaturas e imágenes a opacidad `alpha` (0 a 1); el
+    /// texto y los rellenos no cambian. Lo usa lo cortado (`cut::CUT_ALPHA`).
+    fn faded(&self, alpha: f32, f: &mut dyn FnMut());
     /// Dibuja lo que haga `f` recortado a `r`. Si hace falta un resultado, `f` lo deja en una
     /// variable capturada.
     fn clip(&self, r: Rect, f: &mut dyn FnMut());

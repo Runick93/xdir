@@ -3,6 +3,7 @@
 ## Sin publicar
 
 ### Nuevo
+- Lo cortado (Ctrl+X / ⌘X) se ve con el ícono atenuado hasta que se pega, como en el Explorador; también lo que se corta en el Explorador.
 - El logo de Runick de «Acerca de xdir» ahora está animado.
 - El instalador de Windows suma el logo de Runick en el panel de la bienvenida y el ícono de xdir junto al título y arriba a la derecha en las demás pantallas.
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.

@@ -538,6 +538,9 @@ impl App {
     /// editaron los archivos) y el lector de pantalla vuelve a leer el elemento con foco.
     pub fn on_app_activated(&mut self) {
         self.a11y_focus = None;
+        // Lo cortado pudo cambiar en otra aplicación (respaldo del aviso del sistema; en macOS,
+        // la única forma de enterarse).
+        self.refresh_cut();
         #[cfg(feature = "arbol")]
         self.tree.request_quick(self.hwnd);
         let fresh = Favorites::load();

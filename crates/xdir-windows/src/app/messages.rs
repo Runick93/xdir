@@ -135,7 +135,13 @@ pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                     DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
             }
-            // Al volver a la ventana se releen los favoritos (por si se editó el archivo).
+            // Cambió el portapapeles (en xdir o en otra aplicación): se relee lo cortado.
+            WM_CLIPBOARDUPDATE => {
+                app.on_clipboard_changed();
+                LRESULT(0)
+            }
+            // Al volver a la ventana se releen los favoritos (por si se editó el archivo) y lo
+            // cortado (respaldo del aviso del portapapeles).
             WM_ACTIVATEAPP if wparam.0 != 0 => {
                 app.on_app_activated();
                 LRESULT(0)
@@ -277,6 +283,7 @@ pub(super) fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                     None::<&windows::Win32::UI::Accessibility::IRawElementProviderSimple>,
                 );
                 let _ = RevokeDragDrop(hwnd);
+                let _ = windows::Win32::System::DataExchange::RemoveClipboardFormatListener(hwnd);
                 crate::quicklook::shutdown();
                 crate::auxwin::shutdown();
                 if let Some(host) = Win32Host::current() {

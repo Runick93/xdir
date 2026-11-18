@@ -290,16 +290,14 @@ pub fn read(path: &Path) -> ItemInfo {
     info
 }
 
+/// El error de E/S como lo ve el usuario (el mismo texto que la lista de errores de las copias).
 fn io_text(e: &std::io::Error) -> String {
-    match e.kind() {
-        std::io::ErrorKind::PermissionDenied => "No tenés permiso".into(),
-        std::io::ErrorKind::NotFound => "Ya no existe".into(),
-        _ => match e.raw_os_error() {
-            Some(libc::EPERM) => "No tenés permiso".into(),
-            Some(libc::EROFS) => "El disco es solo de lectura".into(),
-            _ => e.to_string(),
-        },
-    }
+    // `err` se queda con el error: una copia con el mismo código (o tipo y texto).
+    let same = match e.raw_os_error() {
+        Some(n) => std::io::Error::from_raw_os_error(n),
+        None => std::io::Error::new(e.kind(), e.to_string()),
+    };
+    crate::prims::err(same, Path::new("")).message()
 }
 
 fn joined(errors: Vec<String>) -> Result<(), String> {
@@ -313,7 +311,7 @@ fn joined(errors: Vec<String>) -> Result<(), String> {
 fn set_tags(path: &Path, add: &[String], remove: &[String]) -> Result<(), String> {
     let mut tags = match get_xattr(path, TAGS) {
         Ok(v) => parse_tags(&String::from_utf8_lossy(&v.unwrap_or_default())),
-        Err(libc::EACCES | libc::EPERM) => return Err("No tenés permiso".into()),
+        Err(n @ (libc::EACCES | libc::EPERM)) => return Err(io_text(&std::io::Error::from_raw_os_error(n))),
         Err(_) => return Err("Este sistema de archivos no admite etiquetas".into()),
     };
     tags.retain(|t| !remove.contains(t));

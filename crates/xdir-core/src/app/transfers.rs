@@ -171,6 +171,7 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
         JobSpec::Compress { sources } => out.extend(sources.iter().cloned()),
         JobSpec::Extract { archive, .. } => out.push(archive.clone()),
         JobSpec::ExtractEntries { archive, dest, .. } => out.extend([archive.clone(), dest.clone()]),
+        JobSpec::Delete { paths, .. } => out.extend(paths.iter().cloned()),
     }
     out
 }
@@ -195,6 +196,7 @@ fn spec_route(spec: &JobSpec) -> transfer::JobRoute {
         JobSpec::Compress { sources } => ("Se comprimió", "Se comprimieron", folder(sources), None, sources.clone()),
         JobSpec::Extract { archive, .. } => ("Se extrajo", "Se extrajeron", None, None, vec![archive.clone()]),
         JobSpec::ExtractEntries { archive, dest, .. } => ("Se copió", "Se copiaron", name(archive), name(dest), vec![archive.clone()]),
+        JobSpec::Delete { paths, .. } => ("Se eliminó", "Se eliminaron", None, None, paths.clone()),
     };
     transfer::JobRoute { done_one, done_many, from, to, sources }
 }
@@ -204,6 +206,7 @@ fn spec_count(spec: &JobSpec) -> u64 {
     (match spec {
         JobSpec::Copy { sources, .. } | JobSpec::Move { sources, .. } | JobSpec::Duplicate { sources } => sources.len(),
         JobSpec::NewFolderWith { items, .. } | JobSpec::Restore { items } => items.len(),
+        JobSpec::Delete { paths, .. } => paths.len(),
         JobSpec::Retry { pairs, .. } => pairs.len(),
         JobSpec::Compress { sources } => sources.len(),
         JobSpec::Extract { .. } => 1,
@@ -225,6 +228,7 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
         JobSpec::Compress { .. } => ("Comprimir", false),
         JobSpec::Extract { .. } => ("Extraer", false),
         JobSpec::ExtractEntries { .. } => ("Copiar", false),
+        JobSpec::Delete { .. } => ("Eliminar", false),
     }
 }
 

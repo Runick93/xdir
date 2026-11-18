@@ -115,6 +115,9 @@ pub enum JobSpec {
     /// Copia elementos de adentro de `archive` (rutas interiores con `/`: archivos o carpetas,
     /// con todo lo de adentro) a la carpeta `dest`, con los conflictos de siempre.
     ExtractEntries { archive: PathBuf, entries: Vec<String>, dest: PathBuf },
+    /// Elimina `paths`: a la Papelera (`recycle`; si el disco no tiene, pregunta antes y se
+    /// elimina definitivamente) o definitivamente, de adentro hacia afuera.
+    Delete { paths: Vec<PathBuf>, recycle: bool },
 }
 
 /// Lo que manda el hilo de un trabajo al de interfaz.

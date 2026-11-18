@@ -267,14 +267,14 @@ impl RenamePrims for SysRenames {
     }
 }
 
-/// Texto para el usuario de un error de E/S al renombrar `path` (lo usan las plataformas).
+/// Texto para el usuario de un error de E/S al renombrar `path` (lo usan las plataformas): una
+/// frase entera con el nombre, el motivo y qué hacer. Con «ya existe», `path` es el nombre nuevo.
 pub fn io_message(e: &std::io::Error, path: &Path) -> String {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    match e.kind() {
-        std::io::ErrorKind::AlreadyExists => format!("Ya existe «{name}»"),
-        std::io::ErrorKind::PermissionDenied => format!("No tenés permiso para renombrar «{name}»"),
-        std::io::ErrorKind::NotFound => format!("«{name}» ya no existe"),
-        _ => format!("«{name}»: {e}"),
+    let name = crate::sys::shown_name(path);
+    match crate::sys::io_kind(e) {
+        crate::sys::ErrKind::Exists => format!("No se pudo renombrar: ya hay otro elemento llamado «{name}»."),
+        crate::sys::ErrKind::NameTooLong => crate::sys::CopyError::new(crate::sys::too_long(path), path).notice(&format!("renombrar «{name}»")),
+        kind => crate::sys::CopyError::new(kind, path).notice(&format!("renombrar «{name}»")),
     }
 }
 
@@ -371,6 +371,17 @@ fn with_stranded(e: String, stranded: &[(PathBuf, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Renombrar que falla: qué, con qué nombre, por qué y qué hacer.
+    #[test]
+    fn io_message_says_what_and_why() {
+        let p = std::path::Path::new("/d/a.txt");
+        let e = |k| super::io_message(&std::io::Error::from(k), p);
+        assert_eq!(e(std::io::ErrorKind::PermissionDenied), "No se pudo renombrar «a.txt»: no tenés permiso. Pedí acceso a quien administra esa carpeta.");
+        assert_eq!(e(std::io::ErrorKind::NotFound), "No se pudo renombrar «a.txt»: ya no existe.");
+        // Con «ya existe», la ruta es la del nombre nuevo (el que está ocupado).
+        assert_eq!(e(std::io::ErrorKind::AlreadyExists), "No se pudo renombrar: ya hay otro elemento llamado «a.txt».");
+    }
+
     use super::*;
     use std::cell::RefCell;
     use std::collections::BTreeSet;

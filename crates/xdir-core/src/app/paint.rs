@@ -41,6 +41,8 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        // El aviso con explicación se puede señalar (su cartel la muestra): dónde queda.
+        let notice_w = self.notice.as_ref().filter(|_| self.notice_detail_text().is_some()).cloned();
         // Lo que corre en segundo plano: el indicador (y su cartel) desde su umbral.
         let clock = self.now();
         self.sync_activity(clock);
@@ -347,6 +349,7 @@ impl App {
                 self.update_link = Some(link);
                 buttons.lead = lead;
             }
+            self.notice_rect = notice_w.as_ref().map(|n| ui::status_text_rect(w, h, p.measure(crate::paint::FontId::Ui, n), buttons.lead));
             self.size_link = ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado
             // (entra en el área de su lista; en un panel muy bajo puede pasarse).

@@ -754,8 +754,8 @@ fn result(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, error:
 #[test]
 fn op_done_reports_errors_and_clears_the_notice() {
     let mut a = app();
-    a.on_op_done(result(None, None, false, Some("sin permiso")));
-    assert_eq!(a.notice.as_deref(), Some("Error: sin permiso"));
+    a.on_op_done(result(None, None, false, Some("No se pudo renombrar «a.txt»: ya no existe.")));
+    assert_eq!(a.notice.as_deref(), Some("No se pudo renombrar «a.txt»: ya no existe."));
     a.on_op_done(result(None, None, false, None));
     assert_eq!(a.notice, None);
 }
@@ -822,6 +822,38 @@ fn undo_after_new_folder_sends_undo() {
     a.run_command(Command::Undo);
     assert_eq!(FakeFileOps::take_ops(), [Op::Undo(Undo::Created(created))]);
     assert!(a.undo.is_empty());
+}
+
+/// Crear una carpeta que el acceso controlado a carpetas de Windows bloquea (issue #72): el aviso
+/// lo dice, con el nombre de la carpeta, en vez de «no se encuentra».
+#[test]
+fn new_folder_blocked_says_controlled_folder_access() {
+    use crate::sys::testing::FakeFileOps;
+    let mut a = app();
+    let tmp = sys::file_system().true_case(&std::env::temp_dir());
+    a.new_tab(0, Location::Path(tmp.clone()), true);
+    FakeFileOps::take_ops();
+    FakeFileOps::fail_with(sys::ErrKind::Blocked { sure: true });
+    a.run_command(Command::NewFolder);
+    drain_op_results(&mut a);
+    FakeFileOps::respond_with(OpResult::default());
+    let notice = a.notice.clone().unwrap_or_default();
+    assert!(notice.contains("acceso controlado a carpetas"), "{notice}");
+    assert!(notice.contains(&format!("«{}»", sys::shown_name(&tmp))), "{notice}");
+    assert!(!notice.starts_with("Error"), "{notice}");
+    // Corto en la barra de estado; al pasar el mouse por el aviso, la explicación entera.
+    assert!(notice.chars().count() <= 140, "{notice}");
+    a.paint();
+    let r = a.notice_rect.expect("el aviso con detalle se puede señalar");
+    let (x, y) = (r.left + 4.0, (r.top + r.bottom) / 2.0);
+    assert_eq!(a.hit(x, y), Hit::Notice);
+    let tip = a.tooltip_text(Hit::Notice).unwrap_or_default();
+    assert!(tip.contains("Permitir una aplicación a través del acceso controlado a carpetas"), "{tip}");
+    // Otro aviso (sin detalle) no hereda el cartel.
+    a.notice = Some("Otra cosa".into());
+    assert_eq!(a.tooltip_text(Hit::Notice), None);
+    a.paint();
+    assert_eq!(a.notice_rect, None);
 }
 
 /// «Archivo de texto nuevo» manda `Op::NewFile` con la carpeta del panel; en «Este equipo» no
@@ -2437,6 +2469,22 @@ fn stale_delay_message_ignored() {
     assert!(drawn(&host).iter().any(|s| s.starts_with("Layout: 1 panel")));
 }
 
+/// Un cartel largo (la explicación de un aviso) se parte en renglones que entran en el ancho, sin
+/// perder palabras; el rectángulo crece hacia abajo.
+#[test]
+fn long_tooltip_wraps() {
+    let measure = |s: &str| 7.0 * s.chars().count() as f32;
+    let text = "Windows bloqueó a xdir: el acceso controlado a carpetas no lo deja escribir en «Github». Permití xdir en Seguridad de Windows.";
+    let lines = super::tooltip::wrap_lines(&measure, text, 200.0);
+    assert!(lines.len() > 1, "{lines:?}");
+    assert!(lines.iter().all(|l| measure(l) <= 200.0), "{lines:?}");
+    assert_eq!(lines.join(" "), text);
+    assert_eq!(super::tooltip::wrap_lines(&measure, "corto", 200.0), vec!["corto".to_string()]);
+    let one = tooltip_rect(800.0, 600.0, 10.0, 10.0, 100.0, 1);
+    let three = tooltip_rect(800.0, 600.0, 10.0, 10.0, 100.0, 3);
+    assert!(three.bottom - three.top > one.bottom - one.top);
+}
+
 /// Un botón en el borde de abajo a la derecha: el cartel queda entero dentro de la ventana.
 #[test]
 fn tooltip_stays_inside_window() {
@@ -2454,7 +2502,7 @@ fn tooltip_stays_inside_window() {
     // Arriba del cursor, porque abajo no entra.
     assert!(r.bottom <= y);
     // Y la cuenta pura, con un texto más ancho que la ventana.
-    let r = tooltip_rect(300.0, 200.0, 290.0, 195.0, 1000.0);
+    let r = tooltip_rect(300.0, 200.0, 290.0, 195.0, 1000.0, 1);
     assert!(r.left >= 0.0 && r.top >= 0.0 && r.right <= 300.0 && r.bottom <= 200.0, "{r:?}");
 }
 

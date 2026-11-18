@@ -36,7 +36,13 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
         libc::ECANCELED => ErrKind::Cancelled,
         libc::EXDEV => ErrKind::CrossDevice,
         libc::ENAMETOOLONG => ErrKind::NameTooLong,
-        n => ErrKind::Other(io::Error::from_raw_os_error(n).to_string()),
+        libc::EROFS => ErrKind::ReadOnly,
+        // La red o el disco no responden (servidor caído, disco desenchufado, NFS vencido, un
+        // montaje de gvfs o FUSE que se cortó).
+        libc::ETIMEDOUT | libc::EHOSTDOWN | libc::EHOSTUNREACH | libc::ENETDOWN | libc::ENETUNREACH | libc::ENXIO | libc::ESTALE | libc::ENOTCONN => ErrKind::Offline,
+        // Un nombre que el disco no sabe guardar (SMB, exFAT).
+        libc::EILSEQ => ErrKind::InvalidName,
+        n => xdir_core::sys::io_unexpected(&io::Error::from_raw_os_error(n)),
     }
 }
 
@@ -45,8 +51,10 @@ pub(crate) fn dir_sync_unsupported(e: &io::Error) -> bool {
     matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP | libc::EBADF))
 }
 
-fn err(e: io::Error, p: &Path) -> CopyError {
+/// Un error de E/S con la ruta que lo causó (lo que ve el usuario sale de `CopyError::message`).
+pub(crate) fn err(e: io::Error, p: &Path) -> CopyError {
     let kind = match e.raw_os_error() {
+        Some(libc::ENAMETOOLONG) => xdir_core::sys::too_long(p),
         Some(n) => err_kind(n),
         None => match e.kind() {
             io::ErrorKind::NotFound => ErrKind::NotFound,
@@ -525,7 +533,21 @@ mod tests {
         assert_eq!(err_kind(libc::EFBIG), ErrKind::TooBig);
         assert_eq!(err_kind(libc::EEXIST), ErrKind::Exists);
         assert_eq!(err_kind(libc::EXDEV), ErrKind::CrossDevice);
-        assert!(matches!(err_kind(libc::EIO), ErrKind::Other(_)));
+        assert_eq!(err_kind(libc::EROFS), ErrKind::ReadOnly);
+        for n in [libc::ETIMEDOUT, libc::EHOSTDOWN, libc::EHOSTUNREACH, libc::ENETDOWN, libc::ENETUNREACH, libc::ENXIO, libc::ESTALE, libc::ENOTCONN] {
+            assert_eq!(err_kind(n), ErrKind::Offline, "{n}");
+        }
+        assert_eq!(err_kind(libc::EILSEQ), ErrKind::InvalidName);
+        let ErrKind::Other(text) = err_kind(libc::EIO) else { panic!("EIO es Other") };
+        assert!(text.starts_with("Error inesperado del sistema (") && text.ends_with("; Linux: errno 5)"), "{text}");
+    }
+
+    /// Nombre o ruta demasiado largos, según la ruta.
+    #[test]
+    fn prims_name_or_path_too_long() {
+        let e = |p: &str| err(io::Error::from_raw_os_error(libc::ENAMETOOLONG), Path::new(p)).kind;
+        assert_eq!(e(&format!("/tmp/{}", "a".repeat(300))), ErrKind::NameTooLong);
+        assert_eq!(e(&"/carpeta".repeat(600)), ErrKind::PathTooLong);
     }
 
     #[test]

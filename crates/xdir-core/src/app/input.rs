@@ -86,6 +86,13 @@ impl App {
         {
             return Hit::SizeLink;
         }
+        // El aviso con explicación: su cartel la muestra entera.
+        if let Some(r) = self.notice_rect
+            && contains(&r, x, y)
+            && self.notice_detail_text().is_some()
+        {
+            return Hit::Notice;
+        }
         // «Ver novedades» del aviso de actualización (donde quedó en el último cuadro).
         if self.update_notice.is_some()
             && let Some(r) = self.update_link
@@ -287,7 +294,7 @@ impl App {
                     self.open_console(pane, c);
                 }
             }
-            Hit::TermMenu(None) | Hit::Palette(_) | Hit::Suggest(_) => {}
+            Hit::TermMenu(None) | Hit::Palette(_) | Hit::Suggest(_) | Hit::Notice => {}
             // Un clic en el botón con el menú abierto lo cierra (el menú ya se descartó al llegar el
             // clic): no hay que volver a abrirlo.
             Hit::Groups if self.groups_menu_closed.is_some_and(|t| t.elapsed().as_millis() < 300) => self.groups_menu_closed = None,

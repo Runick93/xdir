@@ -87,11 +87,31 @@ pub(super) fn tooltip_for(hit: Hit, keymap: &Keymap, tab_path: &dyn Fn(usize, us
     Some(text)
 }
 
-/// Rectángulo del cartel para un texto de `text_w` DIPs con el mouse en `(x, y)`, en una ventana
-/// de `w`×`h`: debajo del cursor, o arriba si no entra; siempre dentro de la ventana.
-pub(super) fn tooltip_rect(w: f32, h: f32, x: f32, y: f32, text_w: f32) -> Rect {
+/// Ancho máximo de un cartel: lo más largo se parte en renglones.
+const MAX_W: f32 = 460.0;
+
+/// Parte `text` en renglones de hasta `max` DIPs (por palabras; una palabra más larga que eso
+/// queda sola en su renglón).
+pub(super) fn wrap_lines(measure: &dyn Fn(&str) -> f32, text: &str, max: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && measure(&candidate) > max {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = candidate;
+        }
+    }
+    lines.push(line);
+    lines
+}
+
+/// Rectángulo del cartel para `lines` renglones de hasta `text_w` DIPs con el mouse en `(x, y)`,
+/// en una ventana de `w`×`h`: debajo del cursor, o arriba si no entra; siempre dentro de la ventana.
+pub(super) fn tooltip_rect(w: f32, h: f32, x: f32, y: f32, text_w: f32, lines: usize) -> Rect {
     let bw = (text_w + PAD * 2.0).min(w - EDGE * 2.0).max(0.0);
-    let bh = LINE_H + PAD * 2.0;
+    let bh = LINE_H * lines.max(1) as f32 + PAD * 2.0;
     let left = x.min(w - EDGE - bw).max(EDGE.min(w - bw).max(0.0));
     let mut top = y + BELOW;
     if top + bh > h - EDGE {
@@ -101,13 +121,19 @@ pub(super) fn tooltip_rect(w: f32, h: f32, x: f32, y: f32, text_w: f32) -> Rect 
     geom::rect(left, top, left + bw, top + bh)
 }
 
-/// Dibuja el cartel con el mouse en `(x, y)`.
+/// Dibuja el cartel con el mouse en `(x, y)` (en renglones si es largo).
 pub(super) fn draw_tooltip(p: &dyn Painter, w: f32, h: f32, x: f32, y: f32, text: &str) {
     let th = p.theme();
-    let r = tooltip_rect(w, h, x, y, p.measure(FontId::Small, text));
+    let measure = |s: &str| p.measure(FontId::Small, s);
+    let lines = wrap_lines(&measure, text, MAX_W.min(w - EDGE * 2.0 - PAD * 2.0));
+    let text_w = lines.iter().map(|l| measure(l)).fold(0.0, f32::max);
+    let r = tooltip_rect(w, h, x, y, text_w, lines.len());
     p.round_fill(r, 4.0, th.surface_alt);
     p.round_stroke(r, 4.0, th.border);
-    p.text(FontId::Small, text, geom::rect(r.left + PAD, r.top + PAD, r.right - PAD, r.bottom - PAD), th.text);
+    for (i, line) in lines.iter().enumerate() {
+        let top = r.top + PAD + LINE_H * i as f32;
+        p.text(FontId::Small, line, geom::rect(r.left + PAD, top, r.right - PAD, top + LINE_H), th.text);
+    }
 }
 
 impl App {
@@ -134,6 +160,8 @@ impl App {
                     keys => format!("{what} ({keys})"),
                 });
             }
+            // El aviso corto de la barra de estado: la explicación entera.
+            Hit::Notice => return self.notice_detail_text(),
             // El indicador de actividad: la lista de lo que está en curso.
             Hit::Activity => return self.activity.tip(self.now()),
             // La entrada del árbol no dice qué es por sí sola cuando está en franja: sin escaneo,
@@ -213,6 +241,18 @@ impl App {
     /// El mouse salió de la ventana: el cartel se va.
     pub(super) fn hide_tooltip(&mut self) {
         self.tip = None;
+    }
+
+    /// La explicación del aviso a la vista, si la tiene (la de un aviso anterior no vale).
+    pub(super) fn notice_detail_text(&self) -> Option<String> {
+        let (for_notice, detail) = self.notice_detail.as_ref()?;
+        (self.notice.as_deref() == Some(for_notice.as_str())).then(|| detail.clone())
+    }
+
+    /// Muestra `notice` en la barra de estado, con su explicación entera para el cartel.
+    pub(super) fn set_notice(&mut self, notice: Option<String>, detail: Option<String>) {
+        self.notice_detail = notice.clone().zip(detail);
+        self.notice = notice;
     }
 
     /// El cartel a la vista: (texto, punto del mouse).

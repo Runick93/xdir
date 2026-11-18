@@ -6,7 +6,7 @@
 use std::io::{self, Read};
 use std::path::Path;
 
-use super::{CopyError, ErrKind, Flow};
+use super::{CopyError, Flow};
 
 /// Los algoritmos que se ofrecen, en el orden del selector.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -60,11 +60,5 @@ pub trait Hashes: Send + Sync {
 /// El error de abrir o leer `path`, como los de las primitivas de copia (sin lo propio de cada
 /// sistema: eso lo agrega la plataforma).
 pub fn io_error(e: &io::Error, path: &Path) -> CopyError {
-    let kind = match e.kind() {
-        io::ErrorKind::PermissionDenied => ErrKind::Denied,
-        io::ErrorKind::NotFound => ErrKind::NotFound,
-        io::ErrorKind::ResourceBusy => ErrKind::InUse,
-        _ => ErrKind::Other(e.to_string()),
-    };
-    CopyError::new(kind, path)
+    CopyError::new(super::io_kind(e), path)
 }

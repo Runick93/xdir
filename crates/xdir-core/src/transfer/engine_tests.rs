@@ -492,6 +492,21 @@ fn disk_full_stops() {
     assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/df/d/1.txt")])])));
 }
 
+/// Lo bloqueado por el acceso controlado a carpetas tampoco deja seguir (fallaría todo lo demás):
+/// se detiene, con el aviso corto y su explicación para el cartel.
+#[test]
+fn blocked_stops_with_notice() {
+    let fake = FakeCopyPrims::new();
+    let files = three_files(&fake, "/bk");
+    fake.fail_after(&files[1], 0, ErrKind::Blocked { sure: true });
+    let r = go(&fake, JobSpec::Copy { sources: files, dest: p("/bk/d") }, &[]);
+    assert_eq!(r.out.stopped.as_deref(), Some("Bloqueado: acceso controlado"));
+    let (notice, detail) = r.out.stop_notice.clone().expect("aviso del bloqueo");
+    assert!(notice.starts_with("Windows bloqueó a xdir en «"), "{notice}");
+    assert!(detail.is_some_and(|d| d.contains("Permitir una aplicación")));
+    assert_eq!(fake.list_all(&p("/bk/d")), vec![p("/bk/d/1.txt")]);
+}
+
 #[test]
 fn not_enough_space_refuses() {
     let fake = FakeCopyPrims::new();
@@ -524,7 +539,7 @@ fn fat32_big_file_error_upfront() {
     fake.add_file(&p("/f32/s/chico.txt"), b"c".to_vec());
     fake.add_dir(&p("/fat/d"));
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/f32/s/peli.mkv"), p("/f32/s/chico.txt")], dest: p("/fat/d") }, &[]);
-    assert_eq!(r.messages(), vec!["Es demasiado grande para el formato del disco de destino (FAT32)".to_string()]);
+    assert_eq!(r.messages(), vec!["Es demasiado grande para FAT32".to_string()]);
     assert_eq!(fake.reads(&p("/f32/s/peli.mkv")), 0);
     assert!(fake.exists(&p("/fat/d/chico.txt")) && !fake.exists(&p("/fat/d/peli.mkv")));
     // El error figura de entrada, antes de copiar nada.
@@ -1143,6 +1158,19 @@ fn long_partial_name_falls_back_to_a_short_one() {
     assert!(r.out.errors.is_empty(), "{:?}", r.messages());
     assert_eq!(fake.contents(&p("/ln/d/largo.txt")).unwrap(), b"datos");
     no_tmp_left(&fake, &p("/ln/d"));
+}
+
+#[test]
+fn long_partial_path_falls_back_to_a_short_one() {
+    // La ruta con «.nombre.xdir-part» pasa del largo que acepta el sistema: también con uno corto.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/lp/s/largo.txt"), b"datos".to_vec());
+    fake.add_dir(&p("/lp/d"));
+    fake.fail(&p("/lp/d/.largo.txt.xdir-part"), ErrKind::PathTooLong, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/lp/s/largo.txt")], dest: p("/lp/d") }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.contents(&p("/lp/d/largo.txt")).unwrap(), b"datos");
+    no_tmp_left(&fake, &p("/lp/d"));
 }
 
 #[test]

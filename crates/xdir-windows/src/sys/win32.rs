@@ -423,7 +423,7 @@ impl Shell for Win32Shell {
     }
 
     fn copy_files(&self, items: &[Item], cut: bool) -> Result<(), String> {
-        sh::copy_files(items, cut).map_err(|e| e.message())
+        sh::copy_files(items, cut).map_err(|e| crate::ops::win_message(&e))
     }
 
     fn clipboard_files(&self) -> Option<(Vec<PathBuf>, bool)> {
@@ -431,7 +431,7 @@ impl Shell for Win32Shell {
     }
 
     fn paste_virtual(&self, owner: Handle, dest: &Location) -> Result<bool, String> {
-        sh::paste_virtual(owner, dest).map_err(|e| e.message())
+        sh::paste_virtual(owner, dest).map_err(|e| crate::ops::win_message(&e))
     }
 
     fn clear_clipboard(&self) {
@@ -439,7 +439,7 @@ impl Shell for Win32Shell {
     }
 
     fn copy_text(&self, owner: Handle, text: &str) -> Result<(), String> {
-        sh::copy_text(owner, text).map_err(|e| e.message())
+        sh::copy_text(owner, text).map_err(|e| crate::ops::win_message(&e))
     }
 
     fn pick_folder(&self, owner: Handle, title: &str) -> Option<PathBuf> {
@@ -473,15 +473,15 @@ impl Shell for Win32Shell {
     }
 
     fn invoke_verb(&self, owner: Handle, folder: &Location, items: &[Item], verb: &str) -> Result<(), String> {
-        sh::invoke_verb(owner, folder, items, verb).map_err(|e| e.message())
+        sh::invoke_verb(owner, folder, items, verb).map_err(|e| crate::ops::win_message(&e))
     }
 
     fn pin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String> {
-        sh::pin_quick_access(owner, path).map_err(|e| e.message())
+        sh::pin_quick_access(owner, path).map_err(|e| crate::ops::win_message(&e))
     }
 
     fn unpin_quick_access(&self, owner: Handle, path: &Path) -> Result<(), String> {
-        sh::unpin_quick_access(owner, path).map_err(|e| e.message())
+        sh::unpin_quick_access(owner, path).map_err(|e| crate::ops::win_message(&e))
     }
 
     fn set_menu_mode(&self, dark: Option<bool>) {
@@ -676,8 +676,12 @@ impl FileSystem for Win32FileSystem {
             Ok(()) => Ok(()),
             Err(e) => {
                 let io = std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF);
-                let at = if io.kind() == std::io::ErrorKind::AlreadyExists { to } else { from };
-                Err(xdir_core::rename_many::io_message(&io, at))
+                if io.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(xdir_core::rename_many::io_message(&io, to));
+                }
+                // Como renombrar uno: también el acceso controlado a carpetas.
+                let failed = crate::ops::write_error(e.code().0 as u32, &e.message(), from, &|| crate::ops::exists(from));
+                Err(failed.notice(&format!("renombrar «{}»", xdir_core::sys::shown_name(from))))
             }
         }
     }

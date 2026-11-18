@@ -146,7 +146,7 @@ fn list_dir(out: &mut Batcher, path: &Path) {
     let reader = match std::fs::read_dir(path) {
         Ok(r) => r,
         Err(e) => {
-            out.send(LoadMsg::Listed(Err(e.to_string())));
+            out.send(LoadMsg::Listed(Err(crate::prims::err(e, path).message())));
             return;
         }
     };

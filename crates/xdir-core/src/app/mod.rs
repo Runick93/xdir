@@ -213,6 +213,8 @@ enum Hit {
     UpdateNotice,
     /// «calcular tamaño» de la barra de estado (carpetas de red elegidas).
     SizeLink,
+    /// El aviso de la barra de estado que tiene una explicación más larga (su cartel la muestra).
+    Notice,
     /// El panel de Renombrar varios: un control, o el panel sin nada debajo.
     RenamePanel(crate::rename_many_draw::PanelHit),
     /// El panel de comparar: un botón, o el panel sin nada debajo.
@@ -377,6 +379,11 @@ pub struct App {
     new_watch: Option<NewWatch>,
     /// Mensaje para la barra de estado (errores de operaciones).
     notice: Option<String>,
+    /// La explicación entera de un aviso corto (el cartel al pasar el mouse por el aviso): (el
+    /// aviso al que corresponde, la explicación). Vale mientras `notice` sea ese aviso.
+    notice_detail: Option<(String, String)>,
+    /// Dónde quedó en el último cuadro el aviso que tiene explicación (para su cartel).
+    notice_rect: Option<geom::Rect>,
     /// El aviso «Vista: …» que está en `notice`: el panel, la carpeta (`Tab::view_key`) y la vista
     /// que anunció. Se borra cuando la lista activa deja de ser esa (`sync_folder_views`).
     view_notice: Option<(usize, String, list::View)>,
@@ -701,6 +708,8 @@ impl App {
             // Se marca como vista enseguida: el aviso sale una sola vez.
             update_notice: crate::changelog::should_notify(session.seen_version.as_deref(), about::VERSION).then(|| about::VERSION.to_string()),
             update_link: None,
+            notice_detail: None,
+            notice_rect: None,
             sel_size: sel_size::SelSize::new(),
             size_link: None,
             activity: activity::Activities::default(),

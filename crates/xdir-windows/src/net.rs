@@ -31,7 +31,7 @@ pub fn win_error(code: u32, host: &str, share: &str) -> NetError {
         1223 => NetError::Cancelled,
         2401 | 2404 => NetError::OpenFiles { by: None },
         85 => NetError::Other("La letra ya está en uso".into()),
-        other => NetError::Other(std::io::Error::from_raw_os_error(other as i32).to_string()),
+        other => NetError::Other(crate::ops::win_message(&windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(other)))),
     }
 }
 
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(win_error(2401, "nas", "f"), NetError::OpenFiles { by: None });
         assert_eq!(win_error(2404, "nas", "f"), NetError::OpenFiles { by: None });
         assert_eq!(win_error(85, "nas", "f"), NetError::Other("La letra ya está en uso".into()));
-        assert!(matches!(win_error(1234, "nas", "f"), NetError::Other(_)));
+        assert!(matches!(win_error(1234, "nas", "f"), NetError::Other(t) if t.ends_with("Windows: 0x800704D2)")));
     }
 
     #[test]

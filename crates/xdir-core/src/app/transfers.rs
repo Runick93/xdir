@@ -1059,13 +1059,19 @@ impl App {
     fn on_job_done(&mut self, id: JobId, outcome: JobOutcome) {
         let label = self.transfers.meta.get(&id).map_or("La operación", |m| m.label);
         let previous = self.notice.take();
+        let previous_detail = self.notice_detail.take();
         self.on_op_done(outcome.result);
-        self.notice = if let Some(why) = &outcome.stopped {
-            Some(format!("{label}: {why}"))
+        // El motivo sigue la frase: en minúscula (salvo un nombre propio).
+        let mut detail = None;
+        self.notice = if let Some((notice, more)) = &outcome.stop_notice {
+            detail = more.clone();
+            Some(notice.clone())
+        } else if let Some(why) = &outcome.stopped {
+            Some(format!("{label}: {}", sys::lower_first(why)))
         } else if !outcome.errors.is_empty() {
             let first = &outcome.errors[0];
             let name = first.shown_name();
-            Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), first.message))
+            Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), sys::lower_first(&first.message)))
         } else if !outcome.skipped.is_empty() {
             Some(skipped_text(outcome.skipped.len()))
         } else if outcome.omitted > 0 {
@@ -1078,6 +1084,11 @@ impl App {
         } else {
             // No se borra un aviso de otro trabajo (los omitidos, por ejemplo).
             previous.filter(|_| self.running_jobs() > 0)
+        };
+        // La explicación para el cartel: la de este aviso, o la del de antes si sigue.
+        self.notice_detail = match detail {
+            Some(d) => self.notice.clone().map(|n| (n, d)),
+            None => previous_detail,
         };
         // Un zip con contraseña o en un formato que no se sabe leer: se ofrece abrirlo con el sistema.
         if let Some(e) = outcome.errors.iter().find(|e| e.message == sys::PASSWORD || e.message == sys::UNSUPPORTED)

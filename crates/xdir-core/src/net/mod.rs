@@ -309,10 +309,10 @@ impl NetError {
     /// El texto para el usuario (nunca lleva una contraseña: ningún error la recibe).
     pub fn message(&self) -> String {
         match self {
-            NetError::NotFound { host } => format!("No se encuentra el servidor \"{host}\""),
-            NetError::BadCredentials => "Usuario o contraseña incorrectos".into(),
-            NetError::NoShare { host, share } => format!("El recurso \"{share}\" no existe en \"{host}\""),
-            NetError::Timeout { host } => format!("Se agotó el tiempo esperando a \"{host}\""),
+            NetError::NotFound { host } => format!("No se encuentra el servidor «{host}»: revisá el nombre y que esté encendido y en la misma red"),
+            NetError::BadCredentials => "Usuario o contraseña incorrectos: revisalos y probá de nuevo".into(),
+            NetError::NoShare { host, share } => format!("El recurso «{share}» no existe en «{host}»: revisá cómo se llama"),
+            NetError::Timeout { host } => format!("Se agotó el tiempo esperando a «{host}»: revisá la conexión y reintentá"),
             NetError::CredentialConflict { host } => format!("Ya hay una conexión con \"{host}\" con otro usuario"),
             NetError::OpenFiles { by } => format!("lo está usando {}", by.as_deref().unwrap_or("otro programa")),
             NetError::Unsupported { scheme } => format!("En este sistema no se puede conectar a direcciones {scheme}://"),

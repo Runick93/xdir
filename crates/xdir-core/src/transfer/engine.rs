@@ -321,6 +321,8 @@ struct Job<'a> {
     dir_all: Option<Choice>,
     cancelled: bool,
     stopped: Option<String>,
+    /// El aviso de por qué se detuvo, si tiene más que decir que `stopped` (ver `JobOutcome`).
+    stop_notice: Option<(String, Option<String>)>,
     skipped: Vec<PathBuf>,
     /// Lo que el recorrido no pudo leer (cuenta como error de la carpeta que lo contiene).
     walk_failed: Vec<PathBuf>,
@@ -366,6 +368,7 @@ impl<'a> Job<'a> {
             dir_all: None,
             cancelled: false,
             stopped: None,
+            stop_notice: None,
             skipped: Vec::new(),
             walk_failed: Vec::new(),
             ahead: Vec::new(),
@@ -416,11 +419,12 @@ impl<'a> Job<'a> {
         self.progress(0, true);
         let undo = (!self.undo.is_empty()).then(|| Undo::Batch(std::mem::take(&mut self.undo)));
         let focus = self.focus.take().or_else(|| self.select.last().cloned());
-        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, select: std::mem::take(&mut self.select) };
+        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, error_detail: None, select: std::mem::take(&mut self.select) };
         let outcome = JobOutcome {
             result,
             errors: std::mem::take(&mut self.errors),
             stopped: self.stopped.take(),
+            stop_notice: self.stop_notice.take(),
             cancelled: self.cancelled,
             skipped: std::mem::take(&mut self.skipped),
             done_items: self.ok_items,
@@ -441,8 +445,13 @@ impl<'a> Job<'a> {
     fn fail(&mut self, src: &Path, dst: &Path, e: CopyError) {
         match e.kind {
             ErrKind::Cancelled => self.cancelled = true,
-            ErrKind::DiskFull => {
+            // Sin lugar o bloqueado por el acceso controlado a carpetas: todo lo demás fallaría igual.
+            ErrKind::DiskFull | ErrKind::Blocked { .. } => {
                 self.stopped = Some(e.message());
+                if matches!(e.kind, ErrKind::Blocked { .. }) {
+                    let what = format!("copiar «{}»", crate::sys::shown_name(src));
+                    self.stop_notice = Some((e.notice(&what), e.detail(&what)));
+                }
                 self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None });
             }
             _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None }),
@@ -1123,7 +1132,7 @@ impl<'a> Job<'a> {
         // nunca queda algo a medias con el nombre del archivo.
         let mut part = part_name(dst, &|p| self.exists(p).is_some());
         let mut written = self.write(item, &part);
-        if matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+        if matches!(&written, Err(e) if matches!(e.kind, ErrKind::NameTooLong | ErrKind::PathTooLong)) {
             // El disco no acepta el nombre largo del parcial: uno corto del motor.
             part = short_part_name(dst);
             written = self.write(item, &part);
@@ -1671,7 +1680,7 @@ impl<'a> Job<'a> {
                 self.ctl.checkpoint()
             };
             written = archives.create(&part, &items, &mut on_bytes);
-            if !matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+            if !matches!(&written, Err(e) if matches!(e.kind, ErrKind::NameTooLong | ErrKind::PathTooLong)) {
                 break;
             }
         }

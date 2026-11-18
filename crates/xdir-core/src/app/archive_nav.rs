@@ -188,7 +188,7 @@ impl App {
                 self.notice = None;
                 sys::shell().open_file(self.hwnd, &path, path.parent());
             }
-            Err(m) => self.notice = Some(format!("No se pudo abrir «{name}»: {m}")),
+            Err(m) => self.notice = Some(format!("No se pudo abrir «{name}»: {}", sys::lower_first(&m))),
         }
     }
 

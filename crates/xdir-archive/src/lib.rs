@@ -28,21 +28,7 @@ pub(crate) fn other(msg: &str, path: &Path) -> Error {
 
 /// Mismo mapeo que las primitivas de copia.
 pub fn kind_of(e: &io::Error) -> ErrKind {
-    match e.kind() {
-        io::ErrorKind::PermissionDenied => ErrKind::Denied,
-        io::ErrorKind::NotFound => ErrKind::NotFound,
-        io::ErrorKind::AlreadyExists => ErrKind::Exists,
-        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => ErrKind::DiskFull,
-        io::ErrorKind::FileTooLarge => ErrKind::TooBig,
-        io::ErrorKind::ResourceBusy => ErrKind::InUse,
-        _ => match e.raw_os_error() {
-            #[cfg(windows)]
-            Some(32) | Some(33) => ErrKind::InUse,
-            #[cfg(windows)]
-            Some(112) => ErrKind::DiskFull,
-            _ => ErrKind::Other(e.to_string()),
-        },
-    }
+    xdir_core::sys::io_kind(e)
 }
 
 /// Marca de una lectura cortada porque el llamador pidió cancelar.

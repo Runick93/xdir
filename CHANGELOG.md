@@ -28,6 +28,7 @@
 - En xtree, analizar de nuevo con permisos pasa de la `A` a `Ctrl+Shift+A` / `⇧⌘A`: ninguna letra sola hace otra cosa que ir a la carpeta que empieza así.
 - Eliminar muestra su avance en la ventana de copia de xdir (con Pausa y Cancelar) en vez del diálogo de Windows, y en un disco sin Papelera avisa antes de eliminar definitivamente.
 - La ventana de copia muestra los detalles y el gráfico de todas las copias en curso a la vez (cada una se pliega por separado) y, si no entran, se desplaza con la rueda o la barra de la derecha.
+- Los mensajes de error dicen qué pasó, con qué elemento y qué hacer; en Windows avisan si el acceso controlado a carpetas (protección contra ransomware) bloqueó a xdir.
 
 ### Arreglos
 - En la Mac, mover archivos a una carpeta de red (SMB) ya no falla con «No tenés permiso»: la copia se aseguraba en el disco de una forma que esos servidores rechazan.

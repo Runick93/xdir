@@ -45,7 +45,7 @@ impl App {
         self.drag = Drag::None;
         let host = self.host.clone();
         if let Err(e) = host.start_drag(&items) {
-            self.notice = Some(format!("No se pudo arrastrar: {e}"));
+            self.notice = Some(format!("No se pudo arrastrar: {}", sys::lower_first(&e)));
         }
         self.redraw();
     }
@@ -58,7 +58,7 @@ impl App {
             if !items.is_empty()
                 && let Err(e) = sys::shell().copy_files(&items, cut)
             {
-                self.notice = Some(format!("No se pudo copiar: {e}"));
+                self.notice = Some(format!("No se pudo copiar: {}", sys::lower_first(&e)));
             }
         }
         // Lo cortado antes deja de verse atenuado (o se atenúa lo recién cortado).
@@ -103,7 +103,7 @@ impl App {
             match sys::shell().paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
                 Ok(true) => self.reload_shell_tabs(),
                 Ok(false) => {}
-                Err(e) => self.notice = Some(format!("No se pudo pegar: {e}")),
+                Err(e) => self.notice = Some(format!("No se pudo pegar: {}", sys::lower_first(&e))),
             }
             return;
         };
@@ -195,7 +195,7 @@ impl App {
             let items = self.selection_items(self.active);
             if !items.is_empty() {
                 if let Err(e) = sys::shell().invoke_verb(self.hwnd, &location, &items, "undelete") {
-                    self.notice = Some(format!("No se pudo devolver: {e}"));
+                    self.notice = Some(format!("No se pudo devolver: {}", sys::lower_first(&e)));
                 }
                 self.reload_shell_tabs();
             }
@@ -239,7 +239,9 @@ impl App {
     }
 
     pub(super) fn on_op_done(&mut self, result: OpResult) {
-        self.notice = result.error.map(|e| format!("Error: {e}"));
+        // Las plataformas mandan frases completas (`ops::failure`): van tal cual, con su
+        // explicación entera para el cartel (`ops::failure_detail`).
+        self.set_notice(result.error, result.error_detail);
         if let Some(undo) = result.undo {
             self.undo.push(undo);
             if self.undo.len() > UNDO_MAX {

@@ -377,14 +377,9 @@ fn open_with(path: &Path) -> Option<OpenWith> {
 
 /// El error de E/S como lo ve el usuario.
 fn win_text(e: &windows::core::Error) -> String {
-    match e.code().0 as u32 {
-        0x8007_0005 => "No tenés permiso".into(),
-        0x8007_0002 | 0x8007_0003 => "Ya no existe".into(),
-        // ERROR_SHARING_VIOLATION y los de los property store (STG_E_SHAREVIOLATION,
-        // STG_E_LOCKVIOLATION).
-        0x8007_0020 | 0x8003_0020 | 0x8003_0021 => "Lo está usando otro programa".into(),
-        _ => e.message(),
-    }
+    // El mismo texto que la lista de errores de las copias (también los de los property store,
+    // como STG_E_SHAREVIOLATION).
+    crate::ops::win_message(e)
 }
 
 fn joined(errors: Vec<String>) -> Result<(), String> {

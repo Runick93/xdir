@@ -15,6 +15,8 @@ mod fileops;
 mod info;
 mod network;
 mod network_page;
+#[cfg(feature = "arbol")]
+mod places_page;
 mod saved_groups;
 mod settings;
 mod settings_pages;
@@ -427,6 +429,13 @@ pub struct App {
     /// Árbol de carpetas lateral (experimental).
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
+    /// Lugares del árbol (`lugares.toml`): los cambia Configuración ▸ Lugares y el árbol los
+    /// muestra (`Tree::set_places`).
+    #[cfg(feature = "arbol")]
+    places: crate::places::Places,
+    /// Dónde quedó cada control de Configuración ▸ Lugares en el último cuadro.
+    #[cfg(feature = "arbol")]
+    places_hits: Vec<(geom::Rect, places_page::PlaceHit)>,
     show_favorites: bool,
     /// Barra de pestañas de grupos habilitada (se ve si además hay grupos guardados).
     show_group_bar: bool,
@@ -709,6 +718,10 @@ impl App {
             clean_temps_on_close,
             #[cfg(feature = "arbol")]
             tree: tree::Tree::new(&places),
+            #[cfg(feature = "arbol")]
+            places,
+            #[cfg(feature = "arbol")]
+            places_hits: Vec::new(),
             show_favorites: session.show_favorites,
             show_group_bar: session.group_bar,
             file_colors: session.file_colors,

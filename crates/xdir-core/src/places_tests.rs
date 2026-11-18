@@ -95,3 +95,24 @@ fn places_add_folder_ignores_relative() {
     p.add_folder(PathBuf::from("papelera"));
     assert_eq!(p.order, builtins());
 }
+
+/// Varias escrituras seguidas en otro hilo: queda la última (en la carpeta de pruebas del hilo).
+#[test]
+fn places_save_in_background_last_wins() {
+    install_fakes();
+    let dir = session::config_dir().unwrap();
+    let mut p = Places::default();
+    for i in 0..20 {
+        p.move_down(i % 7);
+        p.save_in_background();
+    }
+    let want = p.to_toml();
+    let t0 = std::time::Instant::now();
+    while std::fs::read_to_string(dir.join(FILE_NAME)).ok().as_deref() != Some(want.as_str()) {
+        assert!(t0.elapsed().as_secs() < 10, "no quedó la última escritura");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Y no la pisa una más vieja que llegue tarde.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), want);
+}

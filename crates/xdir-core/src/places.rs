@@ -1,5 +1,5 @@
 //! Los lugares del árbol lateral: las carpetas del usuario, la Papelera, Acceso rápido y carpetas
-//! propias, en el orden que elige el usuario (Configuración) y con la opción de ocultar. Se
+//! propias, en el orden que elige el usuario (Configuración ▸ Lugares) y con la opción de ocultar. Se
 //! guarda en `lugares.toml` (carpeta de configuración; lo escribe xdir y se puede editar a mano).
 
 use std::path::{Path, PathBuf};
@@ -102,7 +102,7 @@ impl Places {
     pub fn to_toml(&self) -> String {
         let list = |items: &[Place]| items.iter().map(|p| toml::quote(&p.to_text())).collect::<Vec<_>>().join(", ");
         format!(
-            "# Lugares del árbol lateral de xdir (Configuración > Árbol).\n\
+            "# Lugares del árbol lateral de xdir (Configuración > Lugares).\n\
              # Lo escribe xdir; se puede editar a mano. Cualquier texto que no sea un lugar fijo\n\
              # (escritorio, descargas, documentos, imagenes, musica, videos, papelera, acceso_rapido)\n\
              # es una carpeta propia.\n\
@@ -125,6 +125,31 @@ impl Places {
     pub fn save(&self) -> std::io::Result<()> {
         let dir = session::config_dir().ok_or(std::io::ErrorKind::NotFound)?;
         self.save_in(&dir)
+    }
+
+    /// Escribe `lugares.toml` en otro hilo y vuelve enseguida. Si se piden varias seguidas, la
+    /// última gana: una escritura más vieja que llega tarde no pisa a una más nueva. La carpeta
+    /// se resuelve acá, en el hilo que llama (en pruebas, cada hilo tiene la suya).
+    pub fn save_in_background(&self) {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        // La última escritura hecha en cada carpeta.
+        static WRITTEN: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+        let Some(dir) = session::config_dir() else { return };
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let places = self.clone();
+        std::thread::spawn(move || {
+            let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+            let at = written.iter().position(|(d, _)| *d == dir).unwrap_or_else(|| {
+                written.push((dir.clone(), 0));
+                written.len() - 1
+            });
+            if n > written[at].1 {
+                let _ = places.save_in(&dir);
+                written[at].1 = n;
+            }
+        });
     }
 
     /// Escritura atómica: un temporal propio de esta escritura en la misma carpeta y renombrar.

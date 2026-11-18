@@ -265,6 +265,9 @@ pub struct Tree {
     known: Vec<PathBuf>,
     /// La Papelera del sistema, leída una vez al armar el árbol (en Windows consulta el Shell).
     trash: Option<Location>,
+    /// Las carpetas del usuario (posición de `PINNED`), leídas una vez al armar el árbol: en
+    /// Windows consultan el Shell y en todos los sistemas miran el disco.
+    user_paths: Vec<Option<PathBuf>>,
     /// Raíces que son carpetas del Acceso rápido (van después de su marca).
     quick_roots: Vec<usize>,
     /// La última lectura del Acceso rápido (para rearmar al cambiar los lugares).
@@ -369,6 +372,7 @@ impl Tree {
             area: rect(0.0, 0.0, 0.0, 0.0),
             known: Vec::new(),
             trash: crate::sys::file_system().trash_place(),
+            user_paths: (0..PINNED.len()).map(|i| crate::sys::file_system().user_folder(i)).collect(),
             quick_roots: Vec::new(),
             quick_items: Vec::new(),
             pinned_paths: Vec::new(),
@@ -483,7 +487,13 @@ impl Tree {
         }
         // Primero las que ya estaban (misma ruta); las nuevas reusan los huecos que quedan.
         let mut ids: Vec<Option<usize>> = shown.iter().map(|i| old.iter().copied().find(|&id| self.nodes[id].path == i.path)).collect();
-        let mut free: Vec<usize> = old.iter().copied().filter(|id| !ids.contains(&Some(*id)) && !self.nodes[*id].loading).collect();
+        // Un hueco con una lectura o relectura en curso no se reusa: vuelve con este número.
+        let busy = |t: &Tree, id: usize| t.nodes[id].loading || t.rereads.contains_key(&id) || t.stale.contains_key(&id);
+        let mut free: Vec<usize> = old.iter().copied().filter(|&id| !ids.contains(&Some(id)) && !busy(self, id)).collect();
+        // Las que se van (y no se reusan) no quedan referenciadas.
+        for &id in old.iter().filter(|id| !ids.contains(&Some(**id))) {
+            self.forget_node(id);
+        }
         for (slot, item) in ids.iter_mut().zip(shown) {
             match *slot {
                 Some(id) => {
@@ -540,18 +550,25 @@ impl Tree {
     // ---------- lugares ----------
 
     /// Las raíces de los lugares visibles, en su orden: reusa los nodos de `old` que siguen (con
-    /// lo desplegado) y crea los que faltan. Recalcula `known`.
+    /// lo desplegado) y crea los que faltan. Recalcula `known` con todos los lugares con ruta,
+    /// también los ocultos (lo oculto no aparece tampoco por el Acceso rápido).
     fn place_roots(&mut self, places: &Places, old: &[usize]) -> Vec<usize> {
-        let fs = crate::sys::file_system();
-        self.known.clear();
+        self.known = places
+            .order
+            .iter()
+            .filter_map(|p| match p {
+                Place::User(i) => self.user_paths.get(*i).cloned().flatten(),
+                Place::Folder(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
         let mut out = Vec::new();
         for place in places.order.iter().filter(|p| !places.is_hidden(p)) {
             let reuse = |t: &Tree, f: &dyn Fn(&Node) -> bool| old.iter().copied().find(|&id| !t.quick_roots.contains(&id) && f(&t.nodes[id]));
             let id = match place {
                 Place::User(i) => {
                     let Some((name, ..)) = PINNED.get(*i) else { continue };
-                    let Some(path) = fs.user_folder(*i) else { continue };
-                    self.known.push(path.clone());
+                    let Some(path) = self.user_paths.get(*i).cloned().flatten() else { continue };
                     reuse(self, &|n| n.kind == Kind::Pinned && n.pin == *i && n.path == path).unwrap_or_else(|| self.new_root(Kind::Pinned, path, (*name).to_string(), *i))
                 }
                 Place::Trash => {
@@ -572,7 +589,6 @@ impl Tree {
                     id
                 }),
                 Place::Folder(path) => {
-                    self.known.push(path.clone());
                     reuse(self, &|n| n.kind == Kind::Folder && n.depth == 0 && n.path == *path).unwrap_or_else(|| {
                         let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
                         self.new_root(Kind::Folder, path.clone(), name, 0)
@@ -950,6 +966,12 @@ impl Tree {
         if n.kind == Kind::Separator {
             return;
         }
+        // Una carpeta propia que no se pudo leer: se vuelve a leer (en otro hilo), por si apareció.
+        if n.missing && !n.loading {
+            n.missing = false;
+            n.children = None;
+            n.expanded = false;
+        }
         n.expanded = !n.expanded;
         if n.expanded {
             self.load_children(hwnd, id, show_hidden);
@@ -1326,7 +1348,8 @@ impl Tree {
         let id = self.node_at(y)?;
         let n = &self.nodes[id];
         let folder = matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::NetConnected);
-        let ok = folder && !n.path.as_os_str().is_empty() && !crate::sys::file_system().is_trash(&Location::Path(n.path.clone()));
+        // Una carpeta propia que no existe tampoco (se movería a una ruta inexistente).
+        let ok = folder && !n.missing && !n.path.as_os_str().is_empty() && !crate::sys::file_system().is_trash(&Location::Path(n.path.clone()));
         ok.then(|| (id, n.path.clone()))
     }
 
@@ -1563,7 +1586,7 @@ impl Tree {
 
     /// ¿Lleva la chincheta? (anclada en el Acceso rápido de Windows, esté arriba o abajo).
     fn shows_pin(&self, n: &Node) -> bool {
-        n.pinned || (n.kind == Kind::Pinned && self.is_pinned(&n.path))
+        n.pinned || (matches!(n.kind, Kind::Pinned | Kind::Folder) && n.depth == 0 && self.is_pinned(&n.path))
     }
 
     /// ¿La fila de `n` es la carpeta del panel activo (`current`)? Solo las carpetas de disco (y la
@@ -2611,6 +2634,91 @@ mod tests {
         assert!(t.rows().contains(&t.nodes[own].children.as_ref().unwrap()[0]));
         assert!(!t.nodes[computer].expanded, "lo fijo no se toca");
         FakeFileSystem::set_user_folders(&[]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Un lugar oculto tampoco aparece por el Acceso rápido.
+    #[test]
+    fn tree_hidden_place_not_in_quick_access() {
+        install_fakes();
+        let root = temp_root("lugares-oculto-acceso");
+        let user = user_folders(&root);
+        let mut places = Places::default();
+        places.hidden.push(Place::User(2));
+        places.order.push(Place::Folder(root.join("propia")));
+        places.hidden.push(Place::Folder(root.join("propia")));
+        let mut t = Tree::new(&places);
+        t.apply_quick(vec![
+            crate::fs::QuickItem { name: "Documentos".into(), path: user[2].clone(), pinned: true },
+            crate::fs::QuickItem { name: "propia".into(), path: root.join("propia"), pinned: true },
+        ]);
+        assert!(!t.rows().iter().any(|&id| t.nodes[id].name == "Documentos" || t.nodes[id].name == "propia"));
+        FakeFileSystem::set_user_folders(&[]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Las carpetas del Acceso rápido que se van no quedan referenciadas; un hueco con una
+    /// relectura pendiente no se reusa.
+    #[test]
+    fn tree_quick_access_slots_released() {
+        install_fakes();
+        let root = temp_root("lugares-huecos");
+        let mut t = Tree::new(&Places::default());
+        let item = |n: &str| crate::fs::QuickItem { name: n.into(), path: root.join(n), pinned: false };
+        t.apply_quick(vec![item("a"), item("b")]);
+        let a = t.nodes.iter().position(|n| n.path == root.join("a")).unwrap();
+        let b = t.nodes.iter().position(|n| n.path == root.join("b")).unwrap();
+        t.hover = Some(a);
+        t.rereads.insert(b, 1);
+        t.apply_quick(vec![]);
+        assert_eq!(t.hover, None, "la que se fue no queda bajo el mouse");
+        t.apply_quick(vec![item("c"), item("d")]);
+        let c = t.nodes.iter().rposition(|n| n.path == root.join("c")).unwrap();
+        let d = t.nodes.iter().rposition(|n| n.path == root.join("d")).unwrap();
+        assert!(c != b && d != b, "no reusa un hueco que se está releyendo");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Una carpeta del usuario o propia (raíz) anclada lleva la chincheta aunque no venga del
+    /// Acceso rápido.
+    #[test]
+    fn tree_pin_on_pinned_place_roots() {
+        install_fakes();
+        let root = temp_root("lugares-chincheta");
+        let mut places = Places::default();
+        places.order.push(Place::Folder(root.clone()));
+        let mut t = Tree::new(&places);
+        let own = t.nodes.iter().position(|n| n.path == root && n.depth == 0).unwrap();
+        assert!(!t.shows_pin(&t.nodes[own]));
+        t.apply_quick(vec![crate::fs::QuickItem { name: "x".into(), path: root.clone(), pinned: true }]);
+        assert!(t.shows_pin(&t.nodes[own]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Una carpeta propia que no existe no recibe lo que se suelta; desplegarla la vuelve a leer.
+    #[test]
+    fn tree_missing_own_folder_refuses_drop_and_rereads() {
+        install_fakes();
+        let root = temp_root("lugares-falta-soltar");
+        let gone = root.join("todavia-no");
+        let mut places = Places::default();
+        places.order.push(Place::Folder(gone.clone()));
+        let mut t = Tree::new(&places);
+        t.probe_places(Handle(0), false);
+        wait_loaded(&mut t);
+        let id = t.nodes.iter().position(|n| n.path == gone).unwrap();
+        assert!(t.nodes[id].missing);
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, rect(0.0, 0.0, WIDTH, 900.0), None, XtreeBadge::Idle);
+        let (x, y) = t.row_point("todavia-no").unwrap();
+        assert_eq!(t.drop_node_at(x, y), None);
+        // Aparece y se despliega: se lee de nuevo (en otro hilo).
+        std::fs::create_dir_all(gone.join("hija")).unwrap();
+        t.toggle(Handle(0), id, false);
+        wait_loaded(&mut t);
+        assert!(!t.nodes[id].missing && t.nodes[id].expanded);
+        assert_eq!(t.nodes[id].children.as_ref().map(Vec::len), Some(1));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

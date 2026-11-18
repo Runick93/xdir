@@ -3,6 +3,7 @@
 ## Sin publicar
 
 ### Nuevo
+- Esc después de cortar deja de cortar: lo cortado sale del portapapeles y vuelve a verse normal (si hay un filtro escrito, el siguiente Esc lo borra).
 - Lo cortado (Ctrl+X / ⌘X) se ve con el ícono atenuado hasta que se pega, como en el Explorador; también lo que se corta en el Explorador.
 - El logo de Runick de «Acerca de xdir» ahora está animado.
 - El instalador de Windows suma el logo de Runick en el panel de la bienvenida y el ícono de xdir junto al título y arriba a la derecha en las demás pantallas.

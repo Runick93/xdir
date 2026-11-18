@@ -189,3 +189,57 @@ fn preview_cut_follows_the_fan() {
     assert!(!a.preview_is_cut());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Esc después de cortar: lo cortado sale del portapapeles y los íconos vuelven a verse
+/// normales; el archivo no se mueve.
+#[test]
+fn escape_cancels_cut() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let src = fixture("esc", &["a.txt", "b.txt"]);
+    go(&mut a, &src);
+    select(&mut a, "a.txt");
+    a.run_command(Command::Cut);
+    a.paint();
+    assert_eq!(icon_alpha(&host, "a.txt"), CUT_ALPHA);
+    assert!(a.on_key(crate::keys::keys::VK_ESCAPE));
+    a.paint();
+    assert_eq!(icon_alpha(&host, "a.txt"), 1.0);
+    assert!(sys::shell().clipboard_files().is_none(), "el portapapeles quedó vacío");
+    assert!(src.join("a.txt").exists());
+    let _ = std::fs::remove_dir_all(&src);
+}
+
+/// Esc con algo copiado (no cortado) no toca el portapapeles: se puede seguir pegando.
+#[test]
+fn escape_keeps_copied_files() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let src = fixture("esc-copia", &["a.txt"]);
+    go(&mut a, &src);
+    select(&mut a, "a.txt");
+    a.run_command(Command::Copy);
+    a.on_key(crate::keys::keys::VK_ESCAPE);
+    assert!(matches!(sys::shell().clipboard_files(), Some((_, false))), "lo copiado sigue en el portapapeles");
+    let _ = std::fs::remove_dir_all(&src);
+}
+
+/// Con un filtro escrito y algo cortado, el primer Esc des-corta y el segundo borra el filtro.
+#[test]
+fn escape_cancels_cut_before_filter() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let src = fixture("esc-filtro", &["a.txt", "b.txt"]);
+    go(&mut a, &src);
+    select(&mut a, "a.txt");
+    a.run_command(Command::Cut);
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().search(hwnd, &tx, "a");
+    assert!(a.panes[0].tab().search.is_some());
+    a.on_key(crate::keys::keys::VK_ESCAPE);
+    assert!(sys::shell().clipboard_files().is_none());
+    assert!(a.panes[0].tab().search.is_some(), "el filtro sigue");
+    a.on_key(crate::keys::keys::VK_ESCAPE);
+    assert!(a.panes[0].tab().search.is_none());
+    let _ = std::fs::remove_dir_all(&src);
+}

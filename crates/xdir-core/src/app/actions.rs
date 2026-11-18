@@ -47,6 +47,9 @@ impl App {
             VK_ESCAPE if self.compare.as_ref().is_some_and(|c| c.focused) => self.close_compare(),
             // Con xtree abierto, sus teclas van primero; de las de xdir quedan solo las globales.
             _ if self.xtree_open => return self.on_xtree_key(vk, ctrl, shift, alt, meta),
+            // Esc después de cortar: lo cortado sale del portapapeles y vuelve a verse normal (antes
+            // que el filtro: es lo último que se hizo).
+            VK_ESCAPE if !self.cut.is_empty() => self.cancel_cut(),
             VK_ESCAPE if self.panes[active].tab().search.is_some() => self.clear_filter(active),
             // Lo último: si nada más tomó el Escape, corta la apertura desde un archivo comprimido.
             VK_ESCAPE if self.archive.opening.as_ref().is_some_and(|s| !s.load(std::sync::atomic::Ordering::Relaxed)) => {

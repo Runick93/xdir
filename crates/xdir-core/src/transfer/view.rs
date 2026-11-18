@@ -149,7 +149,8 @@ fn controls(r: Rect, jobs: &[JobView], expanded: Option<JobId>) -> Vec<(ViewHit,
                 out.push((ViewHit::Cancel(id), cancel));
                 if j.state == JobState::Waiting {
                     let w = START_NOW_W;
-                    out.push((ViewHit::StartNow(id), rect(cancel.left - 8.0 - w, cancel.top, cancel.left - 8.0, cancel.bottom)));
+                    let cy = (cancel.top + cancel.bottom) / 2.0;
+                    out.push((ViewHit::StartNow(id), rect(cancel.left - 8.0 - w, cy - BTN_H / 2.0, cancel.left - 8.0, cy + BTN_H / 2.0)));
                 }
             }
         }

@@ -379,6 +379,25 @@ fn start_now_runs_queued_job() {
     wait(&mut a, idle);
 }
 
+/// Apagar «Copias en cola por disco» con un trabajo esperando lo libera, con el primero corriendo.
+#[test]
+fn turning_queue_off_releases_waiting_job() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-apaga", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    a.toggle_queue_by_disk();
+    assert!(!a.config.queue_by_disk);
+    wait(&mut a, |a| {
+        let st = |id| a.jobs().iter().find(|j| j.id == id).map(|j| j.state);
+        st(i2) == Some(JobState::Running) && st(i1) == Some(JobState::Running)
+    });
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
 /// Clic en el control `h` de la ventana de copia (lo busca recorriendo el área).
 fn click_aux(a: &mut App, h: ViewHit) {
     let jobs = a.jobs().to_vec();

@@ -388,7 +388,7 @@ impl App {
         let rerun = matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }).then(|| spec.clone());
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun });
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
-        let queue = self.config.queue_by_disk;
+        t.sched.set_queue_by_disk(self.config.queue_by_disk);
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
             let send = |u: Update| {
@@ -409,9 +409,8 @@ impl App {
                 send(Update::Finished(JobOutcome { stopped: Some(format!("Se está expulsando \"{label}\"")), ..Default::default() }));
                 return;
             }
-            // Sin la cola por disco no espera a nadie (los discos se siguen avisando para expulsar).
-            let wait_on = if queue { vols.clone() } else { Vec::new() };
-            if !sched.acquire_notify(id, &wait_on, &ctl, &mut || send(Update::Waiting)) {
+            // Se anota con sus discos siempre: si la cola por disco está apagada no espera a nadie.
+            if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
                 send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
                 return;
             }
@@ -428,10 +427,11 @@ impl App {
     }
 
     /// Switch «Copias en cola por disco»: `cola_por_disco = true` en `config.toml` (apagado es lo
-    /// de fábrica: se quita la línea). Rige para los trabajos que se lancen desde ahora.
+    /// de fábrica: se quita la línea). Rige en vivo: al apagarlo, lo que esperaba en la cola sigue de inmediato.
     pub(super) fn toggle_queue_by_disk(&mut self) {
         let on = !self.config.queue_by_disk;
         self.config.queue_by_disk = on;
+        self.transfers.sched.set_queue_by_disk(on);
         let key = "cola_por_disco".to_string();
         self.edit_config(vec![if on {
             ConfigEdit::Set { section: "opciones", key, value: "true".into() }

@@ -2,6 +2,7 @@
 //! de destino); entonces esperan «En cola», en orden de llegada, para no hacer saltar el disco.
 
 use std::ffi::OsString;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -18,15 +19,31 @@ struct Entry {
     forced: bool,
 }
 
-#[derive(Default)]
 pub struct Scheduler {
     entries: Mutex<Vec<Entry>>,
     changed: Condvar,
+    /// «Copias en cola por disco»: sin esto nadie espera a nadie (se puede cambiar en vivo).
+    queue_by_disk: AtomicBool,
+}
+
+impl Default for Scheduler {
+    fn default() -> Scheduler {
+        Scheduler { entries: Mutex::new(Vec::new()), changed: Condvar::new(), queue_by_disk: AtomicBool::new(true) }
+    }
 }
 
 impl Scheduler {
+    /// Nace encolando por disco; la aplicación lo ajusta con `set_queue_by_disk`.
     pub fn new() -> Scheduler {
         Scheduler::default()
+    }
+
+    /// Enciende o apaga la cola por disco: al apagar, lo que esperaba sigue de inmediato.
+    pub fn set_queue_by_disk(&self, on: bool) {
+        self.queue_by_disk.store(on, Ordering::SeqCst);
+        // Con el candado tomado un instante, para no perder el aviso de uno justo por esperar.
+        drop(self.lock());
+        self.changed.notify_all();
     }
 
     fn lock(&self) -> MutexGuard<'_, Vec<Entry>> {
@@ -52,6 +69,7 @@ impl Scheduler {
             }
             let forced = entries.iter().any(|e| e.id == id && e.forced);
             let blocked = !forced
+                && self.queue_by_disk.load(Ordering::SeqCst)
                 && entries
                     .iter()
                     .any(|e| e.id != id && (e.running || e.id < id) && e.vols.iter().any(|v| vols.contains(v)));
@@ -171,6 +189,17 @@ mod tests {
         spawn(&s, 2, v(&["C"]), Control::new(), tx);
         assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
         s.force(2);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((2, true)));
+    }
+
+    #[test]
+    fn scheduler_turning_queue_off_releases_waiting() {
+        let s = Arc::new(Scheduler::new());
+        assert!(s.acquire(1, &v(&["C"]), &Control::new()));
+        let (tx, rx) = channel();
+        spawn(&s, 2, v(&["C"]), Control::new(), tx);
+        assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+        s.set_queue_by_disk(false);
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok((2, true)));
     }
 

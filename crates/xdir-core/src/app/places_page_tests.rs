@@ -172,3 +172,34 @@ fn places_page_rows_and_quick_access_only_on_windows() {
     assert!(!a.places_hits.iter().any(|(_, h)| *h == PlaceHit::Toggle(index_of(&a, &Place::QuickAccess))));
     cleanup(&root);
 }
+
+/// En una ventana angosta los botones no tapan el nombre: «Quitar» y la ruta se van primero y el
+/// nombre siempre tiene su lugar.
+#[test]
+fn places_page_narrow_keeps_names() {
+    let root = temp_root("angosta");
+    let own = root.join("proyectos-propios");
+    std::fs::create_dir_all(&own).unwrap();
+    let (mut a, _host) = places_app(&root);
+    a.places.add_folder(own.clone());
+    let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+    let left = 10.0;
+    super::draw(&mut a, &p, crate::geom::rect(left, 0.0, left + 260.0, 2000.0), None);
+    let floor = left + 52.0 + super::MIN_NAME_W;
+    for (r, hit) in &a.places_hits {
+        if *hit != PlaceHit::Add {
+            assert!(r.left >= floor, "{hit:?} en {r:?} pisa el nombre");
+        }
+    }
+    assert!(!a.places_hits.iter().any(|(_, h)| matches!(h, PlaceHit::Remove(_))), "sin lugar, «Quitar» no se muestra");
+    let texts = p.texts();
+    for name in ["Escritorio", "Papelera"] {
+        assert!(texts.iter().any(|(_, s, _)| s == name), "{name}: {texts:?}");
+    }
+    let shown = texts.iter().find(|(_, s, _)| "proyectos-propios".starts_with(s.trim_end_matches('…')) && s.len() > 3);
+    assert!(shown.is_some(), "{texts:?}");
+    // Ancho: aparecen «Quitar» y la ruta.
+    super::draw(&mut a, &p, crate::geom::rect(left, 0.0, left + 820.0, 2000.0), None);
+    assert!(a.places_hits.iter().any(|(_, h)| matches!(h, PlaceHit::Remove(_))));
+    cleanup(&root);
+}

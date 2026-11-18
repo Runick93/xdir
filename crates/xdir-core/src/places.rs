@@ -40,7 +40,12 @@ impl Place {
         if text.is_empty() {
             return None;
         }
-        Some(KEYS.iter().find(|(k, _)| *k == text).map_or_else(|| Place::Folder(PathBuf::from(text)), |(_, p)| p.clone()))
+        if let Some((_, p)) = KEYS.iter().find(|(k, _)| *k == text) {
+            return Some(p.clone());
+        }
+        // Una carpeta propia es una ruta absoluta; lo demás (una clave mal escrita) se descarta.
+        let path = PathBuf::from(text);
+        path.is_absolute().then_some(Place::Folder(path))
     }
 
     fn to_text(&self) -> String {
@@ -195,11 +200,17 @@ impl Places {
 
     /// Al final, sin repetir una carpeta propia que ya está (compara con `same_path` del sistema).
     /// Solo rutas absolutas: una relativa como «papelera» se leería después como un lugar fijo.
+    /// Una carpeta del usuario no se agrega como propia: si estaba oculta, se vuelve a ver.
     pub fn add_folder(&mut self, path: PathBuf) {
         if !path.is_absolute() {
             return;
         }
         let fs = crate::sys::file_system();
+        let mut users = KEYS.iter().filter_map(|(_, p)| if let Place::User(i) = p { Some(*i) } else { None });
+        if let Some(i) = users.find(|&i| fs.user_folder(i).is_some_and(|u| fs.same_path(&u, &path))) {
+            self.hidden.retain(|h| *h != Place::User(i));
+            return;
+        }
         if self.order.iter().any(|p| matches!(p, Place::Folder(q) if fs.same_path(q, &path))) {
             return;
         }

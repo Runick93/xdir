@@ -30,6 +30,10 @@ pub(super) enum PlaceHit {
 const ROW: f32 = 56.0;
 const GAP: f32 = 4.0;
 const WIDTH: f32 = 820.0;
+/// Lo mínimo que se le deja al nombre: a la izquierda de eso no va ningún botón.
+pub(super) const MIN_NAME_W: f32 = 90.0;
+/// Con menos lugar que esto para el texto, una carpeta propia muestra solo el nombre (sin ruta).
+const MIN_PATH_W: f32 = 160.0;
 const PICK_TITLE: &str = "Agregar carpeta a Lugares";
 
 fn item(title: &str, desc: &str, keywords: &[&str]) -> SearchItem {
@@ -102,6 +106,10 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         // Los botones van a la derecha: switch, ↑, ↓ y, en las carpetas propias, «Quitar».
         let own = matches!(place, Place::Folder(_));
         let cy = y + ROW / 2.0;
+        // Ningún botón empieza a la izquierda de esto (el ícono y lo mínimo del nombre); los que
+        // no entran no se muestran (primero «Quitar»).
+        let text_left = left + 52.0;
+        let floor = text_left + MIN_NAME_W;
         let mut x = right - 16.0;
         let s = rect(x - SWITCH_W, cy - SWITCH_H / 2.0, x, cy + SWITCH_H / 2.0);
         let s_hit = rect(s.left - 6.0, y + 6.0, s.right + 6.0, y + ROW - 6.0);
@@ -110,27 +118,32 @@ pub(super) fn draw(app: &mut App, p: &dyn Painter, r: Rect, hover: Option<(f32, 
         x = s.left - 16.0;
         for (glyph, hit, enabled) in [("\u{E70D}", PlaceHit::Down(i), k + 1 < rows.len()), ("\u{E70E}", PlaceHit::Up(i), k > 0)] {
             let b = rect(x - 26.0, cy - 12.0, x, cy + 12.0);
+            if b.left < floor {
+                break;
+            }
             icon_button(p, b, glyph, hot(b), enabled);
             if enabled {
                 hits.push((b, hit));
             }
             x = b.left - 2.0;
         }
-        if own {
-            let b = rect(x - 8.0 - 80.0, cy - 14.0, x - 8.0, cy + 14.0);
+        let quit = rect(x - 8.0 - 80.0, cy - 14.0, x - 8.0, cy + 14.0);
+        if own && quit.left >= floor {
+            let b = quit;
             controls::button(p, b, "Quitar", hot(b), true);
             hits.push((b, PlaceHit::Remove(i)));
             x = b.left;
         }
-        let text_right = x - 16.0;
+        let text_right = (x - 16.0).max(floor);
         let title_color = if shown { th.text } else { th.text_dim };
-        let text_left = left + 52.0;
-        if let Place::Folder(path) = place {
+        if let Place::Folder(path) = place
+            && text_right - text_left >= MIN_PATH_W
+        {
             let full = path.to_string_lossy();
             p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &name, text_right - text_left), rect(text_left, y + 10.0, text_right, y + 28.0), title_color);
             p.text(FontId::Small, &ellipsize(p, FontId::Small, &full, text_right - text_left), rect(text_left, y + 31.0, text_right, y + 47.0), th.text_dim);
         } else {
-            p.text(FontId::Ui, &name, rect(text_left, cy - 9.0, text_right, cy + 9.0), title_color);
+            p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &name, text_right - text_left), rect(text_left, cy - 9.0, text_right, cy + 9.0), title_color);
         }
         y += ROW + GAP;
     }

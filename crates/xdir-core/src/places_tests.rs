@@ -18,10 +18,12 @@ fn places_default_order() {
 #[test]
 fn places_roundtrip() {
     let mut p = Places::default();
-    p.order.push(Place::Folder(PathBuf::from("C:\\Users\\Jos\u{e9}\\Mis Proyectos \u{f1}and\u{fa}")));
-    p.order.push(Place::Folder(PathBuf::from(r#"D:\con "comillas""#)));
+    // Rutas absolutas en cualquier sistema (las relativas se descartan al leer).
+    let base = std::env::temp_dir();
+    p.order.push(Place::Folder(base.join("Jos\u{e9}").join("Mis Proyectos \u{f1}and\u{fa}")));
+    p.order.push(Place::Folder(base.join(r#"con "comillas""#)));
     p.order.swap(0, 3);
-    p.hidden = vec![Place::User(4), Place::Folder(PathBuf::from(r#"D:\con "comillas""#))];
+    p.hidden = vec![Place::User(4), Place::Folder(base.join(r#"con "comillas""#))];
     let text = p.to_toml();
     assert!(text.contains("\"musica\""));
     assert_eq!(Places::parse(&text), p);
@@ -48,11 +50,15 @@ fn places_unknown_lines_ignored() {
 
 #[test]
 fn places_missing_builtins_appended() {
-    let old = "orden = [\"escritorio\", \"descargas\", \"documentos\", \"imagenes\", \"musica\", \"videos\", \"acceso_rapido\", \"/srv/x\"]\n";
-    let p = Places::parse(old);
+    let srv = std::env::temp_dir().join("x");
+    let old = format!(
+        "orden = [\"escritorio\", \"descargas\", \"documentos\", \"imagenes\", \"musica\", \"videos\", \"acceso_rapido\", {}]\n",
+        crate::toml::quote(&srv.to_string_lossy())
+    );
+    let p = Places::parse(&old);
     assert_eq!(p.order[6], Place::QuickAccess);
     assert_eq!(p.order[7], Place::Trash);
-    assert_eq!(p.order[8], Place::Folder(PathBuf::from("/srv/x")));
+    assert_eq!(p.order[8], Place::Folder(srv));
     assert_eq!(p.order.len(), 9);
 }
 
@@ -115,4 +121,31 @@ fn places_save_in_background_last_wins() {
     // Y no la pisa una más vieja que llegue tarde.
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), want);
+}
+
+/// Una carpeta propia relativa en el archivo («música» a mano) se descarta: no es un lugar fijo
+/// ni una ruta.
+#[test]
+fn places_parse_drops_relative_folders() {
+    let p = Places::parse("orden = [\"música\", \"videos\"]\nocultos = [\"música\"]\n");
+    assert!(!p.order.iter().any(|x| matches!(x, Place::Folder(_))));
+    assert!(p.hidden.is_empty());
+    assert_eq!(p.order.len(), builtins().len());
+}
+
+/// Agregar una carpeta del usuario no la repite como propia: si estaba oculta, se vuelve a ver.
+#[test]
+fn places_add_folder_user_folder_unhides() {
+    install_fakes();
+    let desk = std::env::temp_dir().join("xdir-lugares-escritorio");
+    crate::sys::testing::FakeFileSystem::set_user_folders(&[desk.as_path()]);
+    let mut p = Places::default();
+    p.toggle(0);
+    assert!(p.is_hidden(&Place::User(0)));
+    p.add_folder(desk.clone());
+    assert!(!p.is_hidden(&Place::User(0)), "se vuelve a ver el Escritorio");
+    assert_eq!(p.order, builtins());
+    p.add_folder(desk);
+    assert_eq!(p.order, builtins());
+    crate::sys::testing::FakeFileSystem::set_user_folders(&[]);
 }

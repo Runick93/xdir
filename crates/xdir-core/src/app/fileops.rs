@@ -80,6 +80,13 @@ impl App {
         }
     }
 
+    /// Copia texto al portapapeles del sistema. Reemplaza lo copiado o cortado: se relee lo
+    /// cortado (en macOS no llega ningún aviso mientras xdir está al frente).
+    pub(super) fn copy_text(&mut self, text: &str) {
+        let _ = sys::shell().copy_text(self.hwnd, text);
+        self.refresh_cut();
+    }
+
     /// ¿`path` está cortado? (sin E/S).
     pub(super) fn is_cut(&self, path: &std::path::Path) -> bool {
         self.cut.contains(path)

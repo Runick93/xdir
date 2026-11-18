@@ -498,7 +498,7 @@ impl App {
             CompareHit::Hash(i) => self.compare_hash(i),
             CompareHit::Copy(i) => {
                 if let Some(Some(Ok(hex))) = self.compare.as_ref().map(|s| s.hashes[i].result.clone()) {
-                    let _ = sys::shell().copy_text(self.hwnd, &hex);
+                    self.copy_text(&hex);
                     self.notice = Some("Se copió la suma SHA-256".into());
                 }
             }

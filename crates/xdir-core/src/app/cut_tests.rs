@@ -141,3 +141,51 @@ fn cut_dims_preview_icon() {
     assert_eq!(big, [1.0]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Copiar texto («Copiar como ruta», una suma...) reemplaza lo cortado: deja de verse atenuado
+/// aunque no llegue ningún aviso del sistema (macOS con xdir al frente).
+#[test]
+fn copy_text_clears_cut_dimming() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let dir = fixture("copiar-ruta", &["a.txt", "b.txt"]);
+    go(&mut a, &dir);
+    select(&mut a, "a.txt");
+    a.run_command(Command::Cut);
+    a.paint();
+    assert_eq!(icon_alpha(&host, "a.txt"), CUT_ALPHA);
+    a.run_command(Command::CopyPaths);
+    a.paint();
+    assert_eq!(icon_alpha(&host, "a.txt"), 1.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Con muchos elegidos la vista previa muestra el abanico de los 3 primeros: se atenúa según
+/// esos (sin recorrer toda la selección en cada cuadro).
+#[test]
+fn preview_cut_follows_the_fan() {
+    let mut a = app_with_host(FakeHost::new());
+    let names = ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"];
+    let dir = fixture("abanico", &names);
+    go(&mut a, &dir);
+    {
+        let list = &mut a.panes[0].tab_mut().list;
+        for pos in 0..list.count() {
+            list.set_selected_pos(pos, true);
+        }
+    }
+    let selected: Vec<PathBuf> = {
+        let tab = a.panes[0].tab();
+        tab.list.selected_indices().map(|i| tab.entry_path(i)).collect()
+    };
+    assert_eq!(selected.len(), 5);
+    // Solo los 3 del abanico cortados (los otros 2 no): se atenúa.
+    FakeShell::set_clipboard(Some((selected[..3].to_vec(), true)));
+    a.on_clipboard_changed();
+    assert!(a.preview_is_cut(), "los del abanico están cortados");
+    // Uno del abanico sin cortar: no se atenúa.
+    FakeShell::set_clipboard(Some((selected[1..].to_vec(), true)));
+    a.on_clipboard_changed();
+    assert!(!a.preview_is_cut());
+    let _ = std::fs::remove_dir_all(&dir);
+}

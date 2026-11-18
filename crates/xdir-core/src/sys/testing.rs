@@ -551,8 +551,10 @@ impl Shell for FakeShell {
         shell_state(|s| s.clipboard = None);
     }
 
+    /// Como en el sistema, el texto reemplaza los archivos copiados o cortados.
     fn copy_text(&self, _owner: Handle, text: &str) -> Result<(), String> {
         record(ShellCall::CopyText(text.to_string()));
+        shell_state(|s| s.clipboard = None);
         outcome()
     }
 

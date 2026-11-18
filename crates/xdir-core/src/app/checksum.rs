@@ -196,7 +196,7 @@ impl App {
             InfoHit::HashCopy => {
                 let algo = self.info.sum.algo;
                 if let Some(Ok(hex)) = self.info.sum.result(algo).cloned() {
-                    let _ = sys::shell().copy_text(self.hwnd, &hex);
+                    self.copy_text(&hex);
                     self.notice = Some(format!("Se copió la suma {}", algo.label()));
                 }
             }

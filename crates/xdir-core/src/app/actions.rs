@@ -184,7 +184,7 @@ impl App {
             Command::CopyPaths => {
                 let paths = self.selection(active);
                 if !paths.is_empty() {
-                    let _ = sys::shell().copy_text(hwnd, &fileops::quoted_paths(&paths));
+                    self.copy_text(&fileops::quoted_paths(&paths));
                 }
             }
             Command::Undo => match self.undo.pop() {

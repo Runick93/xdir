@@ -415,15 +415,29 @@ impl App {
         }
     }
 
-    /// ¿Lo que muestra la columna está cortado? El elemento elegido, todos los elegidos o, sin
-    /// selección, la carpeta abierta: entonces su imagen o su ícono va atenuado.
+    /// ¿Lo que muestra la columna está cortado? Lo mismo que elige `preview_shown`: con varios
+    /// elegidos, los (hasta 3) del abanico; si no, el elegido, el enfocado en «Este equipo» o la
+    /// carpeta abierta. Entonces su imagen o su ícono va atenuado. Se llama en cada cuadro: no
+    /// recorre toda la selección.
     pub(super) fn preview_is_cut(&self) -> bool {
-        let tab = self.panes[self.active].tab();
-        let mut selected = tab.list.selected_indices().peekable();
-        if selected.peek().is_none() {
-            return matches!(&tab.location, Location::Path(p) if self.is_cut(p));
+        if self.cut.is_empty() {
+            return false;
         }
-        selected.all(|i| self.is_cut(&tab.entry_path(i)))
+        let tab = self.panes[self.active].tab();
+        let list = &tab.list;
+        let shown: Vec<usize> = list.selected_indices().take(3).collect();
+        if shown.len() > 1 {
+            return shown.iter().all(|&i| self.is_cut(&tab.entry_path(i)));
+        }
+        let idx = match shown.first() {
+            Some(&i) => Some(i),
+            None if matches!(tab.location, Location::Computer) => list.focused_index(),
+            None => None,
+        };
+        match idx.filter(|&i| i < list.entries.len()) {
+            Some(i) => self.is_cut(&tab.entry_path(i)),
+            None => matches!(&tab.location, Location::Path(p) if self.is_cut(p)),
+        }
     }
 
     /// Lo que dibuja la columna ahora.

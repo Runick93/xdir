@@ -383,7 +383,7 @@ impl App {
             .map(|l| format!("\"{}\"", l.address_text()))
             .collect();
         if !text.is_empty() {
-            let _ = sys::shell().copy_text(self.hwnd, &text.join("\r\n"));
+            self.copy_text(&text.join("\r\n"));
         }
     }
 

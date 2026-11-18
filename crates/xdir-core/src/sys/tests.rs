@@ -183,3 +183,16 @@ fn fake_hashes_hang_and_note_ui_io() {
     .unwrap();
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// El lugar de la Papelera del falso es una Papelera para `is_trash` (y sin ella, ninguno).
+#[test]
+fn trash_place_is_trash() {
+    use super::testing::FakeFileSystem;
+    install_fakes();
+    FakeFileSystem::set_trash(Some(Path::new("/fake-trash-place/t")));
+    let fs = file_system();
+    let place = fs.trash_place().expect("hay Papelera");
+    assert!(fs.is_trash(&place));
+    FakeFileSystem::set_trash(None);
+    assert!(fs.trash_place().is_none());
+}

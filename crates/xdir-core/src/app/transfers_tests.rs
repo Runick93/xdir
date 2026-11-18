@@ -771,6 +771,38 @@ fn drop_on_tree_folder_moves_with_engine() {
     assert!(f.exists(&p("/app-tdrop/d/a.txt")) && !f.exists(&p("/app-tdrop/s/a.txt")));
 }
 
+/// Soltar en la Papelera del árbol la manda a la Papelera con el motor (`Delete` con `recycle`),
+/// nunca un `Move` a la carpeta de la Papelera: así «Devolver» sabe de dónde salió. El efecto es
+/// mover, aun con Ctrl; lo que ya está en la Papelera no se acepta.
+#[cfg(feature = "arbol")]
+#[test]
+fn drop_on_tree_trash_deletes() {
+    let f = fake();
+    f.add_file(&p("/app-ttrash/s/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-ttrash/s/b.txt"), b"b".to_vec());
+    f.add_file(&p("/app-ttrash/.Trash/viejo.txt"), b"v".to_vec());
+    crate::sys::testing::FakeFileSystem::set_trash(Some(Path::new("/app-ttrash/.Trash")));
+    let mut a = app_with_tree_drives(&[]);
+    let point = a.tree.row_point("Papelera").expect("la fila de la Papelera");
+    let paths = vec![p("/app-ttrash/s/a.txt"), p("/app-ttrash/s/b.txt")];
+    assert_eq!(drag(&mut a, DragKind::Enter, point, &paths, false), Effect::MOVE);
+    assert!(a.tree.drop_target.is_some(), "la fila se resalta");
+    assert_eq!(drag(&mut a, DragKind::Over, point, &paths, true), Effect::MOVE, "Ctrl no copia");
+    // Lo que ya está en la Papelera no se acepta.
+    let inside = vec![p("/app-ttrash/.Trash/viejo.txt")];
+    assert_eq!(drag(&mut a, DragKind::Over, point, &inside, false), Effect::NONE);
+    assert_eq!(a.tree.drop_target, None);
+    a.take_started();
+    assert_eq!(drag(&mut a, DragKind::Drop, point, &inside, false), Effect::NONE);
+    assert!(a.take_started().is_empty());
+    assert_eq!(drag(&mut a, DragKind::Drop, point, &paths, false), Effect::MOVE);
+    assert_eq!(a.tree.drop_target, None, "al soltar se apaga el resaltado");
+    assert_eq!(a.take_started(), vec![JobSpec::Delete { paths: paths.clone(), recycle: true }]);
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-ttrash/s/a.txt")) && !f.exists(&p("/app-ttrash/s/b.txt")));
+    crate::sys::testing::FakeFileSystem::set_trash(None);
+}
+
 /// #56: lo que no es una carpeta (Este equipo, «Red»), soltar una carpeta en sí misma o un archivo
 /// en su propia carpeta y la Papelera no aceptan nada ni se resaltan; salir apaga el resaltado.
 #[cfg(feature = "arbol")]

@@ -306,6 +306,10 @@ impl App {
         // El árbol no tiene un `Hit` propio para sus filas: lo que queda debajo es `None`.
         #[cfg(feature = "arbol")]
         if hit == Hit::None && self.tree.contains(x, y) {
+            // La Papelera no tiene carpeta destino: soltar manda a la Papelera.
+            if let Some(id) = self.tree.trash_drop_at(x, y) {
+                return Some((DropAt::Trash(id), PathBuf::new()));
+            }
             return self.tree.drop_node_at(x, y).map(|(id, path)| (DropAt::Tree(id), path));
         }
         let Hit::Pane(i, ph) = hit else { return None };
@@ -347,6 +351,14 @@ impl App {
             _ => self.drop_folder(x, y),
         };
         ev.effect = match (&target, ev.paths) {
+            // A la Papelera siempre se «mueve» (aun con Ctrl), salvo lo que ya está adentro.
+            (Some((DropAt::Trash(_), _)), Some(paths)) => {
+                if ev.allowed.allows(Effect::MOVE) && paths.iter().any(|p| !self.path_in_trash(p)) {
+                    Effect::MOVE
+                } else {
+                    Effect::NONE
+                }
+            }
             (Some((_, dest)), Some(paths)) => {
                 let roots: Vec<PathBuf> = self.net.connections.iter().map(|c| c.local.clone()).collect();
                 drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed, &roots)
@@ -362,12 +374,24 @@ impl App {
             && ev.effect != Effect::NONE
             && let (Some((at, dest)), Some(paths)) = (target, ev.paths)
         {
+            if let DropAt::Trash(_) = at {
+                // Lo que ya está en la Papelera se deja; el resto va por el motor como «Eliminar».
+                let paths: Vec<PathBuf> = paths.iter().filter(|p| !self.path_in_trash(p)).cloned().collect();
+                self.start_transfer(JobSpec::Delete { paths, recycle: true });
+                return;
+            }
             let sources = paths.to_vec();
             self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
             if let DropAt::Pane(pane, _) = at {
                 self.set_active(pane);
             }
         }
+    }
+
+    /// ¿La ruta está en la Papelera (ella misma o algo de adentro)?
+    fn path_in_trash(&self, path: &std::path::Path) -> bool {
+        let fs = sys::file_system();
+        path.ancestors().any(|a| fs.is_trash(&Location::Path(a.to_path_buf())))
     }
 
     /// Deja resaltada como destino solo esa carpeta (de una lista o del árbol); repinta si cambió.
@@ -387,7 +411,7 @@ impl App {
         #[cfg(feature = "arbol")]
         {
             let want = match at {
-                Some(DropAt::Tree(id)) => Some(id),
+                Some(DropAt::Tree(id) | DropAt::Trash(id)) => Some(id),
                 _ => None,
             };
             if self.tree.drop_target != want {
@@ -630,6 +654,9 @@ pub(super) enum DropAt {
     Pane(usize, Option<usize>),
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     Tree(usize),
+    /// La fila de la Papelera del árbol: soltar manda a la Papelera, no mueve.
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    Trash(usize),
 }
 
 /// ¿El elemento tiene ruta del disco? Dentro de un archivo comprimido, los de nombre no permitido

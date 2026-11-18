@@ -30,13 +30,6 @@ impl App {
         false
     }
 
-    pub(super) fn tree_quick_open(&self) -> bool {
-        #[cfg(feature = "arbol")]
-        return self.tree.quick_open();
-        #[cfg(not(feature = "arbol"))]
-        true
-    }
-
     pub(super) fn tree_pinned(&self) -> bool {
         #[cfg(feature = "arbol")]
         return self.tree.pinned;
@@ -44,10 +37,12 @@ impl App {
         true
     }
 
-    /// Lee el Acceso rápido de Windows para el árbol y empieza a vigilar sus cambios.
+    /// Lee el Acceso rápido de Windows para el árbol y empieza a vigilar sus cambios; también mira,
+    /// en otro hilo, qué carpetas propias de los lugares ya no existen.
     #[cfg(feature = "arbol")]
     pub fn start_quick_access(&mut self) {
         self.tree.request_quick(self.hwnd);
+        self.tree.probe_places(self.hwnd, self.show_hidden);
         self.quick_watch = sys::file_system().quick_access_watch_dir().and_then(|dir| sys::file_system().watch(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
     }
 
@@ -405,7 +400,6 @@ impl App {
             tree_follow: self.tree_follow,
             show_tree: self.tree_visible(),
             tree_pinned: self.tree_pinned(),
-            quick_open: self.tree_quick_open(),
             accent: self.accent,
             dark_mode: self.dark_mode,
             group: self.group_name.clone(),

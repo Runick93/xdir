@@ -15,6 +15,8 @@ mod fileops;
 mod info;
 mod network;
 mod network_page;
+#[cfg(feature = "arbol")]
+mod places_page;
 mod saved_groups;
 mod settings;
 mod settings_pages;
@@ -427,6 +429,13 @@ pub struct App {
     /// Árbol de carpetas lateral (experimental).
     #[cfg(feature = "arbol")]
     tree: tree::Tree,
+    /// Lugares del árbol (`lugares.toml`): los cambia Configuración ▸ Lugares y el árbol los
+    /// muestra (`Tree::set_places`).
+    #[cfg(feature = "arbol")]
+    places: crate::places::Places,
+    /// Dónde quedó cada control de Configuración ▸ Lugares en el último cuadro.
+    #[cfg(feature = "arbol")]
+    places_hits: Vec<(geom::Rect, places_page::PlaceHit)>,
     show_favorites: bool,
     /// Barra de pestañas de grupos habilitada (se ve si además hay grupos guardados).
     show_group_bar: bool,
@@ -566,6 +575,8 @@ pub struct Init {
     pub groups: Groups,
     /// Vista de cada carpeta (`carpetas.toml`).
     pub folder_views: FolderViews,
+    /// Lugares del árbol (`lugares.toml`).
+    pub places: crate::places::Places,
     pub probe: Option<String>,
     pub start_path: Option<PathBuf>,
     pub started: Instant,
@@ -576,8 +587,8 @@ pub struct Init {
 }
 
 impl Init {
-    /// Lee del disco lo que hace falta para arrancar (historial, configuración, favoritos y
-    /// grupos) y aplica la preferencia de animaciones.
+    /// Lee del disco lo que hace falta para arrancar (historial, configuración, favoritos,
+    /// grupos y lugares del árbol) y aplica la preferencia de animaciones.
     pub fn load(session: Option<Session>, probe: Option<String>, start_path: Option<PathBuf>, started: Instant, marks: Vec<(&'static str, f64)>) -> Init {
         let session = session.unwrap_or_else(default_session);
         // `--probe` mide un arranque limpio: sin historial ni configuración del usuario.
@@ -587,11 +598,12 @@ impl Init {
         anim::set_off_by_config(config.animations == Some(false));
         // `--probe` tampoco lee ni escribe la vista de las carpetas.
         let folder_views = if probe.is_none() { FolderViews::load() } else { FolderViews::default() };
+        let places = if probe.is_none() { crate::places::Places::load() } else { crate::places::Places::default() };
         // Lo que quedó en la temporal de los archivos comprimidos de ejecuciones anteriores.
         if probe.is_none() {
             crate::archive_nav::temps::clean_at_start();
         }
-        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, probe, start_path, started, marks, clean_temps_on_close: true }
+        Init { session, history, config, favorites: Favorites::load(), groups: Groups::load(), folder_views, places, probe, start_path, started, marks, clean_temps_on_close: true }
     }
 
     /// Datos vacíos y sesión por defecto: nada del disco.
@@ -606,6 +618,7 @@ impl Init {
             favorites: Favorites::default(),
             groups: Groups::default(),
             folder_views: FolderViews::default(),
+            places: crate::places::Places::default(),
             probe: None,
             start_path: None,
             started: Instant::now(),
@@ -622,9 +635,11 @@ impl App {
         // Pruebas: el reloj fijado por una prueba anterior en este hilo no pasa a esta.
         #[cfg(test)]
         crate::clock::set(None);
-        let Init { session, history, config, favorites, groups, mut folder_views, probe, start_path, started, marks, clean_temps_on_close } = init;
+        let Init { session, history, config, favorites, groups, mut folder_views, places, probe, start_path, started, marks, clean_temps_on_close } = init;
         // Primera vez con memoria por carpeta: la vista y las columnas de la sesión pasan a ser
         // la vista por defecto.
+        #[cfg(not(feature = "arbol"))]
+        let _ = places;
         if folder_views.is_fresh() {
             folder_views.migrate(&session);
         }
@@ -702,7 +717,11 @@ impl App {
             xtree_search_box: None,
             clean_temps_on_close,
             #[cfg(feature = "arbol")]
-            tree: tree::Tree::new(),
+            tree: tree::Tree::new(&places),
+            #[cfg(feature = "arbol")]
+            places,
+            #[cfg(feature = "arbol")]
+            places_hits: Vec::new(),
             show_favorites: session.show_favorites,
             show_group_bar: session.group_bar,
             file_colors: session.file_colors,
@@ -763,7 +782,6 @@ impl App {
         {
             app.tree.visible = session.show_tree;
             app.tree.set_pinned(session.tree_pinned, false);
-            app.tree.set_quick_open(session.quick_open);
         }
         app
     }

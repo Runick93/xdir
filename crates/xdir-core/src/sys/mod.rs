@@ -344,6 +344,13 @@ pub trait FileSystem: Send + Sync {
     fn is_trash(&self, _loc: &Location) -> bool {
         false
     }
+    /// La Papelera del sistema como lugar del árbol; `is_trash` dice que sí de ella. En Windows
+    /// consulta el Shell (COM), así que se llama una vez al armar el árbol y se guarda.
+    /// Windows: la carpeta virtual del Shell (con su nombre localizado); macOS: `~/.Trash`;
+    /// Linux: `<datos>/Trash/files`. Por defecto, ninguna.
+    fn trash_place(&self) -> Option<Location> {
+        None
+    }
     /// Lo escrito en la barra de dirección como lugar especial del Shell ("shell:RecycleBinFolder").
     fn shell_location(&self, text: &str) -> Option<Location>;
     /// Nombre de análisis de la Red del Explorador (vacío si no existe en el sistema).

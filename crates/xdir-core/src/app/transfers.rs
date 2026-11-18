@@ -410,6 +410,7 @@ impl App {
             _ => None,
         };
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun, delete });
+        let queued = delete.is_none();
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
@@ -431,11 +432,16 @@ impl App {
                 send(Update::Finished(JobOutcome { stopped: Some(format!("Se está expulsando \"{label}\"")), ..Default::default() }));
                 return;
             }
-            if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
-                send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
-                return;
-            }
-            let _turn = Release(sched, id);
+            // Eliminar no hace cola: casi no lee ni escribe, y no tiene que esperar a una copia larga.
+            let _turn = if queued {
+                if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
+                    send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
+                    return;
+                }
+                Some(Release(sched, id))
+            } else {
+                None
+            };
             transfer::run(spec, prims, &ctl, &mut |u| {
                 if auto_skip.load(Ordering::SeqCst) && matches!(u, Update::Conflict(_)) {
                     ctl.answer(Answer { choice: Choice::Skip, all: false });
@@ -476,7 +482,8 @@ impl App {
                     v.title = title;
                     v.items = (0, items);
                     v.bytes = (0, bytes);
-                    v.speed = Speed::new(now, bytes);
+                    // Sin bytes (eliminar, devolver), la velocidad y el tiempo restante van por elementos.
+                    v.speed = Speed::new(now, if bytes > 0 { bytes } else { items });
                     v.state = JobState::Running;
                 }
                 Update::Progress { items, bytes, current } => {
@@ -488,7 +495,7 @@ impl App {
                         v.conflict = None;
                         v.speed.resume(now);
                     }
-                    v.speed.push(now, bytes);
+                    v.speed.push(now, if v.bytes.1 > 0 { bytes } else { items });
                     v.state = JobState::Running;
                 }
                 Update::Conflict(info) => {

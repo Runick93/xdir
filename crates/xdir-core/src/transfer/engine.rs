@@ -1503,7 +1503,11 @@ impl<'a> Job<'a> {
     fn delete(&mut self, paths: &[PathBuf], recycle: bool) {
         let t = title(&JobSpec::Delete { paths: vec![], recycle }, paths.len() as u64);
         let mut recycle = recycle;
-        if recycle && paths.iter().any(|p| self.has_trash(p) == Some(false)) {
+        // Cada carpeta una sola vez: saber si hay Papelera puede ser caro (en Windows suma toda la
+        // Papelera del disco) y con miles de elementos de la misma carpeta sería miles de veces.
+        let mut checked: HashSet<&Path> = HashSet::new();
+        let no_trash = recycle && paths.iter().any(|p| checked.insert(p.parent().unwrap_or(p)) && self.has_trash(p) == Some(false));
+        if no_trash {
             (self.out)(Update::Confirm(NO_TRASH.into()));
             if !self.ctl.wait_confirm() {
                 self.cancelled = true;
@@ -1530,6 +1534,11 @@ impl<'a> Job<'a> {
                 Ok(name) => {
                     self.record(Undo::Recycled(vec![(name, p.clone())]));
                     self.ok_items += 1;
+                }
+                // El sistema lo borró definitivamente en vez de mandarlo a la Papelera (Windows,
+                // si no entraba): se avisa, pero no hay nada que reintentar.
+                Err(e) if e.kind != ErrKind::Cancelled && self.prims.stat(p).is_err_and(|s| s.kind == ErrKind::NotFound) => {
+                    self.fail_msg(p, p, &e.message(), false);
                 }
                 Err(e) => self.fail(p, p, e),
             }

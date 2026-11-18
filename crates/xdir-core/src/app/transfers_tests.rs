@@ -878,6 +878,30 @@ fn delete_retry_of_a_folder_child_deletes_its_folder() {
 }
 
 #[test]
+fn delete_does_not_wait_behind_a_copy() {
+    // Eliminar no hace cola detrás de una copia larga en el mismo disco.
+    let f = fake();
+    let copy = slow_copy(&f, "/app-dq", 100);
+    f.add_file(&p("/app-dq/x.txt"), b"x".to_vec());
+    let (mut a, _host) = app_window();
+    let slow = a.start_transfer(copy);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == slow && j.state == JobState::Running));
+    let del = a.start_transfer(JobSpec::Delete { paths: vec![p("/app-dq/x.txt")], recycle: false });
+    let waited = std::cell::Cell::new(false);
+    wait(&mut a, |a| {
+        if a.jobs().iter().any(|j| j.id == del && j.state == JobState::Waiting) {
+            waited.set(true);
+        }
+        !a.jobs().iter().any(|j| j.id == del)
+    });
+    assert!(!waited.get(), "eliminar esperó en la cola");
+    assert!(!f.exists(&p("/app-dq/x.txt")));
+    assert!(a.jobs().iter().any(|j| j.id == slow && j.state != JobState::Done), "la copia sigue");
+    a.cancel_job(slow);
+    wait(&mut a, idle);
+}
+
+#[test]
 fn no_new_copies_onto_a_disk_being_ejected() {
     // Revisión del cableado (M1): mientras se espera para expulsar un disco, no empiezan copias
     // nuevas que lo usen.

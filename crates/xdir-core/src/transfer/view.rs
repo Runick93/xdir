@@ -77,9 +77,20 @@ fn finished_h(j: &JobView) -> f32 {
     76.0 + list + 45.0
 }
 
+/// Un trabajo que no mueve bytes (eliminar, devolver): el avance y el tiempo restante van por
+/// elementos, sin velocidad en bytes ni gráfico. Mientras se prepara todavía no se sabe.
+fn items_only(j: &JobView) -> bool {
+    j.bytes.1 == 0 && j.state != JobState::Preparing
+}
+
+/// Lo que ocupa el gráfico en los detalles (nada si no hay bytes).
+fn graph_space(j: &JobView) -> f32 {
+    if items_only(j) { 0.0 } else { GRAPH_H + 11.0 }
+}
+
 fn block_h(j: &JobView, expanded: Option<JobId>) -> f32 {
     match block_of(j, expanded) {
-        Block::Expanded => EXPANDED_H,
+        Block::Expanded => EXPANDED_H - (GRAPH_H + 11.0) + graph_space(j),
         Block::Conflict => CONFLICT_H,
         Block::Finished => finished_h(j),
         Block::Row => ROW_H,
@@ -109,7 +120,8 @@ fn controls(r: Rect, jobs: &[JobView], expanded: Option<JobId>) -> Vec<(ViewHit,
         match block_of(j, expanded) {
             Block::Expanded => {
                 header_buttons(&mut out);
-                out.push((ViewHit::Expand(id), rect(r.left + PAD, top + 254.0, r.left + PAD + 120.0, top + 276.0)));
+                let y = top + 254.0 - (GRAPH_H + 11.0) + graph_space(j);
+                out.push((ViewHit::Expand(id), rect(r.left + PAD, y, r.left + PAD + 120.0, y + 22.0)));
             }
             Block::Conflict => {
                 header_buttons(&mut out);
@@ -204,7 +216,7 @@ fn status_line(j: &JobView, env: &dyn SystemEnv, now: Instant) -> String {
         _ if j.paused => format!("{} % · En pausa", percent(j)),
         _ => {
             let mut s = format!("{} %", percent(j));
-            if let Some(rate) = j.speed.rate() {
+            if let Some(rate) = j.speed.rate().filter(|_| !items_only(j)) {
                 s.push_str(&format!(" · {}", speed_text(env, rate)));
             }
             match j.speed.eta(now) {
@@ -395,18 +407,27 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
                 };
                 header(p, r, top, &j.title, &big, th.text);
                 header_buttons(j.paused);
-                let g = rect(l, top + 71.0, rr, top + 71.0 + GRAPH_H);
-                graph_with(p, g, j.speed.graph(), j.speed.average(), j.speed.eta(now), &|rate| speed_text(env, rate));
+                if !items_only(j) {
+                    let g = rect(l, top + 71.0, rr, top + 71.0 + GRAPH_H);
+                    graph_with(p, g, j.speed.graph(), j.speed.average(), j.speed.eta(now), &|rate| speed_text(env, rate));
+                }
                 let eta = if j.paused { "En pausa".to_string() } else { j.speed.eta(now).map_or("Calculando…".into(), eta_long) };
                 let left_items = j.items.1.saturating_sub(j.items.0);
                 let left_bytes = j.bytes.1.saturating_sub(j.bytes.0);
                 let rows = [
                     ("Nombre:", j.current.clone()),
                     ("Tiempo restante:", eta),
-                    ("Elementos restantes:", format!("{} ({})", thousands(left_items), env.format_size_short(left_bytes))),
+                    (
+                        "Elementos restantes:",
+                        if items_only(j) {
+                            thousands(left_items)
+                        } else {
+                            format!("{} ({})", thousands(left_items), env.format_size_short(left_bytes))
+                        },
+                    ),
                 ];
                 for (k, (label, value)) in rows.iter().enumerate() {
-                    let y = top + 182.0 + 22.0 * k as f32;
+                    let y = top + 182.0 - (GRAPH_H + 11.0) + graph_space(j) + 22.0 * k as f32;
                     p.text(FontId::Ui, label, rect(l, y, l + 150.0, y + 18.0), th.text_dim);
                     p.text(FontId::Ui, &ellipsize(p, FontId::Ui, value, rr - l - 156.0), rect(l + 156.0, y, rr, y + 18.0), th.text);
                 }

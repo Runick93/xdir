@@ -306,3 +306,38 @@ fn window_title_counts_waiting_conflicts() {
     assert_eq!(view::window_title(&[conflict(1, false), running(2)]), "Copiando: un conflicto");
     assert_eq!(view::window_title(&[conflict(1, false), conflict(2, true)]), "Copiando: 2 conflictos");
 }
+
+/// Un trabajo sin bytes (eliminar, devolver): 40 de 100 elementos en 3 s.
+fn items_only(id: u64) -> JobView {
+    let start = Instant::now() - Duration::from_secs(3);
+    let mut j = job(id, JobState::Running);
+    j.title = "Eliminando 100 elementos".into();
+    j.items = (40, 100);
+    j.current = "a.txt".into();
+    // Sin bytes, la velocidad se mide en elementos.
+    j.speed = Speed::new(start, 100);
+    j.speed.push(start + Duration::from_secs(3), 40);
+    j
+}
+
+#[test]
+fn items_only_job_has_no_byte_speed() {
+    let jobs = [items_only(1)];
+    for expanded in [None, Some(1)] {
+        let t = texts(&jobs, expanded);
+        assert!(!has(&t, "bytes/s") && !has(&t, "/s"), "{t:?}");
+        assert!(!has(&t, "(0 bytes)") && !has(&t, "Calculando…"), "{t:?}");
+        assert!(!has(&t, "Velocidad: ") && !has(&t, "Promedio: "), "{t:?}");
+    }
+    // El avance y el tiempo restante van por elementos.
+    let t = texts(&jobs, None);
+    assert!(has(&t, "40 %") && has(&t, "quedan 5 s"), "{t:?}");
+    let t = texts(&jobs, Some(1));
+    for s in ["40 % completado", "Tiempo restante:", "Unos 5 segundos", "Elementos restantes:", "Cancelar", "Menos detalles"] {
+        assert!(t.iter().any(|x| x == s || x.contains(s)), "falta {s:?} en {t:?}");
+    }
+    assert!(t.iter().any(|x| x == "60"), "{t:?}");
+    // Sin gráfico, el bloque es más bajo y «Menos detalles» sigue respondiendo.
+    assert!(view::content_height(&jobs, Some(1)) < 290.0);
+    assert!(center_of(&jobs, Some(1), ViewHit::Expand(1)).is_some());
+}

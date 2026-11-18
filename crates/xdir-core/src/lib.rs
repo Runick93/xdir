@@ -35,6 +35,7 @@ pub mod transfer;
 pub mod paint;
 pub mod palette;
 pub mod pane;
+pub mod places;
 pub mod info;
 pub mod preview;
 pub mod quicklook;

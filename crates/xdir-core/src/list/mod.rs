@@ -378,6 +378,8 @@ pub struct FileList {
     header_hover: Option<Column>,
     /// Carpeta de la lista (para pedir las miniaturas por ruta); la pone quien dibuja.
     pub folder: Option<std::path::PathBuf>,
+    /// Lo cortado: esos elementos se dibujan con el ícono atenuado. Lo pone quien dibuja.
+    pub cut: std::sync::Arc<crate::cut::CutSet>,
     /// Carpeta en la que se busca, mientras la lista muestra resultados de una búsqueda.
     pub search_root: Option<std::path::PathBuf>,
     /// Filtro por nombre de lo que ya está en la lista: la búsqueda en una carpeta virtual, que
@@ -531,6 +533,7 @@ impl Default for FileList {
             menu: None,
             header_hover: None,
             folder: None,
+            cut: Default::default(),
             search_root: None,
             name_filter: None,
             header_drag: None,
@@ -2363,6 +2366,7 @@ impl FileList {
                 };
 
                 let renamed = self.rename_of(idx);
+                let cut = self.is_cut(e);
                 if self.drop_target == Some(idx) {
                     p.round_fill(row, 4.0, th.selection);
                     p.round_stroke(row, 4.0, th.accent);
@@ -2408,7 +2412,7 @@ impl FileList {
                 };
                 match self.view {
                     v if v.is_grid() => {
-                        self.draw_cell(p, e, row, color);
+                        self.draw_cell(p, e, row, color, cut);
                         if let Some((r, st)) = checkbox {
                             draw_checkbox(p, r, st);
                         }
@@ -2420,11 +2424,11 @@ impl FileList {
                         continue;
                     }
                     View::List => {
-                        self.draw_list_cell(p, e, item, color);
+                        self.draw_list_cell(p, e, item, color, cut);
                         continue;
                     }
                     View::Content => {
-                        self.draw_content_row(p, e, item, color);
+                        self.draw_content_row(p, e, item, color, cut);
                         continue;
                     }
                     _ => {}
@@ -2434,7 +2438,7 @@ impl FileList {
                     match col {
                         Column::Name => {
                             let iy = y + (ROW_H - ICON) / 2.0;
-                            p.shell_icon(e.icon, e.overlay, cell.left + shift, iy, ICON);
+                            dim_if(p, cut, &mut || p.shell_icon(e.icon, e.overlay, cell.left + shift, iy, ICON));
                             let text = rect(cell.left + shift + ICON + 8.0, y, cell.right, y + ROW_H);
                             let name = shown_name(e, self.show_extensions);
                             match renamed {
@@ -2507,19 +2511,33 @@ impl FileList {
     }
 
     /// Celda de la cuadrícula: miniatura (o ícono grande) arriba y el nombre en hasta dos líneas.
-    fn draw_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color) {
+    fn draw_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color, cut: bool) {
         let size = self.view.icon();
         let cx = (cell.left + cell.right) / 2.0;
         let image = rect(cx - size / 2.0, cell.top + 6.0, cx + size / 2.0, cell.top + 6.0 + size);
-        let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(size)), image));
-        if !drawn {
-            // Mientras llega la miniatura: el ícono chico, centrado.
-            let small = 32.0_f32.min(size);
-            let (ix, iy) = (cx - small / 2.0, (image.top + image.bottom) / 2.0 - small / 2.0);
-            p.shell_icon(e.icon, e.overlay, ix, iy, small);
-        }
+        dim_if(p, cut, &mut || {
+            let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(size)), image));
+            if !drawn {
+                // Mientras llega la miniatura: el ícono chico, centrado.
+                let small = 32.0_f32.min(size);
+                let (ix, iy) = (cx - small / 2.0, (image.top + image.bottom) / 2.0 - small / 2.0);
+                p.shell_icon(e.icon, e.overlay, ix, iy, small);
+            }
+        });
         let label = rect(cell.left + 4.0, image.bottom + 4.0, cell.right - 4.0, cell.bottom - 2.0);
         p.text(FontId::Label, shown_name(e, self.show_extensions), label, color);
+    }
+
+    /// ¿`e` está cortado? Su ruta de disco (`full` o carpeta + nombre) contra `cut`, sin E/S.
+    pub(crate) fn is_cut(&self, e: &Entry) -> bool {
+        if self.cut.is_empty() {
+            return false;
+        }
+        match (&e.full, &self.folder) {
+            (Some(full), _) => self.cut.contains(std::path::Path::new(full)),
+            (None, Some(folder)) => self.cut.contains(&folder.join(&e.name)),
+            _ => false,
+        }
     }
 
     /// De dónde sale la miniatura de un elemento (por PIDL o por ruta).
@@ -2533,9 +2551,9 @@ impl FileList {
     }
 
     /// Celda de la Lista (diseño `list::FileList::draw_list_cell`): ícono de 16 y el nombre.
-    fn draw_list_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color) {
+    fn draw_list_cell(&self, p: &dyn Painter, e: &Entry, cell: Rect, color: Color, cut: bool) {
         let left = cell.left + self.check_shift();
-        p.shell_icon(e.icon, e.overlay, left + 8.0, cell.top + (ROW_H - ICON) / 2.0, ICON);
+        dim_if(p, cut, &mut || p.shell_icon(e.icon, e.overlay, left + 8.0, cell.top + (ROW_H - ICON) / 2.0, ICON));
         let text = rect(left + LIST_TEXT_X, cell.top, cell.right - 8.0, cell.bottom);
         p.text(FontId::Ui, shown_name(e, self.show_extensions), text, color);
     }
@@ -2543,17 +2561,19 @@ impl FileList {
     /// Fila de Contenido (diseño `list::FileList::draw_content_row`): ícono de 32 o miniatura,
     /// el nombre y debajo el tipo; a la derecha la fecha de modificación y debajo el tamaño; una
     /// línea separa cada fila de la siguiente.
-    fn draw_content_row(&self, p: &dyn Painter, e: &Entry, row: Rect, color: Color) {
+    fn draw_content_row(&self, p: &dyn Painter, e: &Entry, row: Rect, color: Color, cut: bool) {
         let th = p.theme();
         p.fill(rect(row.left + CONTENT_EDGE, row.bottom - 1.0, row.right - CONTENT_EDGE, row.bottom), th.border);
         const SIZE: f32 = 32.0;
         let shift = self.check_shift();
         let (ix, iy) = (row.left + shift + 14.0, row.top + (CONTENT_H - SIZE) / 2.0);
         let image = rect(ix, iy, ix + SIZE, iy + SIZE);
-        let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(SIZE)), image));
-        if !drawn {
-            p.shell_icon(e.icon, e.overlay, ix, iy, SIZE);
-        }
+        dim_if(p, cut, &mut || {
+            let drawn = self.thumb_source(e).is_some_and(|s| p.thumbnail(&(s, p.thumb_px(SIZE)), image));
+            if !drawn {
+                p.shell_icon(e.icon, e.overlay, ix, iy, SIZE);
+            }
+        });
         // Dos líneas de texto de 13: arriba centrada en y+18, abajo en y+38.
         let (top, bottom) = ((row.top + 9.0, row.top + 27.0), (row.top + 29.0, row.top + 47.0));
         let right = row.right - CONTENT_EDGE;
@@ -2579,6 +2599,15 @@ fn grow(r: Rect, d: f32) -> Rect {
 /// con el acento y una tilde blanca, o parcial con un guion.
 /// Símbolo del botón de expulsar.
 pub const EJECT_GLYPH: &str = "⏏";
+
+/// Dibuja lo que haga `f` (un ícono o una miniatura) atenuado si `cut` (lo cortado).
+pub(crate) fn dim_if(p: &dyn Painter, cut: bool, f: &mut dyn FnMut()) {
+    if cut {
+        p.faded(crate::cut::CUT_ALPHA, f);
+    } else {
+        f();
+    }
+}
 
 /// Botón ⏏ (con fondo si el mouse está encima).
 pub fn draw_eject(p: &dyn Painter, r: Rect, hover: bool) {

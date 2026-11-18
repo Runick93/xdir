@@ -415,6 +415,17 @@ impl App {
         }
     }
 
+    /// ¿Lo que muestra la columna está cortado? El elemento elegido, todos los elegidos o, sin
+    /// selección, la carpeta abierta: entonces su imagen o su ícono va atenuado.
+    pub(super) fn preview_is_cut(&self) -> bool {
+        let tab = self.panes[self.active].tab();
+        let mut selected = tab.list.selected_indices().peekable();
+        if selected.peek().is_none() {
+            return matches!(&tab.location, Location::Path(p) if self.is_cut(p));
+        }
+        selected.all(|i| self.is_cut(&tab.entry_path(i)))
+    }
+
     /// Lo que dibuja la columna ahora.
     pub(super) fn preview_shown(&self) -> Shown {
         let env = sys::env();

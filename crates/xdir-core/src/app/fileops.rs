@@ -51,17 +51,38 @@ impl App {
     }
 
     pub(super) fn copy_selection(&mut self, cut: bool) {
-        if !cut && self.copy_from_archive() {
-            return;
-        }
-        // Copiar otra cosa reemplaza lo copiado de un archivo comprimido.
-        self.archive.clip = None;
-        let items = self.selection_items(self.active);
-        if !items.is_empty() {
-            if let Err(e) = sys::shell().copy_files(&items, cut) {
+        if cut || !self.copy_from_archive() {
+            // Copiar otra cosa reemplaza lo copiado de un archivo comprimido.
+            self.archive.clip = None;
+            let items = self.selection_items(self.active);
+            if !items.is_empty()
+                && let Err(e) = sys::shell().copy_files(&items, cut)
+            {
                 self.notice = Some(format!("No se pudo copiar: {e}"));
             }
         }
+        // Lo cortado antes deja de verse atenuado (o se atenúa lo recién cortado).
+        self.refresh_cut();
+    }
+
+    /// El portapapeles del sistema cambió (aviso de la plataforma: en Windows,
+    /// `WM_CLIPBOARDUPDATE`): se relee lo cortado.
+    pub fn on_clipboard_changed(&mut self) {
+        self.refresh_cut();
+    }
+
+    /// Relee lo cortado del portapapeles del sistema y repinta si cambió.
+    pub(super) fn refresh_cut(&mut self) {
+        let fresh = crate::cut::CutSet::from_clipboard(sys::shell().clipboard_files());
+        if fresh != *self.cut {
+            self.cut = std::sync::Arc::new(fresh);
+            self.redraw();
+        }
+    }
+
+    /// ¿`path` está cortado? (sin E/S).
+    pub(super) fn is_cut(&self, path: &std::path::Path) -> bool {
+        self.cut.contains(path)
     }
 
     pub(super) fn paste(&mut self) {
@@ -84,6 +105,7 @@ impl App {
         // Lo cortado se pega una sola vez, como en el Explorador.
         if cut {
             sys::shell().clear_clipboard();
+            self.refresh_cut();
         }
     }
 

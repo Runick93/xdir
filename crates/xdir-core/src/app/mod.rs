@@ -64,6 +64,8 @@ mod sel_size_tests;
 mod activity_tests;
 #[cfg(test)]
 mod compare_tests;
+#[cfg(test)]
+mod cut_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -540,6 +542,10 @@ pub struct App {
     net: network::NetState,
     /// Dentro de archivos comprimidos: lo copiado y las extracciones para la vista previa.
     archive: archive_nav::ArchiveState,
+    /// Lo cortado según el portapapeles del sistema (se dibuja con el ícono atenuado). Se relee
+    /// al cortar, copiar o pegar, al volver a la ventana y con el aviso de la plataforma
+    /// (`on_clipboard_changed`).
+    cut: std::sync::Arc<crate::cut::CutSet>,
 }
 
 /// Argumentos de la línea de comandos: sesión a restaurar, `--probe <archivo>` (mide el
@@ -774,6 +780,7 @@ impl App {
             transfers: transfers::Transfers::new(),
             net: network::NetState::default(),
             archive: archive_nav::ArchiveState::default(),
+            cut: Default::default(),
         };
         app.restore_panes(&session, start_path);
         app.sync_folder_views();

@@ -17,6 +17,8 @@ pub mod commands;
 pub mod compare;
 pub mod config;
 pub mod console;
+/// Lo cortado: rutas del portapapeles que se ven con el ícono atenuado.
+pub mod cut;
 pub mod drop;
 pub mod favorites;
 pub mod folder_views;

@@ -288,6 +288,8 @@ pub struct Tree {
     pub ejectable: std::collections::HashSet<PathBuf>,
     /// Discos y conexiones que se están expulsando o desconectando: su ⏏ gira (y se ve siempre).
     pub ejecting: std::collections::HashSet<PathBuf>,
+    /// Lo cortado: esas carpetas se dibujan con el ícono atenuado. La pone la `App` antes de dibujar.
+    pub cut: std::sync::Arc<crate::cut::CutSet>,
     /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, nodo).
     eject_rects: Vec<(Rect, usize)>,
     /// Unidades de red cuyo nombre falta pedir en otro hilo (`drive_label` iría al servidor).
@@ -386,6 +388,7 @@ impl Tree {
             scroll_to: None,
             ejectable: std::collections::HashSet::new(),
             ejecting: std::collections::HashSet::new(),
+            cut: Default::default(),
             pending_labels: Vec::new(),
             net_items: Vec::new(),
             net_shell: None,
@@ -1702,6 +1705,12 @@ impl Tree {
                 }
                 let (icon, color) = self.icon(n, th);
                 let color = if n.missing { alpha(th.text_dim, 0.6) } else { color };
+                // Lo cortado: el ícono atenuado (el nombre queda igual), como en la lista.
+                let color = if !n.path.as_os_str().is_empty() && self.cut.contains(&n.path) {
+                    alpha(color, color.a * crate::cut::CUT_ALPHA)
+                } else {
+                    color
+                };
                 p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
                 if e > 0.05 {
                     p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(self.name_color(n, th), e * e));
@@ -1936,6 +1945,35 @@ mod tests {
         t.reveal(Handle(0), &root.join("alfa"), false);
         assert!(t.revealing().is_none());
         assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Una carpeta cortada se ve en el árbol con el ícono atenuado (`CUT_ALPHA`); el nombre y
+    /// las demás carpetas, igual.
+    #[test]
+    fn cut_folder_dims_in_tree() {
+        install_fakes();
+        let root = temp_root("cortar");
+        for name in ["alfa", "beta"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &root.join("alfa"), false);
+        finish_reveal(&mut t);
+        t.cut = std::sync::Arc::new(crate::cut::CutSet::from_clipboard(Some((vec![root.join("beta")], true))));
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, rect(0.0, 0.0, 240.0, 600.0), None, XtreeBadge::Idle);
+        let draws = p.text_draws();
+        // El glifo del ícono y el nombre de una fila, por la altura del nombre.
+        let row = |name: &str| {
+            let (_, _, r, name_color) = draws.iter().find(|(f, s, ..)| *f == FontId::Ui && s == name).cloned().expect(name);
+            let (.., icon_color) = draws.iter().find(|(f, _, ir, _)| *f == FontId::Glyphs && ir.top == r.top).cloned().expect("ícono");
+            (icon_color.a, name_color.a)
+        };
+        let (alfa_icon, alfa_name) = row("alfa");
+        let (beta_icon, beta_name) = row("beta");
+        assert!((beta_icon - alfa_icon * crate::cut::CUT_ALPHA).abs() < 1e-6, "{beta_icon} {alfa_icon}");
+        assert_eq!(beta_name, alfa_name, "el nombre no se atenúa");
         let _ = std::fs::remove_dir_all(&root);
     }
 

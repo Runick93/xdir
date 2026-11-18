@@ -1271,17 +1271,23 @@ impl Overlays for FakeOverlays {
 
 /// `Painter` que no dibuja: registra cada `text` (fuente, texto y rectángulo) para que los tests
 /// vean qué se escribió y con qué formato. `measure` da 7 DIPs por carácter; `clip` solo llama a
-/// la clausura; los íconos se anotan (`icons`) y las miniaturas no hacen nada (`thumbnail` da `false`). `big_image` anota la
-/// clave (`big_requests`) y devuelve lo fijado con `set_big_ready` (de entrada, `false`).
+/// la clausura; los íconos se anotan (`icons`, y con su opacidad `icon_draws`) y las miniaturas no hacen nada (`thumbnail` da `false`). `big_image` anota la
+/// clave (`big_requests`) y devuelve lo fijado con `set_big_ready` (de entrada, `false`). Los
+/// colores de los textos se ven con `text_draws`.
 pub struct RecordingPainter {
     theme: Theme,
     texts: RefCell<Vec<(FontId, String, Rect)>>,
+    /// Color de cada texto de `texts` (en el mismo orden).
+    text_colors: RefCell<Vec<Color>>,
     paths: RefCell<Vec<RecordedPath>>,
     strokes: RefCell<Vec<(Rect, Color)>>,
     big: RefCell<Vec<(thumbs::Key, Rect)>>,
     big_ready: Cell<bool>,
     forgotten: RefCell<Vec<thumbs::Source>>,
-    icons: RefCell<Vec<(f32, f32, f32)>>,
+    /// Íconos: x, y, lado y opacidad (la de `faded`).
+    icons: RefCell<Vec<(f32, f32, f32, f32)>>,
+    /// Opacidad de las imágenes mientras dura un `faded`.
+    image_alpha: Cell<f32>,
     fills: RefCell<Vec<(Rect, Color)>>,
     round_fills: RefCell<Vec<(Rect, Color)>>,
 }
@@ -1294,12 +1300,14 @@ impl RecordingPainter {
         Self {
             theme,
             texts: RefCell::new(Vec::new()),
+            text_colors: RefCell::new(Vec::new()),
             paths: RefCell::new(Vec::new()),
             strokes: RefCell::new(Vec::new()),
             big: RefCell::new(Vec::new()),
             big_ready: Cell::new(false),
             forgotten: RefCell::new(Vec::new()),
             icons: RefCell::new(Vec::new()),
+            image_alpha: Cell::new(1.0),
             fills: RefCell::new(Vec::new()),
             round_fills: RefCell::new(Vec::new()),
         }
@@ -1347,7 +1355,17 @@ impl RecordingPainter {
 
     /// Íconos dibujados con `shell_icon` (x, y, lado), en orden.
     pub fn icons(&self) -> Vec<(f32, f32, f32)> {
+        self.icons.borrow().iter().map(|&(x, y, size, _)| (x, y, size)).collect()
+    }
+
+    /// Íconos dibujados con `shell_icon` (x, y, lado y opacidad), en orden.
+    pub fn icon_draws(&self) -> Vec<(f32, f32, f32, f32)> {
         self.icons.borrow().clone()
+    }
+
+    /// Los textos dibujados con su color, en orden.
+    pub fn text_draws(&self) -> Vec<(FontId, String, Rect, Color)> {
+        self.texts.borrow().iter().zip(self.text_colors.borrow().iter()).map(|((f, s, r), c)| (*f, s.clone(), *r, *c)).collect()
     }
 
     /// Los textos dibujados, en orden.
@@ -1373,8 +1391,9 @@ impl Painter for RecordingPainter {
     }
     fn round_stroke(&self, _r: Rect, _radius: f32, _c: Color) {}
 
-    fn text(&self, font: FontId, s: &str, r: Rect, _c: Color) {
+    fn text(&self, font: FontId, s: &str, r: Rect, c: Color) {
         self.texts.borrow_mut().push((font, s.to_string(), r));
+        self.text_colors.borrow_mut().push(c);
     }
 
     fn measure(&self, _font: FontId, s: &str) -> f32 {
@@ -1382,7 +1401,13 @@ impl Painter for RecordingPainter {
     }
 
     fn shell_icon(&self, _index: i32, _overlay: u8, x: f32, y: f32, size: f32) {
-        self.icons.borrow_mut().push((x, y, size));
+        self.icons.borrow_mut().push((x, y, size, self.image_alpha.get()));
+    }
+
+    fn faded(&self, alpha: f32, f: &mut dyn FnMut()) {
+        let before = self.image_alpha.replace(alpha);
+        f();
+        self.image_alpha.set(before);
     }
 
     fn thumbnail(&self, _key: &thumbs::Key, _r: Rect) -> bool {
@@ -1439,6 +1464,8 @@ pub struct FakeHost {
     drag_result: RefCell<Result<(), String>>,
     drawn: RefCell<Vec<(FontId, String, Rect)>>,
     drawn_fills: RefCell<Vec<(Rect, Color)>>,
+    /// Íconos del último cuadro (x, y, lado y opacidad).
+    drawn_icons: RefCell<Vec<(f32, f32, f32, f32)>>,
     /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
     text_boxes: RefCell<HashMap<u32, (TextKind, String, bool)>>,
     next_text_box: Cell<u32>,
@@ -1480,6 +1507,7 @@ impl FakeHost {
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
             drawn_fills: RefCell::new(Vec::new()),
+            drawn_icons: RefCell::new(Vec::new()),
             text_boxes: RefCell::new(HashMap::new()),
             next_text_box: Cell::new(1),
             menu_choice: Cell::new(None),
@@ -1595,6 +1623,11 @@ impl FakeHost {
     /// Los rectángulos rellenados del último cuadro dibujado.
     pub fn drawn_fills(&self) -> Vec<(Rect, Color)> {
         self.drawn_fills.borrow().clone()
+    }
+
+    /// Los íconos del último cuadro dibujado (x, y, lado y opacidad).
+    pub fn drawn_icons(&self) -> Vec<(f32, f32, f32, f32)> {
+        self.drawn_icons.borrow().clone()
     }
 
     /// Las cajas de texto abiertas de ese tipo (número y texto).
@@ -1752,6 +1785,7 @@ impl WindowHost for FakeHost {
         paint(&p, w, h);
         *self.drawn.borrow_mut() = p.texts();
         *self.drawn_fills.borrow_mut() = p.fills();
+        *self.drawn_icons.borrow_mut() = p.icon_draws();
         *self.drawn_big.borrow_mut() = p.big_requests();
         Ok(())
     }

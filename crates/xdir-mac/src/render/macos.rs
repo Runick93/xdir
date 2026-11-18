@@ -2,7 +2,7 @@
 //! abajo, como en Windows). El texto se dibuja con AppKit y los íconos de interfaz son SF Symbols
 //! (equivalentes a los glifos de Segoe Fluent Icons que usa Windows).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -129,7 +129,15 @@ impl Renderer {
         self.images.borrow_mut().handle = owner;
         let Some(ctx) = NSGraphicsContext::currentContext() else { return Ok(()) };
         let cg = ctx.CGContext();
-        let painter = Painter { cg: &cg, theme, fonts: &self.fonts, file_colors, images: &self.images, scale: self.scale };
+        let painter = Painter {
+            cg: &cg,
+            theme,
+            fonts: &self.fonts,
+            file_colors,
+            images: &self.images,
+            scale: self.scale,
+            image_alpha: Cell::new(1.0),
+        };
         let (w, h) = self.size;
         painter.fill(rect(0.0, 0.0, w, h), theme.background);
         paint(&painter, w, h);
@@ -144,6 +152,8 @@ pub struct Painter<'a> {
     file_colors: &'a [ColorRule],
     images: &'a RefCell<Images>,
     scale: f32,
+    /// Opacidad de los íconos, miniaturas e imágenes (la de `faded`; el texto no cambia).
+    image_alpha: Cell<f32>,
 }
 
 fn cgr(r: Rect) -> CGRect {
@@ -308,7 +318,7 @@ impl paint::Painter for Painter<'_> {
     /// Dibuja el ícono `index` (ver `icons`) en un cuadrado de `size` DIPs.
     fn shell_icon(&self, index: i32, _overlay: u8, x: f32, y: f32, size: f32) {
         let Some(image) = icons::image(index) else { return };
-        draw_ns_image(&image, rect(x, y, x + size, y + size));
+        draw_ns_image(&image, rect(x, y, x + size, y + size), self.image_alpha.get());
     }
 
     /// Miniatura centrada en `r`, sin deformar y sin agrandarla más que su tamaño en píxeles.
@@ -403,6 +413,12 @@ impl paint::Painter for Painter<'_> {
         (dips * self.scale).round() as u32
     }
 
+    fn faded(&self, alpha: f32, f: &mut dyn FnMut()) {
+        let before = self.image_alpha.replace(alpha);
+        f();
+        self.image_alpha.set(before);
+    }
+
     fn clip(&self, r: Rect, f: &mut dyn FnMut()) {
         CGContext::save_g_state(self.ctx());
         CGContext::clip_to_rect(self.ctx(), cgr(r));
@@ -427,6 +443,7 @@ impl Painter<'_> {
         CGContext::translate_ctm(c, r.left as CGFloat, r.bottom as CGFloat);
         CGContext::scale_ctm(c, 1.0, -1.0);
         CGContext::set_interpolation_quality(c, objc2_core_graphics::CGInterpolationQuality::High);
+        CGContext::set_alpha(c, self.image_alpha.get() as CGFloat);
         let size = CGSize::new((r.right - r.left) as CGFloat, (r.bottom - r.top) as CGFloat);
         CGContext::draw_image(c, CGRect::new(CGPoint::new(0.0, 0.0), size), Some(image));
         CGContext::restore_g_state(c);
@@ -443,15 +460,22 @@ impl Painter<'_> {
         let s = image.size();
         let (w, h) = (s.width as f32, s.height as f32);
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
-        draw_ns_image(&image, rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0));
+        draw_ns_image(&image, rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0), 1.0);
     }
 }
 
-/// Dibuja una imagen de AppKit respetando que la vista está invertida.
-fn draw_ns_image(image: &NSImage, r: Rect) {
+/// Dibuja una imagen de AppKit respetando que la vista está invertida, con opacidad `fraction`.
+fn draw_ns_image(image: &NSImage, r: Rect, fraction: f32) {
     let zero = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
     unsafe {
-        image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(cgr(r), zero, NSCompositingOperation::SourceOver, 1.0, true, None);
+        image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+            cgr(r),
+            zero,
+            NSCompositingOperation::SourceOver,
+            fraction as CGFloat,
+            true,
+            None,
+        );
     }
 }
 

@@ -46,6 +46,9 @@ struct JobMeta {
     volumes: Vec<OsString>,
     /// Comprimir y extraer: «Reintentar» vuelve a correr el mismo trabajo entero.
     rerun: Option<JobSpec>,
+    /// Es un eliminar (con `recycle`: a la Papelera): «Reintentar» vuelve a eliminar lo que
+    /// falló, nunca lo copia sobre sí mismo.
+    delete: Option<bool>,
 }
 
 /// Estado de los trabajos de copia de la `App`.
@@ -174,6 +177,7 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
         JobSpec::Compress { sources } => out.extend(sources.iter().cloned()),
         JobSpec::Extract { archive, .. } => out.push(archive.clone()),
         JobSpec::ExtractEntries { archive, dest, .. } => out.extend([archive.clone(), dest.clone()]),
+        JobSpec::Delete { paths, .. } => out.extend(paths.iter().cloned()),
     }
     out
 }
@@ -198,6 +202,7 @@ fn spec_route(spec: &JobSpec) -> transfer::JobRoute {
         JobSpec::Compress { sources } => ("Se comprimió", "Se comprimieron", folder(sources), None, sources.clone()),
         JobSpec::Extract { archive, .. } => ("Se extrajo", "Se extrajeron", None, None, vec![archive.clone()]),
         JobSpec::ExtractEntries { archive, dest, .. } => ("Se copió", "Se copiaron", name(archive), name(dest), vec![archive.clone()]),
+        JobSpec::Delete { paths, .. } => ("Se eliminó", "Se eliminaron", None, None, paths.clone()),
     };
     transfer::JobRoute { done_one, done_many, from, to, sources }
 }
@@ -207,6 +212,7 @@ fn spec_count(spec: &JobSpec) -> u64 {
     (match spec {
         JobSpec::Copy { sources, .. } | JobSpec::Move { sources, .. } | JobSpec::Duplicate { sources } => sources.len(),
         JobSpec::NewFolderWith { items, .. } | JobSpec::Restore { items } => items.len(),
+        JobSpec::Delete { paths, .. } => paths.len(),
         JobSpec::Retry { pairs, .. } => pairs.len(),
         JobSpec::Compress { sources } => sources.len(),
         JobSpec::Extract { .. } => 1,
@@ -228,7 +234,21 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
         JobSpec::Compress { .. } => ("Comprimir", false),
         JobSpec::Extract { .. } => ("Extraer", false),
         JobSpec::ExtractEntries { .. } => ("Copiar", false),
+        JobSpec::Delete { .. } => ("Eliminar", false),
     }
+}
+
+/// Lo elegido (`roots`) que contiene cada origen que falló, sin repetir; si ninguno lo contiene,
+/// el origen mismo.
+fn chosen_roots(roots: &[PathBuf], pairs: Vec<(PathBuf, PathBuf)>) -> Vec<PathBuf> {
+    let mut items: Vec<PathBuf> = Vec::new();
+    for (src, _) in pairs {
+        let top = roots.iter().find(|r| src.starts_with(r)).cloned().unwrap_or(src);
+        if !items.contains(&top) {
+            items.push(top);
+        }
+    }
+    items
 }
 
 /// Discos que toca un trabajo (lee el disco: corre en el hilo del trabajo).
@@ -388,7 +408,12 @@ impl App {
         });
         let restore = matches!(spec, JobSpec::Restore { .. });
         let rerun = matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }).then(|| spec.clone());
-        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun });
+        let delete = match spec {
+            JobSpec::Delete { recycle, .. } => Some(recycle),
+            _ => None,
+        };
+        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun, delete });
+        let queued = delete.is_none();
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
         t.sched.set_queue_by_disk(self.config.queue_by_disk);
         std::thread::spawn(move || {
@@ -412,11 +437,16 @@ impl App {
                 return;
             }
             // Se anota con sus discos siempre: si la cola por disco está apagada no espera a nadie.
-            if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
-                send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
-                return;
-            }
-            let _turn = Release(sched, id);
+            // Eliminar no hace cola: casi no lee ni escribe, y no tiene que esperar a una copia larga.
+            let _turn = if queued {
+                if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
+                    send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
+                    return;
+                }
+                Some(Release(sched, id))
+            } else {
+                None
+            };
             transfer::run(spec, prims, &ctl, &mut |u| {
                 if auto_skip.load(Ordering::SeqCst) && matches!(u, Update::Conflict(_)) {
                     ctl.answer(Answer { choice: Choice::Skip, all: false });
@@ -471,7 +501,8 @@ impl App {
                     v.title = title;
                     v.items = (0, items);
                     v.bytes = (0, bytes);
-                    v.speed = Speed::new(now, bytes);
+                    // Sin bytes (eliminar, devolver), la velocidad y el tiempo restante van por elementos.
+                    v.speed = Speed::new(now, if bytes > 0 { bytes } else { items });
                     v.state = JobState::Running;
                 }
                 Update::Progress { items, bytes, current } => {
@@ -483,7 +514,7 @@ impl App {
                         v.conflict = None;
                         v.speed.resume(now);
                     }
-                    v.speed.push(now, bytes);
+                    v.speed.push(now, if v.bytes.1 > 0 { bytes } else { items });
                     v.state = JobState::Running;
                 }
                 Update::Conflict(info) => {
@@ -974,6 +1005,7 @@ impl App {
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
         let restore = self.transfers.meta.get(&id).is_some_and(|m| m.restore);
         let rerun = self.transfers.meta.get(&id).and_then(|m| m.rerun.clone());
+        let delete = self.transfers.meta.get(&id).and_then(|m| m.delete);
         let roots = v.route.sources.clone();
         self.forget_job(id);
         let spec = if let Some(spec) = rerun {
@@ -986,14 +1018,11 @@ impl App {
         } else if restore {
             // Lo de adentro de una carpeta devuelta no tiene lugar original propio: se devuelve
             // otra vez esa carpeta (lo elegido en la Papelera que la contiene).
-            let mut items: Vec<PathBuf> = Vec::new();
-            for (src, _) in pairs {
-                let top = roots.iter().find(|r| src.starts_with(r)).cloned().unwrap_or(src);
-                if !items.contains(&top) {
-                    items.push(top);
-                }
-            }
-            JobSpec::Restore { items }
+            JobSpec::Restore { items: chosen_roots(&roots, pairs) }
+        } else if let Some(recycle) = delete {
+            // Lo que falló adentro de una carpeta elegida: se vuelve a eliminar esa carpeta (con
+            // lo que quedó adentro), que si no quedaría vacía.
+            JobSpec::Delete { paths: chosen_roots(&roots, pairs), recycle }
         } else {
             JobSpec::Retry { moving, pairs }
         };

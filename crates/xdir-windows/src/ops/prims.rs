@@ -9,7 +9,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, Prefix};
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
+    CloseHandle, E_ABORT, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, ERROR_DISK_FULL, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
     ERROR_FILE_TOO_LARGE, ERROR_HANDLE_DISK_FULL, ERROR_LOCK_VIOLATION, ERROR_FILENAME_EXCED_RANGE, ERROR_NOT_SAME_DEVICE, ERROR_PATH_NOT_FOUND,
     ERROR_REQUEST_ABORTED, ERROR_SHARING_VIOLATION, FILETIME, HANDLE,
 };
@@ -396,9 +396,23 @@ impl CopyPrims for WinCopyPrims {
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
         let data = attr_data(p)?;
         let wide = long_path(p);
-        if data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
-            // Carpeta vacía, o enlace a una carpeta (se borra el enlace, no lo que apunta).
-            return unsafe { RemoveDirectoryW(PCWSTR(wide.as_ptr())) }.map_err(|e| err(e, p));
+        let attrs = data.dwFileAttributes;
+        if attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+            // Una carpeta personalizada (con desktop.ini) queda de solo lectura y así no se puede
+            // borrar: se le saca. A un enlace no se le toca nada (se borra el enlace, no lo que
+            // apunta).
+            let readonly = attrs & FILE_ATTRIBUTE_READONLY.0 != 0 && attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0;
+            if readonly {
+                let plain = FILE_FLAGS_AND_ATTRIBUTES(attrs & !(FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_DIRECTORY.0));
+                unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), plain) }.map_err(|e| err(e, p))?;
+            }
+            let r = unsafe { RemoveDirectoryW(PCWSTR(wide.as_ptr())) }.map_err(|e| err(e, p));
+            if r.is_err() && readonly {
+                // No se borró: queda como estaba.
+                let keep = FILE_FLAGS_AND_ATTRIBUTES(attrs & !FILE_ATTRIBUTE_DIRECTORY.0);
+                let _ = unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), keep) };
+            }
+            return r;
         }
         if data.dwFileAttributes & FILE_ATTRIBUTE_READONLY.0 != 0 {
             let attrs = FILE_FLAGS_AND_ATTRIBUTES(data.dwFileAttributes & !FILE_ATTRIBUTE_READONLY.0);
@@ -418,6 +432,9 @@ impl CopyPrims for WinCopyPrims {
                 Err(CopyError::new(ErrKind::Other("Se borró definitivamente (no entraba en la Papelera)".into()), p))
             }
             Ok(None) => Err(CopyError::new(ErrKind::Other("No se mandó a la Papelera".into()), p)),
+            // Se contestó que no al aviso del Shell de que no entra en la Papelera y se borraría
+            // definitivamente: es cancelar (el motor para y deja lo demás como está).
+            Err(e) if e.code() == E_ABORT || e.code() == ERROR_CANCELLED.to_hresult() => Err(CopyError::new(ErrKind::Cancelled, p)),
             Err(e) => Err(err(e, p)),
         }
     }

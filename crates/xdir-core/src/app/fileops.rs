@@ -178,6 +178,9 @@ impl App {
         }
     }
 
+    /// Eliminar: a la Papelera o definitivamente (con una pregunta antes, que no se puede
+    /// deshacer). Lo hace el motor de copia (`JobSpec::Delete`), con su avance en la ventana de
+    /// copia de xdir.
     pub(super) fn delete_selection(&mut self, recycle: bool) {
         // En carpetas virtuales borra el propio Shell (en la Papelera: eliminar definitivamente).
         let location = self.panes[self.active].tab().location.clone();
@@ -190,9 +193,20 @@ impl App {
             return;
         }
         let paths = self.selection(self.active);
-        if !paths.is_empty() && self.panes[self.active].tab().location.target().is_some() {
-            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Delete { paths, recycle });
+        if paths.is_empty() || self.panes[self.active].tab().location.target().is_none() {
+            return;
         }
+        if !recycle {
+            let what = match paths.as_slice() {
+                [one] => format!("«{}»", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                _ => format!("{} elementos", paths.len()),
+            };
+            let text = format!("¿Eliminar {what} definitivamente?\n\nNo pasa por la Papelera y no se puede deshacer.");
+            if !self.host.clone().ask_yes_no("Eliminar", &text) {
+                return;
+            }
+        }
+        self.start_transfer(JobSpec::Delete { paths, recycle });
     }
 
     pub(super) fn on_op_done(&mut self, result: OpResult) {

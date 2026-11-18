@@ -356,8 +356,85 @@ fn recycle_in_trash_restores_on_mac() {
     assert_eq!(started(&mut a), [crate::transfer::JobSpec::Restore { items: vec![d.join("a.txt")] }]);
     wait_jobs(&mut a);
     a.run_command(Command::Recycle);
-    assert_eq!(FakeFileOps::take_ops(), [Op::Delete { paths: vec![d.join("a.txt")], recycle: true }]);
+    assert_eq!(FakeFileOps::take_ops(), []);
+    assert_eq!(started(&mut a), [crate::transfer::JobSpec::Delete { paths: vec![d.join("a.txt")], recycle: true }]);
+    wait_jobs(&mut a);
     FakeFileSystem::set_trash(None);
+}
+
+// ---------- Eliminar ----------
+
+/// Eliminar va por el motor de copia (su avance en la ventana de copia de xdir), no por `FileOps`.
+#[test]
+fn delete_uses_engine() {
+    let mut a = app();
+    let d = fixture("del-engine", &["a.txt", "b.txt", "c.txt"]);
+    go(&mut a, &d);
+    select(&mut a, &["a.txt", "b.txt"]);
+    FakeFileOps::take_ops();
+    a.take_started();
+    a.run_command(Command::Recycle);
+    assert_eq!(FakeFileOps::take_ops(), [], "eliminar va por el motor de copia");
+    match started(&mut a).as_slice() {
+        [crate::transfer::JobSpec::Delete { paths, recycle: true }] => {
+            let mut paths = paths.clone();
+            paths.sort();
+            assert_eq!(paths, [d.join("a.txt"), d.join("b.txt")]);
+        }
+        other => panic!("se esperaba un Delete a la Papelera: {other:?}"),
+    }
+    wait_jobs(&mut a);
+}
+
+/// Eliminar definitivamente se confirma en el núcleo (`ask_yes_no`), antes de arrancar el trabajo.
+#[test]
+fn permanent_delete_asks_in_core() {
+    use crate::transfer::JobSpec;
+    let host = FakeHost::new();
+    let mut a = app_with_host(host.clone());
+    let d = fixture("del-perm", &["a.txt", "b.txt"]);
+    go(&mut a, &d);
+    select(&mut a, &["a.txt"]);
+    a.take_started();
+    host.set_answer(Some(false));
+    a.run_command(Command::Delete);
+    assert_eq!(started(&mut a), []);
+    let text = "¿Eliminar «a.txt» definitivamente?\n\nNo pasa por la Papelera y no se puede deshacer.";
+    assert_eq!(host.questions(), [("Eliminar".to_string(), text.to_string())]);
+    host.set_answer(Some(true));
+    a.run_command(Command::Delete);
+    assert_eq!(started(&mut a), [JobSpec::Delete { paths: vec![d.join("a.txt")], recycle: false }]);
+    wait_jobs(&mut a);
+    // Varios: cuenta cuántos.
+    select(&mut a, &["a.txt", "b.txt"]);
+    host.set_answer(Some(false));
+    a.run_command(Command::Delete);
+    assert_eq!(started(&mut a), []);
+    let text = "¿Eliminar 2 elementos definitivamente?\n\nNo pasa por la Papelera y no se puede deshacer.";
+    assert_eq!(host.questions().last().unwrap(), &("Eliminar".to_string(), text.to_string()));
+    assert_eq!(FakeFileOps::take_ops(), []);
+}
+
+/// Lo mandado a la Papelera se deshace con el motor (un paso `Undo::Batch`).
+#[test]
+fn delete_undo_goes_through_engine() {
+    use crate::transfer::JobSpec;
+    let f = crate::sys::testing::FakeCopyPrims::shared();
+    let mut a = app();
+    let d = fixture("del-undo", &["a.txt"]);
+    f.add_file(&d.join("a.txt"), b"a".to_vec());
+    go(&mut a, &d);
+    select(&mut a, &["a.txt"]);
+    a.take_started();
+    a.run_command(Command::Recycle);
+    wait_jobs(&mut a);
+    assert!(!f.exists(&d.join("a.txt")));
+    a.take_started();
+    a.run_command(Command::Undo);
+    assert_eq!(FakeFileOps::take_ops(), [], "deshacer lo hace el motor");
+    assert!(matches!(started(&mut a).as_slice(), [JobSpec::Undo(Undo::Batch(_))]));
+    wait_jobs(&mut a);
+    assert!(f.exists(&d.join("a.txt")));
 }
 
 /// Fuera de la Papelera no hay «Devolver» (ni menú, ni botón, ni comando).

@@ -947,6 +947,10 @@ impl FileSystem for FakeFileSystem {
         TRASH.with(|t| t.borrow().as_deref().is_some_and(|p| loc.is_path(p)))
     }
 
+    fn trash_place(&self) -> Option<Location> {
+        TRASH.with(|t| t.borrow().clone()).map(Location::Path)
+    }
+
     fn network_place(&self) -> &'static str {
         if NET_PLACE.with(Cell::get) { FAKE_NETWORK_PLACE } else { "" }
     }

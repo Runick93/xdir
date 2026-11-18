@@ -58,6 +58,10 @@ impl FileSystem for LinuxFileSystem {
         matches!((loc, files), (Location::Path(p), Some(f)) if *p == f)
     }
 
+    fn trash_place(&self) -> Option<Location> {
+        crate::trash::data_home().map(|d| Location::Path(crate::trash::trash_dir(&d).join("files")))
+    }
+
     fn is_mount_point(&self, path: &Path) -> bool {
         if SYSTEM_DIRS.iter().any(|d| path == Path::new(d)) {
             return true;

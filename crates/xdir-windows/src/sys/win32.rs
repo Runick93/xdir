@@ -515,6 +515,11 @@ impl FileSystem for Win32FileSystem {
         matches!(loc, Location::Shell { parsing, .. } if is_recycle_bin(parsing))
     }
 
+    /// La Papelera como `Location::Shell` (con su nombre localizado), la misma de `shell_location`.
+    fn trash_place(&self) -> Option<Location> {
+        fsp::shell_location("shell:RecycleBinFolder").filter(|l| self.is_trash(l))
+    }
+
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
         fsp::spawn_load(hwnd, tx, panel, generation, current, location)
     }

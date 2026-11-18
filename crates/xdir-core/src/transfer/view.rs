@@ -4,6 +4,10 @@
 //!
 //! Medidas del diseño: 560 de ancho; trabajo expandido 290 (gráfico de 528×100), conflicto 316
 //! (bloque de 528×222), errores 76 + 44 por error + 61; filas de la cola 64 (56 en cola).
+//!
+//! Como la ventana de copia de Windows, cada trabajo en curso tiene sus detalles (se pliegan uno
+//! por uno). La ventana crece hasta `MAX_H`; pasado eso el contenido se desplaza (`scroll`, en DIPs
+//! desde arriba) con la rueda o con la barra delgada de la derecha.
 
 use std::time::{Duration, Instant};
 
@@ -16,6 +20,12 @@ use crate::theme::alpha;
 
 /// Ancho del área de la ventana.
 pub const WIDTH: f32 = 560.0;
+/// Alto máximo del área: pasado esto, el contenido se desplaza.
+pub const MAX_H: f32 = 640.0;
+/// Ancho del riel de la barra de desplazamiento (el pulgar va adentro, más fino).
+const SCROLLBAR_W: f32 = 12.0;
+/// Alto mínimo del pulgar (como en las listas).
+const THUMB_MIN: f32 = 24.0;
 const PAD: f32 = 16.0;
 const EXPANDED_H: f32 = 290.0;
 const CONFLICT_H: f32 = 316.0;
@@ -52,6 +62,15 @@ pub enum ViewHit {
     Dismiss(JobId),
 }
 
+/// Cómo se mira la ventana al dibujarla: qué trabajos muestran sus detalles, cuánto se desplazó
+/// el contenido, qué hay bajo el mouse y si se está arrastrando el pulgar de la barra.
+pub struct Look<'a> {
+    pub expanded: &'a dyn Fn(JobId) -> bool,
+    pub scroll: f32,
+    pub hover: Option<ViewHit>,
+    pub dragging: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Block {
     Expanded,
@@ -61,12 +80,13 @@ enum Block {
     Queued,
 }
 
-fn block_of(j: &JobView, expanded: Option<JobId>) -> Block {
+/// `expanded`: si ese trabajo (en curso) muestra los detalles; los demás estados no lo miran.
+fn block_of(j: &JobView, expanded: &dyn Fn(JobId) -> bool) -> Block {
     match j.state {
         JobState::Done => Block::Finished,
         JobState::Conflict if j.conflict.is_some() => Block::Conflict,
         JobState::Waiting => Block::Queued,
-        _ if expanded == Some(j.id) => Block::Expanded,
+        _ if expanded(j.id) => Block::Expanded,
         _ => Block::Row,
     }
 }
@@ -92,7 +112,7 @@ fn graph_space(j: &JobView) -> f32 {
     if items_only(j) { 0.0 } else { GRAPH_H + 11.0 }
 }
 
-fn block_h(j: &JobView, expanded: Option<JobId>) -> f32 {
+fn block_h(j: &JobView, expanded: &dyn Fn(JobId) -> bool) -> f32 {
     match block_of(j, expanded) {
         Block::Expanded => EXPANDED_H - (GRAPH_H + 11.0) + graph_space(j),
         Block::Conflict => CONFLICT_H,
@@ -103,14 +123,57 @@ fn block_h(j: &JobView, expanded: Option<JobId>) -> f32 {
 }
 
 /// Alto del contenido (sin la barra de título del sistema).
-pub fn content_height(jobs: &[JobView], expanded: Option<JobId>) -> f32 {
+pub fn content_height(jobs: &[JobView], expanded: &dyn Fn(JobId) -> bool) -> f32 {
     jobs.iter().map(|j| block_h(j, expanded)).sum()
 }
 
-/// Los botones y controles de cada trabajo, con su rectángulo.
-fn controls(r: Rect, jobs: &[JobView], expanded: Option<JobId>) -> Vec<(ViewHit, Rect)> {
+/// Dónde está el bloque del trabajo `id` en el contenido (arriba y abajo, sin desplazar).
+pub fn block_span(jobs: &[JobView], expanded: &dyn Fn(JobId) -> bool, id: JobId) -> Option<(f32, f32)> {
+    let mut top = 0.0;
+    for j in jobs {
+        let h = block_h(j, expanded);
+        if j.id == id {
+            return Some((top, top + h));
+        }
+        top += h;
+    }
+    None
+}
+
+/// Cuánto se puede desplazar el contenido.
+pub fn max_scroll(content: f32, visible: f32) -> f32 {
+    (content - visible).max(0.0)
+}
+
+/// El pulgar de la barra en un riel del alto visible: (arriba, alto), o `None` si todo entra.
+pub fn thumb(content: f32, visible: f32, scroll: f32) -> Option<(f32, f32)> {
+    if content <= visible || visible <= 0.0 {
+        return None;
+    }
+    let h = (visible * visible / content).max(THUMB_MIN).min(visible);
+    let f = (scroll / max_scroll(content, visible)).clamp(0.0, 1.0);
+    Some(((visible - h) * f, h))
+}
+
+/// El desplazamiento que deja el pulgar con su borde de arriba en `thumb_top` (al arrastrarlo).
+pub fn scroll_for_thumb(content: f32, visible: f32, thumb_top: f32) -> f32 {
+    let Some((_, h)) = thumb(content, visible, 0.0) else { return 0.0 };
+    let travel = (visible - h).max(1.0);
+    (thumb_top / travel).clamp(0.0, 1.0) * max_scroll(content, visible)
+}
+
+/// La barra de desplazamiento en el área visible `r`: (riel, pulgar), o `None` si todo entra.
+pub fn scrollbar(r: Rect, content: f32, scroll: f32) -> Option<(Rect, Rect)> {
+    let (top, h) = thumb(content, r.bottom - r.top, scroll)?;
+    let track = rect(r.right - SCROLLBAR_W, r.top, r.right, r.bottom);
+    Some((track, rect(track.left + 3.0, r.top + top, track.right - 3.0, r.top + top + h)))
+}
+
+/// Los botones y controles de cada trabajo, con su rectángulo. `r` es el área visible y el
+/// contenido empieza `scroll` más arriba.
+fn controls(r: Rect, jobs: &[JobView], expanded: &dyn Fn(JobId) -> bool, scroll: f32) -> Vec<(ViewHit, Rect)> {
     let mut out = Vec::new();
-    let mut top = r.top;
+    let mut top = r.top - scroll;
     for j in jobs {
         let h = block_h(j, expanded);
         let id = j.id;
@@ -171,9 +234,13 @@ fn controls(r: Rect, jobs: &[JobView], expanded: Option<JobId>) -> Vec<(ViewHit,
     out
 }
 
-/// Qué control hay en (x, y).
-pub fn hit(r: Rect, jobs: &[JobView], expanded: Option<JobId>, x: f32, y: f32) -> Option<ViewHit> {
-    controls(r, jobs, expanded).into_iter().find(|(_, b)| contains(b, x, y)).map(|(h, _)| h)
+/// Qué control hay en (x, y) del área visible `r`, con el contenido desplazado `scroll`. Sobre la
+/// barra de desplazamiento no hay controles.
+pub fn hit(r: Rect, jobs: &[JobView], expanded: &dyn Fn(JobId) -> bool, scroll: f32, x: f32, y: f32) -> Option<ViewHit> {
+    if !contains(&r, x, y) || scrollbar(r, content_height(jobs, expanded), scroll).is_some_and(|(track, _)| contains(&track, x, y)) {
+        return None;
+    }
+    controls(r, jobs, expanded, scroll).into_iter().find(|(_, b)| contains(b, x, y)).map(|(h, _)| h)
 }
 
 /// «48,2 MB/s».
@@ -382,19 +449,35 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
 }
 
-/// Dibuja el contenido de la ventana en `r`.
-pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>, hover: Option<ViewHit>, env: &dyn SystemEnv) {
+/// Dibuja el contenido de la ventana en el área visible `r` (recortado a ella) y, si no entra
+/// todo, la barra de desplazamiento.
+pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], look: &Look, env: &dyn SystemEnv) {
     let th = p.theme();
     p.fill(r, th.surface);
+    p.clip(r, &mut || draw_jobs(p, r, jobs, look, env));
+    if let Some((_, thumb)) = scrollbar(r, content_height(jobs, look.expanded), look.scroll) {
+        let c = if look.dragging { alpha(th.scrollbar, th.scrollbar.a * 1.6) } else { th.scrollbar };
+        p.round_fill(thumb, 3.0, c);
+    }
+}
+
+fn draw_jobs(p: &dyn Painter, r: Rect, jobs: &[JobView], look: &Look, env: &dyn SystemEnv) {
+    let th = p.theme();
     let now = Instant::now();
-    let ctl = controls(r, jobs, expanded);
+    let expanded = look.expanded;
+    let ctl = controls(r, jobs, expanded, look.scroll);
     let find = |h: ViewHit| ctl.iter().find(|(x, _)| *x == h).map(|(_, b)| *b);
-    let hot = |h: ViewHit| hover == Some(h);
+    let hot = |h: ViewHit| look.hover == Some(h);
     let (l, rr) = (r.left + PAD, r.right - PAD);
-    let mut top = r.top;
+    let mut top = r.top - look.scroll;
     for (n, j) in jobs.iter().enumerate() {
         let h = block_h(j, expanded);
         let id = j.id;
+        // Lo que quedó fuera de la vista no se dibuja.
+        if top + h <= r.top || top >= r.bottom {
+            top += h;
+            continue;
+        }
         if n > 0 {
             p.fill(rect(r.left, top, r.right, top + 1.0), th.border);
         }

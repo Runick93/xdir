@@ -18,6 +18,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARA
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
+    ScreenToClient,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -168,6 +169,8 @@ thread_local! {
     static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
     /// Dónde la dejó el usuario (esquina de arriba a la izquierda, en pantalla), para la sesión.
     static PLACE: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+    /// Soltando la captura del mouse después de un `Up`: ese `WM_CAPTURECHANGED` no es una pérdida.
+    static RELEASING: Cell<bool> = const { Cell::new(false) };
     /// Diálogos, menús o arrastres del host abiertos ahora (`Modal`).
     static MODAL: Cell<u32> = const { Cell::new(0) };
     /// El último avance que mandó la `App` (`set_progress`): se vuelve a poner cuando la barra de
@@ -222,11 +225,39 @@ fn window_size(hwnd: HWND, size: (f32, f32)) -> SIZE {
 fn window_size_at(dpi: u32, size: (f32, f32)) -> SIZE {
     let k = dpi as f32 / 96.0;
     let client = SIZE { cx: (size.0 * k).round() as i32, cy: (size.1 * k).round() as i32 };
+    client_to_window_size(client, border_at(dpi))
+}
+
+/// El borde y la barra de título con ese DPI (`AdjustWindowRectExForDpi` de un área vacía).
+fn border_at(dpi: u32) -> RECT {
     let mut border = RECT::default();
     unsafe {
         let _ = AdjustWindowRectExForDpi(&mut border, style(), false, ex_style(), dpi);
     }
-    client_to_window_size(client, border)
+    border
+}
+
+/// El alto más grande del área (DIPs) que entra en `work` con el borde `border` y `MARGIN`
+/// abajo (como la deja `resized_rect`).
+pub fn max_client_dips(work: RECT, border: RECT, dpi: u32) -> f32 {
+    let px = (work.bottom - work.top) - MARGIN - (border.bottom - border.top);
+    px.max(0) as f32 * 96.0 / dpi.max(96) as f32
+}
+
+/// Lo de `WindowHost::aux_max_height`: el alto más grande del área que entra en el área de
+/// trabajo del monitor de la ventana de copia (si está a la vista) o, si no, del de la principal.
+pub fn max_client_height(main: HWND) -> Option<f32> {
+    let aux = with(|a| a.hwnd).filter(|h| unsafe { IsWindowVisible(*h) }.as_bool());
+    let on = aux.unwrap_or(main);
+    if on.is_invalid() {
+        return None;
+    }
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(MonitorFromWindow(on, MONITOR_DEFAULTTONEAREST), &mut info) }.as_bool() {
+        return None;
+    }
+    let dpi = dpi_of(on);
+    Some(max_client_dips(info.rcWork, border_at(dpi), dpi))
 }
 
 fn apply_dark(hwnd: HWND, dark: bool) {
@@ -523,6 +554,34 @@ fn mouse_dips(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
     (x / k, y / k)
 }
 
+/// DIPs que se desplaza una línea de la rueda (como una fila de las listas).
+const WHEEL_LINE: f32 = 24.0;
+
+/// Líneas por cada paso de la rueda (Configuración de Windows ▸ Mouse), como en la principal.
+fn wheel_lines() -> f32 {
+    let mut lines = 3u32;
+    unsafe {
+        let _ = SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, Some(&mut lines as *mut _ as *mut std::ffi::c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+    }
+    // u32::MAX es «una pantalla por clic»: se aproxima con 10 filas, como en la principal.
+    if lines == u32::MAX { 10.0 } else { lines as f32 }
+}
+
+/// La rueda sobre la ventana: `wparam` trae los pasos (positivo hacia arriba, como en la
+/// principal) y `lparam` el punto en la pantalla.
+fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let Some(main) = with(|a| a.main) else { return };
+    if !input_ok(main) {
+        return;
+    }
+    let steps = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
+    let mut pt = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+    let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
+    let k = dpi_of(hwnd) as f32 / 96.0;
+    let dy = -steps * wheel_lines() * WHEEL_LINE;
+    with_app(main, |app| app.aux_mouse(AuxWindow::Transfers, pt.x as f32 / k, pt.y as f32 / k, AuxMouse::Wheel { dy }));
+}
+
 fn mouse(hwnd: HWND, lparam: LPARAM, ev: AuxMouse) {
     let Some(main) = with(|a| a.main) else { return };
     if !input_ok(main) {
@@ -580,8 +639,22 @@ unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                RELEASING.with(|r| r.set(true));
                 let _ = ReleaseCapture();
+                RELEASING.with(|r| r.set(false));
                 mouse(hwnd, lparam, AuxMouse::Up);
+                LRESULT(0)
+            }
+            // Otra ventana (o el sistema: Alt+Tab, un diálogo) se quedó con el mouse sin que
+            // llegue el `Up`: lo que se arrastraba o se apretaba termina.
+            WM_CAPTURECHANGED => {
+                if HWND(lparam.0 as *mut _) != hwnd && !RELEASING.with(|r| r.get()) {
+                    mouse(hwnd, LPARAM(-1), AuxMouse::Cancel);
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                wheel(hwnd, wparam, lparam);
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
@@ -712,6 +785,17 @@ mod tests {
         // Abajo a la derecha: sube para no salirse.
         let r = resized_rect(RECT { left: 1328, top: 724, right: 1904, bottom: 1024 }, SIZE { cx: 576, cy: 450 }, work);
         assert_eq!((r.top, r.bottom), (574, 1024));
+    }
+
+    #[test]
+    fn max_client_height_fits_short_work_areas() {
+        // 1366×768 al 125 % con la barra de tareas de 48: 720 de área de trabajo; borde de 8 y
+        // barra de título de 39.
+        let work = RECT { left: 0, top: 0, right: 1366, bottom: 720 };
+        let border = RECT { left: -8, top: -39, right: 8, bottom: 8 };
+        assert_eq!(max_client_dips(work, border, 120), (720 - 16 - 47) as f32 * 96.0 / 120.0);
+        // Más chico que el borde: nada (la `App` pone su mínimo).
+        assert_eq!(max_client_dips(RECT { left: 0, top: 0, right: 100, bottom: 30 }, border, 96), 0.0);
     }
 
     #[test]

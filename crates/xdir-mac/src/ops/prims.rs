@@ -33,8 +33,32 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
         libc::ECANCELED => ErrKind::Cancelled,
         libc::EXDEV => ErrKind::CrossDevice,
         libc::ENAMETOOLONG => ErrKind::NameTooLong,
-        n => ErrKind::Other(io::Error::from_raw_os_error(n).to_string()),
+        libc::EROFS => ErrKind::ReadOnly,
+        // La red o el disco no responden (servidor caído, disco desenchufado, NFS vencido).
+        libc::ETIMEDOUT | libc::EHOSTDOWN | libc::EHOSTUNREACH | libc::ENETDOWN | libc::ENETUNREACH | libc::ENXIO | libc::ESTALE => ErrKind::Offline,
+        // Un nombre que el disco no sabe guardar (SMB, exFAT).
+        libc::EILSEQ => ErrKind::InvalidName,
+        n => xdir_core::sys::io_unexpected(&io::Error::from_raw_os_error(n)),
     }
+}
+
+/// Las carpetas que cuida la privacidad de macOS (TCC) dentro de la carpeta del usuario: sin el
+/// permiso de Configuración del Sistema, tocarlas da `EPERM`. Los discos de red y extraíbles
+/// también pueden estar cuidados, pero ahí `EPERM` es casi siempre un permiso del servidor o del
+/// disco: no se adivina.
+const PRIVATE_FOLDERS: [&str; 4] = ["Desktop", "Documents", "Downloads", "Library/Mobile Documents"];
+
+/// `Privacy` si `errno` es `EPERM` en una carpeta cuidada por la privacidad de macOS (`home`, la
+/// carpeta del usuario). Solo mira la ruta: nada de E/S.
+pub(crate) fn privacy_kind(errno: i32, p: &Path, home: Option<&Path>) -> Option<ErrKind> {
+    let home = home?;
+    (errno == libc::EPERM && PRIVATE_FOLDERS.iter().any(|f| p.starts_with(home.join(f)))).then_some(ErrKind::Privacy)
+}
+
+/// La carpeta del usuario (leída una vez).
+fn home() -> Option<&'static Path> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| std::env::var_os("HOME").map(PathBuf::from)).as_deref()
 }
 
 /// El sistema de archivos no sabe asegurar una carpeta (no es un error de la copia).
@@ -42,9 +66,11 @@ pub(crate) fn dir_sync_unsupported(e: &io::Error) -> bool {
     matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP | libc::EBADF))
 }
 
-fn err(e: io::Error, p: &Path) -> CopyError {
+/// Un error de E/S con la ruta que lo causó (lo que ve el usuario sale de `CopyError::message`).
+pub(crate) fn err(e: io::Error, p: &Path) -> CopyError {
     let kind = match e.raw_os_error() {
-        Some(n) => err_kind(n),
+        Some(libc::ENAMETOOLONG) => xdir_core::sys::too_long(p),
+        Some(n) => privacy_kind(n, p, home()).unwrap_or_else(|| err_kind(n)),
         None => match e.kind() {
             io::ErrorKind::NotFound => ErrKind::NotFound,
             io::ErrorKind::AlreadyExists => ErrKind::Exists,
@@ -551,7 +577,39 @@ mod tests {
         assert_eq!(err_kind(libc::EFBIG), ErrKind::TooBig);
         assert_eq!(err_kind(libc::EEXIST), ErrKind::Exists);
         assert_eq!(err_kind(libc::EXDEV), ErrKind::CrossDevice);
-        assert!(matches!(err_kind(libc::EIO), ErrKind::Other(_)));
+        assert_eq!(err_kind(libc::EROFS), ErrKind::ReadOnly);
+        for n in [libc::ETIMEDOUT, libc::EHOSTDOWN, libc::EHOSTUNREACH, libc::ENETDOWN, libc::ENETUNREACH, libc::ENXIO, libc::ESTALE] {
+            assert_eq!(err_kind(n), ErrKind::Offline, "{n}");
+        }
+        assert_eq!(err_kind(libc::EILSEQ), ErrKind::InvalidName);
+        // Lo que no tiene explicación: frase propia, texto y código.
+        let ErrKind::Other(text) = err_kind(libc::EIO) else { panic!("EIO es Other") };
+        assert!(text.starts_with("Error inesperado del sistema (") && text.ends_with("; macOS: errno 5)"), "{text}");
+    }
+
+    /// Nombre o ruta demasiado largos, según la ruta.
+    #[test]
+    fn prims_name_or_path_too_long() {
+        let e = |p: &str| err(io::Error::from_raw_os_error(libc::ENAMETOOLONG), Path::new(p)).kind;
+        assert_eq!(e(&format!("/tmp/{}", "a".repeat(300))), ErrKind::NameTooLong);
+        assert_eq!(e(&"/carpeta".repeat(200)), ErrKind::PathTooLong);
+    }
+
+    /// `EPERM` en una carpeta que cuida la privacidad de macOS (Escritorio, Documentos,
+    /// Descargas, iCloud): falta el permiso de Configuración del Sistema. Afuera, o con `EACCES`
+    /// (los permisos de siempre), es «No tenés permiso».
+    #[test]
+    fn prims_privacy_only_in_protected_folders() {
+        let home = Path::new("/Users/ana");
+        let k = |n, p: &str| privacy_kind(n, Path::new(p), Some(home));
+        assert_eq!(k(libc::EPERM, "/Users/ana/Documents/Github"), Some(ErrKind::Privacy));
+        assert_eq!(k(libc::EPERM, "/Users/ana/Desktop"), Some(ErrKind::Privacy));
+        assert_eq!(k(libc::EPERM, "/Users/ana/Downloads/a.zip"), Some(ErrKind::Privacy));
+        assert_eq!(k(libc::EPERM, "/Users/ana/Library/Mobile Documents/com~apple~CloudDocs/x"), Some(ErrKind::Privacy));
+        assert_eq!(k(libc::EPERM, "/Users/ana/Proyectos"), None);
+        assert_eq!(k(libc::EPERM, "/Users/ana/DocumentsViejos"), None);
+        assert_eq!(k(libc::EACCES, "/Users/ana/Documents/Github"), None);
+        assert_eq!(privacy_kind(libc::EPERM, Path::new("/Users/ana/Documents"), None), None);
     }
 
     #[test]

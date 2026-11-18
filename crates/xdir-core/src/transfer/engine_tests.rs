@@ -1146,6 +1146,19 @@ fn long_partial_name_falls_back_to_a_short_one() {
 }
 
 #[test]
+fn long_partial_path_falls_back_to_a_short_one() {
+    // La ruta con «.nombre.xdir-part» pasa del largo que acepta el sistema: también con uno corto.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/lp/s/largo.txt"), b"datos".to_vec());
+    fake.add_dir(&p("/lp/d"));
+    fake.fail(&p("/lp/d/.largo.txt.xdir-part"), ErrKind::PathTooLong, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/lp/s/largo.txt")], dest: p("/lp/d") }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.contents(&p("/lp/d/largo.txt")).unwrap(), b"datos");
+    no_tmp_left(&fake, &p("/lp/d"));
+}
+
+#[test]
 fn final_rename_retries_while_the_file_is_busy() {
     // Un antivirus o el indexador abren el archivo recién escrito: el renombre final se reintenta
     // un rato antes de fallar.

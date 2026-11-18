@@ -167,9 +167,9 @@ pub fn too_long(p: &Path) -> ErrKind {
     }
 }
 
-/// La primera letra en minúscula, salvo que la primera palabra sea un nombre propio («Windows»,
-/// «macOS») o una sigla.
-fn lower_first(text: &str) -> String {
+/// La primera letra en minúscula (para seguir una frase después de «:»), salvo que la primera
+/// palabra sea un nombre propio («Windows», «macOS») o una sigla.
+pub fn lower_first(text: &str) -> String {
     let word = text.split([' ', ':', ',']).next().unwrap_or("");
     let proper = ["Windows", "macOS", "Linux", "Mac", "xdir"].contains(&word) || word.chars().skip(1).any(char::is_uppercase);
     let mut chars = text.chars();

@@ -983,7 +983,11 @@ impl Tab {
             return text;
         }
         if let Some(e) = &self.error {
-            return format!("No se pudo abrir: {e}");
+            let e = sys::lower_first(e);
+            return match &self.location {
+                Location::Path(p) => format!("No se pudo abrir «{}»: {e}", sys::shown_name(p)),
+                _ => format!("No se pudo abrir: {e}"),
+            };
         }
         // Con selección: cuántos y cuánto pesan. Los archivos se suman acá; las carpetas, en otro
         // hilo (`sel`): «calculando…», el total (con «al menos» si alguna no se leyó entera) o,
@@ -1361,5 +1365,17 @@ mod tests {
         assert!(tab.status().ends_with(" (filtrado)"), "{}", tab.status());
         tab.list.set_filter(Column::Extension, Vec::new());
         assert!(!tab.status().contains("filtrado"));
+    }
+
+    /// Una carpeta que no se pudo leer: la barra de estado dice cuál y por qué, en una frase.
+    #[test]
+    fn status_says_which_folder_failed() {
+        crate::sys::testing::install_fakes();
+        let mut tab = Tab::new(3, Location::Path(PathBuf::from("/u/Documentos")), false);
+        tab.error = Some("No tenés permiso: pedí acceso a quien administra esa carpeta".into());
+        assert_eq!(tab.status(), "No se pudo abrir «Documentos»: no tenés permiso: pedí acceso a quien administra esa carpeta");
+        // Lo que ya empieza con un nombre propio no pasa a minúscula.
+        tab.error = Some("macOS no deja que xdir use «Documentos»".into());
+        assert_eq!(tab.status(), "No se pudo abrir «Documentos»: macOS no deja que xdir use «Documentos»");
     }
 }

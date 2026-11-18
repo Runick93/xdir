@@ -30,7 +30,7 @@ pub use hashes::{HashAlgo, Hashes, Opened, Reader, io_error};
 pub use archives::{Archives, Pick, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
     CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
-    io_unexpected, shown_name, starts_with_folded, too_long, unexpected,
+    io_unexpected, lower_first, shown_name, starts_with_folded, too_long, unexpected,
 };
 
 #[cfg(test)]

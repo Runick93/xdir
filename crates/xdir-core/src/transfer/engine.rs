@@ -1123,7 +1123,7 @@ impl<'a> Job<'a> {
         // nunca queda algo a medias con el nombre del archivo.
         let mut part = part_name(dst, &|p| self.exists(p).is_some());
         let mut written = self.write(item, &part);
-        if matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+        if matches!(&written, Err(e) if matches!(e.kind, ErrKind::NameTooLong | ErrKind::PathTooLong)) {
             // El disco no acepta el nombre largo del parcial: uno corto del motor.
             part = short_part_name(dst);
             written = self.write(item, &part);
@@ -1671,7 +1671,7 @@ impl<'a> Job<'a> {
                 self.ctl.checkpoint()
             };
             written = archives.create(&part, &items, &mut on_bytes);
-            if !matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+            if !matches!(&written, Err(e) if matches!(e.kind, ErrKind::NameTooLong | ErrKind::PathTooLong)) {
                 break;
             }
         }

@@ -292,7 +292,7 @@ fn second_eject_does_not_drop_the_first() {
 
 // ---------- ventana de copia ----------
 
-use crate::host::{AuxMouse, AuxWindow};
+use crate::host::{AuxMouse, AuxProgress, AuxWindow};
 use crate::sys::testing::FakeShell;
 use crate::transfer::view::{self, ViewHit};
 
@@ -545,6 +545,20 @@ fn indicator_click_reopens() {
     assert_eq!(host.aux_shows().len(), 2);
     a.cancel_job(id);
     wait(&mut a, idle);
+}
+
+#[test]
+fn copy_window_reports_taskbar_progress() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wtb", 5));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    let reported = host.aux_progresses();
+    assert!(matches!(reported.last(), Some(AuxProgress::Normal(x)) if (0.0..=1.0).contains(x)), "{reported:?}");
+    f.set_slow(&p("/app-wtb/s/grande.bin"), None);
+    wait(&mut a, idle);
+    assert_eq!(host.aux_progresses().last(), Some(&AuxProgress::None));
 }
 
 #[test]

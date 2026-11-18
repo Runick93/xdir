@@ -22,6 +22,7 @@ use super::App;
 use crate::geom::rect;
 use crate::host::{AuxMouse, AuxWindow};
 use crate::keys::{Key, keys::VK_ESCAPE};
+use crate::config::ConfigEdit;
 use crate::ops::Undo;
 use crate::paint::Painter;
 use crate::transfer::view::{self, ViewHit};
@@ -387,6 +388,7 @@ impl App {
         let rerun = matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }).then(|| spec.clone());
         t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun });
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
+        let queue = self.config.queue_by_disk;
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
             let send = |u: Update| {
@@ -407,7 +409,9 @@ impl App {
                 send(Update::Finished(JobOutcome { stopped: Some(format!("Se está expulsando \"{label}\"")), ..Default::default() }));
                 return;
             }
-            if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
+            // Sin la cola por disco no espera a nadie (los discos se siguen avisando para expulsar).
+            let wait_on = if queue { vols.clone() } else { Vec::new() };
+            if !sched.acquire_notify(id, &wait_on, &ctl, &mut || send(Update::Waiting)) {
                 send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
                 return;
             }
@@ -421,6 +425,19 @@ impl App {
         });
         post_due(self.hwnd, id);
         id
+    }
+
+    /// Switch «Copias en cola por disco»: `cola_por_disco = true` en `config.toml` (apagado es lo
+    /// de fábrica: se quita la línea). Rige para los trabajos que se lancen desde ahora.
+    pub(super) fn toggle_queue_by_disk(&mut self) {
+        let on = !self.config.queue_by_disk;
+        self.config.queue_by_disk = on;
+        let key = "cola_por_disco".to_string();
+        self.edit_config(vec![if on {
+            ConfigEdit::Set { section: "opciones", key, value: "true".into() }
+        } else {
+            ConfigEdit::Remove { section: "opciones", key }
+        }]);
     }
 
     /// Vacía el canal de los trabajos (`WM_APP_TRANSFER`).

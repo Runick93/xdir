@@ -26,6 +26,7 @@ use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s,
 use crate::platform::{Handle, HandleExt};
 use crate::fs::wide_path;
 use xdir_core::names;
+use xdir_core::sys::ErrKind;
 
 
 
@@ -59,8 +60,9 @@ fn op_error(op: &Op, e: &windows::core::Error) -> String {
         Op::Shortcuts { targets } => targets.first().cloned().unwrap_or_default(),
         Op::Undo(_) => return format!("No se pudo deshacer: {}", xdir_core::sys::lower_first(&super::errors::win_message(e))),
     };
-    let failed = super::errors::write_error(e.code().0 as u32, &e.message(), &path, &|| super::errors::exists(&path));
-    xdir_core::ops::failure(op, &failed)
+    let present = || super::errors::exists(&path);
+    let failed = super::errors::write_error(e.code().0 as u32, &e.message(), &path, &present);
+    super::errors::op_message(op, &failed, failed.kind == ErrKind::NotFound && present())
 }
 
 fn run(hwnd: HWND, op: Op) -> Result<OpResult> {

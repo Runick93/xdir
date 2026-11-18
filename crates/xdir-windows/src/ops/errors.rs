@@ -235,6 +235,25 @@ fn expand(s: &str) -> String {
     out
 }
 
+/// El aviso de una operación del Shell que falló con `failed` (`present`: lo que se tocaba
+/// está). «No se encuentra» con la carpeta ahí no se explica (issue #72, cuando no se pudo leer si
+/// el acceso controlado a carpetas está encendido): se dice eso y se nombra la sospecha, sin
+/// afirmarla.
+pub(crate) fn op_message(op: &xdir_core::ops::Op, failed: &CopyError, present: bool) -> String {
+    use xdir_core::ops::{Op, doing, failure};
+    let odd = failed.kind == ErrKind::NotFound && present && matches!(op, Op::NewFolder { .. } | Op::NewFile { .. } | Op::Rename { .. });
+    if odd {
+        let name = xdir_core::sys::shown_name(&failed.path);
+        return format!(
+            "No se pudo {}: Windows dice que no encuentra «{name}», pero está. Puede que una protección del sistema \
+             (como el acceso controlado a carpetas de Seguridad de Windows) no deje escribir ahí: probá permitir xdir \
+             o consultá con sistemas.",
+            doing(op, &failed.path)
+        );
+    }
+    failure(op, failed)
+}
+
 /// El texto de un error de Windows como lo ve el usuario (sin ruta: el motivo y qué hacer).
 pub(crate) fn win_message(e: &windows::core::Error) -> String {
     from_hr(e.code().0 as u32, &e.message(), Path::new("")).message()
@@ -327,6 +346,21 @@ mod tests {
         assert_eq!(write_kind(0x8007_0020, "x", parent, &yes, &cfa).kind, ErrKind::InUse);
         let e = write_kind(0x8007_0002, "x", parent, &yes, &cfa);
         assert!(e.message().contains("«d27523»") && e.message().contains("acceso controlado a carpetas"), "{}", e.message());
+    }
+
+    /// Lo que no se explica (no se pudo leer el registro) se dice sin afirmar.
+    #[test]
+    fn op_message_when_not_found_but_there() {
+        use xdir_core::ops::Op;
+        let parent = PathBuf::from(r"C:\Documentos\d27523");
+        let op = Op::NewFolder { parent: parent.clone() };
+        let gone = CopyError::new(ErrKind::NotFound, &parent);
+        let odd = op_message(&op, &gone, true);
+        assert!(odd.starts_with("No se pudo crear la carpeta nueva en «d27523»: Windows dice que no encuentra «d27523», pero está."), "{odd}");
+        assert!(odd.contains("acceso controlado a carpetas"), "{odd}");
+        assert_eq!(op_message(&op, &gone, false), "No se pudo crear la carpeta nueva en «d27523»: ya no existe.");
+        let blocked = CopyError::new(ErrKind::Blocked, &parent);
+        assert!(op_message(&op, &blocked, true).starts_with("Windows bloqueó a xdir"));
     }
 
     #[test]

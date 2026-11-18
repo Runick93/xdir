@@ -1297,7 +1297,8 @@ impl Tree {
 
     /// La fila bajo el punto si acepta que le suelten archivos (#56): una carpeta, una carpeta del
     /// usuario, OneDrive, un disco o una conexión de red ya conectada. No «Este equipo», Inicio,
-    /// xtree, «Red», sus favoritos y máquinas, Linux ni la Papelera (ni su fila ni su carpeta).
+    /// xtree, «Red», sus favoritos y máquinas, Linux ni la carpeta de la Papelera (su fila se resuelve
+    /// aparte, en `trash_drop_at`).
     /// No toca el disco (la Papelera se reconoce por la ruta).
     pub fn drop_node_at(&self, x: f32, y: f32) -> Option<(usize, PathBuf)> {
         if !(self.contains(x, y) && y >= self.area.top + TOP_PAD) {
@@ -1308,6 +1309,15 @@ impl Tree {
         let folder = matches!(n.kind, Kind::Folder | Kind::Pinned | Kind::Cloud | Kind::Drive | Kind::NetConnected);
         let ok = folder && !n.path.as_os_str().is_empty() && !crate::sys::file_system().is_trash(&Location::Path(n.path.clone()));
         ok.then(|| (id, n.path.clone()))
+    }
+
+    /// La fila de la Papelera bajo el punto, si la hay: acepta que le suelten archivos, pero no
+    /// para moverlos adentro sino para mandarlos a la Papelera (la App arranca un `Delete`).
+    pub fn trash_drop_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !(self.contains(x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        self.node_at(y).filter(|&id| self.nodes[id].kind == Kind::Trash)
     }
 
     /// Un evento de arrastre de archivos a la hora `now`, con el puntero en `at` (`None`: fuera del
@@ -2498,8 +2508,9 @@ mod tests {
         assert_eq!(t.hit(area.left + SIDE + 4.0, y), TreeHit::Open(Location::Path(trash.clone())));
         assert!(!p.texts().iter().any(|(_, s, r)| (s == "\u{E76C}" || s == "\u{E70D}") && r.top <= y && r.bottom >= y), "sin flecha");
         assert!(p.texts().iter().any(|(_, s, r)| s == TRASH_GLYPH && r.top <= y && r.bottom >= y), "ícono de papelera");
-        // No recibe lo que se suelta (eso llega después).
+        // No es una carpeta destino: lo que se suelta se manda a la Papelera (`trash_drop_at`).
         assert_eq!(t.drop_node_at(x, y), None);
+        assert!(t.trash_drop_at(x, y).is_some());
         FakeFileSystem::set_trash(None);
     }
 

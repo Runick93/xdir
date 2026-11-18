@@ -279,6 +279,10 @@ impl App {
     pub(super) fn drop_archive_drag(&mut self, from: usize, x: f32, y: f32) {
         self.notice = None;
         let Some((at, dest)) = self.drop_folder(x, y) else { return };
+        // A la Papelera no se extrae.
+        if let super::fileops::DropAt::Trash(_) = at {
+            return;
+        }
         let tab = self.panes[from].tab();
         let Location::Archive { file, nested, .. } = &tab.location else { return };
         let entries: Vec<String> =

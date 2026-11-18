@@ -13,7 +13,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSWindowOrderingMode, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBackingStoreType, NSEvent, NSResponder,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
@@ -57,6 +57,26 @@ pub fn resized_frame(old: NSRect, size: NSSize, visible: NSRect) -> NSRect {
         y = floor.min(visible.origin.y + visible.size.height - size.height);
     }
     NSRect::new(NSPoint::new(old.origin.x, y), size)
+}
+
+/// El alto más grande del área (puntos) que entra en `visible` con una barra de título de
+/// `title` y `MARGIN` abajo (como la deja `resized_frame`).
+pub fn max_content_height(visible: NSRect, title: f64) -> f32 {
+    (visible.size.height - MARGIN - title).max(0.0) as f32
+}
+
+/// Lo de `WindowHost::aux_max_height`: el alto más grande del área que entra en la pantalla de la
+/// ventana de copia (si está a la vista) o, si no, en la de la principal.
+pub fn max_height() -> Option<f32> {
+    let mtm = MainThreadMarker::new()?;
+    let shown = with(|a| a.window.clone()).filter(|w| w.isVisible());
+    let screen = shown
+        .and_then(|w| w.screen())
+        .or_else(|| crate::app::main_window().and_then(|w| w.screen()))
+        .or_else(|| NSScreen::mainScreen(mtm))?;
+    let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(100.0, 100.0));
+    let title = NSWindow::frameRectForContentRect_styleMask(content, style(), mtm).size.height - 100.0;
+    Some(max_content_height(screen.visibleFrame(), title))
 }
 
 struct Aux {
@@ -422,6 +442,14 @@ mod tests {
         // Arriba del todo: la barra de título queda a la vista.
         let f = clamp_frame(NSRect::new(NSPoint::new(10.0, 800.0), size), visible);
         assert_eq!(f.origin.y + f.size.height, 915.0);
+    }
+
+    #[test]
+    fn max_content_height_leaves_title_and_margin() {
+        // Una pantalla con 600 visibles y la barra de título de 28.
+        let visible = NSRect::new(NSPoint::new(0.0, 70.0), NSSize::new(1024.0, 600.0));
+        assert_eq!(max_content_height(visible, 28.0), 600.0 - 16.0 - 28.0);
+        assert_eq!(max_content_height(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0)), 28.0), 0.0);
     }
 
     #[test]

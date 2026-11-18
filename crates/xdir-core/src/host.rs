@@ -140,6 +140,9 @@ pub enum AuxMouse {
     Leave,
     /// La rueda o el trackpad: cuánto se desplaza el contenido, en DIPs (positivo hacia abajo).
     Wheel { dy: f32 },
+    /// La ventana perdió el mouse sin `Up` (Windows le quitó la captura): termina lo que se
+    /// estuviera arrastrando o apretando.
+    Cancel,
 }
 
 /// La ventana principal. Los tamaños y posiciones están en DIPs: el host lee el DPI de su ventana.
@@ -256,6 +259,12 @@ pub trait WindowHost {
     fn aux_set_title(&self, _w: AuxWindow, _title: &str) {}
     /// Cambia el tamaño del área (el contenido creció o se achicó).
     fn aux_resize(&self, _w: AuxWindow, _size: (f32, f32)) {}
+    /// El alto más grande del área (DIPs, sin la barra de título ni el borde) que entra en la
+    /// pantalla donde está la ventana (o donde va a aparecer: la de la principal). `None`: sin
+    /// límite propio del host.
+    fn aux_max_height(&self, _w: AuxWindow) -> Option<f32> {
+        None
+    }
     /// Pide repintarla (sin ventana, no hace nada).
     fn aux_invalidate(&self, _w: AuxWindow) {}
     /// La oculta (sin avisar `aux_closed`).

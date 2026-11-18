@@ -1463,6 +1463,8 @@ pub struct FakeHost {
     aux_hides: Cell<usize>,
     aux_progresses: RefCell<Vec<crate::host::AuxProgress>>,
     aux_visible: Cell<bool>,
+    /// El alto máximo que da `aux_max_height` (por defecto, sin límite).
+    aux_max_height: Cell<Option<f32>>,
 }
 
 impl FakeHost {
@@ -1495,12 +1497,18 @@ impl FakeHost {
             aux_hides: Cell::new(0),
             aux_progresses: RefCell::new(Vec::new()),
             aux_visible: Cell::new(false),
+            aux_max_height: Cell::new(None),
         })
     }
 
     /// Si el host tiene ventanas secundarias (por defecto, sí; sin ellas `aux_show` da `false`).
     pub fn set_aux_native(&self, on: bool) {
         self.aux_native.set(on);
+    }
+
+    /// Simula una pantalla baja: el alto máximo del área de las ventanas secundarias.
+    pub fn set_aux_max_height(&self, h: Option<f32>) {
+        self.aux_max_height.set(h);
     }
 
     /// Lo que se pidió mostrar con `aux_show` (ventana, título y tamaño), en orden.
@@ -1781,6 +1789,10 @@ impl WindowHost for FakeHost {
 
     fn aux_resize(&self, w: AuxWindow, size: (f32, f32)) {
         self.aux_sizes.borrow_mut().push((w, size));
+    }
+
+    fn aux_max_height(&self, _w: AuxWindow) -> Option<f32> {
+        self.aux_max_height.get()
     }
 
     fn aux_invalidate(&self, _w: AuxWindow) {

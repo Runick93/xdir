@@ -1282,3 +1282,126 @@ fn conflict_scrolls_into_view() {
     a.answer_job(id, Answer { choice: Choice::Skip, all: false });
     cancel_all(&mut a, &ids);
 }
+
+/// En una pantalla baja la ventana no pasa del alto que le entra al host, y desplazando al fondo
+/// se llega a los controles del último trabajo.
+#[test]
+fn copy_window_fits_short_screens() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    host.set_aux_max_height(Some(400.0));
+    let ids = running_copies(&mut a, &f, "app-baja", 2);
+    a.show_transfers();
+    assert_eq!(host.aux_shows().last().unwrap().2, (view::WIDTH, 400.0));
+    assert_eq!(a.transfers_size(), (view::WIDTH, 400.0));
+    let last = *ids.last().unwrap();
+    assert!(find_aux(&a, ViewHit::Expand(last)).is_none());
+    a.aux_mouse(AuxWindow::Transfers, 10.0, 10.0, AuxMouse::Wheel { dy: 10_000.0 });
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert_eq!(a.transfers_scroll(), content - 400.0);
+    // «Menos detalles» del último, abajo de todo, se puede tocar adentro de los 400.
+    let (_, y) = find_aux(&a, ViewHit::Expand(last)).expect("se ve el final del último");
+    assert!(y < 400.0);
+    assert!(host.aux_sizes().iter().all(|(_, (_, h))| *h <= 400.0), "{:?}", host.aux_sizes());
+    cancel_all(&mut a, &ids);
+}
+
+/// El pulgar de la barra: se arrastra, salta de a una página (con 40 de solapamiento) y el
+/// arrastre termina si el host pierde el mouse (`Cancel`) o llega otro `Down` sin `Up`.
+#[test]
+fn thumb_drag_pages_and_ends() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-pulgar", 5);
+    a.show_transfers();
+    let (w, h) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    let r = geom::rect(0.0, 0.0, w, h);
+    let (_, thumb) = view::scrollbar(r, content, 0.0).expect("barra");
+    let x = (thumb.left + thumb.right) / 2.0;
+    // Clic en el riel debajo del pulgar: una página menos 40.
+    a.aux_mouse(AuxWindow::Transfers, x, h - 2.0, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, x, h - 2.0, AuxMouse::Up);
+    assert_eq!(a.transfers_scroll(), h - 40.0);
+    a.aux_key(AuxWindow::Transfers, crate::keys::keys::VK_HOME);
+    assert_eq!(a.transfers_scroll(), 0.0);
+    // Arrastrar el pulgar mueve el contenido.
+    let y = (thumb.top + thumb.bottom) / 2.0;
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, x, y + 100.0, AuxMouse::Move);
+    let dragged = a.transfers_scroll();
+    assert!(dragged > 0.0);
+    // El host perdió el mouse: moverlo ya no arrastra.
+    a.aux_mouse(AuxWindow::Transfers, -1.0, -1.0, AuxMouse::Cancel);
+    a.aux_mouse(AuxWindow::Transfers, x, y + 200.0, AuxMouse::Move);
+    assert_eq!(a.transfers_scroll(), dragged);
+    // Un `Down` con el pulgar tomado (se perdió el `Up`) suelta el pulgar.
+    let (_, thumb) = view::scrollbar(r, content, dragged).unwrap();
+    let y = (thumb.top + thumb.bottom) / 2.0;
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, 100.0, 5.0, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, x, y + 150.0, AuxMouse::Move);
+    assert_eq!(a.transfers_scroll(), dragged);
+    a.aux_mouse(AuxWindow::Transfers, 100.0, 5.0, AuxMouse::Up);
+    cancel_all(&mut a, &ids);
+}
+
+/// Al desplazarse solo hasta un conflicto, el clic que se soltó enseguida no le llega a lo que
+/// quedó debajo (era para lo que estaba antes), y se borra lo que estaba bajo el mouse.
+#[test]
+fn click_right_after_reveal_is_ignored() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-guard", 4);
+    a.show_transfers();
+    let (x, y) = find_aux(&a, ViewHit::Cancel(ids[0])).unwrap();
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Move);
+    assert_eq!(a.transfers_hover(), Some(ViewHit::Cancel(ids[0])));
+    let root = Path::new("/app-guard-x");
+    f.add_file(&root.join("s").join("x.txt"), b"nuevo".to_vec());
+    f.add_file(&root.join("d").join("x.txt"), b"viejo".to_vec());
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![root.join("s").join("x.txt")], dest: root.join("d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == id && j.state == JobState::Conflict));
+    assert!(a.transfers_scroll() > 0.0);
+    assert_eq!(a.transfers_hover(), None);
+    // El «Cancelar» del 4 quedó a la vista; un clic enseguida no hace nada.
+    let target = ids[3];
+    click_aux(&mut a, ViewHit::Cancel(target));
+    for _ in 0..30 {
+        a.on_transfer_updates();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(a.jobs().iter().any(|j| j.id == target && j.state == JobState::Running));
+    // Pasado el resguardo, sí.
+    crate::clock::set(Some(Instant::now() + Duration::from_secs(1)));
+    click_aux(&mut a, ViewHit::Cancel(target));
+    crate::clock::set(None);
+    wait(&mut a, |a| !a.jobs().iter().any(|j| j.id == target));
+    a.answer_job(id, Answer { choice: Choice::Skip, all: false });
+    cancel_all(&mut a, &ids);
+}
+
+#[test]
+fn keys_scroll_the_copy_window() {
+    use crate::keys::keys::{VK_DOWN, VK_END, VK_HOME, VK_NEXT, VK_PRIOR, VK_UP};
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-teclas", 5);
+    a.show_transfers();
+    let (_, h) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    let max = content - h;
+    let mut key = |k| {
+        assert!(a.aux_key(AuxWindow::Transfers, k));
+        a.transfers_scroll()
+    };
+    assert_eq!(key(VK_NEXT), h - 40.0);
+    assert_eq!(key(VK_DOWN), h);
+    assert_eq!(key(VK_UP), h - 40.0);
+    assert_eq!(key(VK_END), max);
+    assert_eq!(key(VK_DOWN), max);
+    assert_eq!(key(VK_PRIOR), max - (h - 40.0));
+    assert_eq!(key(VK_HOME), 0.0);
+    assert_eq!(key(VK_UP), 0.0);
+    cancel_all(&mut a, &ids);
+}

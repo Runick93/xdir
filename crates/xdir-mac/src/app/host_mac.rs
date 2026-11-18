@@ -478,6 +478,11 @@ impl WindowHost for MacHost {
         crate::auxwin::resize(w, size);
     }
 
+    fn aux_max_height(&self, w: xdir_core::host::AuxWindow) -> Option<f32> {
+        let xdir_core::host::AuxWindow::Transfers = w;
+        crate::auxwin::max_height()
+    }
+
     fn aux_invalidate(&self, w: xdir_core::host::AuxWindow) {
         crate::auxwin::invalidate(w);
     }

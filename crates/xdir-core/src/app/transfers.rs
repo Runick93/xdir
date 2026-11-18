@@ -22,7 +22,8 @@ use super::App;
 use crate::config::ConfigEdit;
 use crate::geom::{contains, rect};
 use crate::host::{AuxMouse, AuxProgress, AuxWindow};
-use crate::keys::{Key, keys::VK_ESCAPE};
+use crate::keys::Key;
+use crate::keys::keys::{VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_NEXT, VK_PRIOR, VK_UP};
 use crate::ops::Undo;
 use crate::paint::Painter;
 use crate::transfer::view::{self, ViewHit};
@@ -93,6 +94,9 @@ struct CopyWindow {
     scroll: f32,
     /// Arrastrando el pulgar de la barra: a qué distancia de su borde de arriba se lo tomó.
     thumb_grab: Option<f32>,
+    /// Cuándo se desplazó sola hasta algo que pide atención: un clic que se suelta enseguida
+    /// era para lo que había antes ahí y no cuenta.
+    revealed_at: Option<Instant>,
     hover: Option<ViewHit>,
     pressed: Option<ViewHit>,
     /// El último tamaño pedido (para no repetir `aux_resize`) y el último título.
@@ -345,7 +349,14 @@ fn skipped_text(n: usize) -> String {
 /// Entre dos textos de la barra de estado.
 const NOTICE_JOIN: &str = "   ·   ";
 
-/// Los clics en un conflicto recién aparecido no cuentan durante este tiempo.
+/// Lo que se repite de una página a la otra al desplazar la ventana de copia (DIPs).
+const PAGE_OVERLAP: f32 = 40.0;
+/// Lo que desplaza una flecha en la ventana de copia (DIPs).
+const KEY_STEP: f32 = 40.0;
+/// El alto más chico de la ventana de copia aunque la pantalla diga menos.
+const MIN_AUX_H: f32 = 160.0;
+/// Los clics en un conflicto recién aparecido (o recién desplazado a la vista) no cuentan durante
+/// este tiempo.
 const CONFLICT_GUARD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// «Hay 2 operaciones en curso. ¿Cancelarlas y salir?» (al cerrar xdir).
@@ -598,15 +609,27 @@ impl App {
         view::content_height(&self.transfers.jobs, &|id| self.transfers_expanded(id))
     }
 
-    /// Tamaño del área de la ventana: crece con el contenido hasta `view::MAX_H`.
+    /// Tamaño del área de la ventana: crece con el contenido hasta `view::MAX_H`, o hasta lo que
+    /// entra en la pantalla si es más baja.
     pub(super) fn transfers_size(&self) -> (f32, f32) {
-        (view::WIDTH, self.transfers_content().min(view::MAX_H))
+        let mut max = view::MAX_H;
+        if let Some(screen) = self.host.aux_max_height(AuxWindow::Transfers) {
+            // Aunque la pantalla sea diminuta, que entre al menos un bloque de la cola.
+            max = max.min(screen.max(MIN_AUX_H));
+        }
+        (view::WIDTH, self.transfers_content().min(max))
     }
 
     /// Cuánto está desplazado el contenido de la ventana de copia (pruebas).
     #[cfg(test)]
     pub(super) fn transfers_scroll(&self) -> f32 {
         self.transfers.window.scroll
+    }
+
+    /// Lo que está bajo el mouse en la ventana de copia (pruebas).
+    #[cfg(test)]
+    pub(super) fn transfers_hover(&self) -> Option<ViewHit> {
+        self.transfers.window.hover
     }
 
     /// Cuántos trabajos están plegados (pruebas).
@@ -638,7 +661,20 @@ impl App {
         } else {
             scroll
         };
-        self.set_transfers_scroll(to);
+        if self.set_transfers_scroll(to) {
+            // Lo que estaba bajo el mouse ya no está ahí.
+            let w = &mut self.transfers.window;
+            w.revealed_at = Some(crate::clock::now());
+            w.hover = None;
+        }
+    }
+
+    /// Desplaza `dy` (con la rueda, las teclas o el riel) y repinta si cambió.
+    fn scroll_transfers_by(&mut self, dy: f32) {
+        let scroll = self.transfers.window.scroll;
+        if self.set_transfers_scroll(scroll + dy) {
+            self.host.aux_invalidate(AuxWindow::Transfers);
+        }
     }
 
     /// Muestra (o trae al frente) la ventana de copia. Sin ventana del host queda solo el
@@ -765,9 +801,17 @@ impl App {
         let (width, height) = self.transfers_size();
         let r = rect(0.0, 0.0, width, height);
         let content = self.transfers_content();
-        // Arrastrando el pulgar de la barra: el contenido sigue al mouse hasta soltarlo.
+        // Arrastrando el pulgar de la barra: el contenido sigue al mouse hasta soltarlo. Si se
+        // perdió el mouse o llega otro `Down` (el `Up` no llegó), se suelta.
         if let Some(grab) = self.transfers.window.thumb_grab {
             match ev {
+                AuxMouse::Cancel | AuxMouse::Down => {
+                    self.transfers.window.thumb_grab = None;
+                    host.aux_invalidate(w);
+                    if ev == AuxMouse::Cancel {
+                        return;
+                    }
+                }
                 AuxMouse::Move => {
                     self.transfers.window.scroll = view::scroll_for_thumb(content, height, y - r.top - grab);
                     host.aux_invalidate(w);
@@ -782,10 +826,7 @@ impl App {
             }
         }
         if let AuxMouse::Wheel { dy } = ev {
-            let scroll = self.transfers.window.scroll;
-            if self.set_transfers_scroll(scroll + dy) {
-                host.aux_invalidate(w);
-            }
+            self.scroll_transfers_by(dy);
             // Debajo del mouse quedó otra cosa.
             return self.aux_mouse(w, x, y, AuxMouse::Move);
         }
@@ -811,9 +852,9 @@ impl App {
                     if y >= thumb.top && y < thumb.bottom {
                         self.transfers.window.thumb_grab = Some(y - thumb.top);
                     } else {
-                        // Clic en el riel: una página hacia ese lado.
-                        let page = if y < thumb.top { -height } else { height };
-                        self.set_transfers_scroll(scroll + page);
+                        // Clic en el riel: una página hacia ese lado, sin perder de vista el borde.
+                        let page = (height - PAGE_OVERLAP).max(PAGE_OVERLAP);
+                        self.set_transfers_scroll(scroll + if y < thumb.top { -page } else { page });
                     }
                     host.aux_invalidate(w);
                     return;
@@ -822,11 +863,17 @@ impl App {
             }
             AuxMouse::Up => {
                 let pressed = self.transfers.window.pressed.take();
-                if let Some(h) = at.filter(|h| pressed == Some(*h)) {
+                let just_moved = self.transfers.window.revealed_at.is_some_and(|t| crate::clock::now().saturating_duration_since(t) < CONFLICT_GUARD);
+                if let Some(h) = at.filter(|h| pressed == Some(*h) && !just_moved) {
                     self.on_view_hit(h);
                     self.transfers.window.hover = None;
                     self.sync_transfers_window();
                     self.redraw();
+                }
+            }
+            AuxMouse::Cancel => {
+                if self.transfers.window.pressed.take().is_some() {
+                    host.aux_invalidate(w);
                 }
             }
             AuxMouse::Wheel { .. } => {}
@@ -873,13 +920,31 @@ impl App {
     }
 
     /// Una tecla en la ventana de copia: Esc la cierra (los trabajos siguen). `true` si se usó.
+    /// Re Pág / Av Pág desplazan una página (menos un poco, para no perder el borde), Inicio y Fin
+    /// van a los extremos y las flechas de a poco.
     pub fn aux_key(&mut self, w: AuxWindow, vk: Key) -> bool {
         if vk == VK_ESCAPE {
             self.host.clone().aux_hide(w);
             self.aux_closed(w);
             return true;
         }
-        false
+        let (_, visible) = self.transfers_size();
+        let page = (visible - PAGE_OVERLAP).max(PAGE_OVERLAP);
+        let scroll = self.transfers.window.scroll;
+        let to = match vk {
+            VK_PRIOR => scroll - page,
+            VK_NEXT => scroll + page,
+            VK_UP => scroll - KEY_STEP,
+            VK_DOWN => scroll + KEY_STEP,
+            VK_HOME => 0.0,
+            // `set_transfers_scroll` lo deja en el fondo.
+            VK_END => f32::MAX,
+            _ => return false,
+        };
+        if self.set_transfers_scroll(to) {
+            self.host.aux_invalidate(w);
+        }
+        true
     }
 
     /// El usuario cerró la ventana: se oculta, los trabajos siguen y queda el indicador.

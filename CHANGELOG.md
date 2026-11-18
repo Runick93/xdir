@@ -18,6 +18,7 @@
 - El árbol muestra en una sola lista las carpetas del usuario, la **Papelera** y las del Acceso rápido de Windows. En Configuración ▸ Lugares se elige cuáles se ven, en qué orden, y se suman carpetas propias. Soltar archivos sobre la Papelera del árbol los manda a la Papelera.
 
 ### Cambios
+- Las copias, movimientos y extracciones corren a la vez aunque usen el mismo disco. Para que esperen en cola como antes, encendé Configuración ▸ Avanzado ▸ «Copias en cola por disco»; cada una en cola tiene el botón «Empezar ahora».
 - El comando «Abrir PowerShell en la carpeta» (en la Mac, «Abrir Terminal en la carpeta») pasa a llamarse «Abrir la terminal en la carpeta» y abre la terminal por defecto; «Abrir CMD en la carpeta» sigue abriendo CMD.
 - Cualquier carpeta que tarda más de medio segundo en leerse (local, de red o comprimida) muestra «Cargando…» con el indicador girando, encima de lo que ya llegó. En red sigue el aviso «Conectando…» / «no responde».
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
@@ -30,6 +31,7 @@
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.
 - El árbol de carpetas ya muestra u oculta las carpetas ocultas al cambiar «Mostrar archivos ocultos», sin tener que plegarlo y desplegarlo de nuevo; lo desplegado queda como estaba.
+- En Windows, minimizar la ventana de copia la deja en la barra de tareas, con el avance en verde sobre su ícono (amarillo en pausa, rojo con errores); antes se ocultaba y solo se recuperaba desde la barra de estado.
 
 ## 0.2.0 — 2026-11-11
 

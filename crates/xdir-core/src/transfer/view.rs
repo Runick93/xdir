@@ -29,6 +29,8 @@ const GRAPH_H: f32 = 100.0;
 const BTN_W: f32 = 84.0;
 const BTN_H: f32 = 28.0;
 const ICON_BTN: f32 = 24.0;
+/// Ancho del botón «Empezar ahora» de la fila en cola.
+const START_NOW_W: f32 = 104.0;
 
 const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
 
@@ -38,6 +40,8 @@ pub enum ViewHit {
     Pause(JobId),
     Resume(JobId),
     Cancel(JobId),
+    /// «Empezar ahora» de un trabajo en cola: salta la espera.
+    StartNow(JobId),
     /// Mostrar u ocultar los detalles (gráfico) de ese trabajo.
     Expand(JobId),
     Choose(JobId, Choice),
@@ -155,6 +159,11 @@ fn controls(r: Rect, jobs: &[JobView], expanded: Option<JobId>) -> Vec<(ViewHit,
                     out.push((ViewHit::Expand(id), rect(r.left + PAD, top + 8.0, pause.left - 8.0, top + h - 8.0)));
                 }
                 out.push((ViewHit::Cancel(id), cancel));
+                if j.state == JobState::Waiting {
+                    let w = START_NOW_W;
+                    let cy = (cancel.top + cancel.bottom) / 2.0;
+                    out.push((ViewHit::StartNow(id), rect(cancel.left - 8.0 - w, cy - BTN_H / 2.0, cancel.left - 8.0, cy + BTN_H / 2.0)));
+                }
             }
         }
         top += h;
@@ -509,7 +518,7 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
             Block::Row | Block::Queued => {
                 let queued = block_of(j, expanded) == Block::Queued;
                 p.text(FontId::GlyphsSmall, job_glyph(j), rect(l, top + 13.0, l + 16.0, top + 31.0), th.text_dim);
-                let tr = if queued { rr - ICON_BTN - 8.0 } else { rr - 2.0 * ICON_BTN - 16.0 };
+                let tr = if queued { rr - ICON_BTN - START_NOW_W - 16.0 } else { rr - 2.0 * ICON_BTN - 16.0 };
                 p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &j.title, tr - l - 24.0), rect(l + 24.0, top + 12.0, tr, top + 30.0), th.text);
                 if queued {
                     p.text(FontId::Small, "En cola", rect(l + 24.0, top + 32.0, tr, top + 48.0), th.text_dim);
@@ -520,6 +529,9 @@ pub fn draw(p: &dyn Painter, r: Rect, jobs: &[JobView], expanded: Option<JobId>,
                     if let Some(b) = find(ph) {
                         icon_button(p, b, if j.paused { "\u{E768}" } else { "\u{E769}" }, hot(ph));
                     }
+                }
+                if let Some(b) = find(ViewHit::StartNow(id)) {
+                    button(p, b, "Empezar ahora", false, hot(ViewHit::StartNow(id)));
                 }
                 if let Some(b) = find(ViewHit::Cancel(id)) {
                     icon_button(p, b, "\u{E711}", hot(ViewHit::Cancel(id)));

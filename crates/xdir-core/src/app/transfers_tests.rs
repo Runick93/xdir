@@ -398,32 +398,43 @@ fn turning_queue_off_releases_waiting_job() {
     wait(&mut a, idle);
 }
 
-/// Clic en el control `h` de la ventana de copia (lo busca recorriendo el área).
-fn click_aux(a: &mut App, h: ViewHit) {
+/// Dónde está el control `h` en la ventana de copia, tal como se ve (con el desplazamiento).
+fn find_aux(a: &App, h: ViewHit) -> Option<(f32, f32)> {
     let jobs = a.jobs().to_vec();
-    let expanded = a.transfers_expanded();
-    let r = geom::rect(0.0, 0.0, view::WIDTH, view::content_height(&jobs, expanded));
+    let expanded = |id| a.transfers_expanded(id);
+    let (w, vh) = a.transfers_size();
+    let r = geom::rect(0.0, 0.0, w, vh);
     let mut y = 0.0;
     while y < r.bottom {
         let mut x = 0.0;
         while x < r.right {
-            if view::hit(r, &jobs, expanded, x, y) == Some(h) {
-                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Move);
-                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Down);
-                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Up);
-                return;
+            if view::hit(r, &jobs, &expanded, a.transfers_scroll(), x, y) == Some(h) {
+                return Some((x + 1.0, y + 1.0));
             }
             x += 2.0;
         }
         y += 2.0;
     }
-    panic!("no está {h:?} en la ventana");
+    None
+}
+
+/// Clic en (x, y) de la ventana de copia.
+fn click_aux_at(a: &mut App, x: f32, y: f32) {
+    for ev in [AuxMouse::Move, AuxMouse::Down, AuxMouse::Up] {
+        a.aux_mouse(AuxWindow::Transfers, x, y, ev);
+    }
+}
+
+/// Clic en el control `h` de la ventana de copia (tiene que estar a la vista).
+fn click_aux(a: &mut App, h: ViewHit) {
+    let Some((x, y)) = find_aux(a, h) else { panic!("no está {h:?} en la ventana") };
+    click_aux_at(a, x, y);
 }
 
 fn aux_texts(a: &mut App) -> Vec<String> {
     let p = crate::sys::testing::RecordingPainter::new(a.theme);
-    let h = view::content_height(a.jobs(), a.transfers_expanded());
-    a.paint_aux(AuxWindow::Transfers, &p, view::WIDTH, h);
+    let (w, h) = a.transfers_size();
+    a.paint_aux(AuxWindow::Transfers, &p, w, h);
     p.texts().into_iter().map(|(_, s, _)| s).collect()
 }
 
@@ -445,9 +456,9 @@ fn window_appears_after_one_second() {
     let shows = host.aux_shows();
     assert_eq!(shows.len(), 1, "{shows:?}");
     assert_eq!((shows[0].0, shows[0].1.as_str()), (AuxWindow::Transfers, "Copiando…"));
-    assert_eq!(shows[0].2, (view::WIDTH, view::content_height(a.jobs(), a.transfers_expanded())));
-    // El que corre es el expandido (con el gráfico).
-    assert_eq!(a.transfers_expanded(), Some(id));
+    assert_eq!(shows[0].2, (view::WIDTH, view::content_height(a.jobs(), &|id| a.transfers_expanded(id))));
+    // El que corre se ve expandido (con el gráfico).
+    assert!(a.transfers_expanded(id));
     assert!(aux_texts(&mut a).iter().any(|t| t.contains("% completado")));
     a.cancel_job(id);
     wait(&mut a, idle);
@@ -1136,4 +1147,138 @@ fn eject_without_jobs_still_blocks_new_copies_until_done() {
     a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejw/s/a.txt")], dest: p("/app-ejw/d") });
     wait(&mut a, idle);
     assert!(f.exists(&p("/app-ejw/d/a.txt")));
+}
+
+// ---------- varias copias expandidas y desplazamiento ----------
+
+/// `n` copias lentas (unos 2 s cada una), cada una en su disco, todas corriendo.
+fn running_copies(a: &mut App, f: &FakeCopyPrims, tag: &str, n: usize) -> Vec<JobId> {
+    let ids: Vec<JobId> = (1..=n).map(|k| a.start_transfer(slow_copy(f, &format!("/{tag}-{k}"), 100))).collect();
+    wait(a, |a| ids.iter().all(|id| a.jobs().iter().any(|j| j.id == *id && j.state == JobState::Running)));
+    ids
+}
+
+fn cancel_all(a: &mut App, ids: &[JobId]) {
+    for id in ids {
+        a.cancel_job(*id);
+    }
+    wait(a, idle);
+}
+
+#[test]
+fn expanding_one_keeps_the_other() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-exp", 2);
+    let (i1, i2) = (ids[0], ids[1]);
+    a.show_transfers();
+    // De fábrica, las dos con sus detalles.
+    assert!(a.transfers_expanded(i1) && a.transfers_expanded(i2));
+    // «Menos detalles» del 1 pliega solo el 1.
+    click_aux(&mut a, ViewHit::Expand(i1));
+    assert!(!a.transfers_expanded(i1));
+    assert!(a.transfers_expanded(i2));
+    // Expandirlo de nuevo deja las dos expandidas.
+    click_aux(&mut a, ViewHit::Expand(i1));
+    assert!(a.transfers_expanded(i1) && a.transfers_expanded(i2));
+    // Al terminar, el plegado no queda anotado.
+    click_aux(&mut a, ViewHit::Expand(i2));
+    assert!(!a.transfers_expanded(i2));
+    assert_eq!(a.transfers_collapsed_len(), 1);
+    cancel_all(&mut a, &ids);
+    assert_eq!(a.transfers_collapsed_len(), 0);
+}
+
+#[test]
+fn copy_window_caps_height_and_scrolls() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-scr", 5);
+    a.show_transfers();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert!(content > view::MAX_H, "{content}");
+    // El host recibe como mucho el alto máximo.
+    let shown = host.aux_shows().last().unwrap().2;
+    assert_eq!(shown, (view::WIDTH, view::MAX_H));
+    assert!(host.aux_sizes().iter().all(|(_, (_, h))| *h <= view::MAX_H), "{:?}", host.aux_sizes());
+    assert_eq!(a.transfers_scroll(), 0.0);
+    // Lo de abajo no se ve hasta desplazar.
+    let last = *ids.last().unwrap();
+    assert!(find_aux(&a, ViewHit::Cancel(last)).is_none());
+    // La rueda desplaza: el «Cancelar» del 3 sube 200 en la ventana y el clic le llega a ese.
+    let third = ids[2];
+    let (x, y) = find_aux(&a, ViewHit::Cancel(third)).expect("se ve el 3");
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Wheel { dy: 200.0 });
+    assert_eq!(a.transfers_scroll(), 200.0);
+    click_aux_at(&mut a, x, y - 200.0);
+    wait(&mut a, |a| !a.jobs().iter().any(|j| j.id == third));
+    // Más rueda que contenido: queda al fondo y se ve el último, que se cancela con su botón.
+    for _ in 0..10 {
+        a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Wheel { dy: 200.0 });
+    }
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert_eq!(a.transfers_scroll(), content - visible);
+    click_aux(&mut a, ViewHit::Cancel(last));
+    wait(&mut a, |a| !a.jobs().iter().any(|j| j.id == last));
+    // Los demás siguen.
+    for id in [ids[0], ids[1], ids[3]] {
+        assert!(a.jobs().iter().any(|j| j.id == id && j.state == JobState::Running), "{id}");
+    }
+    // Hacia arriba vuelve al principio y no pasa de ahí.
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Wheel { dy: -5000.0 });
+    assert_eq!(a.transfers_scroll(), 0.0);
+    cancel_all(&mut a, &ids);
+}
+
+#[test]
+fn scroll_is_clamped_when_content_shrinks() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-enc", 5);
+    a.show_transfers();
+    a.aux_mouse(AuxWindow::Transfers, 10.0, 10.0, AuxMouse::Wheel { dy: 10_000.0 });
+    assert!(a.transfers_scroll() > 0.0);
+    // Terminan tres: el contenido ya entra y no queda nada desplazado.
+    for id in &ids[..3] {
+        a.cancel_job(*id);
+    }
+    wait(&mut a, |a| a.jobs().len() == 2);
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert!(content <= visible, "{content} {visible}");
+    assert_eq!(a.transfers_scroll(), 0.0);
+    // Plegar uno también achica el contenido y vuelve a limitar.
+    let more = running_copies(&mut a, &f, "app-enc2", 2);
+    a.aux_mouse(AuxWindow::Transfers, 10.0, 10.0, AuxMouse::Wheel { dy: 10_000.0 });
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert_eq!(a.transfers_scroll(), content - visible);
+    click_aux(&mut a, ViewHit::Expand(more[1]));
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert!(a.transfers_scroll() <= (content - visible).max(0.0), "{} {content} {visible}", a.transfers_scroll());
+    cancel_all(&mut a, &ids);
+    cancel_all(&mut a, &more);
+}
+
+#[test]
+fn conflict_scrolls_into_view() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-cv", 4);
+    let root = Path::new("/app-cv-x");
+    f.add_file(&root.join("s").join("x.txt"), b"nuevo".to_vec());
+    f.add_file(&root.join("d").join("x.txt"), b"viejo".to_vec());
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![root.join("s").join("x.txt")], dest: root.join("d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == id && j.state == JobState::Conflict));
+    // El conflicto está al fondo y la ventana se desplazó hasta él: se ven sus botones.
+    let expanded = |k| a.transfers_expanded(k);
+    let (top, bottom) = view::block_span(a.jobs(), &expanded, id).expect("el bloque del conflicto");
+    let (_, visible) = a.transfers_size();
+    let scroll = a.transfers_scroll();
+    assert!(top >= scroll && bottom <= scroll + visible, "{top}..{bottom} con {scroll}+{visible}");
+    assert!(find_aux(&a, ViewHit::Choose(id, Choice::Skip)).is_some());
+    a.answer_job(id, Answer { choice: Choice::Skip, all: false });
+    cancel_all(&mut a, &ids);
 }

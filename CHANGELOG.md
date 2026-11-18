@@ -26,6 +26,7 @@
 - En xtree, los colores del mapa pasan de la `T` a `Ctrl+T` / `⌘T` (se cambia en Atajos de teclado): la `T` ahora salta a la carpeta que empieza con T.
 - En xtree, analizar de nuevo con permisos pasa de la `A` a `Ctrl+Shift+A` / `⇧⌘A`: ninguna letra sola hace otra cosa que ir a la carpeta que empieza así.
 - Eliminar muestra su avance en la ventana de copia de xdir (con Pausa y Cancelar) en vez del diálogo de Windows, y en un disco sin Papelera avisa antes de eliminar definitivamente.
+- La ventana de copia muestra los detalles y el gráfico de todas las copias en curso a la vez (cada una se pliega por separado) y, si no entran, se desplaza con la rueda o la barra de la derecha.
 
 ### Arreglos
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.

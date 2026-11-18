@@ -132,12 +132,14 @@ pub enum AuxProgress {
 }
 
 /// Lo que hace el mouse sobre una ventana secundaria (`App::aux_mouse`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AuxMouse {
     Move,
     Down,
     Up,
     Leave,
+    /// La rueda o el trackpad: cuánto se desplaza el contenido, en DIPs (positivo hacia abajo).
+    Wheel { dy: f32 },
 }
 
 /// La ventana principal. Los tamaños y posiciones están en DIPs: el host lee el DPI de su ventana.

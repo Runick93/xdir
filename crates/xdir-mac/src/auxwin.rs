@@ -148,9 +148,26 @@ define_class!(
             self.mouse(event, AuxMouse::Down);
         }
 
+        /// Con el botón apretado (arrastrar el pulgar de la barra) llega esto en vez de `mouseMoved:`.
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.mouse(event, AuxMouse::Move);
+        }
+
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             self.mouse(event, AuxMouse::Up);
+        }
+
+        /// La rueda o el trackpad desplazan el contenido, como en la ventana principal: el trackpad
+        /// da puntos; la rueda, «clics» de tres filas de 24 puntos.
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let k = if event.hasPreciseScrollingDeltas() { 1.0 } else { 3.0 * 24.0 };
+            let dy = -(event.scrollingDeltaY() as f32) * k;
+            if dy != 0.0 {
+                self.mouse(event, AuxMouse::Wheel { dy });
+            }
         }
 
         #[unsafe(method(mouseExited:))]

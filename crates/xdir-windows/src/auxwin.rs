@@ -18,6 +18,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARA
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
+    ScreenToClient,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -523,6 +524,34 @@ fn mouse_dips(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
     (x / k, y / k)
 }
 
+/// DIPs que se desplaza una línea de la rueda (como una fila de las listas).
+const WHEEL_LINE: f32 = 24.0;
+
+/// Líneas por cada paso de la rueda (Configuración de Windows ▸ Mouse), como en la principal.
+fn wheel_lines() -> f32 {
+    let mut lines = 3u32;
+    unsafe {
+        let _ = SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, Some(&mut lines as *mut _ as *mut std::ffi::c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+    }
+    // u32::MAX es «una pantalla por clic»: se aproxima con 10 filas, como en la principal.
+    if lines == u32::MAX { 10.0 } else { lines as f32 }
+}
+
+/// La rueda sobre la ventana: `wparam` trae los pasos (positivo hacia arriba, como en la
+/// principal) y `lparam` el punto en la pantalla.
+fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let Some(main) = with(|a| a.main) else { return };
+    if !input_ok(main) {
+        return;
+    }
+    let steps = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / WHEEL_DELTA as f32;
+    let mut pt = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+    let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
+    let k = dpi_of(hwnd) as f32 / 96.0;
+    let dy = -steps * wheel_lines() * WHEEL_LINE;
+    with_app(main, |app| app.aux_mouse(AuxWindow::Transfers, pt.x as f32 / k, pt.y as f32 / k, AuxMouse::Wheel { dy }));
+}
+
 fn mouse(hwnd: HWND, lparam: LPARAM, ev: AuxMouse) {
     let Some(main) = with(|a| a.main) else { return };
     if !input_ok(main) {
@@ -582,6 +611,10 @@ unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             WM_LBUTTONUP => {
                 let _ = ReleaseCapture();
                 mouse(hwnd, lparam, AuxMouse::Up);
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                wheel(hwnd, wparam, lparam);
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {

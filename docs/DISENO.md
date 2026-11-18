@@ -226,7 +226,9 @@ Medidas que fija el diseño:
 - Ventana de copia: 560 de ancho y el alto del contenido (con «Más detalles» y dos trabajos en la cola, 32 + 410 = 442; con
   «Menos detalles», 276; con un conflicto, 468; con errores, 365). Margen 16; encabezado en Ui (`text_secondary`) y el
   porcentaje en Title; Pausa y Cancelar de 84×26. Se abre centrada sobre xdir; la cola crece hacia abajo y, si no entra,
-  se desplaza.
+  se desplaza. Como en Windows, cada trabajo en curso muestra sus detalles y se pliega por separado; la ventana crece
+  hasta 640 de alto y, pasado eso, el contenido se desplaza con la rueda o con la barra delgada de la derecha (riel de
+  12, pulgar de 6 con radio 3 en `scrollbar`, como en las listas).
 - Gráfico de velocidad: 528×100 (el ancho de la ventana menos los márgenes), fondo `background`, borde y radio 4, guías al
   25/50/75 %, área en acento al 28 % con su línea de 1,5, escala hasta el máximo visto (80 MB/s en el ejemplo).
 - Fila de la cola: 560×64 (56 en cola), barra de 4 de 440 desde x = 40, botones de 24.

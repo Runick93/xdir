@@ -292,7 +292,7 @@ fn second_eject_does_not_drop_the_first() {
 
 // ---------- ventana de copia ----------
 
-use crate::host::{AuxMouse, AuxWindow};
+use crate::host::{AuxMouse, AuxProgress, AuxWindow};
 use crate::sys::testing::FakeShell;
 use crate::transfer::view::{self, ViewHit};
 
@@ -570,20 +570,25 @@ fn dismiss_errors_hides_window() {
     let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wd/s/b.txt")], dest: p("/app-wd/d") });
     wait(&mut a, idle);
     assert!(host.aux_visible());
+    // Con errores, el avance va en rojo.
+    assert!(host.aux_progresses().contains(&AuxProgress::Error(1.0)), "{:?}", host.aux_progresses());
     click_aux(&mut a, ViewHit::Dismiss(id));
     assert!(a.jobs().is_empty());
     assert!(!host.aux_visible());
+    assert_eq!(host.aux_progresses().last(), Some(&AuxProgress::None));
 }
 
 #[test]
 fn pause_resume_cancel_buttons() {
     let f = fake();
-    let (mut a, _host) = app_window();
+    let (mut a, host) = app_window();
     let id = a.start_transfer(slow_copy(&f, "/app-wp", 20));
     wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
     a.on_transfer_due(id);
     click_aux(&mut a, ViewHit::Pause(id));
     assert!(a.jobs()[0].paused);
+    // En pausa, el avance va en amarillo.
+    assert!(matches!(host.aux_progresses().last(), Some(AuxProgress::Paused(_))), "{:?}", host.aux_progresses());
     assert!(aux_texts(&mut a).iter().any(|t| t == "Reanudar"));
     click_aux(&mut a, ViewHit::Resume(id));
     assert!(!a.jobs()[0].paused);
@@ -629,6 +634,22 @@ fn indicator_click_reopens() {
     assert_eq!(host.aux_shows().len(), 2);
     a.cancel_job(id);
     wait(&mut a, idle);
+}
+
+#[test]
+fn copy_window_reports_taskbar_progress() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wtb", 5));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    let reported = host.aux_progresses();
+    assert!(matches!(reported.last(), Some(AuxProgress::Normal(x)) if (0.0..=1.0).contains(x)), "{reported:?}");
+    // En milésimas: no se manda un avance por cada bloque copiado.
+    assert!(matches!(reported.last(), Some(AuxProgress::Normal(x)) if ((x * 1000.0).round() - x * 1000.0).abs() < 1e-3), "{reported:?}");
+    f.set_slow(&p("/app-wtb/s/grande.bin"), None);
+    wait(&mut a, idle);
+    assert_eq!(host.aux_progresses().last(), Some(&AuxProgress::None));
 }
 
 #[test]

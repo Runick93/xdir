@@ -21,7 +21,7 @@ use std::time::Instant;
 use super::App;
 use crate::config::ConfigEdit;
 use crate::geom::rect;
-use crate::host::{AuxMouse, AuxWindow};
+use crate::host::{AuxMouse, AuxProgress, AuxWindow};
 use crate::keys::{Key, keys::VK_ESCAPE};
 use crate::ops::Undo;
 use crate::paint::Painter;
@@ -92,6 +92,8 @@ struct CopyWindow {
     /// El último tamaño pedido (para no repetir `aux_resize`) y el último título.
     size: (f32, f32),
     title: String,
+    /// El último avance enviado al host (para no repetir `aux_progress`).
+    progress: Option<AuxProgress>,
 }
 
 /// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
@@ -570,6 +572,7 @@ impl App {
             w.size = size;
             w.title = title;
             host.aux_invalidate(AuxWindow::Transfers);
+            self.sync_transfers_progress();
         } else {
             self.transfers.window.shown = false;
             if !self.auto_skip() {
@@ -592,6 +595,7 @@ impl App {
         let host = self.host.clone();
         if self.transfers.jobs.is_empty() {
             self.transfers.window = CopyWindow::default();
+            host.aux_progress(AuxWindow::Transfers, AuxProgress::None);
             host.aux_hide(AuxWindow::Transfers);
             return;
         }
@@ -606,6 +610,27 @@ impl App {
             self.transfers.window.title = title;
         }
         host.aux_invalidate(AuxWindow::Transfers);
+        self.sync_transfers_progress();
+    }
+
+    /// Le pasa al host el avance de la cola, solo si cambió desde la última vez.
+    fn sync_transfers_progress(&mut self) {
+        let jobs = &self.transfers.jobs;
+        // En milésimas (lo que distingue la barra de tareas): así «solo si cambió» no manda un
+        // avance por cada bloque copiado.
+        let value = (self.transfers_progress().unwrap_or(0.0) * 1000.0).round() / 1000.0;
+        let open: Vec<&JobView> = jobs.iter().filter(|j| j.state != JobState::Done).collect();
+        let p = if self.transfers_failed() {
+            AuxProgress::Error(value)
+        } else if !open.is_empty() && open.iter().all(|j| j.paused) {
+            AuxProgress::Paused(value)
+        } else {
+            AuxProgress::Normal(value)
+        };
+        if self.transfers.window.progress != Some(p) {
+            self.transfers.window.progress = Some(p);
+            self.host.aux_progress(AuxWindow::Transfers, p);
+        }
     }
 
     /// Avance total de la cola para el indicador de la barra de estado (`None` sin trabajos).

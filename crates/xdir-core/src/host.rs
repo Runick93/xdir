@@ -121,6 +121,16 @@ pub enum AuxWindow {
     Transfers,
 }
 
+/// El avance de la cola de copias para el host (la barra de tareas en Windows): sin avance, en
+/// curso, en pausa o con errores; el número va de 0.0 a 1.0.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AuxProgress {
+    None,
+    Normal(f32),
+    Paused(f32),
+    Error(f32),
+}
+
 /// Lo que hace el mouse sobre una ventana secundaria (`App::aux_mouse`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AuxMouse {
@@ -248,4 +258,7 @@ pub trait WindowHost {
     fn aux_invalidate(&self, _w: AuxWindow) {}
     /// La oculta (sin avisar `aux_closed`).
     fn aux_hide(&self, _w: AuxWindow) {}
+    /// El avance de la cola para la ventana (la barra de tareas); `None` lo quita. Solo se llama
+    /// cuando cambia.
+    fn aux_progress(&self, _w: AuxWindow, _p: AuxProgress) {}
 }

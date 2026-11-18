@@ -1449,6 +1449,7 @@ pub struct FakeHost {
     aux_sizes: RefCell<Vec<(AuxWindow, (f32, f32))>>,
     aux_invalidations: Cell<usize>,
     aux_hides: Cell<usize>,
+    aux_progresses: RefCell<Vec<crate::host::AuxProgress>>,
     aux_visible: Cell<bool>,
 }
 
@@ -1480,6 +1481,7 @@ impl FakeHost {
             aux_sizes: RefCell::new(Vec::new()),
             aux_invalidations: Cell::new(0),
             aux_hides: Cell::new(0),
+            aux_progresses: RefCell::new(Vec::new()),
             aux_visible: Cell::new(false),
         })
     }
@@ -1507,6 +1509,11 @@ impl FakeHost {
     /// Cuántas veces se ocultó una ventana secundaria desde la `App`.
     pub fn aux_hides(&self) -> usize {
         self.aux_hides.get()
+    }
+
+    /// Los avances pedidos con `aux_progress`, en orden.
+    pub fn aux_progresses(&self) -> Vec<crate::host::AuxProgress> {
+        self.aux_progresses.borrow().clone()
     }
 
     /// La ventana secundaria está a la vista (`aux_show` sin `aux_hide` después).
@@ -1766,6 +1773,10 @@ impl WindowHost for FakeHost {
 
     fn aux_invalidate(&self, _w: AuxWindow) {
         self.aux_invalidations.set(self.aux_invalidations.get() + 1);
+    }
+
+    fn aux_progress(&self, _w: AuxWindow, p: crate::host::AuxProgress) {
+        self.aux_progresses.borrow_mut().push(p);
     }
 
     fn aux_hide(&self, _w: AuxWindow) {

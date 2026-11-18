@@ -229,8 +229,6 @@ pub struct Session {
     pub show_tree: bool,
     /// Árbol fijo al lado de los paneles (si no, queda la franja de íconos y se expande al asomar el mouse).
     pub tree_pinned: bool,
-    /// Grupo "Acceso rápido" del árbol desplegado (se puede plegar para no scrollear tanto).
-    pub quick_open: bool,
     /// Grupo de paneles activo (el que se guarda solo con cada cambio).
     pub group: Option<String>,
     /// Columna de vista previa prendida, y su ancho (240–640).
@@ -279,7 +277,6 @@ impl Default for Session {
             tree_follow: None,
             show_tree: true,
             tree_pinned: true,
-            quick_open: true,
             group: None,
             preview_on: false,
             preview_width: crate::ui::PREVIEW_W,
@@ -343,8 +340,6 @@ fn write(s: &Session) -> String {
 ", s.show_tree);
     out += &format!("arbol_fijo = {}
 ", s.tree_pinned);
-    out += &format!("arbol_rapido = {}
-", s.quick_open);
     out += &format!("vista_previa = {}\n", s.preview_on);
     out += &format!("vista_previa_ancho = {}\n", s.preview_width.round());
     // Las secciones de siempre (bits 0–6, lo que entiende un xdir anterior) y la suma de
@@ -478,7 +473,6 @@ fn parse(text: &str) -> Session {
                 let bit = crate::info::Section::Checksum.bit();
                 s.info_sections = if boolean() == Some(true) { s.info_sections | bit } else { s.info_sections & !bit };
             }
-            ("arbol_rapido", None) => s.quick_open = boolean().unwrap_or(true),
             ("xtree_ultimo", None) => s.xtree_last = parse_list(&format!("[{value}]")).into_iter().next().filter(|p| !p.is_empty()).map(PathBuf::from),
             ("xtree_dias", None) => s.xtree_days = int().filter(|d| [7, 30, 90].contains(d)).map_or(7, |d| d as u16),
             ("version_vista", None) => s.seen_version = Some(value.trim_matches('"').trim().to_string()).filter(|v| !v.is_empty()),
@@ -712,7 +706,6 @@ mod tests {
             tree_follow: Some(false),
             show_tree: true,
             tree_pinned: false,
-            quick_open: true,
             group: Some("Trabajo".into()),
             preview_on: false,
             preview_width: 320.0,
@@ -757,6 +750,9 @@ mod tests {
         assert_eq!(parse("layout = 2\n").xtree_days, 7);
         assert_eq!(parse("xtree_dias = 90\n").xtree_days, 90);
         assert_eq!(parse("xtree_dias = 12\n").xtree_days, 7);
+        // «Acceso rápido» ya no es un grupo del árbol: lo que guardaban las sesiones de antes se
+        // ignora.
+        assert_eq!(parse("arbol_rapido = false\nlayout = 2\n").layout, 2);
     }
 
     /// La pestaña Novedades va como `xdir:novedades`; la versión vista, como `version_vista`. Una

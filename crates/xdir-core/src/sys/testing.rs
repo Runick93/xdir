@@ -640,6 +640,8 @@ thread_local! {
     static CLOUD_CHECKS: Cell<usize> = const { Cell::new(0) };
     /// Carpeta que el falso trata como la Papelera (por hilo; ver `set_trash`).
     static TRASH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Carpetas del usuario del falso (por hilo; ver `set_user_folders`).
+    static USER_FOLDERS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
@@ -659,6 +661,12 @@ impl FakeFileSystem {
     /// Desde ahora (en este hilo) `is_trash` dice que sí para esa carpeta (o para ninguna).
     pub fn set_trash(path: Option<&Path>) {
         TRASH.with(|t| *t.borrow_mut() = path.map(Path::to_path_buf));
+    }
+
+    /// Carpetas del usuario que ve este hilo, en el orden de `user_folder` (Escritorio,
+    /// Descargas, …). Con una lista vacía vuelve a no haber ninguna.
+    pub fn set_user_folders(paths: &[&Path]) {
+        USER_FOLDERS.with(|u| *u.borrow_mut() = paths.iter().map(|p| p.to_path_buf()).collect());
     }
 
     /// Cuántas veces se preguntó `cloud_only` en este hilo (las vistas rápidas lo preguntan por
@@ -889,8 +897,8 @@ impl FileSystem for FakeFileSystem {
         e
     }
 
-    fn user_folder(&self, _i: usize) -> Option<PathBuf> {
-        None
+    fn user_folder(&self, i: usize) -> Option<PathBuf> {
+        USER_FOLDERS.with(|u| u.borrow().get(i).cloned())
     }
 
     fn drives(&self) -> Vec<PathBuf> {

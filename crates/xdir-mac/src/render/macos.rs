@@ -593,6 +593,8 @@ fn symbol_name(ch: char) -> Option<&'static str> {
         0xE73F => "arrow.down.right.and.arrow.up.left",
         0xE740 => "arrow.up.left.and.arrow.down.right",
         0xE74A => "arrow.up",
+        // La Papelera del árbol.
+        0xE74D => "trash",
         0xE74E => "square.and.arrow.down",
         0xE753 => "cloud",
         0xE756 => "terminal",

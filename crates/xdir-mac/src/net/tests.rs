@@ -16,7 +16,10 @@ fn mac_error_codes() {
     assert_eq!(mac_error(60, h, "fotos"), NetError::Timeout { host: "nas".into() });
     assert_eq!(mac_error(89, h, ""), NetError::Cancelled);
     assert_eq!(mac_error(-128, h, ""), NetError::Cancelled);
-    assert_eq!(mac_error(5, h, ""), NetError::Other("error 5".into()));
+    // Lo demás, con el motivo si se sabe y si no, con el texto y el código del sistema.
+    assert_eq!(mac_error(5, h, ""), NetError::Other("Error inesperado del sistema (Input/output error; macOS: errno 5)".into()));
+    assert_eq!(mac_error(13, h, ""), NetError::Other("No tenés permiso: pedí acceso a quien administra esa carpeta".into()));
+    assert_eq!(mac_error(-5000, h, ""), NetError::Other("Error inesperado del sistema (macOS: NetFS -5000)".into()));
 }
 
 #[test]

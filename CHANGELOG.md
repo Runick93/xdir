@@ -28,6 +28,7 @@
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.
 - El árbol de carpetas ya muestra u oculta las carpetas ocultas al cambiar «Mostrar archivos ocultos», sin tener que plegarlo y desplegarlo de nuevo; lo desplegado queda como estaba.
+- En Windows, minimizar la ventana de copia la deja en la barra de tareas, con el avance en verde sobre su ícono (amarillo en pausa, rojo con errores); antes se ocultaba y solo se recuperaba desde la barra de estado.
 
 ## 0.2.0 — 2026-11-11
 

@@ -7,5 +7,6 @@ mod messages;
 mod uia;
 mod win;
 pub use win::run;
+pub(crate) use win::app_icon;
 
 use xdir_core::app::{App, CursorKind, INITIAL_SIZE, Init, ms_since, startup_args};

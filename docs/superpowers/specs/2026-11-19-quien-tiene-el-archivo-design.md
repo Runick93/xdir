@@ -137,3 +137,20 @@ Contenido (el mismo estilo que la ventana de copia, 560 de ancho):
 - La redacción final de los textos y cuál nombre mostrar (el amigable del Restart Manager o el del
   `.exe`).
 - El límite de cuántos archivos se listan antes de pasar a scroll o «y N más».
+
+## Cambio de diseño (2026-11-19, después de probarlo)
+
+Al probarlo con borrar, la ventana nueva se abría pegada a la de errores de la ventana de copia
+(«Terminó con 1 error») y las dos se pisaban: molesto. Decisión de Leandro: **los trabajos del motor
+(borrar, copiar, mover) muestran quién lo tiene dentro de la fila del error de la ventana de copia**,
+sin ventana nueva. La ventana nueva queda **solo para las operaciones sueltas** (renombrar y demás,
+las que no tienen ventana de errores).
+
+- Fila de error con holders: a la derecha, en vez de «Lo está usando otro programa», dos líneas:
+  «En uso por PowerShell 7» (y «y N más» si hay otros programas) y, debajo, en texto secundario,
+  «PID 24012 · usuario DEV-WKS-01\Leandro-Dev» (o «usuario desconocido»), con puntos suspensivos si
+  no entra. Las filas sin holders no cambian.
+- El motor ya guarda los holders en `JobError.holders`; no cambia nada en Windows.
+- Se saca el camino «trabajo → ventana nueva» (`InUseDialog::from_job`, `InUseRetry::Job`, el cierre al
+  olvidar el trabajo, la apertura en `on_job_done`) y lo que solo servía a eso.
+- «Reintentar» de la ventana de copia sigue siendo el reintento de los trabajos.

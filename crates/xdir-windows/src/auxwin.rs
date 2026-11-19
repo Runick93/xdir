@@ -1,14 +1,15 @@
 //! Ventanas secundarias del sistema cuyo contenido dibuja el núcleo (`WindowHost::aux_*`): la
 //! ventana de copia y la de «archivo en uso» (`AuxWindow`), las dos de la clase `xdir.aux` y con
-//! su estado en una casilla propia (`slot`). Solo la de copia lleva el avance en el botón de la
-//! barra de tareas (`carries_progress`). La de copia, como la de Windows: barra de título del sistema con
-//! minimizar y cerrar, dueña la principal pero con su propio botón en la barra de tareas (con el
-//! ícono de xdir y el avance de la cola encima: `set_progress`), sin redimensionar (el alto lo
-//! pone el contenido con `aux_resize`), centrada sobre la ventana de xdir la primera vez (sin
-//! salirse del área de trabajo de su monitor) y después donde la dejó el usuario (mientras dure
-//! la sesión). Dibuja con un `Renderer` propio llamando a `App::paint_aux`; el mouse y las teclas
-//! van a `App::aux_mouse` / `App::aux_key`; minimizarla la deja en la barra de tareas; cerrarla la
-//! oculta (`App::aux_closed`, sin botón en la barra) y los trabajos siguen.
+//! su estado en una casilla propia (`slot`). Las dos tienen la barra de título del sistema con
+//! minimizar y cerrar, son dueñas de la principal pero con su propio botón en la barra de tareas
+//! (con el ícono de xdir), no se redimensionan (el alto lo pone el contenido con `aux_resize`), se
+//! centran sobre la ventana de xdir la primera vez (sin salirse del área de trabajo de su monitor)
+//! y después van donde las dejó el usuario (mientras dure la sesión). Solo la de copia lleva el
+//! avance de la cola encima de su botón (`set_progress`, `carries_progress`); la de «archivo en
+//! uso» tiene el botón sin avance. Dibujan con un `Renderer` propio llamando a `App::paint_aux`; el
+//! mouse y las teclas van a `App::aux_mouse` / `App::aux_key`; minimizarlas las deja en la barra
+//! de tareas; cerrarlas las oculta (`App::aux_closed`, sin botón en la barra) y los trabajos
+//! siguen.
 //!
 //! Sigue el modelo de `quicklook/window.rs`: estado en un `thread_local` del hilo de interfaz que
 //! nunca queda prestado mientras se llama a algo que mande mensajes a la ventana.
@@ -130,10 +131,10 @@ pub fn client_to_window_size(client: SIZE, border: RECT) -> SIZE {
     SIZE { cx: client.cx + (border.right - border.left), cy: client.cy + (border.bottom - border.top) }
 }
 
-/// ¿La ventana de copia puede pasarle el mouse y el teclado a la `App`? No mientras la principal
-/// está deshabilitada (un cuadro de mensaje suyo) ni mientras el host está adentro de un diálogo,
-/// un menú o un arrastre (`Modal`): la `App` está ocupada esperando esa respuesta y no se le
-/// puede entrar de nuevo.
+/// ¿Una ventana auxiliar (la de copia o la de «archivo en uso») puede pasarle el mouse y el teclado
+/// a la `App`? No mientras la principal está deshabilitada (un cuadro de mensaje suyo) ni mientras
+/// el host está adentro de un diálogo, un menú o un arrastre (`Modal`): la `App` está ocupada
+/// esperando esa respuesta y no se le puede entrar de nuevo.
 pub fn accepts_input(main_enabled: bool, modal_depth: u32) -> bool {
     main_enabled && modal_depth == 0
 }

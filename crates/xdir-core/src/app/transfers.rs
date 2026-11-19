@@ -1143,6 +1143,7 @@ impl App {
     fn forget_job(&mut self, id: JobId) {
         self.transfers.jobs.retain(|j| j.id != id);
         self.transfers.meta.remove(&id);
+        self.in_use_forget_job(id);
     }
 
     fn job_ctl(&self, id: JobId) -> Option<Arc<Control>> {

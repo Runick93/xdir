@@ -12,6 +12,7 @@ use crate::host::{AuxMouse, AuxWindow};
 use crate::in_use::{InUseDialog, InUseRetry};
 use crate::in_use_draw::{self, InUseHit};
 use crate::paint::Painter;
+use crate::transfer::JobId;
 
 /// La ventana abierta: lo que muestra, el botón bajo el mouse y el apretado.
 pub(super) struct InUseState {
@@ -27,14 +28,13 @@ fn size_of(d: &InUseDialog) -> (f32, f32) {
 
 impl App {
     /// Abre la ventana con `d`. Si ya estaba abierta, reemplaza su contenido (título, tamaño y
-    /// texto). Si el host no tiene esta ventana, no hace nada (queda el aviso de la barra de estado).
+    /// texto) y la vuelve a mostrar, así una minimizada vuelve sin quitarle el foco a nadie. Si el
+    /// host no tiene esta ventana, no hace nada (queda el aviso de la barra de estado).
     pub fn open_in_use(&mut self, d: InUseDialog) {
         let host = self.host.clone();
         let size = size_of(&d);
-        if self.in_use.is_some() {
-            host.aux_set_title(AuxWindow::InUse, &d.title);
-            host.aux_resize(AuxWindow::InUse, size);
-        } else if !host.aux_show(AuxWindow::InUse, &d.title, size) {
+        if !host.aux_show(AuxWindow::InUse, &d.title, size) {
+            self.in_use = None;
             return;
         }
         self.in_use = Some(InUseState { dialog: d, hover: None, pressed: None });
@@ -93,6 +93,15 @@ impl App {
     /// El usuario cerró la ventana (desde `aux_closed`): se olvida lo que mostraba.
     pub(super) fn in_use_closed(&mut self) {
         self.in_use = None;
+    }
+
+    /// Se olvidó el trabajo `id` (se descartó o se reintentó desde la ventana de copia): si la
+    /// ventana abierta es la de ese trabajo, ya no tiene a qué volver, así que se cierra.
+    pub(super) fn in_use_forget_job(&mut self, id: JobId) {
+        if self.in_use.as_ref().is_some_and(|s| s.dialog.retry == InUseRetry::Job(id)) {
+            self.in_use = None;
+            self.host.clone().aux_hide(AuxWindow::InUse);
+        }
     }
 
     /// «Reintentar»: lo que falló se vuelve a hacer, con el reintento de su origen (la operación

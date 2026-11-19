@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::host::{AuxMouse, AuxWindow};
-use crate::in_use::InUseDialog;
+use crate::in_use::{InUseDialog, InUseRetry};
 use crate::in_use_draw::{self, InUseHit};
 use crate::keys::keys::VK_RETURN;
 use crate::sys::testing::{AuxShow, FakeCopyPrims, FakeFileOps, FakeHost};
@@ -224,20 +224,67 @@ fn cancelled_job_opens_nothing() {
 fn second_failure_replaces_the_window() {
     let (mut a, host) = app_window();
     failed_rename(&mut a, "/iu-dos/a.txt", "b.txt", vec![excel()]);
-    let resized_before = host.aux_sizes().iter().filter(|s| s.0 == AuxWindow::InUse).count();
     failed_rename(&mut a, "/iu-dos/c.txt", "d.txt", vec![excel(), word()]);
+    // Se vuelve a mostrar (así trae de vuelta una ventana minimizada), con el título y tamaño del segundo.
     let shows = in_use_shows(&host);
-    assert_eq!(shows.len(), 1, "no abre otra: {shows:?}");
-    // El título y el tamaño son los del segundo.
-    assert_eq!(shows[0].1, "No se pudo renombrar «c.txt» como «d.txt»");
+    assert_eq!(shows.len(), 2, "{shows:?}");
+    assert_eq!(shows[1].1, "No se pudo renombrar «c.txt» como «d.txt»");
     let d = a.in_use_dialog().expect("abierta").clone();
     assert_eq!(d.title, "No se pudo renombrar «c.txt» como «d.txt»");
     assert_eq!(d.groups.len(), 2);
-    let sizes: Vec<(f32, f32)> = host.aux_sizes().into_iter().filter(|s| s.0 == AuxWindow::InUse).map(|s| s.1).collect();
-    assert_eq!(sizes.len(), resized_before + 1, "{sizes:?}");
-    assert_eq!(sizes.last(), Some(&(in_use_draw::WIDTH, in_use_draw::height(&d))));
+    assert_eq!(shows[1].2, (in_use_draw::WIDTH, in_use_draw::height(&d)));
     let t = texts_of(&mut a, AuxWindow::InUse);
     assert!(t.iter().any(|s| s == "Microsoft Word (WINWORD.EXE)"), "{t:?}");
+}
+
+#[test]
+fn forgetting_the_job_closes_its_window() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    locked_delete(&mut a, &f, "/iu-olv", &["a.txt"]);
+    wait(&mut a, idle);
+    assert!(a.in_use_dialog().is_some());
+    let id = a.jobs()[0].id;
+    // Descartar el trabajo desde la ventana de copia cierra la de «en uso».
+    a.cancel_job(id);
+    assert!(a.in_use_dialog().is_none());
+    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 1);
+    assert!(!host.aux_visible_of(AuxWindow::InUse));
+}
+
+#[test]
+fn retrying_the_job_from_the_copy_window_closes_its_window() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    locked_delete(&mut a, &f, "/iu-rtj", &["a.txt"]);
+    wait(&mut a, idle);
+    let id = a.jobs()[0].id;
+    a.retry_job(id);
+    assert!(a.in_use_dialog().is_none());
+    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 1);
+    wait(&mut a, idle);
+}
+
+#[test]
+fn forgetting_another_job_or_an_op_window_keeps_it_open() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    locked_delete(&mut a, &f, "/iu-k1", &["a.txt"]);
+    wait(&mut a, idle);
+    let first = a.jobs()[0].id;
+    locked_delete(&mut a, &f, "/iu-k2", &["b.txt"]);
+    wait(&mut a, idle);
+    let second = a.jobs().iter().map(|j| j.id).find(|i| *i != first).expect("segundo trabajo");
+    assert_eq!(a.in_use_dialog().map(|d| d.retry.clone()), Some(InUseRetry::Job(second)));
+    // Otro trabajo: la ventana (del segundo) sigue.
+    a.cancel_job(first);
+    assert!(a.in_use_dialog().is_some());
+    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 0);
+    // Una ventana de operación suelta tampoco se cierra por olvidar un trabajo.
+    failed_rename(&mut a, "/iu-k3/a.txt", "b.txt", vec![excel()]);
+    a.cancel_job(second);
+    assert!(a.in_use_dialog().is_some());
+    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 0);
 }
 
 #[test]

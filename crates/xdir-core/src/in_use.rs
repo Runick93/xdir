@@ -62,7 +62,7 @@ impl InUseDialog {
     /// La ventana de una operación suelta que falló; `f.items` no está vacío y tiene holders.
     pub fn from_op(f: &InUseFailure) -> InUseDialog {
         let path = f.items.first().map(|i| i.path.clone()).unwrap_or_default();
-        let (groups, more_groups) = split_groups(group_all(&f.items));
+        let (groups, more_groups) = split_groups(group_all(f.items.iter().map(|i| (i.path.clone(), crate::sys::shown_name(&i.path), i.holders.as_slice()))));
         InUseDialog { title: format!("No se pudo {}", ops::doing(&f.op, &path)), groups, more_groups, retry: InUseRetry::Op(f.op.clone()) }
     }
 
@@ -72,8 +72,9 @@ impl InUseDialog {
         let with: Vec<&JobError> = errors.iter().filter(|e| !e.holders.is_empty()).collect();
         let first = with.first()?;
         let title = if with.len() == 1 { format!("«{}» está en uso", first.shown_name()) } else { format!("{} elementos están en uso", with.len()) };
-        let items: Vec<InUseItem> = with.iter().map(|e| InUseItem { path: PathBuf::from(e.shown_name()), holders: e.holders.clone() }).collect();
-        let (groups, more_groups) = split_groups(group_all(&items));
+        // Un archivo se distingue por su ruta entera (dos `config.json` de carpetas distintas son dos); el nombre es solo para mostrar.
+        let all = group_all(with.iter().map(|e| (e.src.join(e.entry.as_deref().unwrap_or("")), e.shown_name(), e.holders.as_slice())));
+        let (groups, more_groups) = split_groups(all);
         Some(InUseDialog { title, groups, more_groups, retry: InUseRetry::Job(id) })
     }
 
@@ -93,9 +94,17 @@ impl InUseDialog {
     }
 
     /// «Microsoft Excel (EXCEL.EXE)»; solo el nombre si no hay ejecutable o es el mismo.
+    /// Sin nombre se usa el ejecutable, y sin ninguno de los dos, «Proceso <pid>».
     pub fn holder_label(h: &Holder) -> String {
-        match &h.exe {
-            Some(exe) if *exe != h.name => format!("{} ({exe})", h.name),
+        let exe = h.exe.as_deref().filter(|e| !e.trim().is_empty());
+        if h.name.trim().is_empty() {
+            return match exe {
+                Some(exe) => exe.to_string(),
+                None => format!("Proceso {}", h.pid),
+            };
+        }
+        match exe {
+            Some(exe) if exe != h.name => format!("{} ({exe})", h.name),
             _ => h.name.clone(),
         }
     }
@@ -106,23 +115,25 @@ impl InUseDialog {
     }
 }
 
-/// Todos los programas con todos sus archivos, por `pid` y en orden de aparición.
-fn group_all(items: &[InUseItem]) -> Vec<(Holder, Vec<String>)> {
-    let mut all: Vec<(Holder, Vec<String>)> = Vec::new();
-    for it in items {
-        let name = crate::sys::shown_name(&it.path);
-        for h in &it.holders {
-            match all.iter_mut().find(|(g, _)| g.pid == h.pid) {
-                Some((_, files)) => {
-                    if !files.contains(&name) {
+/// Todos los programas con todos sus archivos, por `pid` y en orden de aparición. Cada archivo es
+/// `(clave, nombre a mostrar, holders)`: la clave (su ruta) los distingue y el nombre solo se muestra.
+fn group_all<'a>(items: impl Iterator<Item = (PathBuf, String, &'a [Holder])>) -> Vec<(Holder, Vec<String>)> {
+    // El programa, las claves de sus archivos y los nombres que se muestran.
+    let mut all: Vec<(Holder, Vec<PathBuf>, Vec<String>)> = Vec::new();
+    for (key, name, holders) in items {
+        for h in holders {
+            match all.iter_mut().find(|(g, _, _)| g.pid == h.pid) {
+                Some((_, keys, files)) => {
+                    if !keys.contains(&key) {
+                        keys.push(key.clone());
                         files.push(name.clone());
                     }
                 }
-                None => all.push((h.clone(), vec![name.clone()])),
+                None => all.push((h.clone(), vec![key.clone()], vec![name.clone()])),
             }
         }
     }
-    all
+    all.into_iter().map(|(h, _, files)| (h, files)).collect()
 }
 
 /// Aplica los límites: `MAX_GROUPS` programas con `MAX_FILES` archivos cada uno; devuelve los que sobran.
@@ -144,7 +155,7 @@ fn split_groups(all: Vec<(Holder, Vec<String>)>) -> (Vec<HolderGroup>, usize) {
 /// sobran no se devuelven (ver `from_op` y `from_job`, que cuentan `more_groups`).
 #[cfg(test)]
 fn group(items: &[InUseItem]) -> Vec<HolderGroup> {
-    split_groups(group_all(items)).0
+    split_groups(group_all(items.iter().map(|i| (i.path.clone(), crate::sys::shown_name(&i.path), i.holders.as_slice())))).0
 }
 
 #[cfg(test)]
@@ -209,6 +220,30 @@ mod tests {
         assert_eq!(InUseDialog::holder_label(&h), "Microsoft Excel");
         h.exe = None;
         assert_eq!(InUseDialog::holder_label(&h), "Microsoft Excel");
+    }
+
+    #[test]
+    fn label_without_name_uses_exe_or_pid() {
+        let mut h = Holder { name: "  ".into(), exe: Some("EXCEL.EXE".into()), pid: 77, user: None };
+        assert_eq!(InUseDialog::holder_label(&h), "EXCEL.EXE");
+        h.exe = None;
+        assert_eq!(InUseDialog::holder_label(&h), "Proceso 77");
+        h.name = String::new();
+        h.exe = Some(String::new());
+        assert_eq!(InUseDialog::holder_label(&h), "Proceso 77");
+    }
+
+    #[test]
+    fn from_job_keeps_same_leaf_files_apart() {
+        let e = |dir: &str| JobError { src: PathBuf::from(format!("/u/{dir}/config.json")), dst: PathBuf::new(), message: String::new(), retry: true, entry: None, holders: vec![holder(1)] };
+        let d = InUseDialog::from_job(1, &[e("a"), e("b")]).unwrap();
+        assert_eq!(d.title, "2 elementos están en uso");
+        assert_eq!(d.groups.len(), 1);
+        assert_eq!(d.groups[0].files, vec!["config.json", "config.json"]);
+        assert_eq!(d.groups[0].files.len() + d.groups[0].more_files, 2);
+        // El mismo archivo dos veces sigue contando uno.
+        let d = InUseDialog::from_job(1, &[e("a"), e("a")]).unwrap();
+        assert_eq!(d.groups[0].files.len(), 1);
     }
 
     #[test]

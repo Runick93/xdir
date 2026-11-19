@@ -22,7 +22,6 @@ use super::App;
 use crate::config::ConfigEdit;
 use crate::geom::{contains, rect};
 use crate::host::{AuxMouse, AuxProgress, AuxWindow};
-use crate::in_use::InUseDialog;
 use crate::keys::Key;
 use crate::keys::keys::{VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_NEXT, VK_PRIOR, VK_UP};
 use crate::ops::Undo;
@@ -1110,12 +1109,6 @@ impl App {
             // Ya no usa el disco (no frena «Expulsar»).
             m.paths.clear();
         }
-        // Lo que no se pudo tocar porque lo tiene otro programa: una sola ventana, al terminar.
-        if !outcome.cancelled
-            && let Some(d) = InUseDialog::from_job(id, &outcome.errors)
-        {
-            self.open_in_use(d);
-        }
         self.run_pending_eject();
     }
 
@@ -1143,7 +1136,6 @@ impl App {
     fn forget_job(&mut self, id: JobId) {
         self.transfers.jobs.retain(|j| j.id != id);
         self.transfers.meta.remove(&id);
-        self.in_use_forget_job(id);
     }
 
     fn job_ctl(&self, id: JobId) -> Option<Arc<Control>> {

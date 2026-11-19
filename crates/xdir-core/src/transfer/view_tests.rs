@@ -7,8 +7,9 @@ use super::speed::Speed;
 use super::view::{self, ViewHit};
 use super::{Choice, ConflictInfo, JobError, JobRoute, JobState, JobView};
 use crate::geom::{Rect, rect};
+use crate::paint::FontId;
 use crate::sys::testing::{FakeEnv, RecordingPainter};
-use crate::sys::{ItemKind, ItemStat};
+use crate::sys::{Holder, ItemKind, ItemStat};
 use crate::theme::{DEFAULT_ACCENT, Theme};
 
 const MB: f64 = 1024.0 * 1024.0;
@@ -241,6 +242,103 @@ fn errors_view_and_retry() {
     let mut one = job(3, JobState::Done);
     one.errors = vec![error("a.txt", "Ya no existe", true)];
     assert!(has(&texts(&[one], None), "Terminó con 1 error"));
+}
+
+fn pwsh(pid: u32, user: Option<&str>) -> Holder {
+    Holder { name: "PowerShell 7".into(), exe: Some("pwsh.exe".into()), pid, user: user.map(Into::into) }
+}
+
+/// Un trabajo terminado con un solo error, del archivo que tienen `holders`.
+fn held(holders: Vec<Holder>) -> [JobView; 1] {
+    let mut j = job(1, JobState::Done);
+    let mut e = error("a.txt", "Lo está usando otro programa", true);
+    e.holders = holders;
+    j.errors = vec![e];
+    [j]
+}
+
+#[test]
+fn error_row_names_who_holds_the_file() {
+    let jobs = held(vec![pwsh(24012, Some(r"PC\Leandro"))]);
+    let p = RecordingPainter::new(theme());
+    view::draw(&p, area(&jobs, None), &jobs, &look(&only(None), 0.0), &FakeEnv);
+    let draws = p.text_draws();
+    let th = theme();
+    let first = draws.iter().find(|d| d.1 == "En uso por PowerShell 7").unwrap_or_else(|| panic!("{draws:?}"));
+    assert_eq!(first.3, th.danger);
+    let second = draws.iter().find(|d| d.1 == r"PID 24012 · usuario PC\Leandro").unwrap_or_else(|| panic!("{draws:?}"));
+    // Debajo, con el formato de la línea de la carpeta.
+    assert_eq!((second.0, second.3), (FontId::Small, th.text_dim));
+    assert!(second.2.top >= first.2.bottom - 0.5, "{first:?} {second:?}");
+    assert!(!draws.iter().any(|d| d.1.contains("Lo está usando otro programa")), "{draws:?}");
+    // El alto y los botones, como siempre.
+    assert_eq!(view::content_height(&jobs, &only(None)), 76.0 + 44.0 + 16.0 + 45.0);
+    assert!(center_of(&jobs, None, ViewHit::Retry(1)).is_some());
+    assert!(center_of(&jobs, None, ViewHit::Dismiss(1)).is_some());
+}
+
+#[test]
+fn error_row_counts_other_programs_by_pid() {
+    let two = texts(&held(vec![pwsh(24012, None), Holder { name: "Explorador".into(), exe: None, pid: 9, user: None }]), None);
+    assert!(two.iter().any(|s| s == "En uso por PowerShell 7 y 1 más"), "{two:?}");
+    // El mismo proceso dos veces es uno solo.
+    let same = texts(&held(vec![pwsh(24012, None), pwsh(24012, None)]), None);
+    assert!(same.iter().any(|s| s == "En uso por PowerShell 7"), "{same:?}");
+    assert!(!has(&same, "más"), "{same:?}");
+}
+
+#[test]
+fn error_row_without_name_or_user() {
+    let t = texts(&held(vec![Holder { name: String::new(), exe: None, pid: 24012, user: None }]), None);
+    assert!(t.iter().any(|s| s == "En uso por Proceso 24012"), "{t:?}");
+    assert!(t.iter().any(|s| s == "PID 24012 · usuario desconocido"), "{t:?}");
+    // Sin nombre pero con ejecutable: el ejecutable.
+    let t = texts(&held(vec![Holder { name: " ".into(), exe: Some("pwsh.exe".into()), pid: 5, user: None }]), None);
+    assert!(t.iter().any(|s| s == "En uso por pwsh.exe"), "{t:?}");
+}
+
+/// Sin holders, la fila es la de siempre: el motivo en una línea, centrado en la fila.
+#[test]
+fn error_row_without_holders_is_unchanged() {
+    let jobs = held(Vec::new());
+    let p = RecordingPainter::new(theme());
+    view::draw(&p, area(&jobs, None), &jobs, &look(&only(None), 0.0), &FakeEnv);
+    let draws = p.text_draws();
+    let why = "Lo está usando otro programa";
+    let reason = draws.iter().find(|d| d.1 == why).unwrap_or_else(|| panic!("{draws:?}"));
+    let (right, y) = (view::WIDTH - 16.0, 76.0);
+    let mw = (why.chars().count() as f32 * 7.0).min(220.0);
+    assert_eq!((reason.0, reason.2, reason.3), (FontId::UiRight, rect(right - 16.0 - mw, y + 13.0, right - 12.0, y + 31.0), theme().danger));
+    let name = draws.iter().find(|d| d.1 == "a.txt").expect("nombre");
+    assert_eq!(name.2, rect(16.0 + 38.0, y + 6.0, right - 16.0 - mw - 12.0, y + 24.0));
+    assert!(!has(&draws.iter().map(|d| d.1.clone()).collect::<Vec<_>>(), "En uso por"));
+}
+
+/// Con textos largos, todo queda adentro de la fila (con «…») y el nombre no pisa la columna de la derecha.
+#[test]
+fn error_row_long_texts_stay_inside() {
+    let long = Holder {
+        name: "Un programa con un nombre larguísimo que no entra".into(),
+        exe: None,
+        pid: 24012,
+        user: Some(r"UN-DOMINIO-MUY-LARGO\un.usuario.con.nombre.larguisimo".into()),
+    };
+    let mut jobs = held(vec![long]);
+    jobs[0].errors[0].src = PathBuf::from("/d/Descargas/un-archivo-con-un-nombre-tambien-muy-largo-para-la-fila.txt");
+    let p = RecordingPainter::new(theme());
+    view::draw(&p, area(&jobs, None), &jobs, &look(&only(None), 0.0), &FakeEnv);
+    let row = rect(16.0, 76.0, view::WIDTH - 16.0, 76.0 + 44.0);
+    let inside: Vec<_> = p.texts().into_iter().filter(|(_, _, r)| r.top >= row.top && r.bottom <= row.bottom && r.top < row.bottom).collect();
+    let by = inside.iter().find(|t| t.1.starts_with("En uso por")).expect("primera línea");
+    let pid = inside.iter().find(|t| t.1.starts_with("PID 24012")).expect("segunda línea");
+    let name = inside.iter().find(|t| t.1.starts_with("un-archivo")).expect("nombre");
+    for t in [by, pid, name] {
+        assert!(t.1.ends_with('…'), "{t:?}");
+        assert!(t.2.left >= row.left && t.2.right <= row.right, "{t:?}");
+        // El texto entra en su rectángulo (7 DIPs por carácter en el pintor de prueba).
+        assert!(t.1.chars().count() as f32 * 7.0 <= t.2.right - t.2.left + 0.5, "{t:?}");
+    }
+    assert!(name.2.right <= by.2.left && name.2.right <= pid.2.left, "{name:?} {by:?} {pid:?}");
 }
 
 #[test]

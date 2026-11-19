@@ -1,9 +1,10 @@
-//! Pruebas de la ventana de «archivo en uso» en la `App`: cuándo se abre, qué muestra, y sus
-//! botones y teclas (con el disco falso de todo el proceso: cada prueba usa sus propias rutas).
+//! Pruebas de la ventana de «archivo en uso» en la `App` (solo para operaciones sueltas): cuándo se
+//! abre, qué muestra, y sus botones y teclas; y que los trabajos del motor no la abren (con el
+//! disco falso de todo el proceso: cada prueba usa sus propias rutas).
 
 use super::*;
 use crate::host::{AuxMouse, AuxWindow};
-use crate::in_use::{InUseDialog, InUseRetry};
+use crate::in_use::{InUseDialog, InUseFailure, InUseItem};
 use crate::in_use_draw::{self, InUseHit};
 use crate::keys::keys::VK_RETURN;
 use crate::sys::testing::{AuxShow, FakeCopyPrims, FakeFileOps, FakeHost};
@@ -174,53 +175,6 @@ fn host_without_aux_windows_keeps_only_the_notice() {
 }
 
 #[test]
-fn delete_job_with_locked_files_opens_one_window_at_the_end() {
-    let f = fake();
-    let (mut a, host) = app_window();
-    locked_delete(&mut a, &f, "/iu-del", &["a.txt", "b.txt", "c.txt"]);
-    // Mientras el trabajo sigue, ninguna ventana de «en uso».
-    let early = std::cell::Cell::new(false);
-    let h = host.clone();
-    wait(&mut a, |a| {
-        if !idle(a) && !in_use_shows(&h).is_empty() {
-            early.set(true);
-        }
-        idle(a)
-    });
-    assert!(!early.get(), "se abrió antes de terminar");
-    assert!(a.jobs().iter().all(|j| j.state == JobState::Done));
-    let shows = in_use_shows(&host);
-    assert_eq!(shows.len(), 1, "una sola ventana por trabajo: {shows:?}");
-    assert_eq!(shows[0].1, "3 elementos están en uso");
-    let d = a.in_use_dialog().expect("abierta");
-    assert_eq!(d.groups.len(), 1);
-    assert_eq!(d.groups[0].files, vec!["a.txt", "b.txt", "c.txt"]);
-}
-
-#[test]
-fn cancelled_job_opens_nothing() {
-    let f = fake();
-    let (mut a, host) = app_window();
-    let locked = p("/iu-can/s/a.txt");
-    let big = p("/iu-can/s/grande.bin");
-    f.add_file(&locked, b"a".to_vec());
-    f.fail(&locked, ErrKind::InUse, 1);
-    f.set_holders(&locked, vec![excel()]);
-    f.add_file(&big, vec![1; 64 * 1024 * 20]);
-    f.set_slow(&big, Some(Duration::from_millis(20)));
-    f.add_dir(&p("/iu-can/d"));
-    let id = a.start_transfer(JobSpec::Copy { sources: vec![locked, big], dest: p("/iu-can/d") });
-    // El bloqueado ya falló: el grande está copiándose.
-    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == id && j.bytes.0 > 1));
-    a.cancel_job(id);
-    wait(&mut a, idle);
-    // Terminó cancelado con el error del bloqueado (con quién lo tiene), y no se abrió nada.
-    assert!(a.jobs().iter().any(|j| j.id == id && j.errors.iter().any(|e| !e.holders.is_empty())), "el error tiene que llegar");
-    assert!(in_use_shows(&host).is_empty());
-    assert!(a.in_use_dialog().is_none());
-}
-
-#[test]
 fn second_failure_replaces_the_window() {
     let (mut a, host) = app_window();
     failed_rename(&mut a, "/iu-dos/a.txt", "b.txt", vec![excel()]);
@@ -238,56 +192,6 @@ fn second_failure_replaces_the_window() {
 }
 
 #[test]
-fn forgetting_the_job_closes_its_window() {
-    let f = fake();
-    let (mut a, host) = app_window();
-    locked_delete(&mut a, &f, "/iu-olv", &["a.txt"]);
-    wait(&mut a, idle);
-    assert!(a.in_use_dialog().is_some());
-    let id = a.jobs()[0].id;
-    // Descartar el trabajo desde la ventana de copia cierra la de «en uso».
-    a.cancel_job(id);
-    assert!(a.in_use_dialog().is_none());
-    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 1);
-    assert!(!host.aux_visible_of(AuxWindow::InUse));
-}
-
-#[test]
-fn retrying_the_job_from_the_copy_window_closes_its_window() {
-    let f = fake();
-    let (mut a, host) = app_window();
-    locked_delete(&mut a, &f, "/iu-rtj", &["a.txt"]);
-    wait(&mut a, idle);
-    let id = a.jobs()[0].id;
-    a.retry_job(id);
-    assert!(a.in_use_dialog().is_none());
-    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 1);
-    wait(&mut a, idle);
-}
-
-#[test]
-fn forgetting_another_job_or_an_op_window_keeps_it_open() {
-    let f = fake();
-    let (mut a, host) = app_window();
-    locked_delete(&mut a, &f, "/iu-k1", &["a.txt"]);
-    wait(&mut a, idle);
-    let first = a.jobs()[0].id;
-    locked_delete(&mut a, &f, "/iu-k2", &["b.txt"]);
-    wait(&mut a, idle);
-    let second = a.jobs().iter().map(|j| j.id).find(|i| *i != first).expect("segundo trabajo");
-    assert_eq!(a.in_use_dialog().map(|d| d.retry.clone()), Some(InUseRetry::Job(second)));
-    // Otro trabajo: la ventana (del segundo) sigue.
-    a.cancel_job(first);
-    assert!(a.in_use_dialog().is_some());
-    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 0);
-    // Una ventana de operación suelta tampoco se cierra por olvidar un trabajo.
-    failed_rename(&mut a, "/iu-k3/a.txt", "b.txt", vec![excel()]);
-    a.cancel_job(second);
-    assert!(a.in_use_dialog().is_some());
-    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 0);
-}
-
-#[test]
 fn retry_button_repeats_the_op_and_closes() {
     let (mut a, host) = app_window();
     let op = failed_rename(&mut a, "/iu-rei/a.txt", "b.txt", vec![excel()]);
@@ -296,20 +200,6 @@ fn retry_button_repeats_the_op_and_closes() {
     assert_eq!(host.aux_hides_of(AuxWindow::InUse), 1);
     assert!(!host.aux_visible_of(AuxWindow::InUse));
     assert!(a.in_use_dialog().is_none());
-    // Con un trabajo, «Reintentar» lanza el reintento del motor.
-    let f = fake();
-    let paths = locked_delete(&mut a, &f, "/iu-rej", &["a.txt"]);
-    wait(&mut a, idle);
-    assert!(a.in_use_dialog().is_some());
-    a.take_started();
-    click(&mut a, InUseHit::Retry);
-    let started = a.take_started();
-    assert_eq!(started.len(), 1, "{started:?}");
-    assert!(matches!(&started[0], JobSpec::Delete { paths: again, recycle: true } if *again == paths), "{started:?}");
-    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 2);
-    assert!(a.in_use_dialog().is_none());
-    wait(&mut a, idle);
-    assert!(!f.exists(&paths[0]), "el reintento lo borró");
 }
 
 #[test]
@@ -349,50 +239,55 @@ fn close_button_and_escape_hide_it() {
     assert!(!a.aux_key(AuxWindow::InUse, crate::keys::keys::VK_DOWN));
 }
 
+/// Un trabajo del motor no abre la ventana de «en uso»: quién tiene el archivo va en la fila del
+/// error de la ventana de copia.
 #[test]
-fn copy_window_unchanged() {
+fn delete_job_with_locked_files_says_who_in_the_copy_window() {
     let f = fake();
-    let locked = p("/iu-cop/s/b.txt");
-    f.add_file(&p("/iu-cop/s/a.txt"), b"a".to_vec());
-    f.add_file(&locked, b"b".to_vec());
-    f.add_dir(&p("/iu-cop/d"));
-    f.fail(&locked, ErrKind::InUse, 1);
-    f.set_holders(&locked, vec![excel()]);
     let (mut a, host) = app_window();
-    a.start_transfer(JobSpec::Copy { sources: vec![p("/iu-cop/s/a.txt"), locked], dest: p("/iu-cop/d") });
+    locked_delete(&mut a, &f, "/iu-del", &["a.txt", "b.txt"]);
     wait(&mut a, idle);
-    // Las dos ventanas, cada una con lo suyo.
-    let shows = host.aux_shows();
-    assert_eq!(shows.iter().filter(|s| s.0 == AuxWindow::Transfers).count(), 1, "{shows:?}");
-    assert_eq!(shows.iter().filter(|s| s.0 == AuxWindow::InUse).count(), 1, "{shows:?}");
-    assert!(host.aux_visible_of(AuxWindow::Transfers) && host.aux_visible_of(AuxWindow::InUse));
+    assert!(a.jobs().iter().all(|j| j.state == JobState::Done));
+    assert!(in_use_shows(&host).is_empty(), "{:?}", host.aux_shows());
+    assert!(a.in_use_dialog().is_none());
+    // El trabajo quedó en la ventana de copia con sus errores y quién tiene cada archivo.
+    let job = &a.jobs()[0];
+    assert_eq!(job.errors.len(), 2);
+    assert!(job.errors.iter().all(|e| e.holders == vec![excel()]), "{:?}", job.errors);
     let copy = texts_of(&mut a, AuxWindow::Transfers);
-    assert!(copy.iter().any(|s| s == "Terminó con 1 error"), "{copy:?}");
-    assert!(copy.iter().any(|s| s == "Lo está usando otro programa"), "{copy:?}");
-    let in_use = texts_of(&mut a, AuxWindow::InUse);
-    assert!(in_use.iter().any(|s| s == "«b.txt» está en uso"), "{in_use:?}");
-    assert!(in_use.iter().any(|s| s == "Microsoft Excel (EXCEL.EXE)"), "{in_use:?}");
-    // Cerrar una no toca la otra.
-    click(&mut a, InUseHit::Close);
-    assert!(host.aux_visible_of(AuxWindow::Transfers));
-    assert_eq!(host.aux_hides_of(AuxWindow::Transfers), 0);
-    a.aux_key(AuxWindow::Transfers, VK_ESCAPE);
-    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 1);
+    assert!(copy.iter().any(|s| s == "Terminó con 2 errores"), "{copy:?}");
+    assert_eq!(copy.iter().filter(|s| *s == "En uso por Microsoft Excel").count(), 2, "{copy:?}");
+    assert!(copy.iter().any(|s| s == r"PID 4812 · usuario PC\Leandro"), "{copy:?}");
+    assert!(!copy.iter().any(|s| s == "Lo está usando otro programa"), "{copy:?}");
+    // Descartarlo o reintentarlo desde la ventana de copia no toca la de «en uso».
+    let id = a.jobs()[0].id;
+    a.retry_job(id);
+    wait(&mut a, idle);
+    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 0);
+}
+
+/// Una ventana abierta por una operación suelta sigue abierta aunque se descarte un trabajo.
+#[test]
+fn forgetting_a_job_keeps_the_op_window_open() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    locked_delete(&mut a, &f, "/iu-k1", &["a.txt"]);
+    wait(&mut a, idle);
+    failed_rename(&mut a, "/iu-k3/a.txt", "b.txt", vec![excel()]);
+    let id = a.jobs()[0].id;
+    a.cancel_job(id);
+    assert!(a.in_use_dialog().is_some());
+    assert_eq!(host.aux_hides_of(AuxWindow::InUse), 0);
 }
 
 /// `open_in_use` se puede llamar con cualquier diálogo armado (lo que muestra es ese).
 #[test]
 fn open_in_use_shows_the_given_dialog() {
     let (mut a, host) = app_window();
-    let d = InUseDialog::from_job(9, &[crate::transfer::JobError {
-        src: p("/iu-pub/x.txt"),
-        dst: PathBuf::new(),
-        message: String::new(),
-        retry: true,
-        entry: None,
-        holders: vec![excel()],
-    }])
-    .unwrap();
+    let d = InUseDialog::from_op(&InUseFailure {
+        op: Op::Delete { paths: vec![p("/iu-pub/x.txt")], recycle: false },
+        items: vec![InUseItem { path: p("/iu-pub/x.txt"), holders: vec![excel()] }],
+    });
     a.open_in_use(d.clone());
     assert_eq!(a.in_use_dialog(), Some(&d));
     assert_eq!(in_use_shows(&host).len(), 1);

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use super::{Choice, JobId, JobRoute, JobState, JobView};
 use crate::format::thousands;
 use crate::geom::{Color, Rect, contains, rect};
+use crate::in_use::{self, InUseDialog};
 use crate::paint::{FontId, Painter, ellipsize};
 use crate::sys::{ItemKind, ItemStat, SystemEnv};
 use crate::theme::alpha;
@@ -579,12 +580,27 @@ fn draw_jobs(p: &dyn Painter, r: Rect, jobs: &[JobView], look: &Look, env: &dyn 
                         let name = e.shown_name();
                         let folder = error_folder(&e.src, &j.route);
                         p.text(FontId::GlyphsSmall, "\u{E8A5}", rect(list.left + 12.0, y + 12.0, list.left + 28.0, y + 30.0), th.text_dim);
-                        let mw = p.measure(FontId::Ui, &e.message).min(220.0);
+                        // Si se sabe quién tiene el archivo, a la derecha va eso en dos líneas en vez del motivo.
+                        let holder = in_use::held_by(&e.holders).zip(e.holders.first().map(InUseDialog::holder_line));
+                        let mw = match &holder {
+                            Some((by, line)) => p.measure(FontId::Ui, by).max(p.measure(FontId::Small, line)),
+                            None => p.measure(FontId::Ui, &e.message),
+                        }
+                        .min(220.0);
                         let nx = list.left + 38.0;
                         let nr = list.right - 16.0 - mw - 12.0;
                         p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &name, nr - nx), rect(nx, y + 6.0, nr, y + 24.0), th.text);
                         p.text(FontId::Small, &ellipsize(p, FontId::Small, &folder, nr - nx), rect(nx, y + 24.0, nr, y + 40.0), th.text_dim);
-                        p.text(FontId::UiRight, &e.message, rect(list.right - 16.0 - mw, y + 13.0, list.right - 12.0, y + 31.0), th.danger);
+                        match &holder {
+                            Some((by, line)) => {
+                                p.text(FontId::UiRight, &ellipsize(p, FontId::Ui, by, mw), rect(list.right - 16.0 - mw, y + 6.0, list.right - 12.0, y + 24.0), th.danger);
+                                // No hay fuente chica alineada a la derecha: se mide y se ubica a mano.
+                                let line = ellipsize(p, FontId::Small, line, mw);
+                                let lw = p.measure(FontId::Small, &line);
+                                p.text(FontId::Small, &line, rect(list.right - 12.0 - lw, y + 24.0, list.right - 12.0, y + 40.0), th.text_dim);
+                            }
+                            None => p.text(FontId::UiRight, &e.message, rect(list.right - 16.0 - mw, y + 13.0, list.right - 12.0, y + 31.0), th.danger),
+                        }
                     }
                     if j.errors.len() > MAX_ERRORS {
                         let y = list.bottom + 4.0;

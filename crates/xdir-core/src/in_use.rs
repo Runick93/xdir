@@ -1,12 +1,13 @@
 //! Cuando algo falla porque otro programa tiene abierto el archivo (`ErrKind::InUse`): qué se
-//! intentaba hacer y quién tiene cada archivo, para mostrarlo en la ventana de «archivo en uso».
+//! intentaba hacer y quién tiene cada archivo. Una operación suelta lo muestra en la ventana de
+//! «archivo en uso»; los trabajos de copia, mover y borrar lo dicen en la fila del error de la
+//! ventana de copia (`held_by` y `InUseDialog::holder_line`).
 
 use std::path::PathBuf;
 
 use crate::ops::Op;
 use crate::ops;
 use crate::sys::Holder;
-use crate::transfer::{JobError, JobId};
 
 /// Un archivo que no se pudo tocar y los programas que lo tienen.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,8 +34,6 @@ pub const MAX_FILES: usize = 5;
 pub enum InUseRetry {
     /// Una operación suelta: se vuelve a lanzar.
     Op(Op),
-    /// Un trabajo de copia/mover/borrar: se reintentan sus errores.
-    Job(JobId),
 }
 
 /// Un programa que tiene archivos y cuáles (los primeros `MAX_FILES`).
@@ -66,18 +65,6 @@ impl InUseDialog {
         InUseDialog { title: format!("No se pudo {}", ops::doing(&f.op, &path)), groups, more_groups, retry: InUseRetry::Op(f.op.clone()) }
     }
 
-    /// La ventana de un trabajo cuyos errores nombran quién tiene los archivos; `None` si ningún
-    /// error trae holders (no hay nada que mostrar).
-    pub fn from_job(id: JobId, errors: &[JobError]) -> Option<InUseDialog> {
-        let with: Vec<&JobError> = errors.iter().filter(|e| !e.holders.is_empty()).collect();
-        let first = with.first()?;
-        let title = if with.len() == 1 { format!("«{}» está en uso", first.shown_name()) } else { format!("{} elementos están en uso", with.len()) };
-        // Un archivo se distingue por su ruta entera (dos `config.json` de carpetas distintas son dos); el nombre es solo para mostrar.
-        let all = group_all(with.iter().map(|e| (e.src.join(e.entry.as_deref().unwrap_or("")), e.shown_name(), e.holders.as_slice())));
-        let (groups, more_groups) = split_groups(all);
-        Some(InUseDialog { title, groups, more_groups, retry: InUseRetry::Job(id) })
-    }
-
     /// Hay más de un programa (los listados y los que no entran): decide el singular o el plural.
     fn several(&self) -> bool {
         self.groups.len() + self.more_groups > 1
@@ -94,18 +81,11 @@ impl InUseDialog {
     }
 
     /// «Microsoft Excel (EXCEL.EXE)»; solo el nombre si no hay ejecutable o es el mismo.
-    /// Sin nombre se usa el ejecutable, y sin ninguno de los dos, «Proceso <pid>».
+    /// Sin nombre, lo de `holder_name` (el ejecutable o «Proceso <pid>»).
     pub fn holder_label(h: &Holder) -> String {
-        let exe = h.exe.as_deref().filter(|e| !e.trim().is_empty());
-        if h.name.trim().is_empty() {
-            return match exe {
-                Some(exe) => exe.to_string(),
-                None => format!("Proceso {}", h.pid),
-            };
-        }
-        match exe {
-            Some(exe) if exe != h.name => format!("{} ({exe})", h.name),
-            _ => h.name.clone(),
+        match exe_of(h) {
+            Some(exe) if !h.name.trim().is_empty() && exe != h.name => format!("{} ({exe})", h.name),
+            _ => holder_name(h),
         }
     }
 
@@ -113,6 +93,38 @@ impl InUseDialog {
     pub fn holder_line(h: &Holder) -> String {
         format!("PID {} · usuario {}", h.pid, h.user.as_deref().unwrap_or("desconocido"))
     }
+}
+
+/// El ejecutable del programa, si se sabe (vacío cuenta como que no).
+fn exe_of(h: &Holder) -> Option<&str> {
+    h.exe.as_deref().filter(|e| !e.trim().is_empty())
+}
+
+/// El nombre del programa para mostrar: el amigable («PowerShell 7»); sin él, el ejecutable, y sin
+/// ninguno de los dos, «Proceso <pid>».
+pub fn holder_name(h: &Holder) -> String {
+    if !h.name.trim().is_empty() {
+        return h.name.clone();
+    }
+    match exe_of(h) {
+        Some(exe) => exe.to_string(),
+        None => format!("Proceso {}", h.pid),
+    }
+}
+
+/// Lo que dice la fila de un error de la ventana de copia cuando se sabe quién tiene el archivo:
+/// «En uso por PowerShell 7», con « y N más» si lo tienen otros procesos (distintos por `pid`).
+/// `None` si no se sabe quién lo tiene.
+pub fn held_by(holders: &[Holder]) -> Option<String> {
+    let first = holders.first()?;
+    let mut pids: Vec<u32> = holders.iter().map(|h| h.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let name = holder_name(first);
+    Some(match pids.len() - 1 {
+        0 => format!("En uso por {name}"),
+        more => format!("En uso por {name} y {more} más"),
+    })
 }
 
 /// Todos los programas con todos sus archivos, por `pid` y en orden de aparición. Cada archivo es
@@ -152,7 +164,7 @@ fn split_groups(all: Vec<(Holder, Vec<String>)>) -> (Vec<HolderGroup>, usize) {
 }
 
 /// Agrupa por programa (mismo `pid`) con los límites `MAX_GROUPS` y `MAX_FILES`; los programas que
-/// sobran no se devuelven (ver `from_op` y `from_job`, que cuentan `more_groups`).
+/// sobran no se devuelven (ver `from_op`, que cuenta `more_groups`).
 #[cfg(test)]
 fn group(items: &[InUseItem]) -> Vec<HolderGroup> {
     split_groups(group_all(items.iter().map(|i| (i.path.clone(), crate::sys::shown_name(&i.path), i.holders.as_slice())))).0
@@ -170,10 +182,6 @@ mod tests {
         InUseItem { path: PathBuf::from(format!("/u/{name}")), holders: pids.iter().map(|p| holder(*p)).collect() }
     }
 
-    fn job_error(name: &str, holders: Vec<Holder>) -> JobError {
-        JobError { src: PathBuf::from(format!("/u/{name}")), dst: PathBuf::new(), message: String::new(), retry: true, entry: None, holders }
-    }
-
     #[test]
     fn group_merges_files_of_the_same_process() {
         let g = group(&[item("a.txt", &[1]), item("b.txt", &[1, 2]), item("c.txt", &[2])]);
@@ -188,18 +196,10 @@ mod tests {
     fn group_caps_programs_and_files() {
         let mut items: Vec<InUseItem> = (0..9).map(|i| item(&format!("f{i}"), &[1])).collect();
         items.extend((2..=7).map(|p| item(&format!("g{p}"), &[p])));
-        let d = InUseDialog { title: String::new(), groups: group(&items), more_groups: 0, retry: InUseRetry::Job(1) };
+        let d = InUseDialog { title: String::new(), groups: group(&items), more_groups: 0, retry: InUseRetry::Op(Op::NewFolder { parent: PathBuf::from("/u") }) };
         assert_eq!(d.groups.len(), MAX_GROUPS);
         assert_eq!(d.groups[0].files.len(), MAX_FILES);
         assert_eq!(d.groups[0].more_files, 4);
-    }
-
-    #[test]
-    fn from_job_counts_hidden_programs() {
-        let errs: Vec<JobError> = (1..=7).map(|p| job_error(&format!("f{p}"), vec![holder(p)])).collect();
-        let d = InUseDialog::from_job(3, &errs).unwrap();
-        assert_eq!(d.groups.len(), 4);
-        assert_eq!(d.more_groups, 3);
     }
 
     #[test]
@@ -234,19 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn from_job_keeps_same_leaf_files_apart() {
-        let e = |dir: &str| JobError { src: PathBuf::from(format!("/u/{dir}/config.json")), dst: PathBuf::new(), message: String::new(), retry: true, entry: None, holders: vec![holder(1)] };
-        let d = InUseDialog::from_job(1, &[e("a"), e("b")]).unwrap();
-        assert_eq!(d.title, "2 elementos están en uso");
-        assert_eq!(d.groups.len(), 1);
-        assert_eq!(d.groups[0].files, vec!["config.json", "config.json"]);
-        assert_eq!(d.groups[0].files.len() + d.groups[0].more_files, 2);
-        // El mismo archivo dos veces sigue contando uno.
-        let d = InUseDialog::from_job(1, &[e("a"), e("a")]).unwrap();
-        assert_eq!(d.groups[0].files.len(), 1);
-    }
-
-    #[test]
     fn line_says_unknown_user() {
         let mut h = Holder { name: "x".into(), exe: None, pid: 4812, user: Some(r"PC\Leandro".into()) };
         assert_eq!(InUseDialog::holder_line(&h), r"PID 4812 · usuario PC\Leandro");
@@ -267,18 +254,28 @@ mod tests {
     }
 
     #[test]
-    fn from_job_none_without_holders() {
-        assert!(InUseDialog::from_job(1, &[job_error("a", vec![])]).is_none());
-        assert!(InUseDialog::from_job(1, &[]).is_none());
+    fn from_op_keeps_same_leaf_files_apart() {
+        let at = |dir: &str| InUseItem { path: PathBuf::from(format!("/u/{dir}/config.json")), holders: vec![holder(1)] };
+        let op = Op::Delete { paths: vec![PathBuf::from("/u/a/config.json"), PathBuf::from("/u/b/config.json")], recycle: false };
+        let d = InUseDialog::from_op(&InUseFailure { op: op.clone(), items: vec![at("a"), at("b")] });
+        assert_eq!(d.groups.len(), 1);
+        assert_eq!(d.groups[0].files, vec!["config.json", "config.json"]);
+        // El mismo archivo dos veces sigue contando uno.
+        let d = InUseDialog::from_op(&InUseFailure { op, items: vec![at("a"), at("a")] });
+        assert_eq!(d.groups[0].files.len(), 1);
     }
 
     #[test]
-    fn from_job_titles_one_and_many() {
-        let one = InUseDialog::from_job(7, &[job_error("a.xlsx", vec![holder(1)]), job_error("sin", vec![])]).unwrap();
-        assert_eq!(one.title, "«a.xlsx» está en uso");
-        assert_eq!(one.retry, InUseRetry::Job(7));
-        let many = InUseDialog::from_job(7, &[job_error("a", vec![holder(1)]), job_error("b", vec![holder(1)])]).unwrap();
-        assert_eq!(many.title, "2 elementos están en uso");
+    fn name_and_held_by() {
+        let mut h = Holder { name: "PowerShell 7".into(), exe: Some("pwsh.exe".into()), pid: 24012, user: None };
+        assert_eq!(holder_name(&h), "PowerShell 7");
+        assert_eq!(held_by(std::slice::from_ref(&h)).as_deref(), Some("En uso por PowerShell 7"));
+        assert_eq!(held_by(&[h.clone(), h.clone(), holder(9)]).as_deref(), Some("En uso por PowerShell 7 y 1 más"));
+        assert_eq!(held_by(&[]), None);
+        h.name = " ".into();
+        assert_eq!(holder_name(&h), "pwsh.exe");
+        h.exe = None;
+        assert_eq!(holder_name(&h), "Proceso 24012");
     }
 
     #[test]

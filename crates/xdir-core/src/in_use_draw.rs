@@ -174,7 +174,7 @@ mod tests {
     }
 
     fn dialog(groups: Vec<HolderGroup>, more_groups: usize) -> InUseDialog {
-        InUseDialog { title: "No se pudo eliminar «informe.xlsx»".into(), groups, more_groups, retry: InUseRetry::Job(1) }
+        InUseDialog { title: "No se pudo eliminar «informe.xlsx»".into(), groups, more_groups, retry: InUseRetry::Op(crate::ops::Op::NewFolder { parent: std::path::PathBuf::from("/u") }) }
     }
 
     fn area(d: &InUseDialog) -> Rect {

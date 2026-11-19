@@ -1,10 +1,10 @@
 //! La ventana de «archivo en uso» (`AuxWindow::InUse`): una ventana secundaria del sistema, aparte
-//! de la de copia, cuyo contenido dibuja `in_use_draw`. Se abre sola cuando algo falla porque otro
-//! programa tiene el archivo y se sabe quién: una operación suelta, al fallar (`on_op_done`); un
-//! trabajo del motor, una sola vez al terminar (`on_job_done`). Otro fallo con la ventana abierta
-//! reemplaza su contenido. «Reintentar» (o Enter) vuelve a hacer lo que falló con el reintento de
-//! cada origen; «Cerrar» (o Esc) la oculta. Donde el host no tiene esta ventana queda solo el aviso
-//! de la barra de estado.
+//! de la de copia, cuyo contenido dibuja `in_use_draw`. Es solo para las operaciones sueltas
+//! (renombrar y demás, que no tienen ventana de errores): se abre sola cuando una falla porque otro
+//! programa tiene el archivo y se sabe quién (`on_op_done`). Los trabajos de copia, mover y borrar
+//! no la abren: dicen quién lo tiene en la fila del error de la ventana de copia. Otro fallo con la
+//! ventana abierta reemplaza su contenido. «Reintentar» (o Enter) repite la operación; «Cerrar» (o
+//! Esc) la oculta. Donde el host no tiene esta ventana queda solo el aviso de la barra de estado.
 
 use super::*;
 use crate::geom::rect;
@@ -12,7 +12,6 @@ use crate::host::{AuxMouse, AuxWindow};
 use crate::in_use::{InUseDialog, InUseRetry};
 use crate::in_use_draw::{self, InUseHit};
 use crate::paint::Painter;
-use crate::transfer::JobId;
 
 /// La ventana abierta: lo que muestra, el botón bajo el mouse y el apretado.
 pub(super) struct InUseState {
@@ -95,27 +94,13 @@ impl App {
         self.in_use = None;
     }
 
-    /// Se olvidó el trabajo `id` (se descartó o se reintentó desde la ventana de copia): si la
-    /// ventana abierta es la de ese trabajo, ya no tiene a qué volver, así que se cierra.
-    pub(super) fn in_use_forget_job(&mut self, id: JobId) {
-        if self.in_use.as_ref().is_some_and(|s| s.dialog.retry == InUseRetry::Job(id)) {
-            self.in_use = None;
-            self.host.clone().aux_hide(AuxWindow::InUse);
-        }
-    }
-
-    /// «Reintentar»: lo que falló se vuelve a hacer, con el reintento de su origen (la operación
-    /// suelta se repite; el trabajo reintenta lo que falló), y la ventana se oculta. «Cerrar»: solo
-    /// se oculta.
+    /// «Reintentar»: la operación suelta que falló se vuelve a lanzar entera y la ventana se oculta.
+    /// «Cerrar»: solo se oculta.
     fn on_in_use_hit(&mut self, h: InUseHit) {
         let Some(s) = self.in_use.take() else { return };
         if h == InUseHit::Retry {
-            match s.dialog.retry {
-                InUseRetry::Op(op) => sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op),
-                InUseRetry::Job(id) => {
-                    self.retry_job(id);
-                }
-            }
+            let InUseRetry::Op(op) = s.dialog.retry;
+            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), op);
         }
         // Si el reintento ya la volvió a abrir (falló en el acto), queda abierta con lo nuevo.
         if self.in_use.is_none() {

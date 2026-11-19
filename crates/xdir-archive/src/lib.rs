@@ -42,7 +42,7 @@ impl std::fmt::Display for Cancelled {
 impl std::error::Error for Cancelled {}
 
 pub(crate) fn cancelled(path: &Path) -> Error {
-    Error { kind: ErrKind::Cancelled, path: path.to_path_buf() }
+    Error { kind: ErrKind::Cancelled, path: path.to_path_buf(), holders: Vec::new() }
 }
 
 /// Lector que consulta `check` antes de cada lectura (descomprimir un tar.gz entero lleva tiempo).
@@ -68,7 +68,7 @@ pub(crate) fn io_err(e: io::Error, path: &Path) -> Error {
     if let Some(z) = e.get_ref().and_then(|i| i.downcast_ref::<::zip::result::ZipError>()) {
         return zip::map_zip_ref(z, path);
     }
-    Error { kind: kind_of(&e), path: path.to_path_buf() }
+    Error { kind: kind_of(&e), path: path.to_path_buf(), holders: Vec::new() }
 }
 
 /// Qué hacer con una entrada que no se pudo extraer (nombre, error): `Err` corta todo.
@@ -244,7 +244,7 @@ fn walk_down(root: &Path, rel: &Path) -> Result<PathBuf, Error> {
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.is_dir() => {}
             Ok(m) if m.file_type().is_symlink() => return Err(other(NOT_ALLOWED, &cur)),
-            Ok(_) => return Err(Error { kind: ErrKind::Exists, path: cur }),
+            Ok(_) => return Err(Error { kind: ErrKind::Exists, path: cur, holders: Vec::new() }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir(&cur).map_err(|e| io_err(e, &cur))?;
             }
@@ -266,7 +266,7 @@ pub(crate) fn write_entry(src: Source, root: &Path, progress: &mut dyn FnMut(u64
             match std::fs::symlink_metadata(&dst) {
                 Ok(m) if m.is_dir() => {}
                 Ok(m) if m.file_type().is_symlink() => return Err(other(NOT_ALLOWED, &dst)),
-                Ok(_) => return Err(Error { kind: ErrKind::Exists, path: dst }),
+                Ok(_) => return Err(Error { kind: ErrKind::Exists, path: dst, holders: Vec::new() }),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     std::fs::create_dir(&dst).map_err(|e| io_err(e, &dst))?;
                 }

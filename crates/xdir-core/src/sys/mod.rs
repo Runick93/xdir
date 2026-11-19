@@ -29,7 +29,7 @@ mod hashes;
 pub use hashes::{HashAlgo, Hashes, Opened, Reader, io_error};
 pub use archives::{Archives, Pick, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
-    CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
+    CopyError, CopyPrims, ErrKind, Flow, Holder, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
     io_kind, io_unexpected, lower_first, shown_name, starts_with_folded, too_long, unexpected,
 };
 

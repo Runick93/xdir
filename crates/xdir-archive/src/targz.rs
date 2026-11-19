@@ -108,7 +108,7 @@ pub fn extract(
         )
         .map(|_| ());
     }
-    Err(Error { kind: ErrKind::NotFound, path: archive.to_path_buf() })
+    Err(Error { kind: ErrKind::NotFound, path: archive.to_path_buf(), holders: Vec::new() })
 }
 
 /// Una sola pasada; los enlaces simbólicos se crean al final.

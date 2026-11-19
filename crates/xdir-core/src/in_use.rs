@@ -254,6 +254,22 @@ mod tests {
     }
 
     #[test]
+    fn from_op_counts_hidden_programs_and_files() {
+        let op = Op::NewFolder { parent: PathBuf::from("/u") };
+        // 7 programas, uno por archivo: se listan 4 y quedan 3 en «y N programas más».
+        let items: Vec<InUseItem> = (1..=7).map(|p| item(&format!("f{p}"), &[p])).collect();
+        let d = InUseDialog::from_op(&InUseFailure { op: op.clone(), items });
+        assert_eq!(d.groups.len(), MAX_GROUPS);
+        assert_eq!(d.more_groups, 3);
+        // 8 archivos del mismo programa: se listan 5 y quedan 3 en «y N más».
+        let items: Vec<InUseItem> = (0..8).map(|i| item(&format!("g{i}"), &[1])).collect();
+        let d = InUseDialog::from_op(&InUseFailure { op, items });
+        assert_eq!((d.groups.len(), d.more_groups), (1, 0));
+        assert_eq!(d.groups[0].files.len(), MAX_FILES);
+        assert_eq!(d.groups[0].more_files, 3);
+    }
+
+    #[test]
     fn from_op_keeps_same_leaf_files_apart() {
         let at = |dir: &str| InUseItem { path: PathBuf::from(format!("/u/{dir}/config.json")), holders: vec![holder(1)] };
         let op = Op::Delete { paths: vec![PathBuf::from("/u/a/config.json"), PathBuf::from("/u/b/config.json")], recycle: false };

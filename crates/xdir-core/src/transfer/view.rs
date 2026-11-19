@@ -594,7 +594,8 @@ fn draw_jobs(p: &dyn Painter, r: Rect, jobs: &[JobView], look: &Look, env: &dyn 
                         match &holder {
                             Some((by, line)) => {
                                 p.text(FontId::UiRight, &ellipsize(p, FontId::Ui, by, mw), rect(list.right - 16.0 - mw, y + 6.0, list.right - 12.0, y + 24.0), th.danger);
-                                // No hay fuente chica alineada a la derecha: se mide y se ubica a mano.
+                                // No hay fuente chica alineada a la derecha: se mide y se ubica a mano, con el
+                                // borde derecho en `right - 12`, el mismo de la línea `UiRight` de arriba.
                                 let line = ellipsize(p, FontId::Small, line, mw);
                                 let lw = p.measure(FontId::Small, &line);
                                 p.text(FontId::Small, &line, rect(list.right - 12.0 - lw, y + 24.0, list.right - 12.0, y + 40.0), th.text_dim);

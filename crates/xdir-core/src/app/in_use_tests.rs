@@ -259,7 +259,7 @@ fn delete_job_with_locked_files_says_who_in_the_copy_window() {
     assert_eq!(copy.iter().filter(|s| *s == "En uso por Microsoft Excel").count(), 2, "{copy:?}");
     assert!(copy.iter().any(|s| s == r"PID 4812 · usuario PC\Leandro"), "{copy:?}");
     assert!(!copy.iter().any(|s| s == "Lo está usando otro programa"), "{copy:?}");
-    // Descartarlo o reintentarlo desde la ventana de copia no toca la de «en uso».
+    // Reintentarlo desde la ventana de copia no toca la de «en uso» (descartarlo, en la prueba siguiente).
     let id = a.jobs()[0].id;
     a.retry_job(id);
     wait(&mut a, idle);

@@ -27,6 +27,7 @@ pub mod fs;
 pub mod geom;
 pub mod groups;
 pub mod host;
+pub mod in_use;
 pub mod jump;
 pub mod keys;
 pub mod list;

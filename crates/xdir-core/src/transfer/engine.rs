@@ -419,7 +419,7 @@ impl<'a> Job<'a> {
         self.progress(0, true);
         let undo = (!self.undo.is_empty()).then(|| Undo::Batch(std::mem::take(&mut self.undo)));
         let focus = self.focus.take().or_else(|| self.select.last().cloned());
-        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, error_detail: None, select: std::mem::take(&mut self.select) };
+        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, error_detail: None, select: std::mem::take(&mut self.select), in_use: None };
         let outcome = JobOutcome {
             result,
             errors: std::mem::take(&mut self.errors),

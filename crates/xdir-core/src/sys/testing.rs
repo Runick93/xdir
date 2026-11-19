@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, CopyError, DiskScan, ErrKind, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, CopyError, DiskScan, ErrKind, FileOps, Holder, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use crate::info::{InfoChange, InfoReply, InfoRequest, ItemInfo};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
@@ -19,6 +19,7 @@ use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short
 use crate::geom::{Color, Rect};
 use crate::host::{AuxWindow, MenuPos, TextBox, TextKind, WindowHost};
 use crate::keys::Key;
+use crate::in_use::{InUseFailure, InUseItem};
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
 use crate::paint::{FontId, Painter};
 use crate::preview::{PreviewInfo, PreviewRequest, PreviewTarget};
@@ -221,6 +222,8 @@ thread_local! {
     static OPS: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
     static RESPONSE: RefCell<OpResult> = RefCell::new(OpResult::default());
     static FAIL: RefCell<Option<ErrKind>> = const { RefCell::new(None) };
+    /// Quién tiene el archivo cuando la falla configurada es de archivo en uso (`fail_in_use`).
+    static HOLDERS: RefCell<Vec<Holder>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `FileOps` falso: no toca el disco; anota cada `Op` recibida y responde por el canal, en el
@@ -238,6 +241,7 @@ impl FakeFileOps {
     pub fn respond_with(result: OpResult) {
         RESPONSE.with(|r| *r.borrow_mut() = result);
         FAIL.with(|f| *f.borrow_mut() = None);
+        HOLDERS.with(|h| h.borrow_mut().clear());
     }
 
     /// Las próximas operaciones de este hilo fallan con `kind` en su elemento (la carpeta donde
@@ -245,6 +249,14 @@ impl FakeFileOps {
     /// (`ops::failure`). `respond_with` lo deshace.
     pub fn fail_with(kind: ErrKind) {
         FAIL.with(|f| *f.borrow_mut() = Some(kind));
+        HOLDERS.with(|h| h.borrow_mut().clear());
+    }
+
+    /// Las próximas operaciones de este hilo fallan `InUse` (con el aviso de siempre) y además
+    /// dicen que `holders` tienen el elemento de la operación. `respond_with` lo deshace.
+    pub fn fail_in_use(holders: Vec<Holder>) {
+        Self::fail_with(ErrKind::InUse);
+        HOLDERS.with(|h| *h.borrow_mut() = holders);
     }
 }
 
@@ -264,7 +276,10 @@ impl FileOps for FakeFileOps {
         let result = match FAIL.with(|f| f.borrow().clone()) {
             Some(kind) => {
                 let e = CopyError::new(kind, &op_path(&op));
-                OpResult { error: Some(crate::ops::failure(&op, &e)), error_detail: crate::ops::failure_detail(&op, &e), ..OpResult::default() }
+                let holders = HOLDERS.with(|h| h.borrow().clone());
+                let in_use = (e.kind == ErrKind::InUse && !holders.is_empty())
+                    .then(|| InUseFailure { op: op.clone(), items: vec![InUseItem { path: e.path.clone(), holders }] });
+                OpResult { error: Some(crate::ops::failure(&op, &e)), error_detail: crate::ops::failure_detail(&op, &e), in_use, ..OpResult::default() }
             }
             None => RESPONSE.with(|r| r.borrow().clone()),
         };

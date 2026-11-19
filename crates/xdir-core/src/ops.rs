@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::WM_APP;
+use crate::in_use::InUseFailure;
 use crate::sys::{CopyError, shown_name};
 
 /// Terminó una operación; el resultado está en el canal.
@@ -73,6 +74,9 @@ pub struct OpResult {
     pub error_detail: Option<String>,
     /// Elementos que quedan seleccionados al recargar (las copias de Duplicar…).
     pub select: Vec<PathBuf>,
+    /// Si falló porque otro programa tiene abierto el archivo y se supo quién: la operación y
+    /// los programas, para la ventana de «archivo en uso».
+    pub in_use: Option<InUseFailure>,
 }
 
 /// Qué hacía `op` con `path` (el elemento del error), para el aviso: «crear la carpeta nueva en
@@ -105,7 +109,25 @@ pub fn failure_detail(op: &Op, e: &CopyError) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sys::ErrKind;
+    use crate::in_use::InUseItem;
+    use crate::sys::{ErrKind, FileOps, Handle, Holder};
+    use crate::sys::testing::FakeFileOps;
+
+    /// El falso con `fail_in_use` falla como siempre (el aviso de hoy) y además dice quién tiene el
+    /// archivo.
+    #[test]
+    fn fake_ops_in_use_failure_carries_the_op_and_holders() {
+        let a = PathBuf::from("/u/Docs/a.xlsx");
+        let excel = Holder { name: "Excel".into(), exe: Some("EXCEL.EXE".into()), pid: 4242, user: None };
+        let op = Op::Rename { path: a.clone(), new_name: "b.xlsx".into() };
+        FakeFileOps::fail_in_use(vec![excel.clone()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        FakeFileOps.spawn(Handle(7), tx, op.clone());
+        let r = rx.recv().unwrap();
+        assert_eq!(r.error, Some(failure(&op, &CopyError::new(ErrKind::InUse, &a))));
+        assert_eq!(r.in_use, Some(InUseFailure { op, items: vec![InUseItem { path: a, holders: vec![excel] }] }));
+        FakeFileOps::respond_with(OpResult::default());
+    }
 
     /// Cada operación dice qué no se pudo hacer, con el nombre entre « ».
     #[test]

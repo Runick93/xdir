@@ -103,8 +103,8 @@ fn exe_of(pid: u32) -> Option<String> {
     Path::new(&full).file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-/// El usuario dueño del proceso, «DOMINIO\usuario». Sin permiso para mirar (el proceso System,
-/// los de otros usuarios sin ser administrador), `None`.
+/// El usuario dueño del proceso, «DOMINIO\usuario». Si no se puede mirar (el proceso inactivo,
+/// los de sistema o de otros usuarios sin ser administrador), `None`.
 fn user_of(pid: u32) -> Option<String> {
     let process = open_process(pid)?;
     let mut token = HANDLE::default();
@@ -144,12 +144,13 @@ mod tests {
     fn file_open_without_sharing_names_this_process() {
         let path = temp_file("abierto");
         let _open = OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
-        let me = std::env::var("USERNAME").unwrap();
+        let me = std::env::var("USERNAME").unwrap().to_lowercase();
         let holders = holders_of(&path);
         let mine = holders.iter().find(|h| h.pid == std::process::id()).expect("este proceso tiene el archivo");
         assert!(!mine.name.is_empty());
         assert!(mine.exe.as_deref().is_some_and(|e| e.to_lowercase().ends_with(".exe")), "{mine:?}");
-        assert!(mine.user.as_deref().is_some_and(|u| u.to_lowercase().ends_with(&format!("\\{}", me.to_lowercase()))), "{mine:?}");
+        let user = mine.user.as_deref().map(str::to_lowercase);
+        assert!(user.as_deref().is_some_and(|u| u == me || u.ends_with(&format!("\\{me}"))), "{mine:?}");
     }
 
     #[test]
@@ -174,6 +175,7 @@ mod tests {
 
     #[test]
     fn unreadable_user_is_none() {
-        assert_eq!(user_of(4), None);
+        // El proceso inactivo (PID 0) no se deja abrir nunca, ni siendo administrador.
+        assert_eq!(user_of(0), None);
     }
 }

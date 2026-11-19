@@ -229,6 +229,11 @@ Medidas que fija el diseño:
   se desplaza. Como en Windows, cada trabajo en curso muestra sus detalles y se pliega por separado; la ventana crece
   hasta 640 de alto y, pasado eso, el contenido se desplaza con la rueda o con la barra delgada de la derecha (riel de
   12, pulgar de 6 con radio 3 en `scrollbar`, como en las listas).
+- Ventana de archivo en uso: 560 de ancho y el alto del contenido, margen 16; título en Title (30 de paso), introducción
+  (22), por programa el nombre en negrita (20) con PID y usuario en Small `text_dim` (18) y sus archivos (18, sangrados 28);
+  Reintentar de 104×28 (principal) y Cerrar de 96×28, a la derecha al pie, 8 entre sí. Muestra hasta 4 programas con 5
+  archivos cada uno; el alto no pasa de 640 (`transfer::view::MAX_H`): si 4 programas no entran, se muestran menos
+  archivos por programa y el resto va en «y N más».
 - Gráfico de velocidad: 528×100 (el ancho de la ventana menos los márgenes), fondo `background`, borde y radio 4, guías al
   25/50/75 %, área en acento al 28 % con su línea de 1,5, escala hasta el máximo visto (80 MB/s en el ejemplo).
 - Fila de la cola: 560×64 (56 en cola), barra de 4 de 440 desde x = 40, botones de 24.
@@ -482,6 +487,7 @@ la tarjeta agrandada a 204 con la franja de historial y el mapa 128 más bajo; X
 | X95 | xtree: primera foto | «Primera foto: 13/11» / «El cambio se ve desde el próximo análisis»; sin ▲ | — | `growth::CardState::FirstPhoto` |
 | X96 | xtree: sin historial todavía | «Sin historial todavía: se arma cada vez que analizás» (antes de la primera foto o después de «Borrar historial»); sin ▲ | — | `growth::CardState::Empty` |
 | X97 | Configuración: xtree con el historial de tamaños | Sección xtree: «Analizar al abrir xtree», «Colorear el mapa por tipo de archivo al abrir», «Disco que se analiza al abrir», **«Guardar historial de tamaños»** (encendido) y **«Historial guardado»** con «Borrar historial»; «Teclas de xtree» y «Ver los atajos» | Apagado escribe `xtree_historial = false`. «Borrar historial» pregunta («¿Borrar el historial de tamaños de xtree? Se borran las fotos de todas las carpetas analizadas.») y la descripción suma « · Historial borrado» (o el error) | `settings::options`, `App::clear_xtree_history` |
+| X98 | Ventana: archivo en uso | Ventana propia del sistema (560 de ancho, como la de copia) sobre la lista: «No se pudo eliminar «informe.xlsx»» en Title, «Lo está usando otro programa:», el programa en negrita («Microsoft Excel (EXCEL.EXE)») y debajo en `text_dim` «PID 4812 · usuario PC\Leandro» (o «usuario desconocido» si no se pudo averiguar), sus archivos (informe.xlsx); con varios programas, uno por grupo y «y N programas más» si pasan de 4 (hasta 5 archivos por programa, «y N más» si hay más); «Cerralo y reintentá.» (en plural, «Lo están usando otros programas:» y «Cerralos y reintentá.»); Reintentar (principal) y Cerrar | Reintentar (o Enter) repite lo que falló: una operación suelta se repite entera; un trabajo de copia o borrado reintenta solo lo que falló, como el «Reintentar» de la ventana de copia. Cerrar y Esc la ocultan. Se abre sola al fallar con «en uso», una sola vez por evento (una operación suelta, o un trabajo al terminar), y solo si se sabe quién lo tiene (Windows) | `in_use_draw::draw` |
 
 Medidas que fija el diseño:
 - Tarjeta con historial: 76 + 128 = 204 de alto (el mapa se achica 128); la parte de arriba queda como antes. Sin franja

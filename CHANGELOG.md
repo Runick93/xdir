@@ -18,6 +18,7 @@
 - **Historial de crecimiento en xtree**: cada análisis guarda una foto de los tamaños, y la tarjeta de la carpeta muestra cuánto creció en 7, 30 o 90 días, un gráfico y las 5 subcarpetas que más crecieron (clic para entrar). En la tabla, una ▲ marca las carpetas que crecieron mucho. Se apaga o se borra en Configuración ▸ xtree; los discos de red no guardan historial.
 - **Terminal por defecto**: elegí qué terminal abre «Abrir la terminal en la carpeta» en Configuración ▸ Avanzado ▸ Terminal, o con clic derecho sobre una del menú `>_` → «Usar por defecto» (la elegida dice «Por defecto»). Se detectan más terminales: en la Mac Ghostty, Warp, WezTerm, Alacritty, kitty, Hyper y Tabby además de Terminal e iTerm; en Windows también Git Bash; en Linux todas las que estén instaladas. Otra cualquiera se agrega con `terminal_propia` en config.toml.
 - El árbol muestra en una sola lista las carpetas del usuario, la **Papelera** y las del Acceso rápido de Windows. En Configuración ▸ Lugares se elige cuáles se ven, en qué orden, y se suman carpetas propias. Soltar archivos sobre la Papelera del árbol los manda a la Papelera.
+- Cuando un archivo no se puede borrar, mover, renombrar o copiar porque otro programa lo tiene, una ventana dice qué programa es y qué usuario lo ejecutó (en Windows).
 
 ### Cambios
 - Las copias, movimientos y extracciones corren a la vez aunque usen el mismo disco. Para que esperen en cola como antes, encendé Configuración ▸ Avanzado ▸ «Copias en cola por disco»; cada una en cola tiene el botón «Empezar ahora».

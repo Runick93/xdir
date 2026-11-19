@@ -12,6 +12,7 @@ mod edit;
 mod events;
 mod favs;
 mod fileops;
+mod in_use;
 mod info;
 mod network;
 mod network_page;
@@ -66,6 +67,8 @@ mod activity_tests;
 mod compare_tests;
 #[cfg(test)]
 mod cut_tests;
+#[cfg(test)]
+mod in_use_tests;
 
 pub use events::CursorKind;
 pub use fileops::quoted_paths;
@@ -545,6 +548,8 @@ pub struct App {
     swallow_space: bool,
     /// Trabajos del motor de copia (cola, estado de cada uno).
     transfers: transfers::Transfers,
+    /// La ventana de «archivo en uso», si está abierta.
+    in_use: Option<in_use::InUseState>,
     /// Red: favoritos y recientes, lo conectado y la red local.
     net: network::NetState,
     /// Dentro de archivos comprimidos: lo copiado y las extracciones para la vista previa.
@@ -787,6 +792,7 @@ impl App {
             renaming: false,
             swallow_space: false,
             transfers: transfers::Transfers::new(),
+            in_use: None,
             net: network::NetState::default(),
             archive: archive_nav::ArchiveState::default(),
             cut: Default::default(),

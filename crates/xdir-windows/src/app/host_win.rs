@@ -750,7 +750,7 @@ impl WindowHost for Win32Host {
     }
 
     fn aux_max_height(&self, w: xdir_core::host::AuxWindow) -> Option<f32> {
-        let xdir_core::host::AuxWindow::Transfers = w;
+        let xdir_core::host::AuxWindow::Transfers = w else { return None };
         crate::auxwin::max_client_height(self.hwnd.get().hwnd())
     }
 

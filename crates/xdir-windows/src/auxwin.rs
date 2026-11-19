@@ -338,7 +338,8 @@ fn ensure(main: HWND, theme: &Theme) -> Option<HWND> {
 /// Lo de `WindowHost::aux_show`: crea la ventana o la trae al frente, con `title` y un área de
 /// `size` DIPs. `false` si no se pudo crear.
 pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &Theme) -> bool {
-    let AuxWindow::Transfers = w;
+    // La de «archivo en uso» todavía no existe en Windows: queda el aviso de la barra de estado.
+    let AuxWindow::Transfers = w else { return false };
     let Some(hwnd) = ensure(main, theme) else { return false };
     with(|a| a.size = size);
     let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
@@ -396,7 +397,7 @@ pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &The
 /// Lo de `WindowHost::aux_progress`: el avance sobre el botón de la barra de tareas. Se guarda
 /// aunque la ventana no exista o esté oculta, para ponerlo cuando se muestre.
 pub fn set_progress(w: AuxWindow, p: AuxProgress) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     PROGRESS.with(|c| c.set(p));
     // Oculta no tiene botón: ponerlo igual no hace nada y no depende de cómo se ocultó (con la
     // ✕ o con la principal minimizada).
@@ -437,7 +438,7 @@ fn taskbar_button_created(hwnd: HWND) {
 
 /// El contenido cambió de alto.
 pub fn resize(w: AuxWindow, size: (f32, f32)) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     let Some(hwnd) = with(|a| {
         a.size = size;
         a.hwnd
@@ -472,7 +473,7 @@ pub fn resize(w: AuxWindow, size: (f32, f32)) {
 }
 
 pub fn set_title(w: AuxWindow, title: &str) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     if let Some(hwnd) = with(|a| a.hwnd) {
         unsafe {
             let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
@@ -481,7 +482,7 @@ pub fn set_title(w: AuxWindow, title: &str) {
 }
 
 pub fn invalidate_aux(w: AuxWindow) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     if let Some(hwnd) = with(|a| a.hwnd) {
         invalidate(hwnd);
     }
@@ -489,7 +490,7 @@ pub fn invalidate_aux(w: AuxWindow) {
 
 /// La oculta y recuerda dónde estaba.
 pub fn hide(w: AuxWindow) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     if let Some(hwnd) = with(|a| a.hwnd) {
         remember(hwnd);
         // Sin avance en el botón (el guardado queda para cuando se vuelva a mostrar).

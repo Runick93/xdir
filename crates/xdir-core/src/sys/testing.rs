@@ -1525,15 +1525,15 @@ pub struct FakeHost {
     quick_look_native: Cell<bool>,
     quick_look_cloud: Cell<bool>,
     /// Ventanas secundarias: si el host las tiene (por defecto, sí), lo que se pidió mostrar
-    /// (ventana, título, tamaño), los cambios de tamaño, los repintados, las que se ocultaron y si
-    /// está a la vista.
+    /// (ventana, título, tamaño), los cambios de tamaño, y por ventana los repintados, las veces
+    /// que se ocultó y las que están a la vista.
     aux_native: Cell<bool>,
     aux_shows: RefCell<Vec<AuxShow>>,
     aux_sizes: RefCell<Vec<(AuxWindow, (f32, f32))>>,
-    aux_invalidations: Cell<usize>,
-    aux_hides: Cell<usize>,
+    aux_invalidations: RefCell<Vec<AuxWindow>>,
+    aux_hides: RefCell<Vec<AuxWindow>>,
     aux_progresses: RefCell<Vec<crate::host::AuxProgress>>,
-    aux_visible: Cell<bool>,
+    aux_visible: RefCell<Vec<AuxWindow>>,
     /// El alto máximo que da `aux_max_height` (por defecto, sin límite).
     aux_max_height: Cell<Option<f32>>,
 }
@@ -1565,10 +1565,10 @@ impl FakeHost {
             aux_native: Cell::new(true),
             aux_shows: RefCell::new(Vec::new()),
             aux_sizes: RefCell::new(Vec::new()),
-            aux_invalidations: Cell::new(0),
-            aux_hides: Cell::new(0),
+            aux_invalidations: RefCell::new(Vec::new()),
+            aux_hides: RefCell::new(Vec::new()),
             aux_progresses: RefCell::new(Vec::new()),
-            aux_visible: Cell::new(false),
+            aux_visible: RefCell::new(Vec::new()),
             aux_max_height: Cell::new(None),
         })
     }
@@ -1593,14 +1593,24 @@ impl FakeHost {
         self.aux_sizes.borrow().clone()
     }
 
-    /// Cuántas veces se pidió repintar una ventana secundaria.
+    /// Cuántas veces se pidió repintar la ventana de copia.
     pub fn aux_invalidations(&self) -> usize {
-        self.aux_invalidations.get()
+        self.aux_invalidations_of(AuxWindow::Transfers)
     }
 
-    /// Cuántas veces se ocultó una ventana secundaria desde la `App`.
+    /// Cuántas veces se pidió repintar la ventana secundaria `w`.
+    pub fn aux_invalidations_of(&self, w: AuxWindow) -> usize {
+        self.aux_invalidations.borrow().iter().filter(|x| **x == w).count()
+    }
+
+    /// Cuántas veces se ocultó la ventana de copia desde la `App`.
     pub fn aux_hides(&self) -> usize {
-        self.aux_hides.get()
+        self.aux_hides_of(AuxWindow::Transfers)
+    }
+
+    /// Cuántas veces se ocultó la ventana secundaria `w` desde la `App`.
+    pub fn aux_hides_of(&self, w: AuxWindow) -> usize {
+        self.aux_hides.borrow().iter().filter(|x| **x == w).count()
     }
 
     /// Los avances pedidos con `aux_progress`, en orden.
@@ -1608,14 +1618,25 @@ impl FakeHost {
         self.aux_progresses.borrow().clone()
     }
 
-    /// La ventana secundaria está a la vista (`aux_show` sin `aux_hide` después).
+    /// La ventana de copia está a la vista (`aux_show` sin `aux_hide` después).
     pub fn aux_visible(&self) -> bool {
-        self.aux_visible.get()
+        self.aux_visible_of(AuxWindow::Transfers)
     }
 
-    /// El usuario cerró la ventana (lo que hace la plataforma antes de `App::aux_closed`).
+    /// La ventana secundaria `w` está a la vista (`aux_show` sin `aux_hide` después).
+    pub fn aux_visible_of(&self, w: AuxWindow) -> bool {
+        self.aux_visible.borrow().contains(&w)
+    }
+
+    /// El usuario cerró la ventana de copia (lo que hace la plataforma antes de `App::aux_closed`).
     pub fn aux_user_closed(&self) {
-        self.aux_visible.set(false);
+        self.aux_user_closed_of(AuxWindow::Transfers);
+    }
+
+    /// El usuario cerró la ventana secundaria `w` (lo que hace la plataforma antes de
+    /// `App::aux_closed`).
+    pub fn aux_user_closed_of(&self, w: AuxWindow) {
+        self.aux_visible.borrow_mut().retain(|x| *x != w);
     }
 
     /// Imágenes grandes pedidas en el último cuadro dibujado.
@@ -1855,7 +1876,10 @@ impl WindowHost for FakeHost {
             return false;
         }
         self.aux_shows.borrow_mut().push((w, title.to_string(), size));
-        self.aux_visible.set(true);
+        let mut visible = self.aux_visible.borrow_mut();
+        if !visible.contains(&w) {
+            visible.push(w);
+        }
         true
     }
 
@@ -1873,17 +1897,17 @@ impl WindowHost for FakeHost {
         self.aux_max_height.get()
     }
 
-    fn aux_invalidate(&self, _w: AuxWindow) {
-        self.aux_invalidations.set(self.aux_invalidations.get() + 1);
+    fn aux_invalidate(&self, w: AuxWindow) {
+        self.aux_invalidations.borrow_mut().push(w);
     }
 
     fn aux_progress(&self, _w: AuxWindow, p: crate::host::AuxProgress) {
         self.aux_progresses.borrow_mut().push(p);
     }
 
-    fn aux_hide(&self, _w: AuxWindow) {
-        self.aux_hides.set(self.aux_hides.get() + 1);
-        self.aux_visible.set(false);
+    fn aux_hide(&self, w: AuxWindow) {
+        self.aux_hides.borrow_mut().push(w);
+        self.aux_user_closed_of(w);
     }
 
     fn text_width(&self, s: &str, _bold: bool) -> f32 {

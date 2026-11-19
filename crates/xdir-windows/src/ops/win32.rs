@@ -5,7 +5,7 @@
 //! arma la operación inversa para deshacer (Ctrl+Z).
 
 use super::{Op, OpResult, Undo, WM_APP_OP_DONE};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
@@ -330,10 +330,19 @@ pub(super) fn recycle_one(path: &Path) -> Result<Option<String>> {
         fo.DeleteItem(&item(path)?, None)?;
         fo.PerformOperations()?;
         if fo.GetAnyOperationsAborted().map(|b| b.as_bool()).unwrap_or(false) {
-            return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+            // Con `FOF_NOERRORUI` el Shell no muestra nada cuando un elemento falla (en uso, sin
+            // permiso…) y solo da «abortado»; el motivo verdadero llega en `PostDeleteItem`. Si hubo
+            // uno, ese es el error; si no, el usuario contestó que no al aviso (`E_ABORT`).
+            let hr = recorder_failure(&recorder).filter(|hr| !is_cancel(*hr)).unwrap_or(windows::Win32::Foundation::E_ABORT);
+            return Err(windows::core::Error::from_hresult(hr));
         }
     }
     Ok(recorder_log(&recorder).into_iter().find_map(|r| r.created))
+}
+
+/// ¿El `HRESULT` es una cancelación (`E_ABORT`, `COPYENGINE_E_USER_CANCELLED`, `_CANCELLED`)?
+fn is_cancel(hr: HRESULT) -> bool {
+    matches!(hr.0 as u32, 0x8000_4004 | 0x8027_0000 | 0x8027_0001)
 }
 
 pub fn item(path: &Path) -> Result<IShellItem> {
@@ -362,6 +371,8 @@ struct Record {
 #[derive(Default)]
 struct Recorder {
     log: RefCell<Vec<Record>>,
+    /// El primer error con que el Shell dio por fallido un elemento (`Post*Item` con `hr` de error).
+    failure: Cell<Option<HRESULT>>,
 }
 
 fn recorder_log(sink: &IFileOperationProgressSink) -> Vec<Record> {
@@ -370,9 +381,18 @@ fn recorder_log(sink: &IFileOperationProgressSink) -> Vec<Record> {
     imp.log.borrow().clone()
 }
 
+/// El primer error que el Shell dio para un elemento, si lo hubo.
+fn recorder_failure(sink: &IFileOperationProgressSink) -> Option<HRESULT> {
+    let imp: &Recorder = unsafe { sink.as_impl() };
+    imp.failure.get()
+}
+
 impl Recorder_Impl {
     fn record(&self, hr: HRESULT, source: Ref<IShellItem>, created: Ref<IShellItem>, kind: SIGDN) {
         if hr.is_err() {
+            if self.failure.get().is_none() {
+                self.failure.set(Some(hr));
+            }
             return;
         }
         let source = source.as_ref().and_then(|i| display_name(i, SIGDN_FILESYSPATH)).map(PathBuf::from);

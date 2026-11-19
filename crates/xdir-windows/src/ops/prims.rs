@@ -563,6 +563,26 @@ mod tests {
         assert!(std::fs::symlink_metadata(&other).is_err(), "quedó el archivo a medio copiar");
     }
 
+    /// Mandar a la Papelera algo que otro programa tiene abierto sin compartir: el Shell solo dice
+    /// «abortado» (sin `FOF_NOERRORUI` no muestra nada) y el motivo llega en `PostDeleteItem`. Tiene
+    /// que salir «en uso» (y no «cancelado»: el motor lo tomaría por un no del usuario y no diría
+    /// nada) y el archivo no se toca.
+    #[test]
+    fn trash_of_a_held_file_is_in_use_not_cancelled() {
+        let dir = tmp("papelera-en-uso");
+        let held = dir.join("abierto.txt");
+        std::fs::write(&held, b"x").unwrap();
+        let lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().read(true).share_mode(0).open(&held).unwrap()
+        };
+        let e = WinCopyPrims.trash(&held).unwrap_err();
+        assert_eq!(e.kind, ErrKind::InUse, "{e:?}");
+        assert_eq!(e.path, held);
+        drop(lock);
+        assert_eq!(std::fs::read(&held).unwrap(), b"x");
+    }
+
     #[test]
     fn prims_copy_refuses_existing() {
         let dir = tmp("existe");

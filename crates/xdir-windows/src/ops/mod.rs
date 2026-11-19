@@ -5,6 +5,7 @@
 pub use xdir_core::ops::{Op, OpResult, Undo, WM_APP_OP_DONE};
 
 mod errors;
+mod holders;
 mod prims;
 mod win32;
 pub(crate) use self::errors::{exists, load_message, win_message, write_error};

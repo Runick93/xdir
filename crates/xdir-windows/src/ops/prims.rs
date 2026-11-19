@@ -30,7 +30,7 @@ use windows::Win32::System::SystemServices::{FILE_CASE_SENSITIVE_SEARCH, FILE_RE
 use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
 use windows::core::PCWSTR;
 
-use xdir_core::sys::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, VolumeInfo};
+use xdir_core::sys::{CopyError, CopyPrims, ErrKind, Flow, Holder, ItemKind, ItemStat, VolumeInfo};
 
 /// `GetDriveTypeW` (de `Win32_System_WindowsProgramming`, que no se incluye por una constante).
 const DRIVE_FIXED: u32 = 3;
@@ -517,6 +517,10 @@ impl CopyPrims for WinCopyPrims {
             }
             _ => Ok(()),
         }
+    }
+
+    fn holders(&self, path: &Path) -> Vec<Holder> {
+        super::holders::holders_of(path)
     }
 }
 

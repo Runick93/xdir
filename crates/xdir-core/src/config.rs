@@ -102,6 +102,9 @@ pub struct Config {
     /// `[opciones] xtree_historial`: xtree guarda una foto de los tamaños con cada análisis
     /// completo (de fábrica, sí).
     pub xtree_history: bool,
+    /// `[opciones] cola_por_disco`: las copias que usan el mismo disco esperan su turno de a una
+    /// (de fábrica, no: corren todas a la vez).
+    pub queue_by_disk: bool,
     /// `[opciones] terminal`: la clave de la terminal por defecto (`"iterm"`, `"wt"`, `"propia"`…).
     /// Sin la opción (o si no está instalada), la primera del sistema.
     pub terminal: Option<String>,
@@ -124,7 +127,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_scan_on_open: false, xtree_history: true, terminal: None, custom_terminal: None, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_scan_on_open: false, xtree_history: true, queue_by_disk: false, terminal: None, custom_terminal: None, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
     }
 }
 
@@ -320,6 +323,8 @@ impl Config {
                             ("xtree_analizar_al_abrir", None) => c.errors.push(format!("línea {}: xtree_analizar_al_abrir va como true o false", e.line)),
                             ("xtree_historial", Some(on)) => c.xtree_history = on,
                             ("xtree_historial", None) => c.errors.push(format!("línea {}: xtree_historial va como true o false", e.line)),
+                            ("cola_por_disco", Some(on)) => c.queue_by_disk = on,
+                            ("cola_por_disco", None) => c.errors.push(format!("línea {}: cola_por_disco va como true o false", e.line)),
                             ("xtree_abrir", _) => match XtreeOpen::ALL.into_iter().find(|o| e.value.as_str() == Some(o.id())) {
                                 Some(o) => c.xtree_open = o,
                                 None => c.errors.push(format!("línea {}: xtree_abrir va como \"sistema\", \"panel\" o \"ultimo\"", e.line)),
@@ -484,6 +489,9 @@ pub fn template() -> String {
             # xtree guarda una foto de los tamaños con cada análisis, para ver cuánto creció cada\n\
             # carpeta (false lo apaga).\n\
             # xtree_historial = true\n\
+            # Las copias que usan el mismo disco esperan su turno de a una (si no, corren todas a\n\
+            # la vez).\n\
+            # cola_por_disco = false\n\
             # Terminal que abre «Abrir la terminal en la carpeta»: la clave de una de las detectadas\n\
             # (Windows: \"powershell\", \"cmd\", \"wt\", \"git_bash\"; macOS: \"terminal\", \"iterm\",\n\
             # \"ghostty\", \"warp\", \"wezterm\", \"alacritty\", \"kitty\", \"hyper\", \"tabby\"; Linux:\n\
@@ -673,6 +681,20 @@ mod tests {
         assert!(bad.xtree_history);
         assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
         assert!(template().contains("\n# xtree_historial = true\n"));
+    }
+
+    /// `cola_por_disco`: de fábrica apagada; true la enciende; otra cosa es un error.
+    #[test]
+    fn queue_by_disk_option_parses() {
+        crate::sys::testing::install_fakes();
+        assert!(!Config::parse("").queue_by_disk);
+        let c = Config::parse("[opciones]\ncola_por_disco = true\n");
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert!(c.queue_by_disk);
+        let bad = Config::parse("[opciones]\ncola_por_disco = 1\n");
+        assert!(!bad.queue_by_disk);
+        assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
+        assert!(template().contains("\n# cola_por_disco = false\n"));
     }
 
     #[test]

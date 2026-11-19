@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, DiskScan, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, CopyError, DiskScan, ErrKind, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use crate::info::{InfoChange, InfoReply, InfoRequest, ItemInfo};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
@@ -220,6 +220,7 @@ thread_local! {
     /// (que corren en paralelo, cada uno en su hilo) no se vean entre sí.
     static OPS: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
     static RESPONSE: RefCell<OpResult> = RefCell::new(OpResult::default());
+    static FAIL: RefCell<Option<ErrKind>> = const { RefCell::new(None) };
 }
 
 /// `FileOps` falso: no toca el disco; anota cada `Op` recibida y responde por el canal, en el
@@ -236,13 +237,39 @@ impl FakeFileOps {
     /// Respuesta de las próximas operaciones de este hilo.
     pub fn respond_with(result: OpResult) {
         RESPONSE.with(|r| *r.borrow_mut() = result);
+        FAIL.with(|f| *f.borrow_mut() = None);
+    }
+
+    /// Las próximas operaciones de este hilo fallan con `kind` en su elemento (la carpeta donde
+    /// se crea, lo que se renombra o borra), con el aviso que arman las plataformas
+    /// (`ops::failure`). `respond_with` lo deshace.
+    pub fn fail_with(kind: ErrKind) {
+        FAIL.with(|f| *f.borrow_mut() = Some(kind));
+    }
+}
+
+/// El elemento de una operación con el que se arma su error.
+fn op_path(op: &Op) -> PathBuf {
+    match op {
+        Op::Delete { paths, .. } => paths.first().cloned().unwrap_or_default(),
+        Op::Rename { path, .. } => path.clone(),
+        Op::NewFolder { parent } | Op::NewFile { parent } => parent.clone(),
+        Op::Shortcuts { targets } => targets.first().cloned().unwrap_or_default(),
+        Op::Undo(_) => PathBuf::new(),
     }
 }
 
 impl FileOps for FakeFileOps {
     fn spawn(&self, owner: Handle, tx: Sender<OpResult>, op: Op) {
+        let result = match FAIL.with(|f| f.borrow().clone()) {
+            Some(kind) => {
+                let e = CopyError::new(kind, &op_path(&op));
+                OpResult { error: Some(crate::ops::failure(&op, &e)), error_detail: crate::ops::failure_detail(&op, &e), ..OpResult::default() }
+            }
+            None => RESPONSE.with(|r| r.borrow().clone()),
+        };
         OPS.with(|o| o.borrow_mut().push(op));
-        let _ = tx.send(RESPONSE.with(|r| r.borrow().clone()));
+        let _ = tx.send(result);
         owner.post(WM_APP_OP_DONE, 0, 0);
     }
 }
@@ -551,8 +578,10 @@ impl Shell for FakeShell {
         shell_state(|s| s.clipboard = None);
     }
 
+    /// Como en el sistema, el texto reemplaza los archivos copiados o cortados.
     fn copy_text(&self, _owner: Handle, text: &str) -> Result<(), String> {
         record(ShellCall::CopyText(text.to_string()));
+        shell_state(|s| s.clipboard = None);
         outcome()
     }
 
@@ -640,6 +669,8 @@ thread_local! {
     static CLOUD_CHECKS: Cell<usize> = const { Cell::new(0) };
     /// Carpeta que el falso trata como la Papelera (por hilo; ver `set_trash`).
     static TRASH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Carpetas del usuario del falso (por hilo; ver `set_user_folders`).
+    static USER_FOLDERS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `FileSystem` falso sobre `std::fs`: lee carpetas reales (las temporales de cada test) sin
@@ -659,6 +690,12 @@ impl FakeFileSystem {
     /// Desde ahora (en este hilo) `is_trash` dice que sí para esa carpeta (o para ninguna).
     pub fn set_trash(path: Option<&Path>) {
         TRASH.with(|t| *t.borrow_mut() = path.map(Path::to_path_buf));
+    }
+
+    /// Carpetas del usuario que ve este hilo, en el orden de `user_folder` (Escritorio,
+    /// Descargas, …). Con una lista vacía vuelve a no haber ninguna.
+    pub fn set_user_folders(paths: &[&Path]) {
+        USER_FOLDERS.with(|u| *u.borrow_mut() = paths.iter().map(|p| p.to_path_buf()).collect());
     }
 
     /// Cuántas veces se preguntó `cloud_only` en este hilo (las vistas rápidas lo preguntan por
@@ -889,8 +926,8 @@ impl FileSystem for FakeFileSystem {
         e
     }
 
-    fn user_folder(&self, _i: usize) -> Option<PathBuf> {
-        None
+    fn user_folder(&self, i: usize) -> Option<PathBuf> {
+        USER_FOLDERS.with(|u| u.borrow().get(i).cloned())
     }
 
     fn drives(&self) -> Vec<PathBuf> {
@@ -945,6 +982,10 @@ impl FileSystem for FakeFileSystem {
 
     fn is_trash(&self, loc: &Location) -> bool {
         TRASH.with(|t| t.borrow().as_deref().is_some_and(|p| loc.is_path(p)))
+    }
+
+    fn trash_place(&self) -> Option<Location> {
+        TRASH.with(|t| t.borrow().clone()).map(Location::Path)
     }
 
     fn network_place(&self) -> &'static str {
@@ -1259,17 +1300,23 @@ impl Overlays for FakeOverlays {
 
 /// `Painter` que no dibuja: registra cada `text` (fuente, texto y rectángulo) para que los tests
 /// vean qué se escribió y con qué formato. `measure` da 7 DIPs por carácter; `clip` solo llama a
-/// la clausura; los íconos se anotan (`icons`) y las miniaturas no hacen nada (`thumbnail` da `false`). `big_image` anota la
-/// clave (`big_requests`) y devuelve lo fijado con `set_big_ready` (de entrada, `false`).
+/// la clausura; los íconos se anotan (`icons`, y con su opacidad `icon_draws`) y las miniaturas no hacen nada (`thumbnail` da `false`). `big_image` anota la
+/// clave (`big_requests`) y devuelve lo fijado con `set_big_ready` (de entrada, `false`). Los
+/// colores de los textos se ven con `text_draws`.
 pub struct RecordingPainter {
     theme: Theme,
     texts: RefCell<Vec<(FontId, String, Rect)>>,
+    /// Color de cada texto de `texts` (en el mismo orden).
+    text_colors: RefCell<Vec<Color>>,
     paths: RefCell<Vec<RecordedPath>>,
     strokes: RefCell<Vec<(Rect, Color)>>,
     big: RefCell<Vec<(thumbs::Key, Rect)>>,
     big_ready: Cell<bool>,
     forgotten: RefCell<Vec<thumbs::Source>>,
-    icons: RefCell<Vec<(f32, f32, f32)>>,
+    /// Íconos: x, y, lado y opacidad (la de `faded`).
+    icons: RefCell<Vec<(f32, f32, f32, f32)>>,
+    /// Opacidad de las imágenes mientras dura un `faded`.
+    image_alpha: Cell<f32>,
     fills: RefCell<Vec<(Rect, Color)>>,
     round_fills: RefCell<Vec<(Rect, Color)>>,
 }
@@ -1282,12 +1329,14 @@ impl RecordingPainter {
         Self {
             theme,
             texts: RefCell::new(Vec::new()),
+            text_colors: RefCell::new(Vec::new()),
             paths: RefCell::new(Vec::new()),
             strokes: RefCell::new(Vec::new()),
             big: RefCell::new(Vec::new()),
             big_ready: Cell::new(false),
             forgotten: RefCell::new(Vec::new()),
             icons: RefCell::new(Vec::new()),
+            image_alpha: Cell::new(1.0),
             fills: RefCell::new(Vec::new()),
             round_fills: RefCell::new(Vec::new()),
         }
@@ -1335,7 +1384,17 @@ impl RecordingPainter {
 
     /// Íconos dibujados con `shell_icon` (x, y, lado), en orden.
     pub fn icons(&self) -> Vec<(f32, f32, f32)> {
+        self.icons.borrow().iter().map(|&(x, y, size, _)| (x, y, size)).collect()
+    }
+
+    /// Íconos dibujados con `shell_icon` (x, y, lado y opacidad), en orden.
+    pub fn icon_draws(&self) -> Vec<(f32, f32, f32, f32)> {
         self.icons.borrow().clone()
+    }
+
+    /// Los textos dibujados con su color, en orden.
+    pub fn text_draws(&self) -> Vec<(FontId, String, Rect, Color)> {
+        self.texts.borrow().iter().zip(self.text_colors.borrow().iter()).map(|((f, s, r), c)| (*f, s.clone(), *r, *c)).collect()
     }
 
     /// Los textos dibujados, en orden.
@@ -1361,8 +1420,9 @@ impl Painter for RecordingPainter {
     }
     fn round_stroke(&self, _r: Rect, _radius: f32, _c: Color) {}
 
-    fn text(&self, font: FontId, s: &str, r: Rect, _c: Color) {
+    fn text(&self, font: FontId, s: &str, r: Rect, c: Color) {
         self.texts.borrow_mut().push((font, s.to_string(), r));
+        self.text_colors.borrow_mut().push(c);
     }
 
     fn measure(&self, _font: FontId, s: &str) -> f32 {
@@ -1370,7 +1430,13 @@ impl Painter for RecordingPainter {
     }
 
     fn shell_icon(&self, _index: i32, _overlay: u8, x: f32, y: f32, size: f32) {
-        self.icons.borrow_mut().push((x, y, size));
+        self.icons.borrow_mut().push((x, y, size, self.image_alpha.get()));
+    }
+
+    fn faded(&self, alpha: f32, f: &mut dyn FnMut()) {
+        let before = self.image_alpha.replace(alpha);
+        f();
+        self.image_alpha.set(before);
     }
 
     fn thumbnail(&self, _key: &thumbs::Key, _r: Rect) -> bool {
@@ -1427,6 +1493,8 @@ pub struct FakeHost {
     drag_result: RefCell<Result<(), String>>,
     drawn: RefCell<Vec<(FontId, String, Rect)>>,
     drawn_fills: RefCell<Vec<(Rect, Color)>>,
+    /// Íconos del último cuadro (x, y, lado y opacidad).
+    drawn_icons: RefCell<Vec<(f32, f32, f32, f32)>>,
     /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
     text_boxes: RefCell<HashMap<u32, (TextKind, String, bool)>>,
     next_text_box: Cell<u32>,
@@ -1449,7 +1517,10 @@ pub struct FakeHost {
     aux_sizes: RefCell<Vec<(AuxWindow, (f32, f32))>>,
     aux_invalidations: Cell<usize>,
     aux_hides: Cell<usize>,
+    aux_progresses: RefCell<Vec<crate::host::AuxProgress>>,
     aux_visible: Cell<bool>,
+    /// El alto máximo que da `aux_max_height` (por defecto, sin límite).
+    aux_max_height: Cell<Option<f32>>,
 }
 
 impl FakeHost {
@@ -1465,6 +1536,7 @@ impl FakeHost {
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
             drawn_fills: RefCell::new(Vec::new()),
+            drawn_icons: RefCell::new(Vec::new()),
             text_boxes: RefCell::new(HashMap::new()),
             next_text_box: Cell::new(1),
             menu_choice: Cell::new(None),
@@ -1480,13 +1552,20 @@ impl FakeHost {
             aux_sizes: RefCell::new(Vec::new()),
             aux_invalidations: Cell::new(0),
             aux_hides: Cell::new(0),
+            aux_progresses: RefCell::new(Vec::new()),
             aux_visible: Cell::new(false),
+            aux_max_height: Cell::new(None),
         })
     }
 
     /// Si el host tiene ventanas secundarias (por defecto, sí; sin ellas `aux_show` da `false`).
     pub fn set_aux_native(&self, on: bool) {
         self.aux_native.set(on);
+    }
+
+    /// Simula una pantalla baja: el alto máximo del área de las ventanas secundarias.
+    pub fn set_aux_max_height(&self, h: Option<f32>) {
+        self.aux_max_height.set(h);
     }
 
     /// Lo que se pidió mostrar con `aux_show` (ventana, título y tamaño), en orden.
@@ -1507,6 +1586,11 @@ impl FakeHost {
     /// Cuántas veces se ocultó una ventana secundaria desde la `App`.
     pub fn aux_hides(&self) -> usize {
         self.aux_hides.get()
+    }
+
+    /// Los avances pedidos con `aux_progress`, en orden.
+    pub fn aux_progresses(&self) -> Vec<crate::host::AuxProgress> {
+        self.aux_progresses.borrow().clone()
     }
 
     /// La ventana secundaria está a la vista (`aux_show` sin `aux_hide` después).
@@ -1568,6 +1652,11 @@ impl FakeHost {
     /// Los rectángulos rellenados del último cuadro dibujado.
     pub fn drawn_fills(&self) -> Vec<(Rect, Color)> {
         self.drawn_fills.borrow().clone()
+    }
+
+    /// Los íconos del último cuadro dibujado (x, y, lado y opacidad).
+    pub fn drawn_icons(&self) -> Vec<(f32, f32, f32, f32)> {
+        self.drawn_icons.borrow().clone()
     }
 
     /// Las cajas de texto abiertas de ese tipo (número y texto).
@@ -1725,6 +1814,7 @@ impl WindowHost for FakeHost {
         paint(&p, w, h);
         *self.drawn.borrow_mut() = p.texts();
         *self.drawn_fills.borrow_mut() = p.fills();
+        *self.drawn_icons.borrow_mut() = p.icon_draws();
         *self.drawn_big.borrow_mut() = p.big_requests();
         Ok(())
     }
@@ -1764,8 +1854,16 @@ impl WindowHost for FakeHost {
         self.aux_sizes.borrow_mut().push((w, size));
     }
 
+    fn aux_max_height(&self, _w: AuxWindow) -> Option<f32> {
+        self.aux_max_height.get()
+    }
+
     fn aux_invalidate(&self, _w: AuxWindow) {
         self.aux_invalidations.set(self.aux_invalidations.get() + 1);
+    }
+
+    fn aux_progress(&self, _w: AuxWindow, p: crate::host::AuxProgress) {
+        self.aux_progresses.borrow_mut().push(p);
     }
 
     fn aux_hide(&self, _w: AuxWindow) {

@@ -492,6 +492,21 @@ fn disk_full_stops() {
     assert_eq!(plain(r.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/df/d/1.txt")])])));
 }
 
+/// Lo bloqueado por el acceso controlado a carpetas tampoco deja seguir (fallaría todo lo demás):
+/// se detiene, con el aviso corto y su explicación para el cartel.
+#[test]
+fn blocked_stops_with_notice() {
+    let fake = FakeCopyPrims::new();
+    let files = three_files(&fake, "/bk");
+    fake.fail_after(&files[1], 0, ErrKind::Blocked { sure: true });
+    let r = go(&fake, JobSpec::Copy { sources: files, dest: p("/bk/d") }, &[]);
+    assert_eq!(r.out.stopped.as_deref(), Some("Bloqueado: acceso controlado"));
+    let (notice, detail) = r.out.stop_notice.clone().expect("aviso del bloqueo");
+    assert!(notice.starts_with("Windows bloqueó a xdir en «"), "{notice}");
+    assert!(detail.is_some_and(|d| d.contains("Permitir una aplicación")));
+    assert_eq!(fake.list_all(&p("/bk/d")), vec![p("/bk/d/1.txt")]);
+}
+
 #[test]
 fn not_enough_space_refuses() {
     let fake = FakeCopyPrims::new();
@@ -524,7 +539,7 @@ fn fat32_big_file_error_upfront() {
     fake.add_file(&p("/f32/s/chico.txt"), b"c".to_vec());
     fake.add_dir(&p("/fat/d"));
     let r = go(&fake, JobSpec::Copy { sources: vec![p("/f32/s/peli.mkv"), p("/f32/s/chico.txt")], dest: p("/fat/d") }, &[]);
-    assert_eq!(r.messages(), vec!["Es demasiado grande para el formato del disco de destino (FAT32)".to_string()]);
+    assert_eq!(r.messages(), vec!["Es demasiado grande para FAT32".to_string()]);
     assert_eq!(fake.reads(&p("/f32/s/peli.mkv")), 0);
     assert!(fake.exists(&p("/fat/d/chico.txt")) && !fake.exists(&p("/fat/d/peli.mkv")));
     // El error figura de entrada, antes de copiar nada.
@@ -1146,6 +1161,19 @@ fn long_partial_name_falls_back_to_a_short_one() {
 }
 
 #[test]
+fn long_partial_path_falls_back_to_a_short_one() {
+    // La ruta con «.nombre.xdir-part» pasa del largo que acepta el sistema: también con uno corto.
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/lp/s/largo.txt"), b"datos".to_vec());
+    fake.add_dir(&p("/lp/d"));
+    fake.fail(&p("/lp/d/.largo.txt.xdir-part"), ErrKind::PathTooLong, 1);
+    let r = go(&fake, JobSpec::Copy { sources: vec![p("/lp/s/largo.txt")], dest: p("/lp/d") }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.messages());
+    assert_eq!(fake.contents(&p("/lp/d/largo.txt")).unwrap(), b"datos");
+    no_tmp_left(&fake, &p("/lp/d"));
+}
+
+#[test]
 fn final_rename_retries_while_the_file_is_busy() {
     // Un antivirus o el indexador abren el archivo recién escrito: el renombre final se reintenta
     // un rato antes de fallar.
@@ -1388,4 +1416,185 @@ fn undo_created_trashes_only_the_same_item() {
     assert!(!u.out.errors[0].retry);
     assert!(!fake.exists(&p("/ui/real/a.txt")), "lo mismo que se creó: a la Papelera");
     assert_eq!(fake.contents(&p("/ui/real/b.txt")).unwrap(), b"otro");
+}
+
+// ---------- eliminar ----------
+
+#[test]
+fn delete_to_trash_moves_each_and_undo_restores() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/del1/a.txt"), b"a".to_vec());
+    fake.add_file(&p("/del1/b.txt"), b"b".to_vec());
+    fake.add_file(&p("/del1/Dir/c.txt"), b"c".to_vec());
+    fake.add_file(&p("/del1/Dir/sub/d.txt"), b"d".to_vec());
+    let paths = vec![p("/del1/a.txt"), p("/del1/b.txt"), p("/del1/Dir")];
+    let r = go(&fake, JobSpec::Delete { paths: paths.clone(), recycle: true }, &[]);
+    assert!(r.out.errors.is_empty() && !r.out.cancelled, "{:?}", r.out);
+    assert_eq!(fake.trashed().len(), 3);
+    assert_eq!(r.out.done_items, 3);
+    assert!(r.updates.iter().any(|u| matches!(u, Update::Started { title, items: 3, .. } if title == "Eliminando 3 elementos")), "{:?}", r.updates);
+    assert!(paths.iter().all(|x| !fake.exists(x)));
+    let undo = r.out.result.undo.clone().expect("sin deshacer");
+    let Undo::Batch(steps) = &undo else { panic!("no es Batch: {undo:?}") };
+    match steps.as_slice() {
+        [Undo::Recycled(pairs)] => assert_eq!(pairs.iter().map(|(_, o)| o.clone()).collect::<Vec<_>>(), paths),
+        other => panic!("se esperaba un solo Recycled: {other:?}"),
+    }
+    let r = go(&fake, JobSpec::Undo(undo), &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.out.errors);
+    assert_eq!(fake.contents(&p("/del1/a.txt")).unwrap(), b"a");
+    assert_eq!(fake.contents(&p("/del1/b.txt")).unwrap(), b"b");
+    assert_eq!(fake.contents(&p("/del1/Dir/sub/d.txt")).unwrap(), b"d");
+    assert!(fake.trashed().is_empty());
+}
+
+#[test]
+fn delete_permanent_removes_tree() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/del2/Dir/a.txt"), b"a".to_vec());
+    fake.add_file(&p("/del2/Dir/b.txt"), b"b".to_vec());
+    fake.add_file(&p("/del2/Dir/c.txt"), b"c".to_vec());
+    fake.add_dir(&p("/del2/Dir/sub"));
+    let r = go(&fake, JobSpec::Delete { paths: vec![p("/del2/Dir")], recycle: false }, &[]);
+    assert!(r.out.errors.is_empty() && !r.out.cancelled, "{:?}", r.out);
+    assert!(!fake.exists(&p("/del2/Dir")));
+    assert!(fake.exists(&p("/del2")));
+    assert!(fake.trashed().is_empty());
+    // La carpeta, sus 3 archivos y la subcarpeta.
+    assert!(r.updates.iter().any(|u| matches!(u, Update::Started { title, items: 5, .. } if title == "Eliminando 1 elemento")), "{:?}", r.updates);
+    assert_eq!(r.out.done_items, 5);
+    assert_eq!(r.out.result.undo, None);
+}
+
+#[test]
+fn delete_permanent_cancel_keeps_rest() {
+    let fake = FakeCopyPrims::new();
+    for i in 0..20 {
+        fake.add_file(&p(&format!("/del3/Dir/f{i:02}.txt")), b"x".to_vec());
+    }
+    let ctl = Control::new();
+    let r = go_with(&fake, JobSpec::Delete { paths: vec![p("/del3/Dir")], recycle: false }, &[], &ctl, &mut |u, ctl| {
+        if let Update::Progress { .. } = u {
+            ctl.cancel();
+        }
+    });
+    assert!(r.out.cancelled);
+    assert!(fake.exists(&p("/del3/Dir")));
+    let left = fake.list_all(&p("/del3/Dir")).len();
+    assert!((1..20).contains(&left), "quedaron {left}");
+    assert!(r.out.errors.is_empty(), "{:?}", r.out.errors);
+}
+
+#[test]
+fn delete_without_trash_asks_first() {
+    let fake = FakeCopyPrims::new();
+    fake.set_volume(&p("/del4"), VolumeInfo { has_trash: false, ..volume("del4", "Red") });
+    fake.add_file(&p("/del4/a.txt"), b"a".to_vec());
+    let spec = || JobSpec::Delete { paths: vec![p("/del4/a.txt")], recycle: true };
+    let asked = "No va a la Papelera: se eliminará definitivamente. ¿Seguir?";
+    let r = go_with(&fake, spec(), &[], &Control::new(), &mut |u, ctl| {
+        if let Update::Confirm(_) = u {
+            ctl.confirm(false);
+        }
+    });
+    assert!(r.updates.iter().any(|u| matches!(u, Update::Confirm(q) if q == asked)), "{:?}", r.updates);
+    assert!(r.out.cancelled);
+    assert!(fake.exists(&p("/del4/a.txt")));
+    // Con un sí, se elimina definitivamente (sin Papelera ni deshacer).
+    let r = go_with(&fake, spec(), &[], &Control::new(), &mut |u, ctl| {
+        if let Update::Confirm(_) = u {
+            ctl.confirm(true);
+        }
+    });
+    assert!(!r.out.cancelled && r.out.errors.is_empty(), "{:?}", r.out);
+    assert!(!fake.exists(&p("/del4/a.txt")));
+    assert!(fake.trashed().is_empty());
+    assert_eq!(r.out.result.undo, None);
+}
+
+#[test]
+fn delete_error_does_not_stop_job() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/del5/Dir/a.txt"), b"a".to_vec());
+    fake.add_file(&p("/del5/Dir/b.txt"), b"b".to_vec());
+    fake.add_file(&p("/del5/Dir/c.txt"), b"c".to_vec());
+    fake.add_file(&p("/del5/z.txt"), b"z".to_vec());
+    fake.fail(&p("/del5/Dir/b.txt"), ErrKind::Denied, 1);
+    let r = go(&fake, JobSpec::Delete { paths: vec![p("/del5/Dir"), p("/del5/z.txt")], recycle: false }, &[]);
+    // Un solo error: el de b.txt (no también el de su carpeta, que no se puede borrar con b.txt adentro).
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.out.errors);
+    assert_eq!(r.out.errors[0].src, p("/del5/Dir/b.txt"));
+    assert!(fake.exists(&p("/del5/Dir/b.txt")));
+    assert!(!fake.exists(&p("/del5/Dir/a.txt")) && !fake.exists(&p("/del5/Dir/c.txt")) && !fake.exists(&p("/del5/z.txt")));
+    assert_eq!(r.out.done_items, 3);
+    // A la Papelera: el que falla se anota y los demás van igual.
+    fake.add_file(&p("/del5/x.txt"), b"x".to_vec());
+    fake.add_file(&p("/del5/y.txt"), b"y".to_vec());
+    fake.fail(&p("/del5/x.txt"), ErrKind::Denied, 1);
+    let r = go(&fake, JobSpec::Delete { paths: vec![p("/del5/x.txt"), p("/del5/y.txt")], recycle: true }, &[]);
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.out.errors);
+    assert!(fake.exists(&p("/del5/x.txt")) && !fake.exists(&p("/del5/y.txt")));
+}
+
+#[test]
+fn delete_checks_trash_once_per_folder() {
+    // Saber si hay Papelera puede ser caro (en Windows suma toda la Papelera): una vez por carpeta,
+    // no por cada elemento.
+    let fake = FakeCopyPrims::new();
+    let mut paths = Vec::new();
+    for i in 0..50 {
+        let f = p(&format!("/del6/f{i:02}.txt"));
+        fake.add_file(&f, b"x".to_vec());
+        paths.push(f);
+    }
+    fake.add_file(&p("/del6/sub/z.txt"), b"z".to_vec());
+    paths.push(p("/del6/sub/z.txt"));
+    let r = go(&fake, JobSpec::Delete { paths, recycle: true }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.out.errors);
+    assert_eq!(fake.volume_calls(&p("/del6")), 1);
+    assert_eq!(fake.volume_calls(&p("/del6/sub")), 1);
+}
+
+#[test]
+fn delete_to_trash_gone_is_not_retryable() {
+    // El sistema lo borró definitivamente en vez de mandarlo a la Papelera: se avisa, pero no se
+    // ofrece «Reintentar» (ya no está).
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/del7/a.txt"), b"a".to_vec());
+    fake.set_trash_deletes(true);
+    let r = go(&fake, JobSpec::Delete { paths: vec![p("/del7/a.txt")], recycle: true }, &[]);
+    assert!(!fake.exists(&p("/del7/a.txt")));
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.out.errors);
+    assert!(!r.out.errors[0].retry, "{:?}", r.out.errors);
+}
+
+#[test]
+fn delete_permanent_symlink_removes_link_only() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/del8/afuera/dato.txt"), b"d".to_vec());
+    fake.add_file(&p("/del8/Dir/a.txt"), b"a".to_vec());
+    fake.add_symlink(&p("/del8/Dir/enlace"), &p("/del8/afuera"));
+    let r = go(&fake, JobSpec::Delete { paths: vec![p("/del8/Dir")], recycle: false }, &[]);
+    assert!(r.out.errors.is_empty(), "{:?}", r.out.errors);
+    assert!(!fake.exists(&p("/del8/Dir")));
+    assert!(fake.exists(&p("/del8/afuera")));
+    assert_eq!(fake.contents(&p("/del8/afuera/dato.txt")).unwrap(), b"d");
+}
+
+#[test]
+fn delete_permanent_unreadable_subfolder_one_error() {
+    let fake = FakeCopyPrims::new();
+    fake.add_file(&p("/del9/Dir/a.txt"), b"a".to_vec());
+    fake.add_file(&p("/del9/Dir/Sub/Cerrada/x.txt"), b"x".to_vec());
+    fake.add_file(&p("/del9/Dir/Sub/b.txt"), b"b".to_vec());
+    fake.add_file(&p("/del9/Dir/Otra/c.txt"), b"c".to_vec());
+    fake.fail_list(&p("/del9/Dir/Sub/Cerrada"), ErrKind::Denied, 1);
+    let r = go(&fake, JobSpec::Delete { paths: vec![p("/del9/Dir")], recycle: false }, &[]);
+    assert_eq!(r.out.errors.len(), 1, "{:?}", r.out.errors);
+    assert_eq!(r.out.errors[0].src, p("/del9/Dir/Sub/Cerrada"));
+    // Quedan la carpeta que no se pudo leer y las de arriba; lo demás se borró.
+    assert!(fake.exists(&p("/del9/Dir/Sub/Cerrada/x.txt")));
+    assert!(fake.exists(&p("/del9/Dir/Sub")) && fake.exists(&p("/del9/Dir")));
+    assert!(!fake.exists(&p("/del9/Dir/a.txt")) && !fake.exists(&p("/del9/Dir/Sub/b.txt")));
+    assert!(!fake.exists(&p("/del9/Dir/Otra")));
 }

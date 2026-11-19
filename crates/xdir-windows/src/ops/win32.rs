@@ -26,6 +26,7 @@ use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s,
 use crate::platform::{Handle, HandleExt};
 use crate::fs::wide_path;
 use xdir_core::names;
+use xdir_core::sys::ErrKind;
 
 
 
@@ -35,7 +36,10 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
     std::thread::spawn(move || {
         let hwnd = HWND(hwnd_raw as *mut _);
         let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-        let result = run(hwnd, op).unwrap_or_else(|e| OpResult { error: Some(e.message().to_string()), ..Default::default() });
+        let result = run(hwnd, op.clone()).unwrap_or_else(|e| {
+            let (error, error_detail) = op_error(&op, &e);
+            OpResult { error: Some(error), error_detail, ..Default::default() }
+        });
         if tx.send(result).is_ok() {
             unsafe {
                 let _ = PostMessageW(Some(hwnd), WM_APP_OP_DONE, WPARAM(0), LPARAM(0));
@@ -45,6 +49,24 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
             unsafe { CoUninitialize() };
         }
     });
+}
+
+/// El aviso de una operación que falló: qué no se pudo hacer, con qué elemento, por qué y qué
+/// hacer. Si fue el acceso controlado a carpetas (issue #72: «Carpeta nueva» en Documentos
+/// redirigido daba «no se encuentra»), lo dice y cómo permitir xdir. Con la explicación entera
+/// para el cartel, si el aviso la acorta.
+fn op_error(op: &Op, e: &windows::core::Error) -> (String, Option<String>) {
+    let path = match op {
+        // Lo que se crea va en `parent`: el acceso controlado mira esa carpeta.
+        Op::NewFolder { parent } | Op::NewFile { parent } => parent.clone(),
+        Op::Rename { path, .. } => path.clone(),
+        Op::Delete { paths, .. } => paths.first().cloned().unwrap_or_default(),
+        Op::Shortcuts { targets } => targets.first().cloned().unwrap_or_default(),
+        Op::Undo(_) => return (format!("No se pudo deshacer: {}.", xdir_core::sys::lower_first(&super::errors::win_message(e))), None),
+    };
+    let present = || super::errors::exists(&path);
+    let failed = super::errors::write_error(e.code().0 as u32, &e.message(), &path, &present);
+    super::errors::op_message(op, &failed, failed.kind == ErrKind::NotFound && present())
 }
 
 fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
@@ -141,7 +163,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::CreatedIds(v) => !v.is_empty(),
         Undo::Renames(v) => !v.is_empty(),
     });
-    Ok(OpResult { undo, focus, rename_after, error: None, select })
+    Ok(OpResult { undo, focus, rename_after, error: None, error_detail: None, select })
 }
 
 /// «Crear acceso directo»: un `.lnk` junto a cada uno («nombre - Acceso directo.lnk», « (2)»…).
@@ -153,7 +175,10 @@ fn create_shortcuts(targets: &[PathBuf]) -> Result<OpResult> {
         let lnk = names::free_name(parent, &|n| names::shortcut_name(&name, names::LinkStyle::Lnk, n), &|p| std::fs::symlink_metadata(p).is_ok());
         match crate::shell::win32::create_lnk(target, &lnk) {
             Ok(()) => created.push(lnk),
-            Err(e) => errors.push(format!("{}: {}", lnk.display(), e.message())),
+            Err(e) => {
+                let failed = super::errors::write_error(e.code().0 as u32, &e.message(), parent, &|| super::errors::exists(parent));
+                errors.push(failed.notice(&format!("crear el acceso directo a «{name}»")));
+            }
         }
     }
     let rename_after = created.len() == 1;
@@ -162,6 +187,7 @@ fn create_shortcuts(targets: &[PathBuf]) -> Result<OpResult> {
         focus: created.last().cloned(),
         rename_after,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
+        error_detail: None,
         select: created,
     })
 }
@@ -175,7 +201,7 @@ fn undo_any(hwnd: HWND, undo: &Undo) -> Result<OpResult> {
             for step in steps.iter().rev() {
                 match undo_any(hwnd, step) {
                     Ok(r) => errors.extend(r.error),
-                    Err(e) => errors.push(e.message().to_string()),
+                    Err(e) => errors.push(format!("No se pudo deshacer: {}.", xdir_core::sys::lower_first(&super::errors::win_message(&e)))),
                 }
             }
             Ok(OpResult { error: (!errors.is_empty()).then(|| errors.join("; ")), ..Default::default() })
@@ -230,7 +256,7 @@ fn run_undo(fo: &IFileOperation, undo: &Undo) -> Result<OpResult> {
                 let mut taken = Vec::new();
                 for (recycled, original) in items {
                     if let Some(busy) = super::prims::first_taken(&[original.as_path()], &|p| p.exists()) {
-                        taken.push(format!("{}: ya existe, no se pisa", busy.display()));
+                        taken.push(format!("No se devolvió «{}»: ya hay otro elemento con ese nombre ahí, no se pisa.", xdir_core::sys::shown_name(busy)));
                         continue;
                     }
                     if restore_from_recycle_bin(recycled).is_err() {

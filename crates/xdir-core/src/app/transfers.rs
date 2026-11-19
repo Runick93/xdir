@@ -10,7 +10,7 @@
 //! estado, que la vuelve a abrir. Donde el host no tiene ventanas (Linux sin interfaz) los
 //! conflictos se responden solos con «Omitir» (`auto_skip`) y se avisa en la barra de estado.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,9 +19,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use super::App;
-use crate::geom::rect;
-use crate::host::{AuxMouse, AuxWindow};
-use crate::keys::{Key, keys::VK_ESCAPE};
+use crate::config::ConfigEdit;
+use crate::geom::{contains, rect};
+use crate::host::{AuxMouse, AuxProgress, AuxWindow};
+use crate::keys::Key;
+use crate::keys::keys::{VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_NEXT, VK_PRIOR, VK_UP};
 use crate::ops::Undo;
 use crate::paint::Painter;
 use crate::transfer::view::{self, ViewHit};
@@ -45,6 +47,9 @@ struct JobMeta {
     volumes: Vec<OsString>,
     /// Comprimir y extraer: «Reintentar» vuelve a correr el mismo trabajo entero.
     rerun: Option<JobSpec>,
+    /// Es un eliminar (con `recycle`: a la Papelera): «Reintentar» vuelve a eliminar lo que
+    /// falló, nunca lo copia sobre sí mismo.
+    delete: Option<bool>,
 }
 
 /// Estado de los trabajos de copia de la `App`.
@@ -82,15 +87,23 @@ pub(super) struct Transfers {
 struct CopyWindow {
     /// Está a la vista (la mostró la `App` y nadie la cerró).
     shown: bool,
-    /// El trabajo que se eligió expandir (si no, el primero que corre).
-    chosen: Option<JobId>,
-    /// Se plegó con «Menos detalles».
-    collapsed: bool,
+    /// Los trabajos en curso que se plegaron con «Menos detalles»: de fábrica todos muestran sus
+    /// detalles, como en Windows. Los que terminan salen del conjunto.
+    collapsed: HashSet<JobId>,
+    /// Cuánto se desplazó el contenido (DIPs desde arriba) cuando no entra en `view::MAX_H`.
+    scroll: f32,
+    /// Arrastrando el pulgar de la barra: a qué distancia de su borde de arriba se lo tomó.
+    thumb_grab: Option<f32>,
+    /// Cuándo se desplazó sola hasta algo que pide atención: un clic que se suelta enseguida
+    /// era para lo que había antes ahí y no cuenta.
+    revealed_at: Option<Instant>,
     hover: Option<ViewHit>,
     pressed: Option<ViewHit>,
     /// El último tamaño pedido (para no repetir `aux_resize`) y el último título.
     size: (f32, f32),
     title: String,
+    /// El último avance enviado al host (para no repetir `aux_progress`).
+    progress: Option<AuxProgress>,
 }
 
 /// Lo que sigue cuando terminan unos trabajos (soltar el disco al expulsar).
@@ -171,6 +184,7 @@ fn spec_paths(spec: &JobSpec) -> Vec<PathBuf> {
         JobSpec::Compress { sources } => out.extend(sources.iter().cloned()),
         JobSpec::Extract { archive, .. } => out.push(archive.clone()),
         JobSpec::ExtractEntries { archive, dest, .. } => out.extend([archive.clone(), dest.clone()]),
+        JobSpec::Delete { paths, .. } => out.extend(paths.iter().cloned()),
     }
     out
 }
@@ -195,6 +209,7 @@ fn spec_route(spec: &JobSpec) -> transfer::JobRoute {
         JobSpec::Compress { sources } => ("Se comprimió", "Se comprimieron", folder(sources), None, sources.clone()),
         JobSpec::Extract { archive, .. } => ("Se extrajo", "Se extrajeron", None, None, vec![archive.clone()]),
         JobSpec::ExtractEntries { archive, dest, .. } => ("Se copió", "Se copiaron", name(archive), name(dest), vec![archive.clone()]),
+        JobSpec::Delete { paths, .. } => ("Se eliminó", "Se eliminaron", None, None, paths.clone()),
     };
     transfer::JobRoute { done_one, done_many, from, to, sources }
 }
@@ -204,6 +219,7 @@ fn spec_count(spec: &JobSpec) -> u64 {
     (match spec {
         JobSpec::Copy { sources, .. } | JobSpec::Move { sources, .. } | JobSpec::Duplicate { sources } => sources.len(),
         JobSpec::NewFolderWith { items, .. } | JobSpec::Restore { items } => items.len(),
+        JobSpec::Delete { paths, .. } => paths.len(),
         JobSpec::Retry { pairs, .. } => pairs.len(),
         JobSpec::Compress { sources } => sources.len(),
         JobSpec::Extract { .. } => 1,
@@ -225,7 +241,21 @@ fn spec_label(spec: &JobSpec) -> (&'static str, bool) {
         JobSpec::Compress { .. } => ("Comprimir", false),
         JobSpec::Extract { .. } => ("Extraer", false),
         JobSpec::ExtractEntries { .. } => ("Copiar", false),
+        JobSpec::Delete { .. } => ("Eliminar", false),
     }
+}
+
+/// Lo elegido (`roots`) que contiene cada origen que falló, sin repetir; si ninguno lo contiene,
+/// el origen mismo.
+fn chosen_roots(roots: &[PathBuf], pairs: Vec<(PathBuf, PathBuf)>) -> Vec<PathBuf> {
+    let mut items: Vec<PathBuf> = Vec::new();
+    for (src, _) in pairs {
+        let top = roots.iter().find(|r| src.starts_with(r)).cloned().unwrap_or(src);
+        if !items.contains(&top) {
+            items.push(top);
+        }
+    }
+    items
 }
 
 /// Discos que toca un trabajo (lee el disco: corre en el hilo del trabajo).
@@ -319,7 +349,14 @@ fn skipped_text(n: usize) -> String {
 /// Entre dos textos de la barra de estado.
 const NOTICE_JOIN: &str = "   ·   ";
 
-/// Los clics en un conflicto recién aparecido no cuentan durante este tiempo.
+/// Lo que se repite de una página a la otra al desplazar la ventana de copia (DIPs).
+const PAGE_OVERLAP: f32 = 40.0;
+/// Lo que desplaza una flecha en la ventana de copia (DIPs).
+const KEY_STEP: f32 = 40.0;
+/// El alto más chico de la ventana de copia aunque la pantalla diga menos.
+const MIN_AUX_H: f32 = 160.0;
+/// Los clics en un conflicto recién aparecido (o recién desplazado a la vista) no cuentan durante
+/// este tiempo.
 const CONFLICT_GUARD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// «Hay 2 operaciones en curso. ¿Cancelarlas y salir?» (al cerrar xdir).
@@ -385,8 +422,14 @@ impl App {
         });
         let restore = matches!(spec, JobSpec::Restore { .. });
         let rerun = matches!(spec, JobSpec::Compress { .. } | JobSpec::Extract { .. }).then(|| spec.clone());
-        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun });
+        let delete = match spec {
+            JobSpec::Delete { recycle, .. } => Some(recycle),
+            _ => None,
+        };
+        t.meta.insert(id, JobMeta { ctl: ctl.clone(), moving, restore, label, paths: paths.clone(), volumes: Vec::new(), rerun, delete });
+        let queued = delete.is_none();
         let (tx, hwnd, sched, auto_skip, ejecting) = (t.tx.clone(), self.hwnd, t.sched.clone(), t.auto_skip.clone(), t.ejecting.clone());
+        t.sched.set_queue_by_disk(self.config.queue_by_disk);
         std::thread::spawn(move || {
             let prims = sys::copy_prims();
             let send = |u: Update| {
@@ -407,11 +450,17 @@ impl App {
                 send(Update::Finished(JobOutcome { stopped: Some(format!("Se está expulsando \"{label}\"")), ..Default::default() }));
                 return;
             }
-            if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
-                send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
-                return;
-            }
-            let _turn = Release(sched, id);
+            // Se anota con sus discos siempre: si la cola por disco está apagada no espera a nadie.
+            // Eliminar no hace cola: casi no lee ni escribe, y no tiene que esperar a una copia larga.
+            let _turn = if queued {
+                if !sched.acquire_notify(id, &vols, &ctl, &mut || send(Update::Waiting)) {
+                    send(Update::Finished(JobOutcome { cancelled: true, ..Default::default() }));
+                    return;
+                }
+                Some(Release(sched, id))
+            } else {
+                None
+            };
             transfer::run(spec, prims, &ctl, &mut |u| {
                 if auto_skip.load(Ordering::SeqCst) && matches!(u, Update::Conflict(_)) {
                     ctl.answer(Answer { choice: Choice::Skip, all: false });
@@ -423,11 +472,27 @@ impl App {
         id
     }
 
+    /// Switch «Copias en cola por disco»: `cola_por_disco = true` en `config.toml` (apagado es lo
+    /// de fábrica: se quita la línea). Rige en vivo: al apagarlo, lo que esperaba en la cola sigue de inmediato.
+    pub(super) fn toggle_queue_by_disk(&mut self) {
+        let on = !self.config.queue_by_disk;
+        self.config.queue_by_disk = on;
+        self.transfers.sched.set_queue_by_disk(on);
+        let key = "cola_por_disco".to_string();
+        self.edit_config(vec![if on {
+            ConfigEdit::Set { section: "opciones", key, value: "true".into() }
+        } else {
+            ConfigEdit::Remove { section: "opciones", key }
+        }]);
+    }
+
     /// Vacía el canal de los trabajos (`WM_APP_TRANSFER`).
     pub fn on_transfer_updates(&mut self) {
         let now = Instant::now();
         let mut finished = Vec::new();
         let mut show = false;
+        // El bloque que pide atención (un conflicto o errores al terminar): se desplaza hasta él.
+        let mut attention = None;
         let auto = self.auto_skip();
         // Conflictos que llegaron sin a quién preguntar (el hilo los mandó antes de saberlo).
         let mut skip_now = Vec::new();
@@ -452,7 +517,8 @@ impl App {
                     v.title = title;
                     v.items = (0, items);
                     v.bytes = (0, bytes);
-                    v.speed = Speed::new(now, bytes);
+                    // Sin bytes (eliminar, devolver), la velocidad y el tiempo restante van por elementos.
+                    v.speed = Speed::new(now, if bytes > 0 { bytes } else { items });
                     v.state = JobState::Running;
                 }
                 Update::Progress { items, bytes, current } => {
@@ -464,7 +530,7 @@ impl App {
                         v.conflict = None;
                         v.speed.resume(now);
                     }
-                    v.speed.push(now, bytes);
+                    v.speed.push(now, if v.bytes.1 > 0 { bytes } else { items });
                     v.state = JobState::Running;
                 }
                 Update::Conflict(info) => {
@@ -472,6 +538,7 @@ impl App {
                     v.speed.pause(now);
                     if !auto {
                         self.notice = Some(format!("Ya existe «{}» en «{}»", info.name, info.folder));
+                        attention = Some(id);
                     } else {
                         skip_now.push(id);
                     }
@@ -504,8 +571,16 @@ impl App {
         }
         for (id, outcome) in finished {
             // Terminó con errores o sin poder hacerlo: la ventana lo muestra enseguida.
-            show = show || !outcome.errors.is_empty() || outcome.stopped.is_some();
+            let failed = !outcome.errors.is_empty() || outcome.stopped.is_some();
+            show = show || failed;
+            // Un conflicto que espera respuesta va antes que los errores.
+            if failed && attention.is_none() {
+                attention = Some(id);
+            }
             self.on_job_done(id, outcome);
+        }
+        if let Some(id) = attention {
+            self.reveal_transfer(id);
         }
         if show {
             self.show_transfers();
@@ -523,19 +598,83 @@ impl App {
         }
     }
 
-    /// El trabajo con los detalles y el gráfico: el elegido, o el primero que está corriendo.
-    pub(super) fn transfers_expanded(&self) -> Option<JobId> {
-        let w = &self.transfers.window;
-        if w.collapsed {
-            return None;
-        }
-        let active = |j: &&JobView| matches!(j.state, JobState::Running | JobState::Preparing);
-        let jobs = &self.transfers.jobs;
-        w.chosen.and_then(|id| jobs.iter().filter(active).find(|j| j.id == id)).or_else(|| jobs.iter().find(active)).map(|j| j.id)
+    /// Si el trabajo `id` muestra los detalles y el gráfico (cuando está en curso): todos, salvo los
+    /// que se plegaron con «Menos detalles».
+    pub(super) fn transfers_expanded(&self, id: JobId) -> bool {
+        !self.transfers.window.collapsed.contains(&id)
     }
 
-    fn transfers_size(&self) -> (f32, f32) {
-        (view::WIDTH, view::content_height(&self.transfers.jobs, self.transfers_expanded()))
+    /// Alto de todo el contenido de la ventana de copia (sin desplazar).
+    fn transfers_content(&self) -> f32 {
+        view::content_height(&self.transfers.jobs, &|id| self.transfers_expanded(id))
+    }
+
+    /// Tamaño del área de la ventana: crece con el contenido hasta `view::MAX_H`, o hasta lo que
+    /// entra en la pantalla si es más baja.
+    pub(super) fn transfers_size(&self) -> (f32, f32) {
+        let mut max = view::MAX_H;
+        if let Some(screen) = self.host.aux_max_height(AuxWindow::Transfers) {
+            // Aunque la pantalla sea diminuta, que entre al menos un bloque de la cola.
+            max = max.min(screen.max(MIN_AUX_H));
+        }
+        (view::WIDTH, self.transfers_content().min(max))
+    }
+
+    /// Cuánto está desplazado el contenido de la ventana de copia (pruebas).
+    #[cfg(test)]
+    pub(super) fn transfers_scroll(&self) -> f32 {
+        self.transfers.window.scroll
+    }
+
+    /// Lo que está bajo el mouse en la ventana de copia (pruebas).
+    #[cfg(test)]
+    pub(super) fn transfers_hover(&self) -> Option<ViewHit> {
+        self.transfers.window.hover
+    }
+
+    /// Cuántos trabajos están plegados (pruebas).
+    #[cfg(test)]
+    pub(super) fn transfers_collapsed_len(&self) -> usize {
+        self.transfers.window.collapsed.len()
+    }
+
+    /// Desplaza el contenido a `scroll`, dentro de lo que se puede. `true` si cambió.
+    fn set_transfers_scroll(&mut self, scroll: f32) -> bool {
+        let (_, visible) = self.transfers_size();
+        let scroll = scroll.clamp(0.0, view::max_scroll(self.transfers_content(), visible));
+        let w = &mut self.transfers.window;
+        let changed = w.scroll != scroll;
+        w.scroll = scroll;
+        changed
+    }
+
+    /// Desplaza lo justo para que se vea entero el bloque del trabajo `id` (si no entra, desde
+    /// arriba).
+    fn reveal_transfer(&mut self, id: JobId) {
+        let Some((top, bottom)) = view::block_span(&self.transfers.jobs, &|k| self.transfers_expanded(k), id) else { return };
+        let (_, visible) = self.transfers_size();
+        let scroll = self.transfers.window.scroll;
+        let to = if top < scroll || bottom - top > visible {
+            top
+        } else if bottom > scroll + visible {
+            bottom - visible
+        } else {
+            scroll
+        };
+        if self.set_transfers_scroll(to) {
+            // Lo que estaba bajo el mouse ya no está ahí.
+            let w = &mut self.transfers.window;
+            w.revealed_at = Some(crate::clock::now());
+            w.hover = None;
+        }
+    }
+
+    /// Desplaza `dy` (con la rueda, las teclas o el riel) y repinta si cambió.
+    fn scroll_transfers_by(&mut self, dy: f32) {
+        let scroll = self.transfers.window.scroll;
+        if self.set_transfers_scroll(scroll + dy) {
+            self.host.aux_invalidate(AuxWindow::Transfers);
+        }
     }
 
     /// Muestra (o trae al frente) la ventana de copia. Sin ventana del host queda solo el
@@ -544,6 +683,7 @@ impl App {
         if self.transfers.jobs.is_empty() {
             return;
         }
+        self.tidy_transfers_window();
         let size = self.transfers_size();
         let host = self.host.clone();
         let title = view::window_title(&self.transfers.jobs);
@@ -553,6 +693,7 @@ impl App {
             w.size = size;
             w.title = title;
             host.aux_invalidate(AuxWindow::Transfers);
+            self.sync_transfers_progress();
         } else {
             self.transfers.window.shown = false;
             if !self.auto_skip() {
@@ -567,14 +708,25 @@ impl App {
         self.redraw();
     }
 
+    /// Lo plegado de trabajos que ya terminaron no queda anotado, y el desplazamiento vuelve a
+    /// quedar dentro del contenido (un trabajo terminó, se plegó o apareció uno nuevo).
+    fn tidy_transfers_window(&mut self) {
+        let jobs = &self.transfers.jobs;
+        self.transfers.window.collapsed.retain(|id| jobs.iter().any(|j| j.id == *id && j.state != JobState::Done));
+        let scroll = self.transfers.window.scroll;
+        self.set_transfers_scroll(scroll);
+    }
+
     /// La ventana sigue al contenido: cambia de alto, se repinta, y con la cola vacía se oculta.
     fn sync_transfers_window(&mut self) {
+        self.tidy_transfers_window();
         if !self.transfers.window.shown {
             return;
         }
         let host = self.host.clone();
         if self.transfers.jobs.is_empty() {
             self.transfers.window = CopyWindow::default();
+            host.aux_progress(AuxWindow::Transfers, AuxProgress::None);
             host.aux_hide(AuxWindow::Transfers);
             return;
         }
@@ -589,6 +741,27 @@ impl App {
             self.transfers.window.title = title;
         }
         host.aux_invalidate(AuxWindow::Transfers);
+        self.sync_transfers_progress();
+    }
+
+    /// Le pasa al host el avance de la cola, solo si cambió desde la última vez.
+    fn sync_transfers_progress(&mut self) {
+        let jobs = &self.transfers.jobs;
+        // En milésimas (lo que distingue la barra de tareas): así «solo si cambió» no manda un
+        // avance por cada bloque copiado.
+        let value = (self.transfers_progress().unwrap_or(0.0) * 1000.0).round() / 1000.0;
+        let open: Vec<&JobView> = jobs.iter().filter(|j| j.state != JobState::Done).collect();
+        let p = if self.transfers_failed() {
+            AuxProgress::Error(value)
+        } else if !open.is_empty() && open.iter().all(|j| j.paused) {
+            AuxProgress::Paused(value)
+        } else {
+            AuxProgress::Normal(value)
+        };
+        if self.transfers.window.progress != Some(p) {
+            self.transfers.window.progress = Some(p);
+            self.host.aux_progress(AuxWindow::Transfers, p);
+        }
     }
 
     /// Avance total de la cola para el indicador de la barra de estado (`None` sin trabajos).
@@ -614,8 +787,9 @@ impl App {
     pub fn paint_aux(&mut self, w: AuxWindow, p: &dyn Painter, width: f32, height: f32) {
         match w {
             AuxWindow::Transfers => {
-                let expanded = self.transfers_expanded();
-                view::draw(p, rect(0.0, 0.0, width, height), &self.transfers.jobs, expanded, self.transfers.window.hover, sys::env());
+                let w = &self.transfers.window;
+                let look = view::Look { expanded: &|id| self.transfers_expanded(id), scroll: w.scroll, hover: w.hover, dragging: w.thumb_grab.is_some() };
+                view::draw(p, rect(0.0, 0.0, width, height), &self.transfers.jobs, &look, sys::env());
             }
         }
     }
@@ -623,9 +797,41 @@ impl App {
     /// El mouse en la ventana de copia (DIPs de su área).
     pub fn aux_mouse(&mut self, w: AuxWindow, x: f32, y: f32, ev: AuxMouse) {
         let AuxWindow::Transfers = w;
-        let (width, height) = self.transfers_size();
-        let at = view::hit(rect(0.0, 0.0, width, height), &self.transfers.jobs, self.transfers_expanded(), x, y);
         let host = self.host.clone();
+        let (width, height) = self.transfers_size();
+        let r = rect(0.0, 0.0, width, height);
+        let content = self.transfers_content();
+        // Arrastrando el pulgar de la barra: el contenido sigue al mouse hasta soltarlo. Si se
+        // perdió el mouse o llega otro `Down` (el `Up` no llegó), se suelta.
+        if let Some(grab) = self.transfers.window.thumb_grab {
+            match ev {
+                AuxMouse::Cancel | AuxMouse::Down => {
+                    self.transfers.window.thumb_grab = None;
+                    host.aux_invalidate(w);
+                    if ev == AuxMouse::Cancel {
+                        return;
+                    }
+                }
+                AuxMouse::Move => {
+                    self.transfers.window.scroll = view::scroll_for_thumb(content, height, y - r.top - grab);
+                    host.aux_invalidate(w);
+                    return;
+                }
+                AuxMouse::Up => {
+                    self.transfers.window.thumb_grab = None;
+                    host.aux_invalidate(w);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if let AuxMouse::Wheel { dy } = ev {
+            self.scroll_transfers_by(dy);
+            // Debajo del mouse quedó otra cosa.
+            return self.aux_mouse(w, x, y, AuxMouse::Move);
+        }
+        let scroll = self.transfers.window.scroll;
+        let at = view::hit(r, &self.transfers.jobs, &|id| self.transfers_expanded(id), scroll, x, y);
         match ev {
             AuxMouse::Move => {
                 if self.transfers.window.hover != at {
@@ -638,16 +844,39 @@ impl App {
                     host.aux_invalidate(w);
                 }
             }
-            AuxMouse::Down => self.transfers.window.pressed = at,
+            AuxMouse::Down => {
+                if let Some((track, thumb)) = view::scrollbar(r, content, scroll)
+                    && contains(&track, x, y)
+                {
+                    self.transfers.window.pressed = None;
+                    if y >= thumb.top && y < thumb.bottom {
+                        self.transfers.window.thumb_grab = Some(y - thumb.top);
+                    } else {
+                        // Clic en el riel: una página hacia ese lado, sin perder de vista el borde.
+                        let page = (height - PAGE_OVERLAP).max(PAGE_OVERLAP);
+                        self.set_transfers_scroll(scroll + if y < thumb.top { -page } else { page });
+                    }
+                    host.aux_invalidate(w);
+                    return;
+                }
+                self.transfers.window.pressed = at;
+            }
             AuxMouse::Up => {
                 let pressed = self.transfers.window.pressed.take();
-                if let Some(h) = at.filter(|h| pressed == Some(*h)) {
+                let just_moved = self.transfers.window.revealed_at.is_some_and(|t| crate::clock::now().saturating_duration_since(t) < CONFLICT_GUARD);
+                if let Some(h) = at.filter(|h| pressed == Some(*h) && !just_moved) {
                     self.on_view_hit(h);
                     self.transfers.window.hover = None;
                     self.sync_transfers_window();
                     self.redraw();
                 }
             }
+            AuxMouse::Cancel => {
+                if self.transfers.window.pressed.take().is_some() {
+                    host.aux_invalidate(w);
+                }
+            }
+            AuxMouse::Wheel { .. } => {}
         }
     }
 
@@ -662,13 +891,17 @@ impl App {
             ViewHit::Pause(id) => self.pause_job(id),
             ViewHit::Resume(id) => self.resume_job(id),
             ViewHit::Cancel(id) | ViewHit::Dismiss(id) => self.cancel_job(id),
+            ViewHit::StartNow(id) => {
+                // `force` se pierde si el trabajo todavía no se anotó: solo para los que esperan.
+                if self.transfers.jobs.iter().any(|j| j.id == id && j.state == JobState::Waiting) {
+                    self.transfers.sched.force(id);
+                }
+            }
             ViewHit::Expand(id) => {
-                let w = &mut self.transfers.window;
-                if !w.collapsed && self.transfers_expanded() == Some(id) {
-                    self.transfers.window.collapsed = true;
-                } else {
-                    self.transfers.window.collapsed = false;
-                    self.transfers.window.chosen = Some(id);
+                // Solo ese trabajo: los demás quedan como estaban.
+                let collapsed = &mut self.transfers.window.collapsed;
+                if !collapsed.remove(&id) {
+                    collapsed.insert(id);
                 }
             }
             ViewHit::Choose(id, choice) => {
@@ -687,13 +920,31 @@ impl App {
     }
 
     /// Una tecla en la ventana de copia: Esc la cierra (los trabajos siguen). `true` si se usó.
+    /// Re Pág / Av Pág desplazan una página (menos un poco, para no perder el borde), Inicio y Fin
+    /// van a los extremos y las flechas de a poco.
     pub fn aux_key(&mut self, w: AuxWindow, vk: Key) -> bool {
         if vk == VK_ESCAPE {
             self.host.clone().aux_hide(w);
             self.aux_closed(w);
             return true;
         }
-        false
+        let (_, visible) = self.transfers_size();
+        let page = (visible - PAGE_OVERLAP).max(PAGE_OVERLAP);
+        let scroll = self.transfers.window.scroll;
+        let to = match vk {
+            VK_PRIOR => scroll - page,
+            VK_NEXT => scroll + page,
+            VK_UP => scroll - KEY_STEP,
+            VK_DOWN => scroll + KEY_STEP,
+            VK_HOME => 0.0,
+            // `set_transfers_scroll` lo deja en el fondo.
+            VK_END => f32::MAX,
+            _ => return false,
+        };
+        if self.set_transfers_scroll(to) {
+            self.host.aux_invalidate(w);
+        }
+        true
     }
 
     /// El usuario cerró la ventana: se oculta, los trabajos siguen y queda el indicador.
@@ -703,12 +954,13 @@ impl App {
         win.shown = false;
         win.hover = None;
         win.pressed = None;
+        win.thumb_grab = None;
         self.redraw();
     }
 
     /// Comandos de prueba (feature `pruebas`): `copiar <destino>|<origen>|…` y `mover …` lanzan un
     /// trabajo; `ventana <control>` hace clic en la ventana de copia sobre el control del primer
-    /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `detalles`, `reemplazar`, `ambos`,
+    /// trabajo que lo tenga (`pausa`, `reanudar`, `cancelar`, `ahora`, `detalles`, `reemplazar`, `ambos`,
     /// `omitir`, `combinar`, `todos`, `reintentar`, `cerrar`). `comprimir <a>|<b>…`, `extraer_aqui
     /// <archivo>` y `extraer_en <archivo>` lanzan esos trabajos.
     #[cfg(feature = "pruebas")]
@@ -733,6 +985,7 @@ impl App {
                         "pausa" => ViewHit::Pause(id),
                         "reanudar" => ViewHit::Resume(id),
                         "cancelar" => ViewHit::Cancel(id),
+                        "ahora" => ViewHit::StartNow(id),
                         "detalles" => ViewHit::Expand(id),
                         "reemplazar" => ViewHit::Choose(id, Choice::Replace),
                         "ambos" => ViewHit::Choose(id, Choice::KeepBoth),
@@ -744,17 +997,26 @@ impl App {
                         _ => return None,
                     })
                 };
-                let (w, h) = self.transfers_size();
+                // Se busca en todo el contenido; si el control está fuera de la vista, primero
+                // se desplaza hasta él.
+                let (w, h) = (view::WIDTH, self.transfers_content());
                 let r = rect(0.0, 0.0, w, h);
                 let jobs = self.transfers.jobs.clone();
-                let expanded = self.transfers_expanded();
+                let collapsed = self.transfers.window.collapsed.clone();
+                let expanded = |id: JobId| !collapsed.contains(&id);
                 for j in &jobs {
                     let Some(target) = wanted(j.id) else { return };
                     let mut y = 0.0;
                     while y < h {
                         let mut x = 0.0;
                         while x < w {
-                            if view::hit(r, &jobs, expanded, x, y) == Some(target) {
+                            if view::hit(r, &jobs, &expanded, 0.0, x, y) == Some(target) {
+                                let (_, visible) = self.transfers_size();
+                                let scroll = self.transfers.window.scroll;
+                                if y < scroll || y + 2.0 > scroll + visible {
+                                    self.set_transfers_scroll(y - visible / 2.0);
+                                }
+                                let y = y - self.transfers.window.scroll;
                                 for ev in [AuxMouse::Move, AuxMouse::Down, AuxMouse::Up] {
                                     self.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, ev);
                                 }
@@ -797,13 +1059,19 @@ impl App {
     fn on_job_done(&mut self, id: JobId, outcome: JobOutcome) {
         let label = self.transfers.meta.get(&id).map_or("La operación", |m| m.label);
         let previous = self.notice.take();
+        let previous_detail = self.notice_detail.take();
         self.on_op_done(outcome.result);
-        self.notice = if let Some(why) = &outcome.stopped {
-            Some(format!("{label}: {why}"))
+        // El motivo sigue la frase: en minúscula (salvo un nombre propio).
+        let mut detail = None;
+        self.notice = if let Some((notice, more)) = &outcome.stop_notice {
+            detail = more.clone();
+            Some(notice.clone())
+        } else if let Some(why) = &outcome.stopped {
+            Some(format!("{label}: {}", sys::lower_first(why)))
         } else if !outcome.errors.is_empty() {
             let first = &outcome.errors[0];
             let name = first.shown_name();
-            Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), first.message))
+            Some(format!("{label} terminó con {} («{name}»: {})", plural_errors(outcome.errors.len()), sys::lower_first(&first.message)))
         } else if !outcome.skipped.is_empty() {
             Some(skipped_text(outcome.skipped.len()))
         } else if outcome.omitted > 0 {
@@ -816,6 +1084,11 @@ impl App {
         } else {
             // No se borra un aviso de otro trabajo (los omitidos, por ejemplo).
             previous.filter(|_| self.running_jobs() > 0)
+        };
+        // La explicación para el cartel: la de este aviso, o la del de antes si sigue.
+        self.notice_detail = match detail {
+            Some(d) => self.notice.clone().map(|n| (n, d)),
+            None => previous_detail,
         };
         // Un zip con contraseña o en un formato que no se sabe leer: se ofrece abrirlo con el sistema.
         if let Some(e) = outcome.errors.iter().find(|e| e.message == sys::PASSWORD || e.message == sys::UNSUPPORTED)
@@ -925,6 +1198,7 @@ impl App {
         let moving = self.transfers.meta.get(&id).is_some_and(|m| m.moving);
         let restore = self.transfers.meta.get(&id).is_some_and(|m| m.restore);
         let rerun = self.transfers.meta.get(&id).and_then(|m| m.rerun.clone());
+        let delete = self.transfers.meta.get(&id).and_then(|m| m.delete);
         let roots = v.route.sources.clone();
         self.forget_job(id);
         let spec = if let Some(spec) = rerun {
@@ -937,14 +1211,11 @@ impl App {
         } else if restore {
             // Lo de adentro de una carpeta devuelta no tiene lugar original propio: se devuelve
             // otra vez esa carpeta (lo elegido en la Papelera que la contiene).
-            let mut items: Vec<PathBuf> = Vec::new();
-            for (src, _) in pairs {
-                let top = roots.iter().find(|r| src.starts_with(r)).cloned().unwrap_or(src);
-                if !items.contains(&top) {
-                    items.push(top);
-                }
-            }
-            JobSpec::Restore { items }
+            JobSpec::Restore { items: chosen_roots(&roots, pairs) }
+        } else if let Some(recycle) = delete {
+            // Lo que falló adentro de una carpeta elegida: se vuelve a eliminar esa carpeta (con
+            // lo que quedó adentro), que si no quedaría vacía.
+            JobSpec::Delete { paths: chosen_roots(&roots, pairs), recycle }
         } else {
             JobSpec::Retry { moving, pairs }
         };

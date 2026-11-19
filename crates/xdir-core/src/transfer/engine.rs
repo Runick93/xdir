@@ -14,7 +14,7 @@
 //! - lo a medio copiar lo borra la primitiva; el temporal de un reemplazo lo borra el motor;
 //! - cada error se anota y se sigue, salvo «El disco está lleno», que detiene el trabajo.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -37,6 +37,8 @@ const NO_ORIGIN: &str = "No se sabe de dónde vino";
 const NOT_THE_SAME: &str = "Ahí ya no está lo que se había creado: no se manda a la Papelera";
 const REPLACE_PARENT: &str = "No se puede reemplazar una carpeta que contiene lo que se copia";
 const CHANGED: &str = "El original cambió durante la copia";
+/// Eliminar a la Papelera en un disco que no tiene.
+const NO_TRASH: &str = "No va a la Papelera: se eliminará definitivamente. ¿Seguir?";
 
 /// Extraer más que esto (o más de 100 veces lo que ocupa el archivo) se pregunta antes.
 const BIG_EXPANSION: u64 = 10 * 1024 * 1024 * 1024;
@@ -95,6 +97,7 @@ pub fn title(spec: &JobSpec, items: u64) -> String {
         JobSpec::Duplicate { .. } => count("Duplicando"),
         JobSpec::NewFolderWith { .. } => count("Moviendo"),
         JobSpec::Restore { .. } => count("Devolviendo"),
+        JobSpec::Delete { .. } => count("Eliminando"),
         JobSpec::Undo(_) => "Deshaciendo".into(),
         JobSpec::Compress { .. } => count("Comprimiendo"),
         JobSpec::Extract { archive, .. } => format!("Extrayendo «{}»", name(archive)),
@@ -148,6 +151,7 @@ pub fn run_with(spec: JobSpec, prims: &dyn CopyPrims, archives: &dyn Archives, c
         JobSpec::Extract { archive, into_folder } => job.extract(&archive, into_folder),
         JobSpec::ExtractEntries { archive, entries, dest } => job.extract_entries(&archive, &entries, &dest),
         JobSpec::Restore { items } => job.restore(&items),
+        JobSpec::Delete { paths, recycle } => job.delete(&paths, recycle),
         JobSpec::Undo(undo) => {
             job.start("Deshaciendo".into(), count_steps(&undo), 0);
             job.undo(undo);
@@ -317,6 +321,8 @@ struct Job<'a> {
     dir_all: Option<Choice>,
     cancelled: bool,
     stopped: Option<String>,
+    /// El aviso de por qué se detuvo, si tiene más que decir que `stopped` (ver `JobOutcome`).
+    stop_notice: Option<(String, Option<String>)>,
     skipped: Vec<PathBuf>,
     /// Lo que el recorrido no pudo leer (cuenta como error de la carpeta que lo contiene).
     walk_failed: Vec<PathBuf>,
@@ -362,6 +368,7 @@ impl<'a> Job<'a> {
             dir_all: None,
             cancelled: false,
             stopped: None,
+            stop_notice: None,
             skipped: Vec::new(),
             walk_failed: Vec::new(),
             ahead: Vec::new(),
@@ -412,11 +419,12 @@ impl<'a> Job<'a> {
         self.progress(0, true);
         let undo = (!self.undo.is_empty()).then(|| Undo::Batch(std::mem::take(&mut self.undo)));
         let focus = self.focus.take().or_else(|| self.select.last().cloned());
-        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, select: std::mem::take(&mut self.select) };
+        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, error_detail: None, select: std::mem::take(&mut self.select) };
         let outcome = JobOutcome {
             result,
             errors: std::mem::take(&mut self.errors),
             stopped: self.stopped.take(),
+            stop_notice: self.stop_notice.take(),
             cancelled: self.cancelled,
             skipped: std::mem::take(&mut self.skipped),
             done_items: self.ok_items,
@@ -437,8 +445,13 @@ impl<'a> Job<'a> {
     fn fail(&mut self, src: &Path, dst: &Path, e: CopyError) {
         match e.kind {
             ErrKind::Cancelled => self.cancelled = true,
-            ErrKind::DiskFull => {
+            // Sin lugar o bloqueado por el acceso controlado a carpetas: todo lo demás fallaría igual.
+            ErrKind::DiskFull | ErrKind::Blocked { .. } => {
                 self.stopped = Some(e.message());
+                if matches!(e.kind, ErrKind::Blocked { .. }) {
+                    let what = format!("copiar «{}»", crate::sys::shown_name(src));
+                    self.stop_notice = Some((e.notice(&what), e.detail(&what)));
+                }
                 self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None });
             }
             _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None }),
@@ -1119,7 +1132,7 @@ impl<'a> Job<'a> {
         // nunca queda algo a medias con el nombre del archivo.
         let mut part = part_name(dst, &|p| self.exists(p).is_some());
         let mut written = self.write(item, &part);
-        if matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+        if matches!(&written, Err(e) if matches!(e.kind, ErrKind::NameTooLong | ErrKind::PathTooLong)) {
             // El disco no acepta el nombre largo del parcial: uno corto del motor.
             part = short_part_name(dst);
             written = self.write(item, &part);
@@ -1492,6 +1505,113 @@ impl<'a> Job<'a> {
         }
     }
 
+    // ---------- eliminar ----------
+
+    /// Elimina `paths`: cada uno a la Papelera (`recycle`) o todo definitivamente. Si alguno está
+    /// en un disco sin Papelera, se pregunta antes y, con un sí, se elimina definitivamente.
+    fn delete(&mut self, paths: &[PathBuf], recycle: bool) {
+        let t = title(&JobSpec::Delete { paths: vec![], recycle }, paths.len() as u64);
+        let mut recycle = recycle;
+        // Cada carpeta una sola vez: saber si hay Papelera puede ser caro (en Windows suma toda la
+        // Papelera del disco) y con miles de elementos de la misma carpeta sería miles de veces.
+        let mut checked: HashSet<&Path> = HashSet::new();
+        let no_trash = recycle && paths.iter().any(|p| checked.insert(p.parent().unwrap_or(p)) && self.has_trash(p) == Some(false));
+        if no_trash {
+            (self.out)(Update::Confirm(NO_TRASH.into()));
+            if !self.ctl.wait_confirm() {
+                self.cancelled = true;
+                return;
+            }
+            recycle = false;
+        }
+        if recycle {
+            self.delete_to_trash(t, paths);
+        } else {
+            self.delete_permanently(t, paths);
+        }
+    }
+
+    /// Cada elemento de arriba a la Papelera (se deshace devolviéndolo).
+    fn delete_to_trash(&mut self, title: String, paths: &[PathBuf]) {
+        self.start(title, paths.len() as u64, 0);
+        for p in paths {
+            if self.should_stop() {
+                break;
+            }
+            self.current = name_of(p);
+            match self.prims.trash(p) {
+                Ok(name) => {
+                    self.record(Undo::Recycled(vec![(name, p.clone())]));
+                    self.ok_items += 1;
+                }
+                // El sistema lo borró definitivamente en vez de mandarlo a la Papelera (Windows,
+                // si no entraba): se avisa, pero no hay nada que reintentar.
+                Err(e) if e.kind != ErrKind::Cancelled && self.prims.stat(p).is_err_and(|s| s.kind == ErrKind::NotFound) => {
+                    self.fail_msg(p, p, &e.message(), false);
+                }
+                Err(e) => self.fail(p, p, e),
+            }
+            self.items_done += 1;
+            self.progress(0, false);
+        }
+    }
+
+    /// Recorre todo y lo borra de adentro hacia afuera. Lo que falla se anota y se sigue; la
+    /// carpeta de algo que falló no se intenta (un solo error por rama).
+    fn delete_permanently(&mut self, title: String, paths: &[PathBuf]) {
+        let mut plan = Vec::new();
+        // Lo que no hay que intentar borrar: lo que falló o no se pudo leer, y sus carpetas.
+        let mut blocked: HashSet<PathBuf> = HashSet::new();
+        let mut seen = 0u64;
+        for root in paths {
+            let mut on_seen = |n: u64| (self.out)(Update::Preparing { items: seen + n });
+            match walk(self.prims, root, self.ctl, &mut on_seen) {
+                Ok((items, errors)) => {
+                    seen += items.len() as u64;
+                    for e in errors {
+                        let at = e.path.clone();
+                        // Una carpeta que no se pudo listar, o algo de adentro sin datos.
+                        blocked.extend(at.parent().map(Path::to_path_buf));
+                        blocked.insert(at.clone());
+                        self.fail(&at, &at, e);
+                    }
+                    plan.push(items);
+                }
+                Err(e) => self.fail(root, root, e),
+            }
+            if self.halted() {
+                return;
+            }
+        }
+        self.start(title, seen, 0);
+        for items in plan {
+            for item in items.iter().rev() {
+                if self.should_stop() {
+                    return;
+                }
+                let p = &item.src;
+                self.current = name_of(p);
+                if blocked.contains(p) {
+                    if let Some(parent) = p.parent() {
+                        blocked.insert(parent.to_path_buf());
+                    }
+                } else {
+                    match self.prims.remove(p) {
+                        Ok(()) => self.ok_items += 1,
+                        Err(e) => {
+                            if let Some(parent) = p.parent() {
+                                blocked.insert(parent.to_path_buf());
+                            }
+                            self.fail(p, p, e);
+                        }
+                    }
+                }
+                self.items_done += 1;
+                self.progress(0, false);
+            }
+        }
+    }
+
     // ---------- comprimir ----------
 
     /// Un zip con `sources` en la carpeta del primero: se recorre (solo metadatos), se escribe con
@@ -1560,7 +1680,7 @@ impl<'a> Job<'a> {
                 self.ctl.checkpoint()
             };
             written = archives.create(&part, &items, &mut on_bytes);
-            if !matches!(&written, Err(e) if e.kind == ErrKind::NameTooLong) {
+            if !matches!(&written, Err(e) if matches!(e.kind, ErrKind::NameTooLong | ErrKind::PathTooLong)) {
                 break;
             }
         }

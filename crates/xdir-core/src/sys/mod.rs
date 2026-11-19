@@ -30,7 +30,7 @@ pub use hashes::{HashAlgo, Hashes, Opened, Reader, io_error};
 pub use archives::{Archives, Pick, DAMAGED, DAMAGED_ZIP, NOT_ALLOWED, NoArchives, PASSWORD, UNSUPPORTED};
 pub use copy::{
     CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, UnimplementedCopyPrims, VolumeInfo, folded, same_path_folded,
-    starts_with_folded,
+    io_kind, io_unexpected, lower_first, shown_name, starts_with_folded, too_long, unexpected,
 };
 
 #[cfg(test)]
@@ -343,6 +343,13 @@ pub trait FileSystem: Send + Sync {
     /// Papelera; macOS: `~/.Trash` o `/Volumes/*/.Trashes/<uid>`; Linux: `<datos>/Trash/files`.
     fn is_trash(&self, _loc: &Location) -> bool {
         false
+    }
+    /// La Papelera del sistema como lugar del árbol; `is_trash` dice que sí de ella. En Windows
+    /// consulta el Shell (COM), así que se llama una vez al armar el árbol y se guarda.
+    /// Windows: la carpeta virtual del Shell (con su nombre localizado); macOS: `~/.Trash`;
+    /// Linux: `<datos>/Trash/files`. Por defecto, ninguna.
+    fn trash_place(&self) -> Option<Location> {
+        None
     }
     /// Lo escrito en la barra de dirección como lugar especial del Shell ("shell:RecycleBinFolder").
     fn shell_location(&self, text: &str) -> Option<Location>;

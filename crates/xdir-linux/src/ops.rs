@@ -56,13 +56,23 @@ fn same_item(p: &Path, id: (u64, u64)) -> std::result::Result<Option<bool>, Stri
     match std::fs::symlink_metadata(p) {
         Ok(m) => Ok(Some((m.dev(), m.ino()) == id)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", p.display())),
+        Err(e) => Err(fail(&format!("revisar {}", quoted(p)), e, p)),
     }
 }
 
-/// Error de una ruta como lo ve el usuario.
+/// Error de una ruta como lo ve el usuario (cuando no es de E/S: un texto propio).
 fn err_at(p: &Path, e: impl std::fmt::Display) -> String {
-    format!("{}: {e}", p.display())
+    format!("«{}»: {e}", xdir_core::sys::shown_name(p))
+}
+
+/// El aviso de algo que falló con `p`: qué (`what`, con el nombre), por qué y qué hacer.
+fn fail(what: &str, e: std::io::Error, p: &Path) -> String {
+    crate::prims::err(e, p).notice(what)
+}
+
+/// «nombre» de una ruta, para los avisos.
+fn quoted(p: &Path) -> String {
+    format!("«{}»", xdir_core::sys::shown_name(p))
 }
 
 /// Papelera para borrar; sin ella, error (nunca se borra definitivamente por no encontrarla).
@@ -88,20 +98,21 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                         Err(e) => errors.push(e),
                     }
                 } else if let Err(e) = remove_item(p) {
-                    errors.push(err_at(p, e));
+                    errors.push(fail(&format!("eliminar {}", quoted(p)), e, p));
                 }
             }
             ok((!recycled.is_empty()).then(|| Undo::Recycled(recycled)), None, false, errors)
         }
         Op::Rename { path, new_name } => {
+            let what = xdir_core::ops::doing(&Op::Rename { path: path.clone(), new_name: new_name.clone() }, &path);
             if new_name.contains('/') {
-                return Err("el nombre no puede tener «/»".into());
+                return Err(format!("No se pudo {what}: el nombre no puede tener «/»."));
             }
             let target = path.with_file_name(&new_name);
             if target != path && std::fs::symlink_metadata(&target).is_ok() {
-                return Err(format!("ya existe «{new_name}»"));
+                return Err(format!("No se pudo {what}: ya hay otro elemento con ese nombre en la carpeta."));
             }
-            std::fs::rename(&path, &target).map_err(|e| e.to_string())?;
+            std::fs::rename(&path, &target).map_err(|e| fail(&what, e, &path))?;
             let old_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             ok(Some(Undo::Rename { path: target.clone(), old_name }), Some(target), false, Vec::new())
         }
@@ -112,11 +123,11 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                 target = parent.join(format!("{NEW_FOLDER} ({n})"));
                 n += 1;
             }
-            std::fs::create_dir(&target).map_err(|e| e.to_string())?;
+            std::fs::create_dir(&target).map_err(|e| fail(&format!("crear la carpeta nueva en {}", quoted(&parent)), e, &parent))?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
         Op::NewFile { parent } => {
-            let target = create_new_file(&parent).map_err(|e| err_at(&parent, e))?;
+            let target = create_new_file(&parent).map_err(|e| fail(&format!("crear el archivo nuevo en {}", quoted(&parent)), e, &parent))?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
         Op::Shortcuts { targets } => {
@@ -127,7 +138,7 @@ pub fn run(op: Op, trash: Option<&Path>) -> Result<OpResult> {
                 let link = names::free_name(parent, &|n| names::shortcut_name(&name, names::LinkStyle::Symlink, n), &taken);
                 match std::os::unix::fs::symlink(target, &link) {
                     Ok(()) => created.push(link),
-                    Err(e) => errors.push(err_at(&link, e)),
+                    Err(e) => errors.push(fail(&format!("crear el enlace a «{name}»"), e, parent)),
                 }
             }
             // Con uno solo, queda para renombrar.
@@ -239,7 +250,7 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
             if std::fs::symlink_metadata(&target).is_ok() {
                 return Err(err_at(&target, "ya existe, no se pisa"));
             }
-            std::fs::rename(&path, &target).map_err(|e| e.to_string())?;
+            std::fs::rename(&path, &target).map_err(|e| fail(&format!("devolverle el nombre {}", quoted(&target)), e, &path))?;
             return ok(None, Some(target), false, errors);
         }
         Undo::Created(paths) => {
@@ -264,7 +275,7 @@ fn undo_op(undo: Undo, trash: Option<&Path>) -> Result<OpResult> {
                             errors.push(e);
                         }
                     }
-                    Ok(Some(false)) => errors.push(format!("{}: ahí ya no está lo que se había creado, no se manda a la Papelera", p.display())),
+                    Ok(Some(false)) => errors.push(format!("No se mandó a la Papelera {}: ahí ya no está lo que se había creado.", quoted(&p))),
                     Err(e) => errors.push(e),
                 }
             }
@@ -701,7 +712,8 @@ mod tests {
         let r = run(Op::NewFile { parent: dir.clone() }, None);
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
         let e = r.expect_err("sin permiso de escritura no se puede crear");
-        assert!(!e.is_empty());
+        let name = dir.file_name().unwrap().to_string_lossy();
+        assert_eq!(e, format!("No se pudo crear el archivo nuevo en «{name}»: no tenés permiso. Pedí acceso a quien administra esa carpeta."));
         assert!(!dir.join("Nuevo documento de texto.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

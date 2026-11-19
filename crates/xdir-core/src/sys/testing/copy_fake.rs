@@ -53,6 +53,8 @@ struct FakeFs {
     trash_deletes: bool,
     syncs: Vec<PathBuf>,
     restored: Vec<PathBuf>,
+    /// Cuántas veces se pidió `volume` de cada ruta.
+    volume_calls: HashMap<PathBuf, u32>,
 }
 
 fn default_volume() -> VolumeInfo {
@@ -297,6 +299,11 @@ impl FakeCopyPrims {
         };
     }
 
+    /// Cuántas veces se pidió el disco de `path` (`volume`).
+    pub fn volume_calls(&self, path: &Path) -> u32 {
+        self.fs().volume_calls.get(path).copied().unwrap_or(0)
+    }
+
     /// La Papelera borra definitivamente y responde con error.
     pub fn set_trash_deletes(&self, on: bool) {
         self.fs().trash_deletes = on;
@@ -422,7 +429,8 @@ impl CopyPrims for FakeCopyPrims {
         if let Some(d) = super::FakeNetwork::hang_for(&p.to_string_lossy()) {
             std::thread::sleep(d);
         }
-        let fs = self.fs();
+        let mut fs = self.fs();
+        *fs.volume_calls.entry(p.to_path_buf()).or_default() += 1;
         if fs.hidden.iter().any(|h| p.starts_with(h)) {
             return None;
         }

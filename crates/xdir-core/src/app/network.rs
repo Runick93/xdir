@@ -572,7 +572,7 @@ impl App {
             }
             4 => {
                 if let Some(a) = address.as_deref().and_then(|a| Address::parse(a).ok()) {
-                    let _ = sys::shell().copy_text(self.hwnd, &a.display(self.net_style()));
+                    self.copy_text(&a.display(self.net_style()));
                 }
             }
             5 => self.run_command(crate::commands::Command::MapNetworkDrive),

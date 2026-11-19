@@ -5,6 +5,8 @@
 ## 0.2.1 — 2026-11-14
 
 ### Nuevo
+- Esc después de cortar deja de cortar: lo cortado sale del portapapeles y vuelve a verse normal (si hay un filtro escrito, el siguiente Esc lo borra).
+- Lo cortado (Ctrl+X / ⌘X) se ve con el ícono atenuado hasta que se pega, como en el Explorador; también lo que se corta en el Explorador.
 - El logo de Runick de «Acerca de xdir» ahora está animado.
 - El instalador de Windows suma el logo de Runick en el panel de la bienvenida y el ícono de xdir junto al título y arriba a la derecha en las demás pantallas.
 - En la Mac, «Carpeta nueva» y «Archivo de texto nuevo» en el menú del fondo de la carpeta, con su atajo a la derecha.
@@ -17,19 +19,26 @@
 - Indicador de actividad en la barra de estado: un círculo girando mientras haya algo en segundo plano (conexiones, expulsar, tamaño de lo elegido, comparar contenido, sumas de verificación, búsquedas, carpetas que tardan, xtree, extracciones). Al pasar el mouse dice qué está en curso; con copias, un clic abre su ventana. No aparece por lo que dura menos de 0,3 s.
 - **Historial de crecimiento en xtree**: cada análisis guarda una foto de los tamaños, y la tarjeta de la carpeta muestra cuánto creció en 7, 30 o 90 días, un gráfico y las 5 subcarpetas que más crecieron (clic para entrar). En la tabla, una ▲ marca las carpetas que crecieron mucho. Se apaga o se borra en Configuración ▸ xtree; los discos de red no guardan historial.
 - **Terminal por defecto**: elegí qué terminal abre «Abrir la terminal en la carpeta» en Configuración ▸ Avanzado ▸ Terminal, o con clic derecho sobre una del menú `>_` → «Usar por defecto» (la elegida dice «Por defecto»). Se detectan más terminales: en la Mac Ghostty, Warp, WezTerm, Alacritty, kitty, Hyper y Tabby además de Terminal e iTerm; en Windows también Git Bash; en Linux todas las que estén instaladas. Otra cualquiera se agrega con `terminal_propia` en config.toml.
+- El árbol muestra en una sola lista las carpetas del usuario, la **Papelera** y las del Acceso rápido de Windows. En Configuración ▸ Lugares se elige cuáles se ven, en qué orden, y se suman carpetas propias. Soltar archivos sobre la Papelera del árbol los manda a la Papelera.
 
 ### Cambios
+- Las copias, movimientos y extracciones corren a la vez aunque usen el mismo disco. Para que esperen en cola como antes, encendé Configuración ▸ Avanzado ▸ «Copias en cola por disco»; cada una en cola tiene el botón «Empezar ahora».
 - El comando «Abrir PowerShell en la carpeta» (en la Mac, «Abrir Terminal en la carpeta») pasa a llamarse «Abrir la terminal en la carpeta» y abre la terminal por defecto; «Abrir CMD en la carpeta» sigue abriendo CMD.
 - Cualquier carpeta que tarda más de medio segundo en leerse (local, de red o comprimida) muestra «Cargando…» con el indicador girando, encima de lo que ya llegó. En red sigue el aviso «Conectando…» / «no responde».
 - xtree ya no analiza apenas se abre: elegís el disco y tocás «Analizar». «Analizar al abrir xtree» (Configuración ▸ xtree) lo deja como antes.
 - Los botones del pie del panel (carpeta nueva y vista) son más grandes.
 - En xtree, los colores del mapa pasan de la `T` a `Ctrl+T` / `⌘T` (se cambia en Atajos de teclado): la `T` ahora salta a la carpeta que empieza con T.
 - En xtree, analizar de nuevo con permisos pasa de la `A` a `Ctrl+Shift+A` / `⇧⌘A`: ninguna letra sola hace otra cosa que ir a la carpeta que empieza así.
+- Eliminar muestra su avance en la ventana de copia de xdir (con Pausa y Cancelar) en vez del diálogo de Windows, y en un disco sin Papelera avisa antes de eliminar definitivamente.
+- La ventana de copia muestra los detalles y el gráfico de todas las copias en curso a la vez (cada una se pliega por separado) y, si no entran, se desplaza con la rueda o la barra de la derecha.
+- Los mensajes de error dicen qué pasó, con qué elemento y qué hacer; en Windows avisan si el acceso controlado a carpetas (protección contra ransomware) bloqueó a xdir.
 
 ### Arreglos
+- En la Mac, mover archivos a una carpeta de red (SMB) ya no falla con «No tenés permiso»: la copia se aseguraba en el disco de una forma que esos servidores rechazan.
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.
 - El árbol de carpetas ya muestra u oculta las carpetas ocultas al cambiar «Mostrar archivos ocultos», sin tener que plegarlo y desplegarlo de nuevo; lo desplegado queda como estaba.
+- En Windows, minimizar la ventana de copia la deja en la barra de tareas, con el avance en verde sobre su ícono (amarillo en pausa, rojo con errores); antes se ocultaba y solo se recuperaba desde la barra de estado.
 
 ## 0.2.0 — 2026-11-11
 

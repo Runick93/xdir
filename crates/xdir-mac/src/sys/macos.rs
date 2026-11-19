@@ -486,6 +486,10 @@ impl FileSystem for MacFileSystem {
         matches!(loc, Location::Path(p) if crate::trash::is_trash_dir(p))
     }
 
+    fn trash_place(&self) -> Option<Location> {
+        std::env::var_os("HOME").map(|h| Location::Path(PathBuf::from(h).join(".Trash")))
+    }
+
     fn spawn_load(&self, hwnd: Handle, tx: Sender<LoadEvent>, panel: usize, generation: u64, current: Arc<AtomicU64>, location: Location) {
         fsp::spawn_load(hwnd, tx, panel, generation, current, location)
     }
@@ -724,5 +728,18 @@ mod size_tests {
         let t = MacEnv.format_size_short(0);
         assert!(t.starts_with('0'), "{t}");
         assert!(!t.to_lowercase().contains("zero"), "{t}");
+    }
+}
+
+#[cfg(test)]
+mod trash_place_tests {
+    use super::MacFileSystem;
+    use xdir_core::sys::FileSystem;
+
+    #[test]
+    fn trash_place_is_trash() {
+        let fs = MacFileSystem;
+        let place = fs.trash_place().expect("hay Papelera");
+        assert!(fs.is_trash(&place));
     }
 }

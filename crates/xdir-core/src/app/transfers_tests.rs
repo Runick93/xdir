@@ -5,7 +5,7 @@ use super::*;
 use crate::keys::keys::VK_DOWN as KEY_DOWN;
 use crate::sys::testing::{FakeCopyPrims, FakeFileOps, FakeHost};
 use crate::sys::{ErrKind, VolumeInfo};
-use crate::transfer::{Answer, Choice, JobSpec, JobState};
+use crate::transfer::{Answer, Choice, JobId, JobSpec, JobState};
 use std::path::Path;
 use std::time::Duration;
 
@@ -164,7 +164,7 @@ fn errors_stay_for_retry() {
     let mut a = app();
     let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-retry/s/a.txt"), p("/app-retry/s/b.txt")], dest: p("/app-retry/d") });
     wait(&mut a, idle);
-    assert_eq!(a.notice.as_deref(), Some("Copiar terminó con 1 error («b.txt»: Lo está usando otro programa)"));
+    assert_eq!(a.notice.as_deref(), Some("Copiar terminó con 1 error («b.txt»: lo está usando otro programa)"));
     let view = &a.jobs()[0];
     assert_eq!((view.id, view.state, view.errors.len()), (id, JobState::Done, 1));
     let again = a.retry_job(id).unwrap();
@@ -292,7 +292,7 @@ fn second_eject_does_not_drop_the_first() {
 
 // ---------- ventana de copia ----------
 
-use crate::host::{AuxMouse, AuxWindow};
+use crate::host::{AuxMouse, AuxProgress, AuxWindow};
 use crate::sys::testing::FakeShell;
 use crate::transfer::view::{self, ViewHit};
 
@@ -314,32 +314,127 @@ fn slow_copy(f: &FakeCopyPrims, root: &str, delay: u64) -> JobSpec {
     JobSpec::Copy { sources: vec![src], dest: p(&format!("{root}/d")) }
 }
 
-/// Clic en el control `h` de la ventana de copia (lo busca recorriendo el área).
-fn click_aux(a: &mut App, h: ViewHit) {
+/// Dos copias lentas, con raíces distintas pero sobre el mismo disco falso. Con `first_runs` la
+/// segunda se lanza recién cuando la primera ya corre (si no, los dos hilos compiten por anotarse).
+fn two_same_disk_copies(a: &mut App, f: &FakeCopyPrims, tag: &str, first_runs: bool) -> (JobId, JobId) {
+    let (r1, r2) = (format!("/{tag}-1"), format!("/{tag}-2"));
+    let s1 = slow_copy(f, &r1, 20);
+    let s2 = slow_copy(f, &r2, 20);
+    f.set_volume(&p(&r1), volume(tag));
+    f.set_volume(&p(&r2), volume(tag));
+    let i1 = a.start_transfer(s1);
+    if first_runs {
+        wait(a, |a| a.jobs().iter().any(|j| j.id == i1 && j.state == JobState::Running));
+    }
+    (i1, a.start_transfer(s2))
+}
+
+/// De fábrica las copias sobre el mismo disco corren a la vez: ninguna pasa por «en cola».
+#[test]
+fn same_disk_jobs_run_together_by_default() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-par", false);
+    let waited = std::cell::Cell::new(false);
+    wait(&mut a, |a| {
+        if a.jobs().iter().any(|j| j.state == JobState::Waiting) {
+            waited.set(true);
+        }
+        [i1, i2].iter().all(|id| a.jobs().iter().any(|j| j.id == *id && j.state == JobState::Running))
+    });
+    assert!(!waited.get());
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// Con `cola_por_disco` el segundo trabajo sobre el mismo disco espera su turno.
+#[test]
+fn queue_by_disk_makes_second_wait() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-cola", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// «Empezar ahora» saca de la cola a un trabajo que espera su turno, con el primero todavía corriendo.
+#[test]
+fn start_now_runs_queued_job() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-ahora", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    click_aux(&mut a, ViewHit::StartNow(i2));
+    wait(&mut a, |a| {
+        let st = |id| a.jobs().iter().find(|j| j.id == id).map(|j| j.state);
+        st(i2) == Some(JobState::Running) && st(i1) == Some(JobState::Running)
+    });
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// Apagar «Copias en cola por disco» con un trabajo esperando lo libera, con el primero corriendo.
+#[test]
+fn turning_queue_off_releases_waiting_job() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    a.config.queue_by_disk = true;
+    let (i1, i2) = two_same_disk_copies(&mut a, &f, "app-apaga", true);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == i2 && j.state == JobState::Waiting));
+    a.toggle_queue_by_disk();
+    assert!(!a.config.queue_by_disk);
+    wait(&mut a, |a| {
+        let st = |id| a.jobs().iter().find(|j| j.id == id).map(|j| j.state);
+        st(i2) == Some(JobState::Running) && st(i1) == Some(JobState::Running)
+    });
+    a.cancel_job(i1);
+    a.cancel_job(i2);
+    wait(&mut a, idle);
+}
+
+/// Dónde está el control `h` en la ventana de copia, tal como se ve (con el desplazamiento).
+fn find_aux(a: &App, h: ViewHit) -> Option<(f32, f32)> {
     let jobs = a.jobs().to_vec();
-    let expanded = a.transfers_expanded();
-    let r = geom::rect(0.0, 0.0, view::WIDTH, view::content_height(&jobs, expanded));
+    let expanded = |id| a.transfers_expanded(id);
+    let (w, vh) = a.transfers_size();
+    let r = geom::rect(0.0, 0.0, w, vh);
     let mut y = 0.0;
     while y < r.bottom {
         let mut x = 0.0;
         while x < r.right {
-            if view::hit(r, &jobs, expanded, x, y) == Some(h) {
-                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Move);
-                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Down);
-                a.aux_mouse(AuxWindow::Transfers, x + 1.0, y + 1.0, AuxMouse::Up);
-                return;
+            if view::hit(r, &jobs, &expanded, a.transfers_scroll(), x, y) == Some(h) {
+                return Some((x + 1.0, y + 1.0));
             }
             x += 2.0;
         }
         y += 2.0;
     }
-    panic!("no está {h:?} en la ventana");
+    None
+}
+
+/// Clic en (x, y) de la ventana de copia.
+fn click_aux_at(a: &mut App, x: f32, y: f32) {
+    for ev in [AuxMouse::Move, AuxMouse::Down, AuxMouse::Up] {
+        a.aux_mouse(AuxWindow::Transfers, x, y, ev);
+    }
+}
+
+/// Clic en el control `h` de la ventana de copia (tiene que estar a la vista).
+fn click_aux(a: &mut App, h: ViewHit) {
+    let Some((x, y)) = find_aux(a, h) else { panic!("no está {h:?} en la ventana") };
+    click_aux_at(a, x, y);
 }
 
 fn aux_texts(a: &mut App) -> Vec<String> {
     let p = crate::sys::testing::RecordingPainter::new(a.theme);
-    let h = view::content_height(a.jobs(), a.transfers_expanded());
-    a.paint_aux(AuxWindow::Transfers, &p, view::WIDTH, h);
+    let (w, h) = a.transfers_size();
+    a.paint_aux(AuxWindow::Transfers, &p, w, h);
     p.texts().into_iter().map(|(_, s, _)| s).collect()
 }
 
@@ -361,9 +456,9 @@ fn window_appears_after_one_second() {
     let shows = host.aux_shows();
     assert_eq!(shows.len(), 1, "{shows:?}");
     assert_eq!((shows[0].0, shows[0].1.as_str()), (AuxWindow::Transfers, "Copiando…"));
-    assert_eq!(shows[0].2, (view::WIDTH, view::content_height(a.jobs(), a.transfers_expanded())));
-    // El que corre es el expandido (con el gráfico).
-    assert_eq!(a.transfers_expanded(), Some(id));
+    assert_eq!(shows[0].2, (view::WIDTH, view::content_height(a.jobs(), &|id| a.transfers_expanded(id))));
+    // El que corre se ve expandido (con el gráfico).
+    assert!(a.transfers_expanded(id));
     assert!(aux_texts(&mut a).iter().any(|t| t.contains("% completado")));
     a.cancel_job(id);
     wait(&mut a, idle);
@@ -486,20 +581,25 @@ fn dismiss_errors_hides_window() {
     let id = a.start_transfer(JobSpec::Copy { sources: vec![p("/app-wd/s/b.txt")], dest: p("/app-wd/d") });
     wait(&mut a, idle);
     assert!(host.aux_visible());
+    // Con errores, el avance va en rojo.
+    assert!(host.aux_progresses().contains(&AuxProgress::Error(1.0)), "{:?}", host.aux_progresses());
     click_aux(&mut a, ViewHit::Dismiss(id));
     assert!(a.jobs().is_empty());
     assert!(!host.aux_visible());
+    assert_eq!(host.aux_progresses().last(), Some(&AuxProgress::None));
 }
 
 #[test]
 fn pause_resume_cancel_buttons() {
     let f = fake();
-    let (mut a, _host) = app_window();
+    let (mut a, host) = app_window();
     let id = a.start_transfer(slow_copy(&f, "/app-wp", 20));
     wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
     a.on_transfer_due(id);
     click_aux(&mut a, ViewHit::Pause(id));
     assert!(a.jobs()[0].paused);
+    // En pausa, el avance va en amarillo.
+    assert!(matches!(host.aux_progresses().last(), Some(AuxProgress::Paused(_))), "{:?}", host.aux_progresses());
     assert!(aux_texts(&mut a).iter().any(|t| t == "Reanudar"));
     click_aux(&mut a, ViewHit::Resume(id));
     assert!(!a.jobs()[0].paused);
@@ -545,6 +645,22 @@ fn indicator_click_reopens() {
     assert_eq!(host.aux_shows().len(), 2);
     a.cancel_job(id);
     wait(&mut a, idle);
+}
+
+#[test]
+fn copy_window_reports_taskbar_progress() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let id = a.start_transfer(slow_copy(&f, "/app-wtb", 5));
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.bytes.0 > 0));
+    a.on_transfer_due(id);
+    let reported = host.aux_progresses();
+    assert!(matches!(reported.last(), Some(AuxProgress::Normal(x)) if (0.0..=1.0).contains(x)), "{reported:?}");
+    // En milésimas: no se manda un avance por cada bloque copiado.
+    assert!(matches!(reported.last(), Some(AuxProgress::Normal(x)) if ((x * 1000.0).round() - x * 1000.0).abs() < 1e-3), "{reported:?}");
+    f.set_slow(&p("/app-wtb/s/grande.bin"), None);
+    wait(&mut a, idle);
+    assert_eq!(host.aux_progresses().last(), Some(&AuxProgress::None));
 }
 
 #[test]
@@ -664,6 +780,38 @@ fn drop_on_tree_folder_moves_with_engine() {
     wait(&mut a, idle);
     assert!(FakeFileOps::take_ops().is_empty(), "soltar no pasa por FileOps");
     assert!(f.exists(&p("/app-tdrop/d/a.txt")) && !f.exists(&p("/app-tdrop/s/a.txt")));
+}
+
+/// Soltar en la Papelera del árbol la manda a la Papelera con el motor (`Delete` con `recycle`),
+/// nunca un `Move` a la carpeta de la Papelera: así «Devolver» sabe de dónde salió. El efecto es
+/// mover, aun con Ctrl; lo que ya está en la Papelera no se acepta.
+#[cfg(feature = "arbol")]
+#[test]
+fn drop_on_tree_trash_deletes() {
+    let f = fake();
+    f.add_file(&p("/app-ttrash/s/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-ttrash/s/b.txt"), b"b".to_vec());
+    f.add_file(&p("/app-ttrash/.Trash/viejo.txt"), b"v".to_vec());
+    crate::sys::testing::FakeFileSystem::set_trash(Some(Path::new("/app-ttrash/.Trash")));
+    let mut a = app_with_tree_drives(&[]);
+    let point = a.tree.row_point("Papelera").expect("la fila de la Papelera");
+    let paths = vec![p("/app-ttrash/s/a.txt"), p("/app-ttrash/s/b.txt")];
+    assert_eq!(drag(&mut a, DragKind::Enter, point, &paths, false), Effect::MOVE);
+    assert!(a.tree.drop_target.is_some(), "la fila se resalta");
+    assert_eq!(drag(&mut a, DragKind::Over, point, &paths, true), Effect::MOVE, "Ctrl no copia");
+    // Lo que ya está en la Papelera no se acepta.
+    let inside = vec![p("/app-ttrash/.Trash/viejo.txt")];
+    assert_eq!(drag(&mut a, DragKind::Over, point, &inside, false), Effect::NONE);
+    assert_eq!(a.tree.drop_target, None);
+    a.take_started();
+    assert_eq!(drag(&mut a, DragKind::Drop, point, &inside, false), Effect::NONE);
+    assert!(a.take_started().is_empty());
+    assert_eq!(drag(&mut a, DragKind::Drop, point, &paths, false), Effect::MOVE);
+    assert_eq!(a.tree.drop_target, None, "al soltar se apaga el resaltado");
+    assert_eq!(a.take_started(), vec![JobSpec::Delete { paths: paths.clone(), recycle: true }]);
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-ttrash/s/a.txt")) && !f.exists(&p("/app-ttrash/s/b.txt")));
+    crate::sys::testing::FakeFileSystem::set_trash(None);
 }
 
 /// #56: lo que no es una carpeta (Este equipo, «Red»), soltar una carpeta en sí misma o un archivo
@@ -838,6 +986,70 @@ fn retry_of_a_restore_is_a_restore() {
 }
 
 #[test]
+fn delete_retry_deletes_again() {
+    // «Reintentar» de un eliminar vuelve a eliminar lo que falló (nunca copiarlo sobre sí mismo).
+    let f = fake();
+    f.add_file(&p("/app-dr/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-dr/b.txt"), b"b".to_vec());
+    f.fail(&p("/app-dr/a.txt"), ErrKind::Denied, 1);
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(JobSpec::Delete { paths: vec![p("/app-dr/a.txt"), p("/app-dr/b.txt")], recycle: false });
+    wait(&mut a, idle);
+    assert_eq!(a.jobs()[0].errors.len(), 1, "{:?}", a.jobs()[0].errors);
+    assert!(f.exists(&p("/app-dr/a.txt")) && !f.exists(&p("/app-dr/b.txt")));
+    a.take_started();
+    a.retry_job(id).expect("se reintenta");
+    assert_eq!(a.take_started(), vec![JobSpec::Delete { paths: vec![p("/app-dr/a.txt")], recycle: false }]);
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-dr/a.txt")));
+    assert!(f.list_all(&p("/app-dr")).is_empty(), "no se copió nada: {:?}", f.list_all(&p("/app-dr")));
+    assert!(a.jobs().is_empty());
+}
+
+#[test]
+fn delete_retry_of_a_folder_child_deletes_its_folder() {
+    // Lo que falló adentro de una carpeta elegida: se vuelve a eliminar esa carpeta (si no, quedaría
+    // vacía), a la Papelera si era a la Papelera.
+    let f = fake();
+    f.add_file(&p("/app-drf/Dir/a.txt"), b"a".to_vec());
+    f.add_file(&p("/app-drf/Dir/b.txt"), b"b".to_vec());
+    f.fail(&p("/app-drf/Dir/b.txt"), ErrKind::Denied, 1);
+    let (mut a, _host) = app_window();
+    let id = a.start_transfer(JobSpec::Delete { paths: vec![p("/app-drf/Dir")], recycle: false });
+    wait(&mut a, idle);
+    assert_eq!(a.jobs()[0].errors.len(), 1, "{:?}", a.jobs()[0].errors);
+    a.take_started();
+    a.retry_job(id).expect("se reintenta");
+    assert_eq!(a.take_started(), vec![JobSpec::Delete { paths: vec![p("/app-drf/Dir")], recycle: false }]);
+    wait(&mut a, idle);
+    assert!(!f.exists(&p("/app-drf/Dir")));
+}
+
+#[test]
+fn delete_does_not_wait_behind_a_copy() {
+    // Eliminar no hace cola detrás de una copia larga en el mismo disco.
+    let f = fake();
+    let copy = slow_copy(&f, "/app-dq", 100);
+    f.add_file(&p("/app-dq/x.txt"), b"x".to_vec());
+    let (mut a, _host) = app_window();
+    let slow = a.start_transfer(copy);
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == slow && j.state == JobState::Running));
+    let del = a.start_transfer(JobSpec::Delete { paths: vec![p("/app-dq/x.txt")], recycle: false });
+    let waited = std::cell::Cell::new(false);
+    wait(&mut a, |a| {
+        if a.jobs().iter().any(|j| j.id == del && j.state == JobState::Waiting) {
+            waited.set(true);
+        }
+        !a.jobs().iter().any(|j| j.id == del)
+    });
+    assert!(!waited.get(), "eliminar esperó en la cola");
+    assert!(!f.exists(&p("/app-dq/x.txt")));
+    assert!(a.jobs().iter().any(|j| j.id == slow && j.state != JobState::Done), "la copia sigue");
+    a.cancel_job(slow);
+    wait(&mut a, idle);
+}
+
+#[test]
 fn no_new_copies_onto_a_disk_being_ejected() {
     // Revisión del cableado (M1): mientras se espera para expulsar un disco, no empiezan copias
     // nuevas que lo usen.
@@ -935,4 +1147,261 @@ fn eject_without_jobs_still_blocks_new_copies_until_done() {
     a.start_transfer(JobSpec::Copy { sources: vec![p("/app-ejw/s/a.txt")], dest: p("/app-ejw/d") });
     wait(&mut a, idle);
     assert!(f.exists(&p("/app-ejw/d/a.txt")));
+}
+
+// ---------- varias copias expandidas y desplazamiento ----------
+
+/// `n` copias lentas (unos 2 s cada una), cada una en su disco, todas corriendo.
+fn running_copies(a: &mut App, f: &FakeCopyPrims, tag: &str, n: usize) -> Vec<JobId> {
+    let ids: Vec<JobId> = (1..=n).map(|k| a.start_transfer(slow_copy(f, &format!("/{tag}-{k}"), 100))).collect();
+    wait(a, |a| ids.iter().all(|id| a.jobs().iter().any(|j| j.id == *id && j.state == JobState::Running)));
+    ids
+}
+
+fn cancel_all(a: &mut App, ids: &[JobId]) {
+    for id in ids {
+        a.cancel_job(*id);
+    }
+    wait(a, idle);
+}
+
+#[test]
+fn expanding_one_keeps_the_other() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-exp", 2);
+    let (i1, i2) = (ids[0], ids[1]);
+    a.show_transfers();
+    // De fábrica, las dos con sus detalles.
+    assert!(a.transfers_expanded(i1) && a.transfers_expanded(i2));
+    // «Menos detalles» del 1 pliega solo el 1.
+    click_aux(&mut a, ViewHit::Expand(i1));
+    assert!(!a.transfers_expanded(i1));
+    assert!(a.transfers_expanded(i2));
+    // Expandirlo de nuevo deja las dos expandidas.
+    click_aux(&mut a, ViewHit::Expand(i1));
+    assert!(a.transfers_expanded(i1) && a.transfers_expanded(i2));
+    // Al terminar, el plegado no queda anotado.
+    click_aux(&mut a, ViewHit::Expand(i2));
+    assert!(!a.transfers_expanded(i2));
+    assert_eq!(a.transfers_collapsed_len(), 1);
+    cancel_all(&mut a, &ids);
+    assert_eq!(a.transfers_collapsed_len(), 0);
+}
+
+#[test]
+fn copy_window_caps_height_and_scrolls() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-scr", 5);
+    a.show_transfers();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert!(content > view::MAX_H, "{content}");
+    // El host recibe como mucho el alto máximo.
+    let shown = host.aux_shows().last().unwrap().2;
+    assert_eq!(shown, (view::WIDTH, view::MAX_H));
+    assert!(host.aux_sizes().iter().all(|(_, (_, h))| *h <= view::MAX_H), "{:?}", host.aux_sizes());
+    assert_eq!(a.transfers_scroll(), 0.0);
+    // Lo de abajo no se ve hasta desplazar.
+    let last = *ids.last().unwrap();
+    assert!(find_aux(&a, ViewHit::Cancel(last)).is_none());
+    // La rueda desplaza: el «Cancelar» del 3 sube 200 en la ventana y el clic le llega a ese.
+    let third = ids[2];
+    let (x, y) = find_aux(&a, ViewHit::Cancel(third)).expect("se ve el 3");
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Wheel { dy: 200.0 });
+    assert_eq!(a.transfers_scroll(), 200.0);
+    click_aux_at(&mut a, x, y - 200.0);
+    wait(&mut a, |a| !a.jobs().iter().any(|j| j.id == third));
+    // Más rueda que contenido: queda al fondo y se ve el último, que se cancela con su botón.
+    for _ in 0..10 {
+        a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Wheel { dy: 200.0 });
+    }
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert_eq!(a.transfers_scroll(), content - visible);
+    click_aux(&mut a, ViewHit::Cancel(last));
+    wait(&mut a, |a| !a.jobs().iter().any(|j| j.id == last));
+    // Los demás siguen.
+    for id in [ids[0], ids[1], ids[3]] {
+        assert!(a.jobs().iter().any(|j| j.id == id && j.state == JobState::Running), "{id}");
+    }
+    // Hacia arriba vuelve al principio y no pasa de ahí.
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Wheel { dy: -5000.0 });
+    assert_eq!(a.transfers_scroll(), 0.0);
+    cancel_all(&mut a, &ids);
+}
+
+#[test]
+fn scroll_is_clamped_when_content_shrinks() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-enc", 5);
+    a.show_transfers();
+    a.aux_mouse(AuxWindow::Transfers, 10.0, 10.0, AuxMouse::Wheel { dy: 10_000.0 });
+    assert!(a.transfers_scroll() > 0.0);
+    // Terminan tres: el contenido ya entra y no queda nada desplazado.
+    for id in &ids[..3] {
+        a.cancel_job(*id);
+    }
+    wait(&mut a, |a| a.jobs().len() == 2);
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert!(content <= visible, "{content} {visible}");
+    assert_eq!(a.transfers_scroll(), 0.0);
+    // Plegar uno también achica el contenido y vuelve a limitar.
+    let more = running_copies(&mut a, &f, "app-enc2", 2);
+    a.aux_mouse(AuxWindow::Transfers, 10.0, 10.0, AuxMouse::Wheel { dy: 10_000.0 });
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert_eq!(a.transfers_scroll(), content - visible);
+    click_aux(&mut a, ViewHit::Expand(more[1]));
+    let (_, visible) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert!(a.transfers_scroll() <= (content - visible).max(0.0), "{} {content} {visible}", a.transfers_scroll());
+    cancel_all(&mut a, &ids);
+    cancel_all(&mut a, &more);
+}
+
+#[test]
+fn conflict_scrolls_into_view() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-cv", 4);
+    let root = Path::new("/app-cv-x");
+    f.add_file(&root.join("s").join("x.txt"), b"nuevo".to_vec());
+    f.add_file(&root.join("d").join("x.txt"), b"viejo".to_vec());
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![root.join("s").join("x.txt")], dest: root.join("d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == id && j.state == JobState::Conflict));
+    // El conflicto está al fondo y la ventana se desplazó hasta él: se ven sus botones.
+    let expanded = |k| a.transfers_expanded(k);
+    let (top, bottom) = view::block_span(a.jobs(), &expanded, id).expect("el bloque del conflicto");
+    let (_, visible) = a.transfers_size();
+    let scroll = a.transfers_scroll();
+    assert!(top >= scroll && bottom <= scroll + visible, "{top}..{bottom} con {scroll}+{visible}");
+    assert!(find_aux(&a, ViewHit::Choose(id, Choice::Skip)).is_some());
+    a.answer_job(id, Answer { choice: Choice::Skip, all: false });
+    cancel_all(&mut a, &ids);
+}
+
+/// En una pantalla baja la ventana no pasa del alto que le entra al host, y desplazando al fondo
+/// se llega a los controles del último trabajo.
+#[test]
+fn copy_window_fits_short_screens() {
+    let f = fake();
+    let (mut a, host) = app_window();
+    host.set_aux_max_height(Some(400.0));
+    let ids = running_copies(&mut a, &f, "app-baja", 2);
+    a.show_transfers();
+    assert_eq!(host.aux_shows().last().unwrap().2, (view::WIDTH, 400.0));
+    assert_eq!(a.transfers_size(), (view::WIDTH, 400.0));
+    let last = *ids.last().unwrap();
+    assert!(find_aux(&a, ViewHit::Expand(last)).is_none());
+    a.aux_mouse(AuxWindow::Transfers, 10.0, 10.0, AuxMouse::Wheel { dy: 10_000.0 });
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    assert_eq!(a.transfers_scroll(), content - 400.0);
+    // «Menos detalles» del último, abajo de todo, se puede tocar adentro de los 400.
+    let (_, y) = find_aux(&a, ViewHit::Expand(last)).expect("se ve el final del último");
+    assert!(y < 400.0);
+    assert!(host.aux_sizes().iter().all(|(_, (_, h))| *h <= 400.0), "{:?}", host.aux_sizes());
+    cancel_all(&mut a, &ids);
+}
+
+/// El pulgar de la barra: se arrastra, salta de a una página (con 40 de solapamiento) y el
+/// arrastre termina si el host pierde el mouse (`Cancel`) o llega otro `Down` sin `Up`.
+#[test]
+fn thumb_drag_pages_and_ends() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-pulgar", 5);
+    a.show_transfers();
+    let (w, h) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    let r = geom::rect(0.0, 0.0, w, h);
+    let (_, thumb) = view::scrollbar(r, content, 0.0).expect("barra");
+    let x = (thumb.left + thumb.right) / 2.0;
+    // Clic en el riel debajo del pulgar: una página menos 40.
+    a.aux_mouse(AuxWindow::Transfers, x, h - 2.0, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, x, h - 2.0, AuxMouse::Up);
+    assert_eq!(a.transfers_scroll(), h - 40.0);
+    a.aux_key(AuxWindow::Transfers, crate::keys::keys::VK_HOME);
+    assert_eq!(a.transfers_scroll(), 0.0);
+    // Arrastrar el pulgar mueve el contenido.
+    let y = (thumb.top + thumb.bottom) / 2.0;
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, x, y + 100.0, AuxMouse::Move);
+    let dragged = a.transfers_scroll();
+    assert!(dragged > 0.0);
+    // El host perdió el mouse: moverlo ya no arrastra.
+    a.aux_mouse(AuxWindow::Transfers, -1.0, -1.0, AuxMouse::Cancel);
+    a.aux_mouse(AuxWindow::Transfers, x, y + 200.0, AuxMouse::Move);
+    assert_eq!(a.transfers_scroll(), dragged);
+    // Un `Down` con el pulgar tomado (se perdió el `Up`) suelta el pulgar.
+    let (_, thumb) = view::scrollbar(r, content, dragged).unwrap();
+    let y = (thumb.top + thumb.bottom) / 2.0;
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, 100.0, 5.0, AuxMouse::Down);
+    a.aux_mouse(AuxWindow::Transfers, x, y + 150.0, AuxMouse::Move);
+    assert_eq!(a.transfers_scroll(), dragged);
+    a.aux_mouse(AuxWindow::Transfers, 100.0, 5.0, AuxMouse::Up);
+    cancel_all(&mut a, &ids);
+}
+
+/// Al desplazarse solo hasta un conflicto, el clic que se soltó enseguida no le llega a lo que
+/// quedó debajo (era para lo que estaba antes), y se borra lo que estaba bajo el mouse.
+#[test]
+fn click_right_after_reveal_is_ignored() {
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-guard", 4);
+    a.show_transfers();
+    let (x, y) = find_aux(&a, ViewHit::Cancel(ids[0])).unwrap();
+    a.aux_mouse(AuxWindow::Transfers, x, y, AuxMouse::Move);
+    assert_eq!(a.transfers_hover(), Some(ViewHit::Cancel(ids[0])));
+    let root = Path::new("/app-guard-x");
+    f.add_file(&root.join("s").join("x.txt"), b"nuevo".to_vec());
+    f.add_file(&root.join("d").join("x.txt"), b"viejo".to_vec());
+    let id = a.start_transfer(JobSpec::Copy { sources: vec![root.join("s").join("x.txt")], dest: root.join("d") });
+    wait(&mut a, |a| a.jobs().iter().any(|j| j.id == id && j.state == JobState::Conflict));
+    assert!(a.transfers_scroll() > 0.0);
+    assert_eq!(a.transfers_hover(), None);
+    // El «Cancelar» del 4 quedó a la vista; un clic enseguida no hace nada.
+    let target = ids[3];
+    click_aux(&mut a, ViewHit::Cancel(target));
+    for _ in 0..30 {
+        a.on_transfer_updates();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(a.jobs().iter().any(|j| j.id == target && j.state == JobState::Running));
+    // Pasado el resguardo, sí.
+    crate::clock::set(Some(Instant::now() + Duration::from_secs(1)));
+    click_aux(&mut a, ViewHit::Cancel(target));
+    crate::clock::set(None);
+    wait(&mut a, |a| !a.jobs().iter().any(|j| j.id == target));
+    a.answer_job(id, Answer { choice: Choice::Skip, all: false });
+    cancel_all(&mut a, &ids);
+}
+
+#[test]
+fn keys_scroll_the_copy_window() {
+    use crate::keys::keys::{VK_DOWN, VK_END, VK_HOME, VK_NEXT, VK_PRIOR, VK_UP};
+    let f = fake();
+    let (mut a, _host) = app_window();
+    let ids = running_copies(&mut a, &f, "app-teclas", 5);
+    a.show_transfers();
+    let (_, h) = a.transfers_size();
+    let content = view::content_height(a.jobs(), &|id| a.transfers_expanded(id));
+    let max = content - h;
+    let mut key = |k| {
+        assert!(a.aux_key(AuxWindow::Transfers, k));
+        a.transfers_scroll()
+    };
+    assert_eq!(key(VK_NEXT), h - 40.0);
+    assert_eq!(key(VK_DOWN), h);
+    assert_eq!(key(VK_UP), h - 40.0);
+    assert_eq!(key(VK_END), max);
+    assert_eq!(key(VK_DOWN), max);
+    assert_eq!(key(VK_PRIOR), max - (h - 40.0));
+    assert_eq!(key(VK_HOME), 0.0);
+    assert_eq!(key(VK_UP), 0.0);
+    cancel_all(&mut a, &ids);
 }

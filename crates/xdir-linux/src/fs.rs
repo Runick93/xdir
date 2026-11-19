@@ -58,6 +58,10 @@ impl FileSystem for LinuxFileSystem {
         matches!((loc, files), (Location::Path(p), Some(f)) if *p == f)
     }
 
+    fn trash_place(&self) -> Option<Location> {
+        crate::trash::data_home().map(|d| Location::Path(crate::trash::trash_dir(&d).join("files")))
+    }
+
     fn is_mount_point(&self, path: &Path) -> bool {
         if SYSTEM_DIRS.iter().any(|d| path == Path::new(d)) {
             return true;
@@ -240,7 +244,7 @@ mod rename_tests {
         for (n, body) in [("a.txt", "A"), ("b.txt", "B"), ("foto.jpg", "F")] {
             std::fs::write(dir.join(n), body).unwrap();
         }
-        assert!(Real.rename_noreplace(&dir.join("a.txt"), &dir.join("b.txt")).unwrap_err().contains("Ya existe"));
+        assert!(Real.rename_noreplace(&dir.join("a.txt"), &dir.join("b.txt")).unwrap_err().contains("ya hay otro elemento llamado «b.txt»"));
         let pairs: Vec<(PathBuf, String)> =
             vec![(dir.join("a.txt"), "b.txt".into()), (dir.join("b.txt"), "a.txt".into()), (dir.join("foto.jpg"), "FOTO.jpg".into())];
         let Undo::Renames(back) = rename_all(&Real, &pairs).unwrap() else { panic!("se esperaba Renames") };

@@ -1,7 +1,7 @@
 //! macOS: operaciones de archivos con `copyfile` (clona en APFS y conserva metadatos), `rename`
 //! y la Papelera de `NSFileManager`. Los nombres repetidos se resuelven como el Finder
 //! ("informe copia.txt", "informe copia 2.txt"). Cada operación anota cómo deshacerla. Copiar,
-//! mover y devolver de la Papelera son del motor de copia (`prims`).
+//! mover, eliminar y devolver de la Papelera son del motor de copia (`prims`).
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use objc2::rc::Retained;
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle};
-use objc2_foundation::{MainThreadMarker, NSFileManager, NSString, NSURL};
+use objc2_foundation::{NSFileManager, NSString, NSURL};
 
 use super::{Op, OpResult, Undo, WM_APP_OP_DONE};
 use xdir_core::names;
@@ -18,35 +17,23 @@ use crate::platform::Handle;
 
 type Result<T> = std::result::Result<T, String>;
 
+/// El aviso de algo que falló con `p`: qué (`what`, con el nombre), por qué y qué hacer.
+fn fail(what: &str, e: std::io::Error, p: &Path) -> String {
+    super::prims::err(e, p).notice(what)
+}
+
+/// «nombre» de una ruta, para los avisos.
+fn quoted(p: &Path) -> String {
+    format!("«{}»", xdir_core::sys::shown_name(p))
+}
+
 pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
-    // Borrar sin pasar por la Papelera no se puede deshacer: se confirma antes (en el hilo de la
-    // ventana), como el Finder.
-    if let Op::Delete { paths, recycle: false } = &op {
-        if !confirm_delete(paths) {
-            return;
-        }
-    }
     std::thread::spawn(move || {
         let result = run(op).unwrap_or_else(|e| OpResult { error: Some(e), ..Default::default() });
         if tx.send(result).is_ok() {
             owner.post(WM_APP_OP_DONE, 0, 0);
         }
     });
-}
-
-fn confirm_delete(paths: &[PathBuf]) -> bool {
-    let Some(mtm) = MainThreadMarker::new() else { return false };
-    let alert = NSAlert::new(mtm);
-    let what = match paths {
-        [one] => format!("«{}»", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-        _ => format!("{} elementos", paths.len()),
-    };
-    alert.setMessageText(&NSString::from_str(&format!("¿Eliminar {what} definitivamente?")));
-    alert.setInformativeText(&NSString::from_str("No pasa por la Papelera y no se puede deshacer."));
-    alert.setAlertStyle(NSAlertStyle::Warning);
-    alert.addButtonWithTitle(&NSString::from_str("Eliminar"));
-    alert.addButtonWithTitle(&NSString::from_str("Cancelar"));
-    alert.runModal() == NSAlertFirstButtonReturn
 }
 
 fn ok(undo: Option<Undo>, focus: Option<PathBuf>, rename_after: bool, errors: Vec<String>) -> Result<OpResult> {
@@ -73,7 +60,7 @@ fn same_item(p: &Path, id: (u64, u64)) -> std::result::Result<Option<bool>, Stri
     match std::fs::symlink_metadata(p) {
         Ok(m) => Ok(Some((m.dev(), m.ino()) == id)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", p.display())),
+        Err(e) => Err(fail(&format!("revisar {}", quoted(p)), e, p)),
     }
 }
 
@@ -105,22 +92,23 @@ fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
                 } else {
                     let r = if p.is_dir() && !p.is_symlink() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
                     if let Err(e) = r {
-                        errors.push(format!("{}: {e}", p.display()));
+                        errors.push(fail(&format!("eliminar {}", quoted(p)), e, p));
                     }
                 }
             }
             ok((!recycled.is_empty()).then(|| Undo::Recycled(recycled)), None, false, errors)
         }
         Op::Rename { path, new_name } => {
+            let what = xdir_core::ops::doing(&Op::Rename { path: path.clone(), new_name: new_name.clone() }, &path);
             if new_name.contains('/') {
-                return Err("el nombre no puede tener «/»".into());
+                return Err(format!("No se pudo {what}: el nombre no puede tener «/»."));
             }
             let target = path.with_file_name(&new_name);
             // Solo cambia mayúsculas: el disco dice que "ya existe" (es el mismo).
             if taken(&target) && !same_file(&path, &target) {
-                return Err(format!("ya existe «{new_name}»"));
+                return Err(format!("No se pudo {what}: ya hay otro elemento con ese nombre en la carpeta."));
             }
-            rename_excl(&path, &target).map_err(|e| e.to_string())?;
+            rename_excl(&path, &target).map_err(|e| fail(&what, e, &path))?;
             let old_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             ok(Some(Undo::Rename { path: target.clone(), old_name }), Some(target), false, Vec::new())
         }
@@ -131,11 +119,11 @@ fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
                 target = parent.join(format!("carpeta sin título {n}"));
                 n += 1;
             }
-            std::fs::create_dir(&target).map_err(|e| e.to_string())?;
+            std::fs::create_dir(&target).map_err(|e| fail(&format!("crear la carpeta nueva en {}", quoted(&parent)), e, &parent))?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
         Op::NewFile { parent } => {
-            let target = create_new_file(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            let target = create_new_file(&parent).map_err(|e| fail(&format!("crear el archivo nuevo en {}", quoted(&parent)), e, &parent))?;
             ok(Some(Undo::Created(vec![target.clone()])), Some(target), true, Vec::new())
         }
         Op::Shortcuts { targets } => {
@@ -146,7 +134,7 @@ fn run_with(op: Op, hooks: &Hooks) -> Result<OpResult> {
                 let alias = names::free_name(parent, &|n| names::shortcut_name(&name, names::LinkStyle::Alias, n), &taken);
                 match crate::shell::macos::create_alias(target, &alias) {
                     Ok(()) => created.push(alias),
-                    Err(e) => errors.push(e),
+                    Err(e) => errors.push(format!("No se pudo crear el alias de «{name}»: {e}")),
                 }
             }
             // Con uno solo, queda para renombrar.
@@ -169,7 +157,7 @@ fn undo_op(undo: Undo, hooks: &Hooks) -> Result<OpResult> {
         Undo::Rename { path, old_name } => {
             let target = path.with_file_name(&old_name);
             // Lo que apareció después con el nombre de antes no se pisa.
-            rename_excl(&path, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+            rename_excl(&path, &target).map_err(|e| fail(&format!("devolverle el nombre {}", quoted(&target)), e, &path))?;
             return ok(None, Some(target), false, errors);
         }
         Undo::Created(paths) => {
@@ -194,7 +182,7 @@ fn undo_op(undo: Undo, hooks: &Hooks) -> Result<OpResult> {
                             errors.push(e);
                         }
                     }
-                    Ok(Some(false)) => errors.push(format!("{}: ahí ya no está lo que se había creado, no se manda a la Papelera", p.display())),
+                    Ok(Some(false)) => errors.push(format!("No se mandó a la Papelera {}: ahí ya no está lo que se había creado.", quoted(&p))),
                     Err(e) => errors.push(e),
                 }
             }
@@ -260,7 +248,7 @@ fn create_new_file(parent: &Path) -> std::io::Result<PathBuf> {
 }
 
 fn c_path(p: &Path) -> Result<CString> {
-    CString::new(p.as_os_str().as_bytes()).map_err(|_| format!("ruta inválida: {}", p.display()))
+    CString::new(p.as_os_str().as_bytes()).map_err(|_| format!("No se pudo usar {}: la ruta tiene un carácter nulo.", quoted(p)))
 }
 
 /// Copia un archivo o una carpeta entera, clonando en APFS y conservando los metadatos.
@@ -268,7 +256,7 @@ fn c_path(p: &Path) -> Result<CString> {
 /// copiado (que es solo de esta copia) se quita.
 fn copy(src: &Path, dst: &Path) -> Result<()> {
     if taken(dst) {
-        return Err(format!("{}: ya existe, no se pisa", dst.display()));
+        return Err(format!("No se pudo copiar {}: ya hay otro elemento con ese nombre ahí, no se pisa.", quoted(dst)));
     }
     copy_unchecked(src, dst)
 }
@@ -277,17 +265,18 @@ fn copy(src: &Path, dst: &Path) -> Result<()> {
 /// `create_dir`, un archivo o enlace con `COPYFILE_EXCL`), así lo que haya aparecido en el medio
 /// nunca se toca ni se llena. Si falla después, se quita lo que creó.
 fn copy_unchecked(src: &Path, dst: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    let what = format!("copiar {}", quoted(src));
+    let meta = std::fs::symlink_metadata(src).map_err(|e| fail(&what, e, src))?;
     if !meta.is_dir() {
         return copy_entry(src, dst, false);
     }
     // `copyfile` con una carpeta que ya existe copia adentro de ella: la carpeta la crea esta copia.
-    std::fs::create_dir(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    std::fs::create_dir(dst).map_err(|e| fail(&what, e, dst))?;
     let result = (|| {
         // Cada elemento de adentro igual: las carpetas, creadas por esta copia; los archivos y
         // enlaces, uno por uno (nunca con COPYFILE_RECURSIVE, que copia adentro de lo que haya).
-        for child in std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))? {
-            let child = child.map_err(|e| format!("{}: {e}", src.display()))?;
+        for child in std::fs::read_dir(src).map_err(|e| fail(&what, e, src))? {
+            let child = child.map_err(|e| fail(&what, e, src))?;
             copy_unchecked(&child.path(), &dst.join(child.file_name()))?;
         }
         // Los metadatos de la carpeta (permisos, atributos extendidos, fechas) al final.
@@ -319,7 +308,7 @@ fn copy_entry(src: &Path, dst: &Path, meta_only: bool) -> Result<()> {
         if !meta_only && !existed && e.raw_os_error() != Some(libc::EEXIST) && taken(dst) {
             let _ = remove_tree(dst);
         }
-        return Err(format!("{}: {e}", src.display()));
+        return Err(fail(&format!("copiar {}", quoted(src)), e, src));
     }
     Ok(())
 }
@@ -362,13 +351,13 @@ fn move_item(src: &Path, dst: &Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             if taken(dst) {
-                return Err(format!("{}: ya existe, no se pisa", dst.display()));
+                return Err(format!("No se pudo mover {}: ya hay otro elemento con ese nombre ahí, no se pisa.", quoted(dst)));
             }
             copy(src, dst)?;
             let r = if src.is_dir() && !src.is_symlink() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) };
-            r.map_err(|e| format!("{}: {e}", src.display()))
+            r.map_err(|e| fail(&format!("quitar {} de donde estaba (ya se copió)", quoted(src)), e, src))
         }
-        Err(e) => Err(format!("{}: {e}", src.display())),
+        Err(e) => Err(fail(&format!("mover {}", quoted(src)), e, src)),
     }
 }
 
@@ -377,7 +366,7 @@ pub(super) fn trash(p: &Path) -> Result<PathBuf> {
     let fm = NSFileManager::defaultManager();
     let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
     let mut resulting: Option<Retained<NSURL>> = None;
-    fm.trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting)).map_err(|e| format!("{}: {}", p.display(), e.localizedDescription()))?;
+    fm.trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting)).map_err(|e| format!("No se pudo mandar a la Papelera {}: {}", quoted(p), e.localizedDescription()))?;
     let in_trash = resulting.and_then(|u| u.path()).map(|s| PathBuf::from(s.to_string())).unwrap_or_default();
     // Para «Devolver», por si el `.DS_Store` de la Papelera no lo anota.
     if !in_trash.as_os_str().is_empty() {
@@ -640,7 +629,8 @@ mod tests {
         let r = run(Op::NewFile { parent: dir.clone() });
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
         let e = r.expect_err("sin permiso de escritura no se puede crear");
-        assert!(!e.is_empty());
+        let name = dir.file_name().unwrap().to_string_lossy();
+        assert_eq!(e, format!("No se pudo crear el archivo nuevo en «{name}»: no tenés permiso. Pedí acceso a quien administra esa carpeta."));
         assert!(!dir.join("Nuevo documento de texto.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

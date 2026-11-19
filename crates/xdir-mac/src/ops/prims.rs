@@ -33,8 +33,64 @@ pub(crate) fn err_kind(errno: i32) -> ErrKind {
         libc::ECANCELED => ErrKind::Cancelled,
         libc::EXDEV => ErrKind::CrossDevice,
         libc::ENAMETOOLONG => ErrKind::NameTooLong,
-        n => ErrKind::Other(io::Error::from_raw_os_error(n).to_string()),
+        libc::EROFS => ErrKind::ReadOnly,
+        // La red o el disco no responden (servidor caído, disco desenchufado, NFS vencido).
+        libc::ETIMEDOUT | libc::EHOSTDOWN | libc::EHOSTUNREACH | libc::ENETDOWN | libc::ENETUNREACH | libc::ENXIO | libc::ESTALE | libc::ENOTCONN => ErrKind::Offline,
+        // Un nombre que el disco no sabe guardar (SMB, exFAT).
+        libc::EILSEQ => ErrKind::InvalidName,
+        n => xdir_core::sys::io_unexpected(&io::Error::from_raw_os_error(n)),
     }
+}
+
+/// Las carpetas que cuida la privacidad de macOS (TCC) dentro de la carpeta del usuario: sin el
+/// permiso de Configuración del Sistema, tocarlas da `EPERM`. Los discos de red y extraíbles
+/// también pueden estar cuidados, pero ahí `EPERM` es casi siempre un permiso del servidor o del
+/// disco: no se adivina.
+const PRIVATE_FOLDERS: [&str; 4] = ["Desktop", "Documents", "Downloads", "Library/Mobile Documents"];
+
+/// `Privacy` (sin afirmarlo: al escribir, `EPERM` también puede ser otra cosa) si `errno` es
+/// `EPERM` en una carpeta cuidada por la privacidad de macOS (`home`, la carpeta del usuario).
+/// Solo mira la ruta: nada de E/S.
+pub(crate) fn privacy_kind(errno: i32, p: &Path, home: Option<&Path>) -> Option<ErrKind> {
+    let home = home?;
+    (errno == libc::EPERM && PRIVATE_FOLDERS.iter().any(|f| p.starts_with(home.join(f)))).then_some(ErrKind::Privacy { sure: false })
+}
+
+/// El error de leer una carpeta: ahí `EPERM` en una carpeta cuidada es la privacidad de macOS,
+/// sin duda (al escribir, puede ser otra cosa).
+pub(crate) fn listing(e: CopyError) -> CopyError {
+    match e.kind {
+        ErrKind::Privacy { .. } => CopyError::new(ErrKind::Privacy { sure: true }, &e.path),
+        _ => e,
+    }
+}
+
+/// Por qué no se pudo leer la carpeta `p` (para la barra de estado: «No se pudo abrir «X»: …»).
+/// La privacidad dice qué hacer; lo demás, el motivo corto.
+pub(crate) fn load_message(e: io::Error, p: &Path) -> String {
+    let e = listing(err(e, p));
+    match e.kind {
+        // Sigue a «No se pudo abrir «X»: »: sin otro «:».
+        ErrKind::Privacy { .. } => "Falta permiso de Privacidad de macOS. Dalo en Configuración del Sistema ▸ Privacidad y seguridad.".into(),
+        _ => e.message(),
+    }
+}
+
+/// ¿Está bloqueado `p` (o, si no está, la carpeta donde se crea)? `uchg`/`schg` (Obtener
+/// información ▸ Bloqueado) o solo para agregar: `EPERM` es eso. Un `lstat`, solo al fallar.
+fn locked(p: &Path) -> bool {
+    let bits = libc::UF_IMMUTABLE | libc::SF_IMMUTABLE | libc::UF_APPEND | libc::SF_APPEND;
+    let flags = |q: &Path| std::fs::symlink_metadata(q).ok().map(|m| m.st_flags());
+    match flags(p) {
+        Some(f) => f & bits != 0,
+        None => p.parent().and_then(flags).is_some_and(|f| f & bits != 0),
+    }
+}
+
+/// La carpeta del usuario (leída una vez).
+fn home() -> Option<&'static Path> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| std::env::var_os("HOME").map(PathBuf::from)).as_deref()
 }
 
 /// El sistema de archivos no sabe asegurar una carpeta (no es un error de la copia).
@@ -42,9 +98,12 @@ pub(crate) fn dir_sync_unsupported(e: &io::Error) -> bool {
     matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP | libc::EBADF))
 }
 
-fn err(e: io::Error, p: &Path) -> CopyError {
+/// Un error de E/S con la ruta que lo causó (lo que ve el usuario sale de `CopyError::message`).
+pub(crate) fn err(e: io::Error, p: &Path) -> CopyError {
     let kind = match e.raw_os_error() {
-        Some(n) => err_kind(n),
+        Some(libc::ENAMETOOLONG) => xdir_core::sys::too_long(p),
+        Some(libc::EPERM) if locked(p) => ErrKind::Locked,
+        Some(n) => privacy_kind(n, p, home()).unwrap_or_else(|| err_kind(n)),
         None => match e.kind() {
             io::ErrorKind::NotFound => ErrKind::NotFound,
             io::ErrorKind::AlreadyExists => ErrKind::Exists,
@@ -254,9 +313,14 @@ impl CopyPrims for MacCopyPrims {
     /// original al mover.
     fn sync(&self, p: &Path) -> Result<(), CopyError> {
         let f = std::fs::File::open(p).map_err(|e| err(e, p))?;
-        if unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&f), libc::F_FULLFSYNC) } == -1 {
-            // Discos que no lo tienen (red, FAT): lo que haya.
-            f.sync_all().map_err(|e| err(e, p))?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&f);
+        if unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) } == -1 {
+            // Discos que no lo tienen (FAT) o que no lo aceptan con el archivo abierto solo para
+            // leer (SMB da EACCES, issue #76): `fsync` común. No `sync_all`, que en macOS vuelve a
+            // pedir `F_FULLFSYNC`.
+            if unsafe { libc::fsync(fd) } == -1 {
+                return Err(last(p));
+            }
         }
         Ok(())
     }
@@ -496,6 +560,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Issue #76: en una carpeta SMB, `F_FULLFSYNC` sobre un archivo abierto solo para leer da
+    /// EACCES (y `sync_all` de Rust usa lo mismo); mover a la red fallaba con «No tenés permiso».
+    /// Necesita una carpeta de red montada: `XDIR_SMB_DIR=/Volumes/Public/algo cargo test -p xdir-mac
+    /// -- --ignored sync_on_smb`.
+    #[test]
+    #[ignore]
+    fn sync_on_smb_file_and_dir() {
+        let Some(dir) = std::env::var_os("XDIR_SMB_DIR").map(PathBuf::from) else { return };
+        let f = dir.join(format!("xdir-sync-{}.txt", std::process::id()));
+        std::fs::write(&f, b"hola").unwrap();
+        let r = MacCopyPrims.sync(&f);
+        let _ = std::fs::remove_file(&f);
+        r.unwrap();
+        MacCopyPrims.sync_dir(&dir).unwrap();
+    }
+
     /// Ronda 3: cerrar una carpeta (permisos, fechas, atributos) nunca sigue un enlace: si en su
     /// lugar quedó un enlace a otra carpeta, la del otro lado no cambia.
     #[test]
@@ -530,7 +610,61 @@ mod tests {
         assert_eq!(err_kind(libc::EFBIG), ErrKind::TooBig);
         assert_eq!(err_kind(libc::EEXIST), ErrKind::Exists);
         assert_eq!(err_kind(libc::EXDEV), ErrKind::CrossDevice);
-        assert!(matches!(err_kind(libc::EIO), ErrKind::Other(_)));
+        assert_eq!(err_kind(libc::EROFS), ErrKind::ReadOnly);
+        for n in [libc::ETIMEDOUT, libc::EHOSTDOWN, libc::EHOSTUNREACH, libc::ENETDOWN, libc::ENETUNREACH, libc::ENXIO, libc::ESTALE, libc::ENOTCONN] {
+            assert_eq!(err_kind(n), ErrKind::Offline, "{n}");
+        }
+        assert_eq!(err_kind(libc::EILSEQ), ErrKind::InvalidName);
+        // Lo que no tiene explicación: frase propia, texto y código.
+        let ErrKind::Other(text) = err_kind(libc::EIO) else { panic!("EIO es Other") };
+        assert!(text.starts_with("Error inesperado del sistema (") && text.ends_with("; macOS: errno 5)"), "{text}");
+    }
+
+    /// Nombre o ruta demasiado largos, según la ruta.
+    #[test]
+    fn prims_name_or_path_too_long() {
+        let e = |p: &str| err(io::Error::from_raw_os_error(libc::ENAMETOOLONG), Path::new(p)).kind;
+        assert_eq!(e(&format!("/tmp/{}", "a".repeat(300))), ErrKind::NameTooLong);
+        assert_eq!(e(&"/carpeta".repeat(200)), ErrKind::PathTooLong);
+    }
+
+    /// `EPERM` en una carpeta que cuida la privacidad de macOS (Escritorio, Documentos,
+    /// Descargas, iCloud): falta el permiso de Configuración del Sistema. Afuera, o con `EACCES`
+    /// (los permisos de siempre), es «No tenés permiso».
+    #[test]
+    fn prims_privacy_only_in_protected_folders() {
+        let home = Path::new("/Users/ana");
+        let maybe = Some(ErrKind::Privacy { sure: false });
+        let k = |n, p: &str| privacy_kind(n, Path::new(p), Some(home));
+        assert_eq!(k(libc::EPERM, "/Users/ana/Documents/Github"), maybe);
+        assert_eq!(k(libc::EPERM, "/Users/ana/Desktop"), maybe);
+        assert_eq!(k(libc::EPERM, "/Users/ana/Downloads/a.zip"), maybe);
+        assert_eq!(k(libc::EPERM, "/Users/ana/Library/Mobile Documents/com~apple~CloudDocs/x"), maybe);
+        assert_eq!(k(libc::EPERM, "/Users/ana/Proyectos"), None);
+        assert_eq!(k(libc::EPERM, "/Users/ana/DocumentsViejos"), None);
+        assert_eq!(k(libc::EACCES, "/Users/ana/Documents/Github"), None);
+        assert_eq!(privacy_kind(libc::EPERM, Path::new("/Users/ana/Documents"), None), None);
+        // Al leer una carpeta (no al escribir), `EPERM` ahí es la privacidad: se dice firme.
+        let e = CopyError::new(ErrKind::Privacy { sure: false }, Path::new("/Users/ana/Documents"));
+        assert_eq!(listing(e).kind, ErrKind::Privacy { sure: true });
+        assert_eq!(listing(CopyError::new(ErrKind::Denied, Path::new("/x"))).kind, ErrKind::Denied);
+    }
+
+    /// Un archivo bloqueado en el Finder (`uchg`) da `EPERM` al borrarlo o renombrarlo: es
+    /// «Está bloqueado», no la privacidad ni «No tenés permiso».
+    #[test]
+    fn prims_locked_file() {
+        let dir = tmp("bloqueado");
+        let f = dir.join("a.txt");
+        std::fs::write(&f, b"x").unwrap();
+        let c = std::ffi::CString::new(f.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::chflags(c.as_ptr(), libc::UF_IMMUTABLE) }, 0);
+        let removed = MacCopyPrims.remove(&f);
+        let renamed = MacCopyPrims.rename_noreplace(&f, &dir.join("b.txt"));
+        unsafe { libc::chflags(c.as_ptr(), 0) };
+        assert_eq!(removed.unwrap_err().kind, ErrKind::Locked);
+        assert_eq!(renamed.unwrap_err().kind, ErrKind::Locked);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

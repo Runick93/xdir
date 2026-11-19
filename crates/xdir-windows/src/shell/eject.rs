@@ -243,7 +243,7 @@ fn eject_media(root: &Path) -> Result<(), EjectError> {
     let device = volume_device(root).ok_or_else(|| fail("no es una unidad"))?;
     // Una lectora se abre solo para leer (pedir escritura falla en un CD).
     let h = unsafe { CreateFileW(&device, GENERIC_READ.0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }
-        .map_err(|e| fail(&e.message()))?;
+        .map_err(|e| fail(&xdir_core::sys::lower_first(&crate::ops::win_message(&e))))?;
     let ioctl = |code: u32| unsafe { DeviceIoControl(h, code, None, 0, None, 0, None, None) };
     // Permitir sacar el disco (un programa pudo haberlo trabado).
     let allow = |h: HANDLE| {
@@ -274,7 +274,7 @@ fn eject_media(root: &Path) -> Result<(), EjectError> {
     } else {
         let _ = ioctl(FSCTL_DISMOUNT_VOLUME);
         let _ = allow(h);
-        ioctl(IOCTL_STORAGE_EJECT_MEDIA).map_err(|e| fail(&e.message()))
+        ioctl(IOCTL_STORAGE_EJECT_MEDIA).map_err(|e| fail(&xdir_core::sys::lower_first(&crate::ops::win_message(&e))))
     };
     unsafe {
         let _ = CloseHandle(h);
@@ -289,7 +289,7 @@ fn eject_with_shell(root: &Path) -> Result<(), EjectError> {
     let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
     let item = xdir_core::shell::Item::from(root.to_path_buf());
     let result = crate::shell::win32::invoke_verb(xdir_core::sys::Handle(0), &xdir_core::fs::Location::Computer, &[item], "eject")
-        .map_err(|e| fail(&e.message()));
+        .map_err(|e| fail(&xdir_core::sys::lower_first(&crate::ops::win_message(&e))));
     // Cada CoInitializeEx que anduvo lleva su CoUninitialize.
     if com {
         unsafe { CoUninitialize() };

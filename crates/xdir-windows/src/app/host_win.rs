@@ -749,12 +749,21 @@ impl WindowHost for Win32Host {
         crate::auxwin::resize(w, size);
     }
 
+    fn aux_max_height(&self, w: xdir_core::host::AuxWindow) -> Option<f32> {
+        let xdir_core::host::AuxWindow::Transfers = w;
+        crate::auxwin::max_client_height(self.hwnd.get().hwnd())
+    }
+
     fn aux_invalidate(&self, w: xdir_core::host::AuxWindow) {
         crate::auxwin::invalidate_aux(w);
     }
 
     fn aux_hide(&self, w: xdir_core::host::AuxWindow) {
         crate::auxwin::hide(w);
+    }
+
+    fn aux_progress(&self, w: xdir_core::host::AuxWindow, p: xdir_core::host::AuxProgress) {
+        crate::auxwin::set_progress(w, p);
     }
 }
 

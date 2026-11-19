@@ -93,10 +93,10 @@ fn password_never_persisted() {
 fn error_messages() {
     let h = || "nas".to_string();
     let cases = [
-        (NetError::NotFound { host: h() }, "No se encuentra el servidor \"nas\""),
-        (NetError::BadCredentials, "Usuario o contraseña incorrectos"),
-        (NetError::NoShare { host: h(), share: "fotos".into() }, "El recurso \"fotos\" no existe en \"nas\""),
-        (NetError::Timeout { host: h() }, "Se agotó el tiempo esperando a \"nas\""),
+        (NetError::NotFound { host: h() }, "No se encuentra el servidor «nas»: revisá el nombre y que esté encendido y en la misma red"),
+        (NetError::BadCredentials, "Usuario o contraseña incorrectos: revisalos y probá de nuevo"),
+        (NetError::NoShare { host: h(), share: "fotos".into() }, "El recurso «fotos» no existe en «nas»: revisá cómo se llama"),
+        (NetError::Timeout { host: h() }, "Se agotó el tiempo esperando a «nas»: revisá la conexión y reintentá"),
         (NetError::CredentialConflict { host: h() }, "Ya hay una conexión con \"nas\" con otro usuario"),
         (NetError::OpenFiles { by: Some("Word".into()) }, "lo está usando Word"),
         (NetError::OpenFiles { by: None }, "lo está usando otro programa"),

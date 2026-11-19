@@ -875,7 +875,10 @@ impl Tab {
     pub fn retry_with_credentials(&mut self) -> Option<PathBuf> {
         let Location::Path(path) = &self.location else { return None };
         let e = self.error.as_ref()?;
-        let auth = ["os error 1326", "os error 5)", "os error 86", "os error 1219"].iter().any(|c| e.contains(c));
+        // Por el código (ERROR_LOGON_FAILURE, ERROR_ACCESS_DENIED, ERROR_INVALID_PASSWORD,
+        // ERROR_SESSION_CREDENTIAL_CONFLICT): con el texto de Rust o el de los avisos de xdir.
+        let codes = ["os error 1326", "os error 5)", "os error 86", "os error 1219", "0x8007052E)", "0x80070005)", "0x80070056)", "0x800704C3)"];
+        let auth = codes.iter().any(|c| e.contains(c));
         if !auth || !fs::is_unc(path) || self.auth_nav == self.nav_id {
             return None;
         }
@@ -983,7 +986,11 @@ impl Tab {
             return text;
         }
         if let Some(e) = &self.error {
-            return format!("No se pudo abrir: {e}");
+            let e = sys::lower_first(e);
+            return match &self.location {
+                Location::Path(p) => format!("No se pudo abrir «{}»: {e}", sys::shown_name(p)),
+                _ => format!("No se pudo abrir: {e}"),
+            };
         }
         // Con selección: cuántos y cuánto pesan. Los archivos se suman acá; las carpetas, en otro
         // hilo (`sel`): «calculando…», el total (con «al menos» si alguna no se leyó entera) o,
@@ -1361,5 +1368,40 @@ mod tests {
         assert!(tab.status().ends_with(" (filtrado)"), "{}", tab.status());
         tab.list.set_filter(Column::Extension, Vec::new());
         assert!(!tab.status().contains("filtrado"));
+    }
+
+    /// Una carpeta que no se pudo leer: la barra de estado dice cuál y por qué, en una frase.
+    #[test]
+    fn status_says_which_folder_failed() {
+        crate::sys::testing::install_fakes();
+        let mut tab = Tab::new(3, Location::Path(PathBuf::from("/u/Documentos")), false);
+        tab.error = Some("No tenés permiso: pedí acceso a quien administra esa carpeta".into());
+        assert_eq!(tab.status(), "No se pudo abrir «Documentos»: no tenés permiso: pedí acceso a quien administra esa carpeta");
+        // Lo que ya empieza con un nombre propio no pasa a minúscula.
+        tab.error = Some("macOS no deja que xdir use «Documentos»".into());
+        assert_eq!(tab.status(), "No se pudo abrir «Documentos»: macOS no deja que xdir use «Documentos»");
+    }
+
+    /// Una carpeta de red que falla por credenciales se reconoce por el código, con el texto
+    /// viejo de Rust («os error 1326») o con el de los avisos nuevos («Windows: 0x8007052E»).
+    #[test]
+    fn credentials_failure_recognized_by_code() {
+        crate::sys::testing::install_fakes();
+        let unc = PathBuf::from(r"\\srv\fotos");
+        for text in [
+            "Acceso denegado (os error 1326)",
+            "El usuario o la contraseña no son correctos (Windows: 0x8007052E)",
+            "No tenés permiso: pedí acceso a quien administra esa carpeta (Windows: 0x80070005)",
+            "Ya hay una conexión a ese servidor con otro usuario: desconectala y reintentá (Windows: 0x800704C3)",
+        ] {
+            let mut tab = Tab::new(3, Location::Path(unc.clone()), false);
+            tab.nav_id = 1;
+            tab.error = Some(text.into());
+            assert_eq!(tab.retry_with_credentials(), Some(unc.clone()), "{text}");
+        }
+        let mut tab = Tab::new(3, Location::Path(unc.clone()), false);
+        tab.nav_id = 1;
+        tab.error = Some("El disco o la red no responde: revisá la conexión y reintentá (Windows: 0x80070035)".into());
+        assert_eq!(tab.retry_with_credentials(), None);
     }
 }

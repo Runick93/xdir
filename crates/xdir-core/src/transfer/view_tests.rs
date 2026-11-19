@@ -55,13 +55,26 @@ fn theme() -> Theme {
     Theme::from_system(DEFAULT_ACCENT, Some(true))
 }
 
+/// Expandido solo `e` (o ninguno).
+fn only(e: Option<u64>) -> impl Fn(u64) -> bool {
+    move |id| e == Some(id)
+}
+
 fn area(jobs: &[JobView], expanded: Option<u64>) -> Rect {
-    rect(0.0, 0.0, view::WIDTH, view::content_height(jobs, expanded))
+    rect(0.0, 0.0, view::WIDTH, view::content_height(jobs, &only(expanded)))
+}
+
+fn look(expanded: &dyn Fn(u64) -> bool, scroll: f32) -> view::Look<'_> {
+    view::Look { expanded, scroll, hover: None, dragging: false }
 }
 
 fn texts(jobs: &[JobView], expanded: Option<u64>) -> Vec<String> {
+    texts_in(area(jobs, expanded), jobs, &only(expanded), 0.0)
+}
+
+fn texts_in(r: Rect, jobs: &[JobView], expanded: &dyn Fn(u64) -> bool, scroll: f32) -> Vec<String> {
     let p = RecordingPainter::new(theme());
-    view::draw(&p, area(jobs, expanded), jobs, expanded, None, &FakeEnv);
+    view::draw(&p, r, jobs, &look(expanded, scroll), &FakeEnv);
     p.texts().into_iter().map(|(_, s, _)| s).collect()
 }
 
@@ -91,12 +104,16 @@ fn conflict(id: u64, dir: bool) -> JobView {
 
 /// Centro del control `h` (lo busca recorriendo el área).
 fn center_of(jobs: &[JobView], expanded: Option<u64>, h: ViewHit) -> Option<(f32, f32)> {
-    let r = area(jobs, expanded);
-    let mut y = 0.0;
+    center_in(area(jobs, expanded), jobs, &only(expanded), 0.0, h)
+}
+
+/// Lo mismo en un área visible `r` con el contenido desplazado `scroll`.
+fn center_in(r: Rect, jobs: &[JobView], expanded: &dyn Fn(u64) -> bool, scroll: f32, h: ViewHit) -> Option<(f32, f32)> {
+    let mut y = r.top;
     while y < r.bottom {
-        let mut x = 0.0;
+        let mut x = r.left;
         while x < r.right {
-            if view::hit(r, jobs, expanded, x, y) == Some(h) {
+            if view::hit(r, jobs, expanded, scroll, x, y) == Some(h) {
                 return Some((x + 1.0, y + 1.0));
             }
             x += 2.0;
@@ -130,8 +147,8 @@ fn expanded_shows_details() {
     for s in ["58 % completado", "Pausa", "Cancelar", "Nombre:", "IMG_2041.jpg", "Tiempo restante:", "Unos 2 minutos", "Elementos restantes:", "539 (", "Menos detalles"] {
         assert!(has(&t, s), "falta {s:?} en {t:?}");
     }
-    assert_eq!(view::content_height(&jobs, Some(1)), 290.0);
-    assert_eq!(view::content_height(&jobs, None), 64.0);
+    assert_eq!(view::content_height(&jobs, &only(Some(1))), 290.0);
+    assert_eq!(view::content_height(&jobs, &only(None)), 64.0);
 }
 
 #[test]
@@ -139,7 +156,7 @@ fn queued_row_says_en_cola() {
     let jobs = [job(1, JobState::Waiting)];
     let t = texts(&jobs, None);
     assert!(t.iter().any(|s| s == "En cola"), "{t:?}");
-    assert_eq!(view::content_height(&jobs, None), 56.0);
+    assert_eq!(view::content_height(&jobs, &only(None)), 56.0);
     let mut prep = job(2, JobState::Preparing);
     prep.items = (0, 1240);
     let t = texts(&[prep], None);
@@ -161,7 +178,7 @@ fn graph_drawn_for_expanded() {
     assert_eq!(j.speed.graph().len(), 58);
     let jobs = [j];
     let p = RecordingPainter::new(theme());
-    view::draw(&p, area(&jobs, Some(1)), &jobs, Some(1), None, &FakeEnv);
+    view::draw(&p, area(&jobs, Some(1)), &jobs, &look(&only(Some(1)), 0.0), &FakeEnv);
     let t: Vec<String> = p.texts().into_iter().map(|(_, s, _)| s).collect();
     assert!(has(&t, "Velocidad: "), "{t:?}");
     assert!(has(&t, "Promedio: "), "{t:?}");
@@ -185,7 +202,7 @@ fn conflict_view_buttons() {
     assert!(has(&t, "2,09 MB") && has(&t, "1,89 MB"), "tamaños: {t:?}");
     assert!(center_of(&file, None, ViewHit::Choose(1, Choice::Merge)).is_none());
     assert!(center_of(&file, None, ViewHit::Choose(1, Choice::KeepBoth)).is_some());
-    assert_eq!(view::content_height(&file, None), 316.0);
+    assert_eq!(view::content_height(&file, &only(None)), 316.0);
     let folder = [conflict(1, true)];
     let t = texts(&folder, None);
     assert!(has(&t, "Combinar"), "{t:?}");
@@ -211,7 +228,7 @@ fn errors_view_and_retry() {
     for s in ["Terminó con 3 errores", "Instalador-Rust.exe", "Lo está usando otro programa", "No tenés permiso", "Ya no existe", "Reintentar", "Cerrar"] {
         assert!(has(&t, s), "falta {s:?} en {t:?}");
     }
-    assert_eq!(view::content_height(&jobs, None), 76.0 + 44.0 * 3.0 + 16.0 + 45.0);
+    assert_eq!(view::content_height(&jobs, &only(None)), 76.0 + 44.0 * 3.0 + 16.0 + 45.0);
     assert!(center_of(&jobs, None, ViewHit::Retry(1)).is_some());
     assert!(center_of(&jobs, None, ViewHit::Dismiss(1)).is_some());
     // Solo avisos (nada para reintentar): sin «Reintentar».
@@ -305,4 +322,146 @@ fn window_title_counts_waiting_conflicts() {
     assert_eq!(view::window_title(&[running(1)]), "Copiando…");
     assert_eq!(view::window_title(&[conflict(1, false), running(2)]), "Copiando: un conflicto");
     assert_eq!(view::window_title(&[conflict(1, false), conflict(2, true)]), "Copiando: 2 conflictos");
+}
+
+/// Un trabajo sin bytes (eliminar, devolver): 40 de 100 elementos en 3 s.
+fn items_only(id: u64) -> JobView {
+    let start = Instant::now() - Duration::from_secs(3);
+    let mut j = job(id, JobState::Running);
+    j.title = "Eliminando 100 elementos".into();
+    j.items = (40, 100);
+    j.current = "a.txt".into();
+    // Sin bytes, la velocidad se mide en elementos.
+    j.speed = Speed::new(start, 100);
+    j.speed.push(start + Duration::from_secs(3), 40);
+    j
+}
+
+#[test]
+fn items_only_job_has_no_byte_speed() {
+    let jobs = [items_only(1)];
+    for expanded in [None, Some(1)] {
+        let t = texts(&jobs, expanded);
+        assert!(!has(&t, "bytes/s") && !has(&t, "/s"), "{t:?}");
+        assert!(!has(&t, "(0 bytes)") && !has(&t, "Calculando…"), "{t:?}");
+        assert!(!has(&t, "Velocidad: ") && !has(&t, "Promedio: "), "{t:?}");
+    }
+    // El avance y el tiempo restante van por elementos.
+    let t = texts(&jobs, None);
+    assert!(has(&t, "40 %") && has(&t, "quedan 5 s"), "{t:?}");
+    let t = texts(&jobs, Some(1));
+    for s in ["40 % completado", "Tiempo restante:", "Unos 5 segundos", "Elementos restantes:", "Cancelar", "Menos detalles"] {
+        assert!(t.iter().any(|x| x == s || x.contains(s)), "falta {s:?} en {t:?}");
+    }
+    assert!(t.iter().any(|x| x == "60"), "{t:?}");
+    // Sin gráfico, el bloque es más bajo y «Menos detalles» sigue respondiendo.
+    assert!(view::content_height(&jobs, &only(Some(1))) < 290.0);
+    assert!(center_of(&jobs, Some(1), ViewHit::Expand(1)).is_some());
+}
+
+#[test]
+fn queued_row_has_start_now() {
+    let jobs = [running(1), job(2, JobState::Waiting)];
+    assert!(center_of(&jobs, None, ViewHit::StartNow(2)).is_some());
+    assert!(center_of(&jobs, None, ViewHit::StartNow(1)).is_none());
+    assert!(has(&texts(&jobs, None), "Empezar ahora"));
+    // Alto de un botón de texto (BTN_H), adentro de la fila en cola.
+    let r = rect(0.0, 0.0, view::WIDTH, view::content_height(&jobs, &only(None)));
+    let ys: Vec<f32> = (0..(r.bottom as i32 * 2))
+        .map(|i| i as f32 / 2.0)
+        .filter(|y| view::hit(r, &jobs, &only(None), 0.0, r.right - 60.0, *y) == Some(ViewHit::StartNow(2)))
+        .collect();
+    assert!(!ys.is_empty());
+    let h = ys.last().unwrap() - ys.first().unwrap();
+    assert!((h - 28.0).abs() <= 1.0, "alto {h}");
+}
+
+/// Un trabajo corriendo con 58 muestras de velocidad (el gráfico tiene algo que dibujar).
+fn with_graph(id: u64) -> JobView {
+    let mut j = running(id);
+    let start = Instant::now() - Duration::from_secs(60);
+    j.speed = Speed::new(start, 100 * MB as u64);
+    for k in 1..=58u64 {
+        j.speed.push(start + Duration::from_millis(k * 1000), k * MB as u64);
+    }
+    j
+}
+
+/// Como en Windows: cada copia en curso tiene sus detalles; expandir una no pliega la otra.
+#[test]
+fn two_running_jobs_both_expanded() {
+    let jobs = [with_graph(1), with_graph(2)];
+    let all = |_: u64| true;
+    let r = rect(0.0, 0.0, view::WIDTH, view::content_height(&jobs, &all));
+    assert_eq!(r.bottom, 2.0 * 290.0);
+    let p = RecordingPainter::new(theme());
+    view::draw(&p, r, &jobs, &look(&all, 0.0), &FakeEnv);
+    let t: Vec<String> = p.texts().into_iter().map(|(_, s, _)| s).collect();
+    let count = |needle: &str| t.iter().filter(|s| s.contains(needle)).count();
+    assert_eq!(count("Menos detalles"), 2, "{t:?}");
+    assert_eq!(count("Velocidad: "), 2, "{t:?}");
+    assert_eq!(count("% completado"), 2, "{t:?}");
+    // Un área de gráfico por trabajo.
+    assert_eq!(p.paths().into_iter().filter(|(_, closed, fill)| *closed && fill.is_some()).count(), 2);
+    for id in [1, 2] {
+        assert!(center_in(r, &jobs, &all, 0.0, ViewHit::Expand(id)).is_some(), "falta «Menos detalles» de {id}");
+        assert!(center_in(r, &jobs, &all, 0.0, ViewHit::Cancel(id)).is_some());
+    }
+    // Plegado solo el 1: el 2 sigue con sus detalles.
+    let not_one = |id: u64| id != 1;
+    assert_eq!(view::content_height(&jobs, &not_one), 64.0 + 290.0);
+    let t = texts_in(rect(0.0, 0.0, view::WIDTH, 354.0), &jobs, &not_one, 0.0);
+    assert_eq!(t.iter().filter(|s| s.contains("Menos detalles")).count(), 1, "{t:?}");
+}
+
+#[test]
+fn scroll_thumb_size_and_position() {
+    // Todo entra: sin barra.
+    assert_eq!(view::thumb(500.0, 640.0, 0.0), None);
+    assert_eq!(view::thumb(640.0, 640.0, 0.0), None);
+    // El doble de contenido: el pulgar ocupa la mitad del riel y baja con el desplazamiento.
+    assert_eq!(view::thumb(1280.0, 640.0, 0.0), Some((0.0, 320.0)));
+    assert_eq!(view::thumb(1280.0, 640.0, 320.0), Some((160.0, 320.0)));
+    assert_eq!(view::thumb(1280.0, 640.0, 640.0), Some((320.0, 320.0)));
+    // Pasado el límite, el pulgar queda al fondo.
+    assert_eq!(view::thumb(1280.0, 640.0, 9000.0), Some((320.0, 320.0)));
+    // Mucho contenido: el pulgar no baja de 24.
+    assert_eq!(view::thumb(64_000.0, 640.0, 0.0).map(|t| t.1), Some(24.0));
+    // Al revés: dónde queda el contenido si el pulgar se arrastra a una altura.
+    assert_eq!(view::scroll_for_thumb(1280.0, 640.0, 160.0), 320.0);
+    assert_eq!(view::scroll_for_thumb(1280.0, 640.0, -50.0), 0.0);
+    assert_eq!(view::scroll_for_thumb(1280.0, 640.0, 1000.0), 640.0);
+    assert_eq!(view::max_scroll(1280.0, 640.0), 640.0);
+    assert_eq!(view::max_scroll(300.0, 640.0), 0.0);
+}
+
+/// Con el contenido desplazado, los clics y el dibujo van al trabajo que se ve en ese lugar.
+#[test]
+fn hit_and_draw_follow_the_scroll() {
+    let jobs = [running(1), running(2), running(3)];
+    let all = |_: u64| true;
+    let r = rect(0.0, 0.0, view::WIDTH, 300.0);
+    // Sin desplazar, el 3 no se ve; desplazado al bloque del 3, sí, y el 1 ya no.
+    assert!(center_in(r, &jobs, &all, 0.0, ViewHit::Cancel(3)).is_none());
+    assert!(center_in(r, &jobs, &all, 0.0, ViewHit::Cancel(1)).is_some());
+    assert!(center_in(r, &jobs, &all, 580.0, ViewHit::Cancel(3)).is_some());
+    assert!(center_in(r, &jobs, &all, 580.0, ViewHit::Cancel(1)).is_none());
+    // El mismo punto de la ventana es el «Cancelar» del 2 con el contenido corrido un bloque.
+    let (x, y) = center_in(r, &jobs, &all, 0.0, ViewHit::Cancel(1)).unwrap();
+    assert_eq!(view::hit(r, &jobs, &all, 290.0, x, y), Some(ViewHit::Cancel(2)));
+    // Fuera del área visible no hay nada.
+    assert_eq!(view::hit(r, &jobs, &all, 0.0, x, y + 300.0), None);
+    // El bloque de cada trabajo, en coordenadas del contenido.
+    assert_eq!(view::block_span(&jobs, &all, 2), Some((290.0, 580.0)));
+    assert_eq!(view::block_span(&jobs, &all, 9), None);
+    // Solo se dibuja lo que se ve.
+    let t = texts_in(r, &jobs, &all, 580.0);
+    assert_eq!(t.iter().filter(|s| s.contains("% completado")).count(), 1, "{t:?}");
+    // La barra a la derecha: el riel ocupa el alto visible y el pulgar está al fondo.
+    let (track, thumb) = view::scrollbar(r, view::content_height(&jobs, &all), 570.0).expect("barra");
+    assert_eq!((track.top, track.bottom, track.right), (0.0, 300.0, view::WIDTH));
+    assert_eq!(thumb.bottom, 300.0);
+    // Sobre el riel no hay controles de los trabajos.
+    assert_eq!(view::hit(r, &jobs, &all, 0.0, view::WIDTH - 2.0, y), None);
+    assert!(view::scrollbar(rect(0.0, 0.0, view::WIDTH, 900.0), 870.0, 0.0).is_none());
 }

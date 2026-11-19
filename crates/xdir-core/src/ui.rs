@@ -474,6 +474,13 @@ pub fn draw_update_notice(p: &dyn Painter, h: f32, version: &str, hot: bool) -> 
     (link, tw + sep + lw + sep)
 }
 
+/// Dónde queda en la barra de estado un texto de `text_w` DIPs al principio (el aviso), con `lead`
+/// DIPs ocupados antes (el aviso de actualización).
+pub fn status_text_rect(w: f32, h: f32, text_w: f32, lead: f32) -> Rect {
+    let left = GAP * 2.0 + lead;
+    rect(left, h - STATUSBAR_H, (left + text_w).min(w), h)
+}
+
 /// Dibuja la barra de estado. Devuelve dónde quedó el enlace «calcular tamaño», si lo hay y entra.
 pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout, hover: Option<Layout>, b: StatusButtons) -> Option<Rect> {
     let StatusButtons {

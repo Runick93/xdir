@@ -91,8 +91,25 @@ pub enum ErrKind {
     Cancelled,
     /// Renombrar no puede llevarlo a otro disco (hay que copiar).
     CrossDevice,
-    /// El nombre (o la ruta) es más largo de lo que acepta el disco.
+    /// Un tramo de la ruta (el nombre) es más largo de lo que acepta el disco.
     NameTooLong,
+    /// La ruta entera es más larga de lo que acepta el sistema (cada nombre entra).
+    PathTooLong,
+    /// El nombre tiene caracteres que el disco no acepta o es reservado (CON, NUL…).
+    InvalidName,
+    /// El disco es de solo lectura (protegido contra escritura, un CD, montado así).
+    ReadOnly,
+    /// El disco o la red no responde (desconectado, se cortó la red, no está listo).
+    Offline,
+    /// macOS: el elemento está bloqueado (Obtener información ▸ Bloqueado, `uchg`).
+    Locked,
+    /// Windows: el acceso controlado a carpetas (protección contra ransomware) no deja a xdir
+    /// escribir ahí. `sure`: se pudo leer que xdir no está permitido (si no, se dice con «puede
+    /// que»).
+    Blocked { sure: bool },
+    /// macOS: la privacidad del sistema (TCC) no le dio permiso a xdir para esa carpeta. `sure`:
+    /// al leer una carpeta (al escribir, `EPERM` también puede ser otra cosa: «puede que»).
+    Privacy { sure: bool },
     Other(String),
 }
 
@@ -103,25 +120,201 @@ pub struct CopyError {
     pub path: PathBuf,
 }
 
+/// El nombre que se muestra de una ruta: el último tramo (o la ruta entera si no tiene, como
+/// `C:\` o `/`).
+pub fn shown_name(p: &Path) -> String {
+    match p.file_name() {
+        Some(n) => n.to_string_lossy().into_owned(),
+        None => p.display().to_string(),
+    }
+}
+
+/// Un error que el sistema no explica mejor: una frase propia y, entre paréntesis, el texto del
+/// sistema y su código («Error inesperado del sistema (El dispositivo no está listo; Windows:
+/// 0x80070015)»), para poder diagnosticarlo.
+pub fn unexpected(system: &str, text: &str, code: &str) -> ErrKind {
+    let text = text.trim().trim_end_matches('.').trim();
+    if text.is_empty() {
+        ErrKind::Other(format!("Error inesperado del sistema ({system}: {code})"))
+    } else {
+        ErrKind::Other(format!("Error inesperado del sistema ({text}; {system}: {code})"))
+    }
+}
+
+/// Un error de E/S del sistema que no tiene una explicación mejor (`unexpected` con el texto y
+/// el código: `Windows: 0x80070015` en Windows, `macOS: errno 5` o `Linux: errno 5` en los demás).
+pub fn io_unexpected(e: &std::io::Error) -> ErrKind {
+    let text = e.to_string();
+    // Sin el «(os error N)» que agrega Rust: el código va aparte.
+    let text = text.split(" (os error").next().unwrap_or(&text);
+    match e.raw_os_error() {
+        Some(n) => unexpected(SYSTEM, text, &os_code(n)),
+        None => unexpected(SYSTEM, text, "sin código"),
+    }
+}
+
+/// Un error de E/S de Rust, sin la plataforma a mano (lo usan el núcleo y los comprimidos): por su
+/// tipo y, en Windows, por los códigos que Rust no distingue. Lo que no se reconoce, con el texto y
+/// el código (`io_unexpected`).
+pub fn io_kind(e: &std::io::Error) -> ErrKind {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::PermissionDenied => ErrKind::Denied,
+        K::NotFound => ErrKind::NotFound,
+        K::AlreadyExists => ErrKind::Exists,
+        K::StorageFull | K::QuotaExceeded => ErrKind::DiskFull,
+        K::FileTooLarge => ErrKind::TooBig,
+        K::ResourceBusy | K::ExecutableFileBusy => ErrKind::InUse,
+        K::ReadOnlyFilesystem => ErrKind::ReadOnly,
+        K::CrossesDevices => ErrKind::CrossDevice,
+        K::NetworkDown | K::NetworkUnreachable | K::HostUnreachable | K::TimedOut | K::NotConnected | K::StaleNetworkFileHandle => ErrKind::Offline,
+        // Rust junta ahí «nombre demasiado largo» (ENAMETOOLONG, ERROR_FILENAME_EXCED_RANGE) y
+        // «nombre no válido».
+        K::InvalidFilename if e.raw_os_error() == Some(NAME_TOO_LONG) => ErrKind::NameTooLong,
+        K::InvalidFilename => ErrKind::InvalidName,
+        _ => match e.raw_os_error() {
+            // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_HANDLE_DISK_FULL,
+            // ERROR_WRITE_PROTECT.
+            Some(32 | 33) if cfg!(windows) => ErrKind::InUse,
+            Some(39 | 112) if cfg!(windows) => ErrKind::DiskFull,
+            Some(19) if cfg!(windows) => ErrKind::ReadOnly,
+            _ => io_unexpected(e),
+        },
+    }
+}
+
+/// El código de «nombre demasiado largo» (ENAMETOOLONG, ERROR_FILENAME_EXCED_RANGE).
+const NAME_TOO_LONG: i32 = if cfg!(windows) { 206 } else if cfg!(target_os = "linux") { 36 } else { 63 };
+
+/// El nombre del sistema para los códigos de error.
+const SYSTEM: &str = if cfg!(windows) { "Windows" } else if cfg!(target_os = "macos") { "macOS" } else { "Linux" };
+
+/// El código de un error del sistema como se busca: el HRESULT en Windows, el `errno` en los demás.
+fn os_code(n: i32) -> String {
+    if cfg!(windows) { format!("0x{:08X}", 0x8007_0000u32 | (n as u32 & 0xFFFF)) } else { format!("errno {n}") }
+}
+
+/// «Demasiado largo»: el nombre (algún tramo pasa de 255 caracteres, el máximo de casi todos los
+/// discos) o la ruta entera.
+pub fn too_long(p: &Path) -> ErrKind {
+    if p.components().any(|c| c.as_os_str().to_string_lossy().chars().count() > 255) {
+        ErrKind::NameTooLong
+    } else {
+        ErrKind::PathTooLong
+    }
+}
+
+/// La primera letra en minúscula (para seguir una frase después de «:»), salvo que la primera
+/// palabra sea un nombre propio («Windows», «macOS») o una sigla.
+pub fn lower_first(text: &str) -> String {
+    let word = text.split([' ', ':', ',']).next().unwrap_or("");
+    let proper = ["Windows", "macOS", "Linux", "Mac", "xdir"].contains(&word) || word.chars().skip(1).any(char::is_uppercase);
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if !proper => c.to_lowercase().chain(chars).collect(),
+        _ => text.to_string(),
+    }
+}
+
 impl CopyError {
     pub fn new(kind: ErrKind, path: &Path) -> CopyError {
         CopyError { kind, path: path.to_path_buf() }
     }
 
-    /// El motivo en castellano, para la lista de errores.
+    /// El motivo corto (para la fila de la lista de errores, ~30 caracteres) y, si hay algo
+    /// concreto, qué hacer (solo en el aviso).
+    fn parts(&self) -> (String, Option<&'static str>) {
+        let (why, todo): (&str, Option<&'static str>) = match &self.kind {
+            ErrKind::InUse => ("Lo está usando otro programa", Some("cerralo y reintentá")),
+            ErrKind::Denied => ("No tenés permiso", Some("pedí acceso a quien administra esa carpeta")),
+            ErrKind::NotFound => ("Ya no existe", None),
+            ErrKind::DiskFull => ("El disco está lleno", Some("liberá espacio y reintentá")),
+            ErrKind::TooBig => ("Es demasiado grande para FAT32", Some("ese formato admite hasta 4 GB por archivo: usá otro disco")),
+            ErrKind::Exists => ("Ya existe", None),
+            ErrKind::Cancelled => ("Cancelado", None),
+            ErrKind::CrossDevice => ("Está en otro disco", None),
+            ErrKind::NameTooLong => ("El nombre es demasiado largo", Some("acortalo")),
+            ErrKind::PathTooLong => ("La ruta es demasiado larga", Some("acortá el nombre de alguna carpeta o llevalo más arriba")),
+            ErrKind::InvalidName => {
+                ("Nombre no válido para ese disco", Some("sacale caracteres como : * ? \" < > | o no uses nombres reservados como CON o NUL"))
+            }
+            ErrKind::ReadOnly => ("El disco es de solo lectura", Some("quitale la protección contra escritura o usá otro disco")),
+            ErrKind::Offline => ("El disco o la red no responde", Some("revisá la conexión y reintentá")),
+            ErrKind::Locked => ("Está bloqueado", Some("desbloquealo en Obtener información ▸ Bloqueado")),
+            ErrKind::Blocked { sure: true } => ("Bloqueado: acceso controlado", None),
+            ErrKind::Blocked { sure: false } => ("¿Acceso controlado de Windows?", None),
+            ErrKind::Privacy { sure: true } => ("Falta permiso de Privacidad", None),
+            ErrKind::Privacy { sure: false } => ("¿Falta permiso de Privacidad?", None),
+            ErrKind::Other(text) => return (text.clone(), None),
+        };
+        (why.to_string(), todo)
+    }
+
+    /// El motivo corto, para la fila de la lista de errores (el nombre va al lado): «Lo está
+    /// usando otro programa». Qué hacer va en `notice`.
     pub fn message(&self) -> String {
+        self.parts().0
+    }
+
+    /// El aviso de la barra de estado: qué no se pudo hacer (`what`, con el nombre: «crear la
+    /// carpeta nueva en «Docs»»), por qué y qué hacer, corto. «No se pudo renombrar «a.txt»: lo
+    /// está usando otro programa. Cerralo y reintentá.» Lo bloqueado por el sistema dice dónde y
+    /// cómo permitirlo; la explicación entera está en `detail`.
+    pub fn notice(&self, what: &str) -> String {
+        let name = shown_name(&self.path);
         match &self.kind {
-            ErrKind::InUse => "Lo está usando otro programa".into(),
-            ErrKind::Denied => "No tenés permiso".into(),
-            ErrKind::NotFound => "Ya no existe".into(),
-            ErrKind::DiskFull => "El disco está lleno".into(),
-            ErrKind::TooBig => "Es demasiado grande para el formato del disco de destino (FAT32)".into(),
-            ErrKind::Exists => "Ya existe".into(),
-            ErrKind::Cancelled => "Cancelado".into(),
-            ErrKind::CrossDevice => "Está en otro disco".into(),
-            ErrKind::NameTooLong => "El nombre es demasiado largo para ese disco".into(),
-            ErrKind::Other(text) => text.clone(),
+            ErrKind::Blocked { sure: true } => format!(
+                "Windows bloqueó a xdir en «{name}» (acceso controlado a carpetas): permitilo en Seguridad de Windows ▸ Protección contra ransomware."
+            ),
+            ErrKind::Blocked { sure: false } => format!(
+                "No se pudo {what}: puede que lo haya bloqueado el acceso controlado a carpetas de Windows. \
+                 Si es así, permití xdir en Seguridad de Windows ▸ Protección contra ransomware."
+            ),
+            ErrKind::Privacy { sure: true } => {
+                format!("macOS no deja que xdir use «{name}»: dale permiso en Configuración del Sistema ▸ Privacidad y seguridad.")
+            }
+            ErrKind::Privacy { sure: false } => format!(
+                "No se pudo {what}: puede que macOS no deje a xdir usar esa carpeta. \
+                 Si es así, dale permiso en Configuración del Sistema ▸ Privacidad y seguridad."
+            ),
+            _ => {
+                let (why, todo) = self.parts();
+                let why = lower_first(why.trim_end_matches('.'));
+                match todo {
+                    Some(todo) => {
+                        let mut todo = todo.chars();
+                        let first: String = todo.next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                        format!("No se pudo {what}: {why}. {first}{}.", todo.as_str())
+                    }
+                    None => format!("No se pudo {what}: {why}."),
+                }
+            }
         }
+    }
+
+    /// La explicación entera, para el cartel al pasar el mouse sobre el aviso (lo bloqueado por
+    /// el sistema: dónde se permite xdir paso a paso). `None` si el aviso ya lo dice todo.
+    pub fn detail(&self, what: &str) -> Option<String> {
+        let name = shown_name(&self.path);
+        const CFA_STEPS: &str = "Permití xdir en Seguridad de Windows ▸ Protección contra virus y amenazas ▸ Protección contra ransomware ▸ \
+                                 Permitir una aplicación a través del acceso controlado a carpetas (en una PC de empresa, lo hace sistemas).";
+        const TCC_STEPS: &str = "Configuración del Sistema ▸ Privacidad y seguridad ▸ Archivos y carpetas (o Acceso total al disco)";
+        Some(match &self.kind {
+            ErrKind::Blocked { sure: true } => format!(
+                "Windows bloqueó a xdir: el acceso controlado a carpetas (protección contra ransomware) no lo deja escribir en «{name}». {CFA_STEPS}"
+            ),
+            ErrKind::Blocked { sure: false } => format!(
+                "Puede que el acceso controlado a carpetas (protección contra ransomware) no deje a xdir escribir en «{name}»: \
+                 no se pudo {what}. Si es así, {}{}",
+                CFA_STEPS[..1].to_lowercase(),
+                &CFA_STEPS[1..]
+            ),
+            ErrKind::Privacy { sure: true } => format!("macOS no deja que xdir use «{name}». Dale permiso en {TCC_STEPS} y reintentá."),
+            ErrKind::Privacy { sure: false } => format!(
+                "No se pudo {what}: puede que macOS no deje a xdir usar «{name}». Si es así, dale permiso en {TCC_STEPS} y reintentá."
+            ),
+            _ => return None,
+        })
     }
 }
 

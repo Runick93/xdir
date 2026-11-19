@@ -121,13 +121,28 @@ pub enum AuxWindow {
     Transfers,
 }
 
+/// El avance de la cola de copias para el host (la barra de tareas en Windows): sin avance, en
+/// curso, en pausa o con errores; el número va de 0.0 a 1.0.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AuxProgress {
+    None,
+    Normal(f32),
+    Paused(f32),
+    Error(f32),
+}
+
 /// Lo que hace el mouse sobre una ventana secundaria (`App::aux_mouse`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AuxMouse {
     Move,
     Down,
     Up,
     Leave,
+    /// La rueda o el trackpad: cuánto se desplaza el contenido, en DIPs (positivo hacia abajo).
+    Wheel { dy: f32 },
+    /// La ventana perdió el mouse sin `Up` (Windows le quitó la captura): termina lo que se
+    /// estuviera arrastrando o apretando.
+    Cancel,
 }
 
 /// La ventana principal. Los tamaños y posiciones están en DIPs: el host lee el DPI de su ventana.
@@ -244,8 +259,17 @@ pub trait WindowHost {
     fn aux_set_title(&self, _w: AuxWindow, _title: &str) {}
     /// Cambia el tamaño del área (el contenido creció o se achicó).
     fn aux_resize(&self, _w: AuxWindow, _size: (f32, f32)) {}
+    /// El alto más grande del área (DIPs, sin la barra de título ni el borde) que entra en la
+    /// pantalla donde está la ventana (o donde va a aparecer: la de la principal). `None`: sin
+    /// límite propio del host.
+    fn aux_max_height(&self, _w: AuxWindow) -> Option<f32> {
+        None
+    }
     /// Pide repintarla (sin ventana, no hace nada).
     fn aux_invalidate(&self, _w: AuxWindow) {}
     /// La oculta (sin avisar `aux_closed`).
     fn aux_hide(&self, _w: AuxWindow) {}
+    /// El avance de la cola para la ventana (la barra de tareas); `None` lo quita. Solo se llama
+    /// cuando cambia.
+    fn aux_progress(&self, _w: AuxWindow, _p: AuxProgress) {}
 }

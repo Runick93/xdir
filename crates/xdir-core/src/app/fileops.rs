@@ -45,23 +45,60 @@ impl App {
         self.drag = Drag::None;
         let host = self.host.clone();
         if let Err(e) = host.start_drag(&items) {
-            self.notice = Some(format!("No se pudo arrastrar: {e}"));
+            self.notice = Some(format!("No se pudo arrastrar: {}", sys::lower_first(&e)));
         }
         self.redraw();
     }
 
     pub(super) fn copy_selection(&mut self, cut: bool) {
-        if !cut && self.copy_from_archive() {
-            return;
-        }
-        // Copiar otra cosa reemplaza lo copiado de un archivo comprimido.
-        self.archive.clip = None;
-        let items = self.selection_items(self.active);
-        if !items.is_empty() {
-            if let Err(e) = sys::shell().copy_files(&items, cut) {
-                self.notice = Some(format!("No se pudo copiar: {e}"));
+        if cut || !self.copy_from_archive() {
+            // Copiar otra cosa reemplaza lo copiado de un archivo comprimido.
+            self.archive.clip = None;
+            let items = self.selection_items(self.active);
+            if !items.is_empty()
+                && let Err(e) = sys::shell().copy_files(&items, cut)
+            {
+                self.notice = Some(format!("No se pudo copiar: {}", sys::lower_first(&e)));
             }
         }
+        // Lo cortado antes deja de verse atenuado (o se atenúa lo recién cortado).
+        self.refresh_cut();
+    }
+
+    /// El portapapeles del sistema cambió (aviso de la plataforma: en Windows,
+    /// `WM_CLIPBOARDUPDATE`): se relee lo cortado.
+    pub fn on_clipboard_changed(&mut self) {
+        self.refresh_cut();
+    }
+
+    /// Relee lo cortado del portapapeles del sistema y repinta si cambió.
+    pub(super) fn refresh_cut(&mut self) {
+        let fresh = crate::cut::CutSet::from_clipboard(sys::shell().clipboard_files());
+        if fresh != *self.cut {
+            self.cut = std::sync::Arc::new(fresh);
+            self.redraw();
+        }
+    }
+
+    /// Esc después de cortar: si el portapapeles sigue con lo cortado, se vacía (lo copiado, o lo
+    /// que puso otro programa, no se toca) y los íconos vuelven a verse normales.
+    pub(super) fn cancel_cut(&mut self) {
+        if matches!(sys::shell().clipboard_files(), Some((_, true))) {
+            sys::shell().clear_clipboard();
+        }
+        self.refresh_cut();
+    }
+
+    /// Copia texto al portapapeles del sistema. Reemplaza lo copiado o cortado: se relee lo
+    /// cortado (en macOS no llega ningún aviso mientras xdir está al frente).
+    pub(super) fn copy_text(&mut self, text: &str) {
+        let _ = sys::shell().copy_text(self.hwnd, text);
+        self.refresh_cut();
+    }
+
+    /// ¿`path` está cortado? (sin E/S).
+    pub(super) fn is_cut(&self, path: &std::path::Path) -> bool {
+        self.cut.contains(path)
     }
 
     pub(super) fn paste(&mut self) {
@@ -75,7 +112,7 @@ impl App {
             match sys::shell().paste_virtual(self.hwnd, &self.panes[self.active].tab().location.clone()) {
                 Ok(true) => self.reload_shell_tabs(),
                 Ok(false) => {}
-                Err(e) => self.notice = Some(format!("No se pudo pegar: {e}")),
+                Err(e) => self.notice = Some(format!("No se pudo pegar: {}", sys::lower_first(&e))),
             }
             return;
         };
@@ -84,6 +121,7 @@ impl App {
         // Lo cortado se pega una sola vez, como en el Explorador.
         if cut {
             sys::shell().clear_clipboard();
+            self.refresh_cut();
         }
     }
 
@@ -166,7 +204,7 @@ impl App {
             let items = self.selection_items(self.active);
             if !items.is_empty() {
                 if let Err(e) = sys::shell().invoke_verb(self.hwnd, &location, &items, "undelete") {
-                    self.notice = Some(format!("No se pudo devolver: {e}"));
+                    self.notice = Some(format!("No se pudo devolver: {}", sys::lower_first(&e)));
                 }
                 self.reload_shell_tabs();
             }
@@ -178,6 +216,9 @@ impl App {
         }
     }
 
+    /// Eliminar: a la Papelera o definitivamente (con una pregunta antes, que no se puede
+    /// deshacer). Lo hace el motor de copia (`JobSpec::Delete`), con su avance en la ventana de
+    /// copia de xdir.
     pub(super) fn delete_selection(&mut self, recycle: bool) {
         // En carpetas virtuales borra el propio Shell (en la Papelera: eliminar definitivamente).
         let location = self.panes[self.active].tab().location.clone();
@@ -190,13 +231,26 @@ impl App {
             return;
         }
         let paths = self.selection(self.active);
-        if !paths.is_empty() && self.panes[self.active].tab().location.target().is_some() {
-            sys::file_ops().spawn(self.hwnd, self.ops_tx.clone(), Op::Delete { paths, recycle });
+        if paths.is_empty() || self.panes[self.active].tab().location.target().is_none() {
+            return;
         }
+        if !recycle {
+            let what = match paths.as_slice() {
+                [one] => format!("«{}»", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                _ => format!("{} elementos", paths.len()),
+            };
+            let text = format!("¿Eliminar {what} definitivamente?\n\nNo pasa por la Papelera y no se puede deshacer.");
+            if !self.host.clone().ask_yes_no("Eliminar", &text) {
+                return;
+            }
+        }
+        self.start_transfer(JobSpec::Delete { paths, recycle });
     }
 
     pub(super) fn on_op_done(&mut self, result: OpResult) {
-        self.notice = result.error.map(|e| format!("Error: {e}"));
+        // Las plataformas mandan frases completas (`ops::failure`): van tal cual, con su
+        // explicación entera para el cartel (`ops::failure_detail`).
+        self.set_notice(result.error, result.error_detail);
         if let Some(undo) = result.undo {
             self.undo.push(undo);
             if self.undo.len() > UNDO_MAX {
@@ -292,6 +346,10 @@ impl App {
         // El árbol no tiene un `Hit` propio para sus filas: lo que queda debajo es `None`.
         #[cfg(feature = "arbol")]
         if hit == Hit::None && self.tree.contains(x, y) {
+            // La Papelera no tiene carpeta destino: soltar manda a la Papelera.
+            if let Some(id) = self.tree.trash_drop_at(x, y) {
+                return Some((DropAt::Trash(id), PathBuf::new()));
+            }
             return self.tree.drop_node_at(x, y).map(|(id, path)| (DropAt::Tree(id), path));
         }
         let Hit::Pane(i, ph) = hit else { return None };
@@ -333,6 +391,14 @@ impl App {
             _ => self.drop_folder(x, y),
         };
         ev.effect = match (&target, ev.paths) {
+            // A la Papelera siempre se «mueve» (aun con Ctrl), salvo lo que ya está adentro.
+            (Some((DropAt::Trash(_), _)), Some(paths)) => {
+                if ev.allowed.allows(Effect::MOVE) && paths.iter().any(|p| !self.path_in_trash(p)) {
+                    Effect::MOVE
+                } else {
+                    Effect::NONE
+                }
+            }
             (Some((_, dest)), Some(paths)) => {
                 let roots: Vec<PathBuf> = self.net.connections.iter().map(|c| c.local.clone()).collect();
                 drop_effect(paths, dest, ev.ctrl, ev.shift, ev.allowed, &roots)
@@ -348,12 +414,24 @@ impl App {
             && ev.effect != Effect::NONE
             && let (Some((at, dest)), Some(paths)) = (target, ev.paths)
         {
+            if let DropAt::Trash(_) = at {
+                // Lo que ya está en la Papelera se deja; el resto va por el motor como «Eliminar».
+                let paths: Vec<PathBuf> = paths.iter().filter(|p| !self.path_in_trash(p)).cloned().collect();
+                self.start_transfer(JobSpec::Delete { paths, recycle: true });
+                return;
+            }
             let sources = paths.to_vec();
             self.start_transfer(if ev.effect == Effect::MOVE { JobSpec::Move { sources, dest } } else { JobSpec::Copy { sources, dest } });
             if let DropAt::Pane(pane, _) = at {
                 self.set_active(pane);
             }
         }
+    }
+
+    /// ¿La ruta está en la Papelera (ella misma o algo de adentro)?
+    fn path_in_trash(&self, path: &std::path::Path) -> bool {
+        let fs = sys::file_system();
+        path.ancestors().any(|a| fs.is_trash(&Location::Path(a.to_path_buf())))
     }
 
     /// Deja resaltada como destino solo esa carpeta (de una lista o del árbol); repinta si cambió.
@@ -373,7 +451,7 @@ impl App {
         #[cfg(feature = "arbol")]
         {
             let want = match at {
-                Some(DropAt::Tree(id)) => Some(id),
+                Some(DropAt::Tree(id) | DropAt::Trash(id)) => Some(id),
                 _ => None,
             };
             if self.tree.drop_target != want {
@@ -616,6 +694,9 @@ pub(super) enum DropAt {
     Pane(usize, Option<usize>),
     #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
     Tree(usize),
+    /// La fila de la Papelera del árbol: soltar manda a la Papelera, no mueve.
+    #[cfg_attr(not(feature = "arbol"), allow(dead_code))]
+    Trash(usize),
 }
 
 /// ¿El elemento tiene ruta del disco? Dentro de un archivo comprimido, los de nombre no permitido

@@ -188,7 +188,7 @@ impl App {
                 self.notice = None;
                 sys::shell().open_file(self.hwnd, &path, path.parent());
             }
-            Err(m) => self.notice = Some(format!("No se pudo abrir «{name}»: {m}")),
+            Err(m) => self.notice = Some(format!("No se pudo abrir «{name}»: {}", sys::lower_first(&m))),
         }
     }
 
@@ -279,6 +279,10 @@ impl App {
     pub(super) fn drop_archive_drag(&mut self, from: usize, x: f32, y: f32) {
         self.notice = None;
         let Some((at, dest)) = self.drop_folder(x, y) else { return };
+        // A la Papelera no se extrae.
+        if let super::fileops::DropAt::Trash(_) = at {
+            return;
+        }
         let tab = self.panes[from].tab();
         let Location::Archive { file, nested, .. } = &tab.location else { return };
         let entries: Vec<String> =
@@ -379,7 +383,7 @@ impl App {
             .map(|l| format!("\"{}\"", l.address_text()))
             .collect();
         if !text.is_empty() {
-            let _ = sys::shell().copy_text(self.hwnd, &text.join("\r\n"));
+            self.copy_text(&text.join("\r\n"));
         }
     }
 

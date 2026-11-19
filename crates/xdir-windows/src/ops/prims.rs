@@ -9,7 +9,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, Prefix};
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
+    CloseHandle, E_ABORT, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, ERROR_DISK_FULL, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
     ERROR_FILE_TOO_LARGE, ERROR_HANDLE_DISK_FULL, ERROR_LOCK_VIOLATION, ERROR_FILENAME_EXCED_RANGE, ERROR_NOT_SAME_DEVICE, ERROR_PATH_NOT_FOUND,
     ERROR_REQUEST_ABORTED, ERROR_SHARING_VIOLATION, FILETIME, HANDLE,
 };
@@ -47,23 +47,62 @@ pub(crate) fn err_kind(code: u32) -> ErrKind {
         c if c == ERROR_FILE_TOO_LARGE.0 => ErrKind::TooBig,
         c if c == ERROR_FILE_EXISTS.0 || c == ERROR_ALREADY_EXISTS.0 => ErrKind::Exists,
         c if c == ERROR_REQUEST_ABORTED.0 => ErrKind::Cancelled,
+        // ERROR_CANCELLED sin que nadie lo haya pedido (lo que el usuario cancela en un aviso del
+        // Shell lo atienden `trash` y las operaciones aparte): no corta el trabajo entero.
+        c if c == ERROR_CANCELLED.0 => ErrKind::Other("Windows canceló la operación".into()),
         c if c == ERROR_NOT_SAME_DEVICE.0 => ErrKind::CrossDevice,
         c if c == ERROR_FILENAME_EXCED_RANGE.0 => ErrKind::NameTooLong,
-        c => ErrKind::Other(std::io::Error::from_raw_os_error(c as i32).to_string()),
+        // ERROR_WRITE_PROTECT.
+        19 => ErrKind::ReadOnly,
+        // ERROR_NOT_READY, ERROR_BAD_NETPATH, ERROR_DEV_NOT_EXIST, ERROR_UNEXP_NET_ERR,
+        // ERROR_NETNAME_DELETED, ERROR_BAD_NET_NAME, ERROR_SEM_TIMEOUT, ERROR_DEVICE_NOT_CONNECTED,
+        // ERROR_NO_NET_OR_BAD_PATH, ERROR_NETWORK_UNREACHABLE, ERROR_HOST_UNREACHABLE: el disco o
+        // la red no responden.
+        21 | 53 | 55 | 59 | 64 | 67 | 121 | 1167 | 1222 | 1231 | 1232 => ErrKind::Offline,
+        // ERROR_INVALID_NAME, ERROR_BAD_PATHNAME.
+        123 | 161 => ErrKind::InvalidName,
+        // ERROR_VIRUS_INFECTED, ERROR_VIRUS_DELETED.
+        225 | 226 => ErrKind::Other("El antivirus lo bloqueó porque cree que tiene un virus".into()),
+        // ERROR_LOGON_FAILURE, ERROR_INVALID_PASSWORD.
+        1326 | 86 => ErrKind::Other(format!("El usuario o la contraseña no son correctos (Windows: 0x{:08X})", 0x8007_0000 | code)),
+        // ERROR_SESSION_CREDENTIAL_CONFLICT.
+        1219 => ErrKind::Other("Ya hay una conexión a ese servidor con otro usuario: desconectala y reintentá (Windows: 0x800704C3)".into()),
+        c => xdir_core::sys::io_unexpected(&std::io::Error::from_raw_os_error(c as i32)),
     }
 }
 
 /// Error de la API de Windows (un `HRESULT`, casi siempre de un código Win32).
-fn err(e: windows::core::Error, p: &Path) -> CopyError {
-    let hr = e.code().0 as u32;
-    // FACILITY_WIN32: el código está en los 16 bits de abajo.
-    let kind = if hr >> 16 == 0x8007 { err_kind(hr & 0xFFFF) } else { ErrKind::Other(e.message()) };
-    CopyError::new(kind, p)
+pub(crate) fn err(e: windows::core::Error, p: &Path) -> CopyError {
+    super::errors::from_hr(e.code().0 as u32, &e.message(), p)
+}
+
+/// Error de una escritura en `p` (crear, renombrar, borrar): como `err`, o `Blocked` si fue el
+/// acceso controlado a carpetas. `present`: lo que se tocaba estaba (ver `errors::Cfa::blocks`).
+fn werr(e: windows::core::Error, p: &Path, present: &dyn Fn() -> bool) -> CopyError {
+    super::errors::write_error(e.code().0 as u32, &e.message(), p, present)
+}
+
+/// `werr` de algo que se crea en `dst`: «no se encuentra» con su carpeta presente es sospechoso.
+/// Si fue el acceso controlado a carpetas, el aviso nombra la carpeta (lo nuevo no llegó a estar).
+fn werr_new(e: windows::core::Error, dst: &Path) -> CopyError {
+    let failed = werr(e, dst, &|| dst.parent().is_some_and(super::errors::exists));
+    match (&failed.kind, dst.parent()) {
+        (ErrKind::Blocked { .. }, Some(parent)) => CopyError::new(failed.kind, parent),
+        _ => failed,
+    }
+}
+
+/// `werr` de algo que ya está en `p` (renombrarlo, borrarlo, ponerle fechas).
+fn werr_at(e: windows::core::Error, p: &Path) -> CopyError {
+    werr(e, p, &|| super::errors::exists(p))
 }
 
 fn io_err(e: std::io::Error, p: &Path) -> CopyError {
     match e.raw_os_error() {
-        Some(n) => CopyError::new(err_kind(n as u32), p),
+        Some(n) => CopyError::new(match err_kind(n as u32) {
+            ErrKind::NameTooLong => xdir_core::sys::too_long(p),
+            k => k,
+        }, p),
         None => CopyError::new(ErrKind::Other(e.to_string()), p),
     }
 }
@@ -220,7 +259,7 @@ pub(crate) fn wait_for(ready: &dyn Fn() -> bool, tries: u32, every: std::time::D
 
 fn delete_file(p: &Path) -> Result<(), CopyError> {
     let wide = long_path(p);
-    unsafe { DeleteFileW(PCWSTR(wide.as_ptr())) }.map_err(|e| err(e, p))
+    unsafe { DeleteFileW(PCWSTR(wide.as_ptr())) }.map_err(|e| werr_at(e, p))
 }
 
 /// Raíz del disco de `p` («C:\», «\\server\share\», el punto de montaje).
@@ -315,7 +354,7 @@ impl CopyPrims for WinCopyPrims {
             other => {
                 let e = match other {
                     _ if stopped => CopyError::new(ErrKind::Cancelled, dst),
-                    Err(e) => err(e, dst),
+                    Err(e) => werr_new(e, dst),
                     Ok(()) => CopyError::new(ErrKind::Cancelled, dst),
                 };
                 // Con `FAIL_IF_EXISTS` el destino lo creó esta copia (salvo que ya existiera): lo
@@ -333,12 +372,15 @@ impl CopyPrims for WinCopyPrims {
         let target = std::fs::read_link(src).map_err(|e| io_err(e, src))?;
         let is_dir = std::fs::symlink_metadata(src).map_err(|e| io_err(e, src))?.file_type().is_symlink_dir();
         let r = if is_dir { std::os::windows::fs::symlink_dir(&target, dst) } else { std::os::windows::fs::symlink_file(&target, dst) };
-        r.map_err(|e| io_err(e, dst))
+        r.map_err(|e| match e.raw_os_error() {
+            Some(n) => werr_new(windows::core::Error::from_hresult(windows::core::HRESULT((0x8007_0000 | (n as u32 & 0xFFFF)) as i32)), dst),
+            None => io_err(e, dst),
+        })
     }
 
     fn create_dir(&self, dst: &Path) -> Result<(), CopyError> {
         let wide = long_path(dst);
-        unsafe { CreateDirectoryW(PCWSTR(wide.as_ptr()), None) }.map_err(|e| err(e, dst))
+        unsafe { CreateDirectoryW(PCWSTR(wide.as_ptr()), None) }.map_err(|e| werr_new(e, dst))
     }
 
     fn finish_dir(&self, dst: &Path, like: &Path) -> Result<(), CopyError> {
@@ -354,20 +396,21 @@ impl CopyPrims for WinCopyPrims {
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
                 None,
             )
-            .map_err(|e| err(e, dst))?;
+            .map_err(|e| werr_at(e, dst))?;
             let r = SetFileTime(h, Some(&data.ftCreationTime), Some(&data.ftLastAccessTime), Some(&data.ftLastWriteTime));
             let _ = CloseHandle(h);
-            r.map_err(|e| err(e, dst))?;
+            r.map_err(|e| werr_at(e, dst))?;
             // Atributos (oculto, solo lectura, sistema…), sin los que no se ponen a mano.
             let keep = data.dwFileAttributes & !(FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0);
-            SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(keep)).map_err(|e| err(e, dst))
+            SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(keep)).map_err(|e| werr_at(e, dst))
         }
     }
 
     /// Windows da «acceso denegado» con un archivo abierto por otro para borrar (un antivirus):
-    /// también es «por un momento».
+    /// también es «por un momento». Lo que parece del acceso controlado a carpetas también se
+    /// reintenta: si en realidad era eso, después de un rato igual sale el aviso.
     fn transient(&self, kind: &ErrKind) -> bool {
-        matches!(kind, ErrKind::InUse | ErrKind::Denied)
+        matches!(kind, ErrKind::InUse | ErrKind::Denied | ErrKind::Blocked { .. })
     }
 
     fn rename_noreplace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
@@ -375,12 +418,20 @@ impl CopyPrims for WinCopyPrims {
         // Sin `MOVEFILE_COPY_ALLOWED` (no copia entre discos) ni `REPLACE_EXISTING` (no pisa).
         // `WRITE_THROUGH`: el nombre nuevo queda en el disco al volver (antes de borrar el
         // original al mover; Windows no tiene cómo asegurar una carpeta como `fsync`).
-        unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_WRITE_THROUGH) }.map_err(|e| err(e, from))
+        unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_WRITE_THROUGH) }.map_err(|e| {
+            // El acceso controlado a carpetas frena tanto sacar algo de una carpeta protegida como
+            // llevarlo a una: se mira el origen y, si no, el destino.
+            let at_from = werr_at(e.clone(), from);
+            match werr_new(e, to) {
+                to_blocked if !matches!(at_from.kind, ErrKind::Blocked { .. }) && matches!(to_blocked.kind, ErrKind::Blocked { .. }) => to_blocked,
+                _ => at_from,
+            }
+        })
     }
 
     fn replace(&self, from: &Path, to: &Path) -> Result<(), CopyError> {
         let (f, t) = (long_path(from), long_path(to));
-        unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }.map_err(|e| err(e, to))
+        unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }.map_err(|e| werr_new(e, to))
     }
 
     /// `FlushFileBuffers`: que la copia esté en el disco antes de borrar el original al mover.
@@ -396,13 +447,27 @@ impl CopyPrims for WinCopyPrims {
     fn remove(&self, p: &Path) -> Result<(), CopyError> {
         let data = attr_data(p)?;
         let wide = long_path(p);
-        if data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
-            // Carpeta vacía, o enlace a una carpeta (se borra el enlace, no lo que apunta).
-            return unsafe { RemoveDirectoryW(PCWSTR(wide.as_ptr())) }.map_err(|e| err(e, p));
+        let attrs = data.dwFileAttributes;
+        if attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+            // Una carpeta personalizada (con desktop.ini) queda de solo lectura y así no se puede
+            // borrar: se le saca. A un enlace no se le toca nada (se borra el enlace, no lo que
+            // apunta).
+            let readonly = attrs & FILE_ATTRIBUTE_READONLY.0 != 0 && attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0;
+            if readonly {
+                let plain = FILE_FLAGS_AND_ATTRIBUTES(attrs & !(FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_DIRECTORY.0));
+                unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), plain) }.map_err(|e| werr_at(e, p))?;
+            }
+            let r = unsafe { RemoveDirectoryW(PCWSTR(wide.as_ptr())) }.map_err(|e| werr_at(e, p));
+            if r.is_err() && readonly {
+                // No se borró: queda como estaba.
+                let keep = FILE_FLAGS_AND_ATTRIBUTES(attrs & !FILE_ATTRIBUTE_DIRECTORY.0);
+                let _ = unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), keep) };
+            }
+            return r;
         }
         if data.dwFileAttributes & FILE_ATTRIBUTE_READONLY.0 != 0 {
             let attrs = FILE_FLAGS_AND_ATTRIBUTES(data.dwFileAttributes & !FILE_ATTRIBUTE_READONLY.0);
-            unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), attrs) }.map_err(|e| err(e, p))?;
+            unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), attrs) }.map_err(|e| werr_at(e, p))?;
         }
         delete_file(p)
     }
@@ -418,7 +483,10 @@ impl CopyPrims for WinCopyPrims {
                 Err(CopyError::new(ErrKind::Other("Se borró definitivamente (no entraba en la Papelera)".into()), p))
             }
             Ok(None) => Err(CopyError::new(ErrKind::Other("No se mandó a la Papelera".into()), p)),
-            Err(e) => Err(err(e, p)),
+            // Se contestó que no al aviso del Shell de que no entra en la Papelera y se borraría
+            // definitivamente: es cancelar (el motor para y deja lo demás como está).
+            Err(e) if e.code() == E_ABORT || e.code() == ERROR_CANCELLED.to_hresult() => Err(CopyError::new(ErrKind::Cancelled, p)),
+            Err(e) => Err(werr_at(e, p)),
         }
     }
 
@@ -599,6 +667,19 @@ mod tests {
         assert_eq!(err_kind(ERROR_REQUEST_ABORTED.0), ErrKind::Cancelled);
         assert_eq!(err_kind(ERROR_NOT_SAME_DEVICE.0), ErrKind::CrossDevice);
         assert!(matches!(err_kind(1117), ErrKind::Other(_)));
+        assert_eq!(err_kind(19), ErrKind::ReadOnly);
+        for c in [21, 53, 55, 59, 64, 67, 121, 1167, 1222, 1231, 1232] {
+            assert_eq!(err_kind(c), ErrKind::Offline, "{c}");
+        }
+        assert_eq!(err_kind(123), ErrKind::InvalidName);
+        assert_eq!(err_kind(161), ErrKind::InvalidName);
+        assert_eq!(err_kind(1223), ErrKind::Other("Windows canceló la operación".into()));
+        // Lo que no tiene explicación: frase propia, texto y código (el HRESULT).
+        let ErrKind::Other(text) = err_kind(1117) else { panic!("1117 es Other") };
+        assert!(text.starts_with("Error inesperado del sistema (") && text.ends_with("; Windows: 0x8007045D)"), "{text}");
+        // Usuario o contraseña: el código queda para reconocerlo (`Tab::retry_with_credentials`).
+        let ErrKind::Other(text) = err_kind(1326) else { panic!("1326 es Other") };
+        assert!(text.ends_with("(Windows: 0x8007052E)"), "{text}");
         // Los HRESULT de Win32 se traducen por su código.
         let e = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(ERROR_SHARING_VIOLATION.0));
         assert_eq!(err(e, Path::new("x")).kind, ErrKind::InUse);

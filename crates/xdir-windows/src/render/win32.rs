@@ -1,7 +1,7 @@
 //! Windows: dibujo con Direct2D + DirectWrite sobre un swapchain DXGI (flip model).
 //! Todas las coordenadas están en DIPs (1 DIP = 1 px a 96 DPI); Direct2D escala según el DPI.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::thread::JoinHandle;
@@ -212,6 +212,7 @@ impl Renderer {
             fonts: &self.fonts,
             dwrite: &self.dwrite,
             icons: &self.icons,
+            image_alpha: Cell::new(1.0),
         };
 
         // Con fondo translúcido se limpia a transparente: ahí se ve Mica.
@@ -261,6 +262,8 @@ pub struct Painter<'a> {
     file_colors: &'a [ColorRule],
     dwrite: &'a IDWriteFactory,
     icons: &'a RefCell<Icons>,
+    /// Opacidad de los íconos, miniaturas e imágenes (la de `faded`; el texto no cambia).
+    image_alpha: Cell<f32>,
 }
 
 impl Painter<'_> {
@@ -405,7 +408,7 @@ impl paint::Painter for Painter<'_> {
             self.ctx.DrawBitmap(
                 &bitmap,
                 Some(&d2r(dest)),
-                1.0,
+                self.image_alpha.get(),
                 D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                 None,
                 None,
@@ -429,7 +432,7 @@ impl paint::Painter for Painter<'_> {
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
         let dest = rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
         unsafe {
-            self.ctx.DrawBitmap(&bitmap, Some(&d2r(dest)), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+            self.ctx.DrawBitmap(&bitmap, Some(&d2r(dest)), self.image_alpha.get(), D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
         }
         true
     }
@@ -451,7 +454,7 @@ impl paint::Painter for Painter<'_> {
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
         let dest = rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
         unsafe {
-            self.ctx.DrawBitmap(&bitmap, Some(&d2r(dest)), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+            self.ctx.DrawBitmap(&bitmap, Some(&d2r(dest)), self.image_alpha.get(), D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
         }
         true
     }
@@ -487,6 +490,12 @@ impl paint::Painter for Painter<'_> {
     /// Lado en píxeles para pedir una miniatura de `dips` DIPs.
     fn thumb_px(&self, dips: f32) -> u32 {
         (dips * self.icons.borrow().dpi_k).round() as u32
+    }
+
+    fn faded(&self, alpha: f32, f: &mut dyn FnMut()) {
+        let before = self.image_alpha.replace(alpha);
+        f();
+        self.image_alpha.set(before);
     }
 
     fn clip(&self, r: Rect, f: &mut dyn FnMut()) {

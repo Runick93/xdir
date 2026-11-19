@@ -1,4 +1,4 @@
-//! Páginas de la configuración que escriben otros módulos (Red): su lugar en la lista, su
+//! Páginas de la configuración que escriben otros módulos (Lugares, Red): su lugar en la lista, su
 //! búsqueda, su dibujo y sus clics.
 
 use super::App;
@@ -38,13 +38,27 @@ pub(super) struct ExtraPage {
 // ni lanza trabajos.
 
 /// Las páginas extra, en el orden en que aparecen después de su sección.
-pub(super) const PAGES: &[ExtraPage] = &[ExtraPage {
-    id: "red",
-    title: "Red",
-    after: Section::Keys,
-    search: super::network_page::search,
-    draw: super::network_page::draw,
-    click: super::network_page::click,
-    field_done: super::network_page::field_done,
-    field_tab: super::network_page::field_tab,
-}];
+pub(super) const PAGES: &[ExtraPage] = &[
+    // Lugares del árbol (solo con el árbol).
+    #[cfg(feature = "arbol")]
+    ExtraPage {
+        id: "lugares",
+        title: "Lugares",
+        after: Section::Tree,
+        search: super::places_page::search,
+        draw: super::places_page::draw,
+        click: super::places_page::click,
+        field_done: super::places_page::field_done,
+        field_tab: super::places_page::field_tab,
+    },
+    ExtraPage {
+        id: "red",
+        title: "Red",
+        after: Section::Keys,
+        search: super::network_page::search,
+        draw: super::network_page::draw,
+        click: super::network_page::click,
+        field_done: super::network_page::field_done,
+        field_tab: super::network_page::field_tab,
+    },
+];

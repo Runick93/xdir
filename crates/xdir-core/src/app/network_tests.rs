@@ -225,7 +225,7 @@ fn connect_error_stays_in_dialog() {
     a.on_field_done(true);
     wait_dialog_idle(&mut a);
     let d = a.net.dialog.as_ref().expect("abierto");
-    assert_eq!(d.error.as_deref(), Some("Usuario o contraseña incorrectos"));
+    assert_eq!(d.error.as_deref(), Some("Usuario o contraseña incorrectos: revisalos y probá de nuevo"));
     // Se corrige y se reintenta.
     FakeNetwork::set_connect("nas-n4bad", Ok(tmp_dir("n4-bad")));
     a.on_field_done(true);
@@ -333,7 +333,7 @@ fn address_bar_url_connects_in_place() {
     FakeNetwork::set_connect("nas-n4bar2", Err(NetError::NotFound { host: "nas-n4bar2".into() }));
     a.go_to_text(0, "smb://nas-n4bar2/x");
     wait_until(&mut a, |a| a.panes[0].tab().error.is_some());
-    assert_eq!(a.panes[0].tab().error.as_deref(), Some("No se encuentra el servidor \"nas-n4bar2\""));
+    assert_eq!(a.panes[0].tab().error.as_deref(), Some("No se encuentra el servidor «nas-n4bar2»: revisá el nombre y que esté encendido y en la misma red"));
 }
 
 #[test]
@@ -1721,7 +1721,7 @@ fn late_success_after_timeout_is_accepted() {
     let tabs = a.panes[a.active].tabs.len();
     a.on_field_done(true);
     wait_until(&mut a, |a| a.net.dialog.as_ref().is_some_and(|d| d.error.is_some()));
-    assert_eq!(a.net.dialog.as_ref().unwrap().error.as_deref(), Some("Se agotó el tiempo esperando a \"nas-r1late\""));
+    assert_eq!(a.net.dialog.as_ref().unwrap().error.as_deref(), Some("Se agotó el tiempo esperando a «nas-r1late»: revisá la conexión y reintentá"));
     wait_until(&mut a, |a| a.net.dialog.is_none());
     assert_eq!(a.panes[a.active].tabs.len(), tabs + 1);
     assert_eq!(a.panes[a.active].tab().location, Location::Path(target));

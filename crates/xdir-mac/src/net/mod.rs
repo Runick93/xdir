@@ -48,7 +48,9 @@ pub fn mac_error(code: i32, host: &str, share: &str) -> NetError {
         65 | 51 | 61 => NetError::NotFound { host: host.into() },
         60 => NetError::Timeout { host: host.into() },
         89 | -128 => NetError::Cancelled,
-        other => NetError::Other(format!("error {other}")),
+        // Un errno: el motivo de las copias; los códigos propios de NetFS (negativos), con el código.
+        other if other > 0 => NetError::Other(crate::ops::io_error(std::io::Error::from_raw_os_error(other), std::path::Path::new("")).message()),
+        other => NetError::Other(xdir_core::sys::CopyError::new(xdir_core::sys::unexpected("macOS", "", &format!("NetFS {other}")), std::path::Path::new("")).message()),
     }
 }
 
@@ -204,7 +206,7 @@ impl Network for MacNetwork {
             // SAFETY: ruta terminada en cero.
             match unsafe { libc::unmount(c.as_ptr(), libc::MNT_FORCE) } {
                 0 => Ok(()),
-                _ => Err(NetError::Other(std::io::Error::last_os_error().to_string())),
+                _ => Err(NetError::Other(crate::ops::io_error(std::io::Error::last_os_error(), local).message())),
             }
         } else {
             crate::shell::macos::eject(local).map_err(|e| if e.busy { NetError::OpenFiles { by: e.busy_by } } else { NetError::Other(e.message) })

@@ -12,7 +12,7 @@ use windows::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
@@ -139,7 +139,14 @@ pub fn copy_files(items: &[Item], cut: bool) -> Result<()> {
 }
 
 /// Archivos en el portapapeles y si fueron cortados.
+///
+/// Se llama en el hilo de la interfaz cada vez que cambia el portapapeles (para atenuar lo
+/// cortado): si no hay archivos (`CF_HDROP`) se sale sin abrirlo, así copiar texto en otra
+/// aplicación no cuesta nada ni espera a la aplicación dueña del portapapeles.
 pub fn clipboard_files() -> Option<(Vec<PathBuf>, bool)> {
+    if unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_err() {
+        return None;
+    }
     let obj = unsafe { OleGetClipboard().ok()? };
     let paths = hdrop_paths(&obj)?;
     let cut = drop_effect(&obj).is_some_and(|e| e.0 & DROPEFFECT_MOVE.0 != 0);

@@ -41,6 +41,8 @@ impl App {
         if let Some(n) = &self.notice {
             status = format!("{n}   ·   {status}");
         }
+        // El aviso con explicación se puede señalar (su cartel la muestra): dónde queda.
+        let notice_w = self.notice.as_ref().filter(|_| self.notice_detail_text().is_some()).cloned();
         // Lo que corre en segundo plano: el indicador (y su cartel) desde su umbral.
         let clock = self.now();
         self.sync_activity(clock);
@@ -99,6 +101,7 @@ impl App {
         };
         let preview_shown =
             preview_col.filter(|_| !info_shown && !compare_shown && rename_panel.is_none()).map(|_| self.preview_shown());
+        let preview_cut = preview_shown.is_some() && self.preview_is_cut();
         let info_hover = match self.hover {
             Hit::Info(h) => Some(h),
             _ => None,
@@ -249,6 +252,7 @@ impl App {
                     _ => PaneHit::None,
                 };
                 let favs = show_favorites.then(|| (&self.favorites, fav_drop.filter(|(j, _)| *j == i).map(|(_, d)| d)));
+                self.panes[i].tab_mut().list.cut = self.cut.clone();
                 let tab = self.panes[i].tab();
                 let query = tab.search_query().to_string();
                 let is_settings = tab.is_settings();
@@ -281,10 +285,12 @@ impl App {
                 if !tree.pinned && tree.width_now() > tree::COLLAPSED_W + 1.0 {
                     p.round_fill(geom::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
                 }
+                tree.cut = self.cut.clone();
                 tree.draw(p, r, current_folder.as_deref(), xtree_badge);
             }
             if let (Some(r), Some(shown)) = (preview_col, &preview_shown) {
-                crate::preview::draw::draw(p, r, shown);
+                // Lo cortado: la imagen o el ícono atenuados (el texto no cambia).
+                crate::list::dim_if(p, preview_cut, &mut || crate::preview::draw::draw(p, r, shown));
             }
             if let (Some(r), Some(st)) = (preview_col, &rename_panel) {
                 crate::rename_many_draw::draw(p, r, st, rename_hover);
@@ -343,6 +349,7 @@ impl App {
                 self.update_link = Some(link);
                 buttons.lead = lead;
             }
+            self.notice_rect = notice_w.as_ref().map(|n| ui::status_text_rect(w, h, p.measure(crate::paint::FontId::Ui, n), buttons.lead));
             self.size_link = ui::draw_status(p, w, h, &status, layout, layout_hover, buttons);
             // Desplegable de filtros de una lista: encima de los paneles y de la barra de estado
             // (entra en el área de su lista; en un panel muy bajo puede pasarse).

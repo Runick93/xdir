@@ -354,17 +354,14 @@ pub fn applescript_string(s: &str) -> String {
     out
 }
 
-/// El error de E/S como lo ve el usuario.
+/// El error de E/S como lo ve el usuario (el mismo texto que la lista de errores de las copias).
 fn io_text(e: &std::io::Error) -> String {
-    match e.kind() {
-        std::io::ErrorKind::PermissionDenied => "No tenés permiso".into(),
-        std::io::ErrorKind::NotFound => "Ya no existe".into(),
-        _ => match e.raw_os_error() {
-            Some(libc::EPERM) => "No tenés permiso".into(),
-            Some(libc::EROFS) => "El disco es solo de lectura".into(),
-            _ => e.to_string(),
-        },
-    }
+    // `io_error` se queda con el error: una copia con el mismo código (o tipo y texto).
+    let same = match e.raw_os_error() {
+        Some(n) => std::io::Error::from_raw_os_error(n),
+        None => std::io::Error::new(e.kind(), e.to_string()),
+    };
+    crate::ops::io_error(same, Path::new("")).message()
 }
 
 /// Varios errores juntos: el primero y cuántos más.
@@ -445,7 +442,7 @@ fn chmod_contents(dir: &Path, mode: u32, errors: &mut Vec<String>) {
     let entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
         Err(e) => {
-            errors.push(format!("{}: {}", dir.display(), io_text(&e)));
+            errors.push(format!("«{}»: {}", xdir_core::sys::shown_name(dir), io_text(&e)));
             return;
         }
     };
@@ -459,7 +456,7 @@ fn chmod_contents(dir: &Path, mode: u32, errors: &mut Vec<String>) {
         }
         let next = (m.permissions().mode() & 0o7777 & !0o666) | (mode & 0o666);
         if let Err(e) = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(next)) {
-            errors.push(format!("{}: {}", p.display(), io_text(&e)));
+            errors.push(format!("«{}»: {}", xdir_core::sys::shown_name(&p), io_text(&e)));
         }
     }
 }

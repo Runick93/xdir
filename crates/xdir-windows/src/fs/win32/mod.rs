@@ -130,7 +130,7 @@ fn list_dir(out: &mut Batcher, path: &Path) {
     let reader = match std::fs::read_dir(path) {
         Ok(r) => r,
         Err(e) => {
-            out.send(LoadMsg::Listed(Err(e.to_string())));
+            out.send(LoadMsg::Listed(Err(crate::ops::load_message(&e, path))));
             return;
         }
     };
@@ -353,7 +353,7 @@ fn list_shell(out: &mut Batcher, parsing: &str) {
     let item = match unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(parsing), None) } {
         Ok(i) => i,
         Err(e) => {
-            out.send(LoadMsg::Listed(Err(e.message().to_string())));
+            out.send(LoadMsg::Listed(Err(crate::ops::win_message(&e))));
             return;
         }
     };
@@ -364,7 +364,7 @@ fn list_shell(out: &mut Batcher, parsing: &str) {
         !out.cancelled()
     });
     out.flush();
-    out.send(LoadMsg::Listed(ok.map_err(|e| e.message().to_string())));
+    out.send(LoadMsg::Listed(ok.map_err(|e| crate::ops::win_message(&e))));
 }
 
 /// Carpeta virtual de Linux (WSL) del Explorador.

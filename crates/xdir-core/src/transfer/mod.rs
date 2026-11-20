@@ -169,6 +169,8 @@ pub struct JobError {
     /// Al extraer: el nombre de la entrada tal como figura en el archivo (`src` es el archivo).
     /// Se muestra en lugar del nombre de `src`.
     pub entry: Option<String>,
+    /// Quiénes tienen el archivo, si falló por estar en uso y se pudo averiguar (si no, vacío).
+    pub holders: Vec<crate::sys::Holder>,
 }
 
 impl JobError {

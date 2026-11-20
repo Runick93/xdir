@@ -1,12 +1,15 @@
-//! Ventanas secundarias del sistema cuyo contenido dibuja el núcleo (`WindowHost::aux_*`): por
-//! ahora la ventana de copia (`xdir.aux`), como la de Windows: barra de título del sistema con
-//! minimizar y cerrar, dueña la principal pero con su propio botón en la barra de tareas (con el
-//! ícono de xdir y el avance de la cola encima: `set_progress`), sin redimensionar (el alto lo
-//! pone el contenido con `aux_resize`), centrada sobre la ventana de xdir la primera vez (sin
-//! salirse del área de trabajo de su monitor) y después donde la dejó el usuario (mientras dure
-//! la sesión). Dibuja con un `Renderer` propio llamando a `App::paint_aux`; el mouse y las teclas
-//! van a `App::aux_mouse` / `App::aux_key`; minimizarla la deja en la barra de tareas; cerrarla la
-//! oculta (`App::aux_closed`, sin botón en la barra) y los trabajos siguen.
+//! Ventanas secundarias del sistema cuyo contenido dibuja el núcleo (`WindowHost::aux_*`): la
+//! ventana de copia y la de «archivo en uso» (`AuxWindow`), las dos de la clase `xdir.aux` y con
+//! su estado en una casilla propia (`slot`). Las dos tienen la barra de título del sistema con
+//! minimizar y cerrar, son dueñas de la principal pero con su propio botón en la barra de tareas
+//! (con el ícono de xdir), no se redimensionan (el alto lo pone el contenido con `aux_resize`), se
+//! centran sobre la ventana de xdir la primera vez (sin salirse del área de trabajo de su monitor)
+//! y después van donde las dejó el usuario (mientras dure la sesión). Solo la de copia lleva el
+//! avance de la cola encima de su botón (`set_progress`, `carries_progress`); la de «archivo en
+//! uso» tiene el botón sin avance. Dibujan con un `Renderer` propio llamando a `App::paint_aux`; el
+//! mouse y las teclas van a `App::aux_mouse` / `App::aux_key`; minimizarlas las deja en la barra
+//! de tareas; cerrarlas las oculta (`App::aux_closed`, sin botón en la barra) y los trabajos
+//! siguen.
 //!
 //! Sigue el modelo de `quicklook/window.rs`: estado en un `thread_local` del hilo de interfaz que
 //! nunca queda prestado mientras se llama a algo que mande mensajes a la ventana.
@@ -40,6 +43,24 @@ use crate::render::Renderer;
 const CLASS: PCWSTR = w!("xdir.aux");
 /// Separación de los bordes del área de trabajo (píxeles).
 const MARGIN: i32 = 16;
+
+/// Cuántas ventanas auxiliares hay (una casilla de estado para cada una).
+const COUNT: usize = 2;
+/// Las ventanas, en el orden de sus casillas.
+const KINDS: [AuxWindow; COUNT] = [AuxWindow::Transfers, AuxWindow::InUse];
+
+/// La casilla del estado de `w` (en `AUX`, `RENDERER` y `PLACE`).
+pub fn slot(w: AuxWindow) -> usize {
+    match w {
+        AuxWindow::Transfers => 0,
+        AuxWindow::InUse => 1,
+    }
+}
+
+/// ¿`w` lleva el avance de la cola en su botón de la barra de tareas? Solo la de copia.
+pub fn carries_progress(w: AuxWindow) -> bool {
+    matches!(w, AuxWindow::Transfers)
+}
 
 fn style() -> WINDOW_STYLE {
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
@@ -110,26 +131,33 @@ pub fn client_to_window_size(client: SIZE, border: RECT) -> SIZE {
     SIZE { cx: client.cx + (border.right - border.left), cy: client.cy + (border.bottom - border.top) }
 }
 
-/// ¿La ventana de copia puede pasarle el mouse y el teclado a la `App`? No mientras la principal
-/// está deshabilitada (un cuadro de mensaje suyo) ni mientras el host está adentro de un diálogo,
-/// un menú o un arrastre (`Modal`): la `App` está ocupada esperando esa respuesta y no se le
-/// puede entrar de nuevo.
+/// ¿Una ventana auxiliar (la de copia o la de «archivo en uso») puede pasarle el mouse y el teclado
+/// a la `App`? No mientras la principal está deshabilitada (un cuadro de mensaje suyo) ni mientras
+/// el host está adentro de un diálogo, un menú o un arrastre (`Modal`): la `App` está ocupada
+/// esperando esa respuesta y no se le puede entrar de nuevo.
 pub fn accepts_input(main_enabled: bool, modal_depth: u32) -> bool {
     main_enabled && modal_depth == 0
 }
 
-/// Mientras existe, la ventana de copia no toma mouse ni teclado (y se ve deshabilitada): lo
-/// crea el host alrededor de sus diálogos, menús y arrastres.
+/// Mientras existe, las ventanas auxiliares no toman mouse ni teclado (y se ven deshabilitadas):
+/// lo crea el host alrededor de sus diálogos, menús y arrastres.
 pub struct Modal;
+
+/// Habilita o deshabilita las ventanas auxiliares que existan.
+fn enable_all(on: bool) {
+    for w in KINDS {
+        if let Some(hwnd) = with(w, |a| a.hwnd) {
+            unsafe {
+                let _ = EnableWindow(hwnd, on);
+            }
+        }
+    }
+}
 
 impl Modal {
     pub fn begin() -> Modal {
-        if MODAL.with(|m| m.replace(m.get() + 1)) == 0
-            && let Some(hwnd) = with(|a| a.hwnd)
-        {
-            unsafe {
-                let _ = EnableWindow(hwnd, false);
-            }
+        if MODAL.with(|m| m.replace(m.get() + 1)) == 0 {
+            enable_all(false);
         }
         Modal
     }
@@ -137,12 +165,8 @@ impl Modal {
 
 impl Drop for Modal {
     fn drop(&mut self) {
-        if MODAL.with(|m| m.replace(m.get().saturating_sub(1))) == 1
-            && let Some(hwnd) = with(|a| a.hwnd)
-        {
-            unsafe {
-                let _ = EnableWindow(hwnd, true);
-            }
+        if MODAL.with(|m| m.replace(m.get().saturating_sub(1))) == 1 {
+            enable_all(true);
         }
     }
 }
@@ -153,6 +177,8 @@ fn input_ok(main: HWND) -> bool {
 }
 
 struct Aux {
+    /// Qué ventana es (la de su casilla).
+    kind: AuxWindow,
     main: HWND,
     hwnd: HWND,
     theme: Theme,
@@ -160,21 +186,26 @@ struct Aux {
     size: (f32, f32),
     tracking: bool,
     /// El de la barra de tareas: se crea cuando llega `TaskbarButtonCreated` (antes no sirve).
+    /// Solo en la de copia (`carries_progress`).
     taskbar: Option<ITaskbarList3>,
 }
 
 thread_local! {
-    static AUX: RefCell<Option<Aux>> = const { RefCell::new(None) };
-    /// Aparte de `AUX`: dibujar no debe tener el estado prestado.
-    static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
-    /// Dónde la dejó el usuario (esquina de arriba a la izquierda, en pantalla), para la sesión.
-    static PLACE: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+    /// Una casilla por ventana (`slot`), cada una con su `RefCell`: usar una no presta la otra.
+    static AUX: [RefCell<Option<Aux>>; COUNT] = const { [RefCell::new(None), RefCell::new(None)] };
+    /// Aparte de `AUX`: dibujar no debe tener el estado prestado. Uno por ventana (el destino de
+    /// dibujo es de un `HWND`).
+    static RENDERER: [RefCell<Option<Renderer>>; COUNT] = const { [RefCell::new(None), RefCell::new(None)] };
+    /// Dónde la dejó el usuario (esquina de arriba a la izquierda, en pantalla), para la sesión;
+    /// uno por ventana.
+    static PLACE: [Cell<Option<(i32, i32)>>; COUNT] = const { [Cell::new(None), Cell::new(None)] };
     /// Soltando la captura del mouse después de un `Up`: ese `WM_CAPTURECHANGED` no es una pérdida.
     static RELEASING: Cell<bool> = const { Cell::new(false) };
     /// Diálogos, menús o arrastres del host abiertos ahora (`Modal`).
     static MODAL: Cell<u32> = const { Cell::new(0) };
-    /// El último avance que mandó la `App` (`set_progress`): se vuelve a poner cuando la barra de
-    /// tareas crea el botón y cada vez que la ventana se muestra (la `App` no lo repite).
+    /// El último avance que mandó la `App` (`set_progress`, solo de la de copia): se vuelve a
+    /// poner cuando la barra de tareas crea el botón y cada vez que la ventana se muestra (la
+    /// `App` no lo repite).
     static PROGRESS: Cell<AuxProgress> = const { Cell::new(AuxProgress::None) };
 }
 
@@ -184,21 +215,27 @@ fn taskbar_created() -> u32 {
     *MSG.get_or_init(|| unsafe { RegisterWindowMessageW(w!("TaskbarButtonCreated")) })
 }
 
-fn with<R>(f: impl FnOnce(&mut Aux) -> R) -> Option<R> {
+fn with<R>(w: AuxWindow, f: impl FnOnce(&mut Aux) -> R) -> Option<R> {
     AUX.with(|a| {
-        let mut a = a.try_borrow_mut().ok()?;
+        let mut a = a[slot(w)].try_borrow_mut().ok()?;
         a.as_mut().map(f)
     })
 }
 
-fn with_renderer(f: impl FnOnce(&mut Renderer)) {
+fn with_renderer(w: AuxWindow, f: impl FnOnce(&mut Renderer)) {
     RENDERER.with(|r| {
-        if let Ok(mut r) = r.try_borrow_mut()
+        if let Ok(mut r) = r[slot(w)].try_borrow_mut()
             && let Some(r) = r.as_mut()
         {
             f(r);
         }
     });
+}
+
+/// Qué ventana auxiliar es `hwnd` (`None` si no es ninguna de las que hay, por ejemplo mientras
+/// se está creando).
+fn kind_of(hwnd: HWND) -> Option<AuxWindow> {
+    AUX.with(|a| a.iter().find_map(|c| c.try_borrow().ok()?.as_ref().filter(|x| x.hwnd == hwnd).map(|x| x.kind)))
 }
 
 /// La `App` de la ventana principal (la guarda `wndproc` en `GWLP_USERDATA`).
@@ -247,7 +284,7 @@ pub fn max_client_dips(work: RECT, border: RECT, dpi: u32) -> f32 {
 /// Lo de `WindowHost::aux_max_height`: el alto más grande del área que entra en el área de
 /// trabajo del monitor de la ventana de copia (si está a la vista) o, si no, del de la principal.
 pub fn max_client_height(main: HWND) -> Option<f32> {
-    let aux = with(|a| a.hwnd).filter(|h| unsafe { IsWindowVisible(*h) }.as_bool());
+    let aux = with(AuxWindow::Transfers, |a| a.hwnd).filter(|h| unsafe { IsWindowVisible(*h) }.as_bool());
     let on = aux.unwrap_or(main);
     if on.is_invalid() {
         return None;
@@ -282,13 +319,14 @@ fn invalidate(hwnd: HWND) {
     }
 }
 
-fn ensure(main: HWND, theme: &Theme) -> Option<HWND> {
-    if let Some(h) = with(|a| a.hwnd)
+/// La ventana `w`: la que ya existe o una nueva (oculta), con su estado y su renderizador.
+fn ensure(main: HWND, w: AuxWindow, theme: &Theme) -> Option<HWND> {
+    if let Some(h) = with(w, |a| a.hwnd)
         && unsafe { IsWindow(Some(h)) }.as_bool()
     {
         return Some(h);
     }
-    shutdown();
+    release(w);
     static REGISTER: Once = Once::new();
     unsafe {
         let instance = GetModuleHandleW(None).ok()?;
@@ -307,10 +345,15 @@ fn ensure(main: HWND, theme: &Theme) -> Option<HWND> {
             RegisterClassExW(&class);
         });
         let renderer = Renderer::new().ok()?;
+        // Nace oculta: el título que se ve lo pone `show` antes de mostrarla.
+        let caption = match w {
+            AuxWindow::Transfers => w!("Copiando…"),
+            AuxWindow::InUse => w!(""),
+        };
         let hwnd = CreateWindowExW(
             ex_style(),
             CLASS,
-            w!("Copiando…"),
+            caption,
             style(),
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -322,15 +365,16 @@ fn ensure(main: HWND, theme: &Theme) -> Option<HWND> {
             None,
         )
         .ok()?;
-        // Que llegue `TaskbarButtonCreated` aunque xdir corra como administrador.
+        // Que llegue `TaskbarButtonCreated` aunque xdir corra como administrador (solo la de copia
+        // pone avance en su botón).
         let msg = taskbar_created();
-        if msg != 0 {
+        if msg != 0 && carries_progress(w) {
             let _ = ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, None);
         }
         apply_dark(hwnd, theme.dark);
-        AUX.with(|a| *a.borrow_mut() = Some(Aux { main, hwnd, theme: *theme, size: (0.0, 0.0), tracking: false, taskbar: None }));
-        RENDERER.with(|r| *r.borrow_mut() = Some(renderer));
-        with_renderer(|r| r.set_dpi(dpi_of(hwnd)));
+        AUX.with(|a| *a[slot(w)].borrow_mut() = Some(Aux { kind: w, main, hwnd, theme: *theme, size: (0.0, 0.0), tracking: false, taskbar: None }));
+        RENDERER.with(|r| *r[slot(w)].borrow_mut() = Some(renderer));
+        with_renderer(w, |r| r.set_dpi(dpi_of(hwnd)));
         Some(hwnd)
     }
 }
@@ -338,9 +382,8 @@ fn ensure(main: HWND, theme: &Theme) -> Option<HWND> {
 /// Lo de `WindowHost::aux_show`: crea la ventana o la trae al frente, con `title` y un área de
 /// `size` DIPs. `false` si no se pudo crear.
 pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &Theme) -> bool {
-    let AuxWindow::Transfers = w;
-    let Some(hwnd) = ensure(main, theme) else { return false };
-    with(|a| a.size = size);
+    let Some(hwnd) = ensure(main, w, theme) else { return false };
+    with(w, |a| a.size = size);
     let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
     let ws = window_size(hwnd, size);
     unsafe {
@@ -356,14 +399,14 @@ pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &The
                 let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
                 if GetMonitorInfoW(monitor, &mut info).as_bool() { info.rcWork } else { RECT { left: 0, top: 0, right: 1280, bottom: 800 } }
             };
-            let r = match PLACE.with(|p| p.get()) {
+            let r = match PLACE.with(|p| p[slot(w)].get()) {
                 // Donde la dejó el usuario, entera en el monitor más cercano a ese punto.
                 Some((x, y)) => {
                     let work = work_of(MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST));
                     clamp_rect(RECT { left: x, top: y, right: x + ws.cx, bottom: y + ws.cy }, work)
                 }
-                // La primera vez: centrada sobre la principal, con el DPI de su monitor (la de
-                // copia se creó en otro, quizás con otra escala).
+                // La primera vez: centrada sobre la principal, con el DPI de su monitor (la
+                // auxiliar se creó en otro, quizás con otra escala).
                 None => {
                     let work = work_of(MonitorFromWindow(main, MONITOR_DEFAULTTONEAREST));
                     let mut owner = RECT::default();
@@ -388,31 +431,37 @@ pub fn show(main: HWND, w: AuxWindow, title: &str, size: (f32, f32), theme: &The
         }
     }
     // Ocultarla le sacó el avance al botón; si el botón es nuevo, lo pone `TaskbarButtonCreated`.
-    apply_progress(hwnd);
+    apply_progress(w, hwnd);
     invalidate(hwnd);
     true
 }
 
-/// Lo de `WindowHost::aux_progress`: el avance sobre el botón de la barra de tareas. Se guarda
-/// aunque la ventana no exista o esté oculta, para ponerlo cuando se muestre.
+/// Lo de `WindowHost::aux_progress`: el avance sobre el botón de la barra de tareas (solo el de
+/// la de copia). Se guarda aunque la ventana no exista o esté oculta, para ponerlo cuando se
+/// muestre.
 pub fn set_progress(w: AuxWindow, p: AuxProgress) {
-    let AuxWindow::Transfers = w;
+    if !carries_progress(w) {
+        return;
+    }
     PROGRESS.with(|c| c.set(p));
     // Oculta no tiene botón: ponerlo igual no hace nada y no depende de cómo se ocultó (con la
     // ✕ o con la principal minimizada).
-    if let Some(hwnd) = with(|a| a.hwnd) {
-        apply_progress(hwnd);
+    if let Some(hwnd) = with(w, |a| a.hwnd) {
+        apply_progress(w, hwnd);
     }
 }
 
-/// Pone en el botón el último avance guardado (si ya hay barra de tareas).
-fn apply_progress(hwnd: HWND) {
-    apply_state(hwnd, taskbar_state(PROGRESS.with(|c| c.get())));
+/// Pone en el botón de `w` el último avance guardado (si ya hay barra de tareas y `w` lo lleva).
+fn apply_progress(w: AuxWindow, hwnd: HWND) {
+    apply_state(w, hwnd, taskbar_state(PROGRESS.with(|c| c.get())));
 }
 
-fn apply_state(hwnd: HWND, (state, value): (TBPFLAG, Option<u64>)) {
+fn apply_state(w: AuxWindow, hwnd: HWND, (state, value): (TBPFLAG, Option<u64>)) {
+    if !carries_progress(w) {
+        return;
+    }
     // Se clona (es un AddRef) para no llamar con el estado prestado.
-    let Some(Some(taskbar)) = with(|a| a.taskbar.clone()) else { return };
+    let Some(Some(taskbar)) = with(w, |a| a.taskbar.clone()) else { return };
     unsafe {
         let _ = taskbar.SetProgressState(hwnd, state);
         if let Some(v) = value {
@@ -423,22 +472,25 @@ fn apply_state(hwnd: HWND, (state, value): (TBPFLAG, Option<u64>)) {
 
 /// Llegó `TaskbarButtonCreated`: la primera vez se crea el `ITaskbarList3` (COM ya está iniciado
 /// en este hilo, el de interfaz) y se pone el avance guardado.
-fn taskbar_button_created(hwnd: HWND) {
-    if with(|a| a.taskbar.is_none()) == Some(true) {
+fn taskbar_button_created(w: AuxWindow, hwnd: HWND) {
+    if !carries_progress(w) {
+        return;
+    }
+    if with(w, |a| a.taskbar.is_none()) == Some(true) {
         let taskbar = unsafe { CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER) }
             .ok()
             .filter(|t| unsafe { t.HrInit() }.is_ok());
         if taskbar.is_some() {
-            with(|a| a.taskbar = taskbar);
+            with(w, |a| a.taskbar = taskbar);
         }
     }
-    apply_progress(hwnd);
+    apply_progress(w, hwnd);
 }
 
-/// El contenido cambió de alto.
+/// El contenido cambió de alto. El área queda siempre del tamaño pedido (si no entra, la ventana
+/// sube, pero no se achica).
 pub fn resize(w: AuxWindow, size: (f32, f32)) {
-    let AuxWindow::Transfers = w;
-    let Some(hwnd) = with(|a| {
+    let Some(hwnd) = with(w, |a| {
         a.size = size;
         a.hwnd
     }) else {
@@ -472,8 +524,7 @@ pub fn resize(w: AuxWindow, size: (f32, f32)) {
 }
 
 pub fn set_title(w: AuxWindow, title: &str) {
-    let AuxWindow::Transfers = w;
-    if let Some(hwnd) = with(|a| a.hwnd) {
+    if let Some(hwnd) = with(w, |a| a.hwnd) {
         unsafe {
             let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
         }
@@ -481,31 +532,29 @@ pub fn set_title(w: AuxWindow, title: &str) {
 }
 
 pub fn invalidate_aux(w: AuxWindow) {
-    let AuxWindow::Transfers = w;
-    if let Some(hwnd) = with(|a| a.hwnd) {
+    if let Some(hwnd) = with(w, |a| a.hwnd) {
         invalidate(hwnd);
     }
 }
 
 /// La oculta y recuerda dónde estaba.
 pub fn hide(w: AuxWindow) {
-    let AuxWindow::Transfers = w;
-    if let Some(hwnd) = with(|a| a.hwnd) {
-        remember(hwnd);
+    if let Some(hwnd) = with(w, |a| a.hwnd) {
+        remember(w, hwnd);
         // Sin avance en el botón (el guardado queda para cuando se vuelva a mostrar).
-        apply_state(hwnd, (TBPF_NOPROGRESS, None));
+        apply_state(w, hwnd, (TBPF_NOPROGRESS, None));
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
 }
 
-fn remember(hwnd: HWND) {
+fn remember(w: AuxWindow, hwnd: HWND) {
     unsafe {
         if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
             let mut r = RECT::default();
             if GetWindowRect(hwnd, &mut r).is_ok() {
-                PLACE.with(|p| p.set(Some((r.left, r.top))));
+                PLACE.with(|p| p[slot(w)].set(Some((r.left, r.top))));
             }
         }
     }
@@ -513,36 +562,42 @@ fn remember(hwnd: HWND) {
 
 /// El tema cambió (lo llama el host al dibujar la principal).
 pub fn set_theme(theme: &Theme) {
-    let changed = with(|a| {
-        let t = &a.theme;
-        let same = t.dark == theme.dark && t.accent == theme.accent && t.surface == theme.surface && t.text == theme.text;
-        a.theme = *theme;
-        (!same).then_some(a.hwnd)
-    });
-    if let Some(Some(hwnd)) = changed {
-        apply_dark(hwnd, theme.dark);
-        invalidate(hwnd);
+    for w in KINDS {
+        let changed = with(w, |a| {
+            let t = &a.theme;
+            let same = t.dark == theme.dark && t.accent == theme.accent && t.surface == theme.surface && t.text == theme.text;
+            a.theme = *theme;
+            (!same).then_some(a.hwnd)
+        });
+        if let Some(Some(hwnd)) = changed {
+            apply_dark(hwnd, theme.dark);
+            invalidate(hwnd);
+        }
     }
 }
 
-/// Al cerrar xdir: se sueltan el estado y el renderizador en este hilo (la ventana la destruye
-/// Windows con su dueña).
-pub fn shutdown() {
-    AUX.with(|a| {
-        if let Ok(mut a) = a.try_borrow_mut() {
-            *a = None;
-        }
-    });
-    let renderer = RENDERER.with(|r| r.try_borrow_mut().ok().and_then(|mut r| r.take()));
+/// Suelta el estado y el renderizador de `w` en este hilo (su ventana ya no está o se va).
+fn release(w: AuxWindow) {
+    let aux = AUX.with(|a| a[slot(w)].try_borrow_mut().ok().and_then(|mut a| a.take()));
+    drop(aux);
+    let renderer = RENDERER.with(|r| r[slot(w)].try_borrow_mut().ok().and_then(|mut r| r.take()));
     drop(renderer);
 }
 
-fn paint(hwnd: HWND) {
-    let Some((main, theme)) = with(|a| (a.main, a.theme)) else { return };
+/// Al cerrar xdir: se sueltan el estado y el renderizador de las dos en este hilo (las ventanas
+/// las destruye Windows con su dueña).
+pub fn shutdown() {
+    for w in KINDS {
+        release(w);
+    }
+}
+
+fn paint(w: AuxWindow, hwnd: HWND) {
+    let Some((main, theme)) = with(w, |a| (a.main, a.theme)) else { return };
     let dpi = dpi_of(hwnd);
-    with_renderer(|r| {
-        let _ = r.draw(handle_from_hwnd(hwnd), dpi, &theme, &[], |p, w, h| {
-            with_app(main, |app| app.paint_aux(AuxWindow::Transfers, p, w, h));
+    with_renderer(w, |r| {
+        let _ = r.draw(handle_from_hwnd(hwnd), dpi, &theme, &[], |p, width, height| {
+            with_app(main, |app| app.paint_aux(w, p, width, height));
         });
     });
 }
@@ -569,8 +624,8 @@ fn wheel_lines() -> f32 {
 
 /// La rueda sobre la ventana: `wparam` trae los pasos (positivo hacia arriba, como en la
 /// principal) y `lparam` el punto en la pantalla.
-fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
-    let Some(main) = with(|a| a.main) else { return };
+fn wheel(w: AuxWindow, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let Some(main) = with(w, |a| a.main) else { return };
     if !input_ok(main) {
         return;
     }
@@ -579,23 +634,25 @@ fn wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
     let k = dpi_of(hwnd) as f32 / 96.0;
     let dy = -steps * wheel_lines() * WHEEL_LINE;
-    with_app(main, |app| app.aux_mouse(AuxWindow::Transfers, pt.x as f32 / k, pt.y as f32 / k, AuxMouse::Wheel { dy }));
+    with_app(main, |app| app.aux_mouse(w, pt.x as f32 / k, pt.y as f32 / k, AuxMouse::Wheel { dy }));
 }
 
-fn mouse(hwnd: HWND, lparam: LPARAM, ev: AuxMouse) {
-    let Some(main) = with(|a| a.main) else { return };
+fn mouse(w: AuxWindow, hwnd: HWND, lparam: LPARAM, ev: AuxMouse) {
+    let Some(main) = with(w, |a| a.main) else { return };
     if !input_ok(main) {
         return;
     }
     let (x, y) = mouse_dips(hwnd, lparam);
-    with_app(main, |app| app.aux_mouse(AuxWindow::Transfers, x, y, ev));
+    with_app(main, |app| app.aux_mouse(w, x, y, ev));
 }
 
 unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
+        // Mientras se crea (antes de guardar su estado) todavía no es ninguna: lo del sistema.
+        let Some(w) = kind_of(hwnd) else { return DefWindowProcW(hwnd, msg, wparam, lparam) };
         // Registrado: no se puede poner como patrón del `match` (0 si falló el registro).
         if msg != 0 && msg == taskbar_created() {
-            taskbar_button_created(hwnd);
+            taskbar_button_created(w, hwnd);
             return LRESULT(0);
         }
         match msg {
@@ -603,22 +660,22 @@ unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let mut ps = PAINTSTRUCT::default();
                 BeginPaint(hwnd, &mut ps);
                 let _ = EndPaint(hwnd, &ps);
-                paint(hwnd);
+                paint(w, hwnd);
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_SIZE => {
                 let (width, height) = ((lparam.0 & 0xFFFF) as u32, ((lparam.0 >> 16) & 0xFFFF) as u32);
                 let dpi = dpi_of(hwnd);
-                with_renderer(|r| r.resize(width, height, dpi));
+                with_renderer(w, |r| r.resize(width, height, dpi));
                 LRESULT(0)
             }
             WM_DPICHANGED => {
                 let dpi = (wparam.0 & 0xFFFF) as u32;
-                with_renderer(|r| r.set_dpi(dpi));
+                with_renderer(w, |r| r.set_dpi(dpi));
                 let r = &*(lparam.0 as *const RECT);
                 // El área sigue midiendo lo mismo en DIPs: el alto se recalcula con el DPI nuevo.
-                let size = with(|a| a.size).unwrap_or((560.0, 400.0));
+                let size = with(w, |a| a.size).unwrap_or((560.0, 400.0));
                 let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
                 let ws = window_size(hwnd, size);
                 let _ = SetWindowPos(hwnd, None, 0, 0, ws.cx, ws.cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -626,70 +683,73 @@ unsafe extern "system" fn aux_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                if with(|a| std::mem::replace(&mut a.tracking, true)) == Some(false) {
+                if with(w, |a| std::mem::replace(&mut a.tracking, true)) == Some(false) {
                     let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut tme);
                 }
-                mouse(hwnd, lparam, AuxMouse::Move);
+                mouse(w, hwnd, lparam, AuxMouse::Move);
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
                 SetCapture(hwnd);
-                mouse(hwnd, lparam, AuxMouse::Down);
+                mouse(w, hwnd, lparam, AuxMouse::Down);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
                 RELEASING.with(|r| r.set(true));
                 let _ = ReleaseCapture();
                 RELEASING.with(|r| r.set(false));
-                mouse(hwnd, lparam, AuxMouse::Up);
+                mouse(w, hwnd, lparam, AuxMouse::Up);
                 LRESULT(0)
             }
             // Otra ventana (o el sistema: Alt+Tab, un diálogo) se quedó con el mouse sin que
             // llegue el `Up`: lo que se arrastraba o se apretaba termina.
             WM_CAPTURECHANGED => {
                 if HWND(lparam.0 as *mut _) != hwnd && !RELEASING.with(|r| r.get()) {
-                    mouse(hwnd, LPARAM(-1), AuxMouse::Cancel);
+                    mouse(w, hwnd, LPARAM(-1), AuxMouse::Cancel);
                 }
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
-                wheel(hwnd, wparam, lparam);
+                wheel(w, hwnd, wparam, lparam);
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
-                with(|a| a.tracking = false);
-                mouse(hwnd, LPARAM(-1), AuxMouse::Leave);
+                with(w, |a| a.tracking = false);
+                mouse(w, hwnd, LPARAM(-1), AuxMouse::Leave);
                 LRESULT(0)
             }
             WM_KEYDOWN => {
                 let mut used = false;
-                if let Some(main) = with(|a| a.main).filter(|m| input_ok(*m)) {
-                    with_app(main, |app| used = app.aux_key(AuxWindow::Transfers, Key(wparam.0 as u16)));
+                if let Some(main) = with(w, |a| a.main).filter(|m| input_ok(*m)) {
+                    with_app(main, |app| used = app.aux_key(w, Key(wparam.0 as u16)));
                 }
                 if used { LRESULT(0) } else { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
-            // Cerrar (la ✕ o Alt+F4) la oculta: los trabajos siguen y queda el indicador.
-            // Minimizar la deja en la barra de tareas (`DefWindowProcW`), con su botón propio.
-            // Con la `App` ocupada en un diálogo, cerrar espera (no se le puede avisar ahora).
-            WM_CLOSE if with(|a| a.main).is_some_and(|m| !input_ok(m)) => LRESULT(0),
+            // Cerrar (la ✕ o Alt+F4) la oculta: en la de copia los trabajos siguen y queda el
+            // indicador. Minimizar la deja en la barra de tareas (`DefWindowProcW`), con su botón
+            // propio. Con la `App` ocupada en un diálogo, cerrar espera (no se le puede avisar
+            // ahora).
+            WM_CLOSE if with(w, |a| a.main).is_some_and(|m| !input_ok(m)) => LRESULT(0),
             // La principal se minimizó y Windows la oculta con ella: se recuerda dónde estaba
             // (todavía visible).
             WM_SHOWWINDOW if is_parent_closing(wparam.0, lparam.0) => {
-                remember(hwnd);
+                remember(w, hwnd);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_CLOSE => {
-                remember(hwnd);
-                apply_state(hwnd, (TBPF_NOPROGRESS, None));
+                remember(w, hwnd);
+                // Solo la de copia tiene avance que sacar (`apply_state` no hace nada en la otra).
+                apply_state(w, hwnd, (TBPF_NOPROGRESS, None));
                 let _ = ShowWindow(hwnd, SW_HIDE);
-                if let Some(main) = with(|a| a.main) {
-                    with_app(main, |app| app.aux_closed(AuxWindow::Transfers));
+                if let Some(main) = with(w, |a| a.main) {
+                    with_app(main, |app| app.aux_closed(w));
                 }
                 LRESULT(0)
             }
+            // Se suelta solo lo de esta ventana: la otra sigue.
             WM_DESTROY => {
-                shutdown();
+                release(w);
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -796,6 +856,24 @@ mod tests {
         assert_eq!(max_client_dips(work, border, 120), (720 - 16 - 47) as f32 * 96.0 / 120.0);
         // Más chico que el borde: nada (la `App` pone su mínimo).
         assert_eq!(max_client_dips(RECT { left: 0, top: 0, right: 100, bottom: 30 }, border, 96), 0.0);
+    }
+
+    #[test]
+    fn slots_are_distinct_and_in_range() {
+        assert_ne!(slot(AuxWindow::Transfers), slot(AuxWindow::InUse));
+        assert!(slot(AuxWindow::Transfers) < COUNT);
+        assert!(slot(AuxWindow::InUse) < COUNT);
+        // `KINDS` recorre las dos en el orden de sus casillas.
+        for (i, w) in KINDS.iter().enumerate() {
+            assert_eq!(slot(*w), i);
+        }
+    }
+
+    #[test]
+    fn progress_only_applies_to_transfers() {
+        // El avance de la cola va en el botón de la ventana de copia; la de «en uso» no lo lleva.
+        assert!(carries_progress(AuxWindow::Transfers));
+        assert!(!carries_progress(AuxWindow::InUse));
     }
 
     #[test]

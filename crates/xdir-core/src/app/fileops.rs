@@ -251,6 +251,10 @@ impl App {
         // Las plataformas mandan frases completas (`ops::failure`): van tal cual, con su
         // explicación entera para el cartel (`ops::failure_detail`).
         self.set_notice(result.error, result.error_detail);
+        // Falló porque otro programa tiene el archivo, y se sabe cuál: la ventana lo dice.
+        if let Some(f) = &result.in_use {
+            self.open_in_use(crate::in_use::InUseDialog::from_op(f));
+        }
         if let Some(undo) = result.undo {
             self.undo.push(undo);
             if self.undo.len() > UNDO_MAX {

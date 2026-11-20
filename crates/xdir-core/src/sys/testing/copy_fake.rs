@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use crate::sys::{CopyError, CopyPrims, ErrKind, Flow, ItemKind, ItemStat, VolumeInfo};
+use crate::sys::{CopyError, CopyPrims, ErrKind, Flow, Holder, ItemKind, ItemStat, VolumeInfo};
 
 #[derive(Clone, Debug)]
 enum Node {
@@ -55,6 +55,9 @@ struct FakeFs {
     restored: Vec<PathBuf>,
     /// Cuántas veces se pidió `volume` de cada ruta.
     volume_calls: HashMap<PathBuf, u32>,
+    /// Quiénes tienen abierta cada ruta (`set_holders`) y cuántas veces se pidió (`holders`).
+    holders: HashMap<PathBuf, Vec<Holder>>,
+    holders_calls: HashMap<PathBuf, u32>,
 }
 
 fn default_volume() -> VolumeInfo {
@@ -304,6 +307,16 @@ impl FakeCopyPrims {
         self.fs().volume_calls.get(path).copied().unwrap_or(0)
     }
 
+    /// Carga quiénes tienen abierta `path` (lo que devuelve `holders`).
+    pub fn set_holders(&self, path: &Path, holders: Vec<Holder>) {
+        self.fs().holders.insert(path.to_path_buf(), holders);
+    }
+
+    /// Cuántas veces se pidió quiénes tienen abierta `path` (`holders`).
+    pub fn holders_calls(&self, path: &Path) -> u32 {
+        self.fs().holders_calls.get(path).copied().unwrap_or(0)
+    }
+
     /// La Papelera borra definitivamente y responde con error.
     pub fn set_trash_deletes(&self, on: bool) {
         self.fs().trash_deletes = on;
@@ -422,6 +435,12 @@ impl CopyPrims for FakeCopyPrims {
             return Err(CopyError::new(ErrKind::Other("No es una carpeta".into()), p));
         }
         Ok(fs.nodes.keys().filter(|k| k.parent() == Some(key.as_path())).filter_map(|k| k.file_name().map(|n| n.to_os_string())).collect())
+    }
+
+    fn holders(&self, p: &Path) -> Vec<Holder> {
+        let mut fs = self.fs();
+        *fs.holders_calls.entry(p.to_path_buf()).or_default() += 1;
+        fs.holders.get(p).cloned().unwrap_or_default()
     }
 
     fn volume(&self, p: &Path) -> Option<VolumeInfo> {

@@ -9,7 +9,7 @@ use super::engine::{run, title};
 use super::{Answer, Choice, ConflictInfo, Control, JobOutcome, JobSpec, Update};
 use crate::ops::Undo;
 use crate::sys::testing::{FakeCopyPrims, install_fakes};
-use crate::sys::{ErrKind, VolumeInfo};
+use crate::sys::{ErrKind, Holder, VolumeInfo};
 
 fn p(s: &str) -> PathBuf {
     PathBuf::from(s)
@@ -479,6 +479,59 @@ fn retry_only_failed_pairs() {
     assert!(fake.exists(&p("/rt/d/2.txt")));
     assert_eq!((fake.reads(&files[0]), fake.reads(&files[2])), (1, 1));
     assert_eq!(plain(again.out.result.undo.clone()), Some(Undo::Batch(vec![Undo::Created(vec![p("/rt/d/2.txt")])])));
+}
+
+fn excel() -> Holder {
+    Holder { name: "Excel".into(), exe: Some("C:/Office/EXCEL.EXE".into()), pid: 4242, user: Some("Leandro".into()) }
+}
+
+#[test]
+fn in_use_error_carries_holders() {
+    let fake = FakeCopyPrims::new();
+    let files = three_files(&fake, "/hd");
+    fake.fail(&files[1], ErrKind::InUse, u32::MAX);
+    fake.set_holders(&files[1], vec![excel()]);
+    let r = go(&fake, JobSpec::Copy { sources: files.clone(), dest: p("/hd/d") }, &[]);
+    assert_eq!(r.out.errors.len(), 1);
+    assert_eq!(r.out.errors[0].holders, vec![excel()]);
+    assert_eq!(fake.holders_calls(&files[1]), 1);
+}
+
+#[test]
+fn in_use_that_clears_up_is_not_queried() {
+    // El destino definitivo falla una vez al renombrar el parcial: se arregla en los reintentos.
+    let fake = FakeCopyPrims::new();
+    let files = three_files(&fake, "/hc");
+    let dst = p("/hc/d/2.txt");
+    fake.fail(&dst, ErrKind::InUse, 1);
+    fake.set_holders(&dst, vec![excel()]);
+    let r = go(&fake, JobSpec::Copy { sources: files.clone(), dest: p("/hc/d") }, &[]);
+    assert!(r.out.errors.is_empty());
+    assert!(fake.exists(&dst));
+    assert_eq!((fake.holders_calls(&dst), fake.holders_calls(&files[1])), (0, 0));
+}
+
+#[test]
+fn other_errors_carry_no_holders() {
+    let fake = FakeCopyPrims::new();
+    let files = three_files(&fake, "/ho");
+    fake.fail(&files[1], ErrKind::Denied, 1);
+    fake.set_holders(&files[1], vec![excel()]);
+    let r = go(&fake, JobSpec::Copy { sources: files.clone(), dest: p("/ho/d") }, &[]);
+    assert_eq!(r.out.errors.len(), 1);
+    assert!(r.out.errors[0].holders.is_empty());
+    assert_eq!(fake.holders_calls(&files[1]), 0);
+}
+
+#[test]
+fn holders_gone_leave_the_error_plain() {
+    // El proceso terminó entre el fallo y la consulta: el error queda sin holders.
+    let fake = FakeCopyPrims::new();
+    let files = three_files(&fake, "/hg");
+    fake.fail(&files[1], ErrKind::InUse, u32::MAX);
+    let r = go(&fake, JobSpec::Copy { sources: files.clone(), dest: p("/hg/d") }, &[]);
+    assert_eq!(r.out.errors.len(), 1);
+    assert!(r.out.errors[0].holders.is_empty());
 }
 
 #[test]

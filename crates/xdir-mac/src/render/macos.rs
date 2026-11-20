@@ -626,6 +626,7 @@ fn symbol_name(ch: char) -> Option<&'static str> {
         0xE769 => "pause.fill",
         0xE76C => "chevron.right",
         0xE76B => "chevron.left",
+        0xE77B => "person",
         0xE783 => "exclamationmark.circle",
         0xE789 => "megaphone",
         0xE790 => "paintpalette",

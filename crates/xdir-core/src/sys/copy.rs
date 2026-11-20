@@ -113,11 +113,27 @@ pub enum ErrKind {
     Other(String),
 }
 
+/// Un programa que tiene abierto un archivo (lo que `CopyPrims::holders` encuentra cuando algo
+/// falla con `ErrKind::InUse`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Holder {
+    /// El nombre que se le muestra al usuario (el de la aplicación o el del proceso).
+    pub name: String,
+    /// El ejecutable, si se sabe.
+    pub exe: Option<String>,
+    pub pid: u32,
+    /// El usuario dueño del proceso, si se sabe.
+    pub user: Option<String>,
+}
+
 /// Un error de una primitiva, con la ruta que lo causó.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CopyError {
     pub kind: ErrKind,
     pub path: PathBuf,
+    /// Quiénes tienen la ruta abierta (solo lo llena el motor, para `ErrKind::InUse`; las
+    /// primitivas lo dejan vacío).
+    pub holders: Vec<Holder>,
 }
 
 /// El nombre que se muestra de una ruta: el último tramo (o la ruta entera si no tiene, como
@@ -218,7 +234,7 @@ pub fn lower_first(text: &str) -> String {
 
 impl CopyError {
     pub fn new(kind: ErrKind, path: &Path) -> CopyError {
-        CopyError { kind, path: path.to_path_buf() }
+        CopyError { kind, path: path.to_path_buf(), holders: Vec::new() }
     }
 
     /// El motivo corto (para la fila de la lista de errores, ~30 caracteres) y, si hay algo
@@ -374,6 +390,10 @@ pub trait CopyPrims: Send + Sync {
     /// «Devolver» o «Poner de nuevo»), donde el sistema lo permite. Por defecto, `trash(p)`.
     fn trash_as(&self, p: &Path, _shown: &Path) -> Result<String, CopyError> {
         self.trash(p)
+    }
+    /// Qué programas tienen abierto `p` (bloqueante). Por defecto, ninguno: no se sabe.
+    fn holders(&self, _path: &Path) -> Vec<Holder> {
+        Vec::new()
     }
     /// Lugar original de un elemento de la Papelera, si se sabe.
     fn trash_origin(&self, _in_trash: &Path) -> Option<PathBuf> {

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
-use super::{ConsoleInfo, CopyError, DiskScan, ErrKind, FileOps, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
+use super::{ConsoleInfo, CopyError, DiskScan, ErrKind, FileOps, Holder, FileSystem, Handle, Info, LocalNow, Metadata, Overlays, Preview, Services, Shell, SystemEnv, Watch, Waker};
 use crate::info::{InfoChange, InfoReply, InfoRequest, ItemInfo};
 use crate::fs::{Entry as FsEntry, LoadEvent, LoadMsg, Location, Meta, MetaField, MetadataRequest, OverlayRequest, QuickItem, WM_APP_LOAD};
 use crate::config::ColorRule;
@@ -19,6 +19,7 @@ use crate::format::{DAYS_1601_TO_1970, civil_from_days, size_kb_text, size_short
 use crate::geom::{Color, Rect};
 use crate::host::{AuxWindow, MenuPos, TextBox, TextKind, WindowHost};
 use crate::keys::Key;
+use crate::in_use::{InUseFailure, InUseItem};
 use crate::ops::{Op, OpResult, WM_APP_OP_DONE};
 use crate::paint::{FontId, Painter};
 use crate::preview::{PreviewInfo, PreviewRequest, PreviewTarget};
@@ -221,6 +222,8 @@ thread_local! {
     static OPS: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
     static RESPONSE: RefCell<OpResult> = RefCell::new(OpResult::default());
     static FAIL: RefCell<Option<ErrKind>> = const { RefCell::new(None) };
+    /// Quién tiene el archivo cuando la falla configurada es de archivo en uso (`fail_in_use`).
+    static HOLDERS: RefCell<Vec<Holder>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `FileOps` falso: no toca el disco; anota cada `Op` recibida y responde por el canal, en el
@@ -238,6 +241,7 @@ impl FakeFileOps {
     pub fn respond_with(result: OpResult) {
         RESPONSE.with(|r| *r.borrow_mut() = result);
         FAIL.with(|f| *f.borrow_mut() = None);
+        HOLDERS.with(|h| h.borrow_mut().clear());
     }
 
     /// Las próximas operaciones de este hilo fallan con `kind` en su elemento (la carpeta donde
@@ -245,6 +249,14 @@ impl FakeFileOps {
     /// (`ops::failure`). `respond_with` lo deshace.
     pub fn fail_with(kind: ErrKind) {
         FAIL.with(|f| *f.borrow_mut() = Some(kind));
+        HOLDERS.with(|h| h.borrow_mut().clear());
+    }
+
+    /// Las próximas operaciones de este hilo fallan `InUse` (con el aviso de siempre) y además
+    /// dicen que `holders` tienen el elemento de la operación. `respond_with` lo deshace.
+    pub fn fail_in_use(holders: Vec<Holder>) {
+        Self::fail_with(ErrKind::InUse);
+        HOLDERS.with(|h| *h.borrow_mut() = holders);
     }
 }
 
@@ -264,7 +276,10 @@ impl FileOps for FakeFileOps {
         let result = match FAIL.with(|f| f.borrow().clone()) {
             Some(kind) => {
                 let e = CopyError::new(kind, &op_path(&op));
-                OpResult { error: Some(crate::ops::failure(&op, &e)), error_detail: crate::ops::failure_detail(&op, &e), ..OpResult::default() }
+                let holders = HOLDERS.with(|h| h.borrow().clone());
+                let in_use = (e.kind == ErrKind::InUse && !holders.is_empty())
+                    .then(|| InUseFailure { op: op.clone(), items: vec![InUseItem { path: e.path.clone(), holders }] });
+                OpResult { error: Some(crate::ops::failure(&op, &e)), error_detail: crate::ops::failure_detail(&op, &e), in_use, ..OpResult::default() }
             }
             None => RESPONSE.with(|r| r.borrow().clone()),
         };
@@ -1510,15 +1525,15 @@ pub struct FakeHost {
     quick_look_native: Cell<bool>,
     quick_look_cloud: Cell<bool>,
     /// Ventanas secundarias: si el host las tiene (por defecto, sí), lo que se pidió mostrar
-    /// (ventana, título, tamaño), los cambios de tamaño, los repintados, las que se ocultaron y si
-    /// está a la vista.
+    /// (ventana, título, tamaño), los cambios de tamaño, y por ventana los repintados, las veces
+    /// que se ocultó y las que están a la vista.
     aux_native: Cell<bool>,
     aux_shows: RefCell<Vec<AuxShow>>,
     aux_sizes: RefCell<Vec<(AuxWindow, (f32, f32))>>,
-    aux_invalidations: Cell<usize>,
-    aux_hides: Cell<usize>,
+    aux_invalidations: RefCell<Vec<AuxWindow>>,
+    aux_hides: RefCell<Vec<AuxWindow>>,
     aux_progresses: RefCell<Vec<crate::host::AuxProgress>>,
-    aux_visible: Cell<bool>,
+    aux_visible: RefCell<Vec<AuxWindow>>,
     /// El alto máximo que da `aux_max_height` (por defecto, sin límite).
     aux_max_height: Cell<Option<f32>>,
 }
@@ -1550,10 +1565,10 @@ impl FakeHost {
             aux_native: Cell::new(true),
             aux_shows: RefCell::new(Vec::new()),
             aux_sizes: RefCell::new(Vec::new()),
-            aux_invalidations: Cell::new(0),
-            aux_hides: Cell::new(0),
+            aux_invalidations: RefCell::new(Vec::new()),
+            aux_hides: RefCell::new(Vec::new()),
             aux_progresses: RefCell::new(Vec::new()),
-            aux_visible: Cell::new(false),
+            aux_visible: RefCell::new(Vec::new()),
             aux_max_height: Cell::new(None),
         })
     }
@@ -1578,14 +1593,24 @@ impl FakeHost {
         self.aux_sizes.borrow().clone()
     }
 
-    /// Cuántas veces se pidió repintar una ventana secundaria.
+    /// Cuántas veces se pidió repintar la ventana de copia.
     pub fn aux_invalidations(&self) -> usize {
-        self.aux_invalidations.get()
+        self.aux_invalidations_of(AuxWindow::Transfers)
     }
 
-    /// Cuántas veces se ocultó una ventana secundaria desde la `App`.
+    /// Cuántas veces se pidió repintar la ventana secundaria `w`.
+    pub fn aux_invalidations_of(&self, w: AuxWindow) -> usize {
+        self.aux_invalidations.borrow().iter().filter(|x| **x == w).count()
+    }
+
+    /// Cuántas veces se ocultó la ventana de copia desde la `App`.
     pub fn aux_hides(&self) -> usize {
-        self.aux_hides.get()
+        self.aux_hides_of(AuxWindow::Transfers)
+    }
+
+    /// Cuántas veces se ocultó la ventana secundaria `w` desde la `App`.
+    pub fn aux_hides_of(&self, w: AuxWindow) -> usize {
+        self.aux_hides.borrow().iter().filter(|x| **x == w).count()
     }
 
     /// Los avances pedidos con `aux_progress`, en orden.
@@ -1593,14 +1618,25 @@ impl FakeHost {
         self.aux_progresses.borrow().clone()
     }
 
-    /// La ventana secundaria está a la vista (`aux_show` sin `aux_hide` después).
+    /// La ventana de copia está a la vista (`aux_show` sin `aux_hide` después).
     pub fn aux_visible(&self) -> bool {
-        self.aux_visible.get()
+        self.aux_visible_of(AuxWindow::Transfers)
     }
 
-    /// El usuario cerró la ventana (lo que hace la plataforma antes de `App::aux_closed`).
+    /// La ventana secundaria `w` está a la vista (`aux_show` sin `aux_hide` después).
+    pub fn aux_visible_of(&self, w: AuxWindow) -> bool {
+        self.aux_visible.borrow().contains(&w)
+    }
+
+    /// El usuario cerró la ventana de copia (lo que hace la plataforma antes de `App::aux_closed`).
     pub fn aux_user_closed(&self) {
-        self.aux_visible.set(false);
+        self.aux_user_closed_of(AuxWindow::Transfers);
+    }
+
+    /// El usuario cerró la ventana secundaria `w` (lo que hace la plataforma antes de
+    /// `App::aux_closed`).
+    pub fn aux_user_closed_of(&self, w: AuxWindow) {
+        self.aux_visible.borrow_mut().retain(|x| *x != w);
     }
 
     /// Imágenes grandes pedidas en el último cuadro dibujado.
@@ -1840,7 +1876,10 @@ impl WindowHost for FakeHost {
             return false;
         }
         self.aux_shows.borrow_mut().push((w, title.to_string(), size));
-        self.aux_visible.set(true);
+        let mut visible = self.aux_visible.borrow_mut();
+        if !visible.contains(&w) {
+            visible.push(w);
+        }
         true
     }
 
@@ -1858,17 +1897,17 @@ impl WindowHost for FakeHost {
         self.aux_max_height.get()
     }
 
-    fn aux_invalidate(&self, _w: AuxWindow) {
-        self.aux_invalidations.set(self.aux_invalidations.get() + 1);
+    fn aux_invalidate(&self, w: AuxWindow) {
+        self.aux_invalidations.borrow_mut().push(w);
     }
 
     fn aux_progress(&self, _w: AuxWindow, p: crate::host::AuxProgress) {
         self.aux_progresses.borrow_mut().push(p);
     }
 
-    fn aux_hide(&self, _w: AuxWindow) {
-        self.aux_hides.set(self.aux_hides.get() + 1);
-        self.aux_visible.set(false);
+    fn aux_hide(&self, w: AuxWindow) {
+        self.aux_hides.borrow_mut().push(w);
+        self.aux_user_closed_of(w);
     }
 
     fn text_width(&self, s: &str, _bold: bool) -> f32 {

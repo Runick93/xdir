@@ -27,6 +27,9 @@ pub mod fs;
 pub mod geom;
 pub mod groups;
 pub mod host;
+pub mod in_use;
+/// La ventana de «archivo en uso»: dibujo y hit-test.
+pub mod in_use_draw;
 pub mod jump;
 pub mod keys;
 pub mod list;

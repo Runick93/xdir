@@ -11,9 +11,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::{Choice, JobId, JobRoute, JobState, JobView};
+use super::{Choice, JobError, JobId, JobRoute, JobState, JobView};
 use crate::format::thousands;
 use crate::geom::{Color, Rect, contains, rect};
+use crate::in_use::{self, InUseDialog};
 use crate::paint::{FontId, Painter, ellipsize};
 use crate::sys::{ItemKind, ItemStat, SystemEnv};
 use crate::theme::alpha;
@@ -32,6 +33,9 @@ const CONFLICT_H: f32 = 316.0;
 const ROW_H: f32 = 64.0;
 const QUEUED_H: f32 = 56.0;
 const ERROR_ROW: f32 = 44.0;
+/// Cada línea de la fila de un error con quién tiene el archivo, y la fila entera.
+const HELD_LINE: f32 = 26.0;
+const HELD_H: f32 = HELD_LINE * 4.0 + 4.0;
 /// Errores que se listan; el resto se resume en una línea.
 const MAX_ERRORS: usize = 5;
 const MORE_H: f32 = 22.0;
@@ -91,13 +95,19 @@ fn block_of(j: &JobView, expanded: &dyn Fn(JobId) -> bool) -> Block {
     }
 }
 
-fn shown_errors(j: &JobView) -> usize {
-    j.errors.len().min(MAX_ERRORS)
+/// Alto de la fila de un error: con quién tiene el archivo son cuatro líneas (archivo, ubicación,
+/// proceso y usuario); si no, la de siempre.
+fn error_h(e: &JobError) -> f32 {
+    if e.holders.is_empty() { ERROR_ROW } else { HELD_H }
+}
+
+fn errors_h(j: &JobView) -> f32 {
+    j.errors.iter().take(MAX_ERRORS).map(error_h).sum()
 }
 
 fn finished_h(j: &JobView) -> f32 {
     let more = if j.errors.len() > MAX_ERRORS { MORE_H } else { 0.0 };
-    let list = if j.errors.is_empty() { 0.0 } else { ERROR_ROW * shown_errors(j) as f32 + 16.0 + more };
+    let list = if j.errors.is_empty() { 0.0 } else { errors_h(j) + 16.0 + more };
     76.0 + list + 45.0
 }
 
@@ -568,23 +578,37 @@ fn draw_jobs(p: &dyn Painter, r: Rect, jobs: &[JobView], look: &Look, env: &dyn 
                 let title = if j.errors.iter().any(|e| e.retry) && j.stopped.is_none() { done_line(j) } else { j.title.clone() };
                 header(p, r, top, &title, &big, color);
                 if !j.errors.is_empty() {
-                    let list = rect(l, top + 76.0, rr, top + 76.0 + ERROR_ROW * shown_errors(j) as f32);
+                    let list = rect(l, top + 76.0, rr, top + 76.0 + errors_h(j));
                     p.round_fill(list, 6.0, th.surface_alt);
                     p.round_stroke(list, 6.0, th.border);
+                    let mut y = list.top;
                     for (k, e) in j.errors.iter().take(MAX_ERRORS).enumerate() {
-                        let y = list.top + ERROR_ROW * k as f32;
                         if k > 0 {
                             p.fill(rect(list.left, y, list.right, y + 1.0), th.border);
                         }
                         let name = e.shown_name();
                         let folder = error_folder(&e.src, &j.route);
-                        p.text(FontId::GlyphsSmall, "\u{E8A5}", rect(list.left + 12.0, y + 12.0, list.left + 28.0, y + 30.0), th.text_dim);
-                        let mw = p.measure(FontId::Ui, &e.message).min(220.0);
-                        let nx = list.left + 38.0;
-                        let nr = list.right - 16.0 - mw - 12.0;
-                        p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &name, nr - nx), rect(nx, y + 6.0, nr, y + 24.0), th.text);
-                        p.text(FontId::Small, &ellipsize(p, FontId::Small, &folder, nr - nx), rect(nx, y + 24.0, nr, y + 40.0), th.text_dim);
-                        p.text(FontId::UiRight, &e.message, rect(list.right - 16.0 - mw, y + 13.0, list.right - 12.0, y + 31.0), th.danger);
+                        if let Some(process) = in_use::held_by(&e.holders) {
+                            // Quién tiene el archivo: una línea por dato, con su ícono.
+                            let user = InUseDialog::user_value(&e.holders[0]);
+                            let lines = [("\u{E8A5}", "Archivo", name), ("\u{E8B7}", "Ubicación", folder), ("\u{E756}", "Proceso", process), ("\u{E77B}", "Usuario", user)];
+                            for (i, (glyph, label, value)) in lines.into_iter().enumerate() {
+                                let ly = y + 2.0 + HELD_LINE * i as f32;
+                                p.text(FontId::GlyphsSmall, glyph, rect(list.left + 12.0, ly + 4.0, list.left + 28.0, ly + 22.0), th.text_dim);
+                                p.text(FontId::Ui, label, rect(list.left + 38.0, ly + 4.0, list.left + 118.0, ly + 22.0), th.text_dim);
+                                let (vx, vr) = (list.left + 126.0, list.right - 16.0);
+                                p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &value, vr - vx), rect(vx, ly + 4.0, vr, ly + 22.0), th.text);
+                            }
+                        } else {
+                            p.text(FontId::GlyphsSmall, "\u{E8A5}", rect(list.left + 12.0, y + 12.0, list.left + 28.0, y + 30.0), th.text_dim);
+                            let mw = p.measure(FontId::Ui, &e.message).min(220.0);
+                            let nx = list.left + 38.0;
+                            let nr = list.right - 16.0 - mw - 12.0;
+                            p.text(FontId::Ui, &ellipsize(p, FontId::Ui, &name, nr - nx), rect(nx, y + 6.0, nr, y + 24.0), th.text);
+                            p.text(FontId::Small, &ellipsize(p, FontId::Small, &folder, nr - nx), rect(nx, y + 24.0, nr, y + 40.0), th.text_dim);
+                            p.text(FontId::UiRight, &e.message, rect(list.right - 16.0 - mw, y + 13.0, list.right - 12.0, y + 31.0), th.danger);
+                        }
+                        y += error_h(e);
                     }
                     if j.errors.len() > MAX_ERRORS {
                         let y = list.bottom + 4.0;

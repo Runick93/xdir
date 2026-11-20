@@ -289,7 +289,8 @@ fn ensure(main: Handle, theme: &Theme, size: (f32, f32)) -> Option<Retained<NSWi
 /// Lo de `WindowHost::aux_show`: crea la ventana o la trae al frente (sin quitarle el foco a la
 /// principal), con `title` y un área de `size` puntos.
 pub fn show(main: Handle, w: AuxWindow, title: &str, size: (f32, f32), theme: &Theme) -> bool {
-    let AuxWindow::Transfers = w;
+    // La de «archivo en uso» no existe en macOS: queda el aviso de la barra de estado.
+    let AuxWindow::Transfers = w else { return false };
     let Some(window) = ensure(main, theme, size) else { return false };
     window.setTitle(&NSString::from_str(title));
     set_content_size(&window, size);
@@ -333,28 +334,28 @@ fn set_content_size(window: &NSWindow, size: (f32, f32)) {
 }
 
 pub fn set_title(w: AuxWindow, title: &str) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     if let Some(window) = with(|a| a.window.clone()) {
         window.setTitle(&NSString::from_str(title));
     }
 }
 
 pub fn resize(w: AuxWindow, size: (f32, f32)) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     if let Some(window) = with(|a| a.window.clone()) {
         set_content_size(&window, size);
     }
 }
 
 pub fn invalidate(w: AuxWindow) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     if let Some(view) = with(|a| a.view.clone()) {
         view.setNeedsDisplay(true);
     }
 }
 
 pub fn hide(w: AuxWindow) {
-    let AuxWindow::Transfers = w;
+    let AuxWindow::Transfers = w else { return };
     if let Some(window) = with(|a| a.window.clone()) {
         detach_and_hide(&window);
     }

@@ -5,7 +5,7 @@
 //! arma la operación inversa para deshacer (Ctrl+Z).
 
 use super::{Op, OpResult, Undo, WM_APP_OP_DONE};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
@@ -25,8 +25,11 @@ use windows::core::{AsImpl, HRESULT, HSTRING, PCWSTR, Ref, Result, implement, s,
 
 use crate::platform::{Handle, HandleExt};
 use crate::fs::wide_path;
+use xdir_core::in_use::{InUseFailure, InUseItem};
 use xdir_core::names;
-use xdir_core::sys::ErrKind;
+use xdir_core::sys::{CopyPrims, ErrKind};
+
+use super::WinCopyPrims;
 
 
 
@@ -37,8 +40,8 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
         let hwnd = HWND(hwnd_raw as *mut _);
         let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
         let result = run(hwnd, op.clone()).unwrap_or_else(|e| {
-            let (error, error_detail) = op_error(&op, &e);
-            OpResult { error: Some(error), error_detail, ..Default::default() }
+            let (error, error_detail, in_use) = op_error(&op, &e);
+            OpResult { error: Some(error), error_detail, in_use, ..Default::default() }
         });
         if tx.send(result).is_ok() {
             unsafe {
@@ -54,19 +57,26 @@ pub fn spawn(owner: Handle, tx: Sender<OpResult>, op: Op) {
 /// El aviso de una operación que falló: qué no se pudo hacer, con qué elemento, por qué y qué
 /// hacer. Si fue el acceso controlado a carpetas (issue #72: «Carpeta nueva» en Documentos
 /// redirigido daba «no se encuentra»), lo dice y cómo permitir xdir. Con la explicación entera
-/// para el cartel, si el aviso la acorta.
-fn op_error(op: &Op, e: &windows::core::Error) -> (String, Option<String>) {
+/// para el cartel, si el aviso la acorta. Si lo tiene abierto otro programa (`InUse`), además
+/// quién (el Restart Manager se consulta recién ahora que el fallo es definitivo, y desde el hilo
+/// de la operación, no el de la ventana).
+fn op_error(op: &Op, e: &windows::core::Error) -> (String, Option<String>, Option<InUseFailure>) {
     let path = match op {
         // Lo que se crea va en `parent`: el acceso controlado mira esa carpeta.
         Op::NewFolder { parent } | Op::NewFile { parent } => parent.clone(),
         Op::Rename { path, .. } => path.clone(),
         Op::Delete { paths, .. } => paths.first().cloned().unwrap_or_default(),
         Op::Shortcuts { targets } => targets.first().cloned().unwrap_or_default(),
-        Op::Undo(_) => return (format!("No se pudo deshacer: {}.", xdir_core::sys::lower_first(&super::errors::win_message(e))), None),
+        Op::Undo(_) => return (format!("No se pudo deshacer: {}.", xdir_core::sys::lower_first(&super::errors::win_message(e))), None, None),
     };
     let present = || super::errors::exists(&path);
     let failed = super::errors::write_error(e.code().0 as u32, &e.message(), &path, &present);
-    super::errors::op_message(op, &failed, failed.kind == ErrKind::NotFound && present())
+    let (notice, detail) = super::errors::op_message(op, &failed, failed.kind == ErrKind::NotFound && present());
+    let in_use = (failed.kind == ErrKind::InUse)
+        .then(|| WinCopyPrims.holders(&failed.path))
+        .filter(|holders| !holders.is_empty())
+        .map(|holders| InUseFailure { op: op.clone(), items: vec![InUseItem { path: failed.path.clone(), holders }] });
+    (notice, detail, in_use)
 }
 
 fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
@@ -163,7 +173,7 @@ fn run(hwnd: HWND, op: Op) -> Result<OpResult> {
         Undo::CreatedIds(v) => !v.is_empty(),
         Undo::Renames(v) => !v.is_empty(),
     });
-    Ok(OpResult { undo, focus, rename_after, error: None, error_detail: None, select })
+    Ok(OpResult { undo, focus, rename_after, error: None, error_detail: None, select, in_use: None })
 }
 
 /// «Crear acceso directo»: un `.lnk` junto a cada uno («nombre - Acceso directo.lnk», « (2)»…).
@@ -189,6 +199,7 @@ fn create_shortcuts(targets: &[PathBuf]) -> Result<OpResult> {
         error: (!errors.is_empty()).then(|| errors.join("; ")),
         error_detail: None,
         select: created,
+        in_use: None,
     })
 }
 
@@ -319,10 +330,19 @@ pub(super) fn recycle_one(path: &Path) -> Result<Option<String>> {
         fo.DeleteItem(&item(path)?, None)?;
         fo.PerformOperations()?;
         if fo.GetAnyOperationsAborted().map(|b| b.as_bool()).unwrap_or(false) {
-            return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+            // Con `FOF_NOERRORUI` el Shell no muestra nada cuando un elemento falla (en uso, sin
+            // permiso…) y solo da «abortado»; el motivo verdadero llega en `PostDeleteItem`. Si hubo
+            // uno, ese es el error; si no, el usuario contestó que no al aviso (`E_ABORT`).
+            let hr = recorder_failure(&recorder).filter(|hr| !is_cancel(*hr)).unwrap_or(windows::Win32::Foundation::E_ABORT);
+            return Err(windows::core::Error::from_hresult(hr));
         }
     }
     Ok(recorder_log(&recorder).into_iter().find_map(|r| r.created))
+}
+
+/// ¿El `HRESULT` es una cancelación (`E_ABORT`, `COPYENGINE_E_USER_CANCELLED`, `_CANCELLED`)?
+fn is_cancel(hr: HRESULT) -> bool {
+    matches!(hr.0 as u32, 0x8000_4004 | 0x8027_0000 | 0x8027_0001)
 }
 
 pub fn item(path: &Path) -> Result<IShellItem> {
@@ -351,6 +371,8 @@ struct Record {
 #[derive(Default)]
 struct Recorder {
     log: RefCell<Vec<Record>>,
+    /// El primer error con que el Shell dio por fallido un elemento (`Post*Item` con `hr` de error).
+    failure: Cell<Option<HRESULT>>,
 }
 
 fn recorder_log(sink: &IFileOperationProgressSink) -> Vec<Record> {
@@ -359,9 +381,18 @@ fn recorder_log(sink: &IFileOperationProgressSink) -> Vec<Record> {
     imp.log.borrow().clone()
 }
 
+/// El primer error que el Shell dio para un elemento, si lo hubo.
+fn recorder_failure(sink: &IFileOperationProgressSink) -> Option<HRESULT> {
+    let imp: &Recorder = unsafe { sink.as_impl() };
+    imp.failure.get()
+}
+
 impl Recorder_Impl {
     fn record(&self, hr: HRESULT, source: Ref<IShellItem>, created: Ref<IShellItem>, kind: SIGDN) {
         if hr.is_err() {
+            if self.failure.get().is_none() {
+                self.failure.set(Some(hr));
+            }
             return;
         }
         let source = source.as_ref().and_then(|i| display_name(i, SIGDN_FILESYSPATH)).map(PathBuf::from);
@@ -431,6 +462,36 @@ impl IFileOperationProgressSink_Impl for Recorder_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un archivo abierto sin compartir (como lo tiene Excel) que falla al renombrar: el
+    /// `OpResult` nombra a quien lo tiene (acá, este mismo proceso). Se prueba `op_error`, lo que
+    /// arma `spawn` al fallar, porque el `IFileOperation` real pide una ventana y un hilo COM.
+    #[test]
+    fn rename_of_a_held_file_reports_the_holder() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("xdir-win-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+        let _open = std::fs::OpenOptions::new().read(true).share_mode(0).open(&a).unwrap();
+        let op = Op::Rename { path: a.clone(), new_name: "b.txt".into() };
+        // ERROR_SHARING_VIOLATION, como lo devuelve el Shell.
+        let sharing = windows::core::Error::from(HRESULT(0x8007_0020_u32 as i32));
+        let (notice, _detail, in_use) = op_error(&op, &sharing);
+        assert!(notice.contains("lo está usando otro programa"), "{notice}");
+        let in_use = in_use.expect("el archivo está en uso");
+        assert_eq!(in_use.op, op);
+        assert_eq!(in_use.items.len(), 1);
+        assert_eq!(in_use.items[0].path, a);
+        assert!(in_use.items[0].holders.iter().any(|h| h.pid == std::process::id()), "{in_use:?}");
+        // Otro error, o un archivo libre, no consultan ni informan nada.
+        let denied = windows::core::Error::from(HRESULT(0x8007_0005_u32 as i32));
+        assert_eq!(op_error(&op, &denied).2, None);
+        drop(_open);
+        assert_eq!(op_error(&op, &sharing).2, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// «Crear acceso directo»: «a.txt - Acceso directo.lnk» (y « (2)»), que `link_target` resuelve.
     #[test]

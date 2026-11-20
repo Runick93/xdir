@@ -196,3 +196,33 @@ fn trash_place_is_trash() {
     FakeFileSystem::set_trash(None);
     assert!(fs.trash_place().is_none());
 }
+
+fn holder() -> Holder {
+    Holder { name: "Word".into(), exe: Some("WINWORD.EXE".into()), pid: 4242, user: Some("leandro".into()) }
+}
+
+/// Un error recién armado no sabe quién tiene el archivo.
+#[test]
+fn copy_error_new_has_no_holders() {
+    let e = CopyError::new(ErrKind::InUse, Path::new("a.txt"));
+    assert!(e.holders.is_empty());
+}
+
+/// Un `CopyPrims` que no implementa `holders` no conoce a nadie.
+#[test]
+fn default_prims_know_no_holders() {
+    let disk = super::testing::FakeCopyPrims::new();
+    assert!(CopyPrims::holders(&disk, Path::new("a.txt")).is_empty());
+    assert_eq!(disk.holders_calls(Path::new("a.txt")), 1);
+}
+
+/// El falso devuelve lo cargado y cuenta cada pedido.
+#[test]
+fn fake_prims_return_loaded_holders_and_count_calls() {
+    let disk = super::testing::FakeCopyPrims::new();
+    let p = Path::new("a.txt");
+    assert_eq!(disk.holders_calls(p), 0);
+    disk.set_holders(p, vec![holder()]);
+    assert_eq!(CopyPrims::holders(&disk, p), vec![holder()]);
+    assert_eq!(disk.holders_calls(p), 1);
+}

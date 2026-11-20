@@ -791,12 +791,13 @@ impl App {
                 let look = view::Look { expanded: &|id| self.transfers_expanded(id), scroll: w.scroll, hover: w.hover, dragging: w.thumb_grab.is_some() };
                 view::draw(p, rect(0.0, 0.0, width, height), &self.transfers.jobs, &look, sys::env());
             }
+            AuxWindow::InUse => self.paint_in_use(p, width, height),
         }
     }
 
     /// El mouse en la ventana de copia (DIPs de su área).
     pub fn aux_mouse(&mut self, w: AuxWindow, x: f32, y: f32, ev: AuxMouse) {
-        let AuxWindow::Transfers = w;
+        let AuxWindow::Transfers = w else { return self.in_use_mouse(x, y, ev) };
         let host = self.host.clone();
         let (width, height) = self.transfers_size();
         let r = rect(0.0, 0.0, width, height);
@@ -923,6 +924,7 @@ impl App {
     /// Re Pág / Av Pág desplazan una página (menos un poco, para no perder el borde), Inicio y Fin
     /// van a los extremos y las flechas de a poco.
     pub fn aux_key(&mut self, w: AuxWindow, vk: Key) -> bool {
+        let AuxWindow::Transfers = w else { return self.in_use_key(vk) };
         if vk == VK_ESCAPE {
             self.host.clone().aux_hide(w);
             self.aux_closed(w);
@@ -949,7 +951,7 @@ impl App {
 
     /// El usuario cerró la ventana: se oculta, los trabajos siguen y queda el indicador.
     pub fn aux_closed(&mut self, w: AuxWindow) {
-        let AuxWindow::Transfers = w;
+        let AuxWindow::Transfers = w else { return self.in_use_closed() };
         let win = &mut self.transfers.window;
         win.shown = false;
         win.hover = None;

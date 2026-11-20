@@ -419,7 +419,7 @@ impl<'a> Job<'a> {
         self.progress(0, true);
         let undo = (!self.undo.is_empty()).then(|| Undo::Batch(std::mem::take(&mut self.undo)));
         let focus = self.focus.take().or_else(|| self.select.last().cloned());
-        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, error_detail: None, select: std::mem::take(&mut self.select) };
+        let result = OpResult { undo, focus, rename_after: self.rename_after, error: None, error_detail: None, select: std::mem::take(&mut self.select), in_use: None };
         let outcome = JobOutcome {
             result,
             errors: std::mem::take(&mut self.errors),
@@ -442,7 +442,11 @@ impl<'a> Job<'a> {
 
     // ---------- errores y deshacer ----------
 
-    fn fail(&mut self, src: &Path, dst: &Path, e: CopyError) {
+    fn fail(&mut self, src: &Path, dst: &Path, mut e: CopyError) {
+        // Recién acá, con el fallo ya definitivo, se pregunta quién tiene el archivo.
+        if e.kind == ErrKind::InUse && e.holders.is_empty() {
+            e.holders = self.prims.holders(&e.path);
+        }
         match e.kind {
             ErrKind::Cancelled => self.cancelled = true,
             // Sin lugar o bloqueado por el acceso controlado a carpetas: todo lo demás fallaría igual.
@@ -452,15 +456,15 @@ impl<'a> Job<'a> {
                     let what = format!("copiar «{}»", crate::sys::shown_name(src));
                     self.stop_notice = Some((e.notice(&what), e.detail(&what)));
                 }
-                self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None });
+                self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None, holders: e.holders.clone() });
             }
-            _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None }),
+            _ => self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: e.message(), retry: true, entry: None, holders: e.holders.clone() }),
         }
     }
 
     /// Un error con su texto; `retry`: «Reintentar» lo vuelve a intentar (no, si es un aviso).
     fn fail_msg(&mut self, src: &Path, dst: &Path, message: &str, retry: bool) {
-        self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: message.into(), retry, entry: None });
+        self.errors.push(JobError { src: src.to_path_buf(), dst: dst.to_path_buf(), message: message.into(), retry, entry: None, holders: Vec::new() });
     }
 
     /// Anota un paso de deshacer, juntándolo con el anterior si es del mismo tipo.
@@ -1959,7 +1963,7 @@ impl<'a> Job<'a> {
 
     /// Una entrada del archivo que no llegó.
     fn entry_error(&mut self, archive: &Path, dir: &Path, name: &str, message: &str) {
-        self.errors.push(super::JobError { src: archive.to_path_buf(), dst: dir.to_path_buf(), message: message.into(), retry: false, entry: Some(name.into()) });
+        self.errors.push(super::JobError { src: archive.to_path_buf(), dst: dir.to_path_buf(), message: message.into(), retry: false, entry: Some(name.into()), holders: Vec::new() });
     }
 
     /// «Extraer en "fotos"»: la raíz de lo extraído (o la única carpeta que tiene adentro, como

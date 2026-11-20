@@ -231,7 +231,7 @@ fn keywords_and_comment(wide: &HSTRING) -> (Option<Vec<Tag>>, Option<String>) {
 }
 
 /// Texto de un SID: «DOMINIO\nombre» (o el nombre solo).
-fn account_name(sid: PSID) -> String {
+pub(crate) fn account_name(sid: PSID) -> String {
     let (mut n, mut d) = (256u32, 256u32);
     let (mut name, mut domain) = (vec![0u16; 256], vec![0u16; 256]);
     let mut use_ = SID_NAME_USE::default();

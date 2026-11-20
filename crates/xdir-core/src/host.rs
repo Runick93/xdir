@@ -119,6 +119,8 @@ pub trait Accessibility {
 pub enum AuxWindow {
     /// La ventana de copia: la cola de trabajos del motor (`transfer::view`).
     Transfers,
+    /// La de «archivo en uso»: quién tiene lo que no se pudo tocar (`in_use_draw`).
+    InUse,
 }
 
 /// El avance de la cola de copias para el host (la barra de tareas en Windows): sin avance, en

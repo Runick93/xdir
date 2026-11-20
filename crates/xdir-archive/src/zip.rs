@@ -156,7 +156,7 @@ fn extract_index(
     progress: &mut dyn FnMut(u64) -> Flow,
 ) -> Result<u64, Error> {
     if index >= a.len() {
-        return Err(Error { kind: ErrKind::NotFound, path: archive.to_path_buf() });
+        return Err(Error { kind: ErrKind::NotFound, path: archive.to_path_buf(), holders: Vec::new() });
     }
     {
         let raw = a.by_index_raw(index).map_err(|e| map_zip(e, archive))?;

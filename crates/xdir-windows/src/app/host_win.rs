@@ -735,7 +735,7 @@ impl WindowHost for Win32Host {
         true
     }
 
-    /// La ventana de copia (`crate::auxwin`).
+    /// Las ventanas auxiliares: la de copia y la de «archivo en uso» (`crate::auxwin`).
     fn aux_show(&self, w: xdir_core::host::AuxWindow, title: &str, size: (f32, f32)) -> bool {
         let theme = self.theme.get().unwrap_or_else(|| Theme::from_system(xdir_core::theme::DEFAULT_ACCENT, None));
         crate::auxwin::show(self.hwnd.get().hwnd(), w, title, size, &theme)
@@ -750,7 +750,9 @@ impl WindowHost for Win32Host {
     }
 
     fn aux_max_height(&self, w: xdir_core::host::AuxWindow) -> Option<f32> {
-        let xdir_core::host::AuxWindow::Transfers = w;
+        // Solo la de copia se acorta al área de trabajo; la de «en uso» mide siempre lo que pide
+        // la `App` (sus botones van al pie de ese alto).
+        let xdir_core::host::AuxWindow::Transfers = w else { return None };
         crate::auxwin::max_client_height(self.hwnd.get().hwnd())
     }
 

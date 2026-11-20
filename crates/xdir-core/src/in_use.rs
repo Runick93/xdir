@@ -54,6 +54,8 @@ pub struct InUseDialog {
     pub groups: Vec<HolderGroup>,
     /// Cuántos programas más hay que no entran en `groups`.
     pub more_groups: usize,
+    /// La carpeta donde están los archivos (su nombre), si es una sola.
+    pub location: Option<String>,
     pub retry: InUseRetry,
 }
 
@@ -62,22 +64,24 @@ impl InUseDialog {
     pub fn from_op(f: &InUseFailure) -> InUseDialog {
         let path = f.items.first().map(|i| i.path.clone()).unwrap_or_default();
         let (groups, more_groups) = split_groups(group_all(f.items.iter().map(|i| (i.path.clone(), crate::sys::shown_name(&i.path), i.holders.as_slice()))));
-        InUseDialog { title: format!("No se pudo {}", ops::doing(&f.op, &path)), groups, more_groups, retry: InUseRetry::Op(f.op.clone()) }
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf());
+        let same = parent.is_some() && f.items.iter().all(|i| i.path.parent() == parent.as_deref());
+        let location = parent.filter(|_| same).map(|p| crate::sys::shown_name(&p));
+        InUseDialog { title: format!("No se pudo {}", ops::doing(&f.op, &path)), groups, more_groups, location, retry: InUseRetry::Op(f.op.clone()) }
     }
 
-    /// Hay más de un programa (los listados y los que no entran): decide el singular o el plural.
-    fn several(&self) -> bool {
-        self.groups.len() + self.more_groups > 1
+    /// Cuántos programas la tienen (los listados y los que no entran).
+    fn programs(&self) -> usize {
+        self.groups.len() + self.more_groups
     }
 
-    /// La frase que antecede a la lista: singular con un solo programa, plural con varios.
-    pub fn intro(&self) -> &'static str {
-        if self.several() { "Lo están usando otros programas:" } else { "Lo está usando otro programa:" }
-    }
-
-    /// La frase de cierre, con el mismo criterio de singular y plural que `intro`.
-    pub fn outro(&self) -> &'static str {
-        if self.several() { "Cerralos y reintentá." } else { "Cerralo y reintentá." }
+    /// La frase bajo el título: «PowerShell 7 está usando el archivo.» con un solo programa,
+    /// «Lo están usando N programas.» con varios.
+    pub fn intro(&self) -> String {
+        match (self.programs(), self.groups.first()) {
+            (1, Some(g)) => format!("{} está usando el archivo.", holder_name(&g.holder)),
+            (n, _) => format!("Lo están usando {n} programas."),
+        }
     }
 
     /// «Microsoft Excel (EXCEL.EXE)»; solo el nombre si no hay ejecutable o es el mismo.
@@ -92,6 +96,16 @@ impl InUseDialog {
     /// «PID 4812 · usuario PC\Leandro» («usuario desconocido» si no se pudo leer).
     pub fn holder_line(h: &Holder) -> String {
         format!("PID {} · usuario {}", h.pid, h.user.as_deref().unwrap_or("desconocido"))
+    }
+
+    /// «PowerShell 7 · PID 31432»: la fila «Proceso» de la ventana.
+    pub fn process_value(h: &Holder) -> String {
+        format!("{} · PID {}", holder_name(h), h.pid)
+    }
+
+    /// El usuario de la fila «Usuario» («Desconocido» si no se pudo leer).
+    pub fn user_value(h: &Holder) -> String {
+        h.user.clone().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "Desconocido".into())
     }
 }
 
@@ -112,18 +126,18 @@ pub fn holder_name(h: &Holder) -> String {
     }
 }
 
-/// Lo que dice la fila de un error de la ventana de copia cuando se sabe quién tiene el archivo:
-/// «En uso por PowerShell 7», con « y N más» si lo tienen otros procesos (distintos por `pid`).
-/// `None` si no se sabe quién lo tiene.
+/// El valor de la fila «Proceso» de un error de la ventana de copia cuando se sabe quién tiene el
+/// archivo: «PowerShell 7 · PID 31432», con « y N más» si lo tienen otros procesos (distintos por
+/// `pid`). `None` si no se sabe quién lo tiene.
 pub fn held_by(holders: &[Holder]) -> Option<String> {
     let first = holders.first()?;
     let mut pids: Vec<u32> = holders.iter().map(|h| h.pid).collect();
     pids.sort_unstable();
     pids.dedup();
-    let name = holder_name(first);
+    let process = InUseDialog::process_value(first);
     Some(match pids.len() - 1 {
-        0 => format!("En uso por {name}"),
-        more => format!("En uso por {name} y {more} más"),
+        0 => process,
+        more => format!("{process} y {more} más"),
     })
 }
 
@@ -196,7 +210,7 @@ mod tests {
     fn group_caps_programs_and_files() {
         let mut items: Vec<InUseItem> = (0..9).map(|i| item(&format!("f{i}"), &[1])).collect();
         items.extend((2..=7).map(|p| item(&format!("g{p}"), &[p])));
-        let d = InUseDialog { title: String::new(), groups: group(&items), more_groups: 0, retry: InUseRetry::Op(Op::NewFolder { parent: PathBuf::from("/u") }) };
+        let d = InUseDialog { title: String::new(), groups: group(&items), more_groups: 0, location: None, retry: InUseRetry::Op(Op::NewFolder { parent: PathBuf::from("/u") }) };
         assert_eq!(d.groups.len(), MAX_GROUPS);
         assert_eq!(d.groups[0].files.len(), MAX_FILES);
         assert_eq!(d.groups[0].more_files, 4);
@@ -285,8 +299,8 @@ mod tests {
     fn name_and_held_by() {
         let mut h = Holder { name: "PowerShell 7".into(), exe: Some("pwsh.exe".into()), pid: 24012, user: None };
         assert_eq!(holder_name(&h), "PowerShell 7");
-        assert_eq!(held_by(std::slice::from_ref(&h)).as_deref(), Some("En uso por PowerShell 7"));
-        assert_eq!(held_by(&[h.clone(), h.clone(), holder(9)]).as_deref(), Some("En uso por PowerShell 7 y 1 más"));
+        assert_eq!(held_by(std::slice::from_ref(&h)).as_deref(), Some("PowerShell 7 · PID 24012"));
+        assert_eq!(held_by(&[h.clone(), h.clone(), holder(9)]).as_deref(), Some("PowerShell 7 · PID 24012 y 1 más"));
         assert_eq!(held_by(&[]), None);
         h.name = " ".into();
         assert_eq!(holder_name(&h), "pwsh.exe");
@@ -295,12 +309,28 @@ mod tests {
     }
 
     #[test]
-    fn intro_outro_singular_and_plural() {
+    fn intro_names_the_program_or_counts_them() {
         let one = InUseDialog::from_op(&InUseFailure { op: Op::NewFolder { parent: PathBuf::from("/u") }, items: vec![item("a", &[1])] });
-        assert_eq!(one.intro(), "Lo está usando otro programa:");
-        assert_eq!(one.outro(), "Cerralo y reintentá.");
+        assert_eq!(one.intro(), "Prog1 está usando el archivo.");
         let two = InUseDialog::from_op(&InUseFailure { op: Op::NewFolder { parent: PathBuf::from("/u") }, items: vec![item("a", &[1, 2])] });
-        assert_eq!(two.intro(), "Lo están usando otros programas:");
-        assert_eq!(two.outro(), "Cerralos y reintentá.");
+        assert_eq!(two.intro(), "Lo están usando 2 programas.");
+    }
+
+    #[test]
+    fn location_is_the_shared_folder_or_nothing() {
+        let op = Op::NewFolder { parent: PathBuf::from("/u") };
+        let d = InUseDialog::from_op(&InUseFailure { op: op.clone(), items: vec![item("a", &[1]), item("b", &[1])] });
+        assert_eq!(d.location.as_deref(), Some("u"));
+        let other = InUseItem { path: PathBuf::from("/v/c"), holders: vec![holder(1)] };
+        let d = InUseDialog::from_op(&InUseFailure { op, items: vec![item("a", &[1]), other] });
+        assert_eq!(d.location, None);
+    }
+
+    #[test]
+    fn process_and_user_values() {
+        let h = Holder { name: "PowerShell 7".into(), exe: None, pid: 31432, user: Some(r"PC\Leandro".into()) };
+        assert_eq!(InUseDialog::process_value(&h), "PowerShell 7 · PID 31432");
+        assert_eq!(InUseDialog::user_value(&h), r"PC\Leandro");
+        assert_eq!(InUseDialog::user_value(&Holder { user: None, ..h }), "Desconocido");
     }
 }

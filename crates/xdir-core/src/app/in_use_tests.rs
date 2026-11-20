@@ -142,8 +142,9 @@ fn failed_rename_in_use_opens_the_window() {
     assert!(notice.contains("a.txt"), "{notice}");
     // Y la ventana dice quién lo tiene.
     let t = texts_of(&mut a, AuxWindow::InUse);
-    assert!(t.iter().any(|s| s == "Microsoft Excel (EXCEL.EXE)"), "{t:?}");
-    assert!(t.iter().any(|s| s == r"PID 4812 · usuario PC\Leandro"), "{t:?}");
+    assert!(t.iter().any(|s| s == "Microsoft Excel está usando el archivo."), "{t:?}");
+    assert!(t.iter().any(|s| s == "Microsoft Excel · PID 4812"), "{t:?}");
+    assert!(t.iter().any(|s| s == r"PC\Leandro"), "{t:?}");
 }
 
 #[test]
@@ -188,7 +189,8 @@ fn second_failure_replaces_the_window() {
     assert_eq!(d.groups.len(), 2);
     assert_eq!(shows[1].2, (in_use_draw::WIDTH, in_use_draw::height(&d)));
     let t = texts_of(&mut a, AuxWindow::InUse);
-    assert!(t.iter().any(|s| s == "Microsoft Word (WINWORD.EXE)"), "{t:?}");
+    assert!(t.iter().any(|s| s == "Lo están usando 2 programas."), "{t:?}");
+    assert!(t.iter().any(|s| s == "Microsoft Word · PID 77"), "{t:?}");
 }
 
 #[test]
@@ -256,8 +258,8 @@ fn delete_job_with_locked_files_says_who_in_the_copy_window() {
     assert!(job.errors.iter().all(|e| e.holders == vec![excel()]), "{:?}", job.errors);
     let copy = texts_of(&mut a, AuxWindow::Transfers);
     assert!(copy.iter().any(|s| s == "Terminó con 2 errores"), "{copy:?}");
-    assert_eq!(copy.iter().filter(|s| *s == "En uso por Microsoft Excel").count(), 2, "{copy:?}");
-    assert!(copy.iter().any(|s| s == r"PID 4812 · usuario PC\Leandro"), "{copy:?}");
+    assert_eq!(copy.iter().filter(|s| *s == "Microsoft Excel · PID 4812").count(), 2, "{copy:?}");
+    assert!(copy.iter().any(|s| s == r"PC\Leandro"), "{copy:?}");
     assert!(!copy.iter().any(|s| s == "Lo está usando otro programa"), "{copy:?}");
     // Reintentarlo desde la ventana de copia no toca la de «en uso» (descartarlo, en la prueba siguiente).
     let id = a.jobs()[0].id;

@@ -1,4 +1,5 @@
-//! Contenido de la ventana de «archivo en uso»: el título, quién tiene cada archivo y los botones
+//! Contenido de la ventana de «archivo en uso»: el título en rojo, la frase con el programa, una
+//! tarjeta por programa (ubicación, proceso, usuario y, si hace falta, sus archivos) y los botones
 //! Reintentar y Cerrar, con el mismo estilo que la ventana de copia (`transfer::view`). La ventana
 //! es del sistema (`WindowHost::aux_show`); acá solo se mide, se dibuja y se ubica el clic.
 //!
@@ -15,14 +16,16 @@ use crate::transfer::view::MAX_H;
 /// Ancho del área de la ventana (el mismo que la de copia).
 pub const WIDTH: f32 = 560.0;
 const PAD: f32 = 16.0;
-/// Sangría de cada programa y de sus archivos, desde el margen.
-const GROUP_INDENT: f32 = 12.0;
-const FILE_INDENT: f32 = 28.0;
 const TITLE_STEP: f32 = 30.0;
 const LINE_STEP: f32 = 22.0;
-const LABEL_STEP: f32 = 20.0;
 const SMALL_STEP: f32 = 18.0;
-const GROUP_GAP: f32 = 6.0;
+/// Las tarjetas: alto de cada fila, separación entre tarjetas y dónde empiezan el texto y el valor.
+const ROW_H: f32 = 30.0;
+const CARD_GAP: f32 = 8.0;
+const CARD_RADIUS: f32 = 6.0;
+const ICON_X: f32 = 14.0;
+const LABEL_X: f32 = 42.0;
+const VALUE_X: f32 = 128.0;
 /// Los botones, como «Reintentar» y «Cerrar» de la ventana de copia.
 const RETRY_W: f32 = 104.0;
 const CLOSE_W: f32 = 96.0;
@@ -37,14 +40,45 @@ pub enum InUseHit {
     Close,
 }
 
-/// Una línea de texto: fuente, texto, sangría desde el margen, si va en texto secundario y su
-/// arriba (desde el del contenido).
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+    Normal,
+    Dim,
+    Danger,
+}
+
+/// Una línea de texto suelta: fuente, texto, color y su arriba (desde el del contenido).
 struct Line {
     font: FontId,
     text: String,
-    indent: f32,
-    dim: bool,
+    tone: Tone,
     top: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Icon {
+    None,
+    Folder,
+    Process,
+    User,
+    File,
+}
+
+/// Una fila de una tarjeta: ícono, rótulo y valor.
+struct Row {
+    top: f32,
+    icon: Icon,
+    label: &'static str,
+    value: String,
+    dim: bool,
+}
+
+struct Layout {
+    lines: Vec<Line>,
+    /// Arriba y alto de cada tarjeta.
+    cards: Vec<(f32, f32)>,
+    rows: Vec<Row>,
+    height: f32,
 }
 
 /// «y 1 programa más», «y 3 programas más».
@@ -52,44 +86,56 @@ fn more_programs(n: usize) -> String {
     if n == 1 { "y 1 programa más".into() } else { format!("y {n} programas más") }
 }
 
-/// Las líneas con hasta `shown` archivos por programa, y el alto del contenido.
-fn layout(d: &InUseDialog, shown: usize) -> (Vec<Line>, f32) {
-    let mut out = Vec::new();
+/// La ventana con hasta `shown` archivos por programa.
+fn layout(d: &InUseDialog, shown: usize) -> Layout {
+    let mut lines = Vec::new();
     let mut y = PAD;
-    let push = |out: &mut Vec<Line>, y: &mut f32, font: FontId, text: String, indent: f32, dim: bool, step: f32| {
-        out.push(Line { font, text, indent, dim, top: *y });
-        *y += step;
-    };
-    push(&mut out, &mut y, FontId::Title, d.title.clone(), 0.0, false, TITLE_STEP);
-    push(&mut out, &mut y, FontId::Ui, d.intro().into(), 0.0, false, LINE_STEP);
-    for g in &d.groups {
-        y += GROUP_GAP;
-        push(&mut out, &mut y, FontId::UiBold, InUseDialog::holder_label(&g.holder), GROUP_INDENT, false, LABEL_STEP);
-        push(&mut out, &mut y, FontId::Small, InUseDialog::holder_line(&g.holder), GROUP_INDENT, true, SMALL_STEP);
-        for f in g.files.iter().take(shown) {
-            push(&mut out, &mut y, FontId::Ui, f.clone(), FILE_INDENT, false, SMALL_STEP);
+    lines.push(Line { font: FontId::Title, text: d.title.clone(), tone: Tone::Danger, top: y });
+    y += TITLE_STEP;
+    lines.push(Line { font: FontId::Ui, text: d.intro(), tone: Tone::Normal, top: y });
+    y += LINE_STEP + 8.0;
+    // Con un solo programa y un solo archivo, el título ya dice cuál es: no se repite.
+    let single = d.groups.len() == 1 && d.more_groups == 0 && d.groups[0].files.len() == 1 && d.groups[0].more_files == 0;
+    let (mut cards, mut rows) = (Vec::new(), Vec::new());
+    for (i, g) in d.groups.iter().enumerate() {
+        let mut items: Vec<(Icon, &'static str, String, bool)> = Vec::new();
+        if let (0, Some(loc)) = (i, &d.location) {
+            items.push((Icon::Folder, "Ubicación", loc.clone(), false));
         }
-        let hidden = g.files.len().saturating_sub(shown) + g.more_files;
-        if hidden > 0 {
-            push(&mut out, &mut y, FontId::Small, format!("y {hidden} más"), FILE_INDENT, true, SMALL_STEP);
+        items.push((Icon::Process, "Proceso", InUseDialog::process_value(&g.holder), false));
+        items.push((Icon::User, "Usuario", InUseDialog::user_value(&g.holder), false));
+        if !single {
+            for (k, f) in g.files.iter().take(shown).enumerate() {
+                items.push((if k == 0 { Icon::File } else { Icon::None }, if k == 0 { "Archivos" } else { "" }, f.clone(), false));
+            }
+            let hidden = g.files.len().saturating_sub(shown) + g.more_files;
+            if hidden > 0 {
+                let first = shown == 0;
+                items.push((if first { Icon::File } else { Icon::None }, if first { "Archivos" } else { "" }, format!("y {hidden} más"), true));
+            }
         }
+        let h = items.len() as f32 * ROW_H;
+        cards.push((y, h));
+        for (k, (icon, label, value, dim)) in items.into_iter().enumerate() {
+            rows.push(Row { top: y + k as f32 * ROW_H, icon, label, value, dim });
+        }
+        y += h + CARD_GAP;
     }
     if d.more_groups > 0 {
-        push(&mut out, &mut y, FontId::Small, more_programs(d.more_groups), GROUP_INDENT, true, SMALL_STEP);
+        lines.push(Line { font: FontId::Small, text: more_programs(d.more_groups), tone: Tone::Dim, top: y });
+        y += SMALL_STEP;
     }
-    y += 8.0;
-    push(&mut out, &mut y, FontId::Ui, d.outro().into(), 0.0, false, LINE_STEP);
-    (out, y + 12.0 + BTN_H + PAD)
+    Layout { lines, cards, rows, height: y + 4.0 + BTN_H + PAD }
 }
 
 /// Cuántos archivos por programa entran sin pasarse de `MAX_H` (a lo sumo `MAX_FILES`).
 fn files_shown(d: &InUseDialog) -> usize {
-    (0..=MAX_FILES).rev().find(|&k| layout(d, k).1 <= MAX_H).unwrap_or(0)
+    (0..=MAX_FILES).rev().find(|&k| layout(d, k).height <= MAX_H).unwrap_or(0)
 }
 
 /// Alto del contenido (sin la barra de título del sistema); nunca pasa de `MAX_H`.
 pub fn height(d: &InUseDialog) -> f32 {
-    layout(d, files_shown(d)).1
+    layout(d, files_shown(d)).height
 }
 
 /// Los botones con su rectángulo, alineados a la derecha al pie del contenido.
@@ -125,6 +171,35 @@ fn button(p: &dyn Painter, b: Rect, label: &str, primary: bool, hot: bool, down:
     }
 }
 
+/// Un ícono de línea de 16 × 16 con la esquina de arriba a la izquierda en (x, y).
+fn icon(p: &dyn Painter, kind: Icon, x: f32, y: f32, c: Color) {
+    let s = Some((c, 1.3));
+    match kind {
+        Icon::None => {}
+        Icon::Folder => p.rounded_path(
+            &[(x + 1.0, y + 3.0, 1.5), (x + 6.0, y + 3.0, 0.0), (x + 8.0, y + 5.0, 0.0), (x + 15.0, y + 5.0, 1.5), (x + 15.0, y + 13.5, 1.5), (x + 1.0, y + 13.5, 1.5)],
+            true,
+            None,
+            s,
+        ),
+        Icon::Process => {
+            p.round_stroke_w(rect(x + 0.5, y + 2.0, x + 15.5, y + 14.0), 2.5, c, 1.3);
+            p.rounded_path(&[(x + 4.0, y + 5.5, 0.0), (x + 7.0, y + 8.0, 0.0), (x + 4.0, y + 10.5, 0.0)], false, None, s);
+            p.rounded_path(&[(x + 8.5, y + 10.5, 0.0), (x + 11.5, y + 10.5, 0.0)], false, None, s);
+        }
+        Icon::User => {
+            p.circle_stroke(x + 8.0, y + 5.0, 3.0, c, 1.3);
+            p.rounded_path(&[(x + 2.5, y + 15.0, 0.0), (x + 2.5, y + 13.0, 3.0), (x + 13.5, y + 13.0, 3.0), (x + 13.5, y + 15.0, 0.0)], false, None, s);
+        }
+        Icon::File => p.rounded_path(
+            &[(x + 3.0, y + 1.0, 1.0), (x + 9.5, y + 1.0, 0.0), (x + 13.0, y + 4.5, 0.0), (x + 13.0, y + 15.0, 1.0), (x + 3.0, y + 15.0, 1.0)],
+            true,
+            None,
+            s,
+        ),
+    }
+}
+
 /// Dibuja el contenido en `r` (recortado a él). `pressed` se ve solo mientras el mouse sigue
 /// encima del mismo botón.
 pub fn draw(p: &dyn Painter, r: Rect, d: &InUseDialog, hover: Option<InUseHit>, pressed: Option<InUseHit>) {
@@ -132,16 +207,35 @@ pub fn draw(p: &dyn Painter, r: Rect, d: &InUseDialog, hover: Option<InUseHit>, 
     p.fill(r, th.surface);
     p.clip(r, &mut || {
         let (l, rr) = (r.left + PAD, r.right - PAD);
-        for line in layout(d, files_shown(d)).0 {
-            let x = l + line.indent;
-            let h = match line.font {
-                FontId::Title => 22.0,
-                FontId::Small => 16.0,
-                _ => 18.0,
-            };
+        let lay = layout(d, files_shown(d));
+        for line in &lay.lines {
+            let h = if line.font == FontId::Title { 22.0 } else if line.font == FontId::Small { 16.0 } else { 18.0 };
             let top = r.top + line.top;
-            let c = if line.dim { th.text_dim } else { th.text };
-            p.text(line.font, &ellipsize(p, line.font, &line.text, rr - x), rect(x, top, rr, top + h), c);
+            let c = match line.tone {
+                Tone::Normal => th.text,
+                Tone::Dim => th.text_dim,
+                Tone::Danger => th.danger,
+            };
+            p.text(line.font, &ellipsize(p, line.font, &line.text, rr - l), rect(l, top, rr, top + h), c);
+        }
+        for &(top, h) in &lay.cards {
+            let c = rect(l, r.top + top, rr, r.top + top + h);
+            p.round_fill(c, CARD_RADIUS, th.surface_alt);
+            p.round_stroke(c, CARD_RADIUS, th.border);
+        }
+        for row in &lay.rows {
+            let top = r.top + row.top;
+            // Una raya entre filas de la misma tarjeta, no sobre su borde de arriba.
+            if lay.cards.iter().all(|&(t, _)| t != row.top) {
+                p.fill(rect(l + 1.0, top, rr - 1.0, top + 1.0), th.border);
+            }
+            icon(p, row.icon, l + ICON_X, top + (ROW_H - 16.0) / 2.0, th.text_secondary);
+            let text = |x: f32, s: &str, c: Color| {
+                let font = FontId::Ui;
+                p.text(font, &ellipsize(p, font, s, rr - ICON_X - (l + x)), rect(l + x, top + 6.0, rr - ICON_X, top + 24.0), c);
+            };
+            text(LABEL_X, row.label, th.text_dim);
+            text(VALUE_X, &row.value, if row.dim { th.text_dim } else { th.text });
         }
         for (h, b) in buttons(r, d) {
             let label = if h == InUseHit::Retry { "Reintentar" } else { "Cerrar" };
@@ -174,7 +268,13 @@ mod tests {
     }
 
     fn dialog(groups: Vec<HolderGroup>, more_groups: usize) -> InUseDialog {
-        InUseDialog { title: "No se pudo eliminar «informe.xlsx»".into(), groups, more_groups, retry: InUseRetry::Op(crate::ops::Op::NewFolder { parent: std::path::PathBuf::from("/u") }) }
+        InUseDialog {
+            title: "No se pudo eliminar «informe.xlsx»".into(),
+            groups,
+            more_groups,
+            location: Some("Temp".into()),
+            retry: InUseRetry::Op(crate::ops::Op::NewFolder { parent: std::path::PathBuf::from("/u") }),
+        }
     }
 
     fn area(d: &InUseDialog) -> Rect {
@@ -205,11 +305,11 @@ mod tests {
         assert_eq!(height(&full), height(&huge));
         // Y lo más alto que puede ser entra en lo que permite la ventana de copia.
         assert!(height(&huge) <= crate::transfer::view::MAX_H);
-        // Tres programas con muchos archivos (200 de 3) muestran sus cinco archivos cada uno.
+        // Tres programas con muchos archivos entran y cada uno muestra al menos uno.
         let many = dialog((1..=3).map(|p| group(p, MAX_FILES, 62)).collect(), 0);
         assert!(height(&many) <= crate::transfer::view::MAX_H);
         let shown = texts(&many).iter().filter(|(s, _)| s.starts_with("archivo")).count();
-        assert_eq!(shown, 3 * MAX_FILES);
+        assert!(shown >= 3, "{shown}");
     }
 
     #[test]
@@ -243,19 +343,41 @@ mod tests {
     }
 
     #[test]
-    fn draw_shows_title_intro_process_and_buttons() {
+    fn draw_shows_title_intro_card_rows_and_buttons() {
         let d = dialog(vec![HolderGroup { holder: excel(), files: vec!["informe.xlsx".into()], more_files: 0 }], 0);
         let t: Vec<String> = texts(&d).into_iter().map(|(s, _)| s).collect();
         for want in [
             "No se pudo eliminar «informe.xlsx»",
-            "Lo está usando otro programa:",
-            "Microsoft Excel (EXCEL.EXE)",
-            r"PID 4812 · usuario PC\Leandro",
-            "informe.xlsx",
-            "Cerralo y reintentá.",
+            "Microsoft Excel está usando el archivo.",
+            "Ubicación",
+            "Temp",
+            "Proceso",
+            "Microsoft Excel · PID 4812",
+            "Usuario",
+            r"PC\Leandro",
             "Reintentar",
             "Cerrar",
         ] {
+            assert!(t.iter().any(|s| s == want), "falta «{want}» en {t:?}");
+        }
+        // Con un solo archivo el título ya lo dice: no hay fila de archivos.
+        assert!(!t.iter().any(|s| s == "Archivos"), "{t:?}");
+    }
+
+    #[test]
+    fn title_is_red() {
+        let d = dialog(vec![group(1, 1, 0)], 0);
+        let p = RecordingPainter::new(theme());
+        draw(&p, area(&d), &d, None, None);
+        let (.., c) = p.text_draws().into_iter().find(|(_, s, ..)| s.starts_with("No se pudo")).unwrap();
+        assert_eq!(c, theme().danger);
+    }
+
+    #[test]
+    fn several_files_get_their_own_rows() {
+        let d = dialog(vec![group(1, 2, 0)], 0);
+        let t: Vec<String> = texts(&d).into_iter().map(|(s, _)| s).collect();
+        for want in ["Archivos", "archivo0.txt", "archivo1.txt"] {
             assert!(t.iter().any(|s| s == want), "falta «{want}» en {t:?}");
         }
     }
@@ -292,7 +414,8 @@ mod tests {
         let long = "x".repeat(300);
         let holder = Holder { name: long.clone(), exe: Some(format!("{long}.EXE")), pid: 1, user: Some(long.clone()) };
         let mut d = dialog(vec![HolderGroup { holder, files: vec![format!("{long}.txt")], more_files: 0 }], 0);
-        d.title = long;
+        d.title = long.clone();
+        d.location = Some(long);
         let r = area(&d);
         let p = RecordingPainter::new(theme());
         draw(&p, r, &d, None, None);

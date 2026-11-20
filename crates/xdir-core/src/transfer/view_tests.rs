@@ -264,15 +264,22 @@ fn error_row_names_who_holds_the_file() {
     view::draw(&p, area(&jobs, None), &jobs, &look(&only(None), 0.0), &FakeEnv);
     let draws = p.text_draws();
     let th = theme();
-    let first = draws.iter().find(|d| d.1 == "En uso por PowerShell 7").unwrap_or_else(|| panic!("{draws:?}"));
-    assert_eq!(first.3, th.danger);
-    let second = draws.iter().find(|d| d.1 == r"PID 24012 · usuario PC\Leandro").unwrap_or_else(|| panic!("{draws:?}"));
-    // Debajo, con el formato de la línea de la carpeta.
-    assert_eq!((second.0, second.3), (FontId::Small, th.text_dim));
-    assert!(second.2.top >= first.2.bottom - 0.5, "{first:?} {second:?}");
-    assert!(!draws.iter().any(|d| d.1.contains("Lo está usando otro programa")), "{draws:?}");
+    // Cuatro líneas, una debajo de la otra: rótulo en texto secundario y valor en texto normal.
+    let mut last = f32::MIN;
+    for (label, value) in [("Archivo", "a.txt"), ("Ubicación", ""), ("Proceso", "PowerShell 7 · PID 24012"), ("Usuario", r"PC\Leandro")] {
+        let l = draws.iter().find(|d| d.1 == label).unwrap_or_else(|| panic!("{label}: {draws:?}"));
+        assert_eq!(l.3, th.text_dim);
+        assert!(l.2.top > last, "{label} fuera de orden");
+        last = l.2.top;
+        if !value.is_empty() {
+            let v = draws.iter().find(|d| d.1 == value).unwrap_or_else(|| panic!("{value}: {draws:?}"));
+            assert_eq!(v.3, th.text);
+            assert!(v.2.left > l.2.right - 0.5 && (v.2.top - l.2.top).abs() < 0.5, "{l:?} {v:?}");
+        }
+    }
+    assert!(!draws.iter().any(|d| d.1.contains("Lo está usando otro programa") || d.1.contains("En uso por")), "{draws:?}");
     // El alto y los botones, como siempre.
-    assert_eq!(view::content_height(&jobs, &only(None)), 76.0 + 44.0 + 16.0 + 45.0);
+    assert_eq!(view::content_height(&jobs, &only(None)), 76.0 + 26.0 * 4.0 + 4.0 + 16.0 + 45.0);
     assert!(center_of(&jobs, None, ViewHit::Retry(1)).is_some());
     assert!(center_of(&jobs, None, ViewHit::Dismiss(1)).is_some());
 }
@@ -280,21 +287,21 @@ fn error_row_names_who_holds_the_file() {
 #[test]
 fn error_row_counts_other_programs_by_pid() {
     let two = texts(&held(vec![pwsh(24012, None), Holder { name: "Explorador".into(), exe: None, pid: 9, user: None }]), None);
-    assert!(two.iter().any(|s| s == "En uso por PowerShell 7 y 1 más"), "{two:?}");
+    assert!(two.iter().any(|s| s == "PowerShell 7 · PID 24012 y 1 más"), "{two:?}");
     // El mismo proceso dos veces es uno solo.
     let same = texts(&held(vec![pwsh(24012, None), pwsh(24012, None)]), None);
-    assert!(same.iter().any(|s| s == "En uso por PowerShell 7"), "{same:?}");
+    assert!(same.iter().any(|s| s == "PowerShell 7 · PID 24012"), "{same:?}");
     assert!(!has(&same, "más"), "{same:?}");
 }
 
 #[test]
 fn error_row_without_name_or_user() {
     let t = texts(&held(vec![Holder { name: String::new(), exe: None, pid: 24012, user: None }]), None);
-    assert!(t.iter().any(|s| s == "En uso por Proceso 24012"), "{t:?}");
-    assert!(t.iter().any(|s| s == "PID 24012 · usuario desconocido"), "{t:?}");
+    assert!(t.iter().any(|s| s == "Proceso 24012 · PID 24012"), "{t:?}");
+    assert!(t.iter().any(|s| s == "Desconocido"), "{t:?}");
     // Sin nombre pero con ejecutable: el ejecutable.
     let t = texts(&held(vec![Holder { name: " ".into(), exe: Some("pwsh.exe".into()), pid: 5, user: None }]), None);
-    assert!(t.iter().any(|s| s == "En uso por pwsh.exe"), "{t:?}");
+    assert!(t.iter().any(|s| s == "pwsh.exe · PID 5"), "{t:?}");
 }
 
 /// Sin holders, la fila es la de siempre: el motivo en una línea, centrado en la fila.
@@ -318,27 +325,24 @@ fn error_row_without_holders_is_unchanged() {
 #[test]
 fn error_row_long_texts_stay_inside() {
     let long = Holder {
-        name: "Un programa con un nombre larguísimo que no entra".into(),
+        name: "Un programa con un nombre larguísimo que no entra en la fila de ningún modo posible".into(),
         exe: None,
         pid: 24012,
-        user: Some(r"UN-DOMINIO-MUY-LARGO\un.usuario.con.nombre.larguisimo".into()),
+        user: Some(r"UN-DOMINIO-MUY-LARGO\un.usuario.con.nombre.larguisimo.que.tampoco.entra.en.la.fila".into()),
     };
     let mut jobs = held(vec![long]);
-    jobs[0].errors[0].src = PathBuf::from("/d/Descargas/un-archivo-con-un-nombre-tambien-muy-largo-para-la-fila.txt");
+    jobs[0].errors[0].src = PathBuf::from("/d/Descargas/un-archivo-con-un-nombre-tambien-muy-largo-para-la-fila-que-no-entra-nunca-jamas.txt");
     let p = RecordingPainter::new(theme());
     view::draw(&p, area(&jobs, None), &jobs, &look(&only(None), 0.0), &FakeEnv);
-    let row = rect(16.0, 76.0, view::WIDTH - 16.0, 76.0 + 44.0);
-    let inside: Vec<_> = p.texts().into_iter().filter(|(_, _, r)| r.top >= row.top && r.bottom <= row.bottom && r.top < row.bottom).collect();
-    let by = inside.iter().find(|t| t.1.starts_with("En uso por")).expect("primera línea");
-    let pid = inside.iter().find(|t| t.1.starts_with("PID 24012")).expect("segunda línea");
-    let name = inside.iter().find(|t| t.1.starts_with("un-archivo")).expect("nombre");
-    for t in [by, pid, name] {
+    let row = rect(16.0, 76.0, view::WIDTH - 16.0, 76.0 + 26.0 * 4.0 + 4.0);
+    let inside: Vec<_> = p.texts().into_iter().filter(|(_, _, r)| r.top >= row.top && r.bottom <= row.bottom).collect();
+    for start in ["Un programa", "UN-DOMINIO", "un-archivo"] {
+        let t = inside.iter().find(|t| t.1.starts_with(start)).unwrap_or_else(|| panic!("{start}: {inside:?}"));
         assert!(t.1.ends_with('…'), "{t:?}");
         assert!(t.2.left >= row.left && t.2.right <= row.right, "{t:?}");
         // El texto entra en su rectángulo (7 DIPs por carácter en el pintor de prueba).
         assert!(t.1.chars().count() as f32 * 7.0 <= t.2.right - t.2.left + 0.5, "{t:?}");
     }
-    assert!(name.2.right <= by.2.left && name.2.right <= pid.2.left, "{name:?} {by:?} {pid:?}");
 }
 
 #[test]

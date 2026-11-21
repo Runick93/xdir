@@ -103,6 +103,8 @@ pub(super) enum TaskDone {
     GitBranches { pane: usize, root: PathBuf, result: Result<Vec<String>, String> },
     /// Terminó de cambiar el repo `root` a la rama `dest`.
     GitSwitched { root: PathBuf, dest: String, how: git_branch::GitHow, result: crate::git::SwitchOutcome },
+    /// Ya se sabe si hay git (`git::warm_up`): las pestañas releen su rama.
+    GitReady,
 }
 
 impl App {
@@ -151,6 +153,7 @@ impl App {
             TaskDone::ArchivePrepared { path, ok, cancelled } => self.on_archive_prepared(path, ok, cancelled),
             TaskDone::GitBranches { pane, root, result } => self.on_git_branches(pane, root, result),
             TaskDone::GitSwitched { root, dest, how, result } => self.on_git_switched(root, dest, how, result),
+            TaskDone::GitReady => self.on_git_ready(),
             TaskDone::Original { pane, link, target } => {
                 let name = link.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 match target.as_ref().and_then(|t| Some((t.parent()?, t.file_name()?))) {

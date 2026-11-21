@@ -22,6 +22,16 @@ pub(super) enum GitHow {
 }
 
 impl App {
+    /// Ya se sabe si hay git: las pestañas listadas antes releen su repo y su rama (unas pocas
+    /// lecturas de archivos chicos, solo en carpetas locales: `tab::repo_head_of`).
+    pub(super) fn on_git_ready(&mut self) {
+        for pane in &mut self.panes {
+            for tab in &mut pane.tabs {
+                tab.git = crate::tab::repo_head_of(&tab.location);
+            }
+        }
+    }
+
     /// Clic en el botón de rama del panel `pane`: relee la rama y pide la lista de ramas.
     pub(super) fn open_branch_menu(&mut self, pane: usize) {
         if self.git_busy || pane >= self.panes.len() {

@@ -658,8 +658,6 @@ impl App {
         // Pruebas: el reloj fijado por una prueba anterior en este hilo no pasa a esta.
         #[cfg(test)]
         crate::clock::set(None);
-        #[cfg(not(test))]
-        crate::git::warm_up();
         let Init { session, history, config, favorites, groups, mut folder_views, places, probe, start_path, started, marks, clean_temps_on_close } = init;
         // Primera vez con memoria por carpeta: la vista y las columnas de la sesión pasan a ser
         // la vista por defecto.
@@ -830,6 +828,13 @@ impl App {
         self.load_net_places();
         self.request_connections();
         self.request_remote_drive_labels();
+        // Si hay git (en otro hilo: `git --version` puede tardar o colgarse; hasta que conteste,
+        // sin botón de rama). Las pruebas lo fijan a mano.
+        #[cfg(not(test))]
+        self.spawn_task(|| {
+            crate::git::warm_up();
+            tasks::TaskDone::GitReady
+        });
     }
 
     /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).

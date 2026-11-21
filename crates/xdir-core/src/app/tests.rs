@@ -3392,6 +3392,21 @@ fn tab_git_none_on_unc_path() {
     assert!(crate::tab::repo_head_of(&Location::Path(PathBuf::from(r"\\server\share\x"))).is_none());
 }
 
+/// Cuando termina la prueba de git (en otro hilo), las pestañas ya listadas muestran su rama
+/// sin esperar a otra navegación.
+#[test]
+fn tab_git_appears_when_git_check_finishes() {
+    let Some(repo) = repo_tmp("tab-listo") else { return };
+    let mut a = app();
+    crate::git::set_available_for_tests(Some(false));
+    goto_and_wait(&mut a, &repo.0);
+    assert!(a.panes[0].tab().git.is_none(), "git todavía sin confirmar");
+    crate::git::set_available_for_tests(None);
+    a.on_task_done(super::tasks::TaskDone::GitReady);
+    let g = a.panes[0].tab().git.clone().expect("ya con git");
+    assert_eq!(g.head, crate::git::Head::Branch("main".into()));
+}
+
 #[test]
 fn tab_git_branch_refreshes_on_reload() {
     let Some(repo) = repo_tmp("tab-recarga") else { return };

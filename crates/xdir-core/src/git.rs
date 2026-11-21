@@ -93,12 +93,25 @@ pub fn set_available_for_tests(v: Option<bool>) {
     DISPONIBLE_PRUEBAS.with(|c| c.set(v));
 }
 
+/// El programa de git elegido por `warm_up` (`None`: no hay git). Solo lo escribe `warm_up`, que
+/// corre en otro hilo; la interfaz solo lo lee.
+static GIT: OnceLock<Option<&'static str>> = OnceLock::new();
+
+/// El `git` a lanzar: el que eligió `warm_up`, o el del PATH si todavía no se eligió.
+fn programa() -> &'static str {
+    GIT.get().copied().flatten().unwrap_or("git")
+}
+
 /// Prepara un `git` sin ventana, sin preguntas por terminal y con mensajes en inglés.
+/// `GIT_OPTIONAL_LOCKS=0` en todos: así `status` no toma `index.lock` para refrescar el índice
+/// (no le gana el candado a un IDE abierto). Solo afecta a los candados opcionales: `switch` y
+/// `stash` siguen tomando los que necesitan.
 fn comando(root: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(programa());
     cmd.current_dir(root)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null());
     #[cfg(windows)]
     {
@@ -131,34 +144,78 @@ fn run(root: &Path, args: &[&str]) -> Result<String, String> {
     ejecutar(comando(root), args)
 }
 
-/// Indica si hay un `git` utilizable. Se calcula una sola vez.
+/// Lo ya calculado, sin esperar: si nadie lo calculó (o se está calculando), `false`.
+fn leer_cache(cell: &OnceLock<Option<&'static str>>) -> bool {
+    cell.get().is_some_and(|g| g.is_some())
+}
+
+/// Indica si hay un `git` utilizable. Nunca lanza procesos ni espera: solo lee lo que calculó
+/// `warm_up`; hasta que termine, `false` (la `App` recibe `TaskDone::GitReady` al terminar
+/// y las pestañas releen su rama).
 pub fn available() -> bool {
     #[cfg(test)]
     if let Some(v) = DISPONIBLE_PRUEBAS.with(|c| c.get()) {
         return v;
     }
-    static DISPONIBLE: OnceLock<bool> = OnceLock::new();
-    *DISPONIBLE.get_or_init(|| {
-        let mut cmd = Command::new("git");
-        cmd.arg("--version")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        cmd.status().map(|s| s.success()).unwrap_or(false)
-    })
+    leer_cache(&GIT)
 }
 
-/// Calienta `available()` en segundo plano para que el primer uso no espere.
-pub fn warm_up() {
-    std::thread::spawn(|| {
-        available();
-    });
+/// Qué `git` usar en macOS sin lanzar el de `/usr/bin` cuando no hay herramientas de línea de
+/// comandos: ahí `/usr/bin/git` es el atajo de `xcode-select`, que abre el cartel de Apple para
+/// instalarlas (y sin git no se avisa de nada). `herramientas`: `xcode-select -p` funcionó;
+/// `existe`: si hay un archivo en esa ruta.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn elegir_git_mac(herramientas: bool, existe: impl Fn(&str) -> bool) -> Option<&'static str> {
+    if herramientas {
+        return Some("git");
+    }
+    // Las apps abiertas desde el Finder tienen un PATH mínimo: se usa la ruta completa.
+    ["/opt/homebrew/bin/git", "/usr/local/bin/git"].into_iter().find(|p| existe(p))
+}
+
+/// El programa a probar (`None`: no hay git, sin haber lanzado nada).
+fn candidato() -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        // `xcode-select` es una herramienta de verdad (no un atajo): `-p` solo dice dónde están
+        // las herramientas, o falla si no hay, sin abrir ningún cartel.
+        let herramientas = Command::new("/usr/bin/xcode-select")
+            .arg("-p")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        elegir_git_mac(herramientas, |p| Path::new(p).is_file())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some("git")
+    }
+}
+
+/// Prueba `git --version`. Bloquea: solo desde otro hilo.
+fn probar() -> Option<&'static str> {
+    let prog = candidato()?;
+    let mut cmd = Command::new(prog);
+    cmd.arg("--version")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.status().is_ok_and(|s| s.success()).then_some(prog)
+}
+
+/// Averigua (una sola vez) si hay git y devuelve si lo hay. Lanza `git --version` y lo espera:
+/// nunca desde el hilo de la interfaz (la `App` lo corre con `spawn_task`).
+pub fn warm_up() -> bool {
+    GIT.get_or_init(probar).is_some()
 }
 
 /// Ramas locales, la de commit más reciente primero.
@@ -255,7 +312,8 @@ pub(crate) fn git_test(root: &Path, args: &[&str]) -> Result<String, String> {
 pub(crate) fn temp_repo(name: &str) -> Option<PathBuf> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
-    if !available() {
+    // Las pruebas averiguan si hay git en su hilo (la interfaz nunca lo hace).
+    if !warm_up() {
         return None;
     }
     let p = std::env::temp_dir().join(format!(
@@ -445,7 +503,7 @@ mod tests {
 
     #[test]
     fn branches_empty_repo() {
-        if !available() {
+        if !warm_up() {
             eprintln!("git no está instalado: se salta la prueba");
             return;
         }
@@ -534,6 +592,53 @@ mod tests {
     fn works_in_path_with_spaces_and_unicode() {
         let Some(r) = repo("carpeta con ñ") else { return };
         assert_eq!(switch(&r.0, "feature"), SwitchOutcome::Switched);
+    }
+
+    /// `available()` solo lee lo ya calculado: mientras la prueba de `git --version` sigue en
+    /// curso (en otro hilo) contesta `false` enseguida, sin esperarla.
+    #[test]
+    fn available_never_waits_for_probe() {
+        use std::sync::mpsc::channel;
+        use std::time::{Duration, Instant};
+        let cell: &'static OnceLock<Option<&'static str>> = Box::leak(Box::new(OnceLock::new()));
+        assert!(!leer_cache(cell), "sin calcular: false");
+        let (empezo_tx, empezo_rx) = channel();
+        let (seguir_tx, seguir_rx) = channel::<()>();
+        let h = std::thread::spawn(move || {
+            cell.get_or_init(|| {
+                empezo_tx.send(()).unwrap();
+                let _ = seguir_rx.recv();
+                Some("git")
+            });
+        });
+        empezo_rx.recv().unwrap();
+        let t0 = Instant::now();
+        assert!(!leer_cache(cell), "calculándose: false");
+        assert!(t0.elapsed() < Duration::from_secs(1));
+        seguir_tx.send(()).unwrap();
+        h.join().unwrap();
+        assert!(leer_cache(cell));
+    }
+
+    #[test]
+    fn mac_git_choice_never_runs_the_shim() {
+        // Con las herramientas de línea de comandos (o Xcode), el `git` del PATH.
+        assert_eq!(elegir_git_mac(true, |_| false), Some("git"));
+        // Sin ellas, solo un git de verdad fuera de /usr/bin (el de /usr/bin es el instalador).
+        assert_eq!(elegir_git_mac(false, |p| p == "/opt/homebrew/bin/git"), Some("/opt/homebrew/bin/git"));
+        assert_eq!(elegir_git_mac(false, |p| p == "/usr/local/bin/git"), Some("/usr/local/bin/git"));
+        assert_eq!(elegir_git_mac(false, |p| p == "/usr/bin/git"), None);
+        assert_eq!(elegir_git_mac(false, |_| false), None);
+    }
+
+    #[test]
+    fn commands_skip_optional_locks() {
+        let cmd = comando(Path::new("."));
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(
+            envs.contains(&(std::ffi::OsStr::new("GIT_OPTIONAL_LOCKS"), Some(std::ffi::OsStr::new("0")))),
+            "{envs:?}"
+        );
     }
 
     #[test]

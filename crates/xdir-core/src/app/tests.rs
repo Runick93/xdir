@@ -3207,3 +3207,88 @@ fn context_menu_terminal_opens_the_default() {
     assert_eq!(opened.len(), 1, "{opened:?}");
     assert_eq!((opened[0].0.as_str(), opened[0].1 == dir), ("Otra", true));
 }
+
+// ---------- git en la pestaña ----------
+
+/// Repo temporal que se borra al soltarlo.
+struct RepoTmp(PathBuf);
+
+impl Drop for RepoTmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Crea el repo de prueba o avisa y devuelve `None` si no hay git.
+fn repo_tmp(name: &str) -> Option<RepoTmp> {
+    let r = crate::git::temp_repo(name).map(RepoTmp);
+    if r.is_none() {
+        eprintln!("git no está instalado: se salta la prueba");
+    }
+    r
+}
+
+/// Lleva la pestaña activa del panel 0 a `dir` y espera a que termine de listarla.
+fn goto_and_wait(a: &mut App, dir: &std::path::Path) {
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir.to_path_buf()));
+    wait_loaded(a);
+}
+
+#[test]
+fn tab_git_has_branch_inside_repo() {
+    let Some(repo) = repo_tmp("tab-rama") else { return };
+    let mut a = app();
+    goto_and_wait(&mut a, &repo.0);
+    let g = a.panes[0].tab().git.clone().expect("dentro de un repo");
+    assert_eq!(g.head, crate::git::Head::Branch("main".into()));
+}
+
+#[test]
+fn tab_git_none_outside_repo() {
+    let dir = std::env::temp_dir().join(format!("xdir-sin-git-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut a = app();
+    goto_and_wait(&mut a, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(a.panes[0].tab().git.is_none());
+}
+
+#[test]
+fn tab_git_none_when_git_missing() {
+    let Some(repo) = repo_tmp("tab-sin-git") else { return };
+    let mut a = app();
+    crate::git::set_available_for_tests(Some(false));
+    goto_and_wait(&mut a, &repo.0);
+    crate::git::set_available_for_tests(None);
+    assert!(a.panes[0].tab().git.is_none());
+}
+
+#[test]
+fn tab_git_none_on_unc_path() {
+    crate::git::set_available_for_tests(Some(true));
+    let unc = Location::Path(PathBuf::from(r"\server\share\x"));
+    let r = crate::tab::repo_head_of(&unc);
+    crate::git::set_available_for_tests(None);
+    assert!(r.is_none());
+}
+
+#[test]
+fn tab_git_branch_refreshes_on_reload() {
+    let Some(repo) = repo_tmp("tab-recarga") else { return };
+    let mut a = app();
+    goto_and_wait(&mut a, &repo.0);
+    let out = std::process::Command::new("git").arg("-C").arg(&repo.0).args(["switch", "feature"]).output().unwrap();
+    assert!(out.status.success(), "git switch falló");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().reload(hwnd, &tx, true);
+    // La recarga silenciosa no marca `loading`: se espera a que no quede ninguna en curso.
+    while a.panes[0].tab().reload_pending() {
+        let ev = a.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la recarga termina");
+        if let Some(tab) = a.tab_by_id(ev.panel) {
+            tab.on_load(ev);
+        }
+    }
+    let g = a.panes[0].tab().git.clone().expect("sigue en el repo");
+    assert_eq!(g.head, crate::git::Head::Branch("feature".into()));
+}

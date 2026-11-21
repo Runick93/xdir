@@ -30,6 +30,15 @@ pub struct Search {
     pub in_place: bool,
 }
 
+/// Repo y rama de una carpeta local. Son unas pocas lecturas de archivos chicos, sin lanzar
+/// `git`; las rutas de red (`\...`) se saltan para no colgar la interfaz.
+pub(crate) fn repo_head_of(loc: &Location) -> Option<crate::git::RepoHead> {
+    match loc {
+        Location::Path(p) if crate::git::available() && !p.to_string_lossy().starts_with(r"\\") => crate::git::read_head(p),
+        _ => None,
+    }
+}
+
 pub struct Tab {
     pub id: usize,
     pub location: Location,
@@ -38,6 +47,8 @@ pub struct Tab {
     pub list: FileList,
     pub loading: bool,
     pub error: Option<String>,
+    /// Repo de git en el que está la carpeta y su rama; se relee cada vez que termina un listado.
+    pub git: Option<crate::git::RepoHead>,
     /// Generación de la carga en curso; las cargas viejas se descartan.
     generation: Arc<AtomicU64>,
     /// Identifica la navegación actual para descartar avisos de vigilancia viejos.
@@ -222,6 +233,7 @@ impl Tab {
             list,
             loading: false,
             error: None,
+            git: None,
             generation: Arc::new(AtomicU64::new(0)),
             nav_id: 0,
             reload_buf: None,
@@ -685,6 +697,9 @@ impl Tab {
                     s.done = true;
                     s.progress = 1.0;
                     s.finished = Some(Instant::now());
+                }
+                if result.is_ok() {
+                    self.git = repo_head_of(&self.location);
                 }
                 if let Some(buf) = self.reload_buf.take() {
                     if result.is_ok() {

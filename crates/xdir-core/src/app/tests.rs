@@ -3358,38 +3358,40 @@ fn tab_git_none_when_git_missing() {
 }
 
 #[test]
-fn tab_git_none_on_unc_path() {
-    let Some(repo) = repo_tmp("tab-unc") else { return };
+fn tab_git_none_on_network_path() {
+    let Some(repo) = repo_tmp("tab-red") else { return };
+    crate::sys::testing::install_fakes();
+    // Una subcarpeta del repo que el sistema da por «de red» (una unidad Z: conectada, un
+    // /Volumes/NAS montado...): existe y está en el repo, pero no se lee su HEAD.
+    let red = repo.0.join("montada");
+    std::fs::create_dir_all(&red).unwrap();
+    assert!(crate::git::read_head(&red).is_some(), "la carpeta está en el repo");
     // Contraste: la ruta local del repo sí resuelve.
     assert!(crate::tab::repo_head_of(&Location::Path(repo.0.clone())).is_some());
-    // La misma carpeta por el recurso administrativo local (\\localhost\C$\...): empieza con
-    // `\\`, así que no se consulta aunque exista y git esté disponible. Solo en Windows.
-    #[cfg(windows)]
-    {
-        use std::path::{Component, Prefix};
-        let mut comps = repo.0.components();
-        let unidad = match comps.next() {
-            Some(Component::Prefix(p)) => match p.kind() {
-                Prefix::Disk(l) | Prefix::VerbatimDisk(l) => Some(l as char),
-                _ => None,
-            },
-            _ => None,
-        };
-        let resto: PathBuf = comps.filter(|c| !matches!(c, Component::RootDir)).collect();
-        match unidad {
-            Some(l) => {
-                let unc = PathBuf::from(format!(r"\\localhost\{l}$")).join(resto);
-                if crate::git::read_head(&unc).is_some() {
-                    assert!(crate::tab::repo_head_of(&Location::Path(unc)).is_none());
-                } else {
-                    eprintln!("el recurso administrativo {unc:?} no es accesible: se salta esa parte");
-                }
-            }
-            None => eprintln!("la carpeta temporal no está en una unidad con letra: se salta esa parte"),
-        }
-    }
+    crate::sys::testing::FakeNetwork::set_remote(&red);
+    assert!(crate::tab::repo_head_of(&Location::Path(red)).is_none());
     // Y una ruta UNC cualquiera.
     assert!(crate::tab::repo_head_of(&Location::Path(PathBuf::from(r"\\server\share\x"))).is_none());
+}
+
+/// Si el listado falla (carpeta que no existe, sin permiso), la pestaña no sigue mostrando la
+/// rama del repo de antes.
+#[test]
+fn tab_git_recomputed_when_listing_fails() {
+    let Some(repo) = repo_tmp("tab-falla") else { return };
+    let mut a = app();
+    goto_and_wait(&mut a, &repo.0);
+    assert!(a.panes[0].tab().git.is_some());
+    let fuera = std::env::temp_dir().join(format!("xdir-no-existe-{}", std::process::id())).join("x");
+    let esperado = crate::git::read_head(&fuera);
+    goto_and_wait(&mut a, &fuera);
+    assert!(a.panes[0].tab().error.is_some(), "el listado falló");
+    assert_eq!(a.panes[0].tab().git, esperado);
+    assert!(a.panes[0].tab().git.as_ref().is_none_or(|g| g.root != repo.0));
+    // Una carpeta que no existe dentro del repo: es del repo (se sube por los padres).
+    goto_and_wait(&mut a, &repo.0.join("no-existe"));
+    assert!(a.panes[0].tab().error.is_some());
+    assert_eq!(a.panes[0].tab().git.as_ref().map(|g| g.root.clone()), Some(repo.0.clone()));
 }
 
 /// Cuando termina la prueba de git (en otro hilo), las pestañas ya listadas muestran su rama

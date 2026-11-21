@@ -31,10 +31,11 @@ pub struct Search {
 }
 
 /// Repo y rama de una carpeta local. Son unas pocas lecturas de archivos chicos, sin lanzar
-/// `git`; las rutas de red (`\...`) se saltan para no colgar la interfaz.
+/// `git`; las carpetas de red (UNC, unidades conectadas, montajes de red: `Network::is_remote`,
+/// que no toca el disco) se saltan para no colgar la interfaz.
 pub(crate) fn repo_head_of(loc: &Location) -> Option<crate::git::RepoHead> {
     match loc {
-        Location::Path(p) if crate::git::available() && !p.to_string_lossy().starts_with(r"\\") => crate::git::read_head(p),
+        Location::Path(p) if crate::git::available() && !sys::network().is_remote(p) => crate::git::read_head(p),
         _ => None,
     }
 }
@@ -698,9 +699,9 @@ impl Tab {
                     s.progress = 1.0;
                     s.finished = Some(Instant::now());
                 }
-                if result.is_ok() {
-                    self.git = repo_head_of(&self.location);
-                }
+                // Aunque el listado falle: la ubicación ya cambió (y `read_head` sube por los
+                // padres, así que una carpeta que no existe queda en el repo que la contiene).
+                self.git = repo_head_of(&self.location);
                 if let Some(buf) = self.reload_buf.take() {
                     if result.is_ok() {
                         self.list.replace(buf);

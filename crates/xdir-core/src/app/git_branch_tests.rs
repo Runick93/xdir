@@ -150,6 +150,26 @@ fn choosing_branch_switches_and_reloads_all_panes() {
     assert_eq!(git::read_head(&r.0).unwrap().head, Head::Branch("feature".into()));
 }
 
+/// La pestaña está en una subcarpeta que no existe en la rama destino: la recarga falla, pero
+/// el botón muestra la rama nueva (no la de antes).
+#[test]
+fn switch_to_branch_without_tab_folder_shows_new_branch() {
+    let Some(r) = repo("sin-sub") else { return };
+    let sub = r.0.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("x.txt"), "x").unwrap();
+    git::git_test(&r.0, &["add", "sub/x.txt"]).unwrap();
+    git::git_test(&r.0, &["commit", "-m", "sub"]).unwrap();
+    let (mut a, _host) = app_at(&sub);
+    assert_eq!(a.panes[0].tab().git.as_ref().map(|g| g.head.clone()), Some(Head::Branch("main".into())));
+    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
+    wait_idle(&mut a);
+    assert!(!sub.exists(), "la carpeta no está en feature");
+    wait_loaded(&mut a);
+    let g = a.panes[0].tab().git.clone().expect("sigue en el repo");
+    assert_eq!((g.root, g.head), (r.0.clone(), Head::Branch("feature".into())));
+}
+
 #[test]
 fn switch_failed_shows_notice() {
     let Some(r) = repo("fail") else { return };

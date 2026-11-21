@@ -451,6 +451,7 @@ impl App {
                     PaneHit::NewFolderButton => self.run_command(Command::NewFolder),
                     PaneHit::BranchButton => self.open_branch_menu(i),
                     PaneHit::SyncButton => self.sync_click(i),
+                    PaneHit::DirtyButton => {}
                     PaneHit::Restore => self.restore_selection(),
                     PaneHit::Search => self.begin_filter(i),
                     PaneHit::SearchClear => self.clear_filter(i),

@@ -31,6 +31,9 @@ const SYNC_TEXT_MAX_W: f32 = 170.0;
 /// Ancho mínimo del panel (hasta «Carpeta nueva») para escribir el texto junto al ícono.
 const SYNC_TEXT_MIN_PANE_W: f32 = 440.0;
 const SYNC_GLYPH: &str = "\u{E895}";
+/// Ancho del aviso de cambios sin commitear y su glifo (Segoe Fluent Icons «Warning»).
+const DIRTY_BTN_W: f32 = 28.0;
+const DIRTY_GLYPH: &str = "\u{E7BA}";
 
 /// Ícono de rama de git (no hay un glifo en la fuente de íconos): un tronco con un círculo
 /// arriba y otro abajo, y otro círculo arriba a la derecha unido al tronco por una curva.
@@ -165,6 +168,8 @@ pub enum PaneHit {
     BranchButton,
     /// El botón de sincronizar con el remoto, a la izquierda del de rama.
     SyncButton,
+    /// El aviso rojo de cambios sin commitear, a la derecha del botón de sincronizar (solo informa).
+    DirtyButton,
     /// Botón «Devolver» junto a la barra de dirección (solo en la Papelera).
     Restore,
     /// Un botón del aviso de una carpeta de red que tarda («Reintentar», «Cerrar la pestaña»).
@@ -241,6 +246,7 @@ pub struct Pane {
     /// Botón de la rama actual (vacío si la pestaña no está en un repositorio).
     branch_button: Rect,
     sync_button: Rect,
+    dirty_button: Rect,
     /// Con la Papelera a la vista, el botón «Devolver» (encendido si hay selección); lo pone la
     /// `App` antes de dibujar.
     pub restore: Option<bool>,
@@ -305,6 +311,7 @@ impl Pane {
             new_folder_button: zero,
             branch_button: zero,
             sync_button: zero,
+            dirty_button: zero,
             restore: None,
             restore_button: zero,
             list: zero,
@@ -531,6 +538,9 @@ impl Pane {
         }
         if contains(&self.favbar, x, y) {
             return PaneHit::FavBar;
+        }
+        if contains(&self.dirty_button, x, y) {
+            return PaneHit::DirtyButton;
         }
         if contains(&self.sync_button, x, y) {
             return PaneHit::SyncButton;
@@ -766,6 +776,7 @@ impl Pane {
             self.new_folder_button = rect(0.0, 0.0, 0.0, 0.0);
             self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
             self.sync_button = rect(0.0, 0.0, 0.0, 0.0);
+            self.dirty_button = rect(0.0, 0.0, 0.0, 0.0);
             p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
             let stroke = if active_pane { (th.accent, 1.5) } else { (th.border, 1.0) };
             p.rounded_path(&outline, true, None, Some(stroke));
@@ -793,10 +804,23 @@ impl Pane {
         // dentro de un repositorio (un `git` viejo junto a otro lugar no se muestra).
         self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
         self.sync_button = rect(0.0, 0.0, 0.0, 0.0);
+        self.dirty_button = rect(0.0, 0.0, 0.0, 0.0);
         let tab = &self.tabs[self.active];
         if let (Location::Path(_), Some(g)) = (&tab.location, &tab.git) {
             // De derecha a izquierda: sincronizar (ícono + texto) con un separador, y la rama.
             let mut right = nb.left - 6.0;
+            // Cambios sin commitear: el aviso rojo va a la derecha de todo, con su separador.
+            if tab.dirty > 0 {
+                let wb = rect(right - DIRTY_BTN_W, nb.top, right, nb.bottom);
+                if hover == PaneHit::DirtyButton {
+                    p.round_fill(wb, 6.0, th.hover);
+                }
+                p.text(FontId::Glyphs, DIRTY_GLYPH, wb, th.danger);
+                self.dirty_button = wb;
+                let sx = wb.left - 6.0;
+                p.fill(rect(sx, nb.top + 5.0, sx + 1.0, nb.bottom - 5.0), alpha(th.text_dim, 0.6));
+                right = sx - 6.0;
+            }
             // Sincronizar con el remoto: verde si está al día, amarillo si hay para bajar; gira mientras
             // trabaja. Solo si la rama sigue a una remota (`tab.sync`). El texto, si el panel es ancho.
             if let Some(sv) = tab.sync {

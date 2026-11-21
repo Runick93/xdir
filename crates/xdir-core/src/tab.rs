@@ -54,6 +54,8 @@ pub struct Tab {
     pub sync: Option<crate::git::SyncView>,
     /// Título y subtítulo del botón de sincronizar.
     pub sync_text: Option<(String, String)>,
+    /// Archivos con cambios sin commitear en el repositorio de la pestaña (0: ninguno o no se sabe).
+    pub dirty: usize,
     /// Generación de la carga en curso; las cargas viejas se descartan.
     generation: Arc<AtomicU64>,
     /// Identifica la navegación actual para descartar avisos de vigilancia viejos.
@@ -241,6 +243,7 @@ impl Tab {
             git: None,
             sync: None,
             sync_text: None,
+            dirty: 0,
             generation: Arc::new(AtomicU64::new(0)),
             nav_id: 0,
             reload_buf: None,

@@ -178,6 +178,13 @@ impl App {
             Hit::Pane(i, PaneHit::SyncButton) => {
                 return self.sync_tip(i);
             }
+            // El aviso rojo del pie: cuántos archivos tienen cambios sin commitear.
+            Hit::Pane(i, PaneHit::DirtyButton) => {
+                return Some(match self.panes.get(i)?.tab().dirty {
+                    1 => "1 archivo con cambios sin commitear".to_string(),
+                    n => format!("{n} archivos con cambios sin commitear"),
+                });
+            }
             // Renombrar varios: el motivo del choque de la fila bajo el mouse.
             Hit::Pane(i, PaneHit::List) if self.rename_many.as_ref().is_some_and(|r| r.pane == i) => return self.panes[i].tab().list.rename_clash_tip(),
             Hit::RenamePanel(crate::rename_many_draw::PanelHit::Close) | Hit::Compare(crate::compare::draw::CompareHit::Close) => return Some("Cerrar".to_string()),

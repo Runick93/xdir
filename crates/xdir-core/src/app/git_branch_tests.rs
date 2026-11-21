@@ -920,3 +920,50 @@ fn sync_button_shows_its_title_beside_the_glyph() {
     assert!(t.iter().any(|s| s == "Fetching origin"), "{t:?}");
     assert!(!t.iter().any(|s| s == "Hang on…"), "una sola línea: el subtítulo va en el tooltip");
 }
+
+/// Espera a que termine toda lectura de cambios sin commitear.
+fn settle_dirty(a: &mut App) {
+    super::network_tests::wait_until(a, |a| a.git_sync.values().all(|i| !i.dirty_job));
+}
+
+fn warn_glyph(host: &FakeHost) -> Option<(crate::geom::Rect, crate::geom::Color)> {
+    host.drawn_text_draws().into_iter().find(|(_, s, _, _)| s == "\u{E7BA}").map(|(_, _, r, c)| (r, c))
+}
+
+#[test]
+fn warning_shows_only_with_uncommitted_changes() {
+    let Some(r) = remote("s-sucio") else { return };
+    let (mut a, host) = app_synced(&r.work());
+    settle_dirty(&mut a);
+    a.paint();
+    assert!(warn_glyph(&host).is_none(), "carpeta limpia: sin aviso");
+    assert_eq!(a.panes[0].tab().dirty, 0);
+
+    std::fs::write(r.work().join("nuevo.txt"), "x").unwrap();
+    a.git_sync_tick();
+    settle_dirty(&mut a);
+    a.paint();
+    let (rect, color) = warn_glyph(&host).expect("con cambios: se dibuja el aviso");
+    assert_eq!(color, a.theme.danger, "rojo");
+    assert_eq!(a.panes[0].tab().dirty, 1);
+    assert!(rect.left >= a.panes[0].sync_button_rect().right, "a la derecha del botón de sincronizar");
+    assert!(rect.right <= a.panes[0].footer_buttons().0.left, "antes de «Carpeta nueva»");
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::DirtyButton)).as_deref(), Some("1 archivo con cambios sin commitear"));
+
+    std::fs::remove_file(r.work().join("nuevo.txt")).unwrap();
+    a.git_sync_tick();
+    settle_dirty(&mut a);
+    a.paint();
+    assert!(warn_glyph(&host).is_none(), "al limpiar, el aviso se va");
+}
+
+#[test]
+fn warning_shows_even_when_the_branch_follows_no_remote() {
+    let Some(r) = repo("s-sucio-sin-remota") else { return };
+    std::fs::write(r.0.join("nuevo.txt"), "x").unwrap();
+    let (mut a, host) = app_synced(&r.0);
+    settle_dirty(&mut a);
+    a.paint();
+    assert!(warn_glyph(&host).is_some());
+    assert!(a.panes[0].branch_button_rect().right <= warn_glyph(&host).unwrap().0.left);
+}

@@ -256,6 +256,12 @@ pub fn dirty_count(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Cuántos archivos tienen cambios sin commitear (modificados, borrados, nuevos sin seguimiento);
+/// `None` si git no pudo decirlo.
+pub fn changes_count(root: &Path) -> Option<usize> {
+    run(root, &["status", "--porcelain"]).ok().map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+}
+
 /// Mensaje del stash que se crea antes de pasar a `dest`.
 pub fn stash_message(dest: &str) -> String {
     format!("xdir: antes de pasar a {dest}")

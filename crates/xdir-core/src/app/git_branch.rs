@@ -38,6 +38,11 @@ pub(super) struct SyncInfo {
     pub(super) last_fetch: Option<std::time::Instant>,
     /// Hay una consulta en curso.
     pub(super) job: Option<SyncJob>,
+    /// Archivos con cambios sin commitear, según la última lectura.
+    pub(super) dirty: usize,
+    /// Hay una lectura de cambios en curso, y se pidió otra mientras tanto.
+    pub(super) dirty_job: bool,
+    pub(super) dirty_again: bool,
 }
 
 /// Quién pidió una consulta del remoto.
@@ -120,8 +125,9 @@ impl App {
                 }
             };
             if let Some(fetch) = todo {
-                self.request_sync(root, fetch, SyncJob::Background);
+                self.request_sync(root.clone(), fetch, SyncJob::Background);
             }
+self.request_dirty(root);
         }
         self.apply_sync_views();
     }
@@ -165,6 +171,36 @@ impl App {
         self.git_sync_tick();
     }
 
+    /// Pide en otro hilo cuántos archivos de `root` tienen cambios sin commitear. Si ya hay una lectura
+    /// en curso se anota que falta otra, para que lo ocurrido mientras tanto no quede sin verse.
+    fn request_dirty(&mut self, root: PathBuf) {
+        let info = self.git_sync.entry(root.clone()).or_default();
+        if info.dirty_job {
+            info.dirty_again = true;
+            return;
+        }
+        info.dirty_job = true;
+        let r = root.clone();
+        self.spawn_task_or(
+            move || TaskDone::GitDirty { count: git::changes_count(&r), root: r },
+            move || TaskDone::GitDirty { root, count: None },
+        );
+    }
+
+    /// Llegó la cantidad de archivos con cambios sin commitear de `root`.
+    pub(super) fn on_git_dirty(&mut self, root: PathBuf, count: Option<usize>) {
+        let Some(info) = self.git_sync.get_mut(&root) else { return };
+        info.dirty_job = false;
+        if let Some(n) = count {
+            info.dirty = n;
+        }
+        if std::mem::take(&mut info.dirty_again) {
+            self.request_dirty(root);
+        }
+        self.apply_sync_views();
+        self.redraw();
+    }
+
     /// Pone en cada pestaña lo que dice su botón de sincronizar, según lo que se sabe de su repo.
     pub(super) fn apply_sync_views(&mut self) {
         let pulling = self.git_pulling.clone();
@@ -175,6 +211,7 @@ impl App {
                     let up = info.state?;
                     Some(git::SyncView { behind: up.behind, spinning: matches!(info.job, Some(SyncJob::Refresh | SyncJob::Reload)) || pulling.as_ref() == Some(&g.root) })
                 });
+                tab.dirty = tab.git.as_ref().and_then(|g| self.git_sync.get(&g.root)).map_or(0, |i| i.dirty);
                 tab.sync_text = match (&tab.git, tab.sync) {
                     (Some(g), Some(v)) => Some(Self::sync_texts(self.git_sync.get(&g.root), pulling.as_ref() == Some(&g.root), v.behind)),
                     _ => None,

@@ -25,6 +25,7 @@ pub mod folder_views;
 pub mod format;
 pub mod fs;
 pub mod geom;
+pub mod git;
 pub mod groups;
 pub mod host;
 pub mod in_use;

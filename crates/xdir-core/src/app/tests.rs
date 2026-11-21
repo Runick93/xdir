@@ -3266,11 +3266,17 @@ fn tab_git_none_when_git_missing() {
 
 #[test]
 fn tab_git_none_on_unc_path() {
-    crate::git::set_available_for_tests(Some(true));
-    let unc = Location::Path(PathBuf::from(r"\server\share\x"));
-    let r = crate::tab::repo_head_of(&unc);
-    crate::git::set_available_for_tests(None);
-    assert!(r.is_none());
+    let Some(repo) = repo_tmp("tab-unc") else { return };
+    // Contraste: la ruta local del repo sí resuelve.
+    assert!(crate::tab::repo_head_of(&Location::Path(repo.0.clone())).is_some());
+    // La misma carpeta por el recurso administrativo local (\\localhost\C$\...): empieza con
+    // `\\`, así que no se consulta aunque exista y git esté disponible.
+    let s = repo.0.to_string_lossy().to_string();
+    let unc = PathBuf::from(format!(r"\\localhost\{}${}", &s[..1], &s[2..]));
+    assert!(crate::git::read_head(&unc).is_some(), "el recurso administrativo debe resolver: {unc:?}");
+    assert!(crate::tab::repo_head_of(&Location::Path(unc)).is_none());
+    // Y una ruta UNC cualquiera.
+    assert!(crate::tab::repo_head_of(&Location::Path(PathBuf::from(r"\\server\share\x"))).is_none());
 }
 
 #[test]

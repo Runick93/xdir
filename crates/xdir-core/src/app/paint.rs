@@ -406,6 +406,13 @@ impl App {
             if let Some(u) = &self.net.unmap {
                 crate::net::drives_dialog::unmap_draw(p, w, h, u, drives_style, drives_hover);
             }
+            if let Some(c) = &self.confirm {
+                let hover = match hover {
+                    Hit::Confirm(k) => Some(k),
+                    _ => None,
+                };
+                c.dialog.draw(p, w, h, hover);
+            }
             // El cartel de ayuda va último: encima de todo.
             if let Some((text, x, y)) = &tooltip {
                 tooltip::draw_tooltip(p, w, h, *x, *y, text);

@@ -381,6 +381,10 @@ impl App {
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
         self.dismiss_tooltip();
+        // Con el diálogo de confirmación abierto, lo escrito no va a la lista.
+        if self.confirm.is_some() {
+            return;
+        }
         // Grabando un atajo, lo escrito no va a la lista.
         if self.capturing_keys() {
             return;

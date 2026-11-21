@@ -8,6 +8,7 @@ mod archive_nav;
 mod changelog;
 mod checksum;
 mod compare;
+mod confirm;
 mod edit;
 mod events;
 mod favs;
@@ -231,6 +232,8 @@ enum Hit {
     Connect(crate::net::dialog::DialogHit),
     /// Los paneles de unidades de red (Windows).
     Drives(crate::net::drives_dialog::DrivesHit),
+    /// El diálogo de confirmación propio (git): un botón, la cruz o el panel sin nada debajo.
+    Confirm(confirm::ConfirmHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.
@@ -555,6 +558,8 @@ pub struct App {
     in_use: Option<in_use::InUseState>,
     /// Hay un trabajo de git en curso (leer las ramas o cambiar de rama): no se larga otro.
     git_busy: bool,
+    /// El diálogo de confirmación abierto (cambios sin guardar al cambiar de rama) y qué se hace con la respuesta.
+    confirm: Option<git_branch::ConfirmState>,
     /// Qué hace git mientras `git_busy` (el cartel del indicador de actividad).
     git_task: String,
     /// Red: favoritos y recientes, lo conectado y la red local.
@@ -801,6 +806,7 @@ impl App {
             transfers: transfers::Transfers::new(),
             in_use: None,
             git_busy: false,
+            confirm: None,
             git_task: String::new(),
             net: network::NetState::default(),
             archive: archive_nav::ArchiveState::default(),

@@ -11,6 +11,10 @@ impl App {
 
     pub(super) fn hit(&self, x: f32, y: f32) -> Hit {
         let (w, h) = self.client_dips();
+        // El diálogo de confirmación es modal y va encima de todo.
+        if let Some(c) = &self.confirm {
+            return c.dialog.hit(x, y).map_or(Hit::None, Hit::Confirm);
+        }
         // El diálogo "Acerca de" es modal: tapa todo lo demás.
         if self.about_open {
             return about::at(w, h, x, y).map_or(Hit::None, Hit::About);
@@ -183,6 +187,13 @@ impl App {
         self.info.focused = matches!(hit, Hit::Info(_));
         if let Some(st) = &mut self.compare {
             st.focused = matches!(hit, Hit::Compare(_));
+        }
+        if self.confirm.is_some() {
+            self.confirm_click(match hit {
+                Hit::Confirm(h) => Some(h),
+                _ => None,
+            });
+            return;
         }
         if self.about_open {
             match hit {
@@ -489,7 +500,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
+            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
         // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
         self.quick_look_follow_list();

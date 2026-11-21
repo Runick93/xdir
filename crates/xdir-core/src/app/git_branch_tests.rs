@@ -7,6 +7,7 @@ use crate::host::MenuPos;
 use crate::shell::Entry;
 use crate::sys::testing::FakeHost;
 use super::git_branch::GitHow;
+use crate::keys::keys::{VK_LEFT, VK_RIGHT, VK_TAB};
 
 /// Repo temporal que se borra al soltarlo.
 struct Repo(PathBuf);
@@ -299,10 +300,14 @@ fn cancel_menu_does_nothing() {
     assert_eq!(git::read_head(&r.0).unwrap().head, Head::Branch("main".into()));
 }
 
-// ---- el cartel de cambios sin commitear ----
+// ---- el diálogo de cambios sin commitear (con el estilo de xdir, no un cuadro del sistema) ----
 
-const Q1_TITLE: &str = "No se puede pasar a «feature»";
-const Q1_TEXT: &str = "Tienes cambios sin guardar que chocan con esa rama. ¿Guardarlos en el stash y cambiar? Sí: guardar en el stash y cambiar. No: descartar los cambios. Cancelar: quedarse aquí.";
+const TITLE: &str = "No se puede pasar a «feature»";
+const DIRTY_TEXT: &str = "Tenés cambios sin guardar que chocan con esa rama. Podés guardarlos en el stash para recuperarlos después, o descartarlos.";
+const STASH: &str = "Guardar en el stash y cambiar";
+const DISCARD: &str = "Descartar…";
+const DISCARD_NOW: &str = "Descartar y cambiar";
+const CANCEL: &str = "Cancelar";
 
 fn read(r: &Repo, f: &str) -> String {
     std::fs::read_to_string(r.0.join(f)).unwrap()
@@ -323,21 +328,41 @@ fn head(r: &Repo) -> Head {
     git::read_head(&r.0).unwrap().head
 }
 
-#[test]
-fn dirty_asks_stash_first() {
-    let Some(r) = repo("d-pregunta") else { return };
-    let (mut a, host) = app_at(&r.0);
-    host.set_answer(None);
-    dirty_switch(&mut a, &r, &[]);
-    assert_eq!(host.questions(), vec![(Q1_TITLE.to_string(), Q1_TEXT.to_string())]);
+/// El diálogo abierto (falla si no hay ninguno).
+fn dialog(a: &App) -> &super::confirm::Confirm {
+    &a.confirm.as_ref().expect("hay un diálogo abierto").dialog
+}
+
+fn labels(a: &App) -> Vec<String> {
+    dialog(a).buttons.iter().map(|b| b.label.clone()).collect()
+}
+
+/// Aprieta el botón de nombre `label` del diálogo abierto.
+fn press(a: &mut App, label: &str) {
+    let i = dialog(a).buttons.iter().position(|b| b.label == label).unwrap_or_else(|| panic!("no hay un botón «{label}»: {:?}", labels(a)));
+    a.confirm_choose(Some(i));
 }
 
 #[test]
-fn dirty_yes_stashes_and_switches() {
-    let Some(r) = repo("d-stash") else { return };
+fn dirty_opens_an_own_dialog_with_named_buttons() {
+    let Some(r) = repo("d-dialogo") else { return };
     let (mut a, host) = app_at(&r.0);
-    host.set_answer(Some(true));
     dirty_switch(&mut a, &r, &[]);
+    let d = dialog(&a);
+    assert_eq!((d.title.as_str(), d.text.as_str()), (TITLE, DIRTY_TEXT));
+    assert_eq!(labels(&a), [STASH, DISCARD, CANCEL]);
+    assert_eq!(d.focus, 0, "el foco empieza en guardar en el stash");
+    assert!(!a.git_busy, "nada corre mientras se decide");
+    assert!(host.questions().is_empty(), "ya no es un cuadro del sistema");
+}
+
+#[test]
+fn dirty_stash_button_stashes_and_switches() {
+    let Some(r) = repo("d-stash") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    dirty_switch(&mut a, &r, &[]);
+    press(&mut a, STASH);
+    assert!(a.confirm.is_none());
     assert!(a.git_busy, "el worker del stash arrancó");
     wait_idle(&mut a);
     assert_eq!(head(&r), Head::Branch("feature".into()));
@@ -348,29 +373,34 @@ fn dirty_yes_stashes_and_switches() {
 }
 
 #[test]
-fn dirty_no_then_yes_discards() {
+fn dirty_discard_asks_again_and_then_discards() {
     let Some(r) = repo("d-descarta") else { return };
-    let (mut a, host) = app_at(&r.0);
+    let (mut a, _host) = app_at(&r.0);
     std::fs::write(r.0.join("nuevo.txt"), "n").unwrap();
-    host.set_answers(vec![Some(false), Some(true)]);
     dirty_switch(&mut a, &r, &[]);
+    press(&mut a, DISCARD);
+    let d = dialog(&a);
+    assert_eq!((d.title.as_str(), d.text.as_str()), ("Descartar cambios", "Se perderá 1 archivo modificado. Esto no se puede deshacer."));
+    assert_eq!(labels(&a), [DISCARD_NOW, CANCEL]);
+    assert!(!a.git_busy);
+    assert_eq!(read(&r, "a.txt"), "local", "todavía no se descartó nada");
+    press(&mut a, DISCARD_NOW);
     wait_idle(&mut a);
-    let q = host.questions();
-    assert_eq!(q.len(), 2);
-    assert_eq!(q[1].0, "Descartar cambios");
-    assert_eq!(q[1].1, "Se perderá 1 archivo modificado. Esto no se puede deshacer. ¿Descartar y cambiar?");
     assert_eq!(head(&r), Head::Branch("feature".into()));
     assert_eq!(read(&r, "a.txt"), "feature");
-    assert!(r.0.join("nuevo.txt").exists());
+    assert!(r.0.join("nuevo.txt").exists(), "lo nuevo sin seguimiento no se toca");
 }
 
+/// Un Enter distraído sobre la confirmación de descartar no destruye nada: el foco empieza en «Cancelar».
 #[test]
-fn dirty_no_then_no_does_nothing() {
-    let Some(r) = repo("d-no-no") else { return };
-    let (mut a, host) = app_at(&r.0);
-    host.set_answers(vec![Some(false), Some(false)]);
+fn discard_confirmation_defaults_to_cancel_on_enter() {
+    let Some(r) = repo("d-enter") else { return };
+    let (mut a, _host) = app_at(&r.0);
     dirty_switch(&mut a, &r, &[]);
-    assert_eq!(host.questions().len(), 2);
+    press(&mut a, DISCARD);
+    assert_eq!(dialog(&a).focus, 1);
+    assert!(a.confirm_key(VK_RETURN, false));
+    assert!(a.confirm.is_none());
     assert!(!a.git_busy);
     assert!(a.notice.is_none());
     assert_eq!(head(&r), Head::Branch("main".into()));
@@ -380,10 +410,10 @@ fn dirty_no_then_no_does_nothing() {
 #[test]
 fn dirty_cancel_does_nothing() {
     let Some(r) = repo("d-cancela") else { return };
-    let (mut a, host) = app_at(&r.0);
-    host.set_answer(None);
+    let (mut a, _host) = app_at(&r.0);
     dirty_switch(&mut a, &r, &[]);
-    assert_eq!(host.questions().len(), 1);
+    press(&mut a, CANCEL);
+    assert!(a.confirm.is_none());
     assert!(!a.git_busy);
     assert!(a.notice.is_none());
     assert_eq!(head(&r), Head::Branch("main".into()));
@@ -391,33 +421,95 @@ fn dirty_cancel_does_nothing() {
 }
 
 #[test]
+fn escape_and_close_cross_cancel() {
+    let Some(r) = repo("d-esc") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    dirty_switch(&mut a, &r, &[]);
+    assert!(a.confirm_key(VK_ESCAPE, false));
+    assert!(a.confirm.is_none() && !a.git_busy);
+    dirty_switch(&mut a, &r, &[]);
+    a.confirm_click(Some(super::confirm::ConfirmHit::Close));
+    assert!(a.confirm.is_none() && !a.git_busy);
+    assert_eq!(head(&r), Head::Branch("main".into()));
+    assert_eq!(read(&r, "a.txt"), "local");
+}
+
+#[test]
+fn arrows_and_tab_move_the_focus_and_enter_presses_it() {
+    let Some(r) = repo("d-foco") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    dirty_switch(&mut a, &r, &[]);
+    a.confirm_key(VK_RIGHT, false);
+    assert_eq!(dialog(&a).focus, 1);
+    a.confirm_key(VK_TAB, true);
+    assert_eq!(dialog(&a).focus, 0);
+    a.confirm_key(VK_LEFT, false);
+    assert_eq!(dialog(&a).focus, 2, "da la vuelta");
+    a.confirm_key(VK_TAB, false);
+    assert_eq!(dialog(&a).focus, 0);
+    a.confirm_key(VK_RETURN, false);
+    assert!(a.git_busy && a.confirm.is_none(), "Enter apretó «{STASH}»");
+    wait_idle(&mut a);
+    assert_eq!(head(&r), Head::Branch("feature".into()));
+}
+
+/// Con el diálogo abierto los clics solo cuentan dentro de él, y se resuelven sobre lo dibujado.
+#[test]
+fn clicking_the_drawn_buttons_works_and_the_dialog_is_modal() {
+    let Some(r) = repo("d-clic") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    dirty_switch(&mut a, &r, &[]);
+    a.paint();
+    assert_eq!(a.hit(2.0, 2.0), Hit::None, "fuera del panel no hay nada: ni la lista ni el pie");
+    let nb = a.panes[0].branch_button_rect();
+    assert_ne!(a.hit((nb.left + nb.right) / 2.0, (nb.top + nb.bottom) / 2.0), Hit::Pane(0, PaneHit::BranchButton), "el botón de rama de abajo no responde");
+    // Busca el centro de cada botón probando puntos de la franja de abajo del panel.
+    let (w, h) = a.client_dips();
+    let mut found = Vec::new();
+    for yy in (0..h as i32).step_by(4) {
+        for xx in (0..w as i32).step_by(4) {
+            if let Hit::Confirm(super::confirm::ConfirmHit::Button(i)) = a.hit(xx as f32, yy as f32) {
+                if !found.iter().any(|(j, _, _)| *j == i) {
+                    found.push((i, xx as f32, yy as f32));
+                }
+            }
+        }
+    }
+    found.sort_by_key(|f| f.0);
+    assert_eq!(found.len(), 3, "los tres botones se pueden acertar: {found:?}");
+    let (_, x, y) = found[2]; // «Cancelar»
+    a.on_left_down(x, y, false);
+    assert!(a.confirm.is_none(), "el clic en Cancelar cerró el diálogo");
+    assert_eq!(head(&r), Head::Branch("main".into()));
+}
+
+#[test]
 fn dirty_count_in_plural() {
     let Some(r) = repo("d-plural") else { return };
-    let (mut a, host) = app_at(&r.0);
+    let (mut a, _host) = app_at(&r.0);
     std::fs::write(r.0.join("c.txt"), "c").unwrap();
     git::git_test(&r.0, &["add", "c.txt"]).unwrap();
     git::git_test(&r.0, &["commit", "-m", "c"]).unwrap();
-    host.set_answers(vec![Some(false), Some(false)]);
     dirty_switch(&mut a, &r, &["b.txt", "c.txt"]);
-    let q = host.questions();
-    assert_eq!(q[1].1, "Se perderán 3 archivos modificados. Esto no se puede deshacer. ¿Descartar y cambiar?");
+    press(&mut a, DISCARD);
+    assert_eq!(dialog(&a).text, "Se perderán 3 archivos modificados. Esto no se puede deshacer.");
 }
 
-/// Un `Dirty` sin archivos con seguimiento (no debería pasar): el aviso general, sin ventana.
+/// Un `Dirty` sin archivos con seguimiento (no debería pasar): el aviso general, sin diálogo.
 #[test]
 fn dirty_without_tracked_files_is_a_plain_notice() {
     let (mut a, host) = app_fake(Head::Branch("main".into()));
     let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
     a.git_busy = true;
     a.on_git_switched(root, "feature".into(), GitHow::Plain, SwitchOutcome::Dirty { files: 0 });
-    assert!(host.questions().is_empty());
+    assert!(a.confirm.is_none() && host.questions().is_empty());
     assert!(!a.git_busy);
     assert_eq!(a.notice.as_deref(), Some("No se pudo cambiar de rama: hay cambios sin guardar que chocan"));
 }
 
 // ---- archivos sin seguimiento que se sobrescribirían ----
 
-const UNTRACKED_TEXT: &str = "Hay archivos sin seguimiento que se sobrescribirían al cambiar. ¿Guardarlos en el stash y cambiar?";
+const UNTRACKED_TEXT: &str = "Hay archivos sin seguimiento que se sobrescribirían al cambiar. ¿Querés guardarlos en el stash y cambiar?";
 const UNTRACKED_NOTICE: &str = "No se pudo cambiar de rama: hay archivos sin seguimiento que se sobrescribirían";
 
 /// `feature` gana `n.txt`; en `main` hay un `n.txt` nuevo sin seguimiento que lo tapa.
@@ -430,16 +522,33 @@ fn untracked_in_the_way(r: &Repo) {
     std::fs::write(r.0.join("n.txt"), "local").unwrap();
 }
 
+/// Intenta cambiar a `feature` y espera a que git rechace y se abra el diálogo.
+fn switch_until_dialog(a: &mut App, r: &Repo) {
+    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
+    super::network_tests::wait_until(a, |a| a.confirm.is_some());
+}
+
 #[test]
-fn untracked_yes_stashes_and_switches() {
-    let Some(r) = repo("u-stash") else { return };
+fn untracked_dialog_offers_only_stash_and_cancel() {
+    let Some(r) = repo("u-dialogo") else { return };
     untracked_in_the_way(&r);
     let (mut a, host) = app_at(&r.0);
-    host.set_answers(vec![Some(true)]);
-    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
+    switch_until_dialog(&mut a, &r);
+    let d = dialog(&a);
+    assert_eq!((d.title.as_str(), d.text.as_str()), (TITLE, UNTRACKED_TEXT));
+    assert_eq!(labels(&a), [STASH, CANCEL], "sin la opción de descartar: no serviría");
+    assert!(!a.git_busy);
+    assert!(host.questions().is_empty());
+}
+
+#[test]
+fn untracked_stash_button_stashes_and_switches() {
+    let Some(r) = repo("u-stash") else { return };
+    untracked_in_the_way(&r);
+    let (mut a, _host) = app_at(&r.0);
+    switch_until_dialog(&mut a, &r);
+    press(&mut a, STASH);
     wait_idle(&mut a);
-    assert_eq!(host.questions(), vec![(Q1_TITLE.to_string(), UNTRACKED_TEXT.to_string())]);
-    assert!(!UNTRACKED_TEXT.to_lowercase().contains("descartar"));
     assert_eq!(head(&r), Head::Branch("feature".into()));
     assert_eq!(read(&r, "n.txt"), "feature");
     let archivos = git::git_test(&r.0, &["stash", "show", "--include-untracked", "--name-only"]).unwrap();
@@ -448,35 +557,32 @@ fn untracked_yes_stashes_and_switches() {
 }
 
 #[test]
-fn untracked_no_does_nothing() {
-    let Some(r) = repo("u-no") else { return };
+fn untracked_cancel_does_nothing() {
+    let Some(r) = repo("u-cancela") else { return };
     untracked_in_the_way(&r);
-    let (mut a, host) = app_at(&r.0);
-    host.set_answers(vec![Some(false)]);
-    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
-    wait_idle(&mut a);
-    assert_eq!(host.questions().len(), 1, "una sola pregunta: sin la de descartar");
-    assert!(!a.git_busy);
+    let (mut a, _host) = app_at(&r.0);
+    switch_until_dialog(&mut a, &r);
+    press(&mut a, CANCEL);
+    assert!(a.confirm.is_none() && !a.git_busy);
     assert!(a.notice.is_none());
     assert_eq!(head(&r), Head::Branch("main".into()));
     assert_eq!(read(&r, "n.txt"), "local");
 }
 
-/// Cambios con seguimiento que no chocan y un archivo nuevo que sí: la ventana del archivo
-/// nuevo (no la de guardar o descartar).
+/// Cambios con seguimiento que no chocan y un archivo nuevo que sí: el diálogo del archivo
+/// nuevo (no el de guardar o descartar).
 #[test]
 fn untracked_mixed_with_tracked_changes_asks_untracked() {
     let Some(r) = repo("u-mezcla") else { return };
     untracked_in_the_way(&r);
     std::fs::write(r.0.join("b.txt"), "local").unwrap();
-    let (mut a, host) = app_at(&r.0);
-    host.set_answers(vec![Some(false)]);
-    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
-    wait_idle(&mut a);
-    assert_eq!(host.questions(), vec![(Q1_TITLE.to_string(), UNTRACKED_TEXT.to_string())]);
+    let (mut a, _host) = app_at(&r.0);
+    switch_until_dialog(&mut a, &r);
+    assert_eq!(dialog(&a).text, UNTRACKED_TEXT);
+    assert_eq!(labels(&a), [STASH, CANCEL]);
 }
 
-/// Si ya se probó guardar o descartar: un aviso, sin ventana.
+/// Si ya se probó guardar o descartar: un aviso, sin diálogo.
 #[test]
 fn untracked_after_stash_or_discard_is_a_notice() {
     for how in [GitHow::Stash, GitHow::Discard] {
@@ -484,7 +590,7 @@ fn untracked_after_stash_or_discard_is_a_notice() {
         let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
         a.git_busy = true;
         a.on_git_switched(root, "feature".into(), how, SwitchOutcome::UntrackedInTheWay);
-        assert!(host.questions().is_empty());
+        assert!(a.confirm.is_none() && host.questions().is_empty());
         assert!(!a.git_busy);
         assert_eq!(a.notice.as_deref(), Some(UNTRACKED_NOTICE));
     }
@@ -496,7 +602,7 @@ fn dirty_from_stash_attempt_does_not_reopen_dialog() {
     let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
     a.git_busy = true;
     a.on_git_switched(root, "feature".into(), GitHow::Stash, SwitchOutcome::Dirty { files: 2 });
-    assert!(host.questions().is_empty());
+    assert!(a.confirm.is_none() && host.questions().is_empty());
     assert!(!a.git_busy);
     assert!(a.notice.is_some());
 }

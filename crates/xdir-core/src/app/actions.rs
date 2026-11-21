@@ -33,6 +33,8 @@ impl App {
     fn on_window_key(&mut self, vk: Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
         let active = self.active;
         match vk {
+            // El diálogo de confirmación se queda con todas las teclas mientras está abierto.
+            _ if self.confirm.is_some() => return self.confirm_key(vk, shift),
             VK_ESCAPE if self.about_open => self.about_open = false,
             VK_ESCAPE if self.net.dialog.is_some() => self.close_connect_dialog(),
             VK_ESCAPE if self.net.map.is_some() => self.close_map_dialog(),

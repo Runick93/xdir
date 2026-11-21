@@ -2,6 +2,8 @@
 //! hilo (`spawn_task`): la interfaz nunca espera al proceso.
 
 use super::*;
+use super::confirm::{ButtonKind, Confirm, ConfirmButton, ConfirmHit};
+use crate::keys::keys::{VK_LEFT, VK_RIGHT, VK_TAB};
 use crate::git::{self, Head, SwitchOutcome};
 use crate::host::MenuPos;
 use crate::shell::Entry;
@@ -144,32 +146,109 @@ impl App {
     /// se ofrece guardarlos en el stash (`-u` se los lleva). Descartar no sirve: no toca los
     /// archivos sin seguimiento.
     fn ask_untracked(&mut self, root: PathBuf, dest: String) {
-        let title = format!("No se puede pasar a «{dest}»");
-        let text = "Hay archivos sin seguimiento que se sobrescribirían al cambiar. ¿Guardarlos en el stash y cambiar?";
-        if self.host.ask_yes_no(&title, text) {
-            self.start_switch(root, dest, GitHow::Stash);
-        }
+        let dialog = Confirm::new(
+            format!("No se puede pasar a «{dest}»"),
+            "Hay archivos sin seguimiento que se sobrescribirían al cambiar. ¿Querés guardarlos en el stash y cambiar?",
+            vec![ConfirmButton::new("Guardar en el stash y cambiar", ButtonKind::Primary), ConfirmButton::new("Cancelar", ButtonKind::Plain)],
+            0,
+        );
+        self.confirm = Some(ConfirmState { dialog, ask: GitAsk::Untracked { root, dest } });
     }
 
-    /// Git se negó a cambiar por cambios sin guardar: ofrece guardarlos en el stash o descartarlos.
-    /// Las ventanas son modales en el hilo de la interfaz; `git_busy` ya está apagado y
-    /// `start_switch` lo vuelve a encender si se sigue adelante.
+    /// Git se negó a cambiar por cambios sin guardar: ofrece guardarlos en el stash o descartarlos
+    /// (esto último pide una segunda confirmación). El diálogo es de la propia ventana: `git_busy`
+    /// ya está apagado y `start_switch` lo vuelve a encender si se sigue adelante.
     fn ask_dirty(&mut self, root: PathBuf, dest: String, files: usize) {
-        let title = format!("No se puede pasar a «{dest}»");
-        let text = "Tienes cambios sin guardar que chocan con esa rama. ¿Guardarlos en el stash y cambiar? Sí: guardar en el stash y cambiar. No: descartar los cambios. Cancelar: quedarse aquí.";
-        match self.host.ask_yes_no_cancel(&title, text) {
-            Some(true) => self.start_switch(root, dest, GitHow::Stash),
-            Some(false) => {
-                let text = if files == 1 {
-                    "Se perderá 1 archivo modificado. Esto no se puede deshacer. ¿Descartar y cambiar?".to_string()
-                } else {
-                    format!("Se perderán {files} archivos modificados. Esto no se puede deshacer. ¿Descartar y cambiar?")
-                };
-                if self.host.ask_yes_no("Descartar cambios", &text) {
-                    self.start_switch(root, dest, GitHow::Discard);
-                }
-            }
-            None => {}
+        let dialog = Confirm::new(
+            format!("No se puede pasar a «{dest}»"),
+            "Tenés cambios sin guardar que chocan con esa rama. Podés guardarlos en el stash para recuperarlos después, o descartarlos.",
+            vec![
+                ConfirmButton::new("Guardar en el stash y cambiar", ButtonKind::Primary),
+                ConfirmButton::new("Descartar…", ButtonKind::Plain),
+                ConfirmButton::new("Cancelar", ButtonKind::Plain),
+            ],
+            0,
+        );
+        self.confirm = Some(ConfirmState { dialog, ask: GitAsk::Dirty { root, dest, files } });
+    }
+
+    /// La segunda confirmación de descartar: dice cuántos archivos se pierden y deja el foco en
+    /// «Cancelar», para que un Enter distraído no destruya nada.
+    fn ask_discard(&mut self, root: PathBuf, dest: String, files: usize) {
+        let text = if files == 1 {
+            "Se perderá 1 archivo modificado. Esto no se puede deshacer.".to_string()
+        } else {
+            format!("Se perderán {files} archivos modificados. Esto no se puede deshacer.")
+        };
+        let dialog = Confirm::new(
+            "Descartar cambios",
+            text,
+            vec![ConfirmButton::new("Descartar y cambiar", ButtonKind::Danger), ConfirmButton::new("Cancelar", ButtonKind::Plain)],
+            1,
+        );
+        self.confirm = Some(ConfirmState { dialog, ask: GitAsk::Discard { root, dest } });
+    }
+
+    /// Clic en el diálogo: un botón lo resuelve; la cruz lo cancela; el resto no hace nada.
+    pub(super) fn confirm_click(&mut self, hit: Option<ConfirmHit>) {
+        match hit {
+            Some(ConfirmHit::Button(i)) => self.confirm_choose(Some(i)),
+            Some(ConfirmHit::Close) => self.confirm_choose(None),
+            Some(ConfirmHit::Panel) | None => {}
+        }
+        self.redraw();
+    }
+
+    /// Teclas del diálogo: Esc cancela, Enter aprieta el botón con el foco, y las flechas y Tab
+    /// mueven el foco. Se queda con todas las teclas mientras está abierto.
+    pub(super) fn confirm_key(&mut self, vk: Key, shift: bool) -> bool {
+        let step = match vk {
+            VK_LEFT | VK_UP => -1,
+            VK_RIGHT | VK_DOWN => 1,
+            VK_TAB if shift => -1,
+            VK_TAB => 1,
+            _ => 0,
+        };
+        if vk == VK_ESCAPE {
+            self.confirm_choose(None);
+        } else if vk == VK_RETURN {
+            let focus = self.confirm.as_ref().map(|c| c.dialog.focus);
+            self.confirm_choose(focus);
+        } else if step != 0
+            && let Some(c) = &mut self.confirm
+        {
+            c.dialog.move_focus(step);
+        }
+        self.redraw();
+        true
+    }
+
+    /// Cierra el diálogo y hace lo que corresponde al botón elegido (`None`: se canceló). El
+    /// último botón de cada diálogo es siempre «Cancelar».
+    pub(super) fn confirm_choose(&mut self, choice: Option<usize>) {
+        let Some(state) = self.confirm.take() else { return };
+        let Some(i) = choice else { return };
+        match (state.ask, i) {
+            (GitAsk::Dirty { root, dest, .. } | GitAsk::Untracked { root, dest }, 0) => self.start_switch(root, dest, GitHow::Stash),
+            (GitAsk::Dirty { root, dest, files }, 1) => self.ask_discard(root, dest, files),
+            (GitAsk::Discard { root, dest }, 0) => self.start_switch(root, dest, GitHow::Discard),
+            _ => {}
         }
     }
+}
+
+/// Qué pregunta hay abierta y con qué datos seguir según la respuesta.
+pub(super) enum GitAsk {
+    /// Cambios con seguimiento que chocan: guardar en el stash, descartar (con otra confirmación) o cancelar.
+    Dirty { root: PathBuf, dest: String, files: usize },
+    /// La segunda confirmación de descartar; se abre desde `Dirty`.
+    Discard { root: PathBuf, dest: String },
+    /// Archivos sin seguimiento que estorban: solo guardar en el stash o cancelar.
+    Untracked { root: PathBuf, dest: String },
+}
+
+/// El diálogo de confirmación abierto y la pregunta a la que responde.
+pub(super) struct ConfirmState {
+    pub(super) dialog: Confirm,
+    pub(super) ask: GitAsk,
 }

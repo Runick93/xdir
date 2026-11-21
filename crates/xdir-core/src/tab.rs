@@ -52,6 +52,8 @@ pub struct Tab {
     pub git: Option<crate::git::RepoHead>,
     /// Lo que dice el botón de sincronizar (la `App` lo pone al día con lo que sabe del remoto de `git`).
     pub sync: Option<crate::git::SyncView>,
+    /// Título y subtítulo del botón de sincronizar.
+    pub sync_text: Option<(String, String)>,
     /// Generación de la carga en curso; las cargas viejas se descartan.
     generation: Arc<AtomicU64>,
     /// Identifica la navegación actual para descartar avisos de vigilancia viejos.
@@ -238,6 +240,7 @@ impl Tab {
             error: None,
             git: None,
             sync: None,
+            sync_text: None,
             generation: Arc::new(AtomicU64::new(0)),
             nav_id: 0,
             reload_buf: None,

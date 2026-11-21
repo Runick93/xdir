@@ -14,6 +14,17 @@ const MENU_MAX: usize = 40;
 /// Cada cuánto, como mucho, se consulta la red de un repositorio (`git fetch`).
 const FETCH_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// «ahora mismo», «hace 5 minutos»… para el tiempo transcurrido desde el último `fetch`.
+pub(super) fn ago(secs: u64) -> String {
+    let (n, unit) = match secs {
+        0..=44 => return "ahora mismo".into(),
+        45..=3599 => (secs.div_ceil(60).max(1), ("minuto", "minutos")),
+        3600..=86399 => (secs / 3600, ("hora", "horas")),
+        _ => (secs / 86400, ("día", "días")),
+    };
+    format!("hace {n} {}", if n == 1 { unit.0 } else { unit.1 })
+}
+
 /// Qué se sabe del remoto de un repositorio.
 #[derive(Default)]
 pub(super) struct SyncInfo {
@@ -34,6 +45,8 @@ pub(super) enum SyncJob {
     Background,
     /// La pidió la persona con un clic en el botón verde: el ícono gira hasta que termina.
     Refresh,
+    /// Se relee el estado del repositorio después de un `pull`: el ícono gira un instante más.
+    Reload,
 }
 
 /// Cómo se cambia de rama.
@@ -155,8 +168,12 @@ impl App {
                 tab.sync = tab.git.as_ref().and_then(|g| {
                     let info = self.git_sync.get(&g.root)?;
                     let up = info.state?;
-                    Some(git::SyncView { behind: up.behind, spinning: info.job == Some(SyncJob::Refresh) || pulling.as_ref() == Some(&g.root) })
+                    Some(git::SyncView { behind: up.behind, spinning: matches!(info.job, Some(SyncJob::Refresh | SyncJob::Reload)) || pulling.as_ref() == Some(&g.root) })
                 });
+                tab.sync_text = match (&tab.git, tab.sync) {
+                    (Some(g), Some(v)) => Some(Self::sync_texts(self.git_sync.get(&g.root), pulling.as_ref() == Some(&g.root), v.behind)),
+                    _ => None,
+                };
             }
         }
     }
@@ -214,8 +231,40 @@ impl App {
             }
             Err(t) => self.notice = Some(t),
         }
-        self.request_sync(root, false, SyncJob::Background);
+        self.request_sync(root, false, SyncJob::Reload);
     }
+
+    /// El texto del botón de sincronizar, con la secuencia de estados de GitHub Desktop (título y
+    /// subtítulo): reposo («Comprobar el remoto» / «Bajar cambios», con cuándo se comprobó por
+    /// última vez) → «Comprobando el remoto» o «Bajando cambios» → «Actualizando el repositorio».
+    fn sync_texts(info: Option<&SyncInfo>, pulling: bool, behind: usize) -> (String, String) {
+        let busy = |t: &str| (t.to_string(), "Un momento…".to_string());
+        if pulling {
+            return busy("Bajando cambios");
+        }
+        match info.and_then(|i| i.job) {
+            Some(SyncJob::Refresh) => return busy("Comprobando remoto"),
+            Some(SyncJob::Reload) => return busy("Actualizando repositorio"),
+            _ => {}
+        }
+        let last = match info.and_then(|i| i.last_fetch) {
+            Some(t) => format!("Comprobado {}", ago(t.elapsed().as_secs())),
+            None => "Nunca comprobado".to_string(),
+        };
+        let title = match behind {
+            0 => "Comprobar remoto".to_string(),
+            1 => "Bajar cambios (1)".to_string(),
+            n => format!("Bajar cambios ({n})"),
+        };
+        (title, last)
+    }
+
+    /// El mismo texto en una sola línea, para el tooltip del botón.
+    pub(super) fn sync_tip(&self, pane: usize) -> Option<String> {
+        let (title, sub) = self.panes.get(pane)?.tab().sync_text.clone()?;
+        Some(format!("{title} — {sub}"))
+    }
+
     /// Clic en el botón de rama del panel `pane`: relee la rama y pide la lista de ramas.
     pub(super) fn open_branch_menu(&mut self, pane: usize) {
         if self.git_busy || pane >= self.panes.len() {

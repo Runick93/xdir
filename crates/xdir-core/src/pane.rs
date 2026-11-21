@@ -25,6 +25,11 @@ const BRANCH_CHEV_W: f32 = 12.0;
 const BRANCH_GAP: f32 = 6.0;
 /// Ancho del botón de sincronizar y su glifo (Segoe Fluent Icons «Sync»).
 const SYNC_BTN_W: f32 = 28.0;
+/// Aire entre el texto del botón de sincronizar y el borde; y su tope.
+const SYNC_TEXT_GAP: f32 = 8.0;
+const SYNC_TEXT_MAX_W: f32 = 170.0;
+/// Ancho mínimo del panel (hasta «Carpeta nueva») para escribir el texto junto al ícono.
+const SYNC_TEXT_MIN_PANE_W: f32 = 440.0;
 const SYNC_GLYPH: &str = "\u{E895}";
 
 /// Ícono de rama de git (no hay un glifo en la fuente de íconos): un tronco con un círculo
@@ -790,11 +795,39 @@ impl Pane {
         self.sync_button = rect(0.0, 0.0, 0.0, 0.0);
         let tab = &self.tabs[self.active];
         if let (Location::Path(_), Some(g)) = (&tab.location, &tab.git) {
+            // De derecha a izquierda: sincronizar (ícono + texto) con un separador, y la rama.
+            let mut right = nb.left - 6.0;
+            // Sincronizar con el remoto: verde si está al día, amarillo si hay para bajar; gira mientras
+            // trabaja. Solo si la rama sigue a una remota (`tab.sync`). El texto, si el panel es ancho.
+            if let Some(sv) = tab.sync {
+                let text = tab.sync_text.as_ref().map(|t| t.0.as_str()).filter(|_| nb.left - area.left >= SYNC_TEXT_MIN_PANE_W);
+                let text_w = text.map_or(0.0, |t| p.measure(FontId::Ui, t).min(SYNC_TEXT_MAX_W) + SYNC_TEXT_GAP);
+                let sb = rect(right - SYNC_BTN_W - text_w, nb.top, right, nb.bottom);
+                let glyph_r = rect(sb.left, sb.top, sb.left + SYNC_BTN_W, sb.bottom);
+                if hover == PaneHit::SyncButton {
+                    let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
+                    p.round_fill(sb, 6.0, c);
+                }
+                let color = if sv.behind > 0 { th.warning } else { th.ok };
+                let mut glyph = || p.text(FontId::Glyphs, SYNC_GLYPH, glyph_r, color);
+                if sv.spinning {
+                    p.rotated(spin_degrees(), (glyph_r.left + glyph_r.right) / 2.0, (glyph_r.top + glyph_r.bottom) / 2.0, &mut glyph);
+                } else {
+                    glyph();
+                }
+                if let Some(t) = text {
+                    p.text(FontId::Ui, t, rect(glyph_r.right, sb.top, sb.right - SYNC_TEXT_GAP, sb.bottom), th.text);
+                }
+                self.sync_button = sb;
+                let sx = sb.left - 6.0;
+                p.fill(rect(sx, nb.top + 5.0, sx + 1.0, nb.bottom - 5.0), alpha(th.text_dim, 0.6));
+                right = sx - 6.0;
+            }
             let label = g.head.label();
             // Ícono de rama + nombre + flecha hacia arriba (el menú se abre hacia arriba).
             let fixed = 2.0 * BRANCH_BTN_PAD + BRANCH_ICON_W + BRANCH_GAP + BRANCH_GAP + BRANCH_CHEV_W;
             let w = (p.measure(FontId::Ui, label) + fixed).min(BRANCH_BTN_MAX_W);
-            let bb = rect(nb.left - 6.0 - w, nb.top, nb.left - 6.0, nb.bottom);
+            let bb = rect(right - w, nb.top, right, nb.bottom);
             if hover == PaneHit::BranchButton {
                 let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
                 p.round_fill(bb, 6.0, c);
@@ -806,23 +839,6 @@ impl Pane {
             p.text(FontId::Ui, &crate::paint::ellipsize(p, FontId::Ui, label, inner.right - inner.left), inner, th.text_dim);
             p.text(FontId::Glyphs, "\u{E70E}", rect(bb.right - BRANCH_BTN_PAD - BRANCH_CHEV_W, bb.top, bb.right - BRANCH_BTN_PAD, bb.bottom), th.text_dim);
             self.branch_button = bb;
-            // Sincronizar con el remoto, a la izquierda del de rama: verde si está al día, amarillo si hay
-            // para bajar; gira mientras trabaja. Solo si la rama sigue a una remota (`tab.sync`).
-            if let Some(sv) = tab.sync {
-                let sb = rect(bb.left - 4.0 - SYNC_BTN_W, bb.top, bb.left - 4.0, bb.bottom);
-                if hover == PaneHit::SyncButton {
-                    let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
-                    p.round_fill(sb, 6.0, c);
-                }
-                let color = if sv.behind > 0 { th.warning } else { th.ok };
-                let mut glyph = || p.text(FontId::Glyphs, SYNC_GLYPH, sb, color);
-                if sv.spinning {
-                    p.rotated(spin_degrees(), (sb.left + sb.right) / 2.0, (sb.top + sb.bottom) / 2.0, &mut glyph);
-                } else {
-                    glyph();
-                }
-                self.sync_button = sb;
-            }
         }
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];

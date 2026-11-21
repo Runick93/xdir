@@ -3270,11 +3270,31 @@ fn tab_git_none_on_unc_path() {
     // Contraste: la ruta local del repo sí resuelve.
     assert!(crate::tab::repo_head_of(&Location::Path(repo.0.clone())).is_some());
     // La misma carpeta por el recurso administrativo local (\\localhost\C$\...): empieza con
-    // `\\`, así que no se consulta aunque exista y git esté disponible.
-    let s = repo.0.to_string_lossy().to_string();
-    let unc = PathBuf::from(format!(r"\\localhost\{}${}", &s[..1], &s[2..]));
-    assert!(crate::git::read_head(&unc).is_some(), "el recurso administrativo debe resolver: {unc:?}");
-    assert!(crate::tab::repo_head_of(&Location::Path(unc)).is_none());
+    // `\\`, así que no se consulta aunque exista y git esté disponible. Solo en Windows.
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut comps = repo.0.components();
+        let unidad = match comps.next() {
+            Some(Component::Prefix(p)) => match p.kind() {
+                Prefix::Disk(l) | Prefix::VerbatimDisk(l) => Some(l as char),
+                _ => None,
+            },
+            _ => None,
+        };
+        let resto: PathBuf = comps.filter(|c| !matches!(c, Component::RootDir)).collect();
+        match unidad {
+            Some(l) => {
+                let unc = PathBuf::from(format!(r"\\localhost\{l}$")).join(resto);
+                if crate::git::read_head(&unc).is_some() {
+                    assert!(crate::tab::repo_head_of(&Location::Path(unc)).is_none());
+                } else {
+                    eprintln!("el recurso administrativo {unc:?} no es accesible: se salta esa parte");
+                }
+            }
+            None => eprintln!("la carpeta temporal no está en una unidad con letra: se salta esa parte"),
+        }
+    }
     // Y una ruta UNC cualquiera.
     assert!(crate::tab::repo_head_of(&Location::Path(PathBuf::from(r"\\server\share\x"))).is_none());
 }

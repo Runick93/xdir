@@ -310,6 +310,51 @@ pub fn discard_and_switch(root: &Path, name: &str) -> SwitchOutcome {
     }
 }
 
+/// Cuánto se adelantó y cuánto se atrasó la rama actual respecto de la remota que sigue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Upstream {
+    /// Commits locales que el remoto no tiene (para un `push`).
+    pub ahead: usize,
+    /// Commits del remoto que faltan acá (para un `pull`).
+    pub behind: usize,
+}
+
+/// Lo que el botón de sincronizar de una pestaña tiene que mostrar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SyncView {
+    /// Commits que hay para bajar: 0 es «al día» (verde), más es «hay para bajar» (amarillo).
+    pub behind: usize,
+    /// Gira mientras se baja o se consulta el remoto.
+    pub spinning: bool,
+}
+
+/// Cuánto adelanta o atrasa la rama actual respecto de su remota, según lo último que se trajo
+/// (no consulta la red). `None` si la rama no sigue a ninguna remota o `HEAD` está suelto.
+pub fn upstream_state(root: &Path) -> Option<Upstream> {
+    let out = run(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).ok()?;
+    let mut n = out.split_whitespace();
+    Some(Upstream { ahead: n.next()?.parse().ok()?, behind: n.next()?.parse().ok()? })
+}
+
+/// Trae lo nuevo del remoto sin tocar la copia de trabajo. Corre en segundo plano, así que pide
+/// que el administrador de credenciales no abra ventanas (`GCM_INTERACTIVE=never`): si hace falta
+/// contraseña, falla en silencio.
+pub fn fetch(root: &Path) -> Result<(), String> {
+    ejecutar(comando_fetch(root), &["fetch", "--quiet"]).map(|_| ())
+}
+
+/// El `git` de `fetch`: el de siempre, más el pedido de no abrir ventanas de credenciales.
+fn comando_fetch(root: &Path) -> Command {
+    let mut cmd = comando(root);
+    cmd.env("GCM_INTERACTIVE", "never");
+    cmd
+}
+
+/// Baja lo nuevo avanzando la rama actual. Solo avanza en línea recta (`--ff-only`): nunca crea
+/// un commit de fusión ni deja conflictos a medias; si no se puede, git lo dice y no toca nada.
+pub fn pull(root: &Path) -> Result<(), String> {
+    ejecutar(comando(root), &["pull", "--ff-only", "--quiet"]).map(|_| ())
+}
 /// Solo para pruebas: `git` con identidad fija para poder hacer commits.
 #[cfg(test)]
 pub(crate) fn git_test(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -350,6 +395,31 @@ pub(crate) fn temp_repo(name: &str) -> Option<PathBuf> {
     Some(p)
 }
 
+/// Solo para pruebas: un remoto de verdad en la carpeta temporal. Devuelve `base` con
+/// `origin.git` (sin copia de trabajo), `work` (clon con `main` ya subido y siguiendo a `origin/main`) y
+/// `other` (otro clon, para empujar cambios que `work` todavía no vio). Quien lo pide borra `base`.
+/// Devuelve `None` si no hay git.
+#[cfg(test)]
+pub(crate) fn temp_remote(name: &str) -> Option<PathBuf> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    if !warm_up() {
+        return None;
+    }
+    let base = std::env::temp_dir().join(format!("xdir-gitremote-{}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed), name));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).ok()?;
+    git_test(&base, &["init", "--bare", "-b", "main", "origin.git"]).ok()?;
+    git_test(&base, &["clone", "origin.git", "work"]).ok()?;
+    let work = base.join("work");
+    git_test(&work, &["checkout", "-B", "main"]).ok()?;
+    std::fs::write(work.join("a.txt"), "uno").ok()?;
+    git_test(&work, &["add", "a.txt"]).ok()?;
+    git_test(&work, &["commit", "-m", "inicial"]).ok()?;
+    git_test(&work, &["push", "-u", "origin", "main"]).ok()?;
+    git_test(&base, &["clone", "origin.git", "other"]).ok()?;
+    Some(base)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +785,124 @@ mod tests {
         );
     }
 
+    // ---- sincronizar con el remoto ----
+
+    /// Remoto temporal (ver `temp_remote`) que se borra al soltarlo.
+    struct Remote(PathBuf);
+
+    impl Remote {
+        fn work(&self) -> PathBuf {
+            self.0.join("work")
+        }
+        fn other(&self) -> PathBuf {
+            self.0.join("other")
+        }
+        /// Un commit nuevo en `other` que se sube al remoto, sin que `work` se entere.
+        fn push_from_other(&self, file: &str) {
+            fs::write(self.other().join(file), "otro").unwrap();
+            git_test(&self.other(), &["add", file]).unwrap();
+            git_test(&self.other(), &["commit", "-m", file]).unwrap();
+            git_test(&self.other(), &["push"]).unwrap();
+        }
+    }
+
+    impl Drop for Remote {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn remote(name: &str) -> Option<Remote> {
+        let r = temp_remote(name).map(Remote);
+        if r.is_none() {
+            eprintln!("git no está instalado: se salta la prueba");
+        }
+        r
+    }
+
+    #[test]
+    fn upstream_is_none_without_remote() {
+        let Some(r) = repo("up-sin-remoto") else { return };
+        assert_eq!(upstream_state(&r.0), None);
+    }
+
+    #[test]
+    fn upstream_up_to_date_after_push() {
+        let Some(r) = remote("up-al-dia") else { return };
+        assert_eq!(upstream_state(&r.work()), Some(Upstream { ahead: 0, behind: 0 }));
+    }
+
+    #[test]
+    fn upstream_does_not_see_the_remote_until_fetch() {
+        let Some(r) = remote("up-fetch") else { return };
+        r.push_from_other("b.txt");
+        assert_eq!(upstream_state(&r.work()), Some(Upstream { ahead: 0, behind: 0 }), "sin traer, lo local no cambia");
+        fetch(&r.work()).unwrap();
+        assert_eq!(upstream_state(&r.work()), Some(Upstream { ahead: 0, behind: 1 }));
+        assert!(!r.work().join("b.txt").exists(), "fetch no toca la copia de trabajo");
+    }
+
+    #[test]
+    fn upstream_counts_ahead() {
+        let Some(r) = remote("up-adelante") else { return };
+        fs::write(r.work().join("c.txt"), "c").unwrap();
+        git_test(&r.work(), &["add", "c.txt"]).unwrap();
+        git_test(&r.work(), &["commit", "-m", "c"]).unwrap();
+        assert_eq!(upstream_state(&r.work()), Some(Upstream { ahead: 1, behind: 0 }));
+    }
+
+    #[test]
+    fn upstream_is_none_with_detached_head() {
+        let Some(r) = remote("up-suelto") else { return };
+        git_test(&r.work(), &["switch", "--detach"]).unwrap();
+        assert_eq!(upstream_state(&r.work()), None);
+    }
+
+    #[test]
+    fn pull_fast_forwards_and_brings_the_files() {
+        let Some(r) = remote("pull-ff") else { return };
+        r.push_from_other("b.txt");
+        fetch(&r.work()).unwrap();
+        pull(&r.work()).unwrap();
+        assert_eq!(fs::read_to_string(r.work().join("b.txt")).unwrap(), "otro");
+        assert_eq!(upstream_state(&r.work()), Some(Upstream { ahead: 0, behind: 0 }));
+    }
+
+    #[test]
+    fn pull_refuses_to_merge_diverged_branches() {
+        let Some(r) = remote("pull-diverge") else { return };
+        fs::write(r.work().join("c.txt"), "c").unwrap();
+        git_test(&r.work(), &["add", "c.txt"]).unwrap();
+        git_test(&r.work(), &["commit", "-m", "c"]).unwrap();
+        r.push_from_other("b.txt");
+        fetch(&r.work()).unwrap();
+        let before = git_test(&r.work(), &["rev-parse", "HEAD"]).unwrap();
+        let err = pull(&r.work()).unwrap_err();
+        assert!(err.to_lowercase().contains("fast-forward"), "{err}");
+        assert_eq!(git_test(&r.work(), &["rev-parse", "HEAD"]).unwrap(), before, "no se tocó nada");
+        assert!(!r.work().join("b.txt").exists());
+        assert_eq!(upstream_state(&r.work()), Some(Upstream { ahead: 1, behind: 1 }));
+    }
+
+    #[test]
+    fn fetch_fails_quietly_without_the_remote() {
+        let Some(r) = remote("fetch-sin-remoto") else { return };
+        fs::remove_dir_all(r.0.join("origin.git")).unwrap();
+        let err = fetch(&r.work()).unwrap_err();
+        assert!(!err.is_empty());
+        assert_eq!(upstream_state(&r.work()), Some(Upstream { ahead: 0, behind: 0 }), "se queda con lo último que se sabía");
+    }
+
+    #[test]
+    fn background_fetch_never_asks_for_credentials_in_a_window() {
+        // El pull lo pide la persona: ese sí puede abrir la ventana del administrador de credenciales.
+        let pull_cmd = comando(Path::new("."));
+        assert!(!pull_cmd.get_envs().any(|(k, _)| k == std::ffi::OsStr::new("GCM_INTERACTIVE")));
+        let cmd = comando_fetch(Path::new("."));
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.contains(&(std::ffi::OsStr::new("GCM_INTERACTIVE"), Some(std::ffi::OsStr::new("never")))));
+        assert!(envs.contains(&(std::ffi::OsStr::new("GIT_TERMINAL_PROMPT"), Some(std::ffi::OsStr::new("0")))));
+    }
     #[test]
     fn available_override() {
         set_available_for_tests(Some(false));

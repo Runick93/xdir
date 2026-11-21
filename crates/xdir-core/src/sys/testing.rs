@@ -1334,6 +1334,8 @@ pub struct RecordingPainter {
     image_alpha: Cell<f32>,
     fills: RefCell<Vec<(Rect, Color)>>,
     round_fills: RefCell<Vec<(Rect, Color)>>,
+    /// Giros pedidos con `rotated` (grados), en orden.
+    rotations: RefCell<Vec<f32>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -1354,7 +1356,13 @@ impl RecordingPainter {
             image_alpha: Cell::new(1.0),
             fills: RefCell::new(Vec::new()),
             round_fills: RefCell::new(Vec::new()),
+            rotations: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Los giros pedidos con `rotated` (grados), en orden.
+    pub fn rotations(&self) -> Vec<f32> {
+        self.rotations.borrow().clone()
     }
 
     /// Los rectángulos rellenados con `round_fill` (rectángulo y color), en orden.
@@ -1477,6 +1485,11 @@ impl Painter for RecordingPainter {
         f();
     }
 
+    fn rotated(&self, degrees: f32, _cx: f32, _cy: f32, f: &mut dyn FnMut()) {
+        self.rotations.borrow_mut().push(degrees);
+        f();
+    }
+
     fn theme(&self) -> &Theme {
         &self.theme
     }
@@ -1510,6 +1523,10 @@ pub struct FakeHost {
     drag_result: RefCell<Result<(), String>>,
     drawn: RefCell<Vec<(FontId, String, Rect)>>,
     drawn_fills: RefCell<Vec<(Rect, Color)>>,
+    /// Textos del último cuadro con su color.
+    drawn_text_draws: RefCell<Vec<(FontId, String, Rect, Color)>>,
+    /// Giros (`rotated`) del último cuadro, en grados.
+    drawn_rotations: RefCell<Vec<f32>>,
     /// Íconos del último cuadro (x, y, lado y opacidad).
     drawn_icons: RefCell<Vec<(f32, f32, f32, f32)>>,
     /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
@@ -1555,6 +1572,8 @@ impl FakeHost {
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
             drawn_fills: RefCell::new(Vec::new()),
+            drawn_text_draws: RefCell::new(Vec::new()),
+            drawn_rotations: RefCell::new(Vec::new()),
             drawn_icons: RefCell::new(Vec::new()),
             text_boxes: RefCell::new(HashMap::new()),
             next_text_box: Cell::new(1),
@@ -1693,6 +1712,16 @@ impl FakeHost {
     /// Los textos del último cuadro dibujado, en orden.
     pub fn drawn_texts(&self) -> Vec<(FontId, String, Rect)> {
         self.drawn.borrow().clone()
+    }
+
+    /// Los textos del último cuadro dibujado, con su color.
+    pub fn drawn_text_draws(&self) -> Vec<(FontId, String, Rect, Color)> {
+        self.drawn_text_draws.borrow().clone()
+    }
+
+    /// Los giros del último cuadro dibujado (grados).
+    pub fn drawn_rotations(&self) -> Vec<f32> {
+        self.drawn_rotations.borrow().clone()
     }
 
     /// Los rectángulos rellenados del último cuadro dibujado.
@@ -1870,6 +1899,8 @@ impl WindowHost for FakeHost {
         paint(&p, w, h);
         *self.drawn.borrow_mut() = p.texts();
         *self.drawn_fills.borrow_mut() = p.fills();
+        *self.drawn_text_draws.borrow_mut() = p.text_draws();
+        *self.drawn_rotations.borrow_mut() = p.rotations();
         *self.drawn_icons.borrow_mut() = p.icon_draws();
         *self.drawn_big.borrow_mut() = p.big_requests();
         Ok(())

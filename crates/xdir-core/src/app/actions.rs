@@ -35,6 +35,7 @@ impl App {
         match vk {
             // El diálogo de confirmación se queda con todas las teclas mientras está abierto.
             _ if self.confirm.is_some() => return self.confirm_key(vk, shift),
+            _ if self.drop_menu.is_some() => return self.drop_key(vk),
             VK_ESCAPE if self.about_open => self.about_open = false,
             VK_ESCAPE if self.net.dialog.is_some() => self.close_connect_dialog(),
             VK_ESCAPE if self.net.map.is_some() => self.close_map_dialog(),

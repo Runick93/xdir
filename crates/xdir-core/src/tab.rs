@@ -50,6 +50,8 @@ pub struct Tab {
     pub error: Option<String>,
     /// Repo de git en el que está la carpeta y su rama; se relee cada vez que termina un listado.
     pub git: Option<crate::git::RepoHead>,
+    /// Lo que dice el botón de sincronizar (la `App` lo pone al día con lo que sabe del remoto de `git`).
+    pub sync: Option<crate::git::SyncView>,
     /// Generación de la carga en curso; las cargas viejas se descartan.
     generation: Arc<AtomicU64>,
     /// Identifica la navegación actual para descartar avisos de vigilancia viejos.
@@ -235,6 +237,7 @@ impl Tab {
             loading: false,
             error: None,
             git: None,
+            sync: None,
             generation: Arc::new(AtomicU64::new(0)),
             nav_id: 0,
             reload_buf: None,

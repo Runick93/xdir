@@ -3,8 +3,7 @@
 
 use super::*;
 use crate::git::{self, Head, RepoHead, SwitchOutcome};
-use crate::host::MenuPos;
-use crate::shell::Entry;
+use super::drop_menu::DropHit;
 use crate::sys::testing::FakeHost;
 use super::git_branch::GitHow;
 use crate::keys::keys::{VK_LEFT, VK_RIGHT, VK_TAB};
@@ -52,23 +51,27 @@ fn click_button(a: &mut App, pane: usize) {
     a.on_left_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
 }
 
-/// (id, label, enabled, checked) de las entradas del último menú.
-fn items(host: &FakeHost) -> Vec<(u32, String, bool, bool)> {
-    host.menus()
-        .last()
-        .expect("hubo un menú")
-        .iter()
-        .map(|e| match e {
-            Entry::Item { id, label, enabled, checked } => (*id, label.clone(), *enabled, *checked),
-            _ => panic!("solo items"),
-        })
-        .collect()
+/// (rótulo, habilitada, con tilde) de las filas del menú de ramas abierto.
+fn items(a: &App) -> Vec<(String, bool, bool)> {
+    a.drop_menu.as_ref().expect("hay un menú abierto").menu.items.iter().map(|i| (i.label.clone(), i.enabled, i.checked)).collect()
 }
 
-fn id_of(host: &FakeHost, label: &str) -> u32 {
-    items(host).into_iter().find(|i| i.1 == label).unwrap_or_else(|| panic!("falta {label}")).0
+/// Posición de la fila de nombre `label` en el menú abierto.
+fn row_of(a: &App, label: &str) -> usize {
+    items(a).iter().position(|i| i.0 == label).unwrap_or_else(|| panic!("falta la fila {label}: {:?}", items(a)))
 }
 
+/// Hace clic en la fila `label` del menú abierto.
+fn pick(a: &mut App, label: &str) {
+    let i = row_of(a, label);
+    a.drop_click(Some(DropHit::Item(i)));
+}
+
+/// Hace clic en el botón de rama y espera a que se abra el menú.
+fn open_menu(a: &mut App) {
+    click_button(a, 0);
+    super::network_tests::wait_until(a, |a| a.drop_menu.is_some());
+}
 /// Espera a que ninguna pestaña siga cargando.
 fn wait_loaded(a: &mut App) {
     super::network_tests::wait_until(a, |a| a.panes.iter().all(|p| p.tabs.iter().all(|t| !t.loading && !t.reload_pending())));
@@ -79,71 +82,74 @@ fn wait_idle(a: &mut App) {
 }
 
 #[test]
-fn click_opens_menu_with_branches() {
+fn click_opens_the_branch_menu_above_the_button() {
     let Some(r) = repo("menu") else { return };
     let (mut a, host) = app_at(&r.0);
-    click_button(&mut a, 0);
-    wait_idle(&mut a);
-    let it = items(&host);
+    open_menu(&mut a);
+    assert!(!a.git_busy, "leídas las ramas, nada corre");
+    let it = items(&a);
     assert_eq!(it.len(), 2);
-    let main = it.iter().find(|i| i.1 == "main").unwrap();
-    assert!(main.3 && !main.2, "la actual: marcada y deshabilitada");
-    let feature = it.iter().find(|i| i.1 == "feature").unwrap();
-    assert!(feature.2 && !feature.3);
-    let b = a.panes[0].branch_button_rect();
-    match host.menu_positions().last() {
-        Some(MenuPos::Above(x, y)) => assert_eq!((*x, *y), (b.left, b.top)),
-        p => panic!("se esperaba MenuPos::Above, fue {p:?}"),
+    let main = it.iter().find(|i| i.0 == "main").unwrap();
+    assert!(main.2 && !main.1, "la actual: con tilde y sin poder elegirse");
+    let feature = it.iter().find(|i| i.0 == "feature").unwrap();
+    assert!(feature.1 && !feature.2);
+    assert!(host.menus().is_empty(), "ya no es un menú del sistema");
+    a.paint();
+    let (chip, panel) = (a.panes[0].branch_button_rect(), a.drop_menu.as_ref().unwrap().menu.panel_rect());
+    assert!(panel.bottom <= chip.top, "se abre hacia arriba: {panel:?} sobre {chip:?}");
+    assert!(panel.left <= chip.left, "pegado al botón por la izquierda");
+    let drawn = host.drawn_texts();
+    for s in ["feature", "main", "\u{E73E}"] {
+        assert!(drawn.iter().any(|t| t.1 == s), "se dibuja {s}: {drawn:?}");
     }
 }
 
 #[test]
 fn menu_caps_at_40_branches() {
-    let (mut a, host) = app_fake(Head::Branch("b0".into()));
+    let (mut a, _host) = app_fake(Head::Branch("b0".into()));
     let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
     a.git_busy = true;
     a.on_git_branches(0, root, Ok((0..45).map(|i| format!("b{i}")).collect()));
-    let it = items(&host);
+    let it = items(&a);
     assert_eq!(it.len(), 41);
-    assert_eq!(it[40].1, "…y 5 más");
-    assert!(!it[40].2);
+    assert_eq!(it[40].0, "…y 5 más");
+    assert!(!it[40].1);
     assert!(!a.git_busy);
 }
 
 #[test]
 fn menu_empty_repo_says_no_branches() {
-    let (mut a, host) = app_fake(Head::Branch("main".into()));
+    let (mut a, _host) = app_fake(Head::Branch("main".into()));
     let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
     a.on_git_branches(0, root, Ok(vec![]));
-    let it = items(&host);
+    let it = items(&a);
     assert_eq!(it.len(), 1);
-    assert_eq!((it[0].1.as_str(), it[0].2), ("(sin ramas)", false));
+    assert_eq!((it[0].0.as_str(), it[0].1), ("(sin ramas)", false));
 }
 
 #[test]
 fn menu_detached_head_marks_none() {
-    let (mut a, host) = app_fake(Head::Detached("abc1234def5678".into()));
+    let (mut a, _host) = app_fake(Head::Detached("abc1234def5678".into()));
     let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
     a.on_git_branches(0, root, Ok(vec!["main".into(), "feature".into()]));
-    let it = items(&host);
+    let it = items(&a);
     assert_eq!(it.len(), 2);
-    assert!(it.iter().all(|i| !i.3 && i.2));
+    assert!(it.iter().all(|i| !i.2 && i.1));
 }
 
 #[test]
 fn choosing_branch_switches_and_reloads_all_panes() {
     let Some(r) = repo("switch") else { return };
-    let (mut a, host) = app_at(&r.0);
+    let (mut a, _host) = app_at(&r.0);
     a.new_tab(1, Location::Path(r.0.clone()), true);
     wait_loaded(&mut a);
     a.panes[1].tab_mut().git = git::read_head(&r.0);
     a.paint();
-    // Primero se ve el menú; la elección se fija antes de abrirlo.
-    host.set_menu_choice(Some(1));
-    click_button(&mut a, 0);
-    // El menú se abre al volver las ramas: se elige `feature` por su etiqueta.
-    super::network_tests::wait_until(&mut a, |a| !host.menus().is_empty() || !a.git_busy);
-    assert_eq!(id_of(&host, "feature"), 1, "feature (la más reciente) va primero");
+    open_menu(&mut a);
+    assert_eq!(row_of(&a, "feature"), 0, "feature (la más reciente) va primero");
+    pick(&mut a, "feature");
+    assert!(a.drop_menu.is_none(), "elegir cierra el menú");
+    assert!(a.git_busy, "el cambio está en curso");
     wait_idle(&mut a);
     super::network_tests::wait_until(&mut a, |a| {
         a.panes[..2].iter().all(|p| p.tab().git.as_ref().map(|g| g.head == Head::Branch("feature".into())).unwrap_or(false))
@@ -151,6 +157,89 @@ fn choosing_branch_switches_and_reloads_all_panes() {
     assert_eq!(git::read_head(&r.0).unwrap().head, Head::Branch("feature".into()));
 }
 
+#[test]
+fn clicking_the_current_branch_or_the_panel_keeps_the_menu_open_and_changes_nothing() {
+    let Some(r) = repo("menu-actual") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    open_menu(&mut a);
+    pick(&mut a, "main");
+    assert!(a.drop_menu.is_some(), "la actual no se puede elegir");
+    a.drop_click(Some(DropHit::Panel));
+    assert!(a.drop_menu.is_some());
+    assert!(!a.git_busy);
+    assert_eq!(head(&r), Head::Branch("main".into()));
+}
+
+#[test]
+fn a_click_outside_the_menu_only_closes_it() {
+    let Some(r) = repo("menu-fuera") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    open_menu(&mut a);
+    a.paint();
+    assert_eq!(a.hit(2.0, 2.0), Hit::None, "fuera del panel no hay nada: el menú es modal");
+    a.on_left_down(2.0, 2.0, false);
+    assert!(a.drop_menu.is_none());
+    assert!(!a.git_busy);
+    assert_eq!(head(&r), Head::Branch("main".into()));
+}
+
+#[test]
+fn keyboard_moves_the_focus_and_enter_chooses() {
+    let Some(r) = repo("menu-teclas") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    open_menu(&mut a);
+    assert!(a.drop_key(VK_DOWN));
+    assert_eq!(a.drop_menu.as_ref().unwrap().menu.focus, Some(row_of(&a, "feature")), "salta la actual");
+    // Otras teclas no se cuelan a los paneles.
+    assert!(a.drop_key(crate::keys::keys::VK_TAB));
+    assert!(a.drop_menu.is_some());
+    assert!(a.drop_key(VK_RETURN));
+    assert!(a.drop_menu.is_none());
+    assert!(a.git_busy, "cambiando a feature");
+    wait_idle(&mut a);
+    assert_eq!(head(&r), Head::Branch("feature".into()));
+}
+
+#[test]
+fn escape_closes_the_menu_without_switching() {
+    let Some(r) = repo("menu-esc") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    open_menu(&mut a);
+    assert!(a.drop_key(VK_ESCAPE));
+    assert!(a.drop_menu.is_none() && !a.git_busy);
+    assert_eq!(head(&r), Head::Branch("main".into()));
+}
+
+#[test]
+fn enter_without_a_focused_row_does_nothing() {
+    let Some(r) = repo("menu-enter") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    open_menu(&mut a);
+    assert!(a.drop_key(VK_RETURN));
+    assert!(a.drop_menu.is_some() && !a.git_busy);
+}
+
+#[test]
+fn the_wheel_scrolls_a_long_menu_and_does_not_move_the_panes() {
+    let (mut a, host) = app_fake(Head::Branch("b0".into()));
+    let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
+    a.on_git_branches(0, root, Ok((0..45).map(|i| format!("b{i}")).collect()));
+    a.paint();
+    let shows = |host: &FakeHost, s: &str| host.drawn_texts().iter().any(|t| t.1 == s);
+    assert!(shows(&host, "b3") && !shows(&host, "b20"), "al principio se ven las primeras filas");
+    let panel = a.drop_menu.as_ref().unwrap().menu.panel_rect();
+    let (x, y) = ((panel.left + panel.right) / 2.0, (panel.top + panel.bottom) / 2.0);
+    // La ventana de pruebas es chica: se ven pocas filas, así que se recorre hasta el final.
+    for _ in 0..20 {
+        a.on_wheel(x, y, -1.0, 3.0);
+    }
+    a.paint();
+    assert!(shows(&host, "b39") && !shows(&host, "b3"), "la rueda baja por la lista hasta el final (el tope son 40 ramas)");
+    // La rueda fuera del panel no hace nada (ni mueve lo de abajo).
+    a.on_wheel(2.0, 2.0, 1.0, 3.0);
+    a.paint();
+    assert!(shows(&host, "b39"));
+}
 /// La pestaña está en una subcarpeta que no existe en la rama destino: la recarga falla, pero
 /// el botón muestra la rama nueva (no la de antes).
 #[test]
@@ -192,20 +281,19 @@ fn activity_tip(a: &mut App) -> Option<String> {
 }
 
 #[test]
-fn activity_while_reading_branches_until_menu_closes() {
+fn activity_while_reading_branches_until_the_menu_opens() {
     let Some(r) = repo("act-ramas") else { return };
-    let (mut a, host) = app_at(&r.0);
-    host.set_menu_choice(None);
+    let (mut a, _host) = app_at(&r.0);
     assert!(!git_activity(&mut a));
     click_button(&mut a, 0);
     assert!(a.git_busy);
     assert!(git_activity(&mut a), "leyendo las ramas");
     assert_eq!(activity_tip(&mut a).as_deref(), Some("Leyendo las ramas"));
-    // Se cancela el menú: se apaga.
+    // Llegan las ramas: el menú se abre y el indicador se apaga (abrirlo no es trabajo de git).
     wait_idle(&mut a);
+    assert!(a.drop_menu.is_some());
     assert!(!git_activity(&mut a));
 }
-
 #[test]
 fn activity_while_switching_until_done() {
     let Some(r) = repo("act-cambio") else { return };
@@ -267,39 +355,26 @@ fn switch_failed_shows_notice() {
 #[test]
 fn click_ignored_while_busy() {
     let Some(r) = repo("busy") else { return };
-    let (mut a, host) = app_at(&r.0);
+    let (mut a, _host) = app_at(&r.0);
     a.git_busy = true;
     click_button(&mut a, 0);
-    assert!(host.menus().is_empty());
+    assert!(a.drop_menu.is_none());
     assert!(a.git_busy);
 }
 
 #[test]
 fn result_for_vanished_pane_does_not_panic() {
-    let (mut a, host) = app_fake(Head::Branch("main".into()));
+    let (mut a, _host) = app_fake(Head::Branch("main".into()));
     let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
     a.git_busy = true;
     a.on_git_branches(9, root, Ok(vec!["main".into()]));
-    assert!(host.menus().is_empty());
+    assert!(a.drop_menu.is_none());
     assert!(!a.git_busy);
     a.git_busy = true;
     a.on_git_switched(PathBuf::from("Z:/no/hay/repo"), "x".into(), GitHow::Plain, SwitchOutcome::Switched);
     assert!(!a.git_busy);
-    assert!(host.menus().is_empty());
+    assert!(a.drop_menu.is_none());
 }
-
-#[test]
-fn cancel_menu_does_nothing() {
-    let Some(r) = repo("cancel") else { return };
-    let (mut a, host) = app_at(&r.0);
-    host.set_menu_choice(None);
-    click_button(&mut a, 0);
-    super::network_tests::wait_until(&mut a, |a| !a.git_busy);
-    assert_eq!(host.menus().len(), 1);
-    assert!(!a.git_busy);
-    assert_eq!(git::read_head(&r.0).unwrap().head, Head::Branch("main".into()));
-}
-
 // ---- el diálogo de cambios sin commitear (con el estilo de xdir, no un cuadro del sistema) ----
 
 const TITLE: &str = "No se puede pasar a «feature»";
@@ -616,4 +691,204 @@ fn stash_failure_reports_error_and_keeps_changes_message() {
     a.on_git_switched(root, "feature".into(), GitHow::Stash, SwitchOutcome::Failed(msg));
     assert!(a.notice.as_deref().unwrap().contains("Tus cambios quedan en el stash"));
     assert!(!a.git_busy);
+}
+
+// ---- el botón de sincronizar con el remoto ----
+
+const SYNC_GLYPH: &str = "\u{E895}";
+
+/// Remoto temporal (`git::temp_remote`) que se borra al soltarlo.
+struct Remote(PathBuf);
+
+impl Remote {
+    fn work(&self) -> PathBuf {
+        self.0.join("work")
+    }
+    /// Un commit nuevo en el otro clon que se sube al remoto, sin que `work` se entere.
+    fn push_from_other(&self, file: &str) {
+        let other = self.0.join("other");
+        std::fs::write(other.join(file), "otro").unwrap();
+        git::git_test(&other, &["add", file]).unwrap();
+        git::git_test(&other, &["commit", "-m", file]).unwrap();
+        git::git_test(&other, &["push"]).unwrap();
+    }
+}
+
+impl Drop for Remote {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn remote(name: &str) -> Option<Remote> {
+    let r = git::temp_remote(name).map(Remote);
+    if r.is_none() {
+        eprintln!("git no está instalado: se salta la prueba");
+    }
+    r
+}
+
+/// Espera a que termine toda consulta del remoto (la primera lectura y el `fetch` que le sigue).
+fn settle(a: &mut App) {
+    super::network_tests::wait_until(a, |a| !a.git_sync.is_empty() && a.git_sync.values().all(|i| i.job.is_none() && i.checked));
+}
+
+/// App con el repo `dir` abierto y ya consultado su remoto, dibujada.
+fn app_synced(dir: &std::path::Path) -> (App, Rc<FakeHost>) {
+    let (mut a, host) = app_at(dir);
+    a.git_sync_tick();
+    settle(&mut a);
+    a.paint();
+    (a, host)
+}
+
+fn sync_view(a: &App) -> Option<git::SyncView> {
+    a.panes[0].tab().sync
+}
+
+fn sync_glyph(host: &FakeHost) -> Option<(crate::geom::Rect, crate::geom::Color)> {
+    host.drawn_text_draws().into_iter().find(|(_, s, _, _)| s == SYNC_GLYPH).map(|(_, _, r, c)| (r, c))
+}
+
+#[test]
+fn sync_button_is_hidden_when_the_branch_follows_no_remote() {
+    let Some(r) = repo("s-sin-remota") else { return };
+    let (a, host) = app_synced(&r.0);
+    assert_eq!(sync_view(&a), None);
+    assert!(sync_glyph(&host).is_none());
+    assert_eq!(a.panes[0].sync_button_rect().right, 0.0);
+    // El de rama, en cambio, sigue estando.
+    assert!(a.panes[0].branch_button_rect().right > 0.0);
+}
+
+#[test]
+fn sync_button_is_green_when_up_to_date() {
+    let Some(r) = remote("s-verde") else { return };
+    let (a, host) = app_synced(&r.work());
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 0, spinning: false }));
+    let (rect, color) = sync_glyph(&host).expect("se dibuja el glifo de sincronizar");
+    assert_eq!(color, a.theme.ok, "verde");
+    let sb = a.panes[0].sync_button_rect();
+    assert_eq!(rect, sb);
+    assert!(sb.right <= a.panes[0].branch_button_rect().left, "a la izquierda del botón de rama");
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Al día con el remoto (clic para comprobar)"));
+    assert!(host.drawn_rotations().is_empty(), "quieto: no gira");
+}
+
+#[test]
+fn sync_button_is_yellow_when_there_is_something_to_pull() {
+    let Some(r) = remote("s-amarillo") else { return };
+    r.push_from_other("b.txt");
+    let (a, host) = app_synced(&r.work());
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 1, spinning: false }), "el fetch de fondo vio el commit nuevo");
+    assert_eq!(sync_glyph(&host).unwrap().1, a.theme.warning, "amarillo");
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Hay 1 cambio para bajar (clic para hacer pull)"));
+    assert!(!r.work().join("b.txt").exists(), "el fetch no baja los archivos");
+    assert!(host.drawn_rotations().is_empty());
+}
+
+#[test]
+fn clicking_yellow_spins_until_the_pull_finishes() {
+    let Some(r) = remote("s-pull") else { return };
+    r.push_from_other("b.txt");
+    let (mut a, host) = app_synced(&r.work());
+    let sb = a.panes[0].sync_button_rect();
+    a.on_left_down((sb.left + sb.right) / 2.0, (sb.top + sb.bottom) / 2.0, false);
+    assert!(a.git_busy, "el pull está en curso");
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 1, spinning: true }));
+    a.paint();
+    assert!(!host.drawn_rotations().is_empty(), "el glifo gira mientras baja");
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Sincronizando…"));
+    wait_idle(&mut a);
+    settle(&mut a);
+    assert_eq!(std::fs::read_to_string(r.work().join("b.txt")).unwrap(), "otro", "bajó los archivos");
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 0, spinning: false }), "queda verde y quieto");
+    assert!(a.notice.is_none());
+    a.paint();
+    assert!(host.drawn_rotations().is_empty(), "dejó de girar");
+    assert_eq!(sync_glyph(&host).unwrap().1, a.theme.ok);
+}
+
+#[test]
+fn clicking_green_checks_the_remote_and_spins_meanwhile() {
+    let Some(r) = remote("s-comprobar") else { return };
+    let (mut a, host) = app_synced(&r.work());
+    r.push_from_other("b.txt");
+    a.sync_click(0);
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 0, spinning: true }));
+    assert!(!a.git_busy, "una consulta no bloquea el cambio de rama");
+    a.paint();
+    assert!(!host.drawn_rotations().is_empty());
+    settle(&mut a);
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 1, spinning: false }), "ahora hay algo para bajar");
+    assert!(!r.work().join("b.txt").exists(), "comprobar no baja nada");
+}
+
+#[test]
+fn pull_that_cannot_fast_forward_shows_git_s_reason_and_stops_spinning() {
+    let Some(r) = remote("s-diverge") else { return };
+    std::fs::write(r.work().join("c.txt"), "c").unwrap();
+    git::git_test(&r.work(), &["add", "c.txt"]).unwrap();
+    git::git_test(&r.work(), &["commit", "-m", "c"]).unwrap();
+    r.push_from_other("b.txt");
+    let (mut a, _host) = app_synced(&r.work());
+    assert_eq!(sync_view(&a).map(|v| v.behind), Some(1));
+    let before = git::git_test(&r.work(), &["rev-parse", "HEAD"]).unwrap();
+    a.sync_click(0);
+    wait_idle(&mut a);
+    settle(&mut a);
+    assert!(a.notice.as_deref().is_some_and(|n| n.to_lowercase().contains("fast-forward")), "{:?}", a.notice);
+    assert_eq!(git::git_test(&r.work(), &["rev-parse", "HEAD"]).unwrap(), before, "no se tocó nada");
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 1, spinning: false }), "sigue amarillo y quieto");
+    assert!(!a.git_busy);
+}
+
+#[test]
+fn background_fetch_failure_is_silent_but_a_manual_check_reports_it() {
+    let Some(r) = remote("s-sin-red") else { return };
+    std::fs::remove_dir_all(r.0.join("origin.git")).unwrap();
+    let (mut a, _host) = app_synced(&r.work());
+    assert!(a.notice.is_none(), "el fetch de fondo falla en silencio");
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 0, spinning: false }), "se queda con lo último que se sabía");
+    a.sync_click(0);
+    settle(&mut a);
+    assert!(a.notice.as_deref().is_some_and(|n| n.starts_with("No se pudo consultar el remoto")), "{:?}", a.notice);
+    assert!(sync_view(&a).is_some_and(|v| !v.spinning));
+}
+
+#[test]
+fn the_remote_is_not_fetched_again_before_five_minutes() {
+    let Some(r) = remote("s-throttle") else { return };
+    let (mut a, _host) = app_synced(&r.work());
+    let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
+    let first = a.git_sync[&root].last_fetch.expect("se hizo un fetch");
+    for _ in 0..3 {
+        a.git_sync_tick();
+    }
+    assert!(a.git_sync[&root].job.is_none(), "no se lanzó otra consulta");
+    assert_eq!(a.git_sync[&root].last_fetch, Some(first));
+}
+
+#[test]
+fn sync_click_is_ignored_while_git_is_busy() {
+    let Some(r) = remote("s-ocupado") else { return };
+    r.push_from_other("b.txt");
+    let (mut a, _host) = app_synced(&r.work());
+    a.git_busy = true;
+    a.sync_click(0);
+    assert_eq!(sync_view(&a), Some(git::SyncView { behind: 1, spinning: false }));
+    assert!(a.git_pulling.is_none());
+}
+
+/// Cambiar de rama vuelve a leer cuánto falta bajar: la rama nueva puede no seguir a ninguna remota.
+#[test]
+fn switching_to_a_branch_without_remote_hides_the_sync_button() {
+    let Some(r) = remote("s-cambio") else { return };
+    git::git_test(&r.work(), &["branch", "local-only"]).unwrap();
+    let (mut a, _host) = app_synced(&r.work());
+    assert!(sync_view(&a).is_some());
+    a.start_switch(r.work(), "local-only".into(), GitHow::Plain);
+    wait_idle(&mut a);
+    settle(&mut a);
+    assert_eq!(sync_view(&a), None, "local-only no sigue a ninguna remota");
 }

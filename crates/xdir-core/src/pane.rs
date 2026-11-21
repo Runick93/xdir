@@ -23,6 +23,9 @@ const BRANCH_BTN_PAD: f32 = 8.0;
 const BRANCH_ICON_W: f32 = 14.0;
 const BRANCH_CHEV_W: f32 = 12.0;
 const BRANCH_GAP: f32 = 6.0;
+/// Ancho del botón de sincronizar y su glifo (Segoe Fluent Icons «Sync»).
+const SYNC_BTN_W: f32 = 28.0;
+const SYNC_GLYPH: &str = "\u{E895}";
 
 /// Ícono de rama de git (no hay un glifo en la fuente de íconos): un tronco con un círculo
 /// arriba y otro abajo, y otro círculo arriba a la derecha unido al tronco por una curva.
@@ -155,6 +158,8 @@ pub enum PaneHit {
     NewFolderButton,
     /// Botón del pie con la rama actual del repositorio (a la izquierda de «Carpeta nueva»).
     BranchButton,
+    /// El botón de sincronizar con el remoto, a la izquierda del de rama.
+    SyncButton,
     /// Botón «Devolver» junto a la barra de dirección (solo en la Papelera).
     Restore,
     /// Un botón del aviso de una carpeta de red que tarda («Reintentar», «Cerrar la pestaña»).
@@ -230,6 +235,7 @@ pub struct Pane {
     new_folder_button: Rect,
     /// Botón de la rama actual (vacío si la pestaña no está en un repositorio).
     branch_button: Rect,
+    sync_button: Rect,
     /// Con la Papelera a la vista, el botón «Devolver» (encendido si hay selección); lo pone la
     /// `App` antes de dibujar.
     pub restore: Option<bool>,
@@ -250,6 +256,12 @@ impl Pane {
     /// Botón de la rama en el último cuadro (vacío si no hay): de ahí se abre el menú de ramas.
     pub fn branch_button_rect(&self) -> Rect {
         self.branch_button
+    }
+
+    /// El botón de sincronizar del último cuadro (vacío si no hay). Pruebas de `App`.
+    #[cfg(test)]
+    pub fn sync_button_rect(&self) -> Rect {
+        self.sync_button
     }
 
     pub fn new(tabs: Vec<Tab>, active: usize) -> Self {
@@ -287,6 +299,7 @@ impl Pane {
             loading_card: None,
             new_folder_button: zero,
             branch_button: zero,
+            sync_button: zero,
             restore: None,
             restore_button: zero,
             list: zero,
@@ -513,6 +526,9 @@ impl Pane {
         }
         if contains(&self.favbar, x, y) {
             return PaneHit::FavBar;
+        }
+        if contains(&self.sync_button, x, y) {
+            return PaneHit::SyncButton;
         }
         if contains(&self.branch_button, x, y) {
             return PaneHit::BranchButton;
@@ -744,6 +760,7 @@ impl Pane {
             self.view_button = rect(0.0, 0.0, 0.0, 0.0);
             self.new_folder_button = rect(0.0, 0.0, 0.0, 0.0);
             self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
+            self.sync_button = rect(0.0, 0.0, 0.0, 0.0);
             p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
             let stroke = if active_pane { (th.accent, 1.5) } else { (th.border, 1.0) };
             p.rounded_path(&outline, true, None, Some(stroke));
@@ -770,6 +787,7 @@ impl Pane {
         // Botón con la rama actual, a la izquierda de «Carpeta nueva»: solo en carpetas de disco
         // dentro de un repositorio (un `git` viejo junto a otro lugar no se muestra).
         self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
+        self.sync_button = rect(0.0, 0.0, 0.0, 0.0);
         let tab = &self.tabs[self.active];
         if let (Location::Path(_), Some(g)) = (&tab.location, &tab.git) {
             let label = g.head.label();
@@ -788,6 +806,23 @@ impl Pane {
             p.text(FontId::Ui, &crate::paint::ellipsize(p, FontId::Ui, label, inner.right - inner.left), inner, th.text_dim);
             p.text(FontId::Glyphs, "\u{E70E}", rect(bb.right - BRANCH_BTN_PAD - BRANCH_CHEV_W, bb.top, bb.right - BRANCH_BTN_PAD, bb.bottom), th.text_dim);
             self.branch_button = bb;
+            // Sincronizar con el remoto, a la izquierda del de rama: verde si está al día, amarillo si hay
+            // para bajar; gira mientras trabaja. Solo si la rama sigue a una remota (`tab.sync`).
+            if let Some(sv) = tab.sync {
+                let sb = rect(bb.left - 4.0 - SYNC_BTN_W, bb.top, bb.left - 4.0, bb.bottom);
+                if hover == PaneHit::SyncButton {
+                    let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
+                    p.round_fill(sb, 6.0, c);
+                }
+                let color = if sv.behind > 0 { th.warning } else { th.ok };
+                let mut glyph = || p.text(FontId::Glyphs, SYNC_GLYPH, sb, color);
+                if sv.spinning {
+                    p.rotated(spin_degrees(), (sb.left + sb.right) / 2.0, (sb.top + sb.bottom) / 2.0, &mut glyph);
+                } else {
+                    glyph();
+                }
+                self.sync_button = sb;
+            }
         }
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];
@@ -1235,14 +1270,24 @@ fn draw_list_loading(p: &dyn Painter, list: Rect, header: bool, over_items: bool
     card
 }
 
-/// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
-/// Ocupa unos 14×14 DIPs alrededor de `(cx, cy)`.
-pub fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
+/// Segundos desde la primera animación: el reloj de todo lo que gira.
+fn anim_secs() -> f32 {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f32()
+}
+
+/// Ángulo del ícono de sincronizar mientras gira: una vuelta por segundo, en sentido horario.
+fn spin_degrees() -> f32 {
+    (anim_secs() * 360.0) % 360.0
+}
+
+/// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
+/// Ocupa unos 14×14 DIPs alrededor de `(cx, cy)`.
+pub fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
     const DOTS: usize = 8;
-    let t = START.get_or_init(Instant::now).elapsed().as_secs_f32();
+    let t = anim_secs();
     let head = (t * 10.0) as usize % DOTS;
     for i in 0..DOTS {
         let angle = i as f32 / DOTS as f32 * std::f32::consts::TAU;

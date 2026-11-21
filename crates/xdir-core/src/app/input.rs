@@ -15,6 +15,10 @@ impl App {
         if let Some(c) = &self.confirm {
             return c.dialog.hit(x, y).map_or(Hit::None, Hit::Confirm);
         }
+        // El menú de ramas, abierto sobre el pie, también es modal: un clic fuera solo lo cierra.
+        if let Some(m) = &self.drop_menu {
+            return m.menu.hit(x, y).map_or(Hit::None, Hit::DropMenu);
+        }
         // El diálogo "Acerca de" es modal: tapa todo lo demás.
         if self.about_open {
             return about::at(w, h, x, y).map_or(Hit::None, Hit::About);
@@ -191,6 +195,13 @@ impl App {
         if self.confirm.is_some() {
             self.confirm_click(match hit {
                 Hit::Confirm(h) => Some(h),
+                _ => None,
+            });
+            return;
+        }
+        if self.drop_menu.is_some() {
+            self.drop_click(match hit {
+                Hit::DropMenu(h) => Some(h),
                 _ => None,
             });
             return;
@@ -439,6 +450,7 @@ impl App {
                     }
                     PaneHit::NewFolderButton => self.run_command(Command::NewFolder),
                     PaneHit::BranchButton => self.open_branch_menu(i),
+                    PaneHit::SyncButton => self.sync_click(i),
                     PaneHit::Restore => self.restore_selection(),
                     PaneHit::Search => self.begin_filter(i),
                     PaneHit::SearchClear => self.clear_filter(i),
@@ -500,7 +512,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
+            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::DropMenu(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
         // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
         self.quick_look_follow_list();

@@ -174,6 +174,16 @@ impl App {
                     h @ crate::git::Head::Detached(_) => format!("HEAD suelto en {}", h.label()),
                 });
             }
+            // El botón de sincronizar del pie: qué hay para bajar, o que está trabajando.
+            Hit::Pane(i, PaneHit::SyncButton) => {
+                let v = self.panes.get(i)?.tab().sync?;
+                return Some(match (v.spinning, v.behind) {
+                    (true, _) => "Sincronizando…".to_string(),
+                    (false, 0) => "Al día con el remoto (clic para comprobar)".to_string(),
+                    (false, 1) => "Hay 1 cambio para bajar (clic para hacer pull)".to_string(),
+                    (false, n) => format!("Hay {n} cambios para bajar (clic para hacer pull)"),
+                });
+            }
             // Renombrar varios: el motivo del choque de la fila bajo el mouse.
             Hit::Pane(i, PaneHit::List) if self.rename_many.as_ref().is_some_and(|r| r.pane == i) => return self.panes[i].tab().list.rename_clash_tip(),
             Hit::RenamePanel(crate::rename_many_draw::PanelHit::Close) | Hit::Compare(crate::compare::draw::CompareHit::Close) => return Some("Cerrar".to_string()),

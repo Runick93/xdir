@@ -406,6 +406,13 @@ impl App {
             if let Some(u) = &self.net.unmap {
                 crate::net::drives_dialog::unmap_draw(p, w, h, u, drives_style, drives_hover);
             }
+            if let Some(m) = &self.drop_menu {
+                let hover = match hover {
+                    Hit::DropMenu(k) => Some(k),
+                    _ => None,
+                };
+                m.menu.draw(p, w, h, hover);
+            }
             if let Some(c) = &self.confirm {
                 let hover = match hover {
                     Hit::Confirm(k) => Some(k),
@@ -426,7 +433,9 @@ impl App {
             let tab = self.panes[i].tab();
             tab.search.as_ref().is_some_and(|s| !s.done)
         });
-        if self.panes.iter().any(|p| p.tab_busy) || searching {
+        // El ícono de sincronizar gira mientras baja o consulta el remoto.
+        let syncing = self.shown_panes().into_iter().any(|i| self.panes[i].tab().sync.is_some_and(|s| s.spinning));
+        if self.panes.iter().any(|p| p.tab_busy) || searching || syncing {
             animating = true;
             self.last_frame = Some(now);
         }

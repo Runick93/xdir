@@ -426,6 +426,15 @@ impl paint::Painter for Painter<'_> {
         CGContext::restore_g_state(self.ctx());
     }
 
+    fn rotated(&self, degrees: f32, cx: f32, cy: f32, f: &mut dyn FnMut()) {
+        CGContext::save_g_state(self.ctx());
+        CGContext::translate_ctm(self.ctx(), cx as _, cy as _);
+        CGContext::rotate_ctm(self.ctx(), degrees.to_radians() as _);
+        CGContext::translate_ctm(self.ctx(), -cx as _, -cy as _);
+        f();
+        CGContext::restore_g_state(self.ctx());
+    }
+
     fn theme(&self) -> &Theme {
         self.theme
     }

@@ -555,6 +555,8 @@ pub struct App {
     in_use: Option<in_use::InUseState>,
     /// Hay un trabajo de git en curso (leer las ramas o cambiar de rama): no se larga otro.
     git_busy: bool,
+    /// Qué hace git mientras `git_busy` (el cartel del indicador de actividad).
+    git_task: String,
     /// Red: favoritos y recientes, lo conectado y la red local.
     net: network::NetState,
     /// Dentro de archivos comprimidos: lo copiado y las extracciones para la vista previa.
@@ -799,6 +801,7 @@ impl App {
             transfers: transfers::Transfers::new(),
             in_use: None,
             git_busy: false,
+            git_task: String::new(),
             net: network::NetState::default(),
             archive: archive_nav::ArchiveState::default(),
             cut: Default::default(),

@@ -170,6 +170,86 @@ fn switch_to_branch_without_tab_folder_shows_new_branch() {
     assert_eq!((g.root, g.head), (r.0.clone(), Head::Branch("feature".into())));
 }
 
+// ---- el indicador de actividad mientras git trabaja ----
+
+/// Dibuja y dice si el indicador tiene el trabajo de git.
+fn git_activity(a: &mut App) -> bool {
+    a.paint();
+    a.activity.contains(&super::activity::ActivityKey::Git)
+}
+
+/// El cartel del indicador pasado su umbral (con el reloj fijo).
+fn activity_tip(a: &mut App) -> Option<String> {
+    let t0 = std::time::Instant::now();
+    crate::clock::set(Some(t0));
+    a.paint();
+    crate::clock::set(Some(t0 + super::activity::SHOW_AFTER));
+    a.paint();
+    let tip = a.tooltip_text(Hit::Activity);
+    crate::clock::set(None);
+    tip
+}
+
+#[test]
+fn activity_while_reading_branches_until_menu_closes() {
+    let Some(r) = repo("act-ramas") else { return };
+    let (mut a, host) = app_at(&r.0);
+    host.set_menu_choice(None);
+    assert!(!git_activity(&mut a));
+    click_button(&mut a, 0);
+    assert!(a.git_busy);
+    assert!(git_activity(&mut a), "leyendo las ramas");
+    assert_eq!(activity_tip(&mut a).as_deref(), Some("Leyendo las ramas"));
+    // Se cancela el menú: se apaga.
+    wait_idle(&mut a);
+    assert!(!git_activity(&mut a));
+}
+
+#[test]
+fn activity_while_switching_until_done() {
+    let Some(r) = repo("act-cambio") else { return };
+    let (mut a, _host) = app_at(&r.0);
+    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
+    assert!(git_activity(&mut a), "cambiando de rama");
+    assert_eq!(activity_tip(&mut a).as_deref(), Some("Cambiando a \"feature\""));
+    wait_idle(&mut a);
+    assert!(!git_activity(&mut a));
+    assert_eq!(head(&r), Head::Branch("feature".into()));
+}
+
+/// Todos los caminos que apagan `git_busy` apagan el indicador: error al leer las ramas, panel
+/// que ya no está, y cada resultado del cambio (también el de respaldo si el hilo se cae, que
+/// llega como `Err` o `Failed`).
+#[test]
+fn activity_ends_on_every_path() {
+    let (mut a, host) = app_fake(Head::Branch("main".into()));
+    host.set_answer(None);
+    let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
+    let busy = |a: &mut App, text: &str| {
+        a.git_busy = true;
+        a.git_task = text.to_string();
+        assert!(git_activity(a));
+    };
+    busy(&mut a, "Leyendo las ramas");
+    a.on_git_branches(0, root.clone(), Err("git no respondió".into()));
+    assert!(!git_activity(&mut a), "error al leer");
+    busy(&mut a, "Leyendo las ramas");
+    a.on_git_branches(9, root.clone(), Ok(vec!["main".into()]));
+    assert!(!git_activity(&mut a), "panel que ya no está");
+    let outcomes = [
+        SwitchOutcome::Failed("git no respondió".into()),
+        SwitchOutcome::Dirty { files: 0 },
+        SwitchOutcome::Dirty { files: 2 },
+        SwitchOutcome::UntrackedInTheWay,
+        SwitchOutcome::Switched,
+    ];
+    for o in outcomes {
+        busy(&mut a, "Cambiando a \"feature\"");
+        a.on_git_switched(root.clone(), "feature".into(), GitHow::Plain, o.clone());
+        assert!(!git_activity(&mut a), "{o:?}");
+    }
+}
+
 #[test]
 fn switch_failed_shows_notice() {
     let Some(r) = repo("fail") else { return };

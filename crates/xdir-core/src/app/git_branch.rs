@@ -43,6 +43,7 @@ impl App {
         tab.git = git::read_head(&old_root);
         let Some(root) = tab.git.as_ref().map(|g| g.root.clone()) else { return };
         self.git_busy = true;
+        self.git_task = "Leyendo las ramas".into();
         let r = root.clone();
         self.spawn_task_or(
             move || TaskDone::GitBranches { pane, result: git::branches(&r), root: r },
@@ -92,8 +93,11 @@ impl App {
     }
 
     /// Cambia el repo `root` a `dest` en otro hilo.
+    /// Mientras tanto, el indicador de actividad lo dice; no hay límite de tiempo ni se corta
+    /// git (cortarlo puede dejar `index.lock` puesto).
     pub(super) fn start_switch(&mut self, root: PathBuf, dest: String, how: GitHow) {
         self.git_busy = true;
+        self.git_task = format!("Cambiando a \"{dest}\"");
         let (r, d) = (root.clone(), dest.clone());
         self.spawn_task_or(
             move || {

@@ -1,5 +1,5 @@
 //! Lo que corre en segundo plano (conexiones, expulsar, tamaños, sumas, búsquedas, lecturas que
-//! tardan, xtree, extracciones): el indicador de la barra de estado y su cartel. Nada de esto mira
+//! tardan, xtree, extracciones, git): el indicador de la barra de estado y su cartel. Nada de esto mira
 //! el disco: lo alimentan los lugares que lanzan los trabajos (`begin`/`end`) y, antes de cada
 //! cuadro, lo que ya dice el estado de la `App` (`App::sync_activity`).
 //!
@@ -45,6 +45,8 @@ pub(super) enum ActivityKey {
     XtreeHistory,
     /// Extraer a la temporal un archivo de adentro de un comprimido para abrirlo.
     Extract,
+    /// Git trabajando: leer las ramas o cambiar de rama (sale de `App::git_busy`).
+    Git,
 }
 
 /// Una cosa en curso.
@@ -257,6 +259,11 @@ impl App {
         // milisegundos (no se ve por el umbral); si tarda (un pendrive lento), el indicador lo dice.
         if !self.xtree_open && self.xtree.as_ref().is_some_and(|x| x.history_busy()) {
             list.push((ActivityKey::XtreeHistory, "Guardando el historial de xtree".to_string(), None, SHOW_AFTER));
+        }
+        // Git leyendo las ramas o cambiando de rama (un `switch` con LFS o un hook lento tarda):
+        // sale del estado, así se apaga en todos los caminos que apagan `git_busy`.
+        if self.git_busy {
+            list.push((ActivityKey::Git, self.git_task.clone(), None, SHOW_AFTER));
         }
         self.activity.set_derived(list, now);
     }

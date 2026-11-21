@@ -19,6 +19,25 @@ const FOOTER_BTN_H: f32 = 26.0;
 /// Ancho máximo del botón con la rama del pie, y el margen del texto dentro de él.
 pub const BRANCH_BTN_MAX_W: f32 = 180.0;
 const BRANCH_BTN_PAD: f32 = 8.0;
+/// Ancho del ícono de rama, de la flecha de la derecha y separación entre las tres partes.
+const BRANCH_ICON_W: f32 = 14.0;
+const BRANCH_CHEV_W: f32 = 12.0;
+const BRANCH_GAP: f32 = 6.0;
+
+/// Ícono de rama de git (no hay un glifo en la fuente de íconos): un tronco con un círculo
+/// arriba y otro abajo, y otro círculo arriba a la derecha unido al tronco por una curva.
+/// `x`: borde izquierdo del ícono (de `BRANCH_ICON_W` de ancho); `cy`: su centro vertical.
+fn draw_branch_icon(p: &dyn Painter, x: f32, cy: f32, c: Color) {
+    const R: f32 = 2.2;
+    const W: f32 = 1.5;
+    let (stem, side) = (x + 3.0, x + BRANCH_ICON_W - 3.0);
+    let (top, bottom) = (cy - 5.0, cy + 5.0);
+    p.rounded_path(&[(stem, top + R, 0.0), (stem, bottom - R, 0.0)], false, None, Some((c, W)));
+    p.rounded_path(&[(side, top + R, 0.0), (side, cy - 1.0, 4.0), (stem, cy + 2.5, 0.0)], false, None, Some((c, W)));
+    for (px, py) in [(stem, top), (stem, bottom), (side, top)] {
+        p.circle_stroke(px, py, R, c, W);
+    }
+}
 const PANE_RADIUS: f32 = 8.0;
 /// Inclinación de los lados de las pestañas.
 const TAB_SLANT: f32 = 10.0;
@@ -754,15 +773,20 @@ impl Pane {
         let tab = &self.tabs[self.active];
         if let (Location::Path(_), Some(g)) = (&tab.location, &tab.git) {
             let label = g.head.label();
-            let text_w = p.measure(FontId::Ui, label) + 2.0 * BRANCH_BTN_PAD;
-            let w = text_w.min(BRANCH_BTN_MAX_W);
+            // Ícono de rama + nombre + flecha hacia arriba (el menú se abre hacia arriba).
+            let fixed = 2.0 * BRANCH_BTN_PAD + BRANCH_ICON_W + BRANCH_GAP + BRANCH_GAP + BRANCH_CHEV_W;
+            let w = (p.measure(FontId::Ui, label) + fixed).min(BRANCH_BTN_MAX_W);
             let bb = rect(nb.left - 6.0 - w, nb.top, nb.left - 6.0, nb.bottom);
             if hover == PaneHit::BranchButton {
                 let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
                 p.round_fill(bb, 6.0, c);
             }
-            let inner = rect(bb.left + BRANCH_BTN_PAD, bb.top, bb.right - BRANCH_BTN_PAD, bb.bottom);
+            draw_branch_icon(p, bb.left + BRANCH_BTN_PAD, (bb.top + bb.bottom) / 2.0, th.accent);
+            let text_l = bb.left + BRANCH_BTN_PAD + BRANCH_ICON_W + BRANCH_GAP;
+            let text_r = bb.right - BRANCH_BTN_PAD - BRANCH_CHEV_W - BRANCH_GAP;
+            let inner = rect(text_l, bb.top, text_r, bb.bottom);
             p.text(FontId::Ui, &crate::paint::ellipsize(p, FontId::Ui, label, inner.right - inner.left), inner, th.text_dim);
+            p.text(FontId::Glyphs, "\u{E70E}", rect(bb.right - BRANCH_BTN_PAD - BRANCH_CHEV_W, bb.top, bb.right - BRANCH_BTN_PAD, bb.bottom), th.text_dim);
             self.branch_button = bb;
         }
         // La lista necesita su carpeta para pedir las miniaturas por ruta.

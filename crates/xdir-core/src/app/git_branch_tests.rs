@@ -323,6 +323,7 @@ fn dirty_count_in_plural() {
     assert_eq!(q[1].1, "Se perderán 3 archivos modificados. Esto no se puede deshacer. ¿Descartar y cambiar?");
 }
 
+/// Un `Dirty` sin archivos con seguimiento (no debería pasar): el aviso general, sin ventana.
 #[test]
 fn dirty_without_tracked_files_is_a_plain_notice() {
     let (mut a, host) = app_fake(Head::Branch("main".into()));
@@ -331,7 +332,82 @@ fn dirty_without_tracked_files_is_a_plain_notice() {
     a.on_git_switched(root, "feature".into(), GitHow::Plain, SwitchOutcome::Dirty { files: 0 });
     assert!(host.questions().is_empty());
     assert!(!a.git_busy);
-    assert_eq!(a.notice.as_deref(), Some("No se pudo cambiar de rama: hay archivos sin seguimiento que se sobrescribirían"));
+    assert_eq!(a.notice.as_deref(), Some("No se pudo cambiar de rama: hay cambios sin guardar que chocan"));
+}
+
+// ---- archivos sin seguimiento que se sobrescribirían ----
+
+const UNTRACKED_TEXT: &str = "Hay archivos sin seguimiento que se sobrescribirían al cambiar. ¿Guardarlos en el stash y cambiar?";
+const UNTRACKED_NOTICE: &str = "No se pudo cambiar de rama: hay archivos sin seguimiento que se sobrescribirían";
+
+/// `feature` gana `n.txt`; en `main` hay un `n.txt` nuevo sin seguimiento que lo tapa.
+fn untracked_in_the_way(r: &Repo) {
+    git::git_test(&r.0, &["switch", "feature"]).unwrap();
+    std::fs::write(r.0.join("n.txt"), "feature").unwrap();
+    git::git_test(&r.0, &["add", "n.txt"]).unwrap();
+    git::git_test(&r.0, &["commit", "-m", "n"]).unwrap();
+    git::git_test(&r.0, &["switch", "main"]).unwrap();
+    std::fs::write(r.0.join("n.txt"), "local").unwrap();
+}
+
+#[test]
+fn untracked_yes_stashes_and_switches() {
+    let Some(r) = repo("u-stash") else { return };
+    untracked_in_the_way(&r);
+    let (mut a, host) = app_at(&r.0);
+    host.set_answers(vec![Some(true)]);
+    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
+    wait_idle(&mut a);
+    assert_eq!(host.questions(), vec![(Q1_TITLE.to_string(), UNTRACKED_TEXT.to_string())]);
+    assert!(!UNTRACKED_TEXT.to_lowercase().contains("descartar"));
+    assert_eq!(head(&r), Head::Branch("feature".into()));
+    assert_eq!(read(&r, "n.txt"), "feature");
+    let archivos = git::git_test(&r.0, &["stash", "show", "--include-untracked", "--name-only"]).unwrap();
+    assert!(archivos.contains("n.txt"), "{archivos}");
+    assert_eq!(a.notice.as_deref(), Some("Tus cambios están en el stash (xdir: antes de pasar a feature)"));
+}
+
+#[test]
+fn untracked_no_does_nothing() {
+    let Some(r) = repo("u-no") else { return };
+    untracked_in_the_way(&r);
+    let (mut a, host) = app_at(&r.0);
+    host.set_answers(vec![Some(false)]);
+    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
+    wait_idle(&mut a);
+    assert_eq!(host.questions().len(), 1, "una sola pregunta: sin la de descartar");
+    assert!(!a.git_busy);
+    assert!(a.notice.is_none());
+    assert_eq!(head(&r), Head::Branch("main".into()));
+    assert_eq!(read(&r, "n.txt"), "local");
+}
+
+/// Cambios con seguimiento que no chocan y un archivo nuevo que sí: la ventana del archivo
+/// nuevo (no la de guardar o descartar).
+#[test]
+fn untracked_mixed_with_tracked_changes_asks_untracked() {
+    let Some(r) = repo("u-mezcla") else { return };
+    untracked_in_the_way(&r);
+    std::fs::write(r.0.join("b.txt"), "local").unwrap();
+    let (mut a, host) = app_at(&r.0);
+    host.set_answers(vec![Some(false)]);
+    a.start_switch(r.0.clone(), "feature".into(), GitHow::Plain);
+    wait_idle(&mut a);
+    assert_eq!(host.questions(), vec![(Q1_TITLE.to_string(), UNTRACKED_TEXT.to_string())]);
+}
+
+/// Si ya se probó guardar o descartar: un aviso, sin ventana.
+#[test]
+fn untracked_after_stash_or_discard_is_a_notice() {
+    for how in [GitHow::Stash, GitHow::Discard] {
+        let (mut a, host) = app_fake(Head::Branch("main".into()));
+        let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
+        a.git_busy = true;
+        a.on_git_switched(root, "feature".into(), how, SwitchOutcome::UntrackedInTheWay);
+        assert!(host.questions().is_empty());
+        assert!(!a.git_busy);
+        assert_eq!(a.notice.as_deref(), Some(UNTRACKED_NOTICE));
+    }
 }
 
 #[test]

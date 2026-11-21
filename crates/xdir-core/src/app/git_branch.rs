@@ -126,15 +126,27 @@ impl App {
                 }
             }
             SwitchOutcome::Failed(t) => self.notice = Some(t),
-            // Solo el cambio simple abre la ventana; si ya se probó guardar o descartar, no se repite.
-            SwitchOutcome::Dirty { files } if how == GitHow::Plain && files > 0 => self.ask_dirty(root, dest, files),
-            // Sin archivos con seguimiento modificados descartar no arregla nada: son archivos nuevos.
-            SwitchOutcome::Dirty { files: 0 } => {
+            // Solo el cambio simple abre una ventana; si ya se probó guardar o descartar, no se repite.
+            SwitchOutcome::UntrackedInTheWay if how == GitHow::Plain => self.ask_untracked(root, dest),
+            SwitchOutcome::UntrackedInTheWay => {
                 self.notice = Some("No se pudo cambiar de rama: hay archivos sin seguimiento que se sobrescribirían".into())
             }
+            SwitchOutcome::Dirty { files } if how == GitHow::Plain && files > 0 => self.ask_dirty(root, dest, files),
             SwitchOutcome::Dirty { .. } => self.notice = Some("No se pudo cambiar de rama: hay cambios sin guardar que chocan".into()),
         }
     }
+
+    /// Git se negó a cambiar porque hay archivos nuevos que la rama destino sobrescribiría: solo
+    /// se ofrece guardarlos en el stash (`-u` se los lleva). Descartar no sirve: no toca los
+    /// archivos sin seguimiento.
+    fn ask_untracked(&mut self, root: PathBuf, dest: String) {
+        let title = format!("No se puede pasar a «{dest}»");
+        let text = "Hay archivos sin seguimiento que se sobrescribirían al cambiar. ¿Guardarlos en el stash y cambiar?";
+        if self.host.ask_yes_no(&title, text) {
+            self.start_switch(root, dest, GitHow::Stash);
+        }
+    }
+
     /// Git se negó a cambiar por cambios sin guardar: ofrece guardarlos en el stash o descartarlos.
     /// Las ventanas son modales en el hilo de la interfaz; `git_busy` ya está apagado y
     /// `start_switch` lo vuelve a encender si se sigue adelante.

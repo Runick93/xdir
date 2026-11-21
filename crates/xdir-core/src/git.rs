@@ -225,7 +225,8 @@ pub fn branches(root: &Path) -> Result<Vec<String>, String> {
         &[
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname:short)",
+            // `lstrip=2` y no `short`: con una etiqueta del mismo nombre, `short` da `heads/v1`.
+            "--format=%(refname:lstrip=2)",
             "refs/heads",
         ],
     )?;
@@ -243,6 +244,8 @@ pub enum SwitchOutcome {
     Switched,
     /// Hay cambios sin guardar que chocan con la rama destino.
     Dirty { files: usize },
+    /// Hay archivos nuevos (sin seguimiento) que la rama destino sobrescribiría.
+    UntrackedInTheWay,
     Failed(String),
 }
 
@@ -258,23 +261,33 @@ pub fn stash_message(dest: &str) -> String {
     format!("xdir: antes de pasar a {dest}")
 }
 
-/// Cambia de rama sin tocar nada más; si hay choque con cambios locales devuelve `Dirty`.
+/// Qué quiso decir git al negarse a cambiar (los mensajes salen en inglés: `LC_ALL=C`).
+/// Lo de los archivos sin seguimiento va antes: su mensaje también dice «would be overwritten».
+fn clasificar(root: &Path, e: String) -> SwitchOutcome {
+    // `switch` dice «The following untracked working tree files…»; `--discard-changes`,
+    // «Untracked working tree file 'x'…».
+    if e.to_ascii_lowercase().contains("untracked working tree file") {
+        SwitchOutcome::UntrackedInTheWay
+    } else if e.contains("would be overwritten") || e.contains("commit your changes or stash them") {
+        SwitchOutcome::Dirty { files: dirty_count(root) }
+    } else {
+        SwitchOutcome::Failed(e)
+    }
+}
+
+/// Cambia de rama sin tocar nada más; si hay choque con cambios locales devuelve `Dirty`, y si
+/// lo que estorba son archivos nuevos, `UntrackedInTheWay`.
 pub fn switch(root: &Path, name: &str) -> SwitchOutcome {
     match run(root, &["switch", name]) {
         Ok(_) => SwitchOutcome::Switched,
-        Err(e) => {
-            if e.contains("would be overwritten") || e.contains("commit your changes or stash them")
-            {
-                SwitchOutcome::Dirty { files: dirty_count(root) }
-            } else {
-                SwitchOutcome::Failed(e)
-            }
-        }
+        Err(e) => clasificar(root, e),
     }
 }
 
 /// Guarda los cambios (incluidos los archivos nuevos) en un stash y cambia de rama.
-/// Nunca recupera el stash: los cambios quedan guardados.
+/// Nunca recupera el stash: los cambios quedan guardados. No devuelve `UntrackedInTheWay`: el
+/// stash (`-u`) ya se llevó los archivos nuevos, y si el cambio igual falla el aviso tiene que
+/// decir que los cambios quedaron en el stash.
 pub fn stash_and_switch(root: &Path, name: &str) -> SwitchOutcome {
     let mensaje = stash_message(name);
     if let Err(e) = run(root, &["stash", "push", "-u", "-m", &mensaje]) {
@@ -289,11 +302,11 @@ pub fn stash_and_switch(root: &Path, name: &str) -> SwitchOutcome {
 }
 
 /// Cambia de rama descartando los cambios sobre archivos con seguimiento.
-/// Los archivos nuevos sin seguimiento no se tocan.
+/// Los archivos nuevos sin seguimiento no se tocan: si estorban, `UntrackedInTheWay`.
 pub fn discard_and_switch(root: &Path, name: &str) -> SwitchOutcome {
     match run(root, &["switch", "--discard-changes", name]) {
         Ok(_) => SwitchOutcome::Switched,
-        Err(e) => SwitchOutcome::Failed(e),
+        Err(e) => clasificar(root, e),
     }
 }
 
@@ -586,6 +599,67 @@ mod tests {
         fs::write(r.0.join("b.txt"), "y").unwrap();
         fs::write(r.0.join("nuevo.txt"), "n").unwrap();
         assert_eq!(dirty_count(&r.0), 2);
+    }
+
+    /// Una rama y una etiqueta con el mismo nombre: la lista dice `v1` (no `heads/v1`) y se
+    /// puede cambiar a ella.
+    #[test]
+    fn branch_and_tag_with_same_name() {
+        let Some(r) = repo("rama-etiqueta") else { return };
+        git_ok(&r.0, &["branch", "v1"]);
+        git_ok(&r.0, &["tag", "v1"]);
+        let mut lista = branches(&r.0).unwrap();
+        lista.sort();
+        assert_eq!(lista, vec!["feature".to_string(), "main".to_string(), "v1".to_string()]);
+        assert_eq!(switch(&r.0, "v1"), SwitchOutcome::Switched);
+        assert_eq!(read_head(&r.0).unwrap().head, Head::Branch("v1".into()));
+    }
+
+    /// `feature` gana `n.txt`; en `main` hay un `n.txt` nuevo sin seguimiento que lo tapa.
+    fn untracked_in_the_way(r: &Repo) {
+        git_ok(&r.0, &["switch", "feature"]);
+        fs::write(r.0.join("n.txt"), "feature").unwrap();
+        git_ok(&r.0, &["add", "n.txt"]);
+        git_ok(&r.0, &["commit", "-m", "n"]);
+        git_ok(&r.0, &["switch", "main"]);
+        fs::write(r.0.join("n.txt"), "local").unwrap();
+    }
+
+    #[test]
+    fn switch_blocked_by_untracked_file() {
+        let Some(r) = repo("sin-seguimiento") else { return };
+        untracked_in_the_way(&r);
+        assert_eq!(switch(&r.0, "feature"), SwitchOutcome::UntrackedInTheWay);
+        assert_eq!(leer(&r.0, "n.txt"), "local");
+        assert_eq!(read_head(&r.0).unwrap().head, Head::Branch("main".into()));
+    }
+
+    /// Cambios con seguimiento que no chocan y un archivo nuevo que sí: es lo del archivo nuevo.
+    #[test]
+    fn switch_mixed_untracked_and_tracked_changes() {
+        let Some(r) = repo("mezcla") else { return };
+        untracked_in_the_way(&r);
+        fs::write(r.0.join("b.txt"), "local").unwrap();
+        assert_eq!(switch(&r.0, "feature"), SwitchOutcome::UntrackedInTheWay);
+    }
+
+    /// Descartar no toca los archivos sin seguimiento: sigue sin poder cambiar.
+    #[test]
+    fn discard_blocked_by_untracked_file() {
+        let Some(r) = repo("descartar-nuevo") else { return };
+        untracked_in_the_way(&r);
+        fs::write(r.0.join("a.txt"), "local").unwrap();
+        assert_eq!(discard_and_switch(&r.0, "feature"), SwitchOutcome::UntrackedInTheWay);
+        assert_eq!(leer(&r.0, "n.txt"), "local");
+    }
+
+    /// Guardar en el stash (`-u`) se lleva el archivo que tapaba: cambia.
+    #[test]
+    fn stash_takes_untracked_in_the_way() {
+        let Some(r) = repo("stash-nuevo") else { return };
+        untracked_in_the_way(&r);
+        assert_eq!(stash_and_switch(&r.0, "feature"), SwitchOutcome::Switched);
+        assert_eq!(leer(&r.0, "n.txt"), "feature");
     }
 
     #[test]

@@ -98,7 +98,8 @@ impl Confirm {
         let lines = wrap_lines(&|s| p.measure(FontId::Ui, s), &self.text, WIDTH - 32.0);
         let height = 44.0 + 14.0 + lines.len() as f32 * 20.0 + 20.0 + 58.0;
         let left = ((w - WIDTH) / 2.0).max(8.0);
-        let top = ((h - height) / 3.0).max(40.0).min((h - height).max(8.0));
+        // Centrado en la ventana, a lo alto y a lo ancho (si no entra, pegado arriba con un margen).
+        let top = ((h - height) / 2.0).max(8.0);
         let panel = rect(left, top, (left + WIDTH).min(w - 8.0), top + height);
         let close = rect(panel.right - 36.0, panel.top + 8.0, panel.right - 8.0, panel.top + 36.0);
         // Los botones van pegados a la derecha, en la franja de abajo.
@@ -199,6 +200,25 @@ mod tests {
         assert_eq!(d.hit(1.0, 1.0), None);
         assert!(l.buttons.windows(2).all(|w| w[0].right < w[1].left), "los botones no se pisan");
         assert!(l.buttons.iter().all(|r| r.right <= l.panel.right - 16.0 + 0.01 && r.left >= l.panel.left));
+    }
+
+    #[test]
+    fn panel_is_centered_in_the_window() {
+        for (w, h) in [(1000.0_f32, 800.0_f32), (1366.0, 700.0), (520.0, 600.0)] {
+            let (p, d) = (painter(), dialog("Un texto algo más largo para que ocupe más de un renglón y se vea el panel entero."));
+            d.draw(&p, w, h, None);
+            let r = d.layout.borrow().panel;
+            let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+            assert!((cx - w / 2.0).abs() < 0.5, "centrado a lo ancho en {w}x{h}: {cx}");
+            assert!((cy - h / 2.0).abs() < 0.5, "centrado a lo alto en {w}x{h}: {cy}");
+        }
+    }
+
+    #[test]
+    fn panel_taller_than_the_window_sticks_to_the_top() {
+        let (p, d) = (painter(), dialog(&"palabra ".repeat(200)));
+        d.draw(&p, 1000.0, 200.0, None);
+        assert_eq!(d.layout.borrow().panel.top, 8.0);
     }
 
     #[test]

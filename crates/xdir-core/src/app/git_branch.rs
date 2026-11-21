@@ -14,15 +14,15 @@ const MENU_MAX: usize = 40;
 /// Cada cuánto, como mucho, se consulta la red de un repositorio (`git fetch`).
 const FETCH_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// «ahora mismo», «hace 5 minutos»… para el tiempo transcurrido desde el último `fetch`.
+/// «just now», «5 minutes ago»… para el tiempo transcurrido desde el último `fetch`.
 pub(super) fn ago(secs: u64) -> String {
     let (n, unit) = match secs {
-        0..=44 => return "ahora mismo".into(),
-        45..=3599 => (secs.div_ceil(60).max(1), ("minuto", "minutos")),
-        3600..=86399 => (secs / 3600, ("hora", "horas")),
-        _ => (secs / 86400, ("día", "días")),
+        0..=44 => return "just now".into(),
+        45..=3599 => (secs.div_ceil(60).max(1), "minute"),
+        3600..=86399 => (secs / 3600, "hour"),
+        _ => (secs / 86400, "day"),
     };
-    format!("hace {n} {}", if n == 1 { unit.0 } else { unit.1 })
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 /// Qué se sabe del remoto de un repositorio.
@@ -30,6 +30,8 @@ pub(super) fn ago(secs: u64) -> String {
 pub(super) struct SyncInfo {
     /// Lo último que se leyó; `None` si la rama no sigue a ninguna remota (o aún no se leyó).
     pub(super) state: Option<git::Upstream>,
+    /// El remoto que sigue la rama (para los textos del botón).
+    pub(super) remote: Option<String>,
     /// Ya se hizo la primera lectura (local).
     pub(super) checked: bool,
     /// Cuándo se intentó el último `fetch`.
@@ -137,19 +139,22 @@ impl App {
         self.spawn_task_or(
             move || {
                 let fetch_error = if fetch { git::fetch(&r).err() } else { None };
-                TaskDone::GitSync { state: git::upstream_state(&r), root: r, fetched: fetch, fetch_error }
+                TaskDone::GitSync { state: git::upstream_state(&r), remote: git::upstream_remote(&r), root: r, fetched: fetch, fetch_error }
             },
-            move || TaskDone::GitSync { root, state: None, fetched: fetch, fetch_error: Some("git no respondió".into()) },
+            move || TaskDone::GitSync { root, state: None, remote: None, fetched: fetch, fetch_error: Some("git no respondió".into()) },
         );
         self.apply_sync_views();
     }
 
     /// Llegó lo que se sabe del remoto de `root`. Solo avisa de un `fetch` fallido si lo pidió la
     /// persona; el de fondo falla en silencio (sin red, sin permisos…).
-    pub(super) fn on_git_sync(&mut self, root: PathBuf, state: Option<git::Upstream>, _fetched: bool, fetch_error: Option<String>) {
+    pub(super) fn on_git_sync(&mut self, root: PathBuf, state: Option<git::Upstream>, remote: Option<String>, _fetched: bool, fetch_error: Option<String>) {
         let Some(info) = self.git_sync.get_mut(&root) else { return };
         let job = info.job.take();
         info.state = state;
+        if remote.is_some() {
+            info.remote = remote;
+        }
         info.checked = true;
         if job == Some(SyncJob::Refresh)
             && let Some(e) = fetch_error
@@ -235,26 +240,27 @@ impl App {
     }
 
     /// El texto del botón de sincronizar, con la secuencia de estados de GitHub Desktop (título y
-    /// subtítulo): reposo («Comprobar el remoto» / «Bajar cambios», con cuándo se comprobó por
-    /// última vez) → «Comprobando el remoto» o «Bajando cambios» → «Actualizando el repositorio».
+    /// subtítulo): reposo («Fetch origin» / «Pull origin (N)», con cuándo se trajo por
+    /// última vez) → «Fetching origin» o «Pulling origin» → «Refreshing repository».
     fn sync_texts(info: Option<&SyncInfo>, pulling: bool, behind: usize) -> (String, String) {
-        let busy = |t: &str| (t.to_string(), "Un momento…".to_string());
+        let remote = info.and_then(|i| i.remote.as_deref()).unwrap_or("origin");
+        let busy = |t: &str| (t.to_string(), "Hang on…".to_string());
         if pulling {
-            return busy("Bajando cambios");
+            return busy(&format!("Pulling {remote}"));
         }
         match info.and_then(|i| i.job) {
-            Some(SyncJob::Refresh) => return busy("Comprobando remoto"),
-            Some(SyncJob::Reload) => return busy("Actualizando repositorio"),
+            Some(SyncJob::Refresh) => return busy(&format!("Fetching {remote}")),
+            Some(SyncJob::Reload) => return busy("Refreshing repository"),
             _ => {}
         }
         let last = match info.and_then(|i| i.last_fetch) {
-            Some(t) => format!("Comprobado {}", ago(t.elapsed().as_secs())),
-            None => "Nunca comprobado".to_string(),
+            Some(t) => format!("Last fetched {}", ago(t.elapsed().as_secs())),
+            None => "Never fetched".to_string(),
         };
         let title = match behind {
-            0 => "Comprobar remoto".to_string(),
-            1 => "Bajar cambios (1)".to_string(),
-            n => format!("Bajar cambios ({n})"),
+            0 => format!("Fetch {remote}"),
+            1 => format!("Pull {remote} (1)"),
+            n => format!("Pull {remote} ({n})"),
         };
         (title, last)
     }

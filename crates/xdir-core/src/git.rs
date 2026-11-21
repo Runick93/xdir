@@ -336,6 +336,13 @@ pub fn upstream_state(root: &Path) -> Option<Upstream> {
     Some(Upstream { ahead: n.next()?.parse().ok()?, behind: n.next()?.parse().ok()? })
 }
 
+/// El nombre del remoto que sigue la rama actual (`origin`, casi siempre); `None` si no sigue a ninguno.
+pub fn upstream_remote(root: &Path) -> Option<String> {
+    let head = run(root, &["symbolic-ref", "-q", "HEAD"]).ok()?;
+    let out = run(root, &["for-each-ref", "--format=%(upstream:remotename)", head.trim()]).ok()?;
+    Some(out.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Trae lo nuevo del remoto sin tocar la copia de trabajo. Corre en segundo plano, así que pide
 /// que el administrador de credenciales no abra ventanas (`GCM_INTERACTIVE=never`): si hace falta
 /// contraseña, falla en silencio.
@@ -818,6 +825,14 @@ mod tests {
             eprintln!("git no está instalado: se salta la prueba");
         }
         r
+    }
+
+    #[test]
+    fn upstream_remote_names_the_followed_remote() {
+        let Some(r) = repo("up-nombre-sin") else { return };
+        assert_eq!(upstream_remote(&r.0), None);
+        let Some(r) = remote("up-nombre") else { return };
+        assert_eq!(upstream_remote(&r.work()).as_deref(), Some("origin"));
     }
 
     #[test]

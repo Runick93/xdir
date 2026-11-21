@@ -763,13 +763,13 @@ fn sync_button_is_hidden_when_the_branch_follows_no_remote() {
 
 #[test]
 fn ago_reads_like_github_desktop() {
-    assert_eq!(super::git_branch::ago(0), "ahora mismo");
-    assert_eq!(super::git_branch::ago(44), "ahora mismo");
-    assert_eq!(super::git_branch::ago(60), "hace 1 minuto");
-    assert_eq!(super::git_branch::ago(300), "hace 5 minutos");
-    assert_eq!(super::git_branch::ago(3600), "hace 1 hora");
-    assert_eq!(super::git_branch::ago(7200), "hace 2 horas");
-    assert_eq!(super::git_branch::ago(86400 * 3), "hace 3 días");
+    assert_eq!(super::git_branch::ago(0), "just now");
+    assert_eq!(super::git_branch::ago(44), "just now");
+    assert_eq!(super::git_branch::ago(60), "1 minute ago");
+    assert_eq!(super::git_branch::ago(300), "5 minutes ago");
+    assert_eq!(super::git_branch::ago(3600), "1 hour ago");
+    assert_eq!(super::git_branch::ago(7200), "2 hours ago");
+    assert_eq!(super::git_branch::ago(86400 * 3), "3 days ago");
 }
 
 #[test]
@@ -782,7 +782,7 @@ fn sync_button_is_green_when_up_to_date() {
     let sb = a.panes[0].sync_button_rect();
     assert_eq!((rect.left, rect.right), (sb.left, sb.left + 28.0), "el glifo va al comienzo del botón; el texto, a su derecha");
     assert!(a.panes[0].branch_button_rect().right <= sb.left, "a la derecha del botón de rama");
-    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Comprobar remoto — Comprobado ahora mismo"));
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Fetch origin — Last fetched just now"));
     assert!(host.drawn_rotations().is_empty(), "quieto: no gira");
 }
 
@@ -793,7 +793,7 @@ fn sync_button_is_yellow_when_there_is_something_to_pull() {
     let (a, host) = app_synced(&r.work());
     assert_eq!(sync_view(&a), Some(git::SyncView { behind: 1, spinning: false }), "el fetch de fondo vio el commit nuevo");
     assert_eq!(sync_glyph(&host).unwrap().1, a.theme.warning, "amarillo");
-    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Bajar cambios (1) — Comprobado ahora mismo"));
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Pull origin (1) — Last fetched just now"));
     assert!(!r.work().join("b.txt").exists(), "el fetch no baja los archivos");
     assert!(host.drawn_rotations().is_empty());
 }
@@ -809,7 +809,7 @@ fn clicking_yellow_spins_until_the_pull_finishes() {
     assert_eq!(sync_view(&a), Some(git::SyncView { behind: 1, spinning: true }));
     a.paint();
     assert!(!host.drawn_rotations().is_empty(), "el glifo gira mientras baja");
-    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Bajando cambios — Un momento…"));
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Pulling origin — Hang on…"));
     wait_idle(&mut a);
     settle(&mut a);
     assert_eq!(std::fs::read_to_string(r.work().join("b.txt")).unwrap(), "otro", "bajó los archivos");
@@ -828,7 +828,7 @@ fn clicking_green_checks_the_remote_and_spins_meanwhile() {
     a.sync_click(0);
     assert_eq!(sync_view(&a), Some(git::SyncView { behind: 0, spinning: true }));
     assert!(!a.git_busy, "una consulta no bloquea el cambio de rama");
-    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Comprobando remoto — Un momento…"));
+    assert_eq!(a.tooltip_text(Hit::Pane(0, PaneHit::SyncButton)).as_deref(), Some("Fetching origin — Hang on…"));
     a.paint();
     assert!(!host.drawn_rotations().is_empty());
     settle(&mut a);
@@ -910,13 +910,13 @@ fn sync_button_shows_its_title_beside_the_glyph() {
     let (mut a, host) = app_synced(&r.work());
     a.paint();
     let t: Vec<String> = host.drawn_text_draws().into_iter().map(|x| x.1).collect();
-    assert!(t.iter().any(|s| s == "Comprobar remoto"), "{t:?}");
-    assert!(!t.iter().any(|s| s.starts_with("Comprobado")), "una sola línea: el subtítulo va en el tooltip");
+    assert!(t.iter().any(|s| s == "Fetch origin"), "{t:?}");
+    assert!(!t.iter().any(|s| s.starts_with("Last fetched")), "una sola línea: el subtítulo va en el tooltip");
     let sb = a.panes[0].sync_button_rect();
     assert!(sb.right - sb.left > 28.0 + 60.0, "el botón crece para alojar el texto");
     a.sync_click(0);
     a.paint();
     let t: Vec<String> = host.drawn_text_draws().into_iter().map(|x| x.1).collect();
-    assert!(t.iter().any(|s| s == "Comprobando remoto"), "{t:?}");
-    assert!(!t.iter().any(|s| s == "Un momento…"), "una sola línea: el subtítulo va en el tooltip");
+    assert!(t.iter().any(|s| s == "Fetching origin"), "{t:?}");
+    assert!(!t.iter().any(|s| s == "Hang on…"), "una sola línea: el subtítulo va en el tooltip");
 }

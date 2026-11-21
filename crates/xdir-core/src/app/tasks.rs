@@ -106,7 +106,7 @@ pub(super) enum TaskDone {
     /// Ya se sabe si hay git (`git::warm_up`): las pestañas releen su rama.
     GitReady,
     /// Se consultó el remoto de `root` (`fetched`: se trajo antes; `fetch_error`: por qué no se pudo) y se leyó cuánto adelanta o atrasa la rama.
-    GitSync { root: PathBuf, state: Option<crate::git::Upstream>, fetched: bool, fetch_error: Option<String> },
+    GitSync { root: PathBuf, state: Option<crate::git::Upstream>, remote: Option<String>, fetched: bool, fetch_error: Option<String> },
     /// Terminó el `pull` de `root`.
     GitPulled { root: PathBuf, result: Result<(), String> },
 }
@@ -158,7 +158,7 @@ impl App {
             TaskDone::GitBranches { pane, root, result } => self.on_git_branches(pane, root, result),
             TaskDone::GitSwitched { root, dest, how, result } => self.on_git_switched(root, dest, how, result),
             TaskDone::GitReady => self.on_git_ready(),
-            TaskDone::GitSync { root, state, fetched, fetch_error } => self.on_git_sync(root, state, fetched, fetch_error),
+            TaskDone::GitSync { root, state, remote, fetched, fetch_error } => self.on_git_sync(root, state, remote, fetched, fetch_error),
             TaskDone::GitPulled { root, result } => self.on_git_pulled(root, result),
             TaskDone::Original { pane, link, target } => {
                 let name = link.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

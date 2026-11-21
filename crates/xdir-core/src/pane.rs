@@ -16,6 +16,9 @@ pub const FAVBAR_H: f32 = 30.0;
 const FOOTER_H: f32 = 30.0;
 const VIEW_BTN_W: f32 = 36.0;
 const FOOTER_BTN_H: f32 = 26.0;
+/// Ancho máximo del botón con la rama del pie, y el margen del texto dentro de él.
+pub const BRANCH_BTN_MAX_W: f32 = 180.0;
+const BRANCH_BTN_PAD: f32 = 8.0;
 const PANE_RADIUS: f32 = 8.0;
 /// Inclinación de los lados de las pestañas.
 const TAB_SLANT: f32 = 10.0;
@@ -131,6 +134,8 @@ pub enum PaneHit {
     /// Botón del pie del panel: pasa a la vista siguiente (como Ctrl+rueda).
     ViewButton,
     NewFolderButton,
+    /// Botón del pie con la rama actual del repositorio (a la izquierda de «Carpeta nueva»).
+    BranchButton,
     /// Botón «Devolver» junto a la barra de dirección (solo en la Papelera).
     Restore,
     /// Un botón del aviso de una carpeta de red que tarda («Reintentar», «Cerrar la pestaña»).
@@ -204,6 +209,8 @@ pub struct Pane {
     pub favbar: Rect,
     view_button: Rect,
     new_folder_button: Rect,
+    /// Botón de la rama actual (vacío si la pestaña no está en un repositorio).
+    branch_button: Rect,
     /// Con la Papelera a la vista, el botón «Devolver» (encendido si hay selección); lo pone la
     /// `App` antes de dibujar.
     pub restore: Option<bool>,
@@ -219,6 +226,12 @@ impl Pane {
     #[cfg(test)]
     pub fn footer_buttons(&self) -> (Rect, Rect) {
         (self.new_folder_button, self.view_button)
+    }
+
+    /// Botón de la rama en el último cuadro (vacío si no hay). Pruebas de `App`.
+    #[cfg(test)]
+    pub fn branch_button_rect(&self) -> Rect {
+        self.branch_button
     }
 
     pub fn new(tabs: Vec<Tab>, active: usize) -> Self {
@@ -255,6 +268,7 @@ impl Pane {
             view_button: zero,
             loading_card: None,
             new_folder_button: zero,
+            branch_button: zero,
             restore: None,
             restore_button: zero,
             list: zero,
@@ -482,6 +496,9 @@ impl Pane {
         if contains(&self.favbar, x, y) {
             return PaneHit::FavBar;
         }
+        if contains(&self.branch_button, x, y) {
+            return PaneHit::BranchButton;
+        }
         if contains(&self.new_folder_button, x, y) {
             return PaneHit::NewFolderButton;
         }
@@ -708,6 +725,7 @@ impl Pane {
         if self.tabs[self.active].is_page() {
             self.view_button = rect(0.0, 0.0, 0.0, 0.0);
             self.new_folder_button = rect(0.0, 0.0, 0.0, 0.0);
+            self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
             p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
             let stroke = if active_pane { (th.accent, 1.5) } else { (th.border, 1.0) };
             p.rounded_path(&outline, true, None, Some(stroke));
@@ -731,6 +749,23 @@ impl Pane {
         }
         p.text(FontId::Glyphs, "\u{E8F4}", nb, th.text_dim);
         self.new_folder_button = nb;
+        // Botón con la rama actual, a la izquierda de «Carpeta nueva»: solo en carpetas de disco
+        // dentro de un repositorio (un `git` viejo junto a otro lugar no se muestra).
+        self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
+        let tab = &self.tabs[self.active];
+        if let (Location::Path(_), Some(g)) = (&tab.location, &tab.git) {
+            let label = g.head.label();
+            let text_w = p.measure(FontId::Ui, label) + 2.0 * BRANCH_BTN_PAD;
+            let w = text_w.min(BRANCH_BTN_MAX_W);
+            let bb = rect(nb.left - 6.0 - w, nb.top, nb.left - 6.0, nb.bottom);
+            if hover == PaneHit::BranchButton {
+                let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
+                p.round_fill(bb, 6.0, c);
+            }
+            let inner = rect(bb.left + BRANCH_BTN_PAD, bb.top, bb.right - BRANCH_BTN_PAD, bb.bottom);
+            p.text(FontId::Ui, &crate::paint::ellipsize(p, FontId::Ui, label, inner.right - inner.left), inner, th.text_dim);
+            self.branch_button = bb;
+        }
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];
         tab.list.folder = match &tab.location {

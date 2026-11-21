@@ -427,6 +427,8 @@ impl App {
                         self.set_view(i, list::CYCLE[next]);
                     }
                     PaneHit::NewFolderButton => self.run_command(Command::NewFolder),
+                    // El menú de ramas llega en la tarea siguiente.
+                    PaneHit::BranchButton => {}
                     PaneHit::Restore => self.restore_selection(),
                     PaneHit::Search => self.begin_filter(i),
                     PaneHit::SearchClear => self.clear_filter(i),

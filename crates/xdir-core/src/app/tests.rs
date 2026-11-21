@@ -1237,6 +1237,99 @@ fn footer_buttons_are_36_by_26() {
     assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::ViewButton));
 }
 
+/// App con una pestaña de disco en el panel 0 cuyo `git` se fijó a mano, ya dibujada.
+fn branch_app(head: Option<crate::git::Head>) -> (App, std::rc::Rc<FakeHost>) {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("boton-rama");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    a.panes[0].tab_mut().git = head.map(|head| crate::git::RepoHead { root: dir, head });
+    a.paint();
+    (a, host)
+}
+
+/// El texto de `host` más reciente que cae dentro de `r` y contiene `needle`.
+fn text_inside(host: &FakeHost, r: &geom::Rect, needle: &str) -> Option<String> {
+    host.drawn_texts().into_iter().rev().find(|(_, t, at)| t.contains(needle) && at.left >= r.left && at.right <= r.right && at.top >= r.top && at.bottom <= r.bottom).map(|(_, t, _)| t)
+}
+
+#[test]
+fn branch_button_drawn_left_of_new_folder() {
+    let (a, host) = branch_app(Some(crate::git::Head::Branch("main".into())));
+    let (nb, vb) = a.panes[0].footer_buttons();
+    let bb = a.panes[0].branch_button_rect();
+    assert!(bb.right <= nb.left, "a la izquierda de «Carpeta nueva»");
+    assert_eq!(nb.left - bb.right, 6.0);
+    assert_eq!((bb.top, bb.bottom), (vb.top, vb.bottom));
+    assert!(text_inside(&host, &bb, "main").is_some(), "el nombre dentro del botón");
+    let (cx, cy) = center(&bb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::BranchButton));
+}
+
+#[test]
+fn branch_button_absent_without_git() {
+    let (a, _host) = branch_app(None);
+    let bb = a.panes[0].branch_button_rect();
+    assert_eq!((bb.right - bb.left, bb.bottom - bb.top), (0.0, 0.0));
+    let (nb, _) = a.panes[0].footer_buttons();
+    let (cx, cy) = center(&geom::rect(nb.left - 40.0, nb.top, nb.left - 10.0, nb.bottom));
+    assert_ne!(a.hit(cx, cy), Hit::Pane(0, PaneHit::BranchButton));
+}
+
+#[test]
+fn branch_button_absent_without_path_location() {
+    // Un `git` viejo junto a una ubicación que no es una carpeta de disco no muestra el botón.
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.new_tab(0, Location::Computer, true);
+    a.panes[0].tab_mut().git = Some(crate::git::RepoHead { root: std::env::temp_dir(), head: crate::git::Head::Branch("main".into()) });
+    a.paint();
+    let bb = a.panes[0].branch_button_rect();
+    assert_eq!((bb.right - bb.left, bb.bottom - bb.top), (0.0, 0.0));
+}
+
+#[test]
+fn branch_button_truncates_long_names() {
+    let name = "x".repeat(80);
+    let (a, host) = branch_app(Some(crate::git::Head::Branch(name)));
+    let bb = a.panes[0].branch_button_rect();
+    assert!(bb.right - bb.left <= crate::pane::BRANCH_BTN_MAX_W);
+    let texts = host.drawn_texts();
+    let (_, t, _) = texts.iter().rev().find(|(_, t, at)| t.starts_with('x') && at.left >= bb.left && at.right <= bb.right).expect("texto dentro del botón");
+    assert!(t.ends_with('…'), "{t:?}");
+}
+
+#[test]
+fn branch_button_shows_short_hash_when_detached() {
+    let (a, host) = branch_app(Some(crate::git::Head::Detached("abc1234def5678".into())));
+    let bb = a.panes[0].branch_button_rect();
+    let t = text_inside(&host, &bb, "abc1234").expect("hash corto");
+    assert!(!t.contains("abc1234d"), "{t:?}");
+}
+
+#[test]
+fn branch_button_absent_on_pages() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.new_tab(0, Location::Path(std::env::temp_dir()), true);
+    a.panes[0].tab_mut().git = Some(crate::git::RepoHead { root: std::env::temp_dir(), head: crate::git::Head::Branch("main".into()) });
+    a.paint();
+    assert_ne!(a.panes[0].branch_button_rect().right, 0.0);
+    a.panes[0].tab_mut().location = Location::Settings;
+    a.paint();
+    let bb = a.panes[0].branch_button_rect();
+    assert_eq!((bb.right - bb.left, bb.bottom - bb.top), (0.0, 0.0));
+}
+
+#[test]
+fn branch_tooltip() {
+    let (mut a, _host) = branch_app(Some(crate::git::Head::Branch("main".into())));
+    let hit = Hit::Pane(0, PaneHit::BranchButton);
+    assert_eq!(a.tooltip_text(hit).as_deref(), Some("Rama: main (clic para cambiar)"));
+    a.panes[0].tab_mut().git.as_mut().unwrap().head = crate::git::Head::Detached("abc1234def5678".into());
+    assert_eq!(a.tooltip_text(hit).as_deref(), Some("HEAD suelto en abc1234"));
+}
+
 /// Etiquetas de las entradas propias del menú del fondo del panel activo (los submenús por su nombre).
 fn background_labels(a: &App) -> (Vec<String>, Vec<Command>) {
     let mut cmds = Vec::new();

@@ -228,8 +228,7 @@ impl Pane {
         (self.new_folder_button, self.view_button)
     }
 
-    /// Botón de la rama en el último cuadro (vacío si no hay). Pruebas de `App`.
-    #[cfg(test)]
+    /// Botón de la rama en el último cuadro (vacío si no hay): de ahí se abre el menú de ramas.
     pub fn branch_button_rect(&self) -> Rect {
         self.branch_button
     }

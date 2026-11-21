@@ -1515,6 +1515,7 @@ pub struct FakeHost {
     next_text_box: Cell<u32>,
     menu_choice: Cell<Option<u32>>,
     menus: RefCell<Vec<Vec<Entry>>>,
+    menu_positions: RefCell<Vec<MenuPos>>,
     /// La ventana que se le pasó a `attach` (la última).
     attached: Cell<Option<Handle>>,
     /// Imágenes grandes pedidas en el último cuadro dibujado.
@@ -1556,6 +1557,7 @@ impl FakeHost {
             next_text_box: Cell::new(1),
             menu_choice: Cell::new(None),
             menus: RefCell::new(Vec::new()),
+            menu_positions: RefCell::new(Vec::new()),
             attached: Cell::new(None),
             drawn_big: RefCell::new(Vec::new()),
             quick_look_shown: RefCell::new(Vec::new()),
@@ -1678,6 +1680,11 @@ impl FakeHost {
     /// Los menús que se mostraron, en orden.
     pub fn menus(&self) -> Vec<Vec<Entry>> {
         self.menus.borrow().clone()
+    }
+
+    /// Dónde se pidió cada menú de `menus()`, en el mismo orden.
+    pub fn menu_positions(&self) -> Vec<MenuPos> {
+        self.menu_positions.borrow().clone()
     }
 
     /// Los textos del último cuadro dibujado, en orden.
@@ -1949,8 +1956,9 @@ impl WindowHost for FakeHost {
 
     fn text_restyle(&self, _theme: &Theme) {}
 
-    fn popup_menu(&self, entries: &[Entry], _pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<crate::host::OnContext<'_>>) -> Option<u32> {
+    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<crate::host::OnContext<'_>>) -> Option<u32> {
         self.menus.borrow_mut().push(entries.to_vec());
+        self.menu_positions.borrow_mut().push(pos);
         self.menu_choice.get()
     }
 }

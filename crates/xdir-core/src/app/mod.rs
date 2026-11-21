@@ -12,6 +12,7 @@ mod edit;
 mod events;
 mod favs;
 mod fileops;
+mod git_branch;
 mod in_use;
 mod info;
 mod network;
@@ -67,6 +68,8 @@ mod activity_tests;
 mod compare_tests;
 #[cfg(test)]
 mod cut_tests;
+#[cfg(test)]
+mod git_branch_tests;
 #[cfg(test)]
 mod in_use_tests;
 
@@ -550,6 +553,8 @@ pub struct App {
     transfers: transfers::Transfers,
     /// La ventana de «archivo en uso», si está abierta.
     in_use: Option<in_use::InUseState>,
+    /// Hay un trabajo de git en curso (leer las ramas o cambiar de rama): no se larga otro.
+    git_busy: bool,
     /// Red: favoritos y recientes, lo conectado y la red local.
     net: network::NetState,
     /// Dentro de archivos comprimidos: lo copiado y las extracciones para la vista previa.
@@ -653,6 +658,8 @@ impl App {
         // Pruebas: el reloj fijado por una prueba anterior en este hilo no pasa a esta.
         #[cfg(test)]
         crate::clock::set(None);
+        #[cfg(not(test))]
+        crate::git::warm_up();
         let Init { session, history, config, favorites, groups, mut folder_views, places, probe, start_path, started, marks, clean_temps_on_close } = init;
         // Primera vez con memoria por carpeta: la vista y las columnas de la sesión pasan a ser
         // la vista por defecto.
@@ -793,6 +800,7 @@ impl App {
             swallow_space: false,
             transfers: transfers::Transfers::new(),
             in_use: None,
+            git_busy: false,
             net: network::NetState::default(),
             archive: archive_nav::ArchiveState::default(),
             cut: Default::default(),

@@ -17,8 +17,7 @@ pub(super) enum GitHow {
     Plain,
     /// Guardando antes los cambios en un stash.
     Stash,
-    /// Descartando los cambios (lo usa la ventana de la tarea siguiente).
-    #[allow(dead_code)]
+    /// Descartando los cambios.
     Discard,
 }
 
@@ -117,8 +116,34 @@ impl App {
                 }
             }
             SwitchOutcome::Failed(t) => self.notice = Some(t),
-            // La ventana que ofrece guardar o descartar llega en la tarea siguiente.
+            // Solo el cambio simple abre la ventana; si ya se probó guardar o descartar, no se repite.
+            SwitchOutcome::Dirty { files } if how == GitHow::Plain && files > 0 => self.ask_dirty(root, dest, files),
+            // Sin archivos con seguimiento modificados descartar no arregla nada: son archivos nuevos.
+            SwitchOutcome::Dirty { files: 0 } => {
+                self.notice = Some("No se pudo cambiar de rama: hay archivos sin seguimiento que se sobrescribirían".into())
+            }
             SwitchOutcome::Dirty { .. } => self.notice = Some("No se pudo cambiar de rama: hay cambios sin guardar que chocan".into()),
+        }
+    }
+    /// Git se negó a cambiar por cambios sin guardar: ofrece guardarlos en el stash o descartarlos.
+    /// Las ventanas son modales en el hilo de la interfaz; `git_busy` ya está apagado y
+    /// `start_switch` lo vuelve a encender si se sigue adelante.
+    fn ask_dirty(&mut self, root: PathBuf, dest: String, files: usize) {
+        let title = format!("No se puede pasar a «{dest}»");
+        let text = "Tienes cambios sin guardar que chocan con esa rama. ¿Guardarlos en el stash y cambiar? Sí: guardar en el stash y cambiar. No: descartar los cambios. Cancelar: quedarse aquí.";
+        match self.host.ask_yes_no_cancel(&title, text) {
+            Some(true) => self.start_switch(root, dest, GitHow::Stash),
+            Some(false) => {
+                let text = if files == 1 {
+                    "Se perderá 1 archivo modificado. Esto no se puede deshacer. ¿Descartar y cambiar?".to_string()
+                } else {
+                    format!("Se perderán {files} archivos modificados. Esto no se puede deshacer. ¿Descartar y cambiar?")
+                };
+                if self.host.ask_yes_no("Descartar cambios", &text) {
+                    self.start_switch(root, dest, GitHow::Discard);
+                }
+            }
+            None => {}
         }
     }
 }

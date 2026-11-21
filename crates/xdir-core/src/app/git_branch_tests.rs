@@ -198,3 +198,140 @@ fn cancel_menu_does_nothing() {
     assert!(!a.git_busy);
     assert_eq!(git::read_head(&r.0).unwrap().head, Head::Branch("main".into()));
 }
+
+// ---- el cartel de cambios sin commitear ----
+
+const Q1_TITLE: &str = "No se puede pasar a «feature»";
+const Q1_TEXT: &str = "Tienes cambios sin guardar que chocan con esa rama. ¿Guardarlos en el stash y cambiar? Sí: guardar en el stash y cambiar. No: descartar los cambios. Cancelar: quedarse aquí.";
+
+fn read(r: &Repo, f: &str) -> String {
+    std::fs::read_to_string(r.0.join(f)).unwrap()
+}
+
+/// Deja `a.txt` modificado y entrega a la app el `Dirty` que daría git, como si se hubiera elegido `feature`.
+fn dirty_switch(a: &mut App, r: &Repo, extra_dirty: &[&str]) {
+    std::fs::write(r.0.join("a.txt"), "local").unwrap();
+    for f in extra_dirty {
+        std::fs::write(r.0.join(f), "local").unwrap();
+    }
+    let files = git::dirty_count(&r.0);
+    a.git_busy = true;
+    a.on_git_switched(r.0.clone(), "feature".into(), GitHow::Plain, SwitchOutcome::Dirty { files });
+}
+
+fn head(r: &Repo) -> Head {
+    git::read_head(&r.0).unwrap().head
+}
+
+#[test]
+fn dirty_asks_stash_first() {
+    let Some(r) = repo("d-pregunta") else { return };
+    let (mut a, host) = app_at(&r.0);
+    host.set_answer(None);
+    dirty_switch(&mut a, &r, &[]);
+    assert_eq!(host.questions(), vec![(Q1_TITLE.to_string(), Q1_TEXT.to_string())]);
+}
+
+#[test]
+fn dirty_yes_stashes_and_switches() {
+    let Some(r) = repo("d-stash") else { return };
+    let (mut a, host) = app_at(&r.0);
+    host.set_answer(Some(true));
+    dirty_switch(&mut a, &r, &[]);
+    assert!(a.git_busy, "el worker del stash arrancó");
+    wait_idle(&mut a);
+    assert_eq!(head(&r), Head::Branch("feature".into()));
+    assert_eq!(read(&r, "a.txt"), "feature");
+    let lista = git::git_test(&r.0, &["stash", "list"]).unwrap();
+    assert!(lista.contains("xdir: antes de pasar a feature"), "{lista}");
+    assert_eq!(a.notice.as_deref(), Some("Tus cambios están en el stash (xdir: antes de pasar a feature)"));
+}
+
+#[test]
+fn dirty_no_then_yes_discards() {
+    let Some(r) = repo("d-descarta") else { return };
+    let (mut a, host) = app_at(&r.0);
+    std::fs::write(r.0.join("nuevo.txt"), "n").unwrap();
+    host.set_answers(vec![Some(false), Some(true)]);
+    dirty_switch(&mut a, &r, &[]);
+    wait_idle(&mut a);
+    let q = host.questions();
+    assert_eq!(q.len(), 2);
+    assert_eq!(q[1].0, "Descartar cambios");
+    assert_eq!(q[1].1, "Se perderá 1 archivo modificado. Esto no se puede deshacer. ¿Descartar y cambiar?");
+    assert_eq!(head(&r), Head::Branch("feature".into()));
+    assert_eq!(read(&r, "a.txt"), "feature");
+    assert!(r.0.join("nuevo.txt").exists());
+}
+
+#[test]
+fn dirty_no_then_no_does_nothing() {
+    let Some(r) = repo("d-no-no") else { return };
+    let (mut a, host) = app_at(&r.0);
+    host.set_answers(vec![Some(false), Some(false)]);
+    dirty_switch(&mut a, &r, &[]);
+    assert_eq!(host.questions().len(), 2);
+    assert!(!a.git_busy);
+    assert!(a.notice.is_none());
+    assert_eq!(head(&r), Head::Branch("main".into()));
+    assert_eq!(read(&r, "a.txt"), "local");
+}
+
+#[test]
+fn dirty_cancel_does_nothing() {
+    let Some(r) = repo("d-cancela") else { return };
+    let (mut a, host) = app_at(&r.0);
+    host.set_answer(None);
+    dirty_switch(&mut a, &r, &[]);
+    assert_eq!(host.questions().len(), 1);
+    assert!(!a.git_busy);
+    assert!(a.notice.is_none());
+    assert_eq!(head(&r), Head::Branch("main".into()));
+    assert_eq!(read(&r, "a.txt"), "local");
+}
+
+#[test]
+fn dirty_count_in_plural() {
+    let Some(r) = repo("d-plural") else { return };
+    let (mut a, host) = app_at(&r.0);
+    std::fs::write(r.0.join("c.txt"), "c").unwrap();
+    git::git_test(&r.0, &["add", "c.txt"]).unwrap();
+    git::git_test(&r.0, &["commit", "-m", "c"]).unwrap();
+    host.set_answers(vec![Some(false), Some(false)]);
+    dirty_switch(&mut a, &r, &["b.txt", "c.txt"]);
+    let q = host.questions();
+    assert_eq!(q[1].1, "Se perderán 3 archivos modificados. Esto no se puede deshacer. ¿Descartar y cambiar?");
+}
+
+#[test]
+fn dirty_without_tracked_files_is_a_plain_notice() {
+    let (mut a, host) = app_fake(Head::Branch("main".into()));
+    let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
+    a.git_busy = true;
+    a.on_git_switched(root, "feature".into(), GitHow::Plain, SwitchOutcome::Dirty { files: 0 });
+    assert!(host.questions().is_empty());
+    assert!(!a.git_busy);
+    assert_eq!(a.notice.as_deref(), Some("No se pudo cambiar de rama: hay archivos sin seguimiento que se sobrescribirían"));
+}
+
+#[test]
+fn dirty_from_stash_attempt_does_not_reopen_dialog() {
+    let (mut a, host) = app_fake(Head::Branch("main".into()));
+    let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
+    a.git_busy = true;
+    a.on_git_switched(root, "feature".into(), GitHow::Stash, SwitchOutcome::Dirty { files: 2 });
+    assert!(host.questions().is_empty());
+    assert!(!a.git_busy);
+    assert!(a.notice.is_some());
+}
+
+#[test]
+fn stash_failure_reports_error_and_keeps_changes_message() {
+    let (mut a, _host) = app_fake(Head::Branch("main".into()));
+    let root = a.panes[0].tab().git.as_ref().unwrap().root.clone();
+    let msg = "fatal: algo. Tus cambios quedan en el stash (xdir: antes de pasar a feature).".to_string();
+    a.git_busy = true;
+    a.on_git_switched(root, "feature".into(), GitHow::Stash, SwitchOutcome::Failed(msg));
+    assert!(a.notice.as_deref().unwrap().contains("Tus cambios quedan en el stash"));
+    assert!(!a.git_busy);
+}

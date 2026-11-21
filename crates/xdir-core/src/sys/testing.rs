@@ -1503,6 +1503,8 @@ pub struct FakeHost {
     beeps: Cell<usize>,
     color_choice: Cell<Option<u32>>,
     answer: Cell<Option<bool>>,
+    /// Respuestas en cola: cada pregunta toma la primera; vacía, vale `answer`.
+    answers: RefCell<std::collections::VecDeque<Option<bool>>>,
     /// Preguntas de `ask_yes_no_cancel` (título y texto), en orden.
     questions: RefCell<Vec<(String, String)>>,
     drag_result: RefCell<Result<(), String>>,
@@ -1548,6 +1550,7 @@ impl FakeHost {
             beeps: Cell::new(0),
             color_choice: Cell::new(None),
             answer: Cell::new(None),
+            answers: RefCell::new(std::collections::VecDeque::new()),
             questions: RefCell::new(Vec::new()),
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
@@ -1735,6 +1738,16 @@ impl FakeHost {
         self.answer.set(a);
     }
 
+    /// Respuestas distintas para preguntas seguidas: cada pregunta toma la primera de la cola;
+    /// cuando se acaba, vuelve a valer `set_answer`.
+    pub fn set_answers(&self, a: Vec<Option<bool>>) {
+        *self.answers.borrow_mut() = a.into();
+    }
+
+    fn next_answer(&self) -> Option<bool> {
+        self.answers.borrow_mut().pop_front().unwrap_or_else(|| self.answer.get())
+    }
+
     /// Cuántas veces sonó el pitido de "no se puede".
     pub fn beeps(&self) -> usize {
         self.beeps.get()
@@ -1790,13 +1803,13 @@ impl WindowHost for FakeHost {
 
     fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool> {
         self.questions.borrow_mut().push((title.to_string(), text.to_string()));
-        self.answer.get()
+        self.next_answer()
     }
 
     /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No. Se anota en `questions`.
     fn ask_yes_no(&self, title: &str, text: &str) -> bool {
         self.questions.borrow_mut().push((title.to_string(), text.to_string()));
-        self.answer.get() == Some(true)
+        self.next_answer() == Some(true)
     }
 
     fn open_url(&self, _url: &str) {}

@@ -653,7 +653,7 @@ fn symbol_name(ch: char) -> Option<&'static str> {
         0xE8F4 => "folder.badge.plus",
         0xE91B => "photo",
         0xE946 => "info.circle",
-        0xE9D9 => "chart.pie",
+        0xEB05 => "chart.pie",
         0xEDA2 => "internaldrive",
         0xF012 => "doc.zipper",
         _ => return None,

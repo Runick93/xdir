@@ -1558,7 +1558,7 @@ impl Tree {
             Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
             // El ícono del mapa, como el botón «xtree» de la barra de estado.
-            Kind::Xtree => ("\u{E9D9}", th.accent),
+            Kind::Xtree => ("\u{EB05}", th.accent),
             Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
             // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
             Kind::Trash => (TRASH_GLYPH, rgb(0.62, 0.70, 0.80)),
@@ -2431,7 +2431,7 @@ mod tests {
         let texts = p.texts();
         assert!(texts.iter().any(|(_, s, r)| s == "xtree" && in_row(r)), "{texts:?}");
         assert!(texts.iter().any(|(_, s, r)| s == "37 %" && in_row(r)), "{texts:?}");
-        assert!(texts.iter().any(|(_, s, r)| s == "\u{E9D9}" && in_row(r)), "ícono del mapa");
+        assert!(texts.iter().any(|(_, s, r)| s == "\u{EB05}" && in_row(r)), "ícono del mapa");
         // El anillo, a la derecha de la fila.
         assert!(p.paths().iter().any(|(pts, closed, _)| *closed && pts.iter().all(|&(px, py)| px > area.right - 40.0 && (py - y).abs() <= 8.0)));
         // Sin escaneo: solo el ícono y el nombre.

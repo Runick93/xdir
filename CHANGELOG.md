@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+## 0.2.1 — 2026-11-14
+
 ### Nuevo
 - **Esc cancela un arrastre** de una pestaña, una carpeta del árbol, un favorito o lo elegido dentro de un comprimido: todo queda como estaba (una pestaña ya movida a otro panel o a otra posición vuelve a su lugar).
 - **Agregar a Lugares**, igual en las 3 plataformas: el clic derecho en una carpeta del árbol o de la lista, en el fondo de la carpeta o en el encabezado de columnas suma «Agregar a Lugares» (o «Quitar de Lugares»), que la deja en el árbol como carpeta propia. El encabezado de columnas también suma «Agregar a favoritos». En Windows, el Acceso rápido del Explorador sigue viéndose como un lugar más, sincronizado con el Explorador.

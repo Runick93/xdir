@@ -3,6 +3,7 @@
 ## Sin publicar
 
 ### Nuevo
+- Abrir una carpeta desde el árbol o desde los favoritos ya no desplaza el árbol hasta su ubicación real: la rama se despliega igual, pero la vista se queda donde estaba.
 - Arrastrá una carpeta o una pestaña **entre dos lugares** del árbol para sumarla ahí, como en la barra lateral del Finder (una línea marca dónde queda). En la Mac y Linux queda como carpeta propia; en Windows se ancla al Acceso rápido y, si estaba oculto, vuelve a verse. Soltar sobre una carpeta sigue moviendo o copiando adentro.
 - Esc después de cortar deja de cortar: lo cortado sale del portapapeles y vuelve a verse normal (si hay un filtro escrito, el siguiente Esc lo borra).
 - Lo cortado (Ctrl+X / ⌘X) se ve con el ícono atenuado hasta que se pega, como en el Explorador; también lo que se corta en el Explorador.

@@ -430,6 +430,9 @@ pub struct App {
     /// Carpeta del panel activo que el árbol ya siguió (`follow_tree`); None: ninguna todavía.
     #[cfg(feature = "arbol")]
     tree_followed: Option<Location>,
+    /// Carpeta abierta con un clic en el árbol: al seguirla no se desplaza (`follow_tree`).
+    #[cfg(feature = "arbol")]
+    tree_quiet: Option<Location>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
@@ -732,6 +735,8 @@ impl App {
             tree_ctx: None,
             #[cfg(feature = "arbol")]
             tree_followed: None,
+            #[cfg(feature = "arbol")]
+            tree_quiet: None,
             groups_menu_closed: None,
             palette: None,
             xtree_search_box: None,

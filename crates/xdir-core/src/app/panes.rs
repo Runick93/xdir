@@ -97,10 +97,16 @@ impl App {
             return;
         }
         self.tree_followed = Some(current.clone());
+        // Abierta desde el árbol (un lugar, un favorito): se despliega su rama sin mover la vista.
+        let quiet = self.tree_quiet.take().is_some_and(|l| &l == current);
         // Solo carpetas de disco: "Este equipo" y las ubicaciones del Shell no están en el árbol.
         if let Location::Path(p) = current {
             let p = p.clone();
-            self.tree.reveal(self.hwnd, &p, self.show_hidden);
+            if quiet {
+                self.tree.reveal_without_scroll(self.hwnd, &p, self.show_hidden);
+            } else {
+                self.tree.reveal(self.hwnd, &p, self.show_hidden);
+            }
         }
     }
 
@@ -120,6 +126,7 @@ impl App {
         match self.tree.hit(x, y) {
             tree::TreeHit::Toggle(id) => self.tree.toggle(self.hwnd, id, self.show_hidden),
             tree::TreeHit::Open(loc) => {
+                self.tree_quiet = Some(loc.clone());
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 self.tab_mut().navigate(hwnd, &tx, loc);
             }

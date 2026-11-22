@@ -35,6 +35,11 @@ impl App {
         match self.favorites.get(path).cloned() {
             Some(Fav::Link { location, .. }) if new_tab => self.new_tab(pane, location, false),
             Some(Fav::Link { location, .. }) => {
+                // El árbol despliega su rama sin desplazarse hasta ella.
+                #[cfg(feature = "arbol")]
+                {
+                    self.tree_quiet = Some(location.clone());
+                }
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 self.panes[pane].tab_mut().navigate(hwnd, &tx, location);
             }

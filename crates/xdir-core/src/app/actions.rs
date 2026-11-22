@@ -293,13 +293,17 @@ impl App {
                     self.tree.set_pinned(!self.tree.pinned, true);
                 }
             }
+            // El Acceso rápido es de Windows (en la Mac y Linux el comando no está).
             Command::ToggleQuickPin => {
-                // Sin Acceso rápido (Mac, Linux) la carpeta va a favoritos.
                 #[cfg(feature = "arbol")]
-                if !super::places_page::has_quick_access(self) {
-                    self.toggle_favorite(active);
-                } else if let Location::Path(p) = self.panes[self.active].tab().location.clone() {
+                if let Location::Path(p) = self.panes[active].tab().location.clone() {
                     self.toggle_quick_pin(p);
+                }
+            }
+            Command::TogglePlace => {
+                #[cfg(feature = "arbol")]
+                if let Location::Path(p) = self.panes[active].tab().location.clone() {
+                    self.toggle_place(p);
                 }
             }
             Command::Xtree => self.toggle_xtree(),
@@ -658,5 +662,6 @@ fn needs_folder(c: Command) -> bool {
             | Command::ClearFilters
             | Command::QuickLook
             | Command::ToggleQuickPin
+            | Command::TogglePlace
     )
 }

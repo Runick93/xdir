@@ -175,3 +175,21 @@ fn places_add_folder_at_position() {
     p.add_folder_at(PathBuf::from("papelera"), None);
     assert_eq!(p.order.len(), 10);
 }
+
+/// Lo que la Mac y Linux tenían en su Acceso rápido propio (`acceso_rapido.txt`) pasa a los
+/// lugares al leerlos, y el archivo se borra.
+#[test]
+fn old_quick_access_file_becomes_places() {
+    crate::sys::testing::install_fakes();
+    let dir = std::env::temp_dir().join(format!("xdir-lugares-migrar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("uno"), dir.join("dos"));
+    std::fs::write(dir.join("acceso_rapido.txt"), format!("# comentario\n{}\n\n{}\n", a.display(), b.display())).unwrap();
+    let places = Places::load_from(&dir);
+    let n = places.order.len();
+    assert_eq!(&places.order[n - 2..], &[Place::Folder(a), Place::Folder(b)]);
+    assert!(!dir.join("acceso_rapido.txt").exists(), "el archivo viejo se borra");
+    assert_eq!(Places::load_from(&dir), places, "quedó guardado en lugares.toml");
+    let _ = std::fs::remove_dir_all(&dir);
+}

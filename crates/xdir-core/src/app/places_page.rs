@@ -15,7 +15,7 @@ use crate::settings::controls::{self, SWITCH_H, SWITCH_W};
 use crate::sys;
 use crate::theme::alpha;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{App, Hit};
 use crate::drop::{DragEvent, DragKind, Effect};
@@ -61,6 +61,11 @@ pub(super) fn search(_app: &App) -> Vec<SearchItem> {
 
 /// ¿Se muestra la fila del Acceso rápido? Solo donde lo hay (Windows): se vigila su carpeta
 /// (`App::start_quick_access`) o ya llegaron sus carpetas. Sin tocar el disco.
+/// El texto de la entrada de los menús que agrega o quita una carpeta de los lugares.
+pub(super) fn place_label(is_place: bool) -> &'static str {
+    if is_place { "Quitar de Lugares" } else { "Agregar a Lugares" }
+}
+
 pub(super) fn has_quick_access(app: &App) -> bool {
     app.quick_watch.is_some() || app.tree.has_quick_items()
 }
@@ -205,26 +210,47 @@ impl App {
         }
     }
 
-    /// Lo soltado entre los lugares del árbol (carpetas o la carpeta de una pestaña). Donde hay
-    /// Acceso rápido (Windows) se ancla ahí y, si su grupo estaba oculto, vuelve a verse; en los
-    /// demás sistemas (como la barra lateral del Finder) queda como carpeta propia en ese lugar.
+    /// Lo soltado entre los lugares del árbol (carpetas o la carpeta de una pestaña) queda como
+    /// carpeta propia en ese lugar, como en la barra lateral del Finder, en las 3 plataformas.
     pub(super) fn add_dropped_places(&mut self, paths: Vec<PathBuf>, before: Option<Place>) {
         if paths.is_empty() {
             return;
         }
-        if has_quick_access(self) {
-            let fs = sys::file_system();
-            let failed = paths.iter().filter(|p| !fs.is_quick_pinned(p)).any(|p| sys::shell().pin_quick_access(self.hwnd, p).is_err());
-            if failed {
-                self.notice = Some("No se pudo anclar al Acceso rápido".into());
-            }
-            self.places.hidden.retain(|h| *h != Place::QuickAccess);
-            self.tree.request_quick(self.hwnd);
-        } else {
-            for p in paths {
-                self.places.add_folder_at(p, before.as_ref());
-            }
+        for p in paths {
+            self.places.add_folder_at(p, before.as_ref());
         }
+        self.places_changed();
+    }
+
+    /// ¿La carpeta ya se ve entre los lugares? (una carpeta propia o una del usuario no oculta)
+    pub(super) fn is_place(&self, path: &Path) -> bool {
+        self.place_of_path(path).is_some_and(|p| !self.places.is_hidden(&p))
+    }
+
+    /// El lugar que corresponde a la carpeta, si es una carpeta propia o una del usuario.
+    fn place_of_path(&self, path: &Path) -> Option<Place> {
+        let fs = sys::file_system();
+        self.places.order.iter().find(|p| match p {
+            Place::Folder(q) => fs.same_path(q, path),
+            Place::User(i) => fs.user_folder(*i).is_some_and(|u| fs.same_path(&u, path)),
+            _ => false,
+        }).cloned()
+    }
+
+    /// «Agregar a Lugares» o «Quitar de Lugares»: una carpeta propia se quita, una del usuario se
+    /// oculta (se vuelve a ver desde Configuración ▸ Lugares) y cualquier otra se agrega al final.
+    pub(super) fn toggle_place(&mut self, path: PathBuf) {
+        let shown = self.is_place(&path);
+        match self.place_of_path(&path) {
+            Some(Place::Folder(_)) if shown => {
+                if let Some(i) = self.places.order.iter().position(|p| matches!(p, Place::Folder(q) if sys::file_system().same_path(q, &path))) {
+                    self.places.remove(i);
+                }
+            }
+            Some(p) if shown => self.places.hidden.push(p),
+            _ => self.places.add_folder(path),
+        }
+        self.notice = Some(if shown { "Se quitó de Lugares" } else { "Se agregó a Lugares" }.into());
         self.places_changed();
     }
 

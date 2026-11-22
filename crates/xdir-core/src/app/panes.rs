@@ -46,17 +46,17 @@ impl App {
         self.quick_watch = sys::file_system().quick_access_watch_dir().and_then(|dir| sys::file_system().watch(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
     }
 
-    /// Menú contextual nativo de una carpeta del árbol (incluye "Anclar a Acceso rápido" /
-    /// "Desanclar de Acceso rápido"); al cerrarse se relee el Acceso rápido.
+    /// Menú contextual nativo de una carpeta del árbol, con «Agregar a Lugares» (o «Quitar…»); en
+    /// Windows trae además "Anclar a Acceso rápido" / "Desanclar de Acceso rápido" del sistema, y al
+    /// cerrarse se relee el Acceso rápido.
     #[cfg(feature = "arbol")]
     pub(super) fn tree_context_menu(&mut self, path: PathBuf, at: (f32, f32)) {
         let items = [shell::Item::from(path.clone())];
         let pinned = self.tree.is_pinned(&path);
-        // Donde el menú del sistema no trae anclar (Mac, Linux): la entrada del Acceso rápido propio.
-        let own = self.own_quick_pin_entry(&path, 0).into_iter().collect::<Vec<_>>();
+        let own = [shell::Entry::Sep, self.place_entry(&path, 0)];
         let chosen = sys::shell().context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &own, pinned);
-        if !own.is_empty() && chosen.as_deref() == Some("own:0") {
-            self.toggle_quick_pin(path);
+        if chosen.as_deref() == Some("own:0") {
+            self.toggle_place(path);
         } else if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
             self.toggle_quick_pin(path);
         } else if chosen.is_some() {
@@ -66,15 +66,11 @@ impl App {
         self.redraw();
     }
 
-    /// «Anclar a Acceso rápido» / «Desanclar…» para la carpeta `path`, como entrada propia de un
-    /// menú contextual (con id `id`), donde el menú del sistema no la trae y hay Acceso rápido.
+    /// «Agregar a Lugares» / «Quitar de Lugares» para la carpeta `path`, como entrada propia de un
+    /// menú contextual (con id `id`).
     #[cfg(feature = "arbol")]
-    pub(super) fn own_quick_pin_entry(&self, path: &std::path::Path, id: u32) -> Option<shell::Entry> {
-        if sys::shell().menu_has_quick_pin() || !super::places_page::has_quick_access(self) {
-            return None;
-        }
-        let label = if self.tree.is_pinned(path) { "Desanclar de Acceso rápido" } else { "Anclar a Acceso rápido" };
-        Some(shell::Entry::Item { id, label: label.into(), enabled: true, checked: false })
+    pub(super) fn place_entry(&self, path: &std::path::Path, id: u32) -> shell::Entry {
+        shell::Entry::Item { id, label: super::places_page::place_label(self.is_place(path)).into(), enabled: true, checked: false }
     }
 
     /// Ancla la carpeta al Acceso rápido de Windows, o la desancla si ya lo está (verbos nativos
@@ -317,7 +313,7 @@ impl App {
         };
         let views = self.views_submenu(pane, &mut item);
         let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
-        // Favoritos y Acceso rápido de la carpeta del panel, como en el menú del fondo (en carpetas
+        // Favoritos y Lugares de la carpeta del panel, como en el menú del fondo (en carpetas
         // llenas no queda fondo libre para el clic derecho).
         let pins = self.pin_entries(pane, &mut item);
         entries.push(views);
@@ -339,10 +335,10 @@ impl App {
                         self.redraw();
                         return;
                     }
-                    Some(&Command::ToggleQuickPin) => {
+                    Some(&Command::TogglePlace) => {
                         #[cfg(feature = "arbol")]
                         if let Location::Path(p) = self.panes[pane].tab().location.clone() {
-                            self.toggle_quick_pin(p);
+                            self.toggle_place(p);
                         }
                         self.redraw();
                         return;

@@ -280,11 +280,6 @@ pub trait Shell: Send + Sync {
     fn menu_has_new(&self) -> bool {
         false
     }
-    /// ¿El menú de una carpeta ya trae «Anclar a Acceso rápido» del sistema (Windows)? Si no,
-    /// xdir lo pone (su Acceso rápido propio, `quick_own`).
-    fn menu_has_quick_pin(&self) -> bool {
-        false
-    }
     /// Volumen de una ruta, para decidir si arrastrar mueve o copia.
     fn volume_of(&self, path: &Path) -> Option<OsString>;
 }

@@ -1272,6 +1272,30 @@ fn background_menu_offers_new_entries() {
     assert_eq!(labels[1], "Archivo de texto nuevo");
 }
 
+/// Sin Acceso rápido (Mac y Linux) el fondo de la carpeta no ofrece anclar ahí (fallaba): ofrece
+/// «Agregar a favoritos» / «Quitar de favoritos», que usa la barra de la estrella. El comando
+/// de anclar, si llega igual (un atajo), hace lo mismo.
+#[cfg(feature = "arbol")]
+#[test]
+fn background_menu_offers_favorites_without_quick_access() {
+    let mut a = app();
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-favoritos");
+    let loc = Location::Path(dir);
+    a.new_tab(0, loc.clone(), true);
+    a.set_active(0);
+    let (labels, cmds) = background_labels(&a);
+    assert!(!labels.iter().any(|l| l.contains("Acceso rápido")), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "Agregar a favoritos"), "{labels:?}");
+    assert!(cmds.contains(&Command::ToggleFavorite) && !cmds.contains(&Command::ToggleQuickPin));
+    a.run_command(Command::ToggleFavorite);
+    assert!(a.favorites.find(&loc).is_some(), "se agregó a la barra de favoritos");
+    let (labels, _) = background_labels(&a);
+    assert!(labels.iter().any(|l| l == "Quitar de favoritos"), "{labels:?}");
+    a.run_command(Command::ToggleQuickPin);
+    assert!(a.favorites.find(&loc).is_none(), "el comando de anclar también va a favoritos");
+    assert!(!crate::sys::testing::FakeShell::take_calls().iter().any(|c| matches!(c, crate::sys::testing::ShellCall::PinQuickAccess(_))));
+}
+
 /// Donde no se puede crear nada (Papelera, «Este equipo», Configuración, Novedades, carpetas
 /// virtuales) no aparecen.
 #[test]

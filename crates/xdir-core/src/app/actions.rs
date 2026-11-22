@@ -294,8 +294,11 @@ impl App {
                 }
             }
             Command::ToggleQuickPin => {
+                // Sin Acceso rápido (Mac, Linux) la carpeta va a favoritos.
                 #[cfg(feature = "arbol")]
-                if let Location::Path(p) = self.panes[self.active].tab().location.clone() {
+                if !super::places_page::has_quick_access(self) {
+                    self.toggle_favorite(active);
+                } else if let Location::Path(p) = self.panes[self.active].tab().location.clone() {
                     self.toggle_quick_pin(p);
                 }
             }

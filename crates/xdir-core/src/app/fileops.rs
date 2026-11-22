@@ -543,13 +543,20 @@ impl App {
         let mut entries = new_entries;
         entries.extend([views, sorts, groupings, item("Actualizar", Command::Refresh, true, false), Entry::Sep, item("Pegar", Command::Paste, true, false), undo]);
         // Anclar la carpeta que se está viendo al Acceso rápido de Windows (el menú del fondo del
-        // Shell no trae ese verbo).
+        // Shell no trae ese verbo). Donde no lo hay (Mac, Linux), agregarla a favoritos.
         #[cfg(feature = "arbol")]
         if let Location::Path(p) = &self.panes[pane].tab().location {
             if pane == self.active && p.parent().is_some() {
-                let label = if self.tree.is_pinned(p) { "Desanclar de Acceso rápido" } else { "Anclar a Acceso rápido" };
+                let (label, c) = if !super::places_page::has_quick_access(self) {
+                    let fav = self.favorites.find(&self.panes[pane].tab().location).is_some();
+                    (if fav { "Quitar de favoritos" } else { "Agregar a favoritos" }, Command::ToggleFavorite)
+                } else if self.tree.is_pinned(p) {
+                    ("Desanclar de Acceso rápido", Command::ToggleQuickPin)
+                } else {
+                    ("Anclar a Acceso rápido", Command::ToggleQuickPin)
+                };
                 entries.push(Entry::Sep);
-                entries.push(item(label, Command::ToggleQuickPin, true, false));
+                entries.push(item(label, c, true, false));
             }
         }
         entries

@@ -450,9 +450,11 @@ mod tests {
         });
         assert_eq!(out, None);
         assert!(t0.elapsed() < Duration::from_secs(2));
-        let out = watched(Duration::from_millis(100), &cancel, Default::default(), |_, beat| {
-            for _ in 0..8 {
-                std::thread::sleep(Duration::from_millis(40));
+        // Late cada 25 ms con un límite de 300 ms (margen para una máquina cargada, como la del
+        // CI) y en total tarda más que el límite.
+        let out = watched(Duration::from_millis(300), &cancel, Default::default(), |_, beat| {
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(25));
                 beat.beats.fetch_add(1, Ordering::Relaxed);
             }
             7

@@ -298,6 +298,35 @@ fn dropping_a_tab_between_places_adds_its_folder() {
     cleanup(&root);
 }
 
+/// Arrastrar una carpeta del árbol entre los lugares la deja ahí, como una pestaña: una carpeta
+/// propia que ya estaba se mueve. Sin mover el mouse es un clic: abre y no cambia los lugares.
+#[test]
+fn dragging_a_tree_folder_between_places_moves_it_there() {
+    let root = temp_root("arrastrar-arbol");
+    let own = root.join("trabajo");
+    std::fs::create_dir_all(&own).unwrap();
+    let (mut a, _host) = places_app(&root);
+    a.places.add_folder(own.clone());
+    a.places_changed();
+    a.paint();
+    let (rx, ry) = a.tree.row_point("trabajo").expect("la carpeta propia en el árbol");
+    a.on_left_down(rx, ry, false);
+    a.on_left_up(rx, ry);
+    assert_eq!(a.places.order.last(), Some(&Place::Folder(own.clone())), "un clic no la mueve");
+    a.on_left_down(rx, ry, false);
+    let (x, y) = row_top_edge(&a, "Escritorio");
+    a.on_mouse_move(rx, ry - 20.0);
+    a.on_mouse_move(x, y);
+    assert!(a.tree.place_drop.is_some(), "se ve la línea de inserción");
+    assert!(a.ghost.is_some(), "la carpeta acompaña al mouse");
+    a.on_left_up(x, y);
+    assert_eq!(a.tree.place_drop, None);
+    assert!(a.ghost.is_none());
+    assert_eq!(a.places.order[0], Place::Folder(own.clone()), "va delante del Escritorio");
+    assert_eq!(a.places.order.iter().filter(|p| **p == Place::Folder(own.clone())).count(), 1, "sin repetirse");
+    cleanup(&root);
+}
+
 fn point_of(a: &App, want: super::Hit) -> (f32, f32) {
     let (w, h) = a.client_dips();
     let mut y = 0.0;
@@ -312,4 +341,77 @@ fn point_of(a: &App, want: super::Hit) -> (f32, f32) {
         y += 2.0;
     }
     panic!("no se encontró {want:?}");
+}
+
+// ---------- anclar y favoritos desde los menús ----------
+
+/// Id y texto de los ítems de un menú (sin submenús).
+fn menu_items(menu: &[crate::shell::Entry]) -> Vec<(u32, String)> {
+    menu.iter()
+        .filter_map(|e| match e {
+            crate::shell::Entry::Item { id, label, .. } => Some((*id, label.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// El menú del encabezado de columnas también agrega a favoritos y, donde hay Acceso rápido,
+/// ancla la carpeta del panel (aunque no sea el activo).
+#[test]
+fn header_menu_adds_to_favorites_and_quick_access() {
+    let root = temp_root("encabezado-anclar");
+    let dir = root.join("trabajo");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (mut a, host) = places_app(&root);
+    a.new_tab(0, crate::fs::Location::Path(dir.clone()), true);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let items = menu_items(&host.menus().pop().unwrap());
+    let labels: Vec<&str> = items.iter().map(|i| i.1.as_str()).collect();
+    assert!(labels.contains(&"Agregar a favoritos"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l.contains("Acceso rápido")), "sin Acceso rápido no se ofrece: {labels:?}");
+    let fav = items.iter().find(|i| i.1 == "Agregar a favoritos").unwrap().0;
+    host.set_menu_choice(Some(fav));
+    a.show_columns_menu(0, (10.0, 10.0));
+    assert!(a.favorites.find(&crate::fs::Location::Path(dir.clone())).is_some());
+    // Con Acceso rápido.
+    a.quick_watch = Some(Box::new(QuickWatch));
+    host.set_menu_choice(None);
+    a.show_columns_menu(0, (10.0, 10.0));
+    let items = menu_items(&host.menus().pop().unwrap());
+    assert!(items.iter().any(|i| i.1 == "Quitar de favoritos"));
+    let pin = items.iter().find(|i| i.1 == "Anclar a Acceso rápido").unwrap_or_else(|| panic!("{items:?}")).0;
+    FakeShell::take_calls();
+    host.set_menu_choice(Some(pin));
+    a.show_columns_menu(0, (10.0, 10.0));
+    assert!(FakeShell::take_calls().contains(&ShellCall::PinQuickAccess(dir)));
+    host.set_menu_choice(None);
+    cleanup(&root);
+}
+
+/// Donde el menú del sistema no trae anclar (Mac, Linux), el menú de una carpeta del árbol y el de
+/// una carpeta elegida en la lista suman «Anclar a Acceso rápido»; elegirlo la ancla.
+#[test]
+fn folder_menus_offer_own_quick_pin() {
+    let root = temp_root("menu-anclar");
+    let dir = root.join("trabajo");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let (mut a, _host) = places_app(&root);
+    a.quick_watch = Some(Box::new(QuickWatch));
+    FakeShell::take_calls();
+    FakeShell::choose(Some("own:0"));
+    a.tree_context_menu(dir.clone(), (10.0, 10.0));
+    let calls = FakeShell::take_calls();
+    let own = calls.iter().find_map(|c| match c {
+        ShellCall::ContextMenu { own, .. } => Some(own.clone()),
+        _ => None,
+    });
+    assert_eq!(menu_items(&own.unwrap()), [(0, "Anclar a Acceso rápido".to_string())]);
+    assert!(calls.contains(&ShellCall::PinQuickAccess(dir.clone())), "{calls:?}");
+    FakeShell::choose(None);
+    // Sin Acceso rápido, nada.
+    a.quick_watch = None;
+    a.tree_context_menu(dir.clone(), (10.0, 10.0));
+    let calls = FakeShell::take_calls();
+    assert!(calls.iter().any(|c| matches!(c, ShellCall::ContextMenu { own, .. } if own.is_empty())), "{calls:?}");
+    cleanup(&root);
 }

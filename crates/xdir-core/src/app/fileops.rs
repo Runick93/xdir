@@ -542,24 +542,36 @@ impl App {
         // Sin el árbol no se agrega nada después.
         let mut entries = new_entries;
         entries.extend([views, sorts, groupings, item("Actualizar", Command::Refresh, true, false), Entry::Sep, item("Pegar", Command::Paste, true, false), undo]);
-        // Anclar la carpeta que se está viendo al Acceso rápido de Windows (el menú del fondo del
-        // Shell no trae ese verbo). Donde no lo hay (Mac, Linux), agregarla a favoritos.
-        #[cfg(feature = "arbol")]
-        if let Location::Path(p) = &self.panes[pane].tab().location {
-            if pane == self.active && p.parent().is_some() {
-                let (label, c) = if !super::places_page::has_quick_access(self) {
-                    let fav = self.favorites.find(&self.panes[pane].tab().location).is_some();
-                    (if fav { "Quitar de favoritos" } else { "Agregar a favoritos" }, Command::ToggleFavorite)
-                } else if self.tree.is_pinned(p) {
-                    ("Desanclar de Acceso rápido", Command::ToggleQuickPin)
-                } else {
-                    ("Anclar a Acceso rápido", Command::ToggleQuickPin)
-                };
+        // Favoritos y Acceso rápido de la carpeta que se está viendo (el menú del fondo del Shell
+        // no trae anclar).
+        if pane == self.active {
+            let pins = self.pin_entries(pane, &mut item);
+            if !pins.is_empty() {
                 entries.push(Entry::Sep);
-                entries.push(item(label, c, true, false));
+                entries.extend(pins);
             }
         }
         entries
+    }
+
+    /// «Agregar a favoritos» (o «Quitar de favoritos») y, donde hay Acceso rápido, «Anclar a
+    /// Acceso rápido» (o «Desanclar…») para la carpeta del panel `pane`. Los comparten el menú del
+    /// fondo y el del encabezado de columnas; `item` arma cada ítem.
+    pub(super) fn pin_entries(&self, pane: usize, item: &mut dyn FnMut(&str, Command, bool, bool) -> shell::Entry) -> Vec<shell::Entry> {
+        let location = &self.panes[pane].tab().location;
+        let Location::Path(p) = location else { return Vec::new() };
+        if p.parent().is_none() {
+            return Vec::new();
+        }
+        let fav = self.favorites.find(location).is_some();
+        #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
+        let mut out = vec![item(if fav { "Quitar de favoritos" } else { "Agregar a favoritos" }, Command::ToggleFavorite, true, false)];
+        #[cfg(feature = "arbol")]
+        if super::places_page::has_quick_access(self) {
+            let label = if self.tree.is_pinned(p) { "Desanclar de Acceso rápido" } else { "Anclar a Acceso rápido" };
+            out.push(item(label, Command::ToggleQuickPin, true, false));
+        }
+        out
     }
 
     /// Entradas propias del menú de los elementos seleccionados; `cmds` recibe el comando de cada id.
@@ -656,6 +668,20 @@ impl App {
             (false, true) => self.item_entries(&mut cmds),
             _ => Vec::new(),
         });
+        // Una sola carpeta elegida, donde el menú del sistema no trae anclar (Mac, Linux): la
+        // entrada del Acceso rápido propio. Su id apunta a un comando de relleno (se resuelve acá).
+        #[cfg(feature = "arbol")]
+        let own_pin = match (items.as_slice(), intercept) {
+            ([one], true) if one.pidl.is_none() && crate::fs::probe_dir(&one.path) == Some(true) => {
+                self.own_quick_pin_entry(&one.path, cmds.len() as u32).map(|e| {
+                    own.push(shell::Entry::Sep);
+                    own.push(e);
+                    cmds.push(Command::ToggleQuickPin);
+                    (cmds.len() - 1, one.path.clone())
+                })
+            }
+            _ => None,
+        };
         let before: Option<std::collections::HashSet<String>> = (items.is_empty() && matches!(location, Location::Path(_)))
             .then(|| self.panes[pane].tab().list.entries.iter().map(|e| e.display.to_lowercase()).collect());
         // Una sola carpeta anclada: su menú dice "Desanclar de Acceso rápido".
@@ -682,6 +708,12 @@ impl App {
             self.new_watch = Some(NewWatch { pane, before, since: Instant::now() });
         }
         if let Some(cmd) = chosen.as_deref().and_then(|c| c.strip_prefix("own:")).and_then(|n| n.parse::<usize>().ok()) {
+            #[cfg(feature = "arbol")]
+            if let Some((_, path)) = own_pin.filter(|(id, _)| *id == cmd) {
+                self.toggle_quick_pin(path);
+                self.redraw();
+                return;
+            }
             if let Some(&command) = cmds.get(cmd) {
                 self.run_command(command);
             }

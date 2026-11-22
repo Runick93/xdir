@@ -47,8 +47,7 @@ pub struct LinuxEnv;
 impl SystemEnv for LinuxEnv {
     /// Las unidades de red con letra son solo de Windows.
     fn command_available(&self, c: xdir_core::commands::Command) -> bool {
-        // El Acceso rápido es de Windows (como en la Mac): ahí se usa la barra de favoritos.
-        !matches!(c, xdir_core::commands::Command::ToggleQuickPin | xdir_core::commands::Command::MapNetworkDrive | xdir_core::commands::Command::DisconnectNetworkDrive)
+        !matches!(c, xdir_core::commands::Command::MapNetworkDrive | xdir_core::commands::Command::DisconnectNetworkDrive)
     }
 
     /// Cada escritorio tiene su gestor de archivos: «Mostrar en la carpeta».

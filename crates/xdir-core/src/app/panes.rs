@@ -52,14 +52,29 @@ impl App {
     pub(super) fn tree_context_menu(&mut self, path: PathBuf, at: (f32, f32)) {
         let items = [shell::Item::from(path.clone())];
         let pinned = self.tree.is_pinned(&path);
-        let chosen = sys::shell().context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &[], pinned);
-        if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
+        // Donde el menú del sistema no trae anclar (Mac, Linux): la entrada del Acceso rápido propio.
+        let own = self.own_quick_pin_entry(&path, 0).into_iter().collect::<Vec<_>>();
+        let chosen = sys::shell().context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &own, pinned);
+        if !own.is_empty() && chosen.as_deref() == Some("own:0") {
+            self.toggle_quick_pin(path);
+        } else if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
             self.toggle_quick_pin(path);
         } else if chosen.is_some() {
             self.tree.request_quick(self.hwnd);
             self.tree.on_mouse_leave();
         }
         self.redraw();
+    }
+
+    /// «Anclar a Acceso rápido» / «Desanclar…» para la carpeta `path`, como entrada propia de un
+    /// menú contextual (con id `id`), donde el menú del sistema no la trae y hay Acceso rápido.
+    #[cfg(feature = "arbol")]
+    pub(super) fn own_quick_pin_entry(&self, path: &std::path::Path, id: u32) -> Option<shell::Entry> {
+        if sys::shell().menu_has_quick_pin() || !super::places_page::has_quick_access(self) {
+            return None;
+        }
+        let label = if self.tree.is_pinned(path) { "Desanclar de Acceso rápido" } else { "Anclar a Acceso rápido" };
+        Some(shell::Entry::Item { id, label: label.into(), enabled: true, checked: false })
     }
 
     /// Ancla la carpeta al Acceso rápido de Windows, o la desancla si ya lo está (verbos nativos
@@ -126,6 +141,12 @@ impl App {
         match self.tree.hit(x, y) {
             tree::TreeHit::Toggle(id) => self.tree.toggle(self.hwnd, id, self.show_hidden),
             tree::TreeHit::Open(loc) => {
+                // Una carpeta se puede arrastrar entre los lugares del árbol (al soltar).
+                if let Location::Path(p) = &loc {
+                    self.tree_drag = Some(p.clone());
+                    self.drag = Drag::TreeRow { start_x: x, start_y: y, moved: false };
+                    self.host.capture_mouse();
+                }
                 self.tree_quiet = Some(loc.clone());
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 self.tab_mut().navigate(hwnd, &tx, loc);
@@ -296,15 +317,38 @@ impl App {
         };
         let views = self.views_submenu(pane, &mut item);
         let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
+        // Favoritos y Acceso rápido de la carpeta del panel, como en el menú del fondo (en carpetas
+        // llenas no queda fondo libre para el clic derecho).
+        let pins = self.pin_entries(pane, &mut item);
         entries.push(views);
         entries.push(sorts);
         entries.push(groupings);
         entries.push(shell::Entry::Sep);
         entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
+        if !pins.is_empty() {
+            entries.push(shell::Entry::Sep);
+            entries.extend(pins);
+        }
         let cmd = self.host.popup_menu(&entries, MenuPos::At(at.0, at.1), None, None).map_or(0, |c| c as usize);
         match cmd {
             c if c >= SUB_BASE as usize => {
                 // Lo mismo que en el menú del fondo, pero sobre el panel del encabezado.
+                match cmds.get(c - SUB_BASE as usize) {
+                    Some(&Command::ToggleFavorite) => {
+                        self.toggle_favorite(pane);
+                        self.redraw();
+                        return;
+                    }
+                    Some(&Command::ToggleQuickPin) => {
+                        #[cfg(feature = "arbol")]
+                        if let Location::Path(p) = self.panes[pane].tab().location.clone() {
+                            self.toggle_quick_pin(p);
+                        }
+                        self.redraw();
+                        return;
+                    }
+                    _ => {}
+                }
                 let list = &mut self.panes[pane].tab_mut().list;
                 match cmds.get(c - SUB_BASE as usize) {
                     Some(&Command::View(i)) => match list::VIEWS.get(i as usize) {

@@ -443,17 +443,18 @@ pub fn shell_subfolders(_parsing: &str) -> Vec<(String, PathBuf)> {
     Vec::new()
 }
 
-/// Acceso rápido: es de Windows (la barra lateral del Finder no tiene una API pública).
+/// Acceso rápido: el del sistema es de Windows (y la barra lateral del Finder no tiene una API
+/// pública); en la Mac es el propio de xdir (`xdir_core::quick_own`).
 pub fn quick_access() -> Vec<QuickItem> {
-    Vec::new()
+    xdir_core::quick_own::items()
 }
 
-pub fn is_quick_pinned(_path: &Path) -> bool {
-    false
+pub fn is_quick_pinned(path: &Path) -> bool {
+    xdir_core::quick_own::is_pinned(path)
 }
 
 pub fn quick_access_watch_dir() -> Option<PathBuf> {
-    None
+    xdir_core::quick_own::watch_dir()
 }
 
 /// Forma larga de una ruta: en macOS no hay nombres cortos.

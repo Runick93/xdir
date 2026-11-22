@@ -576,7 +576,7 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
     let badge_top = (xtree.top + xtree.bottom - BADGE) / 2.0;
     match badge {
         XtreeBadge::Idle => {
-            p.text(FontId::GlyphsSmall, "\u{E9D9}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
+            p.text(FontId::GlyphsSmall, "\u{EB05}", rect(xtree.left + 6.0, xtree.top, xtree.left + 26.0, xtree.bottom), color);
             p.text(FontId::Ui, "xtree", rect(xtree.left + 30.0, xtree.top, xtree.right - 4.0, xtree.bottom), color);
         }
         XtreeBadge::Progress(pct) => {
@@ -1077,7 +1077,7 @@ mod tests {
         let texts = p.texts();
         assert!(texts.iter().any(|(_, s, t)| s == "37 %" && t.left >= r.left && t.right <= r.right), "{texts:?}");
         assert!(texts.iter().any(|(_, s, t)| s == "xtree" && t.left >= r.left && t.right <= r.right));
-        assert!(!texts.iter().any(|(_, s, _)| s == "\u{E9D9}"), "el anillo reemplaza al ícono del mapa");
+        assert!(!texts.iter().any(|(_, s, _)| s == "\u{EB05}"), "el anillo reemplaza al ícono del mapa");
         // Anillo: la pista y el avance, dentro del cuadro de 14×14 del indicador.
         let ring: Vec<_> = p.paths().into_iter().filter(|(pts, closed, _)| *closed && pts.iter().all(|&(x, _)| x >= r.left && x <= r.left + 30.0)).collect();
         assert!(!ring.is_empty());
@@ -1088,14 +1088,14 @@ mod tests {
         let (p, r) = status_with(XtreeBadge::Idle);
         assert_eq!(r.right - r.left, 74.0);
         let texts = p.texts();
-        assert!(texts.iter().any(|(_, s, t)| s == "\u{E9D9}" && t.left >= r.left && t.right <= r.right));
+        assert!(texts.iter().any(|(_, s, t)| s == "\u{EB05}" && t.left >= r.left && t.right <= r.right));
         assert!(!texts.iter().any(|(_, s, _)| s.ends_with(" %")));
 
         // Giro, terminado y aviso: el indicador en lugar del ícono, sin ensanchar.
         for badge in [XtreeBadge::Spinning(3), XtreeBadge::Done, XtreeBadge::DoneWithIssues] {
             let (p, r) = status_with(badge);
             assert_eq!(r.right - r.left, 74.0, "{badge:?}");
-            assert!(!p.texts().iter().any(|(_, s, _)| s == "\u{E9D9}"), "{badge:?}");
+            assert!(!p.texts().iter().any(|(_, s, _)| s == "\u{EB05}"), "{badge:?}");
             assert!(!p.paths().is_empty(), "{badge:?}");
         }
     }

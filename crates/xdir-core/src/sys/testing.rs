@@ -1334,6 +1334,8 @@ pub struct RecordingPainter {
     image_alpha: Cell<f32>,
     fills: RefCell<Vec<(Rect, Color)>>,
     round_fills: RefCell<Vec<(Rect, Color)>>,
+    /// Giros pedidos con `rotated` (grados), en orden.
+    rotations: RefCell<Vec<f32>>,
 }
 
 /// Trazo dibujado con `rounded_path`: puntos (sin radios), si es cerrado y su relleno.
@@ -1354,7 +1356,13 @@ impl RecordingPainter {
             image_alpha: Cell::new(1.0),
             fills: RefCell::new(Vec::new()),
             round_fills: RefCell::new(Vec::new()),
+            rotations: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Los giros pedidos con `rotated` (grados), en orden.
+    pub fn rotations(&self) -> Vec<f32> {
+        self.rotations.borrow().clone()
     }
 
     /// Los rectángulos rellenados con `round_fill` (rectángulo y color), en orden.
@@ -1477,6 +1485,11 @@ impl Painter for RecordingPainter {
         f();
     }
 
+    fn rotated(&self, degrees: f32, _cx: f32, _cy: f32, f: &mut dyn FnMut()) {
+        self.rotations.borrow_mut().push(degrees);
+        f();
+    }
+
     fn theme(&self) -> &Theme {
         &self.theme
     }
@@ -1503,11 +1516,17 @@ pub struct FakeHost {
     beeps: Cell<usize>,
     color_choice: Cell<Option<u32>>,
     answer: Cell<Option<bool>>,
+    /// Respuestas en cola: cada pregunta toma la primera; vacía, vale `answer`.
+    answers: RefCell<std::collections::VecDeque<Option<bool>>>,
     /// Preguntas de `ask_yes_no_cancel` (título y texto), en orden.
     questions: RefCell<Vec<(String, String)>>,
     drag_result: RefCell<Result<(), String>>,
     drawn: RefCell<Vec<(FontId, String, Rect)>>,
     drawn_fills: RefCell<Vec<(Rect, Color)>>,
+    /// Textos del último cuadro con su color.
+    drawn_text_draws: RefCell<Vec<(FontId, String, Rect, Color)>>,
+    /// Giros (`rotated`) del último cuadro, en grados.
+    drawn_rotations: RefCell<Vec<f32>>,
     /// Íconos del último cuadro (x, y, lado y opacidad).
     drawn_icons: RefCell<Vec<(f32, f32, f32, f32)>>,
     /// Cajas de texto abiertas: tipo, texto y si tienen el foco.
@@ -1515,6 +1534,7 @@ pub struct FakeHost {
     next_text_box: Cell<u32>,
     menu_choice: Cell<Option<u32>>,
     menus: RefCell<Vec<Vec<Entry>>>,
+    menu_positions: RefCell<Vec<MenuPos>>,
     /// La ventana que se le pasó a `attach` (la última).
     attached: Cell<Option<Handle>>,
     /// Imágenes grandes pedidas en el último cuadro dibujado.
@@ -1547,15 +1567,19 @@ impl FakeHost {
             beeps: Cell::new(0),
             color_choice: Cell::new(None),
             answer: Cell::new(None),
+            answers: RefCell::new(std::collections::VecDeque::new()),
             questions: RefCell::new(Vec::new()),
             drag_result: RefCell::new(Ok(())),
             drawn: RefCell::new(Vec::new()),
             drawn_fills: RefCell::new(Vec::new()),
+            drawn_text_draws: RefCell::new(Vec::new()),
+            drawn_rotations: RefCell::new(Vec::new()),
             drawn_icons: RefCell::new(Vec::new()),
             text_boxes: RefCell::new(HashMap::new()),
             next_text_box: Cell::new(1),
             menu_choice: Cell::new(None),
             menus: RefCell::new(Vec::new()),
+            menu_positions: RefCell::new(Vec::new()),
             attached: Cell::new(None),
             drawn_big: RefCell::new(Vec::new()),
             quick_look_shown: RefCell::new(Vec::new()),
@@ -1680,9 +1704,24 @@ impl FakeHost {
         self.menus.borrow().clone()
     }
 
+    /// Dónde se pidió cada menú de `menus()`, en el mismo orden.
+    pub fn menu_positions(&self) -> Vec<MenuPos> {
+        self.menu_positions.borrow().clone()
+    }
+
     /// Los textos del último cuadro dibujado, en orden.
     pub fn drawn_texts(&self) -> Vec<(FontId, String, Rect)> {
         self.drawn.borrow().clone()
+    }
+
+    /// Los textos del último cuadro dibujado, con su color.
+    pub fn drawn_text_draws(&self) -> Vec<(FontId, String, Rect, Color)> {
+        self.drawn_text_draws.borrow().clone()
+    }
+
+    /// Los giros del último cuadro dibujado (grados).
+    pub fn drawn_rotations(&self) -> Vec<f32> {
+        self.drawn_rotations.borrow().clone()
     }
 
     /// Los rectángulos rellenados del último cuadro dibujado.
@@ -1726,6 +1765,16 @@ impl FakeHost {
     /// La respuesta a `ask_yes_no_cancel` (`None`: cancelar).
     pub fn set_answer(&self, a: Option<bool>) {
         self.answer.set(a);
+    }
+
+    /// Respuestas distintas para preguntas seguidas: cada pregunta toma la primera de la cola;
+    /// cuando se acaba, vuelve a valer `set_answer`.
+    pub fn set_answers(&self, a: Vec<Option<bool>>) {
+        *self.answers.borrow_mut() = a.into();
+    }
+
+    fn next_answer(&self) -> Option<bool> {
+        self.answers.borrow_mut().pop_front().unwrap_or_else(|| self.answer.get())
     }
 
     /// Cuántas veces sonó el pitido de "no se puede".
@@ -1783,13 +1832,13 @@ impl WindowHost for FakeHost {
 
     fn ask_yes_no_cancel(&self, title: &str, text: &str) -> Option<bool> {
         self.questions.borrow_mut().push((title.to_string(), text.to_string()));
-        self.answer.get()
+        self.next_answer()
     }
 
     /// Sí con `set_answer(Some(true))`; cualquier otra respuesta es No. Se anota en `questions`.
     fn ask_yes_no(&self, title: &str, text: &str) -> bool {
         self.questions.borrow_mut().push((title.to_string(), text.to_string()));
-        self.answer.get() == Some(true)
+        self.next_answer() == Some(true)
     }
 
     fn open_url(&self, _url: &str) {}
@@ -1850,6 +1899,8 @@ impl WindowHost for FakeHost {
         paint(&p, w, h);
         *self.drawn.borrow_mut() = p.texts();
         *self.drawn_fills.borrow_mut() = p.fills();
+        *self.drawn_text_draws.borrow_mut() = p.text_draws();
+        *self.drawn_rotations.borrow_mut() = p.rotations();
         *self.drawn_icons.borrow_mut() = p.icon_draws();
         *self.drawn_big.borrow_mut() = p.big_requests();
         Ok(())
@@ -1949,8 +2000,9 @@ impl WindowHost for FakeHost {
 
     fn text_restyle(&self, _theme: &Theme) {}
 
-    fn popup_menu(&self, entries: &[Entry], _pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<crate::host::OnContext<'_>>) -> Option<u32> {
+    fn popup_menu(&self, entries: &[Entry], pos: MenuPos, _dot: Option<(u32, Color)>, _on_context: Option<crate::host::OnContext<'_>>) -> Option<u32> {
         self.menus.borrow_mut().push(entries.to_vec());
+        self.menu_positions.borrow_mut().push(pos);
         self.menu_choice.get()
     }
 }

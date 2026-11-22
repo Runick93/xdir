@@ -30,6 +30,16 @@ pub struct Search {
     pub in_place: bool,
 }
 
+/// Repo y rama de una carpeta local. Son unas pocas lecturas de archivos chicos, sin lanzar
+/// `git`; las carpetas de red (UNC, unidades conectadas, montajes de red: `Network::is_remote`,
+/// que no toca el disco) se saltan para no colgar la interfaz.
+pub(crate) fn repo_head_of(loc: &Location) -> Option<crate::git::RepoHead> {
+    match loc {
+        Location::Path(p) if crate::git::available() && !sys::network().is_remote(p) => crate::git::read_head(p),
+        _ => None,
+    }
+}
+
 pub struct Tab {
     pub id: usize,
     pub location: Location,
@@ -38,6 +48,14 @@ pub struct Tab {
     pub list: FileList,
     pub loading: bool,
     pub error: Option<String>,
+    /// Repo de git en el que está la carpeta y su rama; se relee cada vez que termina un listado.
+    pub git: Option<crate::git::RepoHead>,
+    /// Lo que dice el botón de sincronizar (la `App` lo pone al día con lo que sabe del remoto de `git`).
+    pub sync: Option<crate::git::SyncView>,
+    /// Título y subtítulo del botón de sincronizar.
+    pub sync_text: Option<(String, String)>,
+    /// Archivos con cambios sin commitear en el repositorio de la pestaña (0: ninguno o no se sabe).
+    pub dirty: usize,
     /// Generación de la carga en curso; las cargas viejas se descartan.
     generation: Arc<AtomicU64>,
     /// Identifica la navegación actual para descartar avisos de vigilancia viejos.
@@ -222,6 +240,10 @@ impl Tab {
             list,
             loading: false,
             error: None,
+            git: None,
+            sync: None,
+            sync_text: None,
+            dirty: 0,
             generation: Arc::new(AtomicU64::new(0)),
             nav_id: 0,
             reload_buf: None,
@@ -686,6 +708,9 @@ impl Tab {
                     s.progress = 1.0;
                     s.finished = Some(Instant::now());
                 }
+                // Aunque el listado falle: la ubicación ya cambió (y `read_head` sube por los
+                // padres, así que una carpeta que no existe queda en el repo que la contiene).
+                self.git = repo_head_of(&self.location);
                 if let Some(buf) = self.reload_buf.take() {
                     if result.is_ok() {
                         self.list.replace(buf);

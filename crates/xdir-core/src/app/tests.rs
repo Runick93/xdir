@@ -1237,6 +1237,99 @@ fn footer_buttons_are_36_by_26() {
     assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::ViewButton));
 }
 
+/// App con una pestaña de disco en el panel 0 cuyo `git` se fijó a mano, ya dibujada.
+fn branch_app(head: Option<crate::git::Head>) -> (App, std::rc::Rc<FakeHost>) {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    let dir = std::env::temp_dir().join("xdir-tests").join("boton-rama");
+    a.new_tab(0, Location::Path(dir.clone()), true);
+    a.panes[0].tab_mut().git = head.map(|head| crate::git::RepoHead { root: dir, head });
+    a.paint();
+    (a, host)
+}
+
+/// El texto de `host` más reciente que cae dentro de `r` y contiene `needle`.
+fn text_inside(host: &FakeHost, r: &geom::Rect, needle: &str) -> Option<String> {
+    host.drawn_texts().into_iter().rev().find(|(_, t, at)| t.contains(needle) && at.left >= r.left && at.right <= r.right && at.top >= r.top && at.bottom <= r.bottom).map(|(_, t, _)| t)
+}
+
+#[test]
+fn branch_button_drawn_left_of_new_folder() {
+    let (a, host) = branch_app(Some(crate::git::Head::Branch("main".into())));
+    let (nb, vb) = a.panes[0].footer_buttons();
+    let bb = a.panes[0].branch_button_rect();
+    assert!(bb.right <= nb.left, "a la izquierda de «Carpeta nueva»");
+    assert_eq!(nb.left - bb.right, 16.0, "con el separador de git en el medio");
+    assert_eq!((bb.top, bb.bottom), (vb.top, vb.bottom));
+    assert!(text_inside(&host, &bb, "main").is_some(), "el nombre dentro del botón");
+    let (cx, cy) = center(&bb);
+    assert_eq!(a.hit(cx, cy), Hit::Pane(0, PaneHit::BranchButton));
+}
+
+#[test]
+fn branch_button_absent_without_git() {
+    let (a, _host) = branch_app(None);
+    let bb = a.panes[0].branch_button_rect();
+    assert_eq!((bb.right - bb.left, bb.bottom - bb.top), (0.0, 0.0));
+    let (nb, _) = a.panes[0].footer_buttons();
+    let (cx, cy) = center(&geom::rect(nb.left - 40.0, nb.top, nb.left - 10.0, nb.bottom));
+    assert_ne!(a.hit(cx, cy), Hit::Pane(0, PaneHit::BranchButton));
+}
+
+#[test]
+fn branch_button_absent_without_path_location() {
+    // Un `git` viejo junto a una ubicación que no es una carpeta de disco no muestra el botón.
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.new_tab(0, Location::Computer, true);
+    a.panes[0].tab_mut().git = Some(crate::git::RepoHead { root: std::env::temp_dir(), head: crate::git::Head::Branch("main".into()) });
+    a.paint();
+    let bb = a.panes[0].branch_button_rect();
+    assert_eq!((bb.right - bb.left, bb.bottom - bb.top), (0.0, 0.0));
+}
+
+#[test]
+fn branch_button_truncates_long_names() {
+    let name = "x".repeat(80);
+    let (a, host) = branch_app(Some(crate::git::Head::Branch(name)));
+    let bb = a.panes[0].branch_button_rect();
+    assert!(bb.right - bb.left <= crate::pane::BRANCH_BTN_MAX_W);
+    let texts = host.drawn_texts();
+    let (_, t, _) = texts.iter().rev().find(|(_, t, at)| t.starts_with('x') && at.left >= bb.left && at.right <= bb.right).expect("texto dentro del botón");
+    assert!(t.ends_with('…'), "{t:?}");
+}
+
+#[test]
+fn branch_button_shows_short_hash_when_detached() {
+    let (a, host) = branch_app(Some(crate::git::Head::Detached("abc1234def5678".into())));
+    let bb = a.panes[0].branch_button_rect();
+    let t = text_inside(&host, &bb, "abc1234").expect("hash corto");
+    assert!(!t.contains("abc1234d"), "{t:?}");
+}
+
+#[test]
+fn branch_button_absent_on_pages() {
+    let host = FakeHost::new();
+    let mut a = app_with_host(Init::blank(), host.clone());
+    a.new_tab(0, Location::Path(std::env::temp_dir()), true);
+    a.panes[0].tab_mut().git = Some(crate::git::RepoHead { root: std::env::temp_dir(), head: crate::git::Head::Branch("main".into()) });
+    a.paint();
+    assert_ne!(a.panes[0].branch_button_rect().right, 0.0);
+    a.panes[0].tab_mut().location = Location::Settings;
+    a.paint();
+    let bb = a.panes[0].branch_button_rect();
+    assert_eq!((bb.right - bb.left, bb.bottom - bb.top), (0.0, 0.0));
+}
+
+#[test]
+fn branch_tooltip() {
+    let (mut a, _host) = branch_app(Some(crate::git::Head::Branch("main".into())));
+    let hit = Hit::Pane(0, PaneHit::BranchButton);
+    assert_eq!(a.tooltip_text(hit).as_deref(), Some("Rama: main (clic para cambiar)"));
+    a.panes[0].tab_mut().git.as_mut().unwrap().head = crate::git::Head::Detached("abc1234def5678".into());
+    assert_eq!(a.tooltip_text(hit).as_deref(), Some("HEAD suelto en abc1234"));
+}
+
 /// Etiquetas de las entradas propias del menú del fondo del panel activo (los submenús por su nombre).
 fn background_labels(a: &App) -> (Vec<String>, Vec<Command>) {
     let mut cmds = Vec::new();
@@ -3229,6 +3322,134 @@ fn context_menu_terminal_opens_the_default() {
     let opened = crate::sys::testing::opened_consoles();
     assert_eq!(opened.len(), 1, "{opened:?}");
     assert_eq!((opened[0].0.as_str(), opened[0].1 == dir), ("Otra", true));
+}
+
+// ---------- git en la pestaña ----------
+
+/// Repo temporal que se borra al soltarlo.
+struct RepoTmp(PathBuf);
+
+impl Drop for RepoTmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Crea el repo de prueba o avisa y devuelve `None` si no hay git.
+fn repo_tmp(name: &str) -> Option<RepoTmp> {
+    let r = crate::git::temp_repo(name).map(RepoTmp);
+    if r.is_none() {
+        eprintln!("git no está instalado: se salta la prueba");
+    }
+    r
+}
+
+/// Lleva la pestaña activa del panel 0 a `dir` y espera a que termine de listarla.
+fn goto_and_wait(a: &mut App, dir: &std::path::Path) {
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().navigate(hwnd, &tx, Location::Path(dir.to_path_buf()));
+    wait_loaded(a);
+}
+
+#[test]
+fn tab_git_has_branch_inside_repo() {
+    let Some(repo) = repo_tmp("tab-rama") else { return };
+    let mut a = app();
+    goto_and_wait(&mut a, &repo.0);
+    let g = a.panes[0].tab().git.clone().expect("dentro de un repo");
+    assert_eq!(g.head, crate::git::Head::Branch("main".into()));
+}
+
+#[test]
+fn tab_git_none_outside_repo() {
+    let dir = std::env::temp_dir().join(format!("xdir-sin-git-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut a = app();
+    goto_and_wait(&mut a, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(a.panes[0].tab().git.is_none());
+}
+
+#[test]
+fn tab_git_none_when_git_missing() {
+    let Some(repo) = repo_tmp("tab-sin-git") else { return };
+    let mut a = app();
+    crate::git::set_available_for_tests(Some(false));
+    goto_and_wait(&mut a, &repo.0);
+    crate::git::set_available_for_tests(None);
+    assert!(a.panes[0].tab().git.is_none());
+}
+
+#[test]
+fn tab_git_none_on_network_path() {
+    let Some(repo) = repo_tmp("tab-red") else { return };
+    crate::sys::testing::install_fakes();
+    // Una subcarpeta del repo que el sistema da por «de red» (una unidad Z: conectada, un
+    // /Volumes/NAS montado...): existe y está en el repo, pero no se lee su HEAD.
+    let red = repo.0.join("montada");
+    std::fs::create_dir_all(&red).unwrap();
+    assert!(crate::git::read_head(&red).is_some(), "la carpeta está en el repo");
+    // Contraste: la ruta local del repo sí resuelve.
+    assert!(crate::tab::repo_head_of(&Location::Path(repo.0.clone())).is_some());
+    crate::sys::testing::FakeNetwork::set_remote(&red);
+    assert!(crate::tab::repo_head_of(&Location::Path(red)).is_none());
+    // Y una ruta UNC cualquiera.
+    assert!(crate::tab::repo_head_of(&Location::Path(PathBuf::from(r"\\server\share\x"))).is_none());
+}
+
+/// Si el listado falla (carpeta que no existe, sin permiso), la pestaña no sigue mostrando la
+/// rama del repo de antes.
+#[test]
+fn tab_git_recomputed_when_listing_fails() {
+    let Some(repo) = repo_tmp("tab-falla") else { return };
+    let mut a = app();
+    goto_and_wait(&mut a, &repo.0);
+    assert!(a.panes[0].tab().git.is_some());
+    let fuera = std::env::temp_dir().join(format!("xdir-no-existe-{}", std::process::id())).join("x");
+    let esperado = crate::git::read_head(&fuera);
+    goto_and_wait(&mut a, &fuera);
+    assert!(a.panes[0].tab().error.is_some(), "el listado falló");
+    assert_eq!(a.panes[0].tab().git, esperado);
+    assert!(a.panes[0].tab().git.as_ref().is_none_or(|g| g.root != repo.0));
+    // Una carpeta que no existe dentro del repo: es del repo (se sube por los padres).
+    goto_and_wait(&mut a, &repo.0.join("no-existe"));
+    assert!(a.panes[0].tab().error.is_some());
+    assert_eq!(a.panes[0].tab().git.as_ref().map(|g| g.root.clone()), Some(repo.0.clone()));
+}
+
+/// Cuando termina la prueba de git (en otro hilo), las pestañas ya listadas muestran su rama
+/// sin esperar a otra navegación.
+#[test]
+fn tab_git_appears_when_git_check_finishes() {
+    let Some(repo) = repo_tmp("tab-listo") else { return };
+    let mut a = app();
+    crate::git::set_available_for_tests(Some(false));
+    goto_and_wait(&mut a, &repo.0);
+    assert!(a.panes[0].tab().git.is_none(), "git todavía sin confirmar");
+    crate::git::set_available_for_tests(None);
+    a.on_task_done(super::tasks::TaskDone::GitReady);
+    let g = a.panes[0].tab().git.clone().expect("ya con git");
+    assert_eq!(g.head, crate::git::Head::Branch("main".into()));
+}
+
+#[test]
+fn tab_git_branch_refreshes_on_reload() {
+    let Some(repo) = repo_tmp("tab-recarga") else { return };
+    let mut a = app();
+    goto_and_wait(&mut a, &repo.0);
+    let out = std::process::Command::new("git").arg("-C").arg(&repo.0).args(["switch", "feature"]).output().unwrap();
+    assert!(out.status.success(), "git switch falló");
+    let (hwnd, tx) = (a.hwnd, a.tx.clone());
+    a.panes[0].tab_mut().reload(hwnd, &tx, true);
+    // La recarga silenciosa no marca `loading`: se espera a que no quede ninguna en curso.
+    while a.panes[0].tab().reload_pending() {
+        let ev = a.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("la recarga termina");
+        if let Some(tab) = a.tab_by_id(ev.panel) {
+            tab.on_load(ev);
+        }
+    }
+    let g = a.panes[0].tab().git.clone().expect("sigue en el repo");
+    assert_eq!(g.head, crate::git::Head::Branch("feature".into()));
 }
 
 // ---------- Esc cancela un arrastre ----------

@@ -506,6 +506,15 @@ impl paint::Painter for Painter<'_> {
         unsafe { self.ctx.PopAxisAlignedClip() };
     }
 
+    fn rotated(&self, degrees: f32, cx: f32, cy: f32, f: &mut dyn FnMut()) {
+        // El giro se suma a lo que ya haya (la escala de DPI), y se restaura al terminar.
+        let mut before = windows_numerics::Matrix3x2::default();
+        unsafe { self.ctx.GetTransform(&mut before) };
+        unsafe { self.ctx.SetTransform(&(windows_numerics::Matrix3x2::rotation_around(degrees, v2(cx, cy)) * before)) };
+        f();
+        unsafe { self.ctx.SetTransform(&before) };
+    }
+
     fn theme(&self) -> &Theme {
         self.theme
     }

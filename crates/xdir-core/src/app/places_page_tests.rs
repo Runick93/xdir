@@ -325,6 +325,31 @@ fn dragging_a_tree_folder_between_places_moves_it_there() {
     cleanup(&root);
 }
 
+/// Esc mientras se arrastra una carpeta del árbol: se cancela y soltar después no la agrega.
+#[test]
+fn escape_cancels_dragging_a_tree_folder() {
+    let root = temp_root("esc-arbol");
+    let own = root.join("trabajo");
+    std::fs::create_dir_all(&own).unwrap();
+    let (mut a, _host) = places_app(&root);
+    a.places.add_folder(own.clone());
+    a.places_changed();
+    a.paint();
+    let before = a.places.order.clone();
+    let (rx, ry) = a.tree.row_point("trabajo").unwrap();
+    a.on_left_down(rx, ry, false);
+    let (x, y) = row_top_edge(&a, "Escritorio");
+    a.on_mouse_move(rx, ry - 20.0);
+    a.on_mouse_move(x, y);
+    assert!(a.tree.place_drop.is_some());
+    assert!(a.on_key(crate::keys::keys::VK_ESCAPE));
+    assert_eq!(a.tree.place_drop, None, "se va la línea de inserción");
+    assert!(a.ghost.is_none());
+    a.on_left_up(x, y);
+    assert_eq!(a.places.order, before, "no cambió nada");
+    cleanup(&root);
+}
+
 fn point_of(a: &App, want: super::Hit) -> (f32, f32) {
     let (w, h) = a.client_dips();
     let mut y = 0.0;

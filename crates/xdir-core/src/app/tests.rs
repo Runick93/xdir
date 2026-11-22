@@ -3230,3 +3230,51 @@ fn context_menu_terminal_opens_the_default() {
     assert_eq!(opened.len(), 1, "{opened:?}");
     assert_eq!((opened[0].0.as_str(), opened[0].1 == dir), ("Otra", true));
 }
+
+// ---------- Esc cancela un arrastre ----------
+
+/// Una pestaña (la única de su panel) arrastrada a la tira de otro panel: Esc la devuelve a su
+/// panel, sin la pestaña nueva que había ocupado su lugar, y soltar después no hace nada.
+#[test]
+fn escape_returns_a_dragged_tab() {
+    let mut a = app();
+    a.set_layout(ui::Layout::TwoSide);
+    a.paint();
+    let id = a.panes[0].tabs[0].id;
+    let others: Vec<usize> = a.panes[1].tabs.iter().map(|t| t.id).collect();
+    let (x, y) = point_of(&a, Hit::Pane(0, PaneHit::Tab(0)));
+    a.on_left_down(x, y, false);
+    let (tx, ty) = point_of(&a, Hit::Pane(1, PaneHit::Tab(0)));
+    a.on_mouse_move(x + 20.0, y);
+    a.on_mouse_move(tx, ty);
+    assert!(a.panes[1].tabs.iter().any(|t| t.id == id), "la pestaña pasó al otro panel");
+    assert!(a.on_key(VK_ESCAPE));
+    assert_eq!(a.drag, Drag::None);
+    assert!(a.ghost.is_none());
+    assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![id], "vuelve sola a su panel");
+    assert_eq!(a.panes[1].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), others);
+    assert_eq!(a.active, 0);
+    a.on_left_up(tx, ty);
+    assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![id]);
+    // Sin arrastre, Esc sigue con lo suyo (no se traga la tecla).
+    assert!(!a.cancel_drag());
+}
+
+/// Una pestaña movida dentro de su tira vuelve a su posición con Esc.
+#[test]
+fn escape_restores_tab_order() {
+    let mut a = app();
+    a.new_tab(0, Location::Computer, true);
+    a.new_tab(0, Location::Computer, true);
+    a.paint();
+    let ids: Vec<usize> = a.panes[0].tabs.iter().map(|t| t.id).collect();
+    let (x, y) = point_of(&a, Hit::Pane(0, PaneHit::Tab(0)));
+    a.on_left_down(x, y, false);
+    let (tx, ty) = point_of(&a, Hit::Pane(0, PaneHit::Tab(2)));
+    a.on_mouse_move(x + 20.0, y);
+    a.on_mouse_move(tx, ty);
+    assert_ne!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), ids, "se reordenó al arrastrar");
+    assert!(a.on_key(VK_ESCAPE));
+    assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
+    assert_eq!(a.panes[0].tab().id, ids[0], "sigue activa la arrastrada");
+}

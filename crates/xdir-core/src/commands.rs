@@ -108,6 +108,8 @@ pub enum Command {
     ToggleTreePin,
     /// Anclar la carpeta del panel activo al Acceso rápido de Windows, o desanclarla.
     ToggleQuickPin,
+    /// Agregar la carpeta del panel activo a los lugares del árbol, o quitarla (con el árbol).
+    TogglePlace,
     /// Abrir o cerrar xtree, el mapa de uso de disco.
     Xtree,
     /// Dentro de xtree: colorear el mapa por carpeta o por tipo de archivo (solo vale con la vista
@@ -138,7 +140,7 @@ pub fn available(c: Command) -> bool {
 
 /// `available` con el entorno dado.
 pub fn available_in(env: &dyn SystemEnv, c: Command) -> bool {
-    env.command_available(c) && (c != Command::ToggleTree || cfg!(feature = "arbol"))
+    env.command_available(c) && (!matches!(c, Command::ToggleTree | Command::TogglePlace) || cfg!(feature = "arbol"))
 }
 
 /// Una acción: identificador para `config.toml`, nombre para la paleta y atajos de fábrica.
@@ -236,6 +238,7 @@ pub const ALL: &[Spec] = &[
     spec(Command::Properties, "propiedades", "Propiedades", &["Alt+Enter"]),
     spec(Command::Duplicate, "duplicar", "Duplicar", &["Ctrl+D"]),
     spec(Command::ToggleFavorite, "favorito", "Agregar o quitar de favoritos", &["Ctrl+Shift+D"]),
+    spec(Command::TogglePlace, "lugar", "Agregar o quitar de Lugares (árbol de carpetas)", &[]),
     spec(Command::ToggleFavBar, "barra_favoritos", "Mostrar u ocultar la barra de favoritos", &["Ctrl+Shift+B"]),
     spec(Command::PowerShell, "powershell", "Abrir la terminal en la carpeta", &[]),
     spec(Command::Cmd, "cmd", "Abrir CMD en la carpeta", &[]),
@@ -327,7 +330,8 @@ pub fn group(c: Command) -> Group {
         | Command::GoComputer
         | Command::ToggleFavorite
         | Command::ToggleFavBar
-        | Command::ToggleQuickPin => Group::Navigation,
+        | Command::ToggleQuickPin
+        | Command::TogglePlace => Group::Navigation,
         Command::NewTab
         | Command::CloseTab
         | Command::ReopenTab
@@ -830,6 +834,7 @@ mod tests {
         assert_eq!(available_in(&FakeEnv, Command::ToggleTree), cfg!(feature = "arbol"));
         assert!(available_in(&FakeEnv, Command::ToggleTreePin));
         assert!(available_in(&FakeEnv, Command::ToggleQuickPin));
+        assert_eq!(available_in(&FakeEnv, Command::TogglePlace), cfg!(feature = "arbol"));
     }
 
     /// Cada atajo de fábrica resuelve a su propia acción, y no hay dos acciones con la misma tecla.

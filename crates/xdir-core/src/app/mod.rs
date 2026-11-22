@@ -283,6 +283,10 @@ enum Drag {
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
     /// Arrastre de lo elegido dentro de un archivo comprimido (solo hacia otro panel de xdir).
     ArchiveOut(usize),
+    /// Una carpeta del árbol (su ruta, en `App::tree_drag`): soltada entre los lugares queda como
+    /// lugar, como una pestaña.
+    #[cfg(feature = "arbol")]
+    TreeRow { start_x: f32, start_y: f32, moved: bool },
 }
 
 /// Algo elegido en el menú del fondo ("Nuevo > Carpeta"...): si en los próximos segundos aparece un
@@ -292,6 +296,16 @@ struct NewWatch {
     /// Nombres (en minúsculas) que había antes.
     before: std::collections::HashSet<String>,
     since: Instant,
+}
+
+/// La pestaña al empezar a arrastrarla: panel, posición, su id y si era la única del panel (al
+/// llevarla a otro panel, el de origen recibe una pestaña nueva).
+#[derive(Clone, Copy, Debug)]
+struct TabDragFrom {
+    pane: usize,
+    index: usize,
+    id: usize,
+    alone: bool,
 }
 
 /// Vista previa flotante de la pestaña que se arrastra: acompaña al mouse y se acopla a las tiras.
@@ -439,6 +453,14 @@ pub struct App {
     /// Carpeta del panel activo que el árbol ya siguió (`follow_tree`); None: ninguna todavía.
     #[cfg(feature = "arbol")]
     tree_followed: Option<Location>,
+    /// Carpeta abierta con un clic en el árbol: al seguirla no se desplaza (`follow_tree`).
+    #[cfg(feature = "arbol")]
+    tree_quiet: Option<Location>,
+    /// De dónde salió la pestaña que se arrastra, para volverla ahí si se cancela con Esc.
+    tab_drag_from: Option<TabDragFrom>,
+    /// La carpeta del árbol que se arrastra (`Drag::TreeRow`).
+    #[cfg(feature = "arbol")]
+    tree_drag: Option<PathBuf>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
@@ -753,6 +775,11 @@ impl App {
             tree_ctx: None,
             #[cfg(feature = "arbol")]
             tree_followed: None,
+            #[cfg(feature = "arbol")]
+            tree_quiet: None,
+            tab_drag_from: None,
+            #[cfg(feature = "arbol")]
+            tree_drag: None,
             groups_menu_closed: None,
             palette: None,
             xtree_search_box: None,

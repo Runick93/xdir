@@ -209,6 +209,7 @@ impl App {
         if self.about_open {
             match hit {
                 Hit::About(about::AboutHit::Report) => self.host.open_url(about::ISSUES_URL),
+                Hit::About(about::AboutHit::Repo) => self.host.open_url(about::REPO_URL),
                 Hit::About(about::AboutHit::Changelog) => self.open_changelog(None),
                 Hit::About(about::AboutHit::Panel) => {}
                 _ => self.about_open = false,
@@ -429,6 +430,8 @@ impl App {
                         self.host.capture_mouse();
                         let grab = self.panes[i].tab_grab(j, x);
                         self.drag = Drag::Tab { pane: i, index: j, start_x: x, start_y: y, moved: false, grab };
+                        let (id, alone) = (self.panes[i].tabs[j].id, self.panes[i].tabs.len() == 1);
+                        self.tab_drag_from = Some(TabDragFrom { pane: i, index: j, id, alone });
                     }
                     PaneHit::TabClose(j) => self.close_tab(i, j),
                     PaneHit::Placeholder(crate::list::placeholder::PlaceholderButton::Retry) => {
@@ -520,7 +523,64 @@ impl App {
         self.redraw();
     }
 
+    /// Esc mientras se arrastra una pestaña, una carpeta del árbol, un favorito o lo elegido de un
+    /// comprimido: el arrastre se cancela y todo queda como estaba (una pestaña ya movida vuelve a
+    /// su lugar). Devuelve si había un arrastre que cancelar.
+    pub(super) fn cancel_drag(&mut self) -> bool {
+        let drag = self.drag;
+        match drag {
+            Drag::Tab { pane, index, .. } => self.restore_dragged_tab(pane, index),
+            Drag::Fav { .. } | Drag::ArchiveOut(_) => {}
+            #[cfg(feature = "arbol")]
+            Drag::TreeRow { .. } => {}
+            _ => return false,
+        }
+        self.drag = Drag::None;
+        self.host.release_mouse();
+        self.tab_drop = None;
+        self.tab_drag_from = None;
+        for p in &mut self.panes {
+            p.drag_tab = None;
+            p.drag_hidden = None;
+        }
+        self.ghost = None;
+        self.fav_drop = None;
+        #[cfg(feature = "arbol")]
+        {
+            self.tree_drag = None;
+            self.set_place_drop(None);
+        }
+        if matches!(drag, Drag::ArchiveOut(_)) {
+            self.notice = None;
+        }
+        self.redraw();
+        true
+    }
+
+    /// La pestaña arrastrada (ahora en `pane`, `index`) vuelve a donde estaba al agarrarla; si era
+    /// la única de su panel, se va la pestaña nueva que ocupó su lugar.
+    fn restore_dragged_tab(&mut self, pane: usize, index: usize) {
+        let Some(from) = self.tab_drag_from else { return };
+        if pane != from.pane {
+            self.move_tab_to_pane(pane, index, from.pane, from.index);
+        } else {
+            self.panes[pane].move_tab(index, from.index);
+        }
+        let p = &mut self.panes[from.pane];
+        if from.alone {
+            while let Some(i) = p.tabs.iter().position(|t| t.id != from.id) {
+                p.take_tab(i);
+            }
+        }
+        if let Some(i) = p.tabs.iter().position(|t| t.id == from.id) {
+            p.select_tab(i);
+        }
+        self.active = from.pane;
+        self.sync_visibility();
+    }
+
     pub fn on_left_up(&mut self, x: f32, y: f32) {
+        self.tab_drag_from = None;
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.host.release_mouse();
         let tab_drop = self.tab_drop.take();
@@ -531,9 +591,23 @@ impl App {
         self.ghost = None;
         match drag {
             Drag::Button(i, b) if self.hit(x, y) == Hit::Pane(i, PaneHit::Button(b)) => self.on_button(i, b),
-            Drag::Tab { pane, index, .. } => {
+            Drag::Tab { pane, index, moved, .. } => {
+                #[cfg(not(feature = "arbol"))]
+                let _ = moved;
+                #[cfg(feature = "arbol")]
+                let gap = if moved { self.tab_place_gap(pane, index, x, y) } else { None };
+                #[cfg(feature = "arbol")]
+                self.set_place_drop(None);
                 if let Some((to, at)) = tab_drop {
                     self.move_tab_to_pane(pane, index, to, at);
+                }
+                #[cfg(feature = "arbol")]
+                if let Some(gap) = gap
+                    && let Location::Path(path) = &self.panes[pane].tabs[index].location
+                {
+                    // La pestaña vuelve a su lugar; su carpeta queda como lugar.
+                    let path = path.clone();
+                    self.add_dropped_places(vec![path], gap.before);
                 }
             }
             Drag::Fav { pane, index, moved: false, .. } => self.activate_fav(pane, &[index], key_down(VK_CONTROL)),
@@ -556,6 +630,15 @@ impl App {
                 self.apply(i, action);
             }
             Drag::ArchiveOut(from) => self.drop_archive_drag(from, x, y),
+            #[cfg(feature = "arbol")]
+            Drag::TreeRow { moved, .. } => {
+                let path = self.tree_drag.take();
+                let gap = if moved { self.place_gap_at(x, y, true) } else { None };
+                self.set_place_drop(None);
+                if let (Some(gap), Some(path)) = (gap, path) {
+                    self.add_dropped_places(vec![path], gap.before);
+                }
+            }
             _ => {}
         }
         self.redraw();
@@ -615,6 +698,12 @@ impl App {
                         _ => None,
                     };
                     self.tab_drop = target;
+                    // Sobre los lugares del árbol: la línea de dónde quedaría su carpeta.
+                    #[cfg(feature = "arbol")]
+                    {
+                        let row = self.tab_place_gap(pane, index, x, y).map(|g| g.row);
+                        self.set_place_drop(row);
+                    }
                     // Acoplada mientras el mouse está sobre la tira del panel de la pestaña; fuera de
                     // las tiras se despega y flota.
                     let docked = in_strip(hit) == Some(pane);
@@ -678,6 +767,25 @@ impl App {
                     return;
                 }
                 redraw |= action != Action::None;
+            }
+            #[cfg(feature = "arbol")]
+            Drag::TreeRow { start_x, start_y, moved } => {
+                if moved || (x - start_x).abs() > 6.0 || (y - start_y).abs() > 6.0 {
+                    self.drag = Drag::TreeRow { start_x, start_y, moved: true };
+                    // Sobre los lugares del árbol: la línea de dónde quedaría la carpeta.
+                    let row = self.place_gap_at(x, y, true).map(|g| g.row);
+                    self.set_place_drop(row);
+                    // La carpeta acompaña al mouse, como una pestaña suelta.
+                    let (left, top) = (x - 20.0, y - 17.0);
+                    match &mut self.ghost {
+                        Some(g) => (g.tx, g.ty) = (left, top),
+                        None => {
+                            let title = self.tree_drag.as_ref().map(|p| Location::Path(p.clone()).title()).unwrap_or_default();
+                            self.ghost = Some(Ghost { title, w: 160.0, x: left, y: top, tx: left, ty: top, detach: 1.0, docked: false });
+                        }
+                    }
+                    redraw = true;
+                }
             }
             Drag::Fav { pane, index, start_x, moved } => {
                 if moved || (x - start_x).abs() > 5.0 {

@@ -1365,6 +1365,29 @@ fn background_menu_offers_new_entries() {
     assert_eq!(labels[1], "Archivo de texto nuevo");
 }
 
+/// El fondo de la carpeta ofrece «Agregar a favoritos» y «Agregar a Lugares» (no anclar al
+/// Acceso rápido, que es del menú del sistema de Windows); cada uno cambia de texto al usarlo.
+#[cfg(feature = "arbol")]
+#[test]
+fn background_menu_offers_favorites_and_places() {
+    let mut a = app();
+    let dir = std::env::temp_dir().join("xdir-tests").join("menu-fondo-favoritos");
+    let loc = Location::Path(dir.clone());
+    a.new_tab(0, loc.clone(), true);
+    a.set_active(0);
+    let (labels, cmds) = background_labels(&a);
+    assert!(!labels.iter().any(|l| l.contains("Acceso rápido")), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "Agregar a favoritos") && labels.iter().any(|l| l == "Agregar a Lugares"), "{labels:?}");
+    assert!(cmds.contains(&Command::ToggleFavorite) && cmds.contains(&Command::TogglePlace) && !cmds.contains(&Command::ToggleQuickPin));
+    a.run_command(Command::ToggleFavorite);
+    assert!(a.favorites.find(&loc).is_some(), "se agregó a la barra de favoritos");
+    a.run_command(Command::TogglePlace);
+    assert!(a.places.order.contains(&crate::places::Place::Folder(dir)), "se agregó a Lugares");
+    let (labels, _) = background_labels(&a);
+    assert!(labels.iter().any(|l| l == "Quitar de favoritos") && labels.iter().any(|l| l == "Quitar de Lugares"), "{labels:?}");
+    assert!(!crate::sys::testing::FakeShell::take_calls().iter().any(|c| matches!(c, crate::sys::testing::ShellCall::PinQuickAccess(_))));
+}
+
 /// Donde no se puede crear nada (Papelera, «Este equipo», Configuración, Novedades, carpetas
 /// virtuales) no aparecen.
 #[test]
@@ -3427,4 +3450,52 @@ fn tab_git_branch_refreshes_on_reload() {
     }
     let g = a.panes[0].tab().git.clone().expect("sigue en el repo");
     assert_eq!(g.head, crate::git::Head::Branch("feature".into()));
+}
+
+// ---------- Esc cancela un arrastre ----------
+
+/// Una pestaña (la única de su panel) arrastrada a la tira de otro panel: Esc la devuelve a su
+/// panel, sin la pestaña nueva que había ocupado su lugar, y soltar después no hace nada.
+#[test]
+fn escape_returns_a_dragged_tab() {
+    let mut a = app();
+    a.set_layout(ui::Layout::TwoSide);
+    a.paint();
+    let id = a.panes[0].tabs[0].id;
+    let others: Vec<usize> = a.panes[1].tabs.iter().map(|t| t.id).collect();
+    let (x, y) = point_of(&a, Hit::Pane(0, PaneHit::Tab(0)));
+    a.on_left_down(x, y, false);
+    let (tx, ty) = point_of(&a, Hit::Pane(1, PaneHit::Tab(0)));
+    a.on_mouse_move(x + 20.0, y);
+    a.on_mouse_move(tx, ty);
+    assert!(a.panes[1].tabs.iter().any(|t| t.id == id), "la pestaña pasó al otro panel");
+    assert!(a.on_key(VK_ESCAPE));
+    assert_eq!(a.drag, Drag::None);
+    assert!(a.ghost.is_none());
+    assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![id], "vuelve sola a su panel");
+    assert_eq!(a.panes[1].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), others);
+    assert_eq!(a.active, 0);
+    a.on_left_up(tx, ty);
+    assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![id]);
+    // Sin arrastre, Esc sigue con lo suyo (no se traga la tecla).
+    assert!(!a.cancel_drag());
+}
+
+/// Una pestaña movida dentro de su tira vuelve a su posición con Esc.
+#[test]
+fn escape_restores_tab_order() {
+    let mut a = app();
+    a.new_tab(0, Location::Computer, true);
+    a.new_tab(0, Location::Computer, true);
+    a.paint();
+    let ids: Vec<usize> = a.panes[0].tabs.iter().map(|t| t.id).collect();
+    let (x, y) = point_of(&a, Hit::Pane(0, PaneHit::Tab(0)));
+    a.on_left_down(x, y, false);
+    let (tx, ty) = point_of(&a, Hit::Pane(0, PaneHit::Tab(2)));
+    a.on_mouse_move(x + 20.0, y);
+    a.on_mouse_move(tx, ty);
+    assert_ne!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), ids, "se reordenó al arrastrar");
+    assert!(a.on_key(VK_ESCAPE));
+    assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
+    assert_eq!(a.panes[0].tab().id, ids[0], "sigue activa la arrastrada");
 }

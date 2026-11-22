@@ -8,6 +8,8 @@ use crate::session;
 use crate::toml::{self, Value};
 
 const FILE_NAME: &str = "lugares.toml";
+/// El Acceso rápido propio de la Mac y Linux de antes: se pasa a los lugares al leerlos.
+const OLD_QUICK_FILE: &str = "acceso_rapido.txt";
 
 /// Claves de los lugares fijos, en el orden por defecto. `User(i)` es la posición en
 /// `fs::user_folder` (0..6).
@@ -123,7 +125,23 @@ impl Places {
     }
 
     pub fn load_from(dir: &Path) -> Places {
-        std::fs::read_to_string(dir.join(FILE_NAME)).map(|t| Self::parse(&t)).unwrap_or_default()
+        let mut places = std::fs::read_to_string(dir.join(FILE_NAME)).map(|t| Self::parse(&t)).unwrap_or_default();
+        places.absorb_old_quick(dir);
+        places
+    }
+
+    /// El Acceso rápido propio que tuvieron un tiempo la Mac y Linux (`acceso_rapido.txt`, una
+    /// carpeta por línea): sus carpetas pasan a ser lugares y, guardado `lugares.toml`, el archivo
+    /// se borra.
+    fn absorb_old_quick(&mut self, dir: &Path) {
+        let old = dir.join(OLD_QUICK_FILE);
+        let Ok(text) = std::fs::read_to_string(&old) else { return };
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            self.add_folder(PathBuf::from(line));
+        }
+        if self.save_in(dir).is_ok() {
+            let _ = std::fs::remove_file(old);
+        }
     }
 
     /// Escribe `lugares.toml` (bloqueante: en un hilo de trabajo).
@@ -215,6 +233,35 @@ impl Places {
             return;
         }
         self.order.push(Place::Folder(path));
+    }
+
+    /// Como `add_folder`, pero delante de `before` (sin él, al final): lo que hace soltar una
+    /// carpeta entre dos lugares del árbol. Si ya era una carpeta propia, se mueve ahí.
+    pub fn add_folder_at(&mut self, path: PathBuf, before: Option<&Place>) {
+        if !path.is_absolute() {
+            return;
+        }
+        let fs = crate::sys::file_system();
+        let existing = self.order.iter().position(|p| matches!(p, Place::Folder(q) if fs.same_path(q, &path)));
+        let Some(from) = existing else {
+            let len = self.order.len();
+            self.add_folder(path);
+            // Recién agregada (si no era una carpeta del usuario): va al final; se lleva a su lugar.
+            if self.order.len() > len
+                && let Some(before) = before
+                && let Some(to) = self.order.iter().position(|p| p == before)
+            {
+                let item = self.order.pop().expect("recién agregada");
+                self.order.insert(to, item);
+            }
+            return;
+        };
+        if before == Some(&self.order[from]) {
+            return;
+        }
+        let item = self.order.remove(from);
+        let to = before.and_then(|b| self.order.iter().position(|p| p == b)).unwrap_or(self.order.len());
+        self.order.insert(to, item);
     }
 
     /// Quita una carpeta propia; los lugares fijos no se quitan (se ocultan).

@@ -14,6 +14,10 @@ impl App {
         let meta = key_down(VK_LWIN);
         // El Espacio solo se traga si es el carácter que sigue a esta tecla.
         self.swallow_space = false;
+        // Esc mientras se arrastra algo con el mouse: se cancela el arrastre y nada más.
+        if vk == VK_ESCAPE && self.cancel_drag() {
+            return true;
+        }
         // Grabando un atajo en la configuración, la tecla es para eso (ni ⌘W ni Tab llegan).
         if let Some(used) = self.settings_capture_key(vk, alt) {
             return used;
@@ -296,10 +300,17 @@ impl App {
                     self.tree.set_pinned(!self.tree.pinned, true);
                 }
             }
+            // El Acceso rápido es de Windows (en la Mac y Linux el comando no está).
             Command::ToggleQuickPin => {
                 #[cfg(feature = "arbol")]
-                if let Location::Path(p) = self.panes[self.active].tab().location.clone() {
+                if let Location::Path(p) = self.panes[active].tab().location.clone() {
                     self.toggle_quick_pin(p);
+                }
+            }
+            Command::TogglePlace => {
+                #[cfg(feature = "arbol")]
+                if let Location::Path(p) = self.panes[active].tab().location.clone() {
+                    self.toggle_place(p);
                 }
             }
             Command::Xtree => self.toggle_xtree(),
@@ -658,5 +669,6 @@ fn needs_folder(c: Command) -> bool {
             | Command::ClearFilters
             | Command::QuickLook
             | Command::ToggleQuickPin
+            | Command::TogglePlace
     )
 }

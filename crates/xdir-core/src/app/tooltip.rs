@@ -145,6 +145,7 @@ impl App {
             // El botón «xtree» dice qué hace; el cartel lleva el estado del escaneo, si lo hay.
             Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
             Hit::XtreeBack => return Some("Volver a xdir (Esc)".to_string()),
+            Hit::About(crate::about::AboutHit::Repo) => return Some("Ver el código en GitHub".to_string()),
             // La ▲ de la tabla de xtree: cuánto creció la carpeta en el período.
             Hit::XtreeMark(n) => return self.xtree.as_ref()?.mark_tip(n),
             Hit::XtreeSearch => {

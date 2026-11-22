@@ -217,6 +217,15 @@ pub enum TreeHit {
     Nothing,
 }
 
+/// Dónde iría un lugar soltado entre los del árbol (`Tree::place_gap_at`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaceGap {
+    /// El lugar delante del cual va (`None`: al final del grupo).
+    pub before: Option<Place>,
+    /// La fila sobre cuyo borde de arriba va la línea (`Tree::place_drop`).
+    pub row: usize,
+}
+
 /// Una fila de «Red», para su menú del clic derecho.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NetRow {
@@ -306,6 +315,11 @@ pub struct Tree {
     net_free: Vec<usize>,
     /// Fila resaltada como destino de un arrastre (#56); la pone la `App` en `on_drag`.
     pub drop_target: Option<usize>,
+    /// Línea de inserción entre lugares (soltar una carpeta o una pestaña para agregarla): la fila
+    /// (de `rows`) sobre cuyo borde de arriba se dibuja. La pone la `App`.
+    pub place_drop: Option<usize>,
+    /// El lugar de cada raíz del grupo de lugares (las del Acceso rápido no están: son de Windows).
+    place_of: Vec<(usize, Place)>,
     /// Arrastrando encima: la carpeta plegada bajo el puntero y desde cuándo.
     drag_hover: Option<(usize, std::time::Instant)>,
     /// Hora del evento de arrastre anterior (para desplazar según el tiempo).
@@ -397,6 +411,8 @@ impl Tree {
             net_free: Vec::new(),
             eject_rects: Vec::new(),
             drop_target: None,
+            place_drop: None,
+            place_of: Vec::new(),
             drag_hover: None,
             drag_last: None,
             rereads: Default::default(),
@@ -566,6 +582,7 @@ impl Tree {
             })
             .collect();
         let mut out = Vec::new();
+        let mut of = Vec::new();
         for place in places.order.iter().filter(|p| !places.is_hidden(p)) {
             let reuse = |t: &Tree, f: &dyn Fn(&Node) -> bool| old.iter().copied().find(|&id| !t.quick_roots.contains(&id) && f(&t.nodes[id]));
             let id = match place {
@@ -600,8 +617,10 @@ impl Tree {
             };
             if !out.contains(&id) {
                 out.push(id);
+                of.push((id, place.clone()));
             }
         }
+        self.place_of = of;
         out
     }
 
@@ -1365,6 +1384,52 @@ impl Tree {
         self.node_at(y).filter(|&id| self.nodes[id].kind == Kind::Trash)
     }
 
+    /// Soltar en `(x, y)` para agregar un lugar, como en la barra lateral del Finder: entre dos
+    /// lugares (el borde de arriba o de abajo de su fila, o los separadores del grupo) va la línea
+    /// de inserción. `whole_row`: toda la fila cuenta como borde (una pestaña arrastrada no tiene
+    /// carpeta a la que entrar); si no, el medio de la fila queda para soltar adentro.
+    pub fn place_gap_at(&self, x: f32, y: f32, whole_row: bool) -> Option<PlaceGap> {
+        if !(self.contains(x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        let rows = self.rows();
+        let pos = (y - self.area.top - TOP_PAD + self.scroll) / ROW_H;
+        let (r, f) = (pos.floor() as usize, pos.fract());
+        // El grupo: las filas entre el primer separador y el siguiente.
+        let first = rows.iter().position(|&id| self.nodes[id].kind == Kind::Separator)?;
+        let last = first + 1 + rows[first + 1..].iter().position(|&id| self.nodes[id].kind == Kind::Separator)?;
+        // Las raíces del grupo, con su fila.
+        let roots: Vec<usize> = (first + 1..last).filter(|&i| self.nodes[rows[i]].depth == 0).collect();
+        let gap = |row: usize| {
+            let before = if row >= last { None } else { Some(self.place_at_root(rows[row])) };
+            PlaceGap { before, row }
+        };
+        let next_root = |after: usize| roots.iter().copied().find(|&i| i > after).unwrap_or(last);
+        match r {
+            _ if r == first => Some(gap(roots.first().copied().unwrap_or(last))),
+            _ if r == last => Some(gap(last)),
+            _ if r > first && r < last => {
+                let n = &self.nodes[rows[r]];
+                let root = n.depth == 0;
+                if whole_row {
+                    Some(gap(if root && f < 0.5 { r } else { next_root(r) }))
+                } else if root && f < 0.25 {
+                    Some(gap(r))
+                } else if root && f > 0.75 && !n.expanded {
+                    Some(gap(next_root(r)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// El lugar de una raíz del grupo (las carpetas del Acceso rápido cuentan como él).
+    fn place_at_root(&self, id: usize) -> Place {
+        self.place_of.iter().find(|(r, _)| *r == id).map_or(Place::QuickAccess, |(_, p)| p.clone())
+    }
+
     /// Un evento de arrastre de archivos a la hora `now`, con el puntero en `at` (`None`: fuera del
     /// árbol o tapado). Despliega la carpeta plegada que tiene el puntero encima desde hace
     /// `DRAG_EXPAND` (la lee en otro hilo), desplaza cerca del borde de arriba o de abajo según el
@@ -1426,6 +1491,7 @@ impl Tree {
     /// la franja; al soltar queda como esté hasta que el mouse se mueva.
     pub fn drag_end(&mut self, left: bool) {
         self.drag_hover = None;
+        self.place_drop = None;
         self.drag_last = None;
         if left && !self.pinned {
             self.open = false;
@@ -1763,6 +1829,11 @@ impl Tree {
                         }
                     }
                 }
+            }
+            // Soltar para agregar un lugar: la línea de inserción, como en la barra de favoritos.
+            if let Some(row) = self.place_drop {
+                let y = (area.top + TOP_PAD + row as f32 * ROW_H - self.scroll).round();
+                p.round_fill(rect(area.left + SIDE + 4.0, y - 1.0, area.left + view_w - SIDE - 4.0, y + 1.0), 1.0, th.accent);
             }
         });
         self.eject_rects = ejects;
@@ -2406,6 +2477,44 @@ mod tests {
     /// Centro vertical de la fila `i`.
     fn row_y(area: Rect, i: usize) -> f32 {
         area.top + TOP_PAD + i as f32 * ROW_H + ROW_H / 2.0
+    }
+
+    /// Soltar entre lugares: el borde de arriba o de abajo de una fila marca dónde va (delante de
+    /// qué lugar) y el medio queda para soltar adentro; con `whole_row` (una pestaña) toda la fila
+    /// es borde. Los separadores del grupo son el principio y el final.
+    #[test]
+    fn place_gap_between_places() {
+        install_fakes();
+        let root = temp_root("lugares-hueco");
+        let names = ["escritorio", "descargas"];
+        let paths: Vec<PathBuf> = names.iter().map(|n| root.join(n)).collect();
+        crate::sys::testing::FakeFileSystem::set_user_folders(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>());
+        let mut t = Tree::new(&Places::default());
+        crate::sys::testing::FakeFileSystem::set_user_folders(&[]);
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        let area = rect(0.0, 0.0, WIDTH, 700.0);
+        t.draw(&p, area, None, XtreeBadge::Idle);
+        let rows = t.rows();
+        let row_of = |name: &str| rows.iter().position(|&id| t.nodes[id].name == name).unwrap();
+        let (desk, down) = (row_of("Escritorio"), row_of("Descargas"));
+        let sep = rows.iter().position(|&id| t.nodes[id].kind == Kind::Separator).unwrap();
+        let end = sep + 1 + rows[sep + 1..].iter().position(|&id| t.nodes[id].kind == Kind::Separator).unwrap();
+        let top = |i: usize, f: f32| area.top + TOP_PAD + (i as f32 + f) * ROW_H;
+        let x = 100.0;
+        // Borde de arriba del Escritorio y el separador de arriba: delante del Escritorio.
+        let first = PlaceGap { before: Some(Place::User(0)), row: desk };
+        assert_eq!(t.place_gap_at(x, top(desk, 0.1), false), Some(first.clone()));
+        assert_eq!(t.place_gap_at(x, top(sep, 0.5), false), Some(first));
+        // El medio es para soltar adentro; con una pestaña, la mitad de abajo va después.
+        assert_eq!(t.place_gap_at(x, top(desk, 0.5), false), None);
+        assert_eq!(t.place_gap_at(x, top(desk, 0.6), true), Some(PlaceGap { before: Some(Place::User(1)), row: down }));
+        assert_eq!(t.place_gap_at(x, top(desk, 0.9), false), Some(PlaceGap { before: Some(Place::User(1)), row: down }));
+        // El separador de abajo: al final del grupo.
+        assert_eq!(t.place_gap_at(x, top(end, 0.5), false), Some(PlaceGap { before: None, row: end }));
+        // Fuera del grupo (Inicio) no hay hueco.
+        assert_eq!(t.place_gap_at(x, top(0, 0.1), true), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

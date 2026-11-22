@@ -493,6 +493,11 @@ impl Shell for Win32Shell {
         true
     }
 
+    /// El menú de una carpeta del Shell trae «Anclar a Acceso rápido» (`pintohome`).
+    fn menu_has_quick_pin(&self) -> bool {
+        true
+    }
+
     fn volume_of(&self, path: &Path) -> Option<OsString> {
         sh::volume_of(path)
     }

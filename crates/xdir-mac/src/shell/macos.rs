@@ -271,13 +271,13 @@ pub fn invoke_verb(_owner: Handle, _folder: &Location, items: &[Item], verb: &st
     }
 }
 
-/// Acceso rápido de Windows: no existe en macOS.
-pub fn pin_quick_access(_owner: Handle, _path: &Path) -> Result<()> {
-    Err(ShellError("el Acceso rápido es de Windows".into()))
+/// Acceso rápido: el propio de xdir (`xdir_core::quick_own`), el de Windows no existe en macOS.
+pub fn pin_quick_access(_owner: Handle, path: &Path) -> Result<()> {
+    xdir_core::quick_own::pin(path).map_err(ShellError)
 }
 
-pub fn unpin_quick_access(_owner: Handle, _path: &Path) -> Result<()> {
-    Err(ShellError("el Acceso rápido es de Windows".into()))
+pub fn unpin_quick_access(_owner: Handle, path: &Path) -> Result<()> {
+    xdir_core::quick_own::unpin(path).map_err(ShellError)
 }
 
 /// Identificadores propios: por encima de los del menú de archivos.

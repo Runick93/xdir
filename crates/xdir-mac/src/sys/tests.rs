@@ -114,12 +114,13 @@ fn mac_preview_shortcut_keeps_palette() {
     }
 }
 
-/// En macOS no existen la consola CMD ni el Acceso rápido de Windows; el resto sí.
+/// En macOS no existe la consola CMD; el resto sí, también anclar al Acceso rápido (el propio de
+/// xdir, `quick_own`).
 #[test]
-fn mac_hides_cmd_and_quick_pin() {
+fn mac_hides_cmd_only() {
     let env = platform_env();
     assert!(!available_in(&*env, Command::Cmd));
-    assert!(!available_in(&*env, Command::ToggleQuickPin));
+    assert!(available_in(&*env, Command::ToggleQuickPin));
     assert!(available_in(&*env, Command::PowerShell));
     assert!(available_in(&*env, Command::Xtree));
 }

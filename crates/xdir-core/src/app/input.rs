@@ -508,6 +508,8 @@ impl App {
         match drag {
             Drag::Button(i, b) if self.hit(x, y) == Hit::Pane(i, PaneHit::Button(b)) => self.on_button(i, b),
             Drag::Tab { pane, index, moved, .. } => {
+                #[cfg(not(feature = "arbol"))]
+                let _ = moved;
                 #[cfg(feature = "arbol")]
                 let gap = if moved { self.tab_place_gap(pane, index, x, y) } else { None };
                 #[cfg(feature = "arbol")]
@@ -544,6 +546,15 @@ impl App {
                 self.apply(i, action);
             }
             Drag::ArchiveOut(from) => self.drop_archive_drag(from, x, y),
+            #[cfg(feature = "arbol")]
+            Drag::TreeRow { moved, .. } => {
+                let path = self.tree_drag.take();
+                let gap = if moved { self.place_gap_at(x, y, true) } else { None };
+                self.set_place_drop(None);
+                if let (Some(gap), Some(path)) = (gap, path) {
+                    self.add_dropped_places(vec![path], gap.before);
+                }
+            }
             _ => {}
         }
         self.redraw();
@@ -672,6 +683,25 @@ impl App {
                     return;
                 }
                 redraw |= action != Action::None;
+            }
+            #[cfg(feature = "arbol")]
+            Drag::TreeRow { start_x, start_y, moved } => {
+                if moved || (x - start_x).abs() > 6.0 || (y - start_y).abs() > 6.0 {
+                    self.drag = Drag::TreeRow { start_x, start_y, moved: true };
+                    // Sobre los lugares del árbol: la línea de dónde quedaría la carpeta.
+                    let row = self.place_gap_at(x, y, true).map(|g| g.row);
+                    self.set_place_drop(row);
+                    // La carpeta acompaña al mouse, como una pestaña suelta.
+                    let (left, top) = (x - 20.0, y - 17.0);
+                    match &mut self.ghost {
+                        Some(g) => (g.tx, g.ty) = (left, top),
+                        None => {
+                            let title = self.tree_drag.as_ref().map(|p| Location::Path(p.clone()).title()).unwrap_or_default();
+                            self.ghost = Some(Ghost { title, w: 160.0, x: left, y: top, tx: left, ty: top, detach: 1.0, docked: false });
+                        }
+                    }
+                    redraw = true;
+                }
             }
             Drag::Fav { pane, index, start_x, moved } => {
                 if moved || (x - start_x).abs() > 5.0 {

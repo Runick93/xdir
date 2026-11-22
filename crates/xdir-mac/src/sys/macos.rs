@@ -236,7 +236,7 @@ impl SystemEnv for MacEnv {
     /// En macOS no hay CMD (el comando abre la consola principal, Terminal) y no existe el Acceso
     /// rápido de Windows.
     fn command_available(&self, c: Command) -> bool {
-        !matches!(c, Command::Cmd | Command::ToggleQuickPin | Command::MapNetworkDrive | Command::DisconnectNetworkDrive)
+        !matches!(c, Command::Cmd | Command::MapNetworkDrive | Command::DisconnectNetworkDrive)
     }
 
     /// Abre la terminal en la carpeta (el verbo no aplica): con `open -a` las que reciben una

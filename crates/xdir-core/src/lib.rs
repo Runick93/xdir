@@ -43,6 +43,7 @@ pub mod pane;
 pub mod places;
 pub mod info;
 pub mod preview;
+pub mod quick_own;
 pub mod quicklook;
 /// Renombrar varios: nombres nuevos, choques y renombrado seguro.
 pub mod rename_many;

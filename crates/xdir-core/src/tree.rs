@@ -353,7 +353,7 @@ pub fn place_look(place: &Place, th: &Theme) -> (&'static str, Color, String) {
     match place {
         Place::User(i) => PINNED.get(*i).map_or(("\u{E8B7}", rgb(1.0, 0.79, 0.28), String::new()), |(name, glyph, (r, g, b))| (*glyph, rgb(*r, *g, *b), (*name).to_string())),
         Place::Trash => (TRASH_GLYPH, rgb(0.62, 0.70, 0.80), "Papelera".to_string()),
-        Place::QuickAccess => (PIN_GLYPH, th.accent, "Acceso rápido de Windows".to_string()),
+        Place::QuickAccess => (PIN_GLYPH, th.accent, "Acceso rápido".to_string()),
         Place::Folder(path) => {
             let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
             ("\u{E8B7}", rgb(1.0, 0.79, 0.28), name)

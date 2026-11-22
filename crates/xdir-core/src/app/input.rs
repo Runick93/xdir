@@ -187,6 +187,7 @@ impl App {
         if self.about_open {
             match hit {
                 Hit::About(about::AboutHit::Report) => self.host.open_url(about::ISSUES_URL),
+                Hit::About(about::AboutHit::Repo) => self.host.open_url(about::REPO_URL),
                 Hit::About(about::AboutHit::Changelog) => self.open_changelog(None),
                 Hit::About(about::AboutHit::Panel) => {}
                 _ => self.about_open = false,

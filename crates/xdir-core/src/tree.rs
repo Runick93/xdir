@@ -343,6 +343,8 @@ struct Reveal {
     /// Una fila con esa carpeta fuera de su ubicación real (Acceso rápido, anclada): si la rama
     /// real no se puede desplegar (pasa por una carpeta oculta), se marca esa.
     fallback: Option<usize>,
+    /// Al llegar, desplazar hasta la carpeta (no, si se abrió desde un lugar del árbol).
+    scroll: bool,
 }
 
 /// Ícono, color y nombre de un lugar, los mismos que en el árbol (para Configuración ▸ Lugares).
@@ -1183,6 +1185,16 @@ impl Tree {
     /// recién al encontrar la rama completa se despliega (una carpeta que ya no existe no
     /// despliega nada). Una revelación nueva reemplaza a la pendiente.
     pub fn reveal(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
+        self.reveal_with(hwnd, path, show_hidden, true);
+    }
+
+    /// Como `reveal`, pero sin desplazar el árbol: despliega la rama real y deja la vista donde
+    /// está (se abrió desde un lugar del árbol, que es lo que el usuario está mirando).
+    pub fn reveal_without_scroll(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
+        self.reveal_with(hwnd, path, show_hidden, false);
+    }
+
+    fn reveal_with(&mut self, hwnd: Handle, path: &Path, show_hidden: bool, scroll: bool) {
         self.reveal = None;
         // Ya hay una fila con esa carpeta en su ubicación real: si alguna está dentro del área
         // visible no se mueve nada; si no, se desplaza hasta la primera, sin desplegar otra rama.
@@ -1207,12 +1219,12 @@ impl Tree {
             }
         }
         if let Some(&(_, id)) = shown.first() {
-            if !shown.iter().any(|&(i, _)| self.row_in_view(i)) {
+            if scroll && !shown.iter().any(|&(i, _)| self.row_in_view(i)) {
                 self.scroll_to = Some(id);
             }
             return;
         }
-        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden, fallback });
+        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden, fallback, scroll });
         self.advance_reveal();
     }
 
@@ -1262,7 +1274,9 @@ impl Tree {
                 for a in chain {
                     self.nodes[a].expanded = true;
                 }
-                self.scroll_to = Some(id);
+                if r.scroll {
+                    self.scroll_to = Some(id);
+                }
                 return;
             }
             let next = match &self.nodes[id].children {
@@ -1277,7 +1291,7 @@ impl Tree {
             // Sin la subcarpeta (se borró, está oculta o no es una carpeta): no se despliega nada;
             // si había otra fila con la carpeta (Acceso rápido, anclada), se marca esa.
             let Some(next) = next else {
-                if r.fallback.is_some() {
+                if r.fallback.is_some() && r.scroll {
                     self.scroll_to = r.fallback;
                 }
                 return;
@@ -2016,6 +2030,33 @@ mod tests {
         t.reveal(Handle(0), &root.join("alfa"), false);
         assert!(t.revealing().is_none());
         assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Abrir una carpeta desde un lugar del árbol (sus favoritos): la rama real se despliega
+    /// igual, pero el árbol no se desplaza hasta ella (no se pierde de vista lo que se tocó).
+    #[test]
+    fn tree_reveal_without_scroll_expands_but_stays() {
+        install_fakes();
+        let root = temp_root("revelar-quieto");
+        let target = root.join("alfa").join("beta").join("gama");
+        std::fs::create_dir_all(&target).unwrap();
+        for i in 0..8 {
+            std::fs::create_dir_all(root.join("alfa").join(format!("aa{i}"))).unwrap();
+        }
+        let mut t = tree_with_drive(&root);
+        t.reveal_without_scroll(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        let beta = node_by_path(&t, &root.join("alfa").join("beta")).expect("se leyó beta");
+        assert!(beta.expanded, "la rama se despliega");
+        let area = rect(0.0, 0.0, 240.0, 200.0);
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert_eq!(t.scroll, 0.0, "no se desplazó");
+        // Con la carpeta ya desplegada y fuera de la vista, tampoco.
+        t.reveal_without_scroll(Handle(0), &target, false);
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert_eq!(t.scroll, 0.0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

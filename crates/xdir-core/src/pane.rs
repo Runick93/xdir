@@ -807,9 +807,12 @@ impl Pane {
         self.dirty_button = rect(0.0, 0.0, 0.0, 0.0);
         let tab = &self.tabs[self.active];
         if let (Location::Path(_), Some(g)) = (&tab.location, &tab.git) {
-            // De derecha a izquierda: sincronizar (ícono + texto) con un separador, y la rama.
-            let mut right = nb.left - 6.0;
-            // Cambios sin commitear: el aviso rojo va a la derecha de todo, con su separador.
+            // De derecha a izquierda: el aviso de cambios, sincronizar (ícono + texto) y la rama.
+            // Un solo separador aparta lo de git de «Carpeta nueva» y las vistas.
+            let sep = nb.left - 8.0;
+            p.fill(rect(sep, nb.top + 5.0, sep + 1.0, nb.bottom - 5.0), alpha(th.text_dim, 0.6));
+            let mut right = sep - 8.0;
+            // Cambios sin commitear: el aviso rojo va a la derecha de todo lo de git.
             if tab.dirty > 0 {
                 let wb = rect(right - DIRTY_BTN_W, nb.top, right, nb.bottom);
                 if hover == PaneHit::DirtyButton {
@@ -817,9 +820,7 @@ impl Pane {
                 }
                 p.text(FontId::Glyphs, DIRTY_GLYPH, wb, th.danger);
                 self.dirty_button = wb;
-                let sx = wb.left - 6.0;
-                p.fill(rect(sx, nb.top + 5.0, sx + 1.0, nb.bottom - 5.0), alpha(th.text_dim, 0.6));
-                right = sx - 6.0;
+                right = wb.left - 4.0;
             }
             // Sincronizar con el remoto: verde si está al día, amarillo si hay para bajar; gira mientras
             // trabaja. Solo si la rama sigue a una remota (`tab.sync`). El texto, si el panel es ancho.
@@ -843,9 +844,7 @@ impl Pane {
                     p.text(FontId::Ui, t, rect(glyph_r.right, sb.top, sb.right - SYNC_TEXT_GAP, sb.bottom), th.text);
                 }
                 self.sync_button = sb;
-                let sx = sb.left - 6.0;
-                p.fill(rect(sx, nb.top + 5.0, sx + 1.0, nb.bottom - 5.0), alpha(th.text_dim, 0.6));
-                right = sx - 6.0;
+                right = sb.left - 4.0;
             }
             let label = g.head.label();
             // Ícono de rama + nombre + flecha hacia arriba (el menú se abre hacia arriba).

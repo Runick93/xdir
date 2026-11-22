@@ -1259,7 +1259,7 @@ fn branch_button_drawn_left_of_new_folder() {
     let (nb, vb) = a.panes[0].footer_buttons();
     let bb = a.panes[0].branch_button_rect();
     assert!(bb.right <= nb.left, "a la izquierda de «Carpeta nueva»");
-    assert_eq!(nb.left - bb.right, 6.0);
+    assert_eq!(nb.left - bb.right, 16.0, "con el separador de git en el medio");
     assert_eq!((bb.top, bb.bottom), (vb.top, vb.bottom));
     assert!(text_inside(&host, &bb, "main").is_some(), "el nombre dentro del botón");
     let (cx, cy) = center(&bb);

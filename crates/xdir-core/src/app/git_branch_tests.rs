@@ -908,6 +908,9 @@ fn switching_to_a_branch_without_remote_hides_the_sync_button() {
 fn sync_button_shows_its_title_beside_the_glyph() {
     let Some(r) = remote("s-texto") else { return };
     let (mut a, host) = app_synced(&r.work());
+    // Ancha: con el árbol lateral (feature `arbol`) el panel queda por debajo del mínimo para el texto.
+    host.client.set((2400.0, 900.0));
+    a.on_resized();
     a.paint();
     let t: Vec<String> = host.drawn_text_draws().into_iter().map(|x| x.1).collect();
     assert!(t.iter().any(|s| s == "Fetch origin"), "{t:?}");

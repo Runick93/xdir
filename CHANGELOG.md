@@ -36,6 +36,7 @@
 - Los mensajes de error dicen qué pasó, con qué elemento y qué hacer; en Windows avisan si el acceso controlado a carpetas (protección contra ransomware) bloqueó a xdir.
 
 ### Arreglos
+- En la Mac y Linux, el clic derecho en el fondo de una carpeta ofrecía «Anclar a Acceso rápido» y fallaba (el Acceso rápido es de Windows): ahora dice «Agregar a favoritos» o «Quitar de favoritos» y usa la barra de favoritos.
 - En la Mac, mover archivos a una carpeta de red (SMB) ya no falla con «No tenés permiso»: la copia se aseguraba en el disco de una forma que esos servidores rechazan.
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.

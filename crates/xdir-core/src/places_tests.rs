@@ -149,3 +149,29 @@ fn places_add_folder_user_folder_unhides() {
     assert_eq!(p.order, builtins());
     crate::sys::testing::FakeFileSystem::set_user_folders(&[]);
 }
+
+/// Soltar una carpeta entre dos lugares la agrega ahí (delante de `before`; sin él, al final). Si
+/// ya era una carpeta propia, se mueve a ese lugar en vez de repetirse.
+#[test]
+fn places_add_folder_at_position() {
+    install_fakes();
+    let mut p = Places::default();
+    let a = std::env::temp_dir().join("xdir-lugar-a");
+    let b = std::env::temp_dir().join("xdir-lugar-b");
+    p.add_folder_at(a.clone(), Some(&Place::Trash));
+    assert_eq!(p.order[6], Place::Folder(a.clone()));
+    assert_eq!(p.order[7], Place::Trash);
+    p.add_folder_at(b.clone(), None);
+    assert_eq!(p.order.last(), Some(&Place::Folder(b.clone())));
+    // Ya estaba: se mueve delante del Escritorio, sin repetirse.
+    p.add_folder_at(b.clone(), Some(&Place::User(0)));
+    assert_eq!(p.order[0], Place::Folder(b.clone()));
+    assert_eq!(p.order.iter().filter(|x| **x == Place::Folder(b.clone())).count(), 1);
+    assert_eq!(p.order.len(), 10);
+    // Delante de sí misma: queda donde está.
+    p.add_folder_at(b.clone(), Some(&Place::Folder(b.clone())));
+    assert_eq!(p.order[0], Place::Folder(b));
+    // Relativa: no se agrega.
+    p.add_folder_at(PathBuf::from("papelera"), None);
+    assert_eq!(p.order.len(), 10);
+}

@@ -390,6 +390,12 @@ impl App {
             self.set_drop_targets(None);
             return;
         }
+        // Entre los lugares del árbol: agregar la carpeta como lugar (como en la barra del Finder).
+        #[cfg(feature = "arbol")]
+        if self.on_drag_places(ev, x, y) {
+            self.set_drop_targets(None);
+            return;
+        }
         let target = match ev.kind {
             DragKind::Leave => None,
             _ => self.drop_folder(x, y),

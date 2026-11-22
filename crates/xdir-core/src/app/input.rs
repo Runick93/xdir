@@ -506,9 +506,21 @@ impl App {
         self.ghost = None;
         match drag {
             Drag::Button(i, b) if self.hit(x, y) == Hit::Pane(i, PaneHit::Button(b)) => self.on_button(i, b),
-            Drag::Tab { pane, index, .. } => {
+            Drag::Tab { pane, index, moved, .. } => {
+                #[cfg(feature = "arbol")]
+                let gap = if moved { self.tab_place_gap(pane, index, x, y) } else { None };
+                #[cfg(feature = "arbol")]
+                self.set_place_drop(None);
                 if let Some((to, at)) = tab_drop {
                     self.move_tab_to_pane(pane, index, to, at);
+                }
+                #[cfg(feature = "arbol")]
+                if let Some(gap) = gap
+                    && let Location::Path(path) = &self.panes[pane].tabs[index].location
+                {
+                    // La pestaña vuelve a su lugar; su carpeta queda como lugar.
+                    let path = path.clone();
+                    self.add_dropped_places(vec![path], gap.before);
                 }
             }
             Drag::Fav { pane, index, moved: false, .. } => self.activate_fav(pane, &[index], key_down(VK_CONTROL)),
@@ -590,6 +602,12 @@ impl App {
                         _ => None,
                     };
                     self.tab_drop = target;
+                    // Sobre los lugares del árbol: la línea de dónde quedaría su carpeta.
+                    #[cfg(feature = "arbol")]
+                    {
+                        let row = self.tab_place_gap(pane, index, x, y).map(|g| g.row);
+                        self.set_place_drop(row);
+                    }
                     // Acoplada mientras el mouse está sobre la tira del panel de la pestaña; fuera de
                     // las tiras se despega y flota.
                     let docked = in_strip(hit) == Some(pane);

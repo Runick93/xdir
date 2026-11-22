@@ -203,3 +203,113 @@ fn places_page_narrow_keeps_names() {
     assert!(a.places_hits.iter().any(|(_, h)| matches!(h, PlaceHit::Remove(_))));
     cleanup(&root);
 }
+
+// ---------- soltar entre los lugares del árbol ----------
+
+fn drag_dirs(a: &mut App, kind: crate::drop::DragKind, point: (f32, f32), paths: &[PathBuf]) -> crate::drop::Effect {
+    use crate::drop::{DragEvent, Effect};
+    let mut ev = DragEvent { kind, point, ctrl: false, shift: false, paths: Some(paths), allowed: Effect::ALL, effect: Effect::NONE };
+    a.on_drag(&mut ev);
+    ev.effect
+}
+
+/// El borde de arriba de la fila del árbol con ese nombre (donde va la línea de inserción).
+fn row_top_edge(a: &App, name: &str) -> (f32, f32) {
+    let (x, y) = a.tree.row_point(name).unwrap_or_else(|| panic!("la fila {name}"));
+    (x, y - 12.0)
+}
+
+/// Mac y Linux (sin Acceso rápido): soltar una carpeta entre dos lugares la agrega ahí como
+/// carpeta propia, como la barra lateral del Finder; no se copia ni se mueve nada.
+#[test]
+fn dropping_a_folder_between_places_adds_it_there() {
+    use crate::drop::{DragKind, Effect};
+    let root = temp_root("soltar-entre");
+    let own = root.join("proyectos");
+    std::fs::create_dir_all(&own).unwrap();
+    let (mut a, _host) = places_app(&root);
+    let at = row_top_edge(&a, "Descargas");
+    let paths = vec![own.clone()];
+    assert_eq!(drag_dirs(&mut a, DragKind::Enter, at, &paths), Effect::LINK);
+    assert!(a.tree.place_drop.is_some(), "se ve la línea de inserción");
+    assert_eq!(a.tree.drop_target, None, "no se resalta la carpeta: no se suelta adentro");
+    assert_eq!(drag_dirs(&mut a, DragKind::Drop, at, &paths), Effect::LINK);
+    a.tree.drag_end(false);
+    assert_eq!(a.tree.place_drop, None);
+    assert_eq!(&a.places.order[..3], &[Place::User(0), Place::Folder(own.clone()), Place::User(1)]);
+    a.paint();
+    assert!(a.tree.row_point("proyectos").is_some(), "aparece en el árbol");
+    assert!(!FakeShell::take_calls().iter().any(|c| matches!(c, ShellCall::PinQuickAccess(_))));
+    // Un archivo no es un lugar: el medio de la fila sigue siendo soltar adentro.
+    let file = root.join("nota.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let mid = a.tree.row_point("Descargas").unwrap();
+    assert_eq!(drag_dirs(&mut a, DragKind::Over, mid, &[file]), Effect::MOVE);
+    assert_eq!(a.tree.place_drop, None);
+    cleanup(&root);
+}
+
+/// Una vigilancia de mentira: con ella la `App` cree que el sistema tiene Acceso rápido (Windows).
+struct QuickWatch;
+impl crate::sys::Watch for QuickWatch {}
+
+/// Windows: lo soltado entre los lugares se ancla al Acceso rápido del sistema y, si su grupo
+/// estaba oculto, vuelve a verse.
+#[test]
+fn dropping_between_places_pins_to_quick_access_where_it_exists() {
+    use crate::drop::{DragKind, Effect};
+    let root = temp_root("soltar-acceso");
+    let own = root.join("proyectos");
+    std::fs::create_dir_all(&own).unwrap();
+    let (mut a, _host) = places_app(&root);
+    a.quick_watch = Some(Box::new(QuickWatch));
+    a.places.hidden.push(Place::QuickAccess);
+    FakeShell::take_calls();
+    let at = row_top_edge(&a, "Descargas");
+    assert_eq!(drag_dirs(&mut a, DragKind::Drop, at, &[own.clone()]), Effect::LINK);
+    assert!(FakeShell::take_calls().contains(&ShellCall::PinQuickAccess(own.clone())));
+    assert!(!a.places.is_hidden(&Place::QuickAccess), "el Acceso rápido vuelve a verse");
+    assert!(!a.places.order.contains(&Place::Folder(own)), "no queda como carpeta propia");
+    cleanup(&root);
+}
+
+/// Arrastrar una pestaña entre los lugares del árbol agrega su carpeta; la pestaña se queda donde
+/// estaba.
+#[test]
+fn dropping_a_tab_between_places_adds_its_folder() {
+    let root = temp_root("soltar-pestana");
+    let own = root.join("trabajo");
+    std::fs::create_dir_all(&own).unwrap();
+    let (mut a, _host) = places_app(&root);
+    a.new_tab(0, crate::fs::Location::Path(own.clone()), true);
+    a.paint();
+    let tabs = a.panes[0].tabs.len();
+    let index = a.panes[0].tabs.iter().position(|t| t.location == crate::fs::Location::Path(own.clone())).unwrap();
+    let (tx, ty) = point_of(&a, super::Hit::Pane(0, crate::pane::PaneHit::Tab(index)));
+    a.on_left_down(tx, ty, false);
+    let (x, y) = row_top_edge(&a, "Escritorio");
+    a.on_mouse_move(tx + 40.0, ty + 40.0);
+    a.on_mouse_move(x, y);
+    assert!(a.tree.place_drop.is_some(), "se ve la línea de inserción");
+    a.on_left_up(x, y);
+    assert_eq!(a.tree.place_drop, None);
+    assert_eq!(a.places.order[0], Place::Folder(own.clone()), "va delante del Escritorio");
+    assert_eq!(a.panes[0].tabs.len(), tabs, "la pestaña sigue ahí");
+    cleanup(&root);
+}
+
+fn point_of(a: &App, want: super::Hit) -> (f32, f32) {
+    let (w, h) = a.client_dips();
+    let mut y = 0.0;
+    while y < h {
+        let mut x = 0.0;
+        while x < w {
+            if a.hit(x, y) == want {
+                return (x, y);
+            }
+            x += 2.0;
+        }
+        y += 2.0;
+    }
+    panic!("no se encontró {want:?}");
+}

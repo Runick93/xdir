@@ -4,10 +4,10 @@
 
 ### Nuevo
 - **Esc cancela un arrastre** de una pestaña, una carpeta del árbol, un favorito o lo elegido dentro de un comprimido: todo queda como estaba (una pestaña ya movida a otro panel o a otra posición vuelve a su lugar).
-- **Acceso rápido en la Mac y Linux**: como en Windows, las carpetas ancladas se ven en el árbol, con su chincheta para desanclarlas. Se anclan con «Anclar a Acceso rápido» (clic derecho en una carpeta del árbol o de la lista, en el fondo de la carpeta o en el encabezado de columnas) o soltándolas entre los lugares del árbol. Se guardan en `acceso_rapido.txt`, que también se puede editar a mano. El menú del encabezado de columnas suma «Agregar a favoritos» y «Anclar a Acceso rápido» en las 3 plataformas.
+- **Agregar a Lugares**, igual en las 3 plataformas: el clic derecho en una carpeta del árbol o de la lista, en el fondo de la carpeta o en el encabezado de columnas suma «Agregar a Lugares» (o «Quitar de Lugares»), que la deja en el árbol como carpeta propia. El encabezado de columnas también suma «Agregar a favoritos». En Windows, el Acceso rápido del Explorador sigue viéndose como un lugar más, sincronizado con el Explorador.
 - «Acerca de xdir» dice que es para Windows, macOS y Linux y suma el ícono de GitHub abajo a la derecha, que abre el repositorio.
 - Abrir una carpeta desde el árbol o desde los favoritos ya no desplaza el árbol hasta su ubicación real: la rama se despliega igual, pero la vista se queda donde estaba.
-- Arrastrá una carpeta (de la lista, del mismo árbol o de otra aplicación) o una pestaña **entre dos lugares** del árbol para sumarla, como en la barra lateral del Finder (una línea marca dónde queda): se ancla al Acceso rápido y, si estaba oculto, vuelve a verse. Soltar sobre una carpeta sigue moviendo o copiando adentro.
+- Arrastrá una carpeta (de la lista, del mismo árbol o de otra aplicación) o una pestaña **entre dos lugares** del árbol para sumarla ahí, como en la barra lateral del Finder (una línea marca dónde queda). Soltar sobre una carpeta sigue moviendo o copiando adentro.
 - Esc después de cortar deja de cortar: lo cortado sale del portapapeles y vuelve a verse normal (si hay un filtro escrito, el siguiente Esc lo borra).
 - Lo cortado (Ctrl+X / ⌘X) se ve con el ícono atenuado hasta que se pega, como en el Explorador; también lo que se corta en el Explorador.
 - El logo de Runick de «Acerca de xdir» ahora está animado.
@@ -38,7 +38,7 @@
 - Los mensajes de error dicen qué pasó, con qué elemento y qué hacer; en Windows avisan si el acceso controlado a carpetas (protección contra ransomware) bloqueó a xdir.
 
 ### Arreglos
-- En la Mac y Linux, «Anclar a Acceso rápido» ya no falla: ahora hay Acceso rápido propio (ver Nuevo).
+- En la Mac y Linux, el clic derecho en el fondo de una carpeta ofrecía «Anclar a Acceso rápido» y fallaba (el Acceso rápido es de Windows): ahora ofrece «Agregar a Lugares».
 - En la Mac, mover archivos a una carpeta de red (SMB) ya no falla con «No tenés permiso»: la copia se aseguraba en el disco de una forma que esos servidores rechazan.
 - La vista previa de algo dentro de un comprimido ya no puede quedar vacía si se pasó a otro elemento y se volvió justo cuando terminaba de extraerse.
 - Con «El árbol sigue al panel», ir a una carpeta desde los favoritos o el Acceso rápido también despliega su ubicación real en el árbol.

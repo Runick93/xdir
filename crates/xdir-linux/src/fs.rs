@@ -145,17 +145,16 @@ impl FileSystem for LinuxFileSystem {
         Vec::new()
     }
 
-    /// Acceso rápido: el propio de xdir (`xdir_core::quick_own`).
     fn quick_access(&self) -> Vec<QuickItem> {
-        xdir_core::quick_own::items()
+        Vec::new()
     }
 
-    fn is_quick_pinned(&self, path: &Path) -> bool {
-        xdir_core::quick_own::is_pinned(path)
+    fn is_quick_pinned(&self, _path: &Path) -> bool {
+        false
     }
 
     fn quick_access_watch_dir(&self) -> Option<PathBuf> {
-        xdir_core::quick_own::watch_dir()
+        None
     }
 
     /// En Linux no hay nombres cortos.

@@ -220,13 +220,12 @@ impl Shell for LinuxShell {
         Err(UNAVAILABLE.into())
     }
 
-    /// Acceso rápido: el propio de xdir (`xdir_core::quick_own`).
-    fn pin_quick_access(&self, _owner: Handle, path: &Path) -> Result<(), String> {
-        xdir_core::quick_own::pin(path)
+    fn pin_quick_access(&self, _owner: Handle, _path: &Path) -> Result<(), String> {
+        Err(UNAVAILABLE.into())
     }
 
-    fn unpin_quick_access(&self, _owner: Handle, path: &Path) -> Result<(), String> {
-        xdir_core::quick_own::unpin(path)
+    fn unpin_quick_access(&self, _owner: Handle, _path: &Path) -> Result<(), String> {
+        Err(UNAVAILABLE.into())
     }
 
     /// Sin menús nativos no hay modo que fijar.
@@ -286,6 +285,7 @@ mod tests {
         assert_eq!(sh.pick_folder(Handle(0), "x"), None);
         assert_eq!(sh.paste_virtual(Handle(0), &Location::Computer), Err(UNAVAILABLE.to_string()));
         assert_eq!(sh.invoke_verb(Handle(0), &Location::Computer, &items, "delete"), Err(UNAVAILABLE.to_string()));
+        assert_eq!(sh.pin_quick_access(Handle(0), Path::new("/")), Err(UNAVAILABLE.to_string()));
         assert_eq!(sh.context_menu(Handle(0), &Location::Computer, &items, (0.0, 0.0), false, true, &[], false), None);
     }
 

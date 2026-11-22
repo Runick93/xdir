@@ -542,8 +542,7 @@ impl App {
         // Sin el árbol no se agrega nada después.
         let mut entries = new_entries;
         entries.extend([views, sorts, groupings, item("Actualizar", Command::Refresh, true, false), Entry::Sep, item("Pegar", Command::Paste, true, false), undo]);
-        // Favoritos y Acceso rápido de la carpeta que se está viendo (el menú del fondo del Shell
-        // no trae anclar).
+        // Favoritos y Lugares de la carpeta que se está viendo.
         if pane == self.active {
             let pins = self.pin_entries(pane, &mut item);
             if !pins.is_empty() {
@@ -554,9 +553,9 @@ impl App {
         entries
     }
 
-    /// «Agregar a favoritos» (o «Quitar de favoritos») y, donde hay Acceso rápido, «Anclar a
-    /// Acceso rápido» (o «Desanclar…») para la carpeta del panel `pane`. Los comparten el menú del
-    /// fondo y el del encabezado de columnas; `item` arma cada ítem.
+    /// «Agregar a favoritos» (o «Quitar de favoritos») y, con el árbol, «Agregar a Lugares» (o
+    /// «Quitar de Lugares») para la carpeta del panel `pane`. Los comparten el menú del fondo y el
+    /// del encabezado de columnas; `item` arma cada ítem.
     pub(super) fn pin_entries(&self, pane: usize, item: &mut dyn FnMut(&str, Command, bool, bool) -> shell::Entry) -> Vec<shell::Entry> {
         let location = &self.panes[pane].tab().location;
         let Location::Path(p) = location else { return Vec::new() };
@@ -567,10 +566,7 @@ impl App {
         #[cfg_attr(not(feature = "arbol"), allow(unused_mut))]
         let mut out = vec![item(if fav { "Quitar de favoritos" } else { "Agregar a favoritos" }, Command::ToggleFavorite, true, false)];
         #[cfg(feature = "arbol")]
-        if super::places_page::has_quick_access(self) {
-            let label = if self.tree.is_pinned(p) { "Desanclar de Acceso rápido" } else { "Anclar a Acceso rápido" };
-            out.push(item(label, Command::ToggleQuickPin, true, false));
-        }
+        out.push(item(super::places_page::place_label(self.is_place(p)), Command::TogglePlace, true, false));
         out
     }
 
@@ -668,17 +664,15 @@ impl App {
             (false, true) => self.item_entries(&mut cmds),
             _ => Vec::new(),
         });
-        // Una sola carpeta elegida, donde el menú del sistema no trae anclar (Mac, Linux): la
-        // entrada del Acceso rápido propio. Su id apunta a un comando de relleno (se resuelve acá).
+        // Una sola carpeta elegida: «Agregar a Lugares» (o «Quitar…»). Su id apunta a un comando
+        // de relleno (se resuelve acá, con la carpeta elegida).
         #[cfg(feature = "arbol")]
         let own_pin = match (items.as_slice(), intercept) {
             ([one], true) if one.pidl.is_none() && crate::fs::probe_dir(&one.path) == Some(true) => {
-                self.own_quick_pin_entry(&one.path, cmds.len() as u32).map(|e| {
-                    own.push(shell::Entry::Sep);
-                    own.push(e);
-                    cmds.push(Command::ToggleQuickPin);
-                    (cmds.len() - 1, one.path.clone())
-                })
+                own.push(shell::Entry::Sep);
+                own.push(self.place_entry(&one.path, cmds.len() as u32));
+                cmds.push(Command::TogglePlace);
+                Some((cmds.len() - 1, one.path.clone()))
             }
             _ => None,
         };
@@ -710,7 +704,7 @@ impl App {
         if let Some(cmd) = chosen.as_deref().and_then(|c| c.strip_prefix("own:")).and_then(|n| n.parse::<usize>().ok()) {
             #[cfg(feature = "arbol")]
             if let Some((_, path)) = own_pin.filter(|(id, _)| *id == cmd) {
-                self.toggle_quick_pin(path);
+                self.toggle_place(path);
                 self.redraw();
                 return;
             }

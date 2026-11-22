@@ -289,6 +289,16 @@ struct NewWatch {
     since: Instant,
 }
 
+/// La pestaña al empezar a arrastrarla: panel, posición, su id y si era la única del panel (al
+/// llevarla a otro panel, el de origen recibe una pestaña nueva).
+#[derive(Clone, Copy, Debug)]
+struct TabDragFrom {
+    pane: usize,
+    index: usize,
+    id: usize,
+    alone: bool,
+}
+
 /// Vista previa flotante de la pestaña que se arrastra: acompaña al mouse y se acopla a las tiras.
 struct Ghost {
     title: String,
@@ -437,6 +447,8 @@ pub struct App {
     /// Carpeta abierta con un clic en el árbol: al seguirla no se desplaza (`follow_tree`).
     #[cfg(feature = "arbol")]
     tree_quiet: Option<Location>,
+    /// De dónde salió la pestaña que se arrastra, para volverla ahí si se cancela con Esc.
+    tab_drag_from: Option<TabDragFrom>,
     /// La carpeta del árbol que se arrastra (`Drag::TreeRow`).
     #[cfg(feature = "arbol")]
     tree_drag: Option<PathBuf>,
@@ -744,6 +756,7 @@ impl App {
             tree_followed: None,
             #[cfg(feature = "arbol")]
             tree_quiet: None,
+            tab_drag_from: None,
             #[cfg(feature = "arbol")]
             tree_drag: None,
             groups_menu_closed: None,

@@ -3,6 +3,7 @@
 ## Sin publicar
 
 ### Nuevo
+- **Esc cancela un arrastre** de una pestaña, una carpeta del árbol, un favorito o lo elegido dentro de un comprimido: todo queda como estaba (una pestaña ya movida a otro panel o a otra posición vuelve a su lugar).
 - **Acceso rápido en la Mac y Linux**: como en Windows, las carpetas ancladas se ven en el árbol, con su chincheta para desanclarlas. Se anclan con «Anclar a Acceso rápido» (clic derecho en una carpeta del árbol o de la lista, en el fondo de la carpeta o en el encabezado de columnas) o soltándolas entre los lugares del árbol. Se guardan en `acceso_rapido.txt`, que también se puede editar a mano. El menú del encabezado de columnas suma «Agregar a favoritos» y «Anclar a Acceso rápido» en las 3 plataformas.
 - «Acerca de xdir» dice que es para Windows, macOS y Linux y suma el ícono de GitHub abajo a la derecha, que abre el repositorio.
 - Abrir una carpeta desde el árbol o desde los favoritos ya no desplaza el árbol hasta su ubicación real: la rama se despliega igual, pero la vista se queda donde estaba.

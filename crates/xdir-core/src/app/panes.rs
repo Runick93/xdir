@@ -46,20 +46,31 @@ impl App {
         self.quick_watch = sys::file_system().quick_access_watch_dir().and_then(|dir| sys::file_system().watch(self.hwnd, tree::WM_APP_QUICK, 0, 0, &dir));
     }
 
-    /// Menú contextual nativo de una carpeta del árbol (incluye "Anclar a Acceso rápido" /
-    /// "Desanclar de Acceso rápido"); al cerrarse se relee el Acceso rápido.
+    /// Menú contextual nativo de una carpeta del árbol, con «Agregar a Lugares» (o «Quitar…»); en
+    /// Windows trae además "Anclar a Acceso rápido" / "Desanclar de Acceso rápido" del sistema, y al
+    /// cerrarse se relee el Acceso rápido.
     #[cfg(feature = "arbol")]
     pub(super) fn tree_context_menu(&mut self, path: PathBuf, at: (f32, f32)) {
         let items = [shell::Item::from(path.clone())];
         let pinned = self.tree.is_pinned(&path);
-        let chosen = sys::shell().context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &[], pinned);
-        if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
+        let own = [shell::Entry::Sep, self.place_entry(&path, 0)];
+        let chosen = sys::shell().context_menu(self.hwnd, &Location::Path(path.clone()), &items, at, key_down(VK_SHIFT), false, &own, pinned);
+        if chosen.as_deref() == Some("own:0") {
+            self.toggle_place(path);
+        } else if chosen.as_deref() == Some(shell::UNPIN_QUICK) {
             self.toggle_quick_pin(path);
         } else if chosen.is_some() {
             self.tree.request_quick(self.hwnd);
             self.tree.on_mouse_leave();
         }
         self.redraw();
+    }
+
+    /// «Agregar a Lugares» / «Quitar de Lugares» para la carpeta `path`, como entrada propia de un
+    /// menú contextual (con id `id`).
+    #[cfg(feature = "arbol")]
+    pub(super) fn place_entry(&self, path: &std::path::Path, id: u32) -> shell::Entry {
+        shell::Entry::Item { id, label: super::places_page::place_label(self.is_place(path)).into(), enabled: true, checked: false }
     }
 
     /// Ancla la carpeta al Acceso rápido de Windows, o la desancla si ya lo está (verbos nativos
@@ -97,10 +108,16 @@ impl App {
             return;
         }
         self.tree_followed = Some(current.clone());
+        // Abierta desde el árbol (un lugar, un favorito): se despliega su rama sin mover la vista.
+        let quiet = self.tree_quiet.take().is_some_and(|l| &l == current);
         // Solo carpetas de disco: "Este equipo" y las ubicaciones del Shell no están en el árbol.
         if let Location::Path(p) = current {
             let p = p.clone();
-            self.tree.reveal(self.hwnd, &p, self.show_hidden);
+            if quiet {
+                self.tree.reveal_without_scroll(self.hwnd, &p, self.show_hidden);
+            } else {
+                self.tree.reveal(self.hwnd, &p, self.show_hidden);
+            }
         }
     }
 
@@ -120,6 +137,13 @@ impl App {
         match self.tree.hit(x, y) {
             tree::TreeHit::Toggle(id) => self.tree.toggle(self.hwnd, id, self.show_hidden),
             tree::TreeHit::Open(loc) => {
+                // Una carpeta se puede arrastrar entre los lugares del árbol (al soltar).
+                if let Location::Path(p) = &loc {
+                    self.tree_drag = Some(p.clone());
+                    self.drag = Drag::TreeRow { start_x: x, start_y: y, moved: false };
+                    self.host.capture_mouse();
+                }
+                self.tree_quiet = Some(loc.clone());
                 let (hwnd, tx) = (self.hwnd, self.tx.clone());
                 self.tab_mut().navigate(hwnd, &tx, loc);
             }
@@ -289,15 +313,38 @@ impl App {
         };
         let views = self.views_submenu(pane, &mut item);
         let (sorts, groupings) = self.sort_group_submenus(pane, &mut item);
+        // Favoritos y Lugares de la carpeta del panel, como en el menú del fondo (en carpetas
+        // llenas no queda fondo libre para el clic derecho).
+        let pins = self.pin_entries(pane, &mut item);
         entries.push(views);
         entries.push(sorts);
         entries.push(groupings);
         entries.push(shell::Entry::Sep);
         entries.push(shell::Entry::Item { id: RESET as u32, label: "Columnas de fábrica".into(), enabled: true, checked: false });
+        if !pins.is_empty() {
+            entries.push(shell::Entry::Sep);
+            entries.extend(pins);
+        }
         let cmd = self.host.popup_menu(&entries, MenuPos::At(at.0, at.1), None, None).map_or(0, |c| c as usize);
         match cmd {
             c if c >= SUB_BASE as usize => {
                 // Lo mismo que en el menú del fondo, pero sobre el panel del encabezado.
+                match cmds.get(c - SUB_BASE as usize) {
+                    Some(&Command::ToggleFavorite) => {
+                        self.toggle_favorite(pane);
+                        self.redraw();
+                        return;
+                    }
+                    Some(&Command::TogglePlace) => {
+                        #[cfg(feature = "arbol")]
+                        if let Location::Path(p) = self.panes[pane].tab().location.clone() {
+                            self.toggle_place(p);
+                        }
+                        self.redraw();
+                        return;
+                    }
+                    _ => {}
+                }
                 let list = &mut self.panes[pane].tab_mut().list;
                 match cmds.get(c - SUB_BASE as usize) {
                     Some(&Command::View(i)) => match list::VIEWS.get(i as usize) {

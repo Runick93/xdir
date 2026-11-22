@@ -16,6 +16,39 @@ pub const FAVBAR_H: f32 = 30.0;
 const FOOTER_H: f32 = 30.0;
 const VIEW_BTN_W: f32 = 36.0;
 const FOOTER_BTN_H: f32 = 26.0;
+/// Ancho máximo del botón con la rama del pie, y el margen del texto dentro de él.
+pub const BRANCH_BTN_MAX_W: f32 = 180.0;
+const BRANCH_BTN_PAD: f32 = 8.0;
+/// Ancho del ícono de rama, de la flecha de la derecha y separación entre las tres partes.
+const BRANCH_ICON_W: f32 = 14.0;
+const BRANCH_CHEV_W: f32 = 12.0;
+const BRANCH_GAP: f32 = 6.0;
+/// Ancho del botón de sincronizar y su glifo (Segoe Fluent Icons «Sync»).
+const SYNC_BTN_W: f32 = 28.0;
+/// Aire entre el texto del botón de sincronizar y el borde; y su tope.
+const SYNC_TEXT_GAP: f32 = 8.0;
+const SYNC_TEXT_MAX_W: f32 = 170.0;
+/// Ancho mínimo del panel (hasta «Carpeta nueva») para escribir el texto junto al ícono.
+const SYNC_TEXT_MIN_PANE_W: f32 = 440.0;
+const SYNC_GLYPH: &str = "\u{E895}";
+/// Ancho del aviso de cambios sin commitear y su glifo (Segoe Fluent Icons «Warning»).
+const DIRTY_BTN_W: f32 = 28.0;
+const DIRTY_GLYPH: &str = "\u{E7BA}";
+
+/// Ícono de rama de git (no hay un glifo en la fuente de íconos): un tronco con un círculo
+/// arriba y otro abajo, y otro círculo arriba a la derecha unido al tronco por una curva.
+/// `x`: borde izquierdo del ícono (de `BRANCH_ICON_W` de ancho); `cy`: su centro vertical.
+fn draw_branch_icon(p: &dyn Painter, x: f32, cy: f32, c: Color) {
+    const R: f32 = 2.2;
+    const W: f32 = 1.5;
+    let (stem, side) = (x + 3.0, x + BRANCH_ICON_W - 3.0);
+    let (top, bottom) = (cy - 5.0, cy + 5.0);
+    p.rounded_path(&[(stem, top + R, 0.0), (stem, bottom - R, 0.0)], false, None, Some((c, W)));
+    p.rounded_path(&[(side, top + R, 0.0), (side, cy - 1.0, 4.0), (stem, cy + 2.5, 0.0)], false, None, Some((c, W)));
+    for (px, py) in [(stem, top), (stem, bottom), (side, top)] {
+        p.circle_stroke(px, py, R, c, W);
+    }
+}
 const PANE_RADIUS: f32 = 8.0;
 /// Inclinación de los lados de las pestañas.
 const TAB_SLANT: f32 = 10.0;
@@ -131,6 +164,12 @@ pub enum PaneHit {
     /// Botón del pie del panel: pasa a la vista siguiente (como Ctrl+rueda).
     ViewButton,
     NewFolderButton,
+    /// Botón del pie con la rama actual del repositorio (a la izquierda de «Carpeta nueva»).
+    BranchButton,
+    /// El botón de sincronizar con el remoto, a la izquierda del de rama.
+    SyncButton,
+    /// El aviso rojo de cambios sin commitear, a la derecha del botón de sincronizar (solo informa).
+    DirtyButton,
     /// Botón «Devolver» junto a la barra de dirección (solo en la Papelera).
     Restore,
     /// Un botón del aviso de una carpeta de red que tarda («Reintentar», «Cerrar la pestaña»).
@@ -204,6 +243,10 @@ pub struct Pane {
     pub favbar: Rect,
     view_button: Rect,
     new_folder_button: Rect,
+    /// Botón de la rama actual (vacío si la pestaña no está en un repositorio).
+    branch_button: Rect,
+    sync_button: Rect,
+    dirty_button: Rect,
     /// Con la Papelera a la vista, el botón «Devolver» (encendido si hay selección); lo pone la
     /// `App` antes de dibujar.
     pub restore: Option<bool>,
@@ -219,6 +262,17 @@ impl Pane {
     #[cfg(test)]
     pub fn footer_buttons(&self) -> (Rect, Rect) {
         (self.new_folder_button, self.view_button)
+    }
+
+    /// Botón de la rama en el último cuadro (vacío si no hay): de ahí se abre el menú de ramas.
+    pub fn branch_button_rect(&self) -> Rect {
+        self.branch_button
+    }
+
+    /// El botón de sincronizar del último cuadro (vacío si no hay). Pruebas de `App`.
+    #[cfg(test)]
+    pub fn sync_button_rect(&self) -> Rect {
+        self.sync_button
     }
 
     pub fn new(tabs: Vec<Tab>, active: usize) -> Self {
@@ -255,6 +309,9 @@ impl Pane {
             view_button: zero,
             loading_card: None,
             new_folder_button: zero,
+            branch_button: zero,
+            sync_button: zero,
+            dirty_button: zero,
             restore: None,
             restore_button: zero,
             list: zero,
@@ -482,6 +539,15 @@ impl Pane {
         if contains(&self.favbar, x, y) {
             return PaneHit::FavBar;
         }
+        if contains(&self.dirty_button, x, y) {
+            return PaneHit::DirtyButton;
+        }
+        if contains(&self.sync_button, x, y) {
+            return PaneHit::SyncButton;
+        }
+        if contains(&self.branch_button, x, y) {
+            return PaneHit::BranchButton;
+        }
         if contains(&self.new_folder_button, x, y) {
             return PaneHit::NewFolderButton;
         }
@@ -708,6 +774,9 @@ impl Pane {
         if self.tabs[self.active].is_page() {
             self.view_button = rect(0.0, 0.0, 0.0, 0.0);
             self.new_folder_button = rect(0.0, 0.0, 0.0, 0.0);
+            self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
+            self.sync_button = rect(0.0, 0.0, 0.0, 0.0);
+            self.dirty_button = rect(0.0, 0.0, 0.0, 0.0);
             p.fill(rect(area.left + 1.0, area.bottom - FOOTER_H, area.right - 1.0, area.bottom - FOOTER_H + 1.0), th.border);
             let stroke = if active_pane { (th.accent, 1.5) } else { (th.border, 1.0) };
             p.rounded_path(&outline, true, None, Some(stroke));
@@ -731,6 +800,69 @@ impl Pane {
         }
         p.text(FontId::Glyphs, "\u{E8F4}", nb, th.text_dim);
         self.new_folder_button = nb;
+        // Botón con la rama actual, a la izquierda de «Carpeta nueva»: solo en carpetas de disco
+        // dentro de un repositorio (un `git` viejo junto a otro lugar no se muestra).
+        self.branch_button = rect(0.0, 0.0, 0.0, 0.0);
+        self.sync_button = rect(0.0, 0.0, 0.0, 0.0);
+        self.dirty_button = rect(0.0, 0.0, 0.0, 0.0);
+        let tab = &self.tabs[self.active];
+        if let (Location::Path(_), Some(g)) = (&tab.location, &tab.git) {
+            // De derecha a izquierda: el aviso de cambios, sincronizar (ícono + texto) y la rama.
+            // Un solo separador aparta lo de git de «Carpeta nueva» y las vistas.
+            let sep = nb.left - 8.0;
+            p.fill(rect(sep, nb.top + 5.0, sep + 1.0, nb.bottom - 5.0), alpha(th.text_dim, 0.6));
+            let mut right = sep - 8.0;
+            // Cambios sin commitear: el aviso rojo va a la derecha de todo lo de git.
+            if tab.dirty > 0 {
+                let wb = rect(right - DIRTY_BTN_W, nb.top, right, nb.bottom);
+                if hover == PaneHit::DirtyButton {
+                    p.round_fill(wb, 6.0, th.hover);
+                }
+                p.text(FontId::Glyphs, DIRTY_GLYPH, wb, th.danger);
+                self.dirty_button = wb;
+                right = wb.left - 4.0;
+            }
+            // Sincronizar con el remoto: verde si está al día, amarillo si hay para bajar; gira mientras
+            // trabaja. Solo si la rama sigue a una remota (`tab.sync`). El texto, si el panel es ancho.
+            if let Some(sv) = tab.sync {
+                let text = tab.sync_text.as_ref().map(|t| t.0.as_str()).filter(|_| nb.left - area.left >= SYNC_TEXT_MIN_PANE_W);
+                let text_w = text.map_or(0.0, |t| p.measure(FontId::Ui, t).min(SYNC_TEXT_MAX_W) + SYNC_TEXT_GAP);
+                let sb = rect(right - SYNC_BTN_W - text_w, nb.top, right, nb.bottom);
+                let glyph_r = rect(sb.left, sb.top, sb.left + SYNC_BTN_W, sb.bottom);
+                if hover == PaneHit::SyncButton {
+                    let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
+                    p.round_fill(sb, 6.0, c);
+                }
+                let color = if sv.behind > 0 { th.warning } else { th.ok };
+                let mut glyph = || p.text(FontId::Glyphs, SYNC_GLYPH, glyph_r, color);
+                if sv.spinning {
+                    p.rotated(spin_degrees(), (glyph_r.left + glyph_r.right) / 2.0, (glyph_r.top + glyph_r.bottom) / 2.0, &mut glyph);
+                } else {
+                    glyph();
+                }
+                if let Some(t) = text {
+                    p.text(FontId::Ui, t, rect(glyph_r.right, sb.top, sb.right - SYNC_TEXT_GAP, sb.bottom), th.text);
+                }
+                self.sync_button = sb;
+                right = sb.left - 4.0;
+            }
+            let label = g.head.label();
+            // Ícono de rama + nombre + flecha hacia arriba (el menú se abre hacia arriba).
+            let fixed = 2.0 * BRANCH_BTN_PAD + BRANCH_ICON_W + BRANCH_GAP + BRANCH_GAP + BRANCH_CHEV_W;
+            let w = (p.measure(FontId::Ui, label) + fixed).min(BRANCH_BTN_MAX_W);
+            let bb = rect(right - w, nb.top, right, nb.bottom);
+            if hover == PaneHit::BranchButton {
+                let c = if pressed == hover { alpha(th.text, 0.12) } else { th.hover };
+                p.round_fill(bb, 6.0, c);
+            }
+            draw_branch_icon(p, bb.left + BRANCH_BTN_PAD, (bb.top + bb.bottom) / 2.0, th.accent);
+            let text_l = bb.left + BRANCH_BTN_PAD + BRANCH_ICON_W + BRANCH_GAP;
+            let text_r = bb.right - BRANCH_BTN_PAD - BRANCH_CHEV_W - BRANCH_GAP;
+            let inner = rect(text_l, bb.top, text_r, bb.bottom);
+            p.text(FontId::Ui, &crate::paint::ellipsize(p, FontId::Ui, label, inner.right - inner.left), inner, th.text_dim);
+            p.text(FontId::Glyphs, "\u{E70E}", rect(bb.right - BRANCH_BTN_PAD - BRANCH_CHEV_W, bb.top, bb.right - BRANCH_BTN_PAD, bb.bottom), th.text_dim);
+            self.branch_button = bb;
+        }
         // La lista necesita su carpeta para pedir las miniaturas por ruta.
         let tab = &mut self.tabs[self.active];
         tab.list.folder = match &tab.location {
@@ -1177,14 +1309,24 @@ fn draw_list_loading(p: &dyn Painter, list: Rect, header: bool, over_items: bool
     card
 }
 
-/// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
-/// Ocupa unos 14×14 DIPs alrededor de `(cx, cy)`.
-pub fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
+/// Segundos desde la primera animación: el reloj de todo lo que gira.
+fn anim_secs() -> f32 {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f32()
+}
+
+/// Ángulo del ícono de sincronizar mientras gira: una vuelta por segundo, en sentido horario.
+fn spin_degrees() -> f32 {
+    (anim_secs() * 360.0) % 360.0
+}
+
+/// Indicador de "trabajando": puntos en círculo que giran (se anima mientras se siga dibujando).
+/// Ocupa unos 14×14 DIPs alrededor de `(cx, cy)`.
+pub fn spinner(p: &dyn Painter, cx: f32, cy: f32, c: crate::geom::Color) {
     const DOTS: usize = 8;
-    let t = START.get_or_init(Instant::now).elapsed().as_secs_f32();
+    let t = anim_secs();
     let head = (t * 10.0) as usize % DOTS;
     for i in 0..DOTS {
         let angle = i as f32 / DOTS as f32 * std::f32::consts::TAU;

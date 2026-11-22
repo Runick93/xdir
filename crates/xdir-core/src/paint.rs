@@ -88,6 +88,9 @@ pub trait Painter {
     /// Dibuja lo que haga `f` recortado a `r`. Si hace falta un resultado, `f` lo deja en una
     /// variable capturada.
     fn clip(&self, r: Rect, f: &mut dyn FnMut());
+    /// Dibuja lo que haga `f` girado `degrees` grados (en sentido horario) alrededor de (`cx`, `cy`).
+    /// Lo usa el ícono de sincronizar mientras trabaja.
+    fn rotated(&self, degrees: f32, cx: f32, cy: f32, f: &mut dyn FnMut());
     fn theme(&self) -> &Theme;
     /// Reglas de color por tipo de archivo de `config.toml` (vacías si están apagadas).
     fn file_colors(&self) -> &[ColorRule];

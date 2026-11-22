@@ -8,10 +8,13 @@ mod archive_nav;
 mod changelog;
 mod checksum;
 mod compare;
+mod confirm;
+mod drop_menu;
 mod edit;
 mod events;
 mod favs;
 mod fileops;
+mod git_branch;
 mod in_use;
 mod info;
 mod network;
@@ -67,6 +70,8 @@ mod activity_tests;
 mod compare_tests;
 #[cfg(test)]
 mod cut_tests;
+#[cfg(test)]
+mod git_branch_tests;
 #[cfg(test)]
 mod in_use_tests;
 
@@ -228,6 +233,10 @@ enum Hit {
     Connect(crate::net::dialog::DialogHit),
     /// Los paneles de unidades de red (Windows).
     Drives(crate::net::drives_dialog::DrivesHit),
+    /// El diálogo de confirmación propio (git): un botón, la cruz o el panel sin nada debajo.
+    Confirm(confirm::ConfirmHit),
+    /// El menú de ramas abierto: una fila o el panel sin nada debajo.
+    DropMenu(drop_menu::DropHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.
@@ -274,6 +283,10 @@ enum Drag {
     Fav { pane: usize, index: usize, start_x: f32, moved: bool },
     /// Arrastre de lo elegido dentro de un archivo comprimido (solo hacia otro panel de xdir).
     ArchiveOut(usize),
+    /// Una carpeta del árbol (su ruta, en `App::tree_drag`): soltada entre los lugares queda como
+    /// lugar, como una pestaña.
+    #[cfg(feature = "arbol")]
+    TreeRow { start_x: f32, start_y: f32, moved: bool },
 }
 
 /// Algo elegido en el menú del fondo ("Nuevo > Carpeta"...): si en los próximos segundos aparece un
@@ -283,6 +296,16 @@ struct NewWatch {
     /// Nombres (en minúsculas) que había antes.
     before: std::collections::HashSet<String>,
     since: Instant,
+}
+
+/// La pestaña al empezar a arrastrarla: panel, posición, su id y si era la única del panel (al
+/// llevarla a otro panel, el de origen recibe una pestaña nueva).
+#[derive(Clone, Copy, Debug)]
+struct TabDragFrom {
+    pane: usize,
+    index: usize,
+    id: usize,
+    alone: bool,
 }
 
 /// Vista previa flotante de la pestaña que se arrastra: acompaña al mouse y se acopla a las tiras.
@@ -430,6 +453,14 @@ pub struct App {
     /// Carpeta del panel activo que el árbol ya siguió (`follow_tree`); None: ninguna todavía.
     #[cfg(feature = "arbol")]
     tree_followed: Option<Location>,
+    /// Carpeta abierta con un clic en el árbol: al seguirla no se desplaza (`follow_tree`).
+    #[cfg(feature = "arbol")]
+    tree_quiet: Option<Location>,
+    /// De dónde salió la pestaña que se arrastra, para volverla ahí si se cancela con Esc.
+    tab_drag_from: Option<TabDragFrom>,
+    /// La carpeta del árbol que se arrastra (`Drag::TreeRow`).
+    #[cfg(feature = "arbol")]
+    tree_drag: Option<PathBuf>,
     /// Cuándo se descartó el menú de grupos sin elegir nada (para que el clic que lo cerró sobre su botón no lo reabra).
     groups_menu_closed: Option<Instant>,
     /// Salto rápido o paleta de comandos abierta, con su control de edición.
@@ -550,6 +581,18 @@ pub struct App {
     transfers: transfers::Transfers,
     /// La ventana de «archivo en uso», si está abierta.
     in_use: Option<in_use::InUseState>,
+    /// Hay un trabajo de git en curso (leer las ramas o cambiar de rama): no se larga otro.
+    git_busy: bool,
+    /// El diálogo de confirmación abierto (cambios sin guardar al cambiar de rama) y qué se hace con la respuesta.
+    confirm: Option<git_branch::ConfirmState>,
+    /// El menú de ramas abierto sobre el botón del pie.
+    drop_menu: Option<git_branch::BranchMenu>,
+    /// Qué hace git mientras `git_busy` (el cartel del indicador de actividad).
+    git_task: String,
+    /// Lo que se sabe del remoto de cada repositorio con pestañas abiertas (botón de sincronizar).
+    git_sync: std::collections::HashMap<PathBuf, git_branch::SyncInfo>,
+    /// El repositorio al que se le está haciendo `pull` (mientras `git_busy`).
+    git_pulling: Option<PathBuf>,
     /// Red: favoritos y recientes, lo conectado y la red local.
     net: network::NetState,
     /// Dentro de archivos comprimidos: lo copiado y las extracciones para la vista previa.
@@ -732,6 +775,11 @@ impl App {
             tree_ctx: None,
             #[cfg(feature = "arbol")]
             tree_followed: None,
+            #[cfg(feature = "arbol")]
+            tree_quiet: None,
+            tab_drag_from: None,
+            #[cfg(feature = "arbol")]
+            tree_drag: None,
             groups_menu_closed: None,
             palette: None,
             xtree_search_box: None,
@@ -793,6 +841,12 @@ impl App {
             swallow_space: false,
             transfers: transfers::Transfers::new(),
             in_use: None,
+            git_busy: false,
+            confirm: None,
+            drop_menu: None,
+            git_task: String::new(),
+            git_sync: std::collections::HashMap::new(),
+            git_pulling: None,
             net: network::NetState::default(),
             archive: archive_nav::ArchiveState::default(),
             cut: Default::default(),
@@ -822,6 +876,13 @@ impl App {
         self.load_net_places();
         self.request_connections();
         self.request_remote_drive_labels();
+        // Si hay git (en otro hilo: `git --version` puede tardar o colgarse; hasta que conteste,
+        // sin botón de rama). Las pruebas lo fijan a mano.
+        #[cfg(not(test))]
+        self.spawn_task(|| {
+            crate::git::warm_up();
+            tasks::TaskDone::GitReady
+        });
     }
 
     /// Fija el DPI de la ventana (la plataforma la llama cuando pasa a un monitor con otro DPI).

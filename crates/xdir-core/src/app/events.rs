@@ -150,6 +150,7 @@ impl App {
             _ => None,
         };
         let tab_id = tab.id;
+        let was_listed = matches!(event.msg, fs::LoadMsg::Listed(_));
         let changed = tab.on_load(event);
         let retry = tab.retry_with_credentials().map(|p| (tab.id, p));
         if let Some(path) = tab.visited.take() {
@@ -164,6 +165,9 @@ impl App {
         }
         if computer_listed {
             self.request_ejectable();
+        }
+        if was_listed {
+            self.git_sync_tick();
         }
         if let Some((id, path)) = retry {
             self.connect_for_tab(id, &path);
@@ -381,6 +385,10 @@ impl App {
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
         self.dismiss_tooltip();
+        // Con el diálogo de confirmación abierto, lo escrito no va a la lista.
+        if self.confirm.is_some() || self.drop_menu.is_some() {
+            return;
+        }
         // Grabando un atajo, lo escrito no va a la lista.
         if self.capturing_keys() {
             return;
@@ -437,6 +445,14 @@ impl App {
     /// no sea el activo.
     pub fn on_wheel(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
         self.dismiss_tooltip();
+        // Con el menú de ramas abierto la rueda lo recorre (y no mueve nada de abajo).
+        if let Some(m) = &mut self.drop_menu {
+            if m.menu.hit(x, y).is_some() {
+                m.menu.on_wheel(delta.round() as i32 * 3);
+                self.redraw();
+            }
+            return;
+        }
         // Con xtree abierto la rueda mueve su tabla; los paneles tapados no se mueven.
         if self.xtree_open {
             if matches!(self.hit(x, y), Hit::XtreeView | Hit::XtreeMark(_)) {

@@ -217,6 +217,15 @@ pub enum TreeHit {
     Nothing,
 }
 
+/// Dónde iría un lugar soltado entre los del árbol (`Tree::place_gap_at`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaceGap {
+    /// El lugar delante del cual va (`None`: al final del grupo).
+    pub before: Option<Place>,
+    /// La fila sobre cuyo borde de arriba va la línea (`Tree::place_drop`).
+    pub row: usize,
+}
+
 /// Una fila de «Red», para su menú del clic derecho.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NetRow {
@@ -306,6 +315,11 @@ pub struct Tree {
     net_free: Vec<usize>,
     /// Fila resaltada como destino de un arrastre (#56); la pone la `App` en `on_drag`.
     pub drop_target: Option<usize>,
+    /// Línea de inserción entre lugares (soltar una carpeta o una pestaña para agregarla): la fila
+    /// (de `rows`) sobre cuyo borde de arriba se dibuja. La pone la `App`.
+    pub place_drop: Option<usize>,
+    /// El lugar de cada raíz del grupo de lugares (las del Acceso rápido no están: son de Windows).
+    place_of: Vec<(usize, Place)>,
     /// Arrastrando encima: la carpeta plegada bajo el puntero y desde cuándo.
     drag_hover: Option<(usize, std::time::Instant)>,
     /// Hora del evento de arrastre anterior (para desplazar según el tiempo).
@@ -329,6 +343,8 @@ struct Reveal {
     /// Una fila con esa carpeta fuera de su ubicación real (Acceso rápido, anclada): si la rama
     /// real no se puede desplegar (pasa por una carpeta oculta), se marca esa.
     fallback: Option<usize>,
+    /// Al llegar, desplazar hasta la carpeta (no, si se abrió desde un lugar del árbol).
+    scroll: bool,
 }
 
 /// Ícono, color y nombre de un lugar, los mismos que en el árbol (para Configuración ▸ Lugares).
@@ -337,7 +353,7 @@ pub fn place_look(place: &Place, th: &Theme) -> (&'static str, Color, String) {
     match place {
         Place::User(i) => PINNED.get(*i).map_or(("\u{E8B7}", rgb(1.0, 0.79, 0.28), String::new()), |(name, glyph, (r, g, b))| (*glyph, rgb(*r, *g, *b), (*name).to_string())),
         Place::Trash => (TRASH_GLYPH, rgb(0.62, 0.70, 0.80), "Papelera".to_string()),
-        Place::QuickAccess => (PIN_GLYPH, th.accent, "Acceso rápido de Windows".to_string()),
+        Place::QuickAccess => (PIN_GLYPH, th.accent, "Acceso rápido".to_string()),
         Place::Folder(path) => {
             let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
             ("\u{E8B7}", rgb(1.0, 0.79, 0.28), name)
@@ -397,6 +413,8 @@ impl Tree {
             net_free: Vec::new(),
             eject_rects: Vec::new(),
             drop_target: None,
+            place_drop: None,
+            place_of: Vec::new(),
             drag_hover: None,
             drag_last: None,
             rereads: Default::default(),
@@ -566,6 +584,7 @@ impl Tree {
             })
             .collect();
         let mut out = Vec::new();
+        let mut of = Vec::new();
         for place in places.order.iter().filter(|p| !places.is_hidden(p)) {
             let reuse = |t: &Tree, f: &dyn Fn(&Node) -> bool| old.iter().copied().find(|&id| !t.quick_roots.contains(&id) && f(&t.nodes[id]));
             let id = match place {
@@ -600,8 +619,10 @@ impl Tree {
             };
             if !out.contains(&id) {
                 out.push(id);
+                of.push((id, place.clone()));
             }
         }
+        self.place_of = of;
         out
     }
 
@@ -1164,6 +1185,16 @@ impl Tree {
     /// recién al encontrar la rama completa se despliega (una carpeta que ya no existe no
     /// despliega nada). Una revelación nueva reemplaza a la pendiente.
     pub fn reveal(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
+        self.reveal_with(hwnd, path, show_hidden, true);
+    }
+
+    /// Como `reveal`, pero sin desplazar el árbol: despliega la rama real y deja la vista donde
+    /// está (se abrió desde un lugar del árbol, que es lo que el usuario está mirando).
+    pub fn reveal_without_scroll(&mut self, hwnd: Handle, path: &Path, show_hidden: bool) {
+        self.reveal_with(hwnd, path, show_hidden, false);
+    }
+
+    fn reveal_with(&mut self, hwnd: Handle, path: &Path, show_hidden: bool, scroll: bool) {
         self.reveal = None;
         // Ya hay una fila con esa carpeta en su ubicación real: si alguna está dentro del área
         // visible no se mueve nada; si no, se desplaza hasta la primera, sin desplegar otra rama.
@@ -1188,12 +1219,12 @@ impl Tree {
             }
         }
         if let Some(&(_, id)) = shown.first() {
-            if !shown.iter().any(|&(i, _)| self.row_in_view(i)) {
+            if scroll && !shown.iter().any(|&(i, _)| self.row_in_view(i)) {
                 self.scroll_to = Some(id);
             }
             return;
         }
-        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden, fallback });
+        self.reveal = Some(Reveal { hwnd, path: path.to_path_buf(), show_hidden, fallback, scroll });
         self.advance_reveal();
     }
 
@@ -1243,7 +1274,9 @@ impl Tree {
                 for a in chain {
                     self.nodes[a].expanded = true;
                 }
-                self.scroll_to = Some(id);
+                if r.scroll {
+                    self.scroll_to = Some(id);
+                }
                 return;
             }
             let next = match &self.nodes[id].children {
@@ -1258,7 +1291,7 @@ impl Tree {
             // Sin la subcarpeta (se borró, está oculta o no es una carpeta): no se despliega nada;
             // si había otra fila con la carpeta (Acceso rápido, anclada), se marca esa.
             let Some(next) = next else {
-                if r.fallback.is_some() {
+                if r.fallback.is_some() && r.scroll {
                     self.scroll_to = r.fallback;
                 }
                 return;
@@ -1365,6 +1398,52 @@ impl Tree {
         self.node_at(y).filter(|&id| self.nodes[id].kind == Kind::Trash)
     }
 
+    /// Soltar en `(x, y)` para agregar un lugar, como en la barra lateral del Finder: entre dos
+    /// lugares (el borde de arriba o de abajo de su fila, o los separadores del grupo) va la línea
+    /// de inserción. `whole_row`: toda la fila cuenta como borde (una pestaña arrastrada no tiene
+    /// carpeta a la que entrar); si no, el medio de la fila queda para soltar adentro.
+    pub fn place_gap_at(&self, x: f32, y: f32, whole_row: bool) -> Option<PlaceGap> {
+        if !(self.contains(x, y) && y >= self.area.top + TOP_PAD) {
+            return None;
+        }
+        let rows = self.rows();
+        let pos = (y - self.area.top - TOP_PAD + self.scroll) / ROW_H;
+        let (r, f) = (pos.floor() as usize, pos.fract());
+        // El grupo: las filas entre el primer separador y el siguiente.
+        let first = rows.iter().position(|&id| self.nodes[id].kind == Kind::Separator)?;
+        let last = first + 1 + rows[first + 1..].iter().position(|&id| self.nodes[id].kind == Kind::Separator)?;
+        // Las raíces del grupo, con su fila.
+        let roots: Vec<usize> = (first + 1..last).filter(|&i| self.nodes[rows[i]].depth == 0).collect();
+        let gap = |row: usize| {
+            let before = if row >= last { None } else { Some(self.place_at_root(rows[row])) };
+            PlaceGap { before, row }
+        };
+        let next_root = |after: usize| roots.iter().copied().find(|&i| i > after).unwrap_or(last);
+        match r {
+            _ if r == first => Some(gap(roots.first().copied().unwrap_or(last))),
+            _ if r == last => Some(gap(last)),
+            _ if r > first && r < last => {
+                let n = &self.nodes[rows[r]];
+                let root = n.depth == 0;
+                if whole_row {
+                    Some(gap(if root && f < 0.5 { r } else { next_root(r) }))
+                } else if root && f < 0.25 {
+                    Some(gap(r))
+                } else if root && f > 0.75 && !n.expanded {
+                    Some(gap(next_root(r)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// El lugar de una raíz del grupo (las carpetas del Acceso rápido cuentan como él).
+    fn place_at_root(&self, id: usize) -> Place {
+        self.place_of.iter().find(|(r, _)| *r == id).map_or(Place::QuickAccess, |(_, p)| p.clone())
+    }
+
     /// Un evento de arrastre de archivos a la hora `now`, con el puntero en `at` (`None`: fuera del
     /// árbol o tapado). Despliega la carpeta plegada que tiene el puntero encima desde hace
     /// `DRAG_EXPAND` (la lee en otro hilo), desplaza cerca del borde de arriba o de abajo según el
@@ -1426,6 +1505,7 @@ impl Tree {
     /// la franja; al soltar queda como esté hasta que el mouse se mueva.
     pub fn drag_end(&mut self, left: bool) {
         self.drag_hover = None;
+        self.place_drop = None;
         self.drag_last = None;
         if left && !self.pinned {
             self.open = false;
@@ -1558,7 +1638,7 @@ impl Tree {
             Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
             // El ícono del mapa, como el botón «xtree» de la barra de estado.
-            Kind::Xtree => ("\u{E9D9}", th.accent),
+            Kind::Xtree => ("\u{EB05}", th.accent),
             Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
             // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
             Kind::Trash => (TRASH_GLYPH, rgb(0.62, 0.70, 0.80)),
@@ -1764,6 +1844,11 @@ impl Tree {
                     }
                 }
             }
+            // Soltar para agregar un lugar: la línea de inserción, como en la barra de favoritos.
+            if let Some(row) = self.place_drop {
+                let y = (area.top + TOP_PAD + row as f32 * ROW_H - self.scroll).round();
+                p.round_fill(rect(area.left + SIDE + 4.0, y - 1.0, area.left + view_w - SIDE - 4.0, y + 1.0), 1.0, th.accent);
+            }
         });
         self.eject_rects = ejects;
 
@@ -1945,6 +2030,33 @@ mod tests {
         t.reveal(Handle(0), &root.join("alfa"), false);
         assert!(t.revealing().is_none());
         assert_eq!(expanded_flags(&t), flags);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Abrir una carpeta desde un lugar del árbol (sus favoritos): la rama real se despliega
+    /// igual, pero el árbol no se desplaza hasta ella (no se pierde de vista lo que se tocó).
+    #[test]
+    fn tree_reveal_without_scroll_expands_but_stays() {
+        install_fakes();
+        let root = temp_root("revelar-quieto");
+        let target = root.join("alfa").join("beta").join("gama");
+        std::fs::create_dir_all(&target).unwrap();
+        for i in 0..8 {
+            std::fs::create_dir_all(root.join("alfa").join(format!("aa{i}"))).unwrap();
+        }
+        let mut t = tree_with_drive(&root);
+        t.reveal_without_scroll(Handle(0), &target, false);
+        finish_reveal(&mut t);
+        let beta = node_by_path(&t, &root.join("alfa").join("beta")).expect("se leyó beta");
+        assert!(beta.expanded, "la rama se despliega");
+        let area = rect(0.0, 0.0, 240.0, 200.0);
+        let p = crate::sys::testing::RecordingPainter::new(Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert_eq!(t.scroll, 0.0, "no se desplazó");
+        // Con la carpeta ya desplegada y fuera de la vista, tampoco.
+        t.reveal_without_scroll(Handle(0), &target, false);
+        t.draw(&p, area, Some(&target), XtreeBadge::Idle);
+        assert_eq!(t.scroll, 0.0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2408,6 +2520,44 @@ mod tests {
         area.top + TOP_PAD + i as f32 * ROW_H + ROW_H / 2.0
     }
 
+    /// Soltar entre lugares: el borde de arriba o de abajo de una fila marca dónde va (delante de
+    /// qué lugar) y el medio queda para soltar adentro; con `whole_row` (una pestaña) toda la fila
+    /// es borde. Los separadores del grupo son el principio y el final.
+    #[test]
+    fn place_gap_between_places() {
+        install_fakes();
+        let root = temp_root("lugares-hueco");
+        let names = ["escritorio", "descargas"];
+        let paths: Vec<PathBuf> = names.iter().map(|n| root.join(n)).collect();
+        crate::sys::testing::FakeFileSystem::set_user_folders(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>());
+        let mut t = Tree::new(&Places::default());
+        crate::sys::testing::FakeFileSystem::set_user_folders(&[]);
+        t.visible = true;
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        let area = rect(0.0, 0.0, WIDTH, 700.0);
+        t.draw(&p, area, None, XtreeBadge::Idle);
+        let rows = t.rows();
+        let row_of = |name: &str| rows.iter().position(|&id| t.nodes[id].name == name).unwrap();
+        let (desk, down) = (row_of("Escritorio"), row_of("Descargas"));
+        let sep = rows.iter().position(|&id| t.nodes[id].kind == Kind::Separator).unwrap();
+        let end = sep + 1 + rows[sep + 1..].iter().position(|&id| t.nodes[id].kind == Kind::Separator).unwrap();
+        let top = |i: usize, f: f32| area.top + TOP_PAD + (i as f32 + f) * ROW_H;
+        let x = 100.0;
+        // Borde de arriba del Escritorio y el separador de arriba: delante del Escritorio.
+        let first = PlaceGap { before: Some(Place::User(0)), row: desk };
+        assert_eq!(t.place_gap_at(x, top(desk, 0.1), false), Some(first.clone()));
+        assert_eq!(t.place_gap_at(x, top(sep, 0.5), false), Some(first));
+        // El medio es para soltar adentro; con una pestaña, la mitad de abajo va después.
+        assert_eq!(t.place_gap_at(x, top(desk, 0.5), false), None);
+        assert_eq!(t.place_gap_at(x, top(desk, 0.6), true), Some(PlaceGap { before: Some(Place::User(1)), row: down }));
+        assert_eq!(t.place_gap_at(x, top(desk, 0.9), false), Some(PlaceGap { before: Some(Place::User(1)), row: down }));
+        // El separador de abajo: al final del grupo.
+        assert_eq!(t.place_gap_at(x, top(end, 0.5), false), Some(PlaceGap { before: None, row: end }));
+        // Fuera del grupo (Inicio) no hay hueco.
+        assert_eq!(t.place_gap_at(x, top(0, 0.1), true), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn tree_has_xtree_entry_below_home() {
         install_fakes();
@@ -2431,7 +2581,7 @@ mod tests {
         let texts = p.texts();
         assert!(texts.iter().any(|(_, s, r)| s == "xtree" && in_row(r)), "{texts:?}");
         assert!(texts.iter().any(|(_, s, r)| s == "37 %" && in_row(r)), "{texts:?}");
-        assert!(texts.iter().any(|(_, s, r)| s == "\u{E9D9}" && in_row(r)), "ícono del mapa");
+        assert!(texts.iter().any(|(_, s, r)| s == "\u{EB05}" && in_row(r)), "ícono del mapa");
         // El anillo, a la derecha de la fila.
         assert!(p.paths().iter().any(|(pts, closed, _)| *closed && pts.iter().all(|&(px, py)| px > area.right - 40.0 && (py - y).abs() <= 8.0)));
         // Sin escaneo: solo el ícono y el nombre.

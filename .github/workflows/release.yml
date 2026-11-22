@@ -2,7 +2,8 @@
 # mano desde Actions → "Run workflow". Sube la versión (patch por defecto), pasa «Sin publicar» de
 # CHANGELOG.md a la versión nueva (scripts/changelog.sh), lo deja commiteado en la rama y publica el release
 # con todo; las notas son esa sección del CHANGELOG (o las automáticas de GitHub si está vacía). Al publicar
-# conserva solo los dos releases más recientes.
+# conserva solo los dos releases más recientes. Al terminar, trae el commit «Versión X» a develop
+# (job sync-develop) para que su CHANGELOG no repita lo ya publicado.
 #
 # Firma de macOS (opcional): con los secretos MACOS_CERT_P12 (certificado "Developer ID
 # Application" en base64), MACOS_CERT_PASSWORD, MACOS_SIGN_ID, APPLE_ID, APPLE_TEAM_ID y
@@ -189,3 +190,40 @@ jobs:
             while read -r old; do
               gh release delete "$old" --yes --cleanup-tag
             done
+
+  # El commit «Versión X» (versión nueva y CHANGELOG con «Sin publicar» ya pasado a la versión) se hace
+  # solo en la rama del release. Si develop no lo recibe, su «Sin publicar» sigue lleno con lo ya publicado
+  # y, al fusionar develop en main, las novedades nuevas caen dentro de la sección vieja. Por eso, tras
+  # publicar, se trae ese commit a develop. Si no se puede (conflicto, rama protegida), el release
+  # igual queda publicado y el aviso dice cómo hacerlo a mano.
+  sync-develop:
+    needs: [version, publish]
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Traer «Versión X» a develop
+        shell: bash
+        run: |
+          sha="${{ needs.version.outputs.sha }}"
+          version="${{ needs.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge-base --is-ancestor "$sha" HEAD; then
+            echo "develop ya tiene la versión $version"
+            exit 0
+          fi
+          if ! git merge --no-edit -m "Merge main en develop: versión $version" "$sha"; then
+            git merge --abort || true
+            echo "::warning::No se pudo fusionar la versión $version en develop. A mano: git checkout develop && git pull && git merge origin/main"
+            exit 1
+          fi
+          if ! git push origin HEAD:develop; then
+            echo "::warning::No se pudo subir develop (¿rama protegida?). A mano: git checkout develop && git pull && git merge origin/main && git push"
+            exit 1
+          fi

@@ -15,7 +15,10 @@ use crate::settings::controls::{self, SWITCH_H, SWITCH_W};
 use crate::sys;
 use crate::theme::alpha;
 
-use super::App;
+use std::path::{Path, PathBuf};
+
+use super::{App, Hit};
+use crate::drop::{DragEvent, DragKind, Effect};
 
 /// Lo que se puede tocar en la página; el índice es la posición en `Places::order`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +61,12 @@ pub(super) fn search(_app: &App) -> Vec<SearchItem> {
 
 /// ¿Se muestra la fila del Acceso rápido? Solo donde lo hay (Windows): se vigila su carpeta
 /// (`App::start_quick_access`) o ya llegaron sus carpetas. Sin tocar el disco.
-fn has_quick_access(app: &App) -> bool {
+/// El texto de la entrada de los menús que agrega o quita una carpeta de los lugares.
+pub(super) fn place_label(is_place: bool) -> &'static str {
+    if is_place { "Quitar de Lugares" } else { "Agregar a Lugares" }
+}
+
+pub(super) fn has_quick_access(app: &App) -> bool {
     app.quick_watch.is_some() || app.tree.has_quick_items()
 }
 
@@ -202,9 +210,108 @@ impl App {
         }
     }
 
+    /// Lo soltado entre los lugares del árbol (carpetas o la carpeta de una pestaña) queda como
+    /// carpeta propia en ese lugar, como en la barra lateral del Finder, en las 3 plataformas.
+    pub(super) fn add_dropped_places(&mut self, paths: Vec<PathBuf>, before: Option<Place>) {
+        if paths.is_empty() {
+            return;
+        }
+        for p in paths {
+            self.places.add_folder_at(p, before.as_ref());
+        }
+        self.places_changed();
+    }
+
+    /// ¿La carpeta ya se ve entre los lugares? (una carpeta propia o una del usuario no oculta)
+    pub(super) fn is_place(&self, path: &Path) -> bool {
+        self.place_of_path(path).is_some_and(|p| !self.places.is_hidden(&p))
+    }
+
+    /// El lugar que corresponde a la carpeta, si es una carpeta propia o una del usuario.
+    fn place_of_path(&self, path: &Path) -> Option<Place> {
+        let fs = sys::file_system();
+        self.places.order.iter().find(|p| match p {
+            Place::Folder(q) => fs.same_path(q, path),
+            Place::User(i) => fs.user_folder(*i).is_some_and(|u| fs.same_path(&u, path)),
+            _ => false,
+        }).cloned()
+    }
+
+    /// «Agregar a Lugares» o «Quitar de Lugares»: una carpeta propia se quita, una del usuario se
+    /// oculta (se vuelve a ver desde Configuración ▸ Lugares) y cualquier otra se agrega al final.
+    pub(super) fn toggle_place(&mut self, path: PathBuf) {
+        let shown = self.is_place(&path);
+        match self.place_of_path(&path) {
+            Some(Place::Folder(_)) if shown => {
+                if let Some(i) = self.places.order.iter().position(|p| matches!(p, Place::Folder(q) if sys::file_system().same_path(q, &path))) {
+                    self.places.remove(i);
+                }
+            }
+            Some(p) if shown => self.places.hidden.push(p),
+            _ => self.places.add_folder(path),
+        }
+        self.notice = Some(if shown { "Se quitó de Lugares" } else { "Se agregó a Lugares" }.into());
+        self.places_changed();
+    }
+
+    /// El hueco entre lugares bajo el puntero, si el árbol se ve ahí (no tapado por otra cosa).
+    pub(super) fn place_gap_at(&self, x: f32, y: f32, whole_row: bool) -> Option<crate::tree::PlaceGap> {
+        let over = !self.xtree_open && self.tree.contains(x, y) && matches!(self.hit(x, y), Hit::None | Hit::TreePin | Hit::TreeXtree);
+        over.then(|| self.tree.place_gap_at(x, y, whole_row)).flatten()
+    }
+
+    /// Arrastrando la pestaña `index` del panel `pane`: el hueco entre lugares bajo el puntero, si
+    /// la pestaña muestra una carpeta (lo virtual, como la Papelera o Configuración, no).
+    pub(super) fn tab_place_gap(&self, pane: usize, index: usize, x: f32, y: f32) -> Option<crate::tree::PlaceGap> {
+        let tab = self.panes.get(pane)?.tabs.get(index)?;
+        matches!(tab.location, crate::fs::Location::Path(_)).then(|| self.place_gap_at(x, y, true)).flatten()
+    }
+
+    /// Deja la línea de inserción del árbol en `row`; repinta si cambió.
+    pub(super) fn set_place_drop(&mut self, row: Option<usize>) {
+        if self.tree.place_drop != row {
+            self.tree.place_drop = row;
+            self.redraw();
+        }
+    }
+
+    /// Arrastre de carpetas (de la lista, el Finder o el Explorador) entre los lugares del árbol:
+    /// la línea de inserción y, al soltar, el lugar nuevo. Devuelve si el evento quedó resuelto
+    /// (si no, sigue como soltar en una carpeta).
+    pub(super) fn on_drag_places(&mut self, ev: &mut DragEvent, x: f32, y: f32) -> bool {
+        let gap = match ev.kind {
+            DragKind::Enter | DragKind::Over | DragKind::Drop => self.place_gap_at(x, y, false),
+            DragKind::Leave => None,
+        };
+        let dirs: Vec<PathBuf> = ev.paths.map(|p| p.iter().filter(|p| crate::fs::probe_dir(p) != Some(false)).cloned().collect()).unwrap_or_default();
+        let (Some(gap), false) = (gap, dirs.is_empty()) else {
+            self.set_place_drop(None);
+            return false;
+        };
+        // Un lugar es un vínculo: no se copia ni se mueve nada.
+        ev.effect = if ev.allowed.allows(Effect::LINK) {
+            Effect::LINK
+        } else if ev.allowed.allows(Effect::COPY) {
+            Effect::COPY
+        } else {
+            Effect::NONE
+        };
+        if ev.effect == Effect::NONE {
+            self.set_place_drop(None);
+            return true;
+        }
+        if ev.kind == DragKind::Drop {
+            self.set_place_drop(None);
+            self.add_dropped_places(dirs, gap.before);
+        } else {
+            self.set_place_drop(Some(gap.row));
+        }
+        true
+    }
+
     /// Cambiaron los lugares: el árbol los rearma (y lee en otro hilo las carpetas propias
     /// nuevas, para atenuar las que no existen) y `lugares.toml` se guarda en un hilo.
-    fn places_changed(&mut self) {
+    pub(super) fn places_changed(&mut self) {
         self.tree.set_places(&self.places);
         self.tree.probe_places(self.hwnd, self.show_hidden);
         self.places.save_in_background();

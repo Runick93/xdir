@@ -138,7 +138,7 @@ pub fn map_hit(l: &MapLayout, d: &MapDialog, x: f32, y: f32) -> Option<DrivesHit
     Some(pairs.iter().find(|(r, _)| contains(r, x, y)).map_or(DrivesHit::Panel, |(_, h)| *h))
 }
 
-fn frame(p: &dyn Painter, w: f32, h: f32, pn: Rect, title: &str, close: Rect, hot_close: bool) {
+pub(crate) fn frame(p: &dyn Painter, w: f32, h: f32, pn: Rect, title: &str, close: Rect, hot_close: bool) {
     let th = p.theme();
     p.fill(rect(0.0, 0.0, w, h), Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 });
     p.round_fill(rect(pn.left - 2.0, pn.top, pn.right + 2.0, pn.bottom + 4.0), 12.0, alpha(th.background, 0.5));

@@ -7,6 +7,7 @@ use crate::theme::alpha;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ISSUES_URL: &str = "https://github.com/Runick93/xdir/issues/new/choose";
+pub const REPO_URL: &str = "https://github.com/Runick93/xdir";
 
 /// Logo de Runick, animado: `assets/runick-logo.bgra` (ancho, alto y cantidad de cuadros como u32
 /// little-endian, la duración en ms de cada cuadro y luego los cuadros en BGRA premultiplicado),
@@ -66,6 +67,8 @@ pub enum AboutHit {
     /// «Novedades»: abre la pestaña y cierra el diálogo.
     Changelog,
     Report,
+    /// El ícono de GitHub de la esquina: abre el repositorio.
+    Repo,
     /// Dentro del diálogo pero sobre nada.
     Panel,
 }
@@ -84,9 +87,17 @@ fn panel(w: f32, h: f32) -> Rect {
     rect(cx - WIDTH / 2.0, cy - HEIGHT / 2.0, cx + WIDTH / 2.0, cy + HEIGHT / 2.0)
 }
 
+/// El ícono de GitHub, solo, en la esquina de abajo a la derecha.
+fn repo_button(w: f32, h: f32) -> Rect {
+    let p = panel(w, h);
+    rect(p.right - 16.0 - BTN_H, p.bottom - 16.0 - BTN_H, p.right - 16.0, p.bottom - 16.0)
+}
+
+/// «Reportar…», abajo, hasta el ícono de GitHub.
 fn report_button(w: f32, h: f32) -> Rect {
     let p = panel(w, h);
-    rect(p.left + 16.0, p.bottom - 16.0 - BTN_H, p.right - 16.0, p.bottom - 16.0)
+    let g = repo_button(w, h);
+    rect(p.left + 16.0, g.top, g.left - 4.0, g.bottom)
 }
 
 /// «Novedades», arriba del de reportar (4 entre los dos).
@@ -95,12 +106,53 @@ fn changelog_button(w: f32, h: f32) -> Rect {
     rect(r.left, r.top - 4.0 - BTN_H, r.right, r.top - 4.0)
 }
 
+/// `top` (translúcido) sobre `under`, como color opaco.
+fn over(top: Color, under: Color) -> Color {
+    let a = top.a;
+    Color { r: top.r * a + under.r * (1.0 - a), g: top.g * a + under.g * (1.0 - a), b: top.b * a + under.b * (1.0 - a), a: 1.0 }
+}
+
+/// La marca de GitHub (el gato dentro de un círculo) en el cuadrado `r`: un círculo de `fg` con la
+/// silueta recortada en `bg`. No hay glifo para ella en las fuentes de íconos del sistema.
+fn github_mark(p: &dyn Painter, r: Rect, fg: Color, bg: Color) {
+    let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let s = (r.right - r.left).min(r.bottom - r.top) / 2.0;
+    p.circle(cx, cy, s, fg);
+    // Silueta en unidades del radio (y hacia abajo): cabeza con orejas, cuello y la cola a la
+    // izquierda; el cuerpo baja hasta el borde del círculo, como en la marca.
+    const CAT: [(f32, f32, f32); 19] = [
+        (-0.20, 0.46, 0.05),
+        (-0.47, 0.33, 0.20),
+        (-0.60, 0.02, 0.25),
+        (-0.55, -0.30, 0.10),
+        (-0.50, -0.66, 0.04),
+        (-0.24, -0.50, 0.08),
+        (0.0, -0.54, 0.10),
+        (0.24, -0.50, 0.08),
+        (0.50, -0.66, 0.04),
+        (0.55, -0.30, 0.10),
+        (0.60, 0.02, 0.25),
+        (0.47, 0.33, 0.20),
+        (0.20, 0.46, 0.05),
+        (0.22, 1.05, 0.0),
+        (-0.22, 1.05, 0.0),
+        (-0.22, 0.78, 0.04),
+        (-0.42, 0.74, 0.12),
+        (-0.62, 0.52, 0.04),
+        (-0.30, 0.64, 0.10),
+    ];
+    let pts: Vec<(f32, f32, f32)> = CAT.iter().map(|&(x, y, rad)| (cx + x * s, cy + y * s, rad * s)).collect();
+    p.clip(rect(cx - s, cy - s, cx + s, cy + s - s * 0.02), &mut || p.rounded_path(&pts, true, Some(bg), None));
+}
+
 pub fn at(w: f32, h: f32, x: f32, y: f32) -> Option<AboutHit> {
     if !contains(&panel(w, h), x, y) {
         return None;
     }
     Some(if contains(&report_button(w, h), x, y) {
         AboutHit::Report
+    } else if contains(&repo_button(w, h), x, y) {
+        AboutHit::Repo
     } else if contains(&changelog_button(w, h), x, y) {
         AboutHit::Changelog
     } else {
@@ -126,7 +178,7 @@ pub fn draw(p: &dyn Painter, w: f32, h: f32, hover: Option<AboutHit>, frame: usi
     p.text(FontId::UiBold, &format!("xdir {VERSION}"), line(pn.top + BANNER_H + 8.0, pn.top + BANNER_H + 34.0), th.text);
     p.text(
         FontId::Ui,
-        "Explorador de archivos multipanel para Windows.",
+        "Explorador multipanel para Windows, macOS y Linux.",
         line(pn.top + BANNER_H + 34.0, pn.top + BANNER_H + 58.0),
         th.text_dim,
     );
@@ -137,6 +189,16 @@ pub fn draw(p: &dyn Painter, w: f32, h: f32, hover: Option<AboutHit>, frame: usi
     }
     p.text(FontId::Glyphs, crate::pane::CHANGELOG_GLYPH, rect(r.left + 6.0, r.top, r.left + 32.0, r.bottom), th.text_dim);
     p.text(FontId::Ui, "Novedades", rect(r.left + 38.0, r.top, r.right - 8.0, r.bottom), th.text);
+
+    let r = repo_button(w, h);
+    // La silueta se pinta encima del círculo: necesita el fondo opaco (el resaltado es translúcido).
+    let bg = if hover == Some(AboutHit::Repo) { over(th.hover, th.surface_alt) } else { th.surface_alt };
+    if hover == Some(AboutHit::Repo) {
+        p.round_fill(r, 6.0, th.hover);
+    }
+    let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let c = if hover == Some(AboutHit::Repo) { th.text } else { th.text_dim };
+    github_mark(p, rect(cx - 9.0, cy - 9.0, cx + 9.0, cy + 9.0), c, bg);
 
     let r = report_button(w, h);
     if hover == Some(AboutHit::Report) {
@@ -172,10 +234,18 @@ mod tests {
         assert!(c.bottom < r.top && c.top > panel(w, h).top + BANNER_H + 50.0, "{c:?} {r:?}");
         assert_eq!(at(w, h, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0), Some(AboutHit::Changelog));
         assert_eq!(at(w, h, (r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0), Some(AboutHit::Report));
+        let g = repo_button(w, h);
+        let pn = panel(w, h);
+        assert!(g.right <= pn.right && g.bottom <= pn.bottom && g.left > r.right, "GitHub va solo, abajo a la derecha");
+        assert!((g.right - g.left - (g.bottom - g.top)).abs() < 0.01, "es un botón cuadrado");
+        assert_eq!(at(w, h, (g.left + g.right) / 2.0, (g.top + g.bottom) / 2.0), Some(AboutHit::Repo));
         crate::sys::testing::install_fakes();
         let p = RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(false)));
         draw(&p, w, h, Some(AboutHit::Changelog), 0);
         assert!(p.texts().iter().any(|(_, s, _)| s == "Novedades"));
+        assert!(!p.texts().iter().any(|(_, s, _)| s.contains("GitHub")), "sin texto: solo el ícono");
+        // Ya no es solo para Windows.
+        assert!(p.texts().iter().any(|(_, s, _)| s.contains("Windows, macOS y Linux")));
     }
 
     /// El logo trae cuadros y los pide completos; la animación se repite y avanza con el tiempo.

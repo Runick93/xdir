@@ -14,6 +14,10 @@ impl App {
         let meta = key_down(VK_LWIN);
         // El Espacio solo se traga si es el carácter que sigue a esta tecla.
         self.swallow_space = false;
+        // Esc mientras se arrastra algo con el mouse: se cancela el arrastre y nada más.
+        if vk == VK_ESCAPE && self.cancel_drag() {
+            return true;
+        }
         // Grabando un atajo en la configuración, la tecla es para eso (ni ⌘W ni Tab llegan).
         if let Some(used) = self.settings_capture_key(vk, alt) {
             return used;

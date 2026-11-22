@@ -408,6 +408,8 @@ impl App {
                         self.host.capture_mouse();
                         let grab = self.panes[i].tab_grab(j, x);
                         self.drag = Drag::Tab { pane: i, index: j, start_x: x, start_y: y, moved: false, grab };
+                        let (id, alone) = (self.panes[i].tabs[j].id, self.panes[i].tabs.len() == 1);
+                        self.tab_drag_from = Some(TabDragFrom { pane: i, index: j, id, alone });
                     }
                     PaneHit::TabClose(j) => self.close_tab(i, j),
                     PaneHit::Placeholder(crate::list::placeholder::PlaceholderButton::Retry) => {
@@ -496,7 +498,64 @@ impl App {
         self.redraw();
     }
 
+    /// Esc mientras se arrastra una pestaña, una carpeta del árbol, un favorito o lo elegido de un
+    /// comprimido: el arrastre se cancela y todo queda como estaba (una pestaña ya movida vuelve a
+    /// su lugar). Devuelve si había un arrastre que cancelar.
+    pub(super) fn cancel_drag(&mut self) -> bool {
+        let drag = self.drag;
+        match drag {
+            Drag::Tab { pane, index, .. } => self.restore_dragged_tab(pane, index),
+            Drag::Fav { .. } | Drag::ArchiveOut(_) => {}
+            #[cfg(feature = "arbol")]
+            Drag::TreeRow { .. } => {}
+            _ => return false,
+        }
+        self.drag = Drag::None;
+        self.host.release_mouse();
+        self.tab_drop = None;
+        self.tab_drag_from = None;
+        for p in &mut self.panes {
+            p.drag_tab = None;
+            p.drag_hidden = None;
+        }
+        self.ghost = None;
+        self.fav_drop = None;
+        #[cfg(feature = "arbol")]
+        {
+            self.tree_drag = None;
+            self.set_place_drop(None);
+        }
+        if matches!(drag, Drag::ArchiveOut(_)) {
+            self.notice = None;
+        }
+        self.redraw();
+        true
+    }
+
+    /// La pestaña arrastrada (ahora en `pane`, `index`) vuelve a donde estaba al agarrarla; si era
+    /// la única de su panel, se va la pestaña nueva que ocupó su lugar.
+    fn restore_dragged_tab(&mut self, pane: usize, index: usize) {
+        let Some(from) = self.tab_drag_from else { return };
+        if pane != from.pane {
+            self.move_tab_to_pane(pane, index, from.pane, from.index);
+        } else {
+            self.panes[pane].move_tab(index, from.index);
+        }
+        let p = &mut self.panes[from.pane];
+        if from.alone {
+            while let Some(i) = p.tabs.iter().position(|t| t.id != from.id) {
+                p.take_tab(i);
+            }
+        }
+        if let Some(i) = p.tabs.iter().position(|t| t.id == from.id) {
+            p.select_tab(i);
+        }
+        self.active = from.pane;
+        self.sync_visibility();
+    }
+
     pub fn on_left_up(&mut self, x: f32, y: f32) {
+        self.tab_drag_from = None;
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.host.release_mouse();
         let tab_drop = self.tab_drop.take();

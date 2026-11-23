@@ -19,6 +19,8 @@ const SWATCH_STEP: f32 = 27.0;
 const SWATCH_R: f32 = 10.0;
 /// Lado de cada celdita con que se pinta el degradé (se solapan para que no queden costuras).
 const CELL: f32 = 5.0;
+/// Dónde empieza el texto del valor dentro de su caja.
+const HEX_TEXT_X: f32 = 24.0;
 const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
 
 /// Para qué se elige el color.
@@ -76,8 +78,13 @@ pub struct ColorPicker {
     v: f32,
     /// Lo escrito en la caja (sin «#», en mayúsculas).
     hex: String,
-    /// El valor está seleccionado: lo que se escribe lo reemplaza y Retroceso lo borra entero.
-    selected: bool,
+    /// Posición del cursor en la caja (en dígitos) y, si hay selección, desde dónde se eligió.
+    caret: usize,
+    anchor: Option<usize>,
+    /// La caja tiene el foco del teclado: las flechas mueven su cursor. Si no, mueven el cuadrado.
+    hex_focus: bool,
+    /// Dónde cae cada posición del cursor al pintar (DIPs desde el inicio del texto).
+    offsets: std::cell::RefCell<Vec<f32>>,
     /// El color con que se abrió, para compararlo en la vista previa.
     original: u32,
     /// Lo que se está arrastrando con el mouse apretado.
@@ -175,7 +182,7 @@ pub fn parse_hex(s: &str) -> Option<u32> {
 impl ColorPicker {
     pub fn new(target: PickTarget, current: u32) -> ColorPicker {
         let (h, s, v) = rgb_to_hsv(current);
-        ColorPicker { target, h, s, v, hex: format!("{current:06X}"), selected: true, original: current, dragging: None }
+        ColorPicker { target, h, s, v, hex: format!("{current:06X}"), caret: 6, anchor: Some(0), hex_focus: true, offsets: Default::default(), original: current, dragging: None }
     }
 
     /// El color de ahora.
@@ -191,12 +198,12 @@ impl ColorPicker {
         }
         (self.s, self.v) = (s, v);
         self.hex = format!("{c:06X}");
-        self.selected = true;
+        self.select_all();
     }
 
     fn sync_hex(&mut self) {
         self.hex = format!("{:06X}", self.color());
-        self.selected = true;
+        self.select_all();
     }
 
     /// Lo que hay en (`x`, `y`) con la ventana de `w` × `h`; `None` fuera del panel.
@@ -239,8 +246,64 @@ impl ColorPicker {
                 self.h = ((x - l.bar.left) / (l.bar.right - l.bar.left)).clamp(0.0, 1.0) * 360.0;
                 self.sync_hex();
             }
+            Some(PickHit::Hex) => {
+                self.caret = self.index_at(w, h, x);
+            }
             _ => {}
         }
+    }
+
+    fn select_all(&mut self) {
+        self.caret = self.hex.chars().count();
+        self.anchor = Some(0);
+    }
+
+    /// La selección de la caja como (desde, hasta), si hay.
+    fn selection(&self) -> Option<(usize, usize)> {
+        self.anchor.filter(|a| *a != self.caret).map(|a| (a.min(self.caret), a.max(self.caret)))
+    }
+
+    /// Qué posición del cursor queda más cerca de la coordenada `x` (según lo último pintado).
+    fn index_at(&self, w: f32, h: f32, x: f32) -> usize {
+        let start = layout(w, h).hex.left + HEX_TEXT_X;
+        let offsets = self.offsets.borrow();
+        if offsets.len() != self.hex.chars().count() + 1 {
+            return self.hex.chars().count();
+        }
+        (0..offsets.len())
+            .min_by(|a, b| (x - start - offsets[*a]).abs().total_cmp(&(x - start - offsets[*b]).abs()))
+            .unwrap_or(0)
+    }
+
+    /// Borra la selección (deja el cursor donde estaba). Devuelve si había.
+    fn delete_selection(&mut self) -> bool {
+        let Some((a, b)) = self.selection() else { return false };
+        self.hex = self.hex.chars().take(a).chain(self.hex.chars().skip(b)).collect();
+        (self.caret, self.anchor) = (a, None);
+        true
+    }
+
+    /// Si ya hay 6 dígitos, el color pasa a ser ese (sin tocar el texto ni el cursor).
+    fn apply_typed_hex(&mut self) {
+        if self.hex.len() == 6
+            && let Some(c) = parse_hex(&self.hex)
+        {
+            let (h, s, v) = rgb_to_hsv(c);
+            if s > 0.0 && v > 0.0 {
+                self.h = h;
+            }
+            (self.s, self.v) = (s, v);
+        }
+    }
+
+    /// Mueve el cursor de la caja; con Mayús la selección crece, si no se deshace.
+    fn move_caret(&mut self, to: usize, shift: bool) {
+        if shift {
+            self.anchor.get_or_insert(self.caret);
+        } else {
+            self.anchor = None;
+        }
+        self.caret = to;
     }
 
     /// Botón izquierdo apretado en (`x`, `y`).
@@ -250,12 +313,18 @@ impl ColorPicker {
             Some(PickHit::Ok) => return self.accept(),
             Some(PickHit::Cancel | PickHit::Close) => return Outcome::Cancel,
             Some(part @ (PickHit::Square | PickHit::Hue)) => {
+                self.hex_focus = false;
                 self.dragging = Some(part);
                 self.drag_to(w, h, x, y);
             }
             Some(PickHit::Swatch(i)) => self.set_rgb(self.target.suggestions()[i]),
-            // Un clic en la caja selecciona todo el valor: escribir lo reemplaza, Retroceso lo borra.
-            Some(PickHit::Hex) => self.selected = true,
+            // Un clic en la caja pone el cursor ahí; arrastrando se selecciona.
+            Some(PickHit::Hex) => {
+                self.hex_focus = true;
+                self.caret = self.index_at(w, h, x);
+                self.anchor = Some(self.caret);
+                self.dragging = Some(PickHit::Hex);
+            }
             _ => {}
         }
         Outcome::Open
@@ -287,20 +356,40 @@ impl ColorPicker {
         Outcome::Accept(self.color())
     }
 
-    /// Una tecla: Esc cancela, Enter acepta, Retroceso borra un dígito del valor y las flechas
-    /// mueven el cuadrado (Mayús + izquierda o derecha mueve el tono).
-    pub fn key(&mut self, vk: Key, shift: bool) -> Outcome {
+    /// Una tecla: Esc cancela y Enter acepta. Con el foco en la caja del valor, las flechas, Inicio,
+    /// Fin, Retroceso, Supr y Ctrl+A la editan (con Mayús se selecciona). Si no, las flechas mueven
+    /// el cuadrado (Mayús + izquierda o derecha mueve el tono).
+    pub fn key(&mut self, vk: Key, shift: bool, ctrl: bool) -> Outcome {
         const STEP: f32 = 0.02;
+        let len = self.hex.chars().count();
         match vk {
             VK_ESCAPE => return Outcome::Cancel,
             VK_RETURN => return self.accept(),
-            VK_BACK | VK_DELETE if self.selected => {
-                self.hex.clear();
-                self.selected = false;
+            Key(0x41) if ctrl => {
+                self.hex_focus = true;
+                self.select_all();
             }
-            VK_BACK => {
-                self.hex.pop();
+            VK_BACK | VK_DELETE if self.hex_focus => {
+                if !self.delete_selection() {
+                    if vk == VK_BACK && self.caret > 0 {
+                        self.caret -= 1;
+                        self.hex = self.hex.chars().take(self.caret).chain(self.hex.chars().skip(self.caret + 1)).collect();
+                    } else if vk == VK_DELETE && self.caret < len {
+                        self.hex = self.hex.chars().take(self.caret).chain(self.hex.chars().skip(self.caret + 1)).collect();
+                    }
+                }
+                self.anchor = None;
             }
+            VK_LEFT if self.hex_focus => match self.selection().filter(|_| !shift) {
+                Some((a, _)) => self.move_caret(a, false),
+                None => self.move_caret(self.caret.saturating_sub(1), shift),
+            },
+            VK_RIGHT if self.hex_focus => match self.selection().filter(|_| !shift) {
+                Some((_, b)) => self.move_caret(b, false),
+                None => self.move_caret((self.caret + 1).min(len), shift),
+            },
+            VK_HOME if self.hex_focus => self.move_caret(0, shift),
+            VK_END if self.hex_focus => self.move_caret(len, shift),
             VK_LEFT | VK_RIGHT if shift => {
                 self.h = (self.h + if vk == VK_LEFT { -4.0 } else { 4.0 }).rem_euclid(360.0);
                 self.sync_hex();
@@ -326,22 +415,21 @@ impl ColorPicker {
         Outcome::Open
     }
 
-    /// Un carácter escrito: va a la caja si es un dígito hexadecimal; con 6 dígitos ya cambia el color.
+    /// Un carácter escrito: va a la caja si es un dígito hexadecimal (reemplaza la selección, si
+    /// hay); con 6 dígitos ya cambia el color.
     pub fn char(&mut self, c: char) {
         if !c.is_ascii_hexdigit() {
             return;
         }
-        // Con el valor seleccionado (o con los 6 dígitos completos), escribir empieza de cero.
-        if self.selected || self.hex.len() >= 6 {
-            self.hex.clear();
+        self.hex_focus = true;
+        self.delete_selection();
+        self.anchor = None;
+        if self.hex.chars().count() < 6 {
+            let at = self.caret.min(self.hex.len());
+            self.hex.insert(at, c.to_ascii_uppercase());
+            self.caret = at + 1;
         }
-        self.selected = false;
-        self.hex.push(c.to_ascii_uppercase());
-        if self.hex.len() == 6
-            && let Some(c) = parse_hex(&self.hex)
-        {
-            self.set_rgb(c);
-        }
+        self.apply_typed_hex();
     }
 
     /// Pinta el selector sobre toda la ventana (`w` × `h`).
@@ -402,12 +490,21 @@ impl ColorPicker {
         p.round_fill(hx, 6.0, th.background);
         p.round_stroke_w(hx, 6.0, if hover == Some(PickHit::Hex) { th.text_dim } else { th.border }, 1.0);
         p.text(FontId::Ui, "#", rect(hx.left + 10.0, hx.top, hx.left + 24.0, hx.bottom), th.text_dim);
-        let tw = p.measure(FontId::Ui, &self.hex);
-        if self.selected {
-            p.round_fill(rect(hx.left + 22.0, hx.top + 6.0, hx.left + 26.0 + tw, hx.bottom - 6.0), 3.0, alpha(th.accent, 0.45));
+        // Dónde cae cada posición del cursor (también lo usa el clic para ubicarlo).
+        let chars: Vec<char> = self.hex.chars().collect();
+        let offsets: Vec<f32> = (0..=chars.len()).map(|i| p.measure(FontId::Ui, &chars[..i].iter().collect::<String>())).collect();
+        let tx = hx.left + HEX_TEXT_X;
+        if self.hex_focus
+            && let Some((a, b)) = self.selection()
+        {
+            p.round_fill(rect(tx + offsets[a] - 1.0, hx.top + 6.0, tx + offsets[b] + 1.0, hx.bottom - 6.0), 3.0, alpha(th.accent, 0.45));
         }
-        let shown = if self.selected { self.hex.clone() } else { format!("{}|", self.hex) };
-        p.text(FontId::Ui, &shown, rect(hx.left + 24.0, hx.top, hx.right - 6.0, hx.bottom), th.text);
+        p.text(FontId::Ui, &self.hex, rect(tx, hx.top, hx.right - 6.0, hx.bottom), th.text);
+        if self.hex_focus && self.selection().is_none() {
+            let cx = tx + offsets[self.caret.min(chars.len())];
+            p.fill(rect(cx, hx.top + 7.0, cx + 1.5, hx.bottom - 7.0), th.text);
+        }
+        *self.offsets.borrow_mut() = offsets;
         p.text(FontId::Small, "Valor hexadecimal", rect(hx.left, hx.bottom + 4.0, hx.right + 40.0, hx.bottom + 20.0), th.text_dim);
 
         // Colores sugeridos.
@@ -529,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_hex_applies_at_six_digits_and_restarts_after() {
+    fn typing_hex_applies_at_six_digits() {
         let mut p = ColorPicker::new(PickTarget::Background, 0x000000);
         for c in "12AB3".chars() {
             p.char(c);
@@ -540,40 +637,39 @@ mod tests {
         p.char('g');
         assert_eq!(p.hex, "12AB3F", "lo que no es hexadecimal se ignora");
         p.char('0');
-        assert_eq!(p.hex, "0", "con los seis completos, el siguiente dígito empieza de cero");
-        p.key(VK_BACK, false);
-        assert_eq!(p.hex, "");
+        assert_eq!(p.hex, "12AB3F", "con los seis completos no entra otro dígito");
     }
 
     #[test]
     fn enter_accepts_and_completes_a_short_hex() {
         let mut p = ColorPicker::new(PickTarget::Accent, 0x000000);
-        p.key(VK_BACK, false);
+        p.key(VK_BACK, false, false);
         for _ in 0..6 {
-            p.key(VK_BACK, false);
+            p.key(VK_BACK, false, false);
         }
         for c in "f80".chars() {
             p.char(c);
         }
-        assert_eq!(p.key(VK_RETURN, false), Outcome::Accept(0xFF8800));
+        assert_eq!(p.key(VK_RETURN, false, false), Outcome::Accept(0xFF8800));
     }
 
     #[test]
     fn escape_cancels_and_enter_accepts_the_picked_color() {
         let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
-        assert_eq!(p.key(VK_ESCAPE, false), Outcome::Cancel);
-        assert_eq!(p.key(VK_RETURN, false), Outcome::Accept(0x3B9EFF));
+        assert_eq!(p.key(VK_ESCAPE, false, false), Outcome::Cancel);
+        assert_eq!(p.key(VK_RETURN, false, false), Outcome::Accept(0x3B9EFF));
     }
 
     #[test]
     fn arrows_move_the_picker_and_shift_moves_the_hue() {
         let mut p = ColorPicker::new(PickTarget::Accent, 0xFF0000);
-        p.key(VK_LEFT, false);
+        p.hex_focus = false;
+        p.key(VK_LEFT, false, false);
         assert!(p.s < 1.0);
         let before = p.h;
-        p.key(VK_RIGHT, true);
+        p.key(VK_RIGHT, true, false);
         assert!(p.h > before);
-        p.key(VK_DOWN, false);
+        p.key(VK_DOWN, false, false);
         assert!(p.v < 1.0);
         assert_eq!(p.hex, format!("{:06X}", p.color()), "la caja sigue al color");
     }
@@ -650,38 +746,114 @@ mod tests {
 mod hex_selection_tests {
     use super::*;
 
-    #[test]
-    fn value_starts_selected_and_backspace_clears_it_whole() {
-        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
-        assert!(p.selected);
-        p.key(VK_BACK, false);
-        assert_eq!(p.hex, "");
-        assert!(!p.selected);
-        p.char('a');
-        p.key(VK_BACK, false);
-        assert_eq!(p.hex, "", "sin selección borra de a un dígito");
+    const W: f32 = 1000.0;
+    const H: f32 = 800.0;
+
+    /// Un selector con lo medido como lo dejaría el pintado: 10 DIPs por dígito.
+    fn picker() -> ColorPicker {
+        let p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        *p.offsets.borrow_mut() = (0..=6).map(|i| i as f32 * 10.0).collect();
+        p
+    }
+
+    fn hex_x(i: usize) -> (f32, f32) {
+        let l = layout(W, H);
+        (l.hex.left + HEX_TEXT_X + i as f32 * 10.0, (l.hex.top + l.hex.bottom) / 2.0)
     }
 
     #[test]
-    fn clicking_the_box_selects_it_and_typing_replaces() {
-        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
-        p.char('1');
-        p.char('2');
-        assert!(!p.selected);
-        let l = layout(1000.0, 800.0);
-        let (x, y) = ((l.hex.left + l.hex.right) / 2.0, (l.hex.top + l.hex.bottom) / 2.0);
-        p.press(1000.0, 800.0, x, y);
-        assert!(p.selected);
-        p.char('f');
-        assert_eq!(p.hex, "F");
+    fn opens_with_everything_selected_and_backspace_clears_it() {
+        let mut p = picker();
+        assert_eq!(p.selection(), Some((0, 6)));
+        p.key(VK_BACK, false, false);
+        assert_eq!(p.hex, "");
+        assert_eq!(p.selection(), None);
     }
 
     #[test]
-    fn delete_also_clears_a_selection_and_picking_selects_again() {
-        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
-        p.key(VK_DELETE, false);
-        assert_eq!(p.hex, "");
-        p.key(VK_RIGHT, false);
-        assert!(p.selected, "al mover el color, la caja vuelve a quedar seleccionada");
+    fn clicking_puts_the_cursor_there_and_typing_inserts() {
+        let mut p = picker();
+        let (x, y) = hex_x(2);
+        p.press(W, H, x + 3.0, y);
+        p.release();
+        assert_eq!((p.caret, p.selection()), (2, None));
+        p.char('0');
+        assert_eq!(p.hex, "3B9EFF", "con los seis dígitos completos no entra otro");
+        p.key(VK_BACK, false, false);
+        p.char('0');
+        assert_eq!(p.hex, "309EFF", "borra el de la izquierda y escribe en su lugar");
+        assert_eq!(p.caret, 2);
+    }
+
+    #[test]
+    fn arrows_home_end_move_the_cursor_and_shift_selects() {
+        let mut p = picker();
+        let (x, y) = hex_x(3);
+        p.press(W, H, x, y);
+        p.release();
+        p.key(VK_LEFT, false, false);
+        assert_eq!(p.caret, 2);
+        p.key(VK_RIGHT, true, false);
+        p.key(VK_RIGHT, true, false);
+        assert_eq!(p.selection(), Some((2, 4)));
+        p.key(VK_RIGHT, false, false);
+        assert_eq!((p.caret, p.selection()), (4, None), "sin Mayús, la flecha cierra la selección en su borde");
+        p.key(VK_HOME, false, false);
+        assert_eq!(p.caret, 0);
+        p.key(VK_END, true, false);
+        assert_eq!(p.selection(), Some((0, 6)));
+    }
+
+    #[test]
+    fn dragging_across_the_digits_selects_them_and_typing_replaces() {
+        let mut p = picker();
+        let (x, y) = hex_x(1);
+        p.press(W, H, x, y);
+        p.drag(W, H, hex_x(4).0, y);
+        p.release();
+        assert_eq!(p.selection(), Some((1, 4)));
+        p.char('F');
+        assert_eq!(p.hex, "3F".to_string() + &"3B9EFF"[4..]);
+        assert_eq!(p.caret, 2);
+    }
+
+    #[test]
+    fn backspace_and_delete_work_around_the_cursor() {
+        let mut p = picker();
+        let (x, y) = hex_x(3);
+        p.press(W, H, x, y);
+        p.release();
+        p.key(VK_BACK, false, false);
+        assert_eq!((p.hex.as_str(), p.caret), ("3BEFF", 2));
+        p.key(VK_DELETE, false, false);
+        assert_eq!(p.hex, "3BFF");
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_and_the_arrows_move_the_color_when_the_box_is_not_focused() {
+        let mut p = picker();
+        let (x, y) = hex_x(2);
+        p.press(W, H, x, y);
+        p.release();
+        p.key(Key(0x41), false, true);
+        assert_eq!(p.selection(), Some((0, 6)));
+        // Un clic en el cuadrado le saca el foco a la caja: las flechas mueven el color.
+        let l = layout(W, H);
+        p.press(W, H, (l.square.left + l.square.right) / 2.0, (l.square.top + l.square.bottom) / 2.0);
+        p.release();
+        let before = p.s;
+        p.key(VK_LEFT, false, false);
+        assert!(p.s < before);
+    }
+
+    #[test]
+    fn typing_never_goes_past_six_digits() {
+        let mut p = picker();
+        p.key(VK_BACK, false, false);
+        for c in "12AB3FFF".chars() {
+            p.char(c);
+        }
+        assert_eq!(p.hex, "12AB3F");
+        assert_eq!(p.color(), 0x12AB3F);
     }
 }

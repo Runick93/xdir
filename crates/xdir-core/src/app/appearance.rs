@@ -130,10 +130,10 @@ impl App {
     }
 
     /// Una tecla con el selector abierto: se queda con todas.
-    pub(super) fn color_picker_key(&mut self, vk: Key, shift: bool) -> bool {
+    pub(super) fn color_picker_key(&mut self, vk: Key, shift: bool, ctrl: bool) -> bool {
         let Some(pk) = &mut self.color_picker else { return false };
         let target = pk.target;
-        let outcome = pk.key(vk, shift);
+        let outcome = pk.key(vk, shift, ctrl);
         self.color_picker_done(target, outcome);
         self.redraw();
         true

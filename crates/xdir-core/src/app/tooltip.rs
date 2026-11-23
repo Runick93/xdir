@@ -154,6 +154,7 @@ impl App {
                     keys => format!("Buscar en xtree ({keys})"),
                 });
             }
+            Hit::XtreeFree => return Some(self.xtree.as_ref()?.free_tip().to_string()),
             Hit::XtreeSide => return Some(self.xtree.as_ref()?.side_tip().to_string()),
             Hit::XtreeColors => {
                 let what = self.xtree.as_ref()?.colors_tip();

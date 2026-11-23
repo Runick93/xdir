@@ -38,6 +38,7 @@ pub const OPTIONS: &[OptionSpec] = &[
     opt("xtree_analizar_al_abrir", Section::Xtree, "Analizar al abrir xtree", "Si no, elegís el disco y tocás Analizar", &["xtree", "analizar", "abrir", "escanear", "disco"]),
     opt("xtree_por_tipo", Section::Xtree, "Colorear el mapa por tipo de archivo al abrir", "Lo mismo que el botón Colores, desde que se abre", &["xtree", "color", "tipo", "mapa"]),
     opt("xtree_abrir", Section::Xtree, "Disco que se analiza al abrir", "El del sistema, el de la carpeta del panel o el último", &["xtree", "disco", "analizar", "carpeta"]),
+    opt("xtree_espacio_libre", Section::Xtree, "Mostrar el espacio libre en el mapa", "Al analizar un disco entero, el libre aparece como un bloque más (también el botón de la barra superior)", &["xtree", "libre", "espacio", "disco", "mapa", "bloque"]),
     opt("xtree_barra_lateral", Section::Xtree, "Lista de carpetas de xtree", "A la izquierda o a la derecha del mapa (también el botón de la barra superior)", &["xtree", "barra", "lateral", "lista", "izquierda", "derecha", "lado"]),
     opt("xtree_historial", Section::Xtree, "Guardar historial de tamaños", "Una foto de cada análisis para ver cuánto creció cada carpeta", &["xtree", "historial", "crecimiento", "tamaño", "foto"]),
     opt("xtree_borrar_historial", Section::Xtree, "Historial guardado", "Las fotos de tamaños de todas las carpetas analizadas", &["xtree", "historial", "borrar", "limpiar", "fotos"]),

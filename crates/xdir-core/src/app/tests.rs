@@ -3556,3 +3556,15 @@ fn escape_restores_tab_order() {
     assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
     assert_eq!(a.panes[0].tab().id, ids[0], "sigue activa la arrastrada");
 }
+
+/// Los círculos de «Color de fondo» muestran el nombre de cada fondo al pasar el mouse.
+#[test]
+fn background_circles_show_their_name() {
+    let a = app();
+    for (i, (name, ..)) in theme::BACKGROUNDS.iter().enumerate() {
+        let hit = Hit::Settings(0, crate::settings::SettingsHit::Part("fondo", i));
+        assert_eq!(a.tooltip_text(hit).as_deref(), Some(*name));
+    }
+    let none = Hit::Settings(0, crate::settings::SettingsHit::Part("fondo", theme::BACKGROUNDS.len()));
+    assert_eq!(a.tooltip_text(none), None);
+}

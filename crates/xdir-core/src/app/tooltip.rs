@@ -146,6 +146,10 @@ impl App {
             Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
             Hit::XtreeBack => return Some("Volver a xdir (Esc)".to_string()),
             Hit::About(crate::about::AboutHit::Repo) => return Some("Ver el código en GitHub".to_string()),
+            // Los círculos de «Color de fondo»: el nombre de cada fondo.
+            Hit::Settings(_, crate::settings::SettingsHit::Part("fondo", i)) if i < theme::BACKGROUNDS.len() => {
+                return Some(theme::BACKGROUNDS[i].0.to_string());
+            }
             // La ▲ de la tabla de xtree: cuánto creció la carpeta en el período.
             Hit::XtreeMark(n) => return self.xtree.as_ref()?.mark_tip(n),
             Hit::XtreeSearch => {

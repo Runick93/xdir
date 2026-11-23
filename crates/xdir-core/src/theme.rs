@@ -45,21 +45,22 @@ pub const PRESETS: [(&str, u32); 12] = [
     ("Gris", 0x8B98A9),
 ];
 
-/// Fondos predefinidos, uno por énfasis (todos oscuros): (cómo se lee, fondo base, fondo de panel),
-/// en el orden de `PRESETS`. Con uno de estos el panel usa su propio color en vez del derivado.
+/// Fondos predefinidos, uno por énfasis (todos oscuros y con tinte del color): (nombre, fondo base,
+/// fondo de panel), en el orden de `PRESETS`. Con uno de estos el panel usa su propio color en vez
+/// del derivado.
 pub const BACKGROUNDS: [(&str, u32, u32); 12] = [
-    ("Grafito azulado", 0x0F141C, 0x151C27),
-    ("Gris frío", 0x0E151B, 0x141E26),
-    ("Grafito petróleo", 0x0E1718, 0x142021),
-    ("Gris verdoso", 0x111713, 0x182019),
-    ("Grafito oliva", 0x151714, 0x1C2118),
-    ("Carbón cálido", 0x171612, 0x201E18),
-    ("Gris cálido", 0x181512, 0x211C17),
-    ("Grafito vino", 0x181416, 0x211A1D),
-    ("Gris ciruela", 0x171319, 0x201A23),
-    ("Grafito violáceo", 0x15131C, 0x1D1926),
-    ("Azul noche", 0x121420, 0x191D2B),
-    ("Grafito neutro", 0x12161B, 0x191F27),
+    ("Azul", 0x00122D, 0x092044),
+    ("Celeste", 0x001923, 0x092831),
+    ("Turquesa", 0x001D1A, 0x092C28),
+    ("Verde", 0x001806, 0x09260F),
+    ("Lima", 0x151D00, 0x222B08),
+    ("Amarillo", 0x201900, 0x302609),
+    ("Naranja", 0x241000, 0x351C08),
+    ("Rojo", 0x230009, 0x350B16),
+    ("Rosa", 0x260019, 0x380A28),
+    ("Violeta", 0x19082C, 0x281340),
+    ("Índigo", 0x0D0C30, 0x191943),
+    ("Gris azulado", 0x101B25, 0x1C2936),
 ];
 
 /// Acento por defecto: el azul del diseño.

@@ -432,6 +432,52 @@ impl ColorPicker {
         self.apply_typed_hex();
     }
 
+    /// Lo que copia Ctrl+C: la selección tal cual o, sin selección, el color entero con su «#».
+    pub fn copy_text(&self) -> String {
+        match self.selection() {
+            Some((a, b)) => self.hex.chars().skip(a).take(b - a).collect(),
+            None => format!("#{}", self.hex),
+        }
+    }
+
+    /// Ctrl+X: devuelve lo copiado y borra la selección (sin selección, no borra nada).
+    pub fn cut_text(&mut self) -> String {
+        let text = self.copy_text();
+        self.delete_selection();
+        text
+    }
+
+    /// Ctrl+V: un color completo («#FF8800», «ff8800», «#F80») reemplaza todo el valor; otro texto
+    /// entra con sus dígitos hexadecimales en el cursor, reemplazando la selección.
+    pub fn paste(&mut self, text: &str) {
+        self.hex_focus = true;
+        let digits: String = text.chars().filter(char::is_ascii_hexdigit).map(|c| c.to_ascii_uppercase()).collect();
+        let whole = text.trim().trim_start_matches('#');
+        if whole.chars().all(|c| c.is_ascii_hexdigit()) && matches!(whole.len(), 3 | 6) {
+            self.hex = digits.clone();
+            self.caret = digits.len();
+            self.anchor = None;
+        } else {
+            self.delete_selection();
+            self.anchor = None;
+            for c in digits.chars() {
+                if self.hex.chars().count() < 6 {
+                    self.hex.insert(self.caret.min(self.hex.len()), c);
+                    self.caret += 1;
+                }
+            }
+        }
+        if self.hex.len() == 3
+            && let Some(c) = parse_hex(&self.hex)
+        {
+            // «#F80» pegado: se ve ya como «FF8800».
+            self.set_rgb(c);
+            self.anchor = None;
+            self.caret = 6;
+        }
+        self.apply_typed_hex();
+    }
+
     /// Pinta el selector sobre toda la ventana (`w` × `h`).
     pub fn draw(&self, p: &dyn Painter, w: f32, h: f32, hover: Option<PickHit>) {
         let th = p.theme();
@@ -855,5 +901,48 @@ mod hex_selection_tests {
         }
         assert_eq!(p.hex, "12AB3F");
         assert_eq!(p.color(), 0x12AB3F);
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn copy_gives_the_selection_or_the_whole_color() {
+        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        assert_eq!(p.copy_text(), "3B9EFF", "abre con todo seleccionado");
+        p.key(VK_END, false, false);
+        assert_eq!(p.copy_text(), "#3B9EFF", "sin selección copia el color con su #");
+        p.key(VK_LEFT, true, false);
+        p.key(VK_LEFT, true, false);
+        assert_eq!(p.copy_text(), "FF");
+    }
+
+    #[test]
+    fn cut_removes_the_selection() {
+        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        assert_eq!(p.cut_text(), "3B9EFF");
+        assert_eq!(p.hex, "");
+    }
+
+    #[test]
+    fn pasting_a_whole_color_replaces_everything() {
+        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        p.key(VK_END, false, false);
+        p.paste(" #f85149 ");
+        assert_eq!((p.hex.as_str(), p.color()), ("F85149", 0xF85149));
+        p.paste("#F80");
+        assert_eq!((p.hex.as_str(), p.color()), ("FF8800", 0xFF8800));
+    }
+
+    #[test]
+    fn pasting_pieces_inserts_at_the_cursor_and_ignores_the_rest() {
+        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        p.key(VK_BACK, false, false);
+        p.paste("12-zz-34");
+        assert_eq!(p.hex, "1234");
+        p.paste("5678");
+        assert_eq!(p.hex, "123456", "no pasa de seis dígitos");
     }
 }

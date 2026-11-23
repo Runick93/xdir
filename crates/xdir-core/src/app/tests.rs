@@ -3580,3 +3580,26 @@ fn accent_circles_show_their_name() {
     let sys = Hit::Settings(0, crate::settings::SettingsHit::Part("acento", theme::PRESETS.len()));
     assert_eq!(a.tooltip_text(sys), None);
 }
+
+/// Ctrl+C, Ctrl+X y Ctrl+V del valor del selector van al portapapeles de texto del sistema.
+#[test]
+fn color_picker_hex_copies_cuts_and_pastes() {
+    use crate::keys::keys::VK_CONTROL;
+    let _ = VK_CONTROL;
+    let mut a = app();
+    a.choose_custom_color();
+    let ctrl = |a: &mut App, k: u16| a.color_picker_key(Key(k), false, true);
+    // Copiar con todo seleccionado copia el valor tal cual.
+    ctrl(&mut a, 0x43);
+    assert_eq!(crate::sys::shell().clipboard_text(a.hwnd).as_deref().map(|s| s.len()), Some(6));
+    // Pegar un color completo con «#» reemplaza todo el valor.
+    crate::sys::testing::FakeShell::set_clipboard_text(Some("#f85149"));
+    ctrl(&mut a, 0x56);
+    a.on_key(crate::keys::keys::VK_RETURN);
+    assert_eq!(a.accent, Accent::Rgb(0xF85149));
+    // Cortar deja el valor vacío y el texto en el portapapeles.
+    a.choose_custom_color();
+    ctrl(&mut a, 0x58);
+    assert_eq!(crate::sys::shell().clipboard_text(a.hwnd).as_deref().map(|s| s.len()), Some(6));
+    assert_eq!(a.color_picker.as_ref().unwrap().copy_text(), "#");
+}

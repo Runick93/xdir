@@ -416,6 +416,8 @@ struct ShellState {
     calls: Vec<ShellCall>,
     /// Portapapeles de archivos: lo llena `copy_files` (o `FakeShell::set_clipboard`).
     clipboard: Option<(Vec<PathBuf>, bool)>,
+    /// Texto del portapapeles: lo llena `copy_text` (o `FakeShell::set_clipboard_text`).
+    clipboard_text: Option<String>,
     /// Lo que devuelve el próximo `context_menu`.
     menu_choice: Option<String>,
     /// Si hay, las operaciones que pueden fallar fallan con este texto.
@@ -520,6 +522,11 @@ impl FakeShell {
         shell_state(|s| s.menu_has_new = on);
     }
 
+    /// Texto del portapapeles de este hilo.
+    pub fn set_clipboard_text(text: Option<&str>) {
+        shell_state(|s| s.clipboard_text = text.map(str::to_string));
+    }
+
     /// Contenido del portapapeles de archivos de este hilo.
     pub fn set_clipboard(files: Option<(Vec<PathBuf>, bool)>) {
         shell_state(|s| s.clipboard = files);
@@ -596,8 +603,15 @@ impl Shell for FakeShell {
     /// Como en el sistema, el texto reemplaza los archivos copiados o cortados.
     fn copy_text(&self, _owner: Handle, text: &str) -> Result<(), String> {
         record(ShellCall::CopyText(text.to_string()));
-        shell_state(|s| s.clipboard = None);
+        shell_state(|s| {
+            s.clipboard = None;
+            s.clipboard_text = Some(text.to_string());
+        });
         outcome()
+    }
+
+    fn clipboard_text(&self, _owner: Handle) -> Option<String> {
+        shell_state(|s| s.clipboard_text.clone())
     }
 
     fn pick_folder(&self, _owner: Handle, title: &str) -> Option<PathBuf> {

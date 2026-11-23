@@ -197,6 +197,11 @@ pub fn copy_text(_owner: Handle, text: &str) -> Result<()> {
     }
 }
 
+/// El texto del portapapeles, si hay.
+pub fn clipboard_text(_owner: Handle) -> Option<String> {
+    NSPasteboard::generalPasteboard().stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())
+}
+
 /// Diálogo del sistema para elegir una carpeta (`NSOpenPanel` solo con carpetas).
 pub fn pick_folder(_owner: Handle, title: &str) -> Option<PathBuf> {
     use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};

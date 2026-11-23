@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+## 0.2.6 — 2026-11-23
+
 ### Nuevo
 - **Color de cada grupo**: clic derecho sobre la pestaña de un grupo abre un panel con los 12 colores de acento (con su nombre al pasar el mouse) o «Acento de la aplicación» para volver al de la app. La pestaña lleva un subrayado de ese color y la activa un tinte suave al 25% (con el acento de la app si no tiene color propio). Se guarda en `grupos.toml` (`color = "#RRGGBB"`, también se puede editar a mano) y los grupos existentes siguen sin color.
 - En Linux, «Copiar como ruta» y demás copias de texto ahora funcionan: usan `wl-copy`, `xclip` o `xsel`, el que haya instalado.

@@ -81,6 +81,42 @@ impl XtreeOpen {
     }
 }
 
+/// `[opciones] xtree_barra_lateral`: de qué lado de xtree va la lista de carpetas.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum XtreeSide {
+    #[default]
+    Left,
+    Right,
+}
+
+impl XtreeSide {
+    pub const ALL: [XtreeSide; 2] = [XtreeSide::Left, XtreeSide::Right];
+
+    /// Valor en `config.toml`.
+    pub fn id(self) -> &'static str {
+        match self {
+            XtreeSide::Left => "izquierda",
+            XtreeSide::Right => "derecha",
+        }
+    }
+
+    /// Nombre en la configuración.
+    pub fn title(self) -> &'static str {
+        match self {
+            XtreeSide::Left => "A la izquierda",
+            XtreeSide::Right => "A la derecha",
+        }
+    }
+
+    /// El otro lado.
+    pub fn flip(self) -> XtreeSide {
+        match self {
+            XtreeSide::Left => XtreeSide::Right,
+            XtreeSide::Right => XtreeSide::Left,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keymap: Keymap,
@@ -96,6 +132,8 @@ pub struct Config {
     pub xtree_by_type: bool,
     /// `[opciones] xtree_abrir`: qué analiza xtree al abrirse.
     pub xtree_open: XtreeOpen,
+    /// `[opciones] xtree_barra_lateral`: de qué lado de xtree va la lista de carpetas.
+    pub xtree_side: XtreeSide,
     /// `[opciones] xtree_analizar_al_abrir`: xtree analiza apenas se abre (de fábrica, no: se
     /// elige el disco y se toca «Analizar»).
     pub xtree_scan_on_open: bool,
@@ -127,7 +165,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_scan_on_open: false, xtree_history: true, queue_by_disk: false, terminal: None, custom_terminal: None, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_side: XtreeSide::Left, xtree_scan_on_open: false, xtree_history: true, queue_by_disk: false, terminal: None, custom_terminal: None, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
     }
 }
 
@@ -328,6 +366,10 @@ impl Config {
                             ("xtree_abrir", _) => match XtreeOpen::ALL.into_iter().find(|o| e.value.as_str() == Some(o.id())) {
                                 Some(o) => c.xtree_open = o,
                                 None => c.errors.push(format!("línea {}: xtree_abrir va como \"sistema\", \"panel\" o \"ultimo\"", e.line)),
+                            },
+                            ("xtree_barra_lateral", _) => match XtreeSide::ALL.into_iter().find(|o| e.value.as_str() == Some(o.id())) {
+                                Some(o) => c.xtree_side = o,
+                                None => c.errors.push(format!("línea {}: xtree_barra_lateral va como \"izquierda\" o \"derecha\"", e.line)),
                             },
                             ("terminal", _) => match e.value.as_str() {
                                 Some(k) if !k.trim().is_empty() => c.terminal = Some(k.trim().to_string()),
@@ -653,6 +695,24 @@ mod tests {
         assert_eq!(bad.xtree_open, XtreeOpen::Pane);
         assert_eq!(bad.errors.len(), 2, "{:?}", bad.errors);
         assert!(bad.errors[0].starts_with("línea 2: "), "{:?}", bad.errors);
+    }
+
+    /// #105: `xtree_barra_lateral` — de fábrica a la izquierda; otra cosa es un error.
+    #[test]
+    fn xtree_side_option_parses() {
+        crate::sys::testing::install_fakes();
+        assert_eq!(Config::parse("").xtree_side, XtreeSide::Left);
+        let c = Config::parse("[opciones]
+xtree_barra_lateral = \"derecha\"
+");
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert_eq!(c.xtree_side, XtreeSide::Right);
+        let bad = Config::parse("[opciones]
+xtree_barra_lateral = \"arriba\"
+");
+        assert_eq!(bad.xtree_side, XtreeSide::Left);
+        assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
+        assert_eq!(XtreeSide::Left.flip(), XtreeSide::Right);
     }
 
     /// `xtree_analizar_al_abrir`: de fábrica apagado; true lo prende; otra cosa es un error.

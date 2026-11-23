@@ -123,19 +123,43 @@ pub struct Ui {
     pub colors_btn: Rect,
     /// La lupa (abre la búsqueda), a la izquierda de «Colores».
     pub search_btn: Rect,
+    /// El botón de «Lista a la izquierda / derecha», a la izquierda de la lupa.
+    pub side_btn: Rect,
 }
 
 /// Distribución de la vista en `area`. `legend_h` es 0 cuando no hay leyenda (color por carpeta):
 /// el mapa gana ese espacio.
 pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
+    layout_ui_side(area, legend_h, LIST_RIGHT.with(|c| c.get()))
+}
+
+// De qué lado va la lista de carpetas para las funciones que solo reciben el `area` (la caja de
+// búsqueda, que la pone la `App`). Es del hilo de la interfaz: la `App` lo fija con
+// `set_list_side` al cambiar la opción (y así las pruebas, cada una en su hilo, no se pisan).
+thread_local! {
+    static LIST_RIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Fija el lado de la lista de carpetas para `layout_ui` y las funciones que dependen de ella.
+pub fn set_list_side(right: bool) {
+    LIST_RIGHT.with(|c| c.set(right));
+}
+
+/// `layout_ui` con la lista de carpetas a la derecha (`right`) o a la izquierda del mapa (#105).
+/// La barra superior no cambia; la barra de datos queda siempre debajo del mapa.
+pub fn layout_ui_side(area: Rect, legend_h: f32, right: bool) -> Ui {
     let (l, t, r, b) = (area.left, area.top, area.right, area.bottom);
     let body_bottom = b - STATUS_H - 4.0;
-    let x0 = l + MARGIN + LIST_W + MARGIN;
+    let (list_l, x0, x1) = if right {
+        (r - MARGIN - LIST_W, l + MARGIN, r - MARGIN - LIST_W - MARGIN)
+    } else {
+        (l + MARGIN, l + MARGIN + LIST_W + MARGIN, r - MARGIN)
+    };
     // La lista de carpetas llega al borde inferior de la ventana (a la altura del pie de la barra de datos).
-    let list = rect(l + MARGIN, t + TOP_H + 4.0, l + MARGIN + LIST_W, b - 6.0);
-    let legend = rect(x0, body_bottom - legend_h, r - MARGIN, body_bottom);
-    let card = rect(x0, legend.top - GAP - CARD_H, r - MARGIN, legend.top - GAP);
-    let map = rect(x0, t + TOP_H + 4.0, r - MARGIN, card.top - GAP);
+    let list = rect(list_l, t + TOP_H + 4.0, list_l + LIST_W, b - 6.0);
+    let legend = rect(x0, body_bottom - legend_h, x1, body_bottom);
+    let card = rect(x0, legend.top - GAP - CARD_H, x1, legend.top - GAP);
+    let map = rect(x0, t + TOP_H + 4.0, x1, card.top - GAP);
     let widths = [168.0, 134.0, 150.0];
     let (top, bottom) = ((card.top + card.bottom) / 2.0 - 20.0, (card.top + card.bottom) / 2.0 + 20.0);
     let mut x = card.right - 14.0;
@@ -147,7 +171,26 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
     let back = back_rect(area);
     let combo = rect(back.right + 8.0, t + 6.0, back.right + 8.0 + 250.0, t + TOP_H - 6.0);
     let scan_btn = rect(combo.right + 8.0, t + 6.0, combo.right + 108.0, t + TOP_H - 6.0);
-    Ui { list, map, card, legend, status: rect(x0, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area), search_btn: search_btn_rect(area) }
+    Ui {
+        list,
+        map,
+        card,
+        legend,
+        // Debajo del mapa; el pie de la barra de datos va de `status.left` a `status.right - MARGIN`.
+        status: rect(x0, b - STATUS_H, x1 + MARGIN, b),
+        buttons,
+        back,
+        combo,
+        scan_btn,
+        colors_btn: colors_rect(area),
+        search_btn: search_btn_rect(area),
+        side_btn: side_btn_rect(area),
+    }
+}
+
+/// El botón que cambia de lado la lista de carpetas, a la izquierda de la lupa (ver `top_buttons`).
+pub fn side_btn_rect(area: Rect) -> Rect {
+    top_buttons(area).2
 }
 
 /// La lupa de la barra superior de la vista en `area` (ver `top_buttons`).
@@ -210,7 +253,7 @@ struct SearchState {
 /// La lupa y «Colores» de la barra superior en `area`: terminan 40 antes del estado del análisis
 /// y nunca pisan «Analizar». Si no entran, «Colores» queda solo con la muestra (del ancho de la
 /// lupa) y, si tampoco, no están (rectángulos vacíos: ningún punto cae adentro).
-fn top_buttons(area: Rect) -> (Rect, Rect) {
+fn top_buttons(area: Rect) -> (Rect, Rect, Rect) {
     let (top, bottom) = (area.top + 6.0, area.top + TOP_H - 6.0);
     let right = area.right - STATE_W - 40.0;
     // «Analizar» termina en `back` (76) + 8 + combo (250) + 8 + 100.
@@ -221,10 +264,13 @@ fn top_buttons(area: Rect) -> (Rect, Rect) {
         SEARCH_W
     } else {
         let none = rect(area.left, top, area.left, bottom);
-        return (none, none);
+        return (none, none, none);
     };
     let colors = rect(right - colors_w, top, right, bottom);
-    (colors, rect(colors.left - 6.0 - SEARCH_W, top, colors.left - 6.0, bottom))
+    let lens = rect(colors.left - 6.0 - SEARCH_W, top, colors.left - 6.0, bottom);
+    // El de lado va si todavía entra sin pisar «Analizar».
+    let side = if lens.left - 6.0 - SEARCH_W >= min_left { rect(lens.left - 6.0 - SEARCH_W, top, lens.left - 6.0, bottom) } else { rect(area.left, top, area.left, bottom) };
+    (colors, lens, side)
 }
 
 /// Botón «Colores: carpeta / tipo» de la vista en `area` (ver `top_buttons`).
@@ -314,6 +360,8 @@ pub struct Xtree {
     hover_back: bool,
     /// El mouse está sobre «Colores».
     hover_colors: bool,
+    /// El mouse está sobre el botón de lado de la lista.
+    hover_side: bool,
     /// Atajos en uso de los colores y de analizar con permisos, para la ayuda y el aviso de la
     /// barra de datos (los pone la `App`; vacíos si no hay).
     keys_colors: String,
@@ -442,6 +490,7 @@ impl Xtree {
             hover_btn: None,
             hover_back: false,
             hover_colors: false,
+            hover_side: false,
             keys_colors: String::new(),
             keys_elevate: String::new(),
             scroll: 0.0,
@@ -602,6 +651,7 @@ impl Xtree {
         self.menu_hover = None;
         self.hover_back = false;
         self.hover_colors = false;
+        self.hover_side = false;
         self.hover_search = false;
     }
 
@@ -636,6 +686,11 @@ impl Xtree {
     pub fn toggle_colors(&mut self) {
         self.by_type = !self.by_type;
         self.cells_for = None;
+    }
+
+    /// Lo que hace el botón de lado de la lista ahora (para su cartel, sin el atajo).
+    pub fn side_tip(&self) -> &'static str {
+        if LIST_RIGHT.with(|c| c.get()) { "Pasar la lista de carpetas a la izquierda" } else { "Pasar la lista de carpetas a la derecha" }
     }
 
     /// Lo que hace el botón «Colores» ahora (para su cartel, sin el atajo).
@@ -1372,11 +1427,13 @@ impl Xtree {
         let back = contains(&back_rect(area), x, y);
         let colors = contains(&colors_rect(area), x, y);
         let lens = contains(&search_btn_rect(area), x, y);
+        let side = contains(&side_btn_rect(area), x, y);
         let result = self.result_at(area, x, y);
-        let mut back_changed = back != self.hover_back || colors != self.hover_colors || lens != self.hover_search;
+        let mut back_changed = back != self.hover_back || colors != self.hover_colors || lens != self.hover_search || side != self.hover_side;
         self.hover_back = back;
         self.hover_colors = colors;
         self.hover_search = lens;
+        self.hover_side = side;
         if let Some(st) = &mut self.search {
             back_changed |= st.hover != result;
             st.hover = result;
@@ -1838,6 +1895,18 @@ impl Xtree {
             p.round_stroke_w(sbtn, 6.0, if self.search.is_some() { th.accent } else { th.border }, 1.0);
             p.text(FontId::GlyphsSmall, "\u{E721}", sbtn, th.text);
         }
+        // «Lista a la izquierda / derecha» (#105): una ventanita con la franja de la lista del lado
+        // en que está.
+        let lbtn = ui.side_btn;
+        if lbtn.right > lbtn.left {
+            p.round_fill(lbtn, 6.0, if self.hover_side { th.hover } else { th.surface_alt });
+            p.round_stroke_w(lbtn, 6.0, th.border, 1.0);
+            let (cx, cy) = ((lbtn.left + lbtn.right) / 2.0, (lbtn.top + lbtn.bottom) / 2.0);
+            let frame = rect(cx - 8.0, cy - 6.0, cx + 8.0, cy + 6.0);
+            p.round_stroke_w(frame, 2.0, th.text_dim, 1.0);
+            let strip = if LIST_RIGHT.with(|c| c.get()) { rect(frame.right - 5.0, frame.top + 2.0, frame.right - 2.0, frame.bottom - 2.0) } else { rect(frame.left + 2.0, frame.top + 2.0, frame.left + 5.0, frame.bottom - 2.0) };
+            p.round_fill(strip, 1.0, th.text);
+        }
         // El estado (y su punto) después de «Analizar» si la ventana es angosta: lo recorta.
         let state_l = (r0 - STATE_W).max(ui.scan_btn.right + 36.0);
         let state = self.state_text();
@@ -2226,7 +2295,7 @@ mod tests {
         for w in [560.0, 640.0, 700.0, 760.0, 800.0, 860.0, 900.0, 1000.0, 1400.0] {
             let area = rect(0.0, 0.0, w, 790.0);
             let ui = layout_ui(area, 0.0);
-            for b in [ui.colors_btn, ui.search_btn] {
+            for b in [ui.colors_btn, ui.search_btn, ui.side_btn] {
                 for other in [ui.scan_btn, ui.combo, ui.back] {
                     assert!(!overlap(b, other), "ancho {w}: {b:?} pisa {other:?}");
                 }
@@ -2544,6 +2613,43 @@ mod tests {
             assert!(ui.status.top >= ui.legend.bottom, "la barra queda debajo de la leyenda");
             assert!(ui.status.top >= ui.map.bottom && ui.status.top >= ui.card.bottom);
         }
+    }
+
+    /// #105: con la lista a la derecha todo se refleja: el mapa, la tarjeta, la leyenda y la barra
+    /// de datos quedan a la izquierda de la lista, alineados entre sí y sin pisarla.
+    #[test]
+    fn list_on_the_right_mirrors_the_layout() {
+        for legend_h in [0.0, LEGEND_H] {
+            let area = rect(0.0, 0.0, 1600.0, 900.0);
+            let (lf, rt) = (layout_ui_side(area, legend_h, false), layout_ui_side(area, legend_h, true));
+            assert_eq!(rt.list.right, area.right - MARGIN, "la lista pegada al borde derecho");
+            assert_eq!((rt.list.top, rt.list.bottom), (lf.list.top, lf.list.bottom), "mismo alto");
+            assert_eq!(rt.list.right - rt.list.left, lf.list.right - lf.list.left, "mismo ancho");
+            for (a, b) in [(rt.map, lf.map), (rt.card, lf.card), (rt.legend, lf.legend)] {
+                assert_eq!(a.right - a.left, b.right - b.left, "mismo ancho que a la izquierda");
+                assert_eq!((a.top, a.bottom), (b.top, b.bottom), "mismo alto");
+                assert!(a.right <= rt.list.left, "no pisa la lista");
+            }
+            assert_eq!((rt.map.left, rt.map.right), (rt.card.left, rt.card.right), "mapa y tarjeta alineados");
+            assert_eq!((rt.map.left, rt.map.right), (rt.legend.left, rt.legend.right), "mapa y leyenda alineados");
+            assert_eq!(rt.status.left, rt.map.left, "la barra de datos empieza donde el mapa");
+            assert_eq!(rt.status.right - MARGIN, rt.map.right, "y termina donde el mapa");
+            assert!(rt.status.right <= rt.list.left);
+            for b in rt.buttons {
+                assert!(b.left >= rt.card.left && b.right <= rt.card.right, "los botones quedan en la tarjeta");
+            }
+            // La barra superior no cambia de lado.
+            assert_eq!((rt.back.left, rt.combo.left, rt.scan_btn.left, rt.colors_btn.left), (lf.back.left, lf.combo.left, lf.scan_btn.left, lf.colors_btn.left));
+        }
+    }
+
+    /// #105: el botón de lado entra en la barra superior solo si no pisa «Analizar».
+    #[test]
+    fn side_button_sits_left_of_the_lens() {
+        let wide = layout_ui(rect(0.0, 0.0, 1400.0, 790.0), 0.0);
+        assert!(wide.side_btn.right <= wide.search_btn.left && wide.side_btn.left > wide.scan_btn.right);
+        let narrow = layout_ui(rect(0.0, 0.0, 560.0, 790.0), 0.0);
+        assert!(narrow.side_btn.right <= narrow.side_btn.left, "sin lugar: no está");
     }
 
     /// Recorre la vista entera con hit-tests y clics: nada debe entrar en pánico.

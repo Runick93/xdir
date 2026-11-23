@@ -231,6 +231,7 @@ impl App {
             let elevate_keys = self.config.keymap.label(Command::XtreeElevate);
             if let Some(v) = self.xtree.as_mut().filter(|_| xtree_open) {
                 v.set_key_labels(colors_keys, elevate_keys);
+                crate::xtree::view::set_list_side(self.config.xtree_side == crate::config::XtreeSide::Right);
                 v.paint(p, ui::xtree_area(w, h));
             } else if groups_h > 0.0 {
                 let names: Vec<(&str, bool)> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();

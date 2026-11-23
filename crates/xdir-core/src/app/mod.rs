@@ -210,6 +210,8 @@ enum Hit {
     XtreeColors,
     /// La lupa de la barra superior de xtree (abre y cierra la búsqueda).
     XtreeSearch,
+    /// El botón que pasa la lista de carpetas de xtree al otro lado.
+    XtreeSide,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),

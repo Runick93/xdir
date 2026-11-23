@@ -122,6 +122,9 @@ impl App {
             if contains(&crate::xtree::view::search_btn_rect(ui::xtree_area(w, h)), x, y) {
                 return Hit::XtreeSearch;
             }
+            if contains(&crate::xtree::view::side_btn_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeSide;
+            }
             if !contains(&ui::xtree_area(w, h), x, y) {
                 return Hit::None;
             }
@@ -345,6 +348,10 @@ impl App {
                 if let Some(x) = &mut self.xtree {
                     x.toggle_colors();
                 }
+                self.redraw();
+            }
+            Hit::XtreeSide => {
+                self.set_xtree_side(self.config.xtree_side.flip());
                 self.redraw();
             }
             Hit::XtreeSearch => {

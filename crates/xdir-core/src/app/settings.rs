@@ -185,6 +185,7 @@ impl App {
             "xtree_analizar_al_abrir" => one(row(Control::Switch(self.config.xtree_scan_on_open))),
             "xtree_por_tipo" => one(row(Control::Switch(self.config.xtree_by_type))),
             "xtree_abrir" => one(row(Control::Dropdown(self.config.xtree_open.title().to_string()))),
+            "xtree_barra_lateral" => one(row(Control::Dropdown(self.config.xtree_side.title().to_string()))),
             "xtree_historial" => one(row(Control::Switch(self.config.xtree_history))),
             "cola_por_disco" => one(row(Control::Switch(self.config.queue_by_disk))),
             "xtree_borrar_historial" => {
@@ -434,6 +435,7 @@ impl App {
                 }]);
             }
             ("xtree_abrir", _) => self.xtree_open_menu(pane),
+            ("xtree_barra_lateral", _) => self.xtree_side_menu(pane),
             ("xtree_historial", _) => self.toggle_xtree_history(),
             ("cola_por_disco", _) => self.toggle_queue_by_disk(),
             ("xtree_borrar_historial", _) => self.clear_xtree_history(),
@@ -474,6 +476,34 @@ impl App {
             config::XtreeOpen::Pane => ConfigEdit::Remove { section: "opciones", key },
             o => ConfigEdit::Set { section: "opciones", key, value: crate::toml::quote(o.id()) },
         }]);
+    }
+
+    /// De qué lado de xtree va la lista de carpetas (`[opciones] xtree_barra_lateral`): se guarda
+    /// y se aplica al instante.
+    pub(super) fn set_xtree_side(&mut self, side: config::XtreeSide) {
+        self.config.xtree_side = side;
+        crate::xtree::view::set_list_side(side == config::XtreeSide::Right);
+        let key = "xtree_barra_lateral".to_string();
+        self.edit_config(vec![match side {
+            config::XtreeSide::Left => ConfigEdit::Remove { section: "opciones", key },
+            o => ConfigEdit::Set { section: "opciones", key, value: crate::toml::quote(o.id()) },
+        }]);
+    }
+
+    /// El desplegable de «Lista de carpetas de xtree».
+    fn xtree_side_menu(&mut self, pane: usize) {
+        let current = self.config.xtree_side;
+        let entries: Vec<shell::Entry> = config::XtreeSide::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, o)| shell::Entry::Item { id: i as u32 + 1, label: o.title().to_string(), enabled: true, checked: *o == current })
+            .collect();
+        let at = self.part_rect(pane, "xtree_barra_lateral", 0).map_or(MenuPos::Cursor, |r| MenuPos::At(r.left, r.bottom + 2.0));
+        if let Some(i) = self.host.popup_menu(&entries, at, None, None).and_then(|c| (c as usize).checked_sub(1))
+            && let Some(o) = config::XtreeSide::ALL.get(i)
+        {
+            self.set_xtree_side(*o);
+        }
     }
 
     /// El desplegable de «Disco que se analiza al abrir».

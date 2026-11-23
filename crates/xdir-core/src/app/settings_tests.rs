@@ -620,6 +620,16 @@ fn xtree_switch_writes_option() {
     wait_config(&mut a);
     assert_eq!(a.config.xtree_open, config::XtreeOpen::Last);
     assert!(config_text().contains("\nxtree_abrir = \"ultimo\"\n"));
+    // #105: la lista de carpetas pasa a la derecha: se guarda y se aplica al instante.
+    host.set_menu_choice(Some(2));
+    click(&mut a, "xtree_barra_lateral", 0);
+    wait_config(&mut a);
+    assert_eq!(a.config.xtree_side, config::XtreeSide::Right);
+    assert!(config_text().contains("\nxtree_barra_lateral = \"derecha\"\n"));
+    assert!(crate::xtree::view::layout_ui(crate::geom::rect(0.0, 0.0, 1600.0, 900.0), 0.0).list.left > 800.0, "la lista quedó a la derecha");
+    a.set_xtree_side(config::XtreeSide::Left);
+    wait_config(&mut a);
+    assert!(!config_text().contains("\nxtree_barra_lateral = "), "a la izquierda es lo de fábrica: se borra");
     // «Ver los atajos» lleva a la página Atajos.
     click(&mut a, "ver_atajos", 0);
     assert_eq!(page(&a), PageId::Builtin(Section::Keys));

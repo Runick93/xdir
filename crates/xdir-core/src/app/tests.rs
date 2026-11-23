@@ -3568,3 +3568,15 @@ fn background_circles_show_their_name() {
     let none = Hit::Settings(0, crate::settings::SettingsHit::Part("fondo", theme::BACKGROUNDS.len()));
     assert_eq!(a.tooltip_text(none), None);
 }
+
+/// Los círculos de «Color de acento» muestran el nombre de cada color al pasar el mouse.
+#[test]
+fn accent_circles_show_their_name() {
+    let a = app();
+    for (i, (name, _)) in theme::PRESETS.iter().enumerate() {
+        let hit = Hit::Settings(0, crate::settings::SettingsHit::Part("acento", i));
+        assert_eq!(a.tooltip_text(hit).as_deref(), Some(*name));
+    }
+    let sys = Hit::Settings(0, crate::settings::SettingsHit::Part("acento", theme::PRESETS.len()));
+    assert_eq!(a.tooltip_text(sys), None);
+}

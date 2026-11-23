@@ -8,6 +8,7 @@ mod archive_nav;
 mod changelog;
 mod checksum;
 mod compare;
+mod color_picker;
 mod confirm;
 mod drop_menu;
 mod edit;
@@ -239,6 +240,8 @@ enum Hit {
     Drives(crate::net::drives_dialog::DrivesHit),
     /// El diálogo de confirmación propio (git): un botón, la cruz o el panel sin nada debajo.
     Confirm(confirm::ConfirmHit),
+    /// El selector de color propio: una parte o el panel sin nada debajo.
+    ColorPicker(color_picker::PickHit),
     /// El menú de ramas abierto: una fila o el panel sin nada debajo.
     DropMenu(drop_menu::DropHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
@@ -522,6 +525,10 @@ pub struct App {
     /// Hay un aviso de guardado en camino (`WM_APP_VIEWS_SAVE`).
     views_save_posted: bool,
     accent: Accent,
+    /// Fondo elegido (0xRRGGBB); sin él, el del modo claro u oscuro.
+    background: Option<u32>,
+    /// El selector de color abierto (acento o fondo).
+    color_picker: Option<color_picker::ColorPicker>,
     /// Modo fijado con el switch; None sigue al modo de Windows.
     dark_mode: Option<bool>,
     /// Panel de colores abierto (rueda dentada).
@@ -718,7 +725,7 @@ impl App {
         if folder_views.is_fresh() {
             folder_views.migrate(&session);
         }
-        let theme = Theme::from_system(session.accent, session.dark_mode);
+        let theme = Theme::with_background(session.accent, session.dark_mode, session.background);
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
         let (task_tx, task_rx) = channel();
@@ -824,6 +831,8 @@ impl App {
             views_changed_at: None,
             views_save_posted: false,
             accent: session.accent,
+            background: session.background,
+            color_picker: None,
             dark_mode: session.dark_mode,
             picker_open: false,
             about_open: false,

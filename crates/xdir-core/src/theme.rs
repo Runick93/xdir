@@ -61,7 +61,17 @@ impl Theme {
     /// Arma la paleta con el acento elegido. `dark`: modo fijado por el usuario; sin él, el
     /// modo de apps de Windows.
     pub fn from_system(accent: Accent, dark: Option<bool>) -> Self {
-        let dark = dark.unwrap_or_else(|| crate::sys::env().system_dark());
+        Self::with_background(accent, dark, None)
+    }
+
+    /// Lo mismo con un fondo elegido (0xRRGGBB). Con fondo propio el modo claro u oscuro sale del
+    /// fondo (el más legible para su luminosidad) y las superficies, bordes y textos se derivan de
+    /// él, así el texto siempre se lee.
+    pub fn with_background(accent: Accent, dark: Option<bool>, background: Option<u32>) -> Self {
+        let dark = match background {
+            Some(bg) => !bg_is_light(bg),
+            None => dark.unwrap_or_else(|| crate::sys::env().system_dark()),
+        };
 
         let accent = match accent {
             Accent::Rgb(c) => rgb(c >> 16, (c >> 8) & 0xFF, c & 0xFF),
@@ -72,7 +82,7 @@ impl Theme {
 
         // Oscuro con tinte azulado y superficies apenas más claras que el fondo; los paneles
         // se separan por su borde, no por contraste de relleno.
-        if dark {
+        let mut theme = if dark {
             Self {
                 dark,
                 background: rgb(0x0B, 0x0F, 0x14),
@@ -110,8 +120,57 @@ impl Theme {
                 warning: rgb(0xB7, 0x79, 0x1F),
                 danger: rgb(0xEB, 0x52, 0x57),
             }
+        };
+        if let Some(bg) = background {
+            theme.derive_from_background(bg);
         }
+        theme
     }
+
+    /// Reemplaza el fondo y deriva de él las superficies, el borde y los textos: las superficies
+    /// se corren hacia el texto, el borde un poco más, y el texto secundario se acerca al fondo.
+    fn derive_from_background(&mut self, bg: u32) {
+        let base = rgb(bg >> 16, (bg >> 8) & 0xFF, bg & 0xFF);
+        let toward = if self.dark { WHITE } else { BLACK };
+        self.background = base;
+        self.surface = mix(base, toward, if self.dark { 0.035 } else { 0.0 });
+        self.surface_alt = mix(base, toward, if self.dark { 0.07 } else { 0.035 });
+        if !self.dark {
+            // En claro las superficies son más claras que el fondo, como en el tema de fábrica.
+            self.surface = mix(base, WHITE, 0.6);
+            self.surface_alt = mix(base, WHITE, 0.3);
+        }
+        self.border = mix(base, toward, if self.dark { 0.16 } else { 0.14 });
+        // Texto casi blanco o casi negro (el más legible sobre este fondo) y de él los tenues.
+        self.text = mix(if self.dark { WHITE } else { BLACK }, base, 0.04);
+        self.text_dim = mix(self.text, base, 0.35);
+        self.text_secondary = mix(self.text, base, 0.15);
+        self.hover = Color { a: if self.dark { 0.05 } else { 0.045 }, ..toward };
+        self.scrollbar = Color { a: if self.dark { 0.22 } else { 0.28 }, ..toward };
+    }
+}
+
+const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+
+/// Luminancia relativa (WCAG) de 0xRRGGBB.
+fn luminance(c: u32) -> f32 {
+    let lin = |v: u32| {
+        let v = v as f32 / 255.0;
+        if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(c >> 16 & 0xFF) + 0.7152 * lin(c >> 8 & 0xFF) + 0.0722 * lin(c & 0xFF)
+}
+
+/// ¿Con este fondo se lee mejor texto oscuro? Es el punto donde el contraste con blanco y con
+/// negro se iguala (luminancia ≈ 0,179).
+pub fn bg_is_light(bg: u32) -> bool {
+    luminance(bg) > 0.179
+}
+
+/// `a` corrido `t` (0 a 1) hacia `b`.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1.0 }
 }
 
 fn rgb(r: u32, g: u32, b: u32) -> Color {
@@ -129,4 +188,50 @@ fn rgba(r: u32, g: u32, b: u32, a: f32) -> Color {
 
 pub fn alpha(c: Color, a: f32) -> Color {
     Color { a, ..c }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lum(c: Color) -> f32 {
+        luminance(((c.r * 255.0).round() as u32) << 16 | ((c.g * 255.0).round() as u32) << 8 | (c.b * 255.0).round() as u32)
+    }
+
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn without_background_nothing_changes() {
+        let a = Theme::from_system(DEFAULT_ACCENT, Some(true));
+        let b = Theme::with_background(DEFAULT_ACCENT, Some(true), None);
+        assert_eq!(a.background, b.background);
+        assert_eq!(a.surface, b.surface);
+        assert_eq!(a.text, b.text);
+    }
+
+    #[test]
+    fn background_decides_the_mode() {
+        assert!(Theme::with_background(DEFAULT_ACCENT, Some(false), Some(0x101820)).dark);
+        assert!(!Theme::with_background(DEFAULT_ACCENT, Some(true), Some(0xF4EFE6)).dark);
+    }
+
+    #[test]
+    fn every_background_keeps_text_readable() {
+        // Una grilla de fondos de todo el espectro: el texto y el secundario deben leerse.
+        for r in (0..=255).step_by(51) {
+            for g in (0..=255).step_by(51) {
+                for b in (0..=255).step_by(51) {
+                    let bg = r << 16 | g << 8 | b;
+                    let t = Theme::with_background(DEFAULT_ACCENT, None, Some(bg));
+                    assert_eq!(t.background, rgb(r, g, b));
+                    assert!(contrast(t.text, t.background) >= 4.0, "texto en {bg:06X}: {}", contrast(t.text, t.background));
+                    assert!(contrast(t.text_secondary, t.background) >= 3.0, "secundario en {bg:06X}");
+                    assert!(contrast(t.text_dim, t.background) >= 2.0, "tenue en {bg:06X}");
+                }
+            }
+        }
+    }
 }

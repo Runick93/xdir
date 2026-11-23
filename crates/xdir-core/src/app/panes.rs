@@ -449,6 +449,7 @@ impl App {
             show_tree: self.tree_visible(),
             tree_pinned: self.tree_pinned(),
             accent: self.accent,
+            background: self.background,
             dark_mode: self.dark_mode,
             group: self.group_name.clone(),
             preview_on: self.preview.on,

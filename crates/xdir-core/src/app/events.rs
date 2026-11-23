@@ -240,7 +240,7 @@ impl App {
 
     /// Cambió el modo claro/oscuro del sistema.
     pub fn on_system_theme_changed(&mut self) {
-        self.theme = Theme::from_system(self.accent, self.dark_mode);
+        self.theme = self.make_theme();
         self.apply_window_theme();
         self.redraw();
     }
@@ -385,6 +385,12 @@ impl App {
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
         self.dismiss_tooltip();
+        // El selector de color se queda con lo escrito (el valor hexadecimal).
+        if let Some(pk) = &mut self.color_picker {
+            pk.char(c);
+            self.redraw();
+            return;
+        }
         // Con el diálogo de confirmación abierto, lo escrito no va a la lista.
         if self.confirm.is_some() || self.drop_menu.is_some() {
             return;

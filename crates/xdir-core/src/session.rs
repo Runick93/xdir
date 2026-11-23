@@ -214,6 +214,8 @@ pub struct Session {
     /// Barra de pestañas de grupos habilitada (aparece solo si hay grupos).
     pub group_bar: bool,
     pub accent: Accent,
+    /// Fondo elegido (0xRRGGBB); sin él, el del modo claro u oscuro.
+    pub background: Option<u32>,
     /// Modo fijado por el usuario; None sigue a Windows.
     pub dark_mode: Option<bool>,
     /// Colores por tipo de archivo (reglas de `config.toml`) encendidos.
@@ -274,6 +276,7 @@ impl Default for Session {
             show_favorites: true,
             group_bar: true,
             accent: DEFAULT_ACCENT,
+            background: None,
             dark_mode: None,
             file_colors: true,
             show_extensions: true,
@@ -368,6 +371,9 @@ fn write(s: &Session) -> String {
         Accent::System => "acento = \"sistema\"\n".to_string(),
         Accent::Rgb(c) => format!("acento = \"#{c:06X}\"\n"),
     };
+    if let Some(c) = s.background {
+        out += &format!("fondo = \"#{c:06X}\"\n");
+    }
     out += match s.dark_mode {
         None => "modo = \"sistema\"\n",
         Some(true) => "modo = \"oscuro\"\n",
@@ -492,6 +498,10 @@ fn parse(text: &str) -> Session {
                     "claro" => Some(false),
                     _ => None,
                 };
+            }
+            ("fondo", None) => {
+                let v = value.trim_matches('"');
+                s.background = v.strip_prefix('#').filter(|_| v.len() == 7).and_then(|h| u32::from_str_radix(h, 16).ok());
             }
             ("acento", None) => {
                 let v = value.trim_matches('"');
@@ -715,6 +725,7 @@ mod tests {
             show_favorites: false,
             group_bar: false,
             accent: Accent::Rgb(0xA371F7),
+            background: Some(0x1B2A3A),
             dark_mode: Some(false),
             file_colors: false,
             show_extensions: false,
@@ -765,6 +776,9 @@ mod tests {
         assert!(parse("layout = 2\n").show_extensions);
         // Período del historial de xtree: 7, 30 o 90; otra cosa, 7.
         assert_eq!(parse("layout = 2\n").xtree_days, 7);
+        assert_eq!(parse("fondo = \"#102030\"\n").background, Some(0x102030));
+        assert_eq!(parse("fondo = \"azul\"\n").background, None);
+        assert_eq!(parse("modo = \"claro\"\n").background, None);
         assert_eq!(parse("xtree_dias = 90\n").xtree_days, 90);
         assert_eq!(parse("xtree_dias = 12\n").xtree_days, 7);
         // «Acceso rápido» ya no es un grupo del árbol: lo que guardaban las sesiones de antes se

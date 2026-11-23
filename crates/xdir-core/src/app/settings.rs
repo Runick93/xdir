@@ -133,6 +133,13 @@ impl App {
                 };
                 one(row(Control::Accent(choice)))
             }
+            "fondo" => {
+                let desc = match self.background {
+                    Some(c) => format!("#{c:06X}: se derivan de él los paneles, los bordes y el texto"),
+                    None => spec.desc.to_string(),
+                };
+                one(Row::new(spec.id, spec.title, desc, Control::Buttons(vec![("Restablecer".into(), self.background.is_some()), ("Elegir color…".into(), true)])))
+            }
             "animaciones" => {
                 let sel = match self.config.animations {
                     None => 0,
@@ -331,7 +338,7 @@ impl App {
     /// Tema: claro, oscuro o el del sistema.
     pub(super) fn set_theme_mode(&mut self, mode: Option<bool>) {
         self.dark_mode = mode;
-        self.theme = Theme::from_system(self.accent, self.dark_mode);
+        self.theme = self.make_theme();
         self.apply_window_theme();
         sys::shell().set_menu_mode(self.dark_mode);
         self.redraw();
@@ -385,6 +392,8 @@ impl App {
             ("acento", i) if i < theme::PRESETS.len() => self.set_accent(Accent::Rgb(theme::PRESETS[i].1)),
             ("acento", i) if i == theme::PRESETS.len() => self.set_accent(Accent::System),
             ("acento", _) => self.choose_custom_color(),
+            ("fondo", 0) => self.set_background(None),
+            ("fondo", _) => self.choose_background(),
             ("animaciones", 0) => self.set_animations(None),
             ("animaciones", 1) => self.set_animations(Some(true)),
             ("animaciones", _) => self.set_animations(Some(false)),

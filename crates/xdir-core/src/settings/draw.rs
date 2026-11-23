@@ -280,8 +280,8 @@ fn draw_row(p: &dyn Painter, r: Rect, row: &Row, hover: Option<SettingsHit>, hit
         }
         Control::Background(bg) => {
             let y = r.top + 74.0;
-            let preset = bg.and_then(|c| BACKGROUNDS.iter().position(|(_, p)| *p == c));
-            for (i, (_, c)) in BACKGROUNDS.iter().enumerate() {
+            let preset = bg.and_then(|c| BACKGROUNDS.iter().position(|(_, p, _)| *p == c));
+            for (i, (_, c, _)) in BACKGROUNDS.iter().enumerate() {
                 let cx = r.left + 16.0 + 15.0 + 34.0 * i as f32;
                 if preset == Some(i) {
                     p.circle_stroke(cx, y, 15.0, th.text, 2.0);

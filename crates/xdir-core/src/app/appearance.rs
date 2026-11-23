@@ -132,6 +132,25 @@ impl App {
     /// Una tecla con el selector abierto: se queda con todas.
     pub(super) fn color_picker_key(&mut self, vk: Key, shift: bool, ctrl: bool) -> bool {
         let Some(pk) = &mut self.color_picker else { return false };
+        // Copiar, cortar y pegar el valor con el portapapeles de texto del sistema.
+        if ctrl {
+            match vk {
+                Key(0x43) | Key(0x58) => {
+                    let text = if vk == Key(0x58) { pk.cut_text() } else { pk.copy_text() };
+                    let _ = sys::shell().copy_text(self.hwnd, &text);
+                    self.redraw();
+                    return true;
+                }
+                Key(0x56) => {
+                    if let Some(text) = sys::shell().clipboard_text(self.hwnd) {
+                        pk.paste(&text);
+                    }
+                    self.redraw();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         let target = pk.target;
         let outcome = pk.key(vk, shift, ctrl);
         self.color_picker_done(target, outcome);

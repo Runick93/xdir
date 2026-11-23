@@ -244,6 +244,8 @@ pub trait Shell: Send + Sync {
     /// Vacía el portapapeles (lo cortado se pega una sola vez).
     fn clear_clipboard(&self);
     fn copy_text(&self, owner: Handle, text: &str) -> Result<(), String>;
+    /// El texto del portapapeles del sistema, si hay.
+    fn clipboard_text(&self, owner: Handle) -> Option<String>;
     /// Diálogo del sistema para elegir una carpeta.
     fn pick_folder(&self, owner: Handle, title: &str) -> Option<PathBuf>;
     /// Abre un elemento con su programa (las aplicaciones se ejecutan).

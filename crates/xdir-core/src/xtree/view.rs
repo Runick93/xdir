@@ -1934,7 +1934,8 @@ impl Xtree {
         }
         let bb = ui.back;
         p.round_fill(bb, 6.0, if self.hover_back { th.hover } else { th.surface_alt });
-        p.round_stroke_w(bb, 6.0, th.border, 1.0);
+        // Contorno de 2 px con el color de énfasis (#110): es la forma de volver y no debe pasar desapercibido.
+        p.round_stroke_w(bb, 6.0, th.accent, 2.0);
         p.text(FontId::UiCenter, "\u{2190} xdir", bb, th.text);
         let cb = ui.combo;
         p.round_fill(cb, 6.0, th.surface_alt);

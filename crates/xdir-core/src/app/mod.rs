@@ -676,8 +676,16 @@ impl Init {
     pub fn blank() -> Init {
         // `Config::default()` arma el `Keymap`, que consulta el entorno del sistema.
         crate::sys::testing::install_fakes();
+        // Las pruebas parten del estado de antes de los nuevos valores de fábrica (ocultos, barra
+        // de grupos y colores por tipo apagados; el árbol sigue a `config.toml`): cada una prende lo
+        // que necesita. Los valores de fábrica reales los cubre `session::tests`.
+        let mut session = default_session();
+        session.show_hidden = false;
+        session.group_bar = false;
+        session.file_colors = false;
+        session.tree_follow = None;
         Init {
-            session: default_session(),
+            session,
             history: History::default(),
             config: Config::default(),
             favorites: Favorites::default(),

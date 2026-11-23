@@ -1434,21 +1434,6 @@ fn title_follows_group_name() {
     assert_eq!(host.titles().last().map(String::as_str), Some("xdir - Trabajo"));
 }
 
-/// Punto del panel de colores donde está «Personalizado…».
-fn custom_color_point(a: &App) -> (f32, f32) {
-    let (w, h) = a.client_dips();
-    let r = ui::picker_rect(w, h);
-    let mut y = r.top;
-    while y < r.bottom {
-        let x = (r.left + r.right) / 2.0;
-        if ui::picker_at(w, h, x, y) == Some(ui::PickerHit::Custom) {
-            return (x, y);
-        }
-        y += 1.0;
-    }
-    panic!("no se encontró «Personalizado…»");
-}
-
 fn click(a: &mut App, (x, y): (f32, f32)) {
     a.on_left_down(x, y, false);
     a.on_left_up(x, y);
@@ -1461,9 +1446,7 @@ fn custom_color_none_keeps_accent() {
     let mut a = app_with_host(Init::blank(), host.clone());
     host.set_color_choice(None);
     let before = a.accent;
-    a.picker_open = true;
-    let at = custom_color_point(&a);
-    click(&mut a, at);
+    a.choose_custom_color();
     assert_eq!(a.accent, before);
 }
 
@@ -1473,9 +1456,7 @@ fn custom_color_some_sets_accent() {
     let host = FakeHost::new();
     let mut a = app_with_host(Init::blank(), host.clone());
     host.set_color_choice(Some(0xF85149));
-    a.picker_open = true;
-    let at = custom_color_point(&a);
-    click(&mut a, at);
+    a.choose_custom_color();
     assert_eq!(a.accent, Accent::Rgb(0xF85149));
 }
 

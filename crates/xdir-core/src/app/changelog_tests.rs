@@ -155,18 +155,6 @@ fn folder_commands_ignored_in_changelog() {
 }
 
 #[test]
-fn picker_changelog_opens_it() {
-    let mut a = app();
-    a.picker_open = true;
-    let (w, h) = a.client_dips();
-    let at = find_point(&a, |x, y| ui::picker_at(w, h, x, y) == Some(ui::PickerHit::Changelog)).expect("la rueda tiene «Novedades»");
-    a.on_left_down(at.0, at.1, false);
-    assert!(!a.picker_open);
-    assert_eq!(changelog_count(&a), 1);
-    assert!(a.panes[a.active].tab().is_changelog());
-}
-
-#[test]
 fn about_changelog_button_opens_it_and_closes_about() {
     let mut a = app();
     a.run_command(Command::About);

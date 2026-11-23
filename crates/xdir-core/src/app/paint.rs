@@ -183,7 +183,7 @@ impl App {
         let (layout, splits, active, maximized) = (self.layout, self.splits, self.active, self.maximized);
         let (hover, drag, edit_pane) = (self.hover, self.drag, self.edit.map(|(_, p)| p));
         let (show_favorites, fav_drop) = (self.show_favorites, self.fav_drop);
-        let (picker_open, accent) = (self.picker_open, self.accent);
+        let picker_open = self.picker_open;
         let about_open = self.about_open;
         // Logo animado: el cuadro que toca y, si falta para el siguiente, un cuadro pedido a tiempo.
         let mut about_frame = 0;
@@ -371,7 +371,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, accent, picker_hover, switches);
+                ui::draw_picker(p, w, h, picker_hover, switches);
             }
             // Vista rápida sin visor del sistema: la tarjeta de xdir encima de los paneles.
             if let Some(st) = self.quick_look.as_ref().filter(|s| !s.ql.native) {

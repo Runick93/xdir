@@ -138,7 +138,7 @@ impl App {
                     Some(c) => format!("#{c:06X}: se derivan de él los paneles, los bordes y el texto"),
                     None => spec.desc.to_string(),
                 };
-                one(Row::new(spec.id, spec.title, desc, Control::Buttons(vec![("Restablecer".into(), self.background.is_some()), ("Elegir color…".into(), true)])))
+                one(Row::new(spec.id, spec.title, desc, Control::Background(self.background)))
             }
             "animaciones" => {
                 let sel = match self.config.animations {
@@ -392,7 +392,8 @@ impl App {
             ("acento", i) if i < theme::PRESETS.len() => self.set_accent(Accent::Rgb(theme::PRESETS[i].1)),
             ("acento", i) if i == theme::PRESETS.len() => self.set_accent(Accent::System),
             ("acento", _) => self.choose_custom_color(),
-            ("fondo", 0) => self.set_background(None),
+            ("fondo", i) if i < theme::BACKGROUNDS.len() => self.set_background(Some(theme::BACKGROUNDS[i].1)),
+            ("fondo", i) if i == theme::BACKGROUNDS.len() => self.set_background(None),
             ("fondo", _) => self.choose_background(),
             ("animaciones", 0) => self.set_animations(None),
             ("animaciones", 1) => self.set_animations(Some(true)),

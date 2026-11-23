@@ -40,9 +40,7 @@ impl PickTarget {
     pub fn suggestions(self) -> [u32; 12] {
         match self {
             PickTarget::Accent => std::array::from_fn(|i| theme::PRESETS[i].1),
-            PickTarget::Background => [
-                0x0B0F14, 0x111827, 0x1E1B2E, 0x0F1F1A, 0x2A1A1A, 0x000000, 0xEEF1F5, 0xFAF6EE, 0xE8F0E9, 0xE9EEF8, 0xF3E9F0, 0xFFFFFF,
-            ],
+            PickTarget::Background => std::array::from_fn(|i| theme::BACKGROUNDS[i].1),
         }
     }
 }

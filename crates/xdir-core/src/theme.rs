@@ -45,6 +45,23 @@ pub const PRESETS: [(&str, u32); 12] = [
     ("Gris", 0x8B98A9),
 ];
 
+/// Fondos predefinidos (oscuros primero, después claros): (nombre, 0xRRGGBB). El primero y el
+/// séptimo son los de fábrica de los modos oscuro y claro.
+pub const BACKGROUNDS: [(&str, u32); 12] = [
+    ("Medianoche", 0x0B0F14),
+    ("Pizarra", 0x111827),
+    ("Ciruela", 0x1E1B2E),
+    ("Bosque", 0x0F1F1A),
+    ("Granate", 0x2A1A1A),
+    ("Negro", 0x000000),
+    ("Niebla", 0xEEF1F5),
+    ("Crema", 0xFAF6EE),
+    ("Menta", 0xE8F0E9),
+    ("Cielo", 0xE9EEF8),
+    ("Rosado", 0xF3E9F0),
+    ("Blanco", 0xFFFFFF),
+];
+
 /// Acento por defecto: el azul del diseño.
 pub const DEFAULT_ACCENT: Accent = Accent::Rgb(PRESETS[0].1);
 

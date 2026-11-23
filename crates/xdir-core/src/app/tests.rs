@@ -1512,25 +1512,26 @@ fn background_picks_applies_and_resets() {
     assert!(!a.theme.dark, "sin fondo propio vuelve al modo elegido");
 }
 
-/// El fondo se ve en la página Apariencia, con «Restablecer» solo cuando hay uno elegido.
+/// El fondo de la página Apariencia: predefinidos, «Del tema» y «Otro…» (abre el selector).
 #[test]
 fn background_row_in_appearance() {
     let mut a = app();
-    let buttons = |a: &App| {
+    let control = |a: &App| {
         a.settings_items(crate::settings::Section::Appearance).into_iter().find_map(|i| match i {
-            crate::settings::Item::Row(r) if r.id == "fondo" => match r.control {
-                crate::settings::Control::Buttons(b) => Some(b),
-                _ => None,
-            },
+            crate::settings::Item::Row(r) if r.id == "fondo" => Some(r.control),
             _ => None,
         })
     };
-    assert_eq!(buttons(&a), Some(vec![("Restablecer".to_string(), false), ("Elegir color…".to_string(), true)]));
-    a.set_background(Some(0x203040));
-    assert_eq!(buttons(&a).unwrap()[0].1, true);
+    assert_eq!(control(&a), Some(crate::settings::Control::Background(None)));
+    a.settings_part(0, "fondo", 7, 0.0);
+    assert_eq!(a.background, Some(theme::BACKGROUNDS[7].1));
+    assert!(!a.theme.dark, "Crema es un fondo claro");
     a.settings_part(0, "fondo", 0, 0.0);
+    assert!(a.theme.dark, "Medianoche es un fondo oscuro");
+    assert_eq!(control(&a), Some(crate::settings::Control::Background(Some(theme::BACKGROUNDS[0].1))));
+    a.settings_part(0, "fondo", theme::BACKGROUNDS.len(), 0.0);
     assert_eq!(a.background, None);
-    a.settings_part(0, "fondo", 1, 0.0);
+    a.settings_part(0, "fondo", theme::BACKGROUNDS.len() + 1, 0.0);
     assert!(a.color_picker.as_ref().is_some_and(|p| p.target == color_picker::PickTarget::Background));
 }
 

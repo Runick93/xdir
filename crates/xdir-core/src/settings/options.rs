@@ -22,7 +22,7 @@ pub const OPTIONS: &[OptionSpec] = &[
     opt("tema", Section::Appearance, "Tema", "Claro, oscuro o el del sistema", &["oscuro", "claro", "modo", "noche", "dia", "apariencia"]),
     opt("acento", Section::Appearance, "Color de acento", "Se usa en la selección, los bordes y los botones", &["color", "acento", "resaltado", "seleccion"]),
     opt("fondo", Section::Appearance, "Color de fondo", "El del tema claro u oscuro, o el que elijas; el resto de los colores se ajusta solo", &["fondo", "color", "background", "superficie", "paneles", "personalizar"]),
-    opt("glow_iconos", Section::Appearance, "Íconos con glow", "Un resplandor suave del color de cada ícono en la barra lateral", &["glow", "brillo", "resplandor", "iconos", "barra", "lateral"]),
+    opt("glow_iconos", Section::Appearance, "Íconos con glow", "Un resplandor del color del ícono, en la barra lateral, al pasar el mouse", &["glow", "brillo", "resplandor", "iconos", "barra", "lateral"]),
     opt("animaciones", Section::Appearance, "Animaciones", "Desplazamiento suave y transición al cambiar de layout", &["animacion", "movimiento", "suave", "efectos"]),
     opt("extensiones", Section::ListViews, "Mostrar extensiones", "Los nombres de archivo con su extensión (.pdf, .txt)", &["extension", "nombre", "archivo", "mostrar"]),
     opt("ocultos", Section::ListViews, "Mostrar archivos ocultos", "Lo mismo que Ctrl+H en la lista", &["ocultos", "escondidos", "punto", "mostrar", "archivos"]),

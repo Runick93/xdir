@@ -41,11 +41,9 @@ pub const COLLAPSED_W: f32 = 48.0;
 const BAR: f32 = 6.0;
 const BAR_ROOM: f32 = 12.0;
 const ROW_H: f32 = 32.0;
-/// «Íconos con glow»: desviación del blur (DIPs) y opacidad de la copia difuminada del trazo del ícono,
-/// en reposo y con el mouse encima.
+/// «Íconos con glow»: desviación del blur (DIPs) de la copia difuminada del trazo del ícono, que
+/// solo se dibuja con el mouse encima de la fila.
 const GLOW_SIGMA: f32 = 1.75;
-const GLOW_REST: f32 = 0.65;
-const GLOW_HOVER: f32 = 1.0;
 const INDENT: f32 = 18.0;
 /// Margen a los costados de las filas.
 const SIDE: f32 = 8.0;
@@ -1799,11 +1797,10 @@ impl Tree {
                 } else {
                     color
                 };
-                if self.glow && !n.missing {
-                    // Resplandor: una copia del ícono difuminada (blur gaussiano) y de baja opacidad
-                    // detrás del ícono nítido; al pasar el mouse sube solo la opacidad de la copia.
-                    let strength = if self.hover == Some(id) { GLOW_HOVER } else { GLOW_REST };
-                    p.glow_text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), alpha(color, color.a * strength), GLOW_SIGMA);
+                if self.glow && !n.missing && self.hover == Some(id) {
+                    // Resplandor: una copia del ícono difuminada (blur gaussiano) detrás del ícono
+                    // nítido, solo en la fila bajo el mouse.
+                    p.glow_text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color, GLOW_SIGMA);
                 }
                 p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
                 if e > 0.05 {
@@ -2075,9 +2072,9 @@ mod tests {
     }
 
     /// «Íconos con glow»: apagado no dibuja resplandor; prendido, una copia difuminada del ícono
-    /// detrás de cada uno (sin círculos de fondo).
+    /// solo detrás del que tiene el mouse encima (sin círculos de fondo).
     #[test]
-    fn glow_is_a_blurred_copy_behind_the_icon_only_when_on() {
+    fn glow_is_a_blurred_copy_behind_the_hovered_icon_only_when_on() {
         install_fakes();
         let root = temp_root("glow");
         std::fs::create_dir_all(root.join("alfa")).unwrap();
@@ -2093,20 +2090,17 @@ mod tests {
         let on = crate::sys::testing::RecordingPainter::new(theme.clone());
         t.draw(&on, area, None, XtreeBadge::Idle);
         let sharp: Vec<String> = on.text_draws().iter().filter(|(f, ..)| *f == FontId::Glyphs).map(|(_, s, ..)| s.clone()).collect();
-        let glows = on.glows();
-        assert!(!glows.is_empty());
-        // Cada copia difuminada es del mismo ícono que uno nítido, y no hay círculos de fondo.
-        assert!(glows.iter().all(|(s, ..)| sharp.contains(s)));
-        assert!(on.circles().is_empty());
-        // Con el mouse encima de una fila, solo sube la opacidad de su copia difuminada.
-        let rest = glows.iter().map(|g| g.2.a).fold(f32::MIN, f32::max);
+        assert!(on.glows().is_empty(), "prendido pero sin el mouse encima no hay resplandor");
+        // Con el mouse encima de una fila, solo esa fila tiene su copia difuminada.
         let id = (0..t.nodes.len()).find(|&i| t.nodes[i].name == "alfa").expect("alfa");
         t.hover = Some(id);
         let hot = crate::sys::testing::RecordingPainter::new(theme);
         t.draw(&hot, area, None, XtreeBadge::Idle);
-        let hot_max = hot.glows().iter().map(|g| g.2.a).fold(f32::MIN, f32::max);
-        assert!(hot_max > rest, "{hot_max} {rest}");
-        assert_eq!(hot.glows().len(), glows.len(), "no cambia cuántos se dibujan");
+        let glows = hot.glows();
+        assert_eq!(glows.len(), 1, "solo el ícono bajo el mouse");
+        // La copia difuminada es del mismo ícono que uno nítido, y no hay círculos de fondo.
+        assert!(glows.iter().all(|(s, ..)| sharp.contains(s)));
+        assert!(hot.circles().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

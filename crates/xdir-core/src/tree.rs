@@ -299,6 +299,8 @@ pub struct Tree {
     pub ejecting: std::collections::HashSet<PathBuf>,
     /// Lo cortado: esas carpetas se dibujan con el ícono atenuado. La pone la `App` antes de dibujar.
     pub cut: std::sync::Arc<crate::cut::CutSet>,
+    /// Resplandor detrás de cada ícono (opción «Íconos con glow»); la pone la `App` antes de dibujar.
+    pub glow: bool,
     /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, nodo).
     eject_rects: Vec<(Rect, usize)>,
     /// Unidades de red cuyo nombre falta pedir en otro hilo (`drive_label` iría al servidor).
@@ -405,6 +407,7 @@ impl Tree {
             ejectable: std::collections::HashSet::new(),
             ejecting: std::collections::HashSet::new(),
             cut: Default::default(),
+            glow: false,
             pending_labels: Vec::new(),
             net_items: Vec::new(),
             net_shell: None,
@@ -1791,6 +1794,14 @@ impl Tree {
                 } else {
                     color
                 };
+                if self.glow && !n.missing {
+                    // Resplandor: tres círculos concéntricos cada vez más tenues del color del ícono
+                    // (sin desenfoque real, para no frenar el dibujo de la lista).
+                    let (cx, cy) = (icon_x + 11.0, y + ROW_H / 2.0);
+                    for (radius, strength) in [(14.0, 0.07), (11.0, 0.10), (8.0, 0.14)] {
+                        p.circle(cx, cy, radius, alpha(color, color.a * strength));
+                    }
+                }
                 p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
                 if e > 0.05 {
                     p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(self.name_color(n, th), e * e));
@@ -2057,6 +2068,31 @@ mod tests {
         t.reveal_without_scroll(Handle(0), &target, false);
         t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         assert_eq!(t.scroll, 0.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// «Íconos con glow»: apagado no dibuja resplandor; prendido, tres círculos del color del ícono
+    /// detrás de cada uno.
+    #[test]
+    fn glow_draws_circles_behind_icons_only_when_on() {
+        install_fakes();
+        let root = temp_root("glow");
+        std::fs::create_dir_all(root.join("alfa")).unwrap();
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &root.join("alfa"), false);
+        finish_reveal(&mut t);
+        let area = rect(0.0, 0.0, 240.0, 600.0);
+        let theme = Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true));
+        let off = crate::sys::testing::RecordingPainter::new(theme.clone());
+        t.draw(&off, area, None, XtreeBadge::Idle);
+        assert!(off.circles().is_empty(), "apagado queda como hoy");
+        t.glow = true;
+        let on = crate::sys::testing::RecordingPainter::new(theme);
+        t.draw(&on, area, None, XtreeBadge::Idle);
+        let icons = on.text_draws().iter().filter(|(f, ..)| *f == FontId::Glyphs).count();
+        assert!(icons > 0);
+        let glows = on.circles().into_iter().filter(|c| c.2 >= 8.0 && c.2 <= 14.0).count();
+        assert!(glows >= 3, "tres círculos por ícono: {glows}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

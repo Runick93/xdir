@@ -289,6 +289,7 @@ impl App {
                     p.round_fill(geom::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
                 }
                 tree.cut = self.cut.clone();
+                tree.glow = self.icon_glow;
                 tree.draw(p, r, current_folder.as_deref(), xtree_badge);
             }
             if let (Some(r), Some(shown)) = (preview_col, &preview_shown) {

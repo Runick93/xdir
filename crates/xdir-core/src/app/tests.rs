@@ -1525,9 +1525,10 @@ fn background_row_in_appearance() {
     assert_eq!(control(&a), Some(crate::settings::Control::Background(None)));
     a.settings_part(0, "fondo", 7, 0.0);
     assert_eq!(a.background, Some(theme::BACKGROUNDS[7].1));
-    assert!(!a.theme.dark, "Crema es un fondo claro");
+    assert!(a.theme.dark, "los fondos predefinidos son oscuros");
+    assert_eq!(a.theme.surface_alt, crate::ui::hex(theme::BACKGROUNDS[7].2), "el panel usa el color de su fondo");
     a.settings_part(0, "fondo", 0, 0.0);
-    assert!(a.theme.dark, "Medianoche es un fondo oscuro");
+    assert!(a.theme.dark, "un fondo oscuro pasa el tema a oscuro");
     assert_eq!(control(&a), Some(crate::settings::Control::Background(Some(theme::BACKGROUNDS[0].1))));
     a.settings_part(0, "fondo", theme::BACKGROUNDS.len(), 0.0);
     assert_eq!(a.background, None);

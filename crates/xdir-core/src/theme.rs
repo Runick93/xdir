@@ -45,21 +45,21 @@ pub const PRESETS: [(&str, u32); 12] = [
     ("Gris", 0x8B98A9),
 ];
 
-/// Fondos predefinidos (oscuros primero, después claros): (nombre, 0xRRGGBB). El primero y el
-/// séptimo son los de fábrica de los modos oscuro y claro.
-pub const BACKGROUNDS: [(&str, u32); 12] = [
-    ("Medianoche", 0x0B0F14),
-    ("Pizarra", 0x111827),
-    ("Ciruela", 0x1E1B2E),
-    ("Bosque", 0x0F1F1A),
-    ("Granate", 0x2A1A1A),
-    ("Negro", 0x000000),
-    ("Niebla", 0xEEF1F5),
-    ("Crema", 0xFAF6EE),
-    ("Menta", 0xE8F0E9),
-    ("Cielo", 0xE9EEF8),
-    ("Rosado", 0xF3E9F0),
-    ("Blanco", 0xFFFFFF),
+/// Fondos predefinidos, uno por énfasis (todos oscuros): (cómo se lee, fondo base, fondo de panel),
+/// en el orden de `PRESETS`. Con uno de estos el panel usa su propio color en vez del derivado.
+pub const BACKGROUNDS: [(&str, u32, u32); 12] = [
+    ("Grafito azulado", 0x0F141C, 0x151C27),
+    ("Gris frío", 0x0E151B, 0x141E26),
+    ("Grafito petróleo", 0x0E1718, 0x142021),
+    ("Gris verdoso", 0x111713, 0x182019),
+    ("Grafito oliva", 0x151714, 0x1C2118),
+    ("Carbón cálido", 0x171612, 0x201E18),
+    ("Gris cálido", 0x181512, 0x211C17),
+    ("Grafito vino", 0x181416, 0x211A1D),
+    ("Gris ciruela", 0x171319, 0x201A23),
+    ("Grafito violáceo", 0x15131C, 0x1D1926),
+    ("Azul noche", 0x121420, 0x191D2B),
+    ("Grafito neutro", 0x12161B, 0x191F27),
 ];
 
 /// Acento por defecto: el azul del diseño.
@@ -139,14 +139,14 @@ impl Theme {
             }
         };
         if let Some(bg) = background {
-            theme.derive_from_background(bg);
+            theme.derive_from_background(bg, BACKGROUNDS.iter().find(|b| b.1 == bg).map(|b| b.2));
         }
         theme
     }
 
     /// Reemplaza el fondo y deriva de él las superficies, el borde y los textos: las superficies
     /// se corren hacia el texto, el borde un poco más, y el texto secundario se acerca al fondo.
-    fn derive_from_background(&mut self, bg: u32) {
+    fn derive_from_background(&mut self, bg: u32, panel: Option<u32>) {
         let base = rgb(bg >> 16, (bg >> 8) & 0xFF, bg & 0xFF);
         let toward = if self.dark { WHITE } else { BLACK };
         self.background = base;
@@ -160,6 +160,12 @@ impl Theme {
         self.border = mix(base, toward, if self.dark { 0.16 } else { 0.14 });
         // Texto casi blanco o casi negro (el más legible sobre este fondo) y de él los tenues.
         self.text = mix(if self.dark { WHITE } else { BLACK }, base, 0.04);
+        // Un fondo predefinido trae el color de su panel: de ahí salen la superficie y el borde.
+        if let Some(p) = panel {
+            self.surface_alt = rgb(p >> 16, (p >> 8) & 0xFF, p & 0xFF);
+            self.surface = mix(base, self.surface_alt, 0.5);
+            self.border = mix(self.surface_alt, WHITE, 0.09);
+        }
         self.text_dim = mix(self.text, base, 0.35);
         self.text_secondary = mix(self.text, base, 0.15);
         self.hover = Color { a: if self.dark { 0.05 } else { 0.045 }, ..toward };
@@ -227,6 +233,16 @@ mod tests {
         assert_eq!(a.background, b.background);
         assert_eq!(a.surface, b.surface);
         assert_eq!(a.text, b.text);
+    }
+
+    #[test]
+    fn presets_use_their_own_panel_color_and_stay_readable() {
+        for (name, base, panel) in BACKGROUNDS {
+            let t = Theme::with_background(DEFAULT_ACCENT, Some(false), Some(base));
+            assert!(t.dark, "{name}");
+            assert_eq!(t.surface_alt, rgb(panel >> 16, (panel >> 8) & 0xFF, panel & 0xFF), "{name}");
+            assert!(contrast(t.text, t.surface_alt) >= 7.0, "{name}");
+        }
     }
 
     #[test]

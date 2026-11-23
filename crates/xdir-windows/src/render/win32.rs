@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
     D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
@@ -23,6 +23,10 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::D2D1_QUADRATIC_BEZIER_SEGMENT;
+use windows::Win32::Graphics::Direct2D::{
+    CLSID_D2D1GaussianBlur, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_PROPERTY_TYPE_UNKNOWN, ID2D1Effect, ID2D1Image,
+};
 use windows_numerics::Vector2;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -250,6 +254,7 @@ impl Renderer {
         self.icons.borrow_mut().thumbs.clear();
         self.icons.borrow_mut().big.clear();
         self.icons.borrow_mut().logo.clear();
+        self.icons.borrow_mut().glows.clear();
     }
 }
 
@@ -270,6 +275,28 @@ impl Painter<'_> {
     fn color(&self, c: Color) {
         let c = d2c(c);
         unsafe { self.brush.SetColor(&c) };
+    }
+
+    /// Dibuja `s` con el color `c` (opacidad incluida) en un bitmap de `r` más `pad` de margen por
+    /// lado y devuelve el efecto de blur gaussiano sobre él; `None` si algo falla.
+    fn blurred_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32, pad: f32) -> Option<ID2D1Effect> {
+        let (w, h) = (r.right - r.left + pad * 2.0, r.bottom - r.top + pad * 2.0);
+        unsafe {
+            let size = D2D_SIZE_F { width: w, height: h };
+            let target = self.ctx.CreateCompatibleRenderTarget(Some(&size), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok()?;
+            let brush = target.CreateSolidColorBrush(&d2c(c), None).ok()?;
+            target.BeginDraw();
+            target.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            let wide: Vec<u16> = s.encode_utf16().collect();
+            target.DrawText(&wide, self.fonts.get(font), &d2r(rect(pad, pad, w - pad, h - pad)), &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            target.EndDraw(None, None).ok()?;
+            let bitmap = target.GetBitmap().ok()?;
+            let effect = self.ctx.CreateEffect(&CLSID_D2D1GaussianBlur).ok()?;
+            effect.SetInput(0, &bitmap, true);
+            // Propiedad 0: desviación estándar (f32).
+            effect.SetValue(0, D2D1_PROPERTY_TYPE_UNKNOWN, &sigma.to_ne_bytes()).ok()?;
+            Some(effect)
+        }
     }
 }
 
@@ -394,6 +421,29 @@ impl paint::Painter for Painter<'_> {
                 DWRITE_MEASURING_MODE_NATURAL,
             )
         };
+    }
+
+    /// Texto difuminado: se dibuja una vez en un bitmap aparte, se le aplica el efecto de blur
+    /// gaussiano de Direct2D y se guarda (la caché sigue al texto, color, opacidad y sigma).
+    fn glow_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32) {
+        if r.right <= r.left || r.bottom <= r.top || c.a <= 0.0 {
+            return;
+        }
+        let pad = (sigma * 3.0).ceil();
+        let key = (font, s.to_string(), [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()], sigma.to_bits());
+        let effect = {
+            let mut icons = self.icons.borrow_mut();
+            icons.glows.entry(key).or_insert_with(|| self.blurred_text(font, s, r, c, sigma, pad)).clone()
+        };
+        let Some(effect) = effect else {
+            self.text(font, s, r, c);
+            return;
+        };
+        unsafe {
+            if let Ok(image) = effect.cast::<ID2D1Image>() {
+                self.ctx.DrawImage(&image, Some(&v2(r.left - pad, r.top - pad)), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            }
+        }
     }
 
     fn measure(&self, font: FontId, s: &str) -> f32 {
@@ -649,6 +699,8 @@ struct Icons {
     big_failed: thumbs::BigFailures,
     /// Cuadros del logo del diálogo "Acerca de", creados la primera vez que se muestran.
     logo: Vec<Option<ID2D1Bitmap1>>,
+    /// Resplandores ya difuminados (`glow_text`): el efecto de blur con la copia del texto de entrada.
+    glows: HashMap<(FontId, String, [u32; 4], u32), Option<ID2D1Effect>>,
 }
 
 /// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
@@ -667,6 +719,7 @@ impl Icons {
             big: thumbs::BigCache::default(),
             big_failed: thumbs::BigFailures::default(),
             logo: Vec::new(),
+            glows: HashMap::new(),
         }
     }
 

@@ -76,6 +76,8 @@ pub struct ColorPicker {
     v: f32,
     /// Lo escrito en la caja (sin «#», en mayúsculas).
     hex: String,
+    /// El valor está seleccionado: lo que se escribe lo reemplaza y Retroceso lo borra entero.
+    selected: bool,
     /// El color con que se abrió, para compararlo en la vista previa.
     original: u32,
     /// Lo que se está arrastrando con el mouse apretado.
@@ -173,7 +175,7 @@ pub fn parse_hex(s: &str) -> Option<u32> {
 impl ColorPicker {
     pub fn new(target: PickTarget, current: u32) -> ColorPicker {
         let (h, s, v) = rgb_to_hsv(current);
-        ColorPicker { target, h, s, v, hex: format!("{current:06X}"), original: current, dragging: None }
+        ColorPicker { target, h, s, v, hex: format!("{current:06X}"), selected: true, original: current, dragging: None }
     }
 
     /// El color de ahora.
@@ -189,10 +191,12 @@ impl ColorPicker {
         }
         (self.s, self.v) = (s, v);
         self.hex = format!("{c:06X}");
+        self.selected = true;
     }
 
     fn sync_hex(&mut self) {
         self.hex = format!("{:06X}", self.color());
+        self.selected = true;
     }
 
     /// Lo que hay en (`x`, `y`) con la ventana de `w` × `h`; `None` fuera del panel.
@@ -250,6 +254,8 @@ impl ColorPicker {
                 self.drag_to(w, h, x, y);
             }
             Some(PickHit::Swatch(i)) => self.set_rgb(self.target.suggestions()[i]),
+            // Un clic en la caja selecciona todo el valor: escribir lo reemplaza, Retroceso lo borra.
+            Some(PickHit::Hex) => self.selected = true,
             _ => {}
         }
         Outcome::Open
@@ -288,6 +294,10 @@ impl ColorPicker {
         match vk {
             VK_ESCAPE => return Outcome::Cancel,
             VK_RETURN => return self.accept(),
+            VK_BACK | VK_DELETE if self.selected => {
+                self.hex.clear();
+                self.selected = false;
+            }
             VK_BACK => {
                 self.hex.pop();
             }
@@ -321,10 +331,11 @@ impl ColorPicker {
         if !c.is_ascii_hexdigit() {
             return;
         }
-        // Con los 6 dígitos completos, escribir uno nuevo empieza de cero.
-        if self.hex.len() >= 6 {
+        // Con el valor seleccionado (o con los 6 dígitos completos), escribir empieza de cero.
+        if self.selected || self.hex.len() >= 6 {
             self.hex.clear();
         }
+        self.selected = false;
         self.hex.push(c.to_ascii_uppercase());
         if self.hex.len() == 6
             && let Some(c) = parse_hex(&self.hex)
@@ -391,7 +402,11 @@ impl ColorPicker {
         p.round_fill(hx, 6.0, th.background);
         p.round_stroke_w(hx, 6.0, if hover == Some(PickHit::Hex) { th.text_dim } else { th.border }, 1.0);
         p.text(FontId::Ui, "#", rect(hx.left + 10.0, hx.top, hx.left + 24.0, hx.bottom), th.text_dim);
-        let shown = format!("{}|", self.hex);
+        let tw = p.measure(FontId::Ui, &self.hex);
+        if self.selected {
+            p.round_fill(rect(hx.left + 22.0, hx.top + 6.0, hx.left + 26.0 + tw, hx.bottom - 6.0), 3.0, alpha(th.accent, 0.45));
+        }
+        let shown = if self.selected { self.hex.clone() } else { format!("{}|", self.hex) };
         p.text(FontId::Ui, &shown, rect(hx.left + 24.0, hx.top, hx.right - 6.0, hx.bottom), th.text);
         p.text(FontId::Small, "Valor hexadecimal", rect(hx.left, hx.bottom + 4.0, hx.right + 40.0, hx.bottom + 20.0), th.text_dim);
 
@@ -628,5 +643,45 @@ mod tests {
             v.dedup();
             assert_eq!(v.len(), 12);
         }
+    }
+}
+
+#[cfg(test)]
+mod hex_selection_tests {
+    use super::*;
+
+    #[test]
+    fn value_starts_selected_and_backspace_clears_it_whole() {
+        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        assert!(p.selected);
+        p.key(VK_BACK, false);
+        assert_eq!(p.hex, "");
+        assert!(!p.selected);
+        p.char('a');
+        p.key(VK_BACK, false);
+        assert_eq!(p.hex, "", "sin selección borra de a un dígito");
+    }
+
+    #[test]
+    fn clicking_the_box_selects_it_and_typing_replaces() {
+        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        p.char('1');
+        p.char('2');
+        assert!(!p.selected);
+        let l = layout(1000.0, 800.0);
+        let (x, y) = ((l.hex.left + l.hex.right) / 2.0, (l.hex.top + l.hex.bottom) / 2.0);
+        p.press(1000.0, 800.0, x, y);
+        assert!(p.selected);
+        p.char('f');
+        assert_eq!(p.hex, "F");
+    }
+
+    #[test]
+    fn delete_also_clears_a_selection_and_picking_selects_again() {
+        let mut p = ColorPicker::new(PickTarget::Accent, 0x3B9EFF);
+        p.key(VK_DELETE, false);
+        assert_eq!(p.hex, "");
+        p.key(VK_RIGHT, false);
+        assert!(p.selected, "al mover el color, la caja vuelve a quedar seleccionada");
     }
 }

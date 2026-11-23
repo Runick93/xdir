@@ -7,7 +7,7 @@
 - **xtree**: al analizar un disco entero, el espacio libre aparece como un bloque más del mapa («Espacio libre», con su tamaño y su porcentaje del disco, como en SquirrelDisk). No se puede abrir y no aparece dentro de una carpeta. Se oculta con el botón nuevo de la barra superior o en Configuración ▸ xtree ▸ «Mostrar el espacio libre en el mapa» (`xtree_espacio_libre` en `config.toml`).
 - **xtree**: la lista de carpetas puede ir a la izquierda o a la derecha del mapa. Se elige con el botón nuevo de la barra superior (a la izquierda de la lupa) o en Configuración ▸ xtree ▸ «Lista de carpetas de xtree» (`xtree_barra_lateral` en `config.toml`); se aplica al instante y se recuerda. La barra de datos del disco queda siempre debajo del mapa.
 - **xtree**: la lista de carpetas ocupa todo el alto de la ventana y la barra de datos del disco (espacio total, utilizado y libre) pasó a la columna derecha, debajo del mapa, con un largo mucho menor.
-- El botón de **xtree** (en el árbol y en la barra de estado) tiene su propio color violeta, que ya no cambia con el énfasis elegido.
+- El botón de **xtree** del árbol (la barra lateral) tiene su propio color violeta, que ya no cambia con el énfasis elegido.
 
 ## 0.2.5 — 2026-11-22
 

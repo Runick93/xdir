@@ -424,6 +424,13 @@ impl App {
                 };
                 c.dialog.draw(p, w, h, hover);
             }
+            if let Some(pk) = &self.color_picker {
+                let hover = match hover {
+                    Hit::ColorPicker(k) => Some(k),
+                    _ => None,
+                };
+                pk.draw(p, w, h, hover);
+            }
             // El cartel de ayuda va último: encima de todo.
             if let Some((text, x, y)) = &tooltip {
                 tooltip::draw_tooltip(p, w, h, *x, *y, text);

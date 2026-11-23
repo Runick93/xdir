@@ -291,13 +291,22 @@ fn theme_three_states() {
 
 #[test]
 fn accent_preset_and_system() {
-    let (mut a, host) = settings_app(Section::Appearance);
+    let (mut a, _host) = settings_app(Section::Appearance);
     click(&mut a, "acento", 3);
     assert_eq!(a.accent, Accent::Rgb(theme::PRESETS[3].1));
     click(&mut a, "acento", theme::PRESETS.len());
     assert_eq!(a.accent, Accent::System);
-    host.set_color_choice(Some(0x123456));
+    // «Otro…» abre el selector propio: el color escrito y aceptado queda como acento.
     click(&mut a, "acento", theme::PRESETS.len() + 1);
+    assert!(a.color_picker.is_some());
+    assert_eq!(a.accent, Accent::System, "abrir el selector no cambia nada");
+    for _ in 0..6 {
+        a.on_key(crate::keys::keys::VK_BACK);
+    }
+    for c in "123456".chars() {
+        a.on_char(c);
+    }
+    a.on_key(crate::keys::keys::VK_RETURN);
     assert_eq!(a.accent, Accent::Rgb(0x123456));
     assert!(a.settings_items(Section::Appearance).iter().any(|i| matches!(i, Item::Row(r) if r.control == Control::Accent(AccentChoice::Other(0x123456)))));
 }

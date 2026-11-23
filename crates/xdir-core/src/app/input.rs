@@ -11,6 +11,10 @@ impl App {
 
     pub(super) fn hit(&self, x: f32, y: f32) -> Hit {
         let (w, h) = self.client_dips();
+        // El selector de color es modal y va encima de todo.
+        if let Some(pk) = &self.color_picker {
+            return pk.hit(w, h, x, y).map_or(Hit::None, Hit::ColorPicker);
+        }
         // El diálogo de confirmación es modal y va encima de todo.
         if let Some(c) = &self.confirm {
             return c.dialog.hit(x, y).map_or(Hit::None, Hit::Confirm);
@@ -197,6 +201,10 @@ impl App {
         self.info.focused = matches!(hit, Hit::Info(_));
         if let Some(st) = &mut self.compare {
             st.focused = matches!(hit, Hit::Compare(_));
+        }
+        if self.color_picker.is_some() {
+            self.color_picker_click(x, y);
+            return;
         }
         if self.confirm.is_some() {
             self.confirm_click(match hit {
@@ -526,7 +534,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::DropMenu(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
+            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::ColorPicker(_) | Hit::DropMenu(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
         // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
         self.quick_look_follow_list();
@@ -590,6 +598,13 @@ impl App {
     }
 
     pub fn on_left_up(&mut self, x: f32, y: f32) {
+        // Soltar sobre el selector de color termina su arrastre y nada más.
+        if let Some(pk) = &mut self.color_picker {
+            pk.release();
+            self.host.release_mouse();
+            self.redraw();
+            return;
+        }
         self.tab_drag_from = None;
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.host.release_mouse();
@@ -679,6 +694,16 @@ impl App {
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) {
         self.host.track_mouse_leave();
+        // Con el selector de color abierto, el mouse es solo suyo.
+        if self.color_picker.is_some() {
+            self.color_picker_drag(x, y);
+            let hover = self.hit(x, y);
+            if hover != self.hover {
+                self.hover = hover;
+                self.redraw();
+            }
+            return;
+        }
         let mut redraw = false;
         match self.drag {
             Drag::Splitter(s) => {

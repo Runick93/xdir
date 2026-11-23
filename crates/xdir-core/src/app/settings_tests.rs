@@ -630,6 +630,16 @@ fn xtree_switch_writes_option() {
     a.set_xtree_side(config::XtreeSide::Left);
     wait_config(&mut a);
     assert!(!config_text().contains("\nxtree_barra_lateral = "), "a la izquierda es lo de fábrica: se borra");
+    // #104: el espacio libre se muestra de fábrica; apagarlo escribe false, prenderlo borra la línea.
+    assert!(a.config.xtree_free_space);
+    click(&mut a, "xtree_espacio_libre", 0);
+    wait_config(&mut a);
+    assert!(!a.config.xtree_free_space);
+    assert!(config_text().contains("\nxtree_espacio_libre = false\n"));
+    a.toggle_xtree_free_space();
+    wait_config(&mut a);
+    assert!(a.config.xtree_free_space);
+    assert!(!config_text().contains("\nxtree_espacio_libre = "), "visible es lo de fábrica: se borra");
     // «Ver los atajos» lleva a la página Atajos.
     click(&mut a, "ver_atajos", 0);
     assert_eq!(page(&a), PageId::Builtin(Section::Keys));

@@ -5,7 +5,7 @@ use crate::geom::{Color, Rect, contains, rect};
 use crate::paint::{FontId, Painter};
 
 use crate::console::Console;
-use crate::theme::{Accent, PRESETS, alpha};
+use crate::theme::alpha;
 pub use crate::xtree::view::XtreeBadge;
 
 pub const STATUSBAR_H: f32 = 30.0;
@@ -623,11 +623,6 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
 /// Elementos del panel de colores.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PickerHit {
-    Preset(usize),
-    /// Usar el acento de Windows.
-    System,
-    /// Elegir cualquier color con el selector de Windows.
-    Custom,
     /// Switch de modo oscuro.
     DarkMode,
     /// Switch de los colores por tipo de archivo.
@@ -644,8 +639,6 @@ pub enum PickerHit {
     GroupBar,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
     Tree,
-    /// «Novedades»: cierra la rueda y abre la pestaña Novedades.
-    Changelog,
     /// «Más opciones…»: cierra la rueda y abre la pestaña Configuración.
     MoreOptions,
     /// Abre el diálogo "Acerca de".
@@ -654,8 +647,8 @@ pub enum PickerHit {
     Panel,
 }
 
-const PICKER_COLS: usize = 6;
-const PICKER_CELL: f32 = 38.0;
+/// Ancho del panel (antes lo daba la grilla de colores: 6 celdas de 38 + márgenes).
+const PICKER_W: f32 = 256.0;
 const PICKER_PAD: f32 = 14.0;
 const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
@@ -698,25 +691,21 @@ fn switch_rows() -> usize {
 #[derive(Clone, Copy)]
 struct PickerLayout {
     title: f32,
-    cell: f32,
     btn: f32,
     sep: f32,
     pad: f32,
-    gap: f32,
 }
 
 const PICKER_LAYOUTS: [PickerLayout; 3] = [
-    PickerLayout { title: PICKER_TITLE_H, cell: PICKER_CELL, btn: PICKER_BTN_H, sep: PICKER_SEP_H, pad: PICKER_PAD, gap: 8.0 },
-    PickerLayout { title: 28.0, cell: 30.0, btn: 24.0, sep: 8.0, pad: 10.0, gap: 6.0 },
-    PickerLayout { title: 24.0, cell: 26.0, btn: 20.0, sep: 6.0, pad: 6.0, gap: 4.0 },
+    PickerLayout { title: PICKER_TITLE_H, btn: PICKER_BTN_H, sep: PICKER_SEP_H, pad: PICKER_PAD },
+    PickerLayout { title: 28.0, btn: 24.0, sep: 8.0, pad: 10.0 },
+    PickerLayout { title: 24.0, btn: 20.0, sep: 6.0, pad: 6.0 },
 ];
 
 impl PickerLayout {
     fn height(&self) -> f32 {
-        let rows = (PRESETS.len() / PICKER_COLS) as f32;
-        // Colores, dos botones, un separador, las filas de switches, otro separador, «Novedades»,
-        // «Más opciones…» y «Acerca de».
-        self.title + self.cell * rows + self.gap + self.btn * 2.0 + self.sep + self.btn * switch_rows() as f32 + self.sep + self.btn * 3.0 + self.pad
+        // Título, las filas de switches, un separador, «Más opciones…» y «Acerca de».
+        self.title + self.btn * switch_rows() as f32 + self.sep + self.btn * 2.0 + self.pad
     }
 }
 
@@ -731,7 +720,7 @@ fn picker_layout(h: f32) -> PickerLayout {
 /// Panel flotante sobre la rueda dentada.
 pub fn picker_rect(w: f32, h: f32) -> Rect {
     let l = picker_layout(h);
-    let width = PICKER_CELL * PICKER_COLS as f32 + PICKER_PAD * 2.0;
+    let width = PICKER_W;
     let right = w - GAP * 2.0;
     let bottom = (h - STATUSBAR_H - 4.0).max(l.height());
     rect(right - width, bottom - l.height(), right, bottom)
@@ -741,26 +730,15 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     let panel = picker_rect(w, h);
     let lay = picker_layout(h);
     let mut out = Vec::new();
-    let x0 = panel.left + (panel.right - panel.left - lay.cell * PICKER_COLS as f32) / 2.0;
-    for i in 0..PRESETS.len() {
-        let (col, row) = ((i % PICKER_COLS) as f32, (i / PICKER_COLS) as f32);
-        let x = x0 + col * lay.cell;
-        let y = panel.top + lay.title + row * lay.cell;
-        out.push((PickerHit::Preset(i), rect(x, y, x + lay.cell, y + lay.cell)));
-    }
-    let rows = (PRESETS.len() / PICKER_COLS) as f32;
-    let y = panel.top + lay.title + lay.cell * rows + lay.gap;
     let (l, r) = (panel.left + PICKER_PAD - 6.0, panel.right - PICKER_PAD + 6.0);
-    out.push((PickerHit::System, rect(l, y, r, y + lay.btn)));
-    out.push((PickerHit::Custom, rect(l, y + lay.btn, r, y + lay.btn * 2.0)));
-    let y = y + lay.btn * 2.0 + lay.sep;
+    let y = panel.top + lay.title;
     for (i, kind) in switch_kinds().into_iter().enumerate() {
         let top = y + lay.btn * i as f32;
         out.push((kind, rect(l, top, r, top + lay.btn)));
     }
     let top = y + lay.btn * switch_rows() as f32 + lay.sep;
-    // De arriba abajo: Novedades, Más opciones… y Acerca de xdir.
-    for (i, kind) in [PickerHit::Changelog, PickerHit::MoreOptions, PickerHit::About].into_iter().enumerate() {
+    // De arriba abajo: Más opciones… y Acerca de xdir.
+    for (i, kind) in [PickerHit::MoreOptions, PickerHit::About].into_iter().enumerate() {
         let t = top + lay.btn * i as f32;
         out.push((kind, rect(l, t, r, t + lay.btn)));
     }
@@ -774,7 +752,7 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
     Some(picker_items(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(k, _)| k).unwrap_or(PickerHit::Panel))
 }
 
-pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, sw: PickerSwitches) {
+pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, hover: Option<PickerHit>, sw: PickerSwitches) {
     let th = p.theme();
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
@@ -783,46 +761,11 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
     p.round_stroke(panel, 10.0, th.border);
     let lay = picker_layout(h);
     let title = rect(panel.left + PICKER_PAD, panel.top + 4.0, panel.right - PICKER_PAD, panel.top + lay.title);
-    p.text(FontId::UiBold, "Color de acento", title, th.text);
+    p.text(FontId::UiBold, "Ajustes rápidos", title, th.text);
 
-    let is_preset = PRESETS.iter().any(|(_, c)| current == Accent::Rgb(*c));
     for (kind, r) in picker_items(w, h) {
         let hot = hover == Some(kind);
         match kind {
-            PickerHit::Preset(i) => {
-                let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
-                let c = hex(PRESETS[i].1);
-                if current == Accent::Rgb(PRESETS[i].1) {
-                    p.circle_stroke(cx, cy, lay.cell * 15.0 / PICKER_CELL, th.text, 2.0);
-                } else if hot {
-                    p.circle_stroke(cx, cy, lay.cell * 15.0 / PICKER_CELL, th.text_dim, 1.0);
-                }
-                p.circle(cx, cy, lay.cell * 11.0 / PICKER_CELL, c);
-            }
-            PickerHit::System | PickerHit::Custom => {
-                if hot {
-                    p.round_fill(r, 6.0, th.hover);
-                }
-                let selected = match kind {
-                    PickerHit::System => current == Accent::System,
-                    _ => !is_preset && current != Accent::System,
-                };
-                let label = if kind == PickerHit::System { "Color de Windows" } else { "Personalizado…" };
-                p.text(FontId::Ui, label, rect(r.left + 34.0, r.top, r.right - 8.0, r.bottom), th.text);
-                let icon = rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom);
-                if kind == PickerHit::Custom {
-                    // Muestra del color personalizado, o el ícono de paleta si no hay.
-                    match (selected, current) {
-                        (true, Accent::Rgb(c)) => p.circle((icon.left + icon.right) / 2.0, (icon.top + icon.bottom) / 2.0, 8.0, hex(c)),
-                        _ => p.text(FontId::Glyphs, "\u{E790}", icon, th.text_dim),
-                    }
-                } else {
-                    p.text(FontId::Glyphs, "\u{E7F8}", icon, th.text_dim);
-                }
-                if selected {
-                    p.text(FontId::GlyphsSmall, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
-                }
-            }
             PickerHit::DarkMode
             | PickerHit::FileColors
             | PickerHit::Extensions
@@ -865,16 +808,6 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                 let (kx, kr) = if on { (track.right - half, half - 4.0) } else { (track.left + half, half - 5.0) };
                 p.circle(kx, cy, kr, if on { th.background } else { th.text_dim });
             }
-            PickerHit::Changelog => {
-                if hot {
-                    p.round_fill(r, 6.0, th.hover);
-                }
-                // Separador sobre las tres filas del final.
-                let sy = r.top - lay.sep / 2.0;
-                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
-                p.text(FontId::Glyphs, crate::pane::CHANGELOG_GLYPH, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
-                p.text(FontId::Ui, "Novedades", rect(r.left + 34.0, r.top, r.right - 10.0, r.bottom), th.text);
-            }
             PickerHit::About => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
@@ -887,6 +820,9 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
+                // Separador sobre las dos filas del final.
+                let sy = r.top - lay.sep / 2.0;
+                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 p.text(FontId::Glyphs, "\u{E713}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
                 p.text(FontId::Ui, "Más opciones…", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
                 let keys = crate::commands::combo_label(crate::commands::parse_combo("Ctrl+Coma").expect("atajo válido"));
@@ -987,7 +923,7 @@ mod tests {
     fn picker_switch_labels_have_room() {
         let p = RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(false)));
         let (w, h) = (1400.0, 900.0);
-        draw_picker(&p, w, h, DEFAULT_ACCENT, None, PickerSwitches::default());
+        draw_picker(&p, w, h, None, PickerSwitches::default());
         let panel = picker_rect(w, h);
         let texts = p.texts();
         let (_, _, t) = texts.iter().find(|(_, s, _)| s == "Mostrar archivos ocultos").expect("el switch");
@@ -1124,33 +1060,37 @@ mod picker_tests {
         let (w, h) = (900.0, 360.0);
         let kinds = switch_kinds();
         let items = picker_items(w, h);
-        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::Changelog, PickerHit::About, PickerHit::Preset(0)] {
+        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::MoreOptions, PickerHit::About] {
             let (_, r) = items.iter().find(|(k, _)| *k == want).unwrap();
             let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
             assert_eq!(picker_at(w, h, x, y), Some(want));
         }
     }
-    /// El final de la rueda, de arriba abajo: Novedades, Más opciones… y Acerca de xdir (pedido
-    /// del usuario), las tres del mismo alto y una debajo de la otra.
+    /// El final de la rueda, de arriba abajo: Más opciones… y Acerca de xdir, del mismo alto y una
+    /// debajo de la otra.
     #[test]
-    fn el_final_es_novedades_mas_opciones_y_acerca_de() {
+    fn el_final_es_mas_opciones_y_acerca_de() {
         for h in [360.0, 700.0] {
             let items = picker_items(900.0, h);
-            let tail: Vec<PickerHit> = items[items.len() - 3..].iter().map(|(k, _)| *k).collect();
-            assert_eq!(tail, vec![PickerHit::Changelog, PickerHit::MoreOptions, PickerHit::About]);
-            let rs: Vec<Rect> = items[items.len() - 3..].iter().map(|(_, r)| *r).collect();
+            let tail: Vec<PickerHit> = items[items.len() - 2..].iter().map(|(k, _)| *k).collect();
+            assert_eq!(tail, vec![PickerHit::MoreOptions, PickerHit::About]);
+            let rs: Vec<Rect> = items[items.len() - 2..].iter().map(|(_, r)| *r).collect();
             assert!(rs.windows(2).all(|w| (w[0].bottom - w[1].top).abs() < 0.01), "{rs:?}");
         }
     }
 
-    /// La fila de Novedades dice «Novedades».
+    /// La rueda ya no tiene énfasis, color de Windows, personalizado ni Novedades (van en «Más
+    /// opciones» y «Acerca de xdir»).
     #[test]
-    fn la_rueda_dibuja_novedades() {
+    fn la_rueda_no_dibuja_lo_que_se_mudo() {
         crate::sys::testing::install_fakes();
         let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
-        draw_picker(&p, 900.0, 700.0, crate::theme::DEFAULT_ACCENT, Some(PickerHit::Changelog), PickerSwitches::default());
+        draw_picker(&p, 900.0, 700.0, Some(PickerHit::About), PickerSwitches::default());
         let texts: Vec<String> = p.texts().into_iter().map(|(_, s, _)| s).collect();
+        for gone in ["Color de acento", "Color de Windows", "Personalizado…", "Novedades"] {
+            assert!(!texts.iter().any(|s| s == gone), "{gone}: {texts:?}");
+        }
         let at = |t: &str| texts.iter().position(|s| s == t).unwrap_or_else(|| panic!("{t}: {texts:?}"));
-        assert!(at("Novedades") < at("Más opciones…") && at("Más opciones…") < at("Acerca de xdir"));
+        assert!(at("Más opciones…") < at("Acerca de xdir"));
     }
 }

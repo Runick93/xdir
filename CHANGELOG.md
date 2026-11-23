@@ -3,6 +3,7 @@
 ## Sin publicar
 
 ### Nuevo
+- **La rueda dentada es más liviana**: ya no tiene el color de énfasis, «Color de Windows», «Personalizado…» ni «Novedades». El énfasis y los colores se cambian en «Más opciones» ▸ Apariencia, y las Novedades están en «Acerca de xdir». Una instalación nueva arranca con todo prendido (archivos ocultos, colores por tipo, barra de grupos, árbol de carpetas, extensiones) salvo «Casillas de selección» y «El árbol sigue al panel»; quien ya tiene configuración guardada no ve cambiadas sus opciones.
 - **xtree**: el botón «← xdir» tiene un contorno con el color de énfasis elegido, para que se note que es la forma de volver.
 - **xtree**: al analizar un disco entero, el espacio libre aparece como un bloque más del mapa («Espacio libre», con su tamaño y su porcentaje del disco, como en SquirrelDisk). No se puede abrir y no aparece dentro de una carpeta. Se oculta con el botón nuevo de la barra superior o en Configuración ▸ xtree ▸ «Mostrar el espacio libre en el mapa» (`xtree_espacio_libre` en `config.toml`).
 - **xtree**: la lista de carpetas puede ir a la izquierda o a la derecha del mapa. Se elige con el botón nuevo de la barra superior (a la izquierda de la lupa) o en Configuración ▸ xtree ▸ «Lista de carpetas de xtree» (`xtree_barra_lateral` en `config.toml`); se aplica al instante y se recuerda. La barra de datos del disco queda siempre debajo del mapa.

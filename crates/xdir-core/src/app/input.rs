@@ -390,9 +390,6 @@ impl App {
                 self.picker_open = !self.picker_open;
                 self.redraw();
             }
-            Hit::Picker(ui::PickerHit::Preset(i)) => self.set_accent(Accent::Rgb(theme::PRESETS[i].1)),
-            Hit::Picker(ui::PickerHit::System) => self.set_accent(Accent::System),
-            Hit::Picker(ui::PickerHit::Custom) => self.choose_custom_color(),
             Hit::Picker(ui::PickerHit::DarkMode) => self.set_dark_mode(!self.theme.dark),
             Hit::Picker(ui::PickerHit::FileColors) => {
                 self.file_colors = !self.file_colors;
@@ -409,7 +406,6 @@ impl App {
             Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
-            Hit::Picker(ui::PickerHit::Changelog) => self.run_command(Command::Changelog),
             Hit::UpdateNotice => self.open_update_notice(),
             Hit::SizeLink => self.request_sel_size(),
             Hit::Changelog(i) => {

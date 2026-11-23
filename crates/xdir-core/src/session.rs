@@ -266,15 +266,17 @@ impl Default for Session {
             split_x: 0.5,
             split_y: 0.5,
             active_pane: 0,
-            show_hidden: false,
+            // Instalación nueva: todo prendido salvo las casillas y «El árbol sigue al panel».
+            // Quien ya tiene `sesion.toml` conserva lo que guardó.
+            show_hidden: true,
             show_favorites: true,
-            group_bar: false,
+            group_bar: true,
             accent: DEFAULT_ACCENT,
             dark_mode: None,
-            file_colors: false,
+            file_colors: true,
             show_extensions: true,
             checkboxes: false,
-            tree_follow: None,
+            tree_follow: Some(false),
             show_tree: true,
             tree_pinned: true,
             group: None,
@@ -398,7 +400,7 @@ const LEGACY_SECTIONS: u32 = 0x7F;
 
 fn parse(text: &str) -> Session {
     // Sin `version_vista` en el archivo, la sesión es de una versión de antes de Novedades.
-    let mut s = Session { seen_version: None, ..Session::default() };
+    let mut s = Session { seen_version: None, tree_follow: None, ..Session::default() };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -558,6 +560,15 @@ fn parse_list(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Instalación nueva: todo prendido salvo «Casillas de selección» y «El árbol sigue al panel».
+    #[test]
+    fn fresh_install_defaults() {
+        let s = Session::default();
+        assert!(s.show_hidden && s.group_bar && s.file_colors && s.show_extensions && s.show_tree);
+        assert!(!s.checkboxes);
+        assert_eq!(s.tree_follow, Some(false));
+    }
+
     use super::*;
 
     /// Una pestaña dentro de un archivo comprimido (también anidado) se guarda y se lee igual.

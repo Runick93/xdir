@@ -2,6 +2,9 @@
 
 ## Sin publicar
 
+### Nuevo
+- El botón de **xtree** (en el árbol y en la barra de estado) tiene su propio color violeta, que ya no cambia con el énfasis elegido.
+
 ## 0.2.5 — 2026-11-22
 
 ### Nuevo

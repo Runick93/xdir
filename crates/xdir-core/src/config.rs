@@ -526,6 +526,8 @@ pub fn template() -> String {
             # Qué analiza xtree al abrirse: \"sistema\" (el disco del sistema), \"panel\" (la\n\
             # carpeta del panel activo) o \"ultimo\" (la última analizada).\n\
             # xtree_abrir = \"panel\"\n\
+            # De qué lado de xtree va la lista de carpetas: \"izquierda\" o \"derecha\".\n\
+            # xtree_barra_lateral = \"izquierda\"\n\
             # xtree analiza apenas se abre (si no, se elige el disco y se toca Analizar).\n\
             # xtree_analizar_al_abrir = false\n\
             # xtree guarda una foto de los tamaños con cada análisis, para ver cuánto creció cada\n\
@@ -702,14 +704,10 @@ mod tests {
     fn xtree_side_option_parses() {
         crate::sys::testing::install_fakes();
         assert_eq!(Config::parse("").xtree_side, XtreeSide::Left);
-        let c = Config::parse("[opciones]
-xtree_barra_lateral = \"derecha\"
-");
+        let c = Config::parse("[opciones]\nxtree_barra_lateral = \"derecha\"\n");
         assert!(c.errors.is_empty(), "{:?}", c.errors);
         assert_eq!(c.xtree_side, XtreeSide::Right);
-        let bad = Config::parse("[opciones]
-xtree_barra_lateral = \"arriba\"
-");
+        let bad = Config::parse("[opciones]\nxtree_barra_lateral = \"arriba\"\n");
         assert_eq!(bad.xtree_side, XtreeSide::Left);
         assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
         assert_eq!(XtreeSide::Left.flip(), XtreeSide::Right);

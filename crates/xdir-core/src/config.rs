@@ -134,6 +134,9 @@ pub struct Config {
     pub xtree_open: XtreeOpen,
     /// `[opciones] xtree_barra_lateral`: de qué lado de xtree va la lista de carpetas.
     pub xtree_side: XtreeSide,
+    /// `[opciones] xtree_espacio_libre`: al analizar un disco entero, el mapa muestra el espacio
+    /// libre como un bloque más (de fábrica, sí).
+    pub xtree_free_space: bool,
     /// `[opciones] xtree_analizar_al_abrir`: xtree analiza apenas se abre (de fábrica, no: se
     /// elige el disco y se toca «Analizar»).
     pub xtree_scan_on_open: bool,
@@ -165,7 +168,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_side: XtreeSide::Left, xtree_scan_on_open: false, xtree_history: true, queue_by_disk: false, terminal: None, custom_terminal: None, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
+        Self { keymap: Keymap::default(), colors: Vec::new(), animations: None, tree_follows_pane: true, xtree_by_type: false, xtree_open: XtreeOpen::Pane, xtree_side: XtreeSide::Left, xtree_free_space: true,xtree_scan_on_open: false, xtree_history: true, queue_by_disk: false, terminal: None, custom_terminal: None, errors: Vec::new(), key_errors: Vec::new(), own_shortcut_ids: std::collections::BTreeSet::new(), own_colors: 0, modified: None }
     }
 }
 
@@ -367,6 +370,8 @@ impl Config {
                                 Some(o) => c.xtree_open = o,
                                 None => c.errors.push(format!("línea {}: xtree_abrir va como \"sistema\", \"panel\" o \"ultimo\"", e.line)),
                             },
+                            ("xtree_espacio_libre", Some(on)) => c.xtree_free_space = on,
+                            ("xtree_espacio_libre", None) => c.errors.push(format!("línea {}: xtree_espacio_libre va como true o false", e.line)),
                             ("xtree_barra_lateral", _) => match XtreeSide::ALL.into_iter().find(|o| e.value.as_str() == Some(o.id())) {
                                 Some(o) => c.xtree_side = o,
                                 None => c.errors.push(format!("línea {}: xtree_barra_lateral va como \"izquierda\" o \"derecha\"", e.line)),
@@ -528,6 +533,9 @@ pub fn template() -> String {
             # xtree_abrir = \"panel\"\n\
             # De qué lado de xtree va la lista de carpetas: \"izquierda\" o \"derecha\".\n\
             # xtree_barra_lateral = \"izquierda\"\n\
+            # Al analizar un disco entero, el mapa muestra el espacio libre como un bloque más\n\
+            # (false lo oculta).\n\
+            # xtree_espacio_libre = true\n\
             # xtree analiza apenas se abre (si no, se elige el disco y se toca Analizar).\n\
             # xtree_analizar_al_abrir = false\n\
             # xtree guarda una foto de los tamaños con cada análisis, para ver cuánto creció cada\n\
@@ -697,6 +705,17 @@ mod tests {
         assert_eq!(bad.xtree_open, XtreeOpen::Pane);
         assert_eq!(bad.errors.len(), 2, "{:?}", bad.errors);
         assert!(bad.errors[0].starts_with("línea 2: "), "{:?}", bad.errors);
+    }
+
+    /// #104: `xtree_espacio_libre` — de fábrica visible; false lo oculta; otra cosa es un error.
+    #[test]
+    fn xtree_free_space_option_parses() {
+        crate::sys::testing::install_fakes();
+        assert!(Config::parse("").xtree_free_space);
+        assert!(!Config::parse("[opciones]\nxtree_espacio_libre = false\n").xtree_free_space);
+        let bad = Config::parse("[opciones]\nxtree_espacio_libre = 3\n");
+        assert!(bad.xtree_free_space);
+        assert_eq!(bad.errors.len(), 1, "{:?}", bad.errors);
     }
 
     /// #105: `xtree_barra_lateral` — de fábrica a la izquierda; otra cosa es un error.

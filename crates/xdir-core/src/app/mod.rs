@@ -212,6 +212,8 @@ enum Hit {
     XtreeSearch,
     /// El botón que pasa la lista de carpetas de xtree al otro lado.
     XtreeSide,
+    /// El botón que muestra u oculta el espacio libre en el mapa de xtree.
+    XtreeFree,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),

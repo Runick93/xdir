@@ -185,6 +185,7 @@ impl App {
             "xtree_analizar_al_abrir" => one(row(Control::Switch(self.config.xtree_scan_on_open))),
             "xtree_por_tipo" => one(row(Control::Switch(self.config.xtree_by_type))),
             "xtree_abrir" => one(row(Control::Dropdown(self.config.xtree_open.title().to_string()))),
+            "xtree_espacio_libre" => one(row(Control::Switch(self.config.xtree_free_space))),
             "xtree_barra_lateral" => one(row(Control::Dropdown(self.config.xtree_side.title().to_string()))),
             "xtree_historial" => one(row(Control::Switch(self.config.xtree_history))),
             "cola_por_disco" => one(row(Control::Switch(self.config.queue_by_disk))),
@@ -435,6 +436,7 @@ impl App {
                 }]);
             }
             ("xtree_abrir", _) => self.xtree_open_menu(pane),
+            ("xtree_espacio_libre", _) => self.toggle_xtree_free_space(),
             ("xtree_barra_lateral", _) => self.xtree_side_menu(pane),
             ("xtree_historial", _) => self.toggle_xtree_history(),
             ("cola_por_disco", _) => self.toggle_queue_by_disk(),
@@ -475,6 +477,20 @@ impl App {
         self.edit_config(vec![match open {
             config::XtreeOpen::Pane => ConfigEdit::Remove { section: "opciones", key },
             o => ConfigEdit::Set { section: "opciones", key, value: crate::toml::quote(o.id()) },
+        }]);
+    }
+
+    /// Switch «Mostrar el espacio libre en el mapa» (y botón de xtree): `xtree_espacio_libre =
+    /// false` en `config.toml` (encendido es lo de fábrica: se quita la línea). La vista lo toma en
+    /// el próximo cuadro.
+    pub(super) fn toggle_xtree_free_space(&mut self) {
+        let on = !self.config.xtree_free_space;
+        self.config.xtree_free_space = on;
+        let key = "xtree_espacio_libre".to_string();
+        self.edit_config(vec![if on {
+            ConfigEdit::Remove { section: "opciones", key }
+        } else {
+            ConfigEdit::Set { section: "opciones", key, value: "false".into() }
         }]);
     }
 

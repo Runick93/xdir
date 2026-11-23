@@ -42,7 +42,7 @@ pub const PRESETS: [(&str, u32); 12] = [
     ("Rosa", 0xF778BA),
     ("Violeta", 0xA371F7),
     ("Índigo", 0x6E7BFF),
-    ("Gris", 0x8B98A9),
+    ("Gris azulado", 0x8B98A9),
 ];
 
 /// Fondos predefinidos, uno por énfasis (todos oscuros y con tinte del color): (nombre, fondo base,

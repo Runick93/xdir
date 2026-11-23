@@ -63,9 +63,10 @@ pub trait Painter {
     fn round_stroke_w(&self, r: Rect, radius: f32, c: Color, width: f32);
     fn round_stroke(&self, r: Rect, radius: f32, c: Color);
     fn text(&self, font: FontId, s: &str, r: Rect, c: Color);
-    /// Como `text`, pero difuminado con un blur gaussiano de desviación `sigma` DIPs: el resplandor
-    /// que va detrás del texto nítido (`c.a` es su opacidad). Donde la plataforma no sabe
-    /// difuminar, queda una copia tenue sin desenfoque.
+    /// Resplandor de un ícono: el trazo del glifo engrosado (1,5 a 2 veces) y difuminado con un blur
+    /// gaussiano de desviación `sigma` DIPs, para dibujar detrás del glifo nítido (`c.a` es la
+    /// opacidad del resplandor). Donde la plataforma no sabe difuminar, queda una copia tenue sin
+    /// desenfoque.
     fn glow_text(&self, font: FontId, s: &str, r: Rect, c: Color, _sigma: f32) {
         self.text(font, s, r, c);
     }

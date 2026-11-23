@@ -19,6 +19,10 @@ impl App {
         if let Some(c) = &self.confirm {
             return c.dialog.hit(x, y).map_or(Hit::None, Hit::Confirm);
         }
+        // El panel de colores de un grupo, abierto sobre su pestaña, también es modal.
+        if let Some(m) = &self.group_color {
+            return m.hit(w, h, x, y).map_or(Hit::None, Hit::GroupColor);
+        }
         // El menú de ramas, abierto sobre el pie, también es modal: un clic fuera solo lo cierra.
         if let Some(m) = &self.drop_menu {
             return m.menu.hit(x, y).map_or(Hit::None, Hit::DropMenu);
@@ -213,6 +217,13 @@ impl App {
             });
             return;
         }
+        if self.group_color.is_some() {
+            self.group_color_click(match hit {
+                Hit::GroupColor(h) => Some(h),
+                _ => None,
+            });
+            return;
+        }
         if self.drop_menu.is_some() {
             self.drop_click(match hit {
                 Hit::DropMenu(h) => Some(h),
@@ -398,6 +409,7 @@ impl App {
                 self.picker_open = !self.picker_open;
                 self.redraw();
             }
+            Hit::Picker(ui::PickerHit::Preset(i)) => self.set_accent(Accent::Rgb(theme::PRESETS[i].1)),
             Hit::Picker(ui::PickerHit::DarkMode) => self.set_dark_mode(!self.theme.dark),
             Hit::Picker(ui::PickerHit::FileColors) => {
                 self.file_colors = !self.file_colors;
@@ -534,7 +546,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::ColorPicker(_) | Hit::DropMenu(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
+            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::ColorPicker(_) | Hit::DropMenu(_) | Hit::GroupColor(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
         // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
         self.quick_look_follow_list();

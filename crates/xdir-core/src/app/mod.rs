@@ -16,6 +16,7 @@ mod events;
 mod favs;
 mod fileops;
 mod git_branch;
+mod group_color;
 mod in_use;
 mod info;
 mod network;
@@ -74,6 +75,8 @@ mod cut_tests;
 #[cfg(test)]
 mod git_branch_tests;
 #[cfg(test)]
+mod group_color_tests;
+#[cfg(test)]
 mod in_use_tests;
 
 pub use events::CursorKind;
@@ -94,7 +97,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use crate::geom::{self, contains};
-use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
+use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP}};
 use crate::sys::{self, Handle};
 use crate::{WM_APP, fs, shell};
 
@@ -244,6 +247,8 @@ enum Hit {
     ColorPicker(color_picker::PickHit),
     /// El menú de ramas abierto: una fila o el panel sin nada debajo.
     DropMenu(drop_menu::DropHit),
+    /// El panel de colores de una pestaña de grupo: un color, el acento de la app o el panel.
+    GroupColor(group_color::GroupColorHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.
@@ -600,6 +605,11 @@ pub struct App {
     confirm: Option<git_branch::ConfirmState>,
     /// El menú de ramas abierto sobre el botón del pie.
     drop_menu: Option<git_branch::BranchMenu>,
+    /// El panel de colores abierto sobre una pestaña de grupo (clic derecho).
+    group_color: Option<group_color::GroupColorMenu>,
+    /// Clic derecho apretado sobre una pestaña de grupo (su posición y el punto), a la espera del
+    /// pedido de menú que llega al soltar.
+    group_ctx: Option<(usize, (f32, f32))>,
     /// Qué hace git mientras `git_busy` (el cartel del indicador de actividad).
     git_task: String,
     /// Lo que se sabe del remoto de cada repositorio con pestañas abiertas (botón de sincronizar).
@@ -868,6 +878,8 @@ impl App {
             git_busy: false,
             confirm: None,
             drop_menu: None,
+            group_color: None,
+            group_ctx: None,
             git_task: String::new(),
             git_sync: std::collections::HashMap::new(),
             git_pulling: None,

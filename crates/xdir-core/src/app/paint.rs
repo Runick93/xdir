@@ -183,7 +183,7 @@ impl App {
         let (layout, splits, active, maximized) = (self.layout, self.splits, self.active, self.maximized);
         let (hover, drag, edit_pane) = (self.hover, self.drag, self.edit.map(|(_, p)| p));
         let (show_favorites, fav_drop) = (self.show_favorites, self.fav_drop);
-        let picker_open = self.picker_open;
+        let (picker_open, accent) = (self.picker_open, self.accent);
         let about_open = self.about_open;
         // Logo animado: el cuadro que toca y, si falta para el siguiente, un cuadro pedido a tiempo.
         let mut about_frame = 0;
@@ -235,7 +235,7 @@ impl App {
                 crate::xtree::view::set_list_side(self.config.xtree_side == crate::config::XtreeSide::Right);
                 v.paint(p, ui::xtree_area(w, h));
             } else if groups_h > 0.0 {
-                let names: Vec<(&str, bool)> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
+                let names: Vec<ui::GroupTab> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp, g.color)).collect();
                 let active_group = self.group_name.as_deref().and_then(|n| self.groups.find(n));
                 let group_hover = match hover {
                     Hit::GroupBar(g) => Some(g),
@@ -372,7 +372,7 @@ impl App {
                     Hit::Picker(k) => Some(k),
                     _ => None,
                 };
-                ui::draw_picker(p, w, h, picker_hover, switches);
+                ui::draw_picker(p, w, h, accent, picker_hover, switches);
             }
             // Vista rápida sin visor del sistema: la tarjeta de xdir encima de los paneles.
             if let Some(st) = self.quick_look.as_ref().filter(|s| !s.ql.native) {
@@ -416,6 +416,13 @@ impl App {
                     _ => None,
                 };
                 m.menu.draw(p, w, h, hover);
+            }
+            if let Some(m) = &self.group_color {
+                let hover = match hover {
+                    Hit::GroupColor(k) => Some(k),
+                    _ => None,
+                };
+                m.draw(p, w, h, hover);
             }
             if let Some(c) = &self.confirm {
                 let hover = match hover {

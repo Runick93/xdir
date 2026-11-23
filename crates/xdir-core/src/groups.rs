@@ -16,6 +16,8 @@ pub struct Group {
     pub panes: Vec<PaneState>,
     /// Pestaña sin guardar (como un archivo nuevo de un editor): al cerrarla se decide si se conserva.
     pub temp: bool,
+    /// Color propio de la pestaña (0xRRGGBB); sin él usa el acento de la aplicación.
+    pub color: Option<u32>,
 }
 
 impl Group {
@@ -25,6 +27,8 @@ impl Group {
             && self.layout == other.layout
             && self.panes == other.panes
             && self.temp == other.temp
+            && self.color == other.color
+            && self.color == other.color
             && (self.split_x - other.split_x).abs() < 1e-3
             && (self.split_y - other.split_y).abs() < 1e-3
     }
@@ -76,6 +80,9 @@ impl Groups {
             if g.temp {
                 out += "temporal = true\n";
             }
+            if let Some(c) = g.color {
+                out += &format!("color = \"#{c:06X}\"\n");
+            }
             out += &format!("layout = {}\n", g.layout);
             out += &format!("division_x = {:.4}\n", g.split_x);
             out += &format!("division_y = {:.4}\n", g.split_y);
@@ -119,6 +126,7 @@ impl Groups {
                     split_y: num("division_y", 0.5) as f32,
                     panes,
                     temp: s.get("temporal").and_then(Value::as_bool).unwrap_or(false),
+                    color: s.get("color").and_then(Value::as_str).and_then(|c| u32::from_str_radix(c.trim().trim_start_matches('#'), 16).ok()).filter(|c| *c <= 0xFF_FFFF),
                 })
             })
             .collect();
@@ -143,6 +151,7 @@ mod tests {
                 PaneState { tabs: vec![Location::Path(r"\\servidor\recurso".into())], active: 0 },
             ],
             temp: true,
+            color: Some(0xA371F7),
         };
         let mut gs = Groups::default();
         gs.put(g.clone());
@@ -154,16 +163,24 @@ mod tests {
         assert!((b.split_x - 0.3).abs() < 1e-4 && (b.split_y - 0.6).abs() < 1e-4);
         assert_eq!(b.panes, g.panes);
         assert!(b.temp);
+        assert_eq!(b.color, Some(0xA371F7));
     }
 
     #[test]
     fn put_replaces_by_name() {
         let mut gs = Groups::default();
-        let g = |name: &str, layout| Group { name: name.into(), layout, split_x: 0.5, split_y: 0.5, panes: vec![], temp: false };
+        let g = |name: &str, layout| Group { name: name.into(), layout, split_x: 0.5, split_y: 0.5, panes: vec![], temp: false, color: None };
         gs.put(g("Uno", 1));
         gs.put(g("dos", 2));
         gs.put(g("UNO", 4));
         assert_eq!(gs.items.iter().map(|g| (g.name.as_str(), g.layout)).collect::<Vec<_>>(), [("UNO", 4), ("dos", 2)]);
+    }
+
+    #[test]
+    fn color_is_optional_and_bad_values_are_ignored() {
+        let gs = Groups::parse("[[grupo]]\nnombre = 'A'\ncolor = '#3b9eff'\npaneles = []\n[[grupo]]\nnombre = 'B'\ncolor = 'rojo'\npaneles = []\n[[grupo]]\nnombre = 'C'\npaneles = []\n");
+        assert_eq!(gs.items.iter().map(|g| g.color).collect::<Vec<_>>(), [Some(0x3B9EFF), None, None]);
+        assert_eq!(gs.write().matches("color = ").count(), 1, "sin color no se escribe la línea");
     }
 
     #[test]

@@ -131,7 +131,8 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
     let (l, t, r, b) = (area.left, area.top, area.right, area.bottom);
     let body_bottom = b - STATUS_H - 4.0;
     let x0 = l + MARGIN + LIST_W + MARGIN;
-    let list = rect(l + MARGIN, t + TOP_H + 4.0, l + MARGIN + LIST_W, body_bottom);
+    // La lista de carpetas llega al borde inferior de la ventana (a la altura del pie de la barra de datos).
+    let list = rect(l + MARGIN, t + TOP_H + 4.0, l + MARGIN + LIST_W, b - 6.0);
     let legend = rect(x0, body_bottom - legend_h, r - MARGIN, body_bottom);
     let card = rect(x0, legend.top - GAP - CARD_H, r - MARGIN, legend.top - GAP);
     let map = rect(x0, t + TOP_H + 4.0, r - MARGIN, card.top - GAP);
@@ -146,7 +147,7 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
     let back = back_rect(area);
     let combo = rect(back.right + 8.0, t + 6.0, back.right + 8.0 + 250.0, t + TOP_H - 6.0);
     let scan_btn = rect(combo.right + 8.0, t + 6.0, combo.right + 108.0, t + TOP_H - 6.0);
-    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area), search_btn: search_btn_rect(area) }
+    Ui { list, map, card, legend, status: rect(x0, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area), search_btn: search_btn_rect(area) }
 }
 
 /// La lupa de la barra superior de la vista en `area` (ver `top_buttons`).
@@ -2050,7 +2051,8 @@ impl Xtree {
         }
 
         // ----- barra de datos del disco: carpeta actual, espacio total, utilizado y libre -----
-        let bar = rect(l0 + MARGIN, ui.status.top + 4.0, r0 - MARGIN, b0 - 6.0);
+        // Va en la columna derecha (la lista de carpetas ocupa todo el alto a su izquierda).
+        let bar = rect(ui.status.left, ui.status.top + 4.0, ui.status.right - MARGIN, b0 - 6.0);
         p.round_fill(bar, 8.0, th.surface);
         p.round_stroke_w(bar, 8.0, th.border, 1.0);
         let mut cols: Vec<(&str, String)> = Vec::new();
@@ -2086,9 +2088,12 @@ impl Xtree {
         let hint = self.data_hint();
         // Con el aviso, las columnas se achican para que entre el texto.
         let widths: [f32; 5] = if hint.is_empty() { [250.0, 120.0, 190.0, 180.0, 190.0] } else { [220.0, 110.0, 170.0, 150.0, 170.0] };
+        // La barra es más angosta que antes: si las columnas no entran, se achican parejo.
+        let wanted: f32 = (0..cols.len()).map(|i| widths[i.min(widths.len() - 1)]).sum();
+        let squeeze = ((bar.right - bar.left - 32.0) / wanted.max(1.0)).min(1.0);
         let mut x = bar.left + 16.0;
         for (i, (label, value)) in cols.iter().enumerate() {
-            let cw = widths[i.min(widths.len() - 1)];
+            let cw = widths[i.min(widths.len() - 1)] * squeeze;
             p.text(FontId::Small, label, rect(x, bar.top + 4.0, x + cw, bar.top + 20.0), th.text_dim);
             p.text(FontId::UiBold, value, rect(x, bar.top + 19.0, x + cw, bar.top + 37.0), th.text);
             x += cw;
@@ -2524,6 +2529,21 @@ mod tests {
         assert!(x.search_open());
         x.on_click(area, lx, ly, false);
         assert!(!x.search_open());
+    }
+
+    /// #101: la lista de carpetas ocupa todo el alto; la barra de datos va en la columna derecha,
+    /// debajo de lo demás y sin tapar la lista.
+    #[test]
+    fn list_is_full_height_and_data_bar_sits_right() {
+        for legend_h in [0.0, LEGEND_H] {
+            let area = rect(0.0, 0.0, 1600.0, 900.0);
+            let ui = layout_ui(area, legend_h);
+            assert_eq!(ui.list.bottom, area.bottom - 6.0, "la lista llega abajo");
+            assert!(ui.status.left >= ui.list.right, "la barra no pisa la lista");
+            assert!(ui.status.left < ui.status.right && ui.status.right <= area.right);
+            assert!(ui.status.top >= ui.legend.bottom, "la barra queda debajo de la leyenda");
+            assert!(ui.status.top >= ui.map.bottom && ui.status.top >= ui.card.bottom);
+        }
     }
 
     /// Recorre la vista entera con hit-tests y clics: nada debe entrar en pánico.

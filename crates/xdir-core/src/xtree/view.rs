@@ -2102,16 +2102,18 @@ impl Xtree {
                 for c in &self.cells {
                     if c.free {
                         let exact = self.hover.and_then(|i| self.cells.get(i)).is_some_and(|h| h.free);
-                        let col = lighten(th.surface_alt, if exact { 0.12 } else { 0.0 });
+                        // Blanco agrisado (igual en claro y oscuro): se distingue de las carpetas.
+                        let col = if exact { rgb((0.93, 0.93, 0.95)) } else { rgb((0.85, 0.85, 0.87)) };
+                        let (ink, ink_dim) = (rgb((0.13, 0.13, 0.15)), rgb((0.33, 0.33, 0.37)));
                         p.round_fill(c.r, 3.0, col);
                         p.round_stroke_w(c.r, 3.0, th.border, 1.0);
                         let (cw, ch) = (c.r.right - c.r.left, c.r.bottom - c.r.top);
                         let free = self.volume().map_or(0, |(t, f)| f.min(t));
                         if cw >= 60.0 && ch >= 38.0 {
-                            p.text(FontId::SmallBold, "Espacio libre", rect(c.r.left + 8.0, c.r.top + 3.0, c.r.right - 3.0, c.r.top + 19.0), th.text);
-                            p.text(FontId::Small, &fmt_size(free), rect(c.r.left + 8.0, c.r.top + 19.0, c.r.right - 3.0, c.r.top + 35.0), th.text_dim);
+                            p.text(FontId::SmallBold, "Espacio libre", rect(c.r.left + 8.0, c.r.top + 3.0, c.r.right - 3.0, c.r.top + 19.0), ink);
+                            p.text(FontId::Small, &fmt_size(free), rect(c.r.left + 8.0, c.r.top + 19.0, c.r.right - 3.0, c.r.top + 35.0), ink_dim);
                         } else if cw >= 60.0 && ch >= 18.0 {
-                            p.text(FontId::Small, "Espacio libre", rect(c.r.left + 6.0, c.r.top, c.r.right - 3.0, c.r.bottom), th.text_dim);
+                            p.text(FontId::Small, "Espacio libre", rect(c.r.left + 6.0, c.r.top, c.r.right - 3.0, c.r.bottom), ink_dim);
                         }
                         continue;
                     }

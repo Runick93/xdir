@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
     D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1,
     D2D1_ELLIPSE, ID2D1PathGeometry1, ID2D1SolidColorBrush,
@@ -24,7 +24,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::D2D1_QUADRATIC_BEZIER_SEGMENT;
 use windows::Win32::Graphics::Direct2D::{
-    CLSID_D2D1GaussianBlur, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
+    CLSID_D2D1GaussianBlur, CLSID_D2D1Opacity, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_PROPERTY_TYPE_UNKNOWN, ID2D1Effect, ID2D1Image,
 };
 use windows_numerics::Vector2;
@@ -258,6 +258,10 @@ impl Renderer {
     }
 }
 
+/// Resplandor de los íconos: margen mínimo del bitmap del efecto por lado y cuánto se engrosa el trazo.
+const GLOW_MIN_PAD: f32 = 6.0;
+const GLOW_GROW: f32 = 0.6;
+
 pub struct Painter<'a> {
     ctx: &'a ID2D1DeviceContext,
     factory: &'a ID2D1Factory1,
@@ -277,25 +281,35 @@ impl Painter<'_> {
         unsafe { self.brush.SetColor(&c) };
     }
 
-    /// Dibuja `s` con el color `c` (opacidad incluida) en un bitmap de `r` más `pad` de margen por
-    /// lado y devuelve el efecto de blur gaussiano sobre él; `None` si algo falla.
+    /// Dibuja el trazo de `s` engrosado (el glifo repetido a `GLOW_GROW` DIPs en las 8 direcciones,
+    /// opaco: de 1,2 DIPs de grosor pasa a unos 2,4) en un bitmap de `r` más `pad` de margen por
+    /// lado, y devuelve el blur gaussiano sobre él con la opacidad de `c.a`; `None` si algo falla.
     fn blurred_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32, pad: f32) -> Option<ID2D1Effect> {
         let (w, h) = (r.right - r.left + pad * 2.0, r.bottom - r.top + pad * 2.0);
         unsafe {
             let size = D2D_SIZE_F { width: w, height: h };
             let target = self.ctx.CreateCompatibleRenderTarget(Some(&size), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok()?;
-            let brush = target.CreateSolidColorBrush(&d2c(c), None).ok()?;
+            let brush = target.CreateSolidColorBrush(&d2c(Color { a: 1.0, ..c }), None).ok()?;
             target.BeginDraw();
             target.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
             let wide: Vec<u16> = s.encode_utf16().collect();
-            target.DrawText(&wide, self.fonts.get(font), &d2r(rect(pad, pad, w - pad, h - pad)), &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            let base = rect(pad, pad, w - pad, h - pad);
+            let k = GLOW_GROW * std::f32::consts::FRAC_1_SQRT_2;
+            for (dx, dy) in [(0.0, 0.0), (GLOW_GROW, 0.0), (-GLOW_GROW, 0.0), (0.0, GLOW_GROW), (0.0, -GLOW_GROW), (k, k), (k, -k), (-k, k), (-k, -k)] {
+                let at = rect(base.left + dx, base.top + dy, base.right + dx, base.bottom + dy);
+                target.DrawText(&wide, self.fonts.get(font), &d2r(at), &brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
             target.EndDraw(None, None).ok()?;
             let bitmap = target.GetBitmap().ok()?;
             let effect = self.ctx.CreateEffect(&CLSID_D2D1GaussianBlur).ok()?;
             effect.SetInput(0, &bitmap, true);
             // Propiedad 0: desviación estándar (f32).
             effect.SetValue(0, D2D1_PROPERTY_TYPE_UNKNOWN, &sigma.to_ne_bytes()).ok()?;
-            Some(effect)
+            // Opacidad del resplandor (propiedad 0), encima del blur.
+            let opacity = self.ctx.CreateEffect(&CLSID_D2D1Opacity).ok()?;
+            opacity.SetInput(0, &effect.GetOutput().ok()?, true);
+            opacity.SetValue(0, D2D1_PROPERTY_TYPE_UNKNOWN, &c.a.to_ne_bytes()).ok()?;
+            Some(opacity)
         }
     }
 }
@@ -423,13 +437,15 @@ impl paint::Painter for Painter<'_> {
         };
     }
 
-    /// Texto difuminado: se dibuja una vez en un bitmap aparte, se le aplica el efecto de blur
-    /// gaussiano de Direct2D y se guarda (la caché sigue al texto, color, opacidad y sigma).
+    /// Resplandor de un glifo: su trazo engrosado se dibuja una vez en un bitmap aparte, se le aplica
+    /// el blur gaussiano de Direct2D y la opacidad, y el efecto se guarda (la caché sigue al texto,
+    /// color, opacidad y sigma).
     fn glow_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32) {
         if r.right <= r.left || r.bottom <= r.top || c.a <= 0.0 {
             return;
         }
-        let pad = (sigma * 3.0).ceil();
+        // Margen por lado: al menos 6 DIPs para que el halo tenga lugar (y 3 sigmas del blur).
+        let pad = (sigma * 3.0).ceil().max(GLOW_MIN_PAD);
         let key = (font, s.to_string(), [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()], sigma.to_bits());
         let effect = {
             let mut icons = self.icons.borrow_mut();

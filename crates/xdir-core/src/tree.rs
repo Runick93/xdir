@@ -41,11 +41,11 @@ pub const COLLAPSED_W: f32 = 48.0;
 const BAR: f32 = 6.0;
 const BAR_ROOM: f32 = 12.0;
 const ROW_H: f32 = 32.0;
-/// «Íconos con glow»: desviación del blur (DIPs) y opacidad de la copia difuminada, en reposo y con el
-/// mouse encima.
-const GLOW_SIGMA: f32 = 3.0;
-const GLOW_REST: f32 = 0.55;
-const GLOW_HOVER: f32 = 0.95;
+/// «Íconos con glow»: desviación del blur (DIPs) y opacidad de la copia difuminada del trazo del ícono,
+/// en reposo y con el mouse encima.
+const GLOW_SIGMA: f32 = 1.75;
+const GLOW_REST: f32 = 0.65;
+const GLOW_HOVER: f32 = 1.0;
 const INDENT: f32 = 18.0;
 /// Margen a los costados de las filas.
 const SIDE: f32 = 8.0;

@@ -39,7 +39,7 @@ impl App {
         match vk {
             // El selector de color y el diálogo de confirmación se quedan con todas las teclas
             // mientras están abiertos.
-            _ if self.color_picker.is_some() => return self.color_picker_key(vk, shift),
+            _ if self.color_picker.is_some() => return self.color_picker_key(vk, shift, ctrl),
             _ if self.confirm.is_some() => return self.confirm_key(vk, shift),
             _ if self.drop_menu.is_some() => return self.drop_key(vk),
             VK_ESCAPE if self.about_open => self.about_open = false,

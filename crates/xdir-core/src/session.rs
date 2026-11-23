@@ -222,6 +222,8 @@ pub struct Session {
     pub show_extensions: bool,
     /// Casillas de selección en las listas (switch «Casillas de selección»).
     pub checkboxes: bool,
+    /// Íconos de la barra lateral con resplandor (opción «Íconos con glow»).
+    pub icon_glow: bool,
     /// Switch «El árbol sigue al panel», si el usuario lo tocó alguna vez; `None` usa
     /// `arbol_sigue_panel` de `config.toml`.
     pub tree_follow: Option<bool>,
@@ -276,6 +278,7 @@ impl Default for Session {
             file_colors: true,
             show_extensions: true,
             checkboxes: false,
+            icon_glow: false,
             tree_follow: Some(false),
             show_tree: true,
             tree_pinned: true,
@@ -335,6 +338,7 @@ fn write(s: &Session) -> String {
 ", s.file_colors);
     out += &format!("extensiones = {}\n", s.show_extensions);
     out += &format!("casillas = {}\n", s.checkboxes);
+    out += &format!("brillo_iconos = {}\n", s.icon_glow);
     if let Some(on) = s.tree_follow {
         out += &format!("arbol_sigue = {on}\n");
     }
@@ -458,6 +462,7 @@ fn parse(text: &str) -> Session {
             ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(false),
             ("extensiones", None) => s.show_extensions = boolean().unwrap_or(true),
             ("casillas", None) => s.checkboxes = boolean().unwrap_or(false),
+            ("brillo_iconos", None) => s.icon_glow = boolean().unwrap_or(false),
             ("arbol_sigue", None) => s.tree_follow = boolean(),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(true),
             ("arbol_fijo", None) => s.tree_pinned = boolean().unwrap_or(true),
@@ -714,6 +719,7 @@ mod tests {
             file_colors: false,
             show_extensions: false,
             checkboxes: true,
+            icon_glow: true,
             tree_follow: Some(false),
             show_tree: true,
             tree_pinned: false,

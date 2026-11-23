@@ -144,6 +144,7 @@ impl App {
             "extensiones" => one(row(Control::Switch(self.show_extensions))),
             "ocultos" => one(row(Control::Switch(self.show_hidden))),
             "casillas" => one(row(Control::Switch(self.checkboxes))),
+            "glow_iconos" => one(row(Control::Switch(self.icon_glow))),
             "barra_grupos" => one(row(Control::Switch(self.show_group_bar))),
             "colores_tipo" => {
                 let rules = self
@@ -390,6 +391,10 @@ impl App {
             ("extensiones", _) => self.set_show_extensions(!self.show_extensions),
             ("ocultos", _) => self.run_command(Command::ToggleHidden),
             ("casillas", _) => self.set_checkboxes(!self.checkboxes),
+            ("glow_iconos", _) => {
+                self.icon_glow = !self.icon_glow;
+                self.redraw();
+            }
             ("barra_grupos", _) => self.run_command(Command::ToggleGroupBar),
             ("colores_tipo", _) => self.file_colors = !self.file_colors,
             ("reglas_color", _) | ("error_config", _) => self.run_command(Command::OpenConfig),

@@ -1325,6 +1325,8 @@ pub struct RecordingPainter {
     text_colors: RefCell<Vec<Color>>,
     paths: RefCell<Vec<RecordedPath>>,
     strokes: RefCell<Vec<(Rect, Color)>>,
+    /// Círculos rellenos (centro, radio y color), en orden.
+    circles: RefCell<Vec<(f32, f32, f32, Color)>>,
     big: RefCell<Vec<(thumbs::Key, Rect)>>,
     big_ready: Cell<bool>,
     forgotten: RefCell<Vec<thumbs::Source>>,
@@ -1349,6 +1351,7 @@ impl RecordingPainter {
             text_colors: RefCell::new(Vec::new()),
             paths: RefCell::new(Vec::new()),
             strokes: RefCell::new(Vec::new()),
+            circles: RefCell::new(Vec::new()),
             big: RefCell::new(Vec::new()),
             big_ready: Cell::new(false),
             forgotten: RefCell::new(Vec::new()),
@@ -1395,6 +1398,11 @@ impl RecordingPainter {
         self.big_ready.set(ready);
     }
 
+    /// Los círculos rellenos dibujados con `circle` (centro, radio y color), en orden.
+    pub fn circles(&self) -> Vec<(f32, f32, f32, Color)> {
+        self.circles.borrow().clone()
+    }
+
     /// Los trazos dibujados con `rounded_path`, en orden.
     pub fn paths(&self) -> Vec<RecordedPath> {
         self.paths.borrow().clone()
@@ -1436,7 +1444,9 @@ impl Painter for RecordingPainter {
     fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, _stroke: Option<(Color, f32)>) {
         self.paths.borrow_mut().push((pts.iter().map(|&(x, y, _)| (x, y)).collect(), closed, fill));
     }
-    fn circle(&self, _cx: f32, _cy: f32, _radius: f32, _fill: Color) {}
+    fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
+        self.circles.borrow_mut().push((cx, cy, radius, fill));
+    }
     fn circle_stroke(&self, _cx: f32, _cy: f32, _radius: f32, _c: Color, _width: f32) {}
     fn round_stroke_w(&self, r: Rect, _radius: f32, c: Color, _width: f32) {
         self.strokes.borrow_mut().push((r, c));

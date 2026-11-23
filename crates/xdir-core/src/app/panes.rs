@@ -444,6 +444,7 @@ impl App {
             file_colors: self.file_colors,
             show_extensions: self.show_extensions,
             checkboxes: self.checkboxes,
+            icon_glow: self.icon_glow,
             tree_follow: self.tree_follow,
             show_tree: self.tree_visible(),
             tree_pinned: self.tree_pinned(),

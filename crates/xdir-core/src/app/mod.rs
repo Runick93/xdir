@@ -492,6 +492,8 @@ pub struct App {
     show_extensions: bool,
     /// Casillas de selección en las listas (switch «Casillas de selección»).
     checkboxes: bool,
+    /// Íconos de la barra lateral con glow (opción «Íconos con glow» de Más opciones).
+    icon_glow: bool,
     /// Switch «El árbol sigue al panel», si el usuario lo tocó; `None` sigue a `arbol_sigue_panel`
     /// de `config.toml` (ver `tree_follows`).
     tree_follow: Option<bool>,
@@ -807,6 +809,7 @@ impl App {
             file_colors: session.file_colors,
             show_extensions: session.show_extensions,
             checkboxes: session.checkboxes,
+            icon_glow: session.icon_glow,
             tree_follow: session.tree_follow,
             fav_drop: None,
             tab_drop: None,

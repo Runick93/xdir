@@ -1327,6 +1327,8 @@ pub struct RecordingPainter {
     strokes: RefCell<Vec<(Rect, Color)>>,
     /// Círculos rellenos (centro, radio y color), en orden.
     circles: RefCell<Vec<(f32, f32, f32, Color)>>,
+    /// Textos difuminados (`glow_text`): texto, rectángulo, color y sigma, en orden.
+    glows: RefCell<Vec<(String, Rect, Color, f32)>>,
     big: RefCell<Vec<(thumbs::Key, Rect)>>,
     big_ready: Cell<bool>,
     forgotten: RefCell<Vec<thumbs::Source>>,
@@ -1352,6 +1354,7 @@ impl RecordingPainter {
             paths: RefCell::new(Vec::new()),
             strokes: RefCell::new(Vec::new()),
             circles: RefCell::new(Vec::new()),
+            glows: RefCell::new(Vec::new()),
             big: RefCell::new(Vec::new()),
             big_ready: Cell::new(false),
             forgotten: RefCell::new(Vec::new()),
@@ -1396,6 +1399,11 @@ impl RecordingPainter {
     /// Lo que devuelve `big_image` desde ahora (si la imagen "está").
     pub fn set_big_ready(&self, ready: bool) {
         self.big_ready.set(ready);
+    }
+
+    /// Los textos dibujados con `glow_text` (texto, rectángulo, color y sigma), en orden.
+    pub fn glows(&self) -> Vec<(String, Rect, Color, f32)> {
+        self.glows.borrow().clone()
     }
 
     /// Los círculos rellenos dibujados con `circle` (centro, radio y color), en orden.
@@ -1443,6 +1451,10 @@ impl Painter for RecordingPainter {
     }
     fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, _stroke: Option<(Color, f32)>) {
         self.paths.borrow_mut().push((pts.iter().map(|&(x, y, _)| (x, y)).collect(), closed, fill));
+    }
+    fn glow_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32) {
+        let _ = font;
+        self.glows.borrow_mut().push((s.to_string(), r, c, sigma));
     }
     fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
         self.circles.borrow_mut().push((cx, cy, radius, fill));

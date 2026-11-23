@@ -41,6 +41,11 @@ pub const COLLAPSED_W: f32 = 48.0;
 const BAR: f32 = 6.0;
 const BAR_ROOM: f32 = 12.0;
 const ROW_H: f32 = 32.0;
+/// «Íconos con glow»: desviación del blur (DIPs) y opacidad de la copia difuminada, en reposo y con el
+/// mouse encima.
+const GLOW_SIGMA: f32 = 3.0;
+const GLOW_REST: f32 = 0.55;
+const GLOW_HOVER: f32 = 0.95;
 const INDENT: f32 = 18.0;
 /// Margen a los costados de las filas.
 const SIDE: f32 = 8.0;
@@ -1795,12 +1800,10 @@ impl Tree {
                     color
                 };
                 if self.glow && !n.missing {
-                    // Resplandor: tres círculos concéntricos cada vez más tenues del color del ícono
-                    // (sin desenfoque real, para no frenar el dibujo de la lista).
-                    let (cx, cy) = (icon_x + 11.0, y + ROW_H / 2.0);
-                    for (radius, strength) in [(14.0, 0.07), (11.0, 0.10), (8.0, 0.14)] {
-                        p.circle(cx, cy, radius, alpha(color, color.a * strength));
-                    }
+                    // Resplandor: una copia del ícono difuminada (blur gaussiano) y de baja opacidad
+                    // detrás del ícono nítido; al pasar el mouse sube solo la opacidad de la copia.
+                    let strength = if self.hover == Some(id) { GLOW_HOVER } else { GLOW_REST };
+                    p.glow_text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), alpha(color, color.a * strength), GLOW_SIGMA);
                 }
                 p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
                 if e > 0.05 {
@@ -2071,10 +2074,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// «Íconos con glow»: apagado no dibuja resplandor; prendido, tres círculos del color del ícono
-    /// detrás de cada uno.
+    /// «Íconos con glow»: apagado no dibuja resplandor; prendido, una copia difuminada del ícono
+    /// detrás de cada uno (sin círculos de fondo).
     #[test]
-    fn glow_draws_circles_behind_icons_only_when_on() {
+    fn glow_is_a_blurred_copy_behind_the_icon_only_when_on() {
         install_fakes();
         let root = temp_root("glow");
         std::fs::create_dir_all(root.join("alfa")).unwrap();
@@ -2085,14 +2088,25 @@ mod tests {
         let theme = Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true));
         let off = crate::sys::testing::RecordingPainter::new(theme.clone());
         t.draw(&off, area, None, XtreeBadge::Idle);
-        assert!(off.circles().is_empty(), "apagado queda como hoy");
+        assert!(off.glows().is_empty(), "apagado queda como hoy");
         t.glow = true;
-        let on = crate::sys::testing::RecordingPainter::new(theme);
+        let on = crate::sys::testing::RecordingPainter::new(theme.clone());
         t.draw(&on, area, None, XtreeBadge::Idle);
-        let icons = on.text_draws().iter().filter(|(f, ..)| *f == FontId::Glyphs).count();
-        assert!(icons > 0);
-        let glows = on.circles().into_iter().filter(|c| c.2 >= 8.0 && c.2 <= 14.0).count();
-        assert!(glows >= 3, "tres círculos por ícono: {glows}");
+        let sharp: Vec<String> = on.text_draws().iter().filter(|(f, ..)| *f == FontId::Glyphs).map(|(_, s, ..)| s.clone()).collect();
+        let glows = on.glows();
+        assert!(!glows.is_empty());
+        // Cada copia difuminada es del mismo ícono que uno nítido, y no hay círculos de fondo.
+        assert!(glows.iter().all(|(s, ..)| sharp.contains(s)));
+        assert!(on.circles().is_empty());
+        // Con el mouse encima de una fila, solo sube la opacidad de su copia difuminada.
+        let rest = glows.iter().map(|g| g.2.a).fold(f32::MIN, f32::max);
+        let id = (0..t.nodes.len()).find(|&i| t.nodes[i].name == "alfa").expect("alfa");
+        t.hover = Some(id);
+        let hot = crate::sys::testing::RecordingPainter::new(theme);
+        t.draw(&hot, area, None, XtreeBadge::Idle);
+        let hot_max = hot.glows().iter().map(|g| g.2.a).fold(f32::MIN, f32::max);
+        assert!(hot_max > rest, "{hot_max} {rest}");
+        assert_eq!(hot.glows().len(), glows.len(), "no cambia cuántos se dibujan");
         let _ = std::fs::remove_dir_all(&root);
     }
 

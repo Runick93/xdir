@@ -1637,8 +1637,8 @@ impl Tree {
         match n.kind {
             Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
-            // El ícono del mapa, como el botón «xtree» de la barra de estado.
-            Kind::Xtree => ("\u{EB05}", th.accent),
+            // El ícono del mapa, con el violeta propio de xtree (no sigue al énfasis).
+            Kind::Xtree => ("\u{EB05}", ui::XTREE_COLOR),
             Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
             // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
             Kind::Trash => (TRASH_GLYPH, rgb(0.62, 0.70, 0.80)),
@@ -2589,6 +2589,19 @@ mod tests {
         let y = row_y(area, xtree_row(&t));
         assert!(!p.texts().iter().any(|(_, s, _)| s.ends_with(" %")));
         assert!(!p.paths().iter().any(|(pts, _, _)| pts.iter().all(|&(_, py)| (py - y).abs() <= 8.0)));
+    }
+
+    /// El ícono de xtree tiene su violeta propio: no cambia con el énfasis elegido.
+    #[test]
+    fn tree_xtree_icon_ignores_accent() {
+        let (t, _, _) = drawn(XtreeBadge::Idle);
+        let node = &t.nodes[t.roots.iter().copied().find(|&i| t.nodes[i].kind == Kind::Xtree).expect("entrada xtree")];
+        for &(_, c) in crate::theme::PRESETS.iter() {
+            for dark in [true, false] {
+                let th = crate::theme::Theme::from_system(crate::theme::Accent::Rgb(c), Some(dark));
+                assert_eq!(t.icon(node, &th).1, ui::XTREE_COLOR);
+            }
+        }
     }
 
     /// Un clic en cualquier parte de la fila (también donde iría el chevron) es la entrada xtree.

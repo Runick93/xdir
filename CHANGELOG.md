@@ -4,6 +4,7 @@
 
 ### Nuevo
 - **xtree**: la lista de carpetas ocupa todo el alto de la ventana y la barra de datos del disco (espacio total, utilizado y libre) pasó a la columna derecha, debajo del mapa, con un largo mucho menor.
+- El botón de **xtree** (en el árbol y en la barra de estado) tiene su propio color violeta, que ya no cambia con el énfasis elegido.
 
 ## 0.2.5 — 2026-11-22
 

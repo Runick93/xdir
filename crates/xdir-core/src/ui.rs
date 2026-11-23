@@ -24,6 +24,8 @@ const ACTIVITY_W: f32 = 24.0;
 const ACTIVITY_GAP: f32 = 6.0;
 /// Lado del indicador del escaneo de xtree.
 pub const BADGE: f32 = 14.0;
+/// Violeta propio de xtree: su ícono (árbol y barra de estado) no cambia con el énfasis.
+pub const XTREE_COLOR: Color = Color { r: 0.65, g: 0.47, b: 0.95, a: 1.0 };
 const MIN_SPLIT: f32 = 0.15;
 /// Ancho mínimo de un panel: prender o ensanchar la columna de vista previa nunca lo deja más
 /// angosto.
@@ -572,7 +574,7 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
     } else if xtree_hot {
         p.round_fill(xtree, 4.0, th.hover);
     }
-    let color = if xtree_on { th.accent } else if xtree_hot { th.text } else { th.text_dim };
+    let color = if xtree_on { XTREE_COLOR } else if xtree_hot { th.text } else { th.text_dim };
     let badge_top = (xtree.top + xtree.bottom - BADGE) / 2.0;
     match badge {
         XtreeBadge::Idle => {

@@ -9,7 +9,7 @@ use super::keys::{RowState, ShortcutRow};
 use super::{AccentChoice, Control, Item, PageId, Row, SettingsHit, SettingsView};
 use crate::geom::{Rect, contains, rect};
 use crate::paint::{FontId, Painter};
-use crate::theme::{PRESETS, alpha};
+use crate::theme::{BACKGROUNDS, PRESETS, alpha};
 
 pub const NAV_W: f32 = 220.0;
 const NAV_ITEM_W: f32 = 204.0;
@@ -87,7 +87,7 @@ fn item_height(item: &Item) -> f32 {
         Item::Action(..) => 36.0,
         Item::Link(..) => ROW_H,
         Item::Row(row) => match &row.control {
-            Control::Accent(_) => ACCENT_H,
+            Control::Accent(_) | Control::Background(_) => ACCENT_H,
             Control::ColorRules(rules) => 58.0 + RULE_H * rules.len() as f32,
             Control::Table(rows) => 48.0 + RULE_H * rows.len() as f32,
             _ => ROW_H,
@@ -277,6 +277,33 @@ fn draw_row(p: &dyn Painter, r: Rect, row: &Row, hover: Option<SettingsHit>, hit
                 p.circle(other.right + 8.0, y, 8.0, crate::ui::hex(*c));
             }
             hits.push((other, SettingsHit::Part(id, PRESETS.len() + 1)));
+        }
+        Control::Background(bg) => {
+            let y = r.top + 74.0;
+            let preset = bg.and_then(|c| BACKGROUNDS.iter().position(|(_, p)| *p == c));
+            for (i, (_, c)) in BACKGROUNDS.iter().enumerate() {
+                let cx = r.left + 16.0 + 15.0 + 34.0 * i as f32;
+                if preset == Some(i) {
+                    p.circle_stroke(cx, y, 15.0, th.text, 2.0);
+                } else if hot(hover, id, i) {
+                    p.circle_stroke(cx, y, 15.0, th.text_dim, 1.0);
+                }
+                p.circle(cx, y, 11.0, crate::ui::hex(*c));
+                // Un borde tenue: los fondos casi negros o casi blancos se pierden contra la tarjeta.
+                p.circle_stroke(cx, y, 11.0, alpha(th.text, 0.2), 1.0);
+                hits.push((rect(cx - 17.0, y - 17.0, cx + 17.0, y + 17.0), SettingsHit::Part(id, i)));
+            }
+            let x = r.left + 16.0 + 34.0 * BACKGROUNDS.len() as f32 + 24.0;
+            let theme_r = rect(x, y - 14.0, x + 120.0, y + 14.0);
+            controls::radio(p, theme_r, "Del tema", bg.is_none(), hot(hover, id, BACKGROUNDS.len()));
+            hits.push((theme_r, SettingsHit::Part(id, BACKGROUNDS.len())));
+            let other = rect(theme_r.right + 8.0, y - 14.0, theme_r.right + 100.0, y + 14.0);
+            let custom = bg.filter(|_| preset.is_none());
+            controls::radio(p, other, "Otro…", custom.is_some(), hot(hover, id, BACKGROUNDS.len() + 1));
+            if let Some(c) = custom {
+                p.circle(other.right + 8.0, y, 8.0, crate::ui::hex(c));
+            }
+            hits.push((other, SettingsHit::Part(id, BACKGROUNDS.len() + 1)));
         }
         Control::ColorRules(rules) => {
             let b = rect(right - BUTTON_W, r.top + 14.0, right, r.top + 14.0 + CONTROL_H);

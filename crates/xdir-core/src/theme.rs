@@ -49,18 +49,18 @@ pub const PRESETS: [(&str, u32); 12] = [
 /// fondo de panel), en el orden de `PRESETS`. Con uno de estos el panel usa su propio color en vez
 /// del derivado.
 pub const BACKGROUNDS: [(&str, u32, u32); 12] = [
-    ("Azul abisal", 0x00122D, 0x092044),
-    ("Azul glaciar", 0x001923, 0x092831),
-    ("Verde petróleo", 0x001D1A, 0x092C28),
-    ("Verde bosque", 0x001806, 0x09260F),
-    ("Oliva oscuro", 0x151D00, 0x222B08),
-    ("Ámbar oscuro", 0x201900, 0x302609),
-    ("Cobre oscuro", 0x241000, 0x351C08),
-    ("Bordó", 0x230009, 0x350B16),
-    ("Mora", 0x260019, 0x380A28),
-    ("Berenjena", 0x19082C, 0x281340),
-    ("Índigo nocturno", 0x0D0C30, 0x191943),
-    ("Pizarra", 0x101B25, 0x1C2936),
+    ("Azul abisal", 0x000B1B, 0x092044),
+    ("Azul glaciar", 0x000F15, 0x092831),
+    ("Verde petróleo", 0x001110, 0x092C28),
+    ("Verde bosque", 0x000E04, 0x09260F),
+    ("Oliva oscuro", 0x0D1100, 0x222B08),
+    ("Ámbar oscuro", 0x130F00, 0x302609),
+    ("Cobre oscuro", 0x160A00, 0x351C08),
+    ("Bordó", 0x150005, 0x350B16),
+    ("Mora", 0x17000F, 0x380A28),
+    ("Berenjena", 0x0F051A, 0x281340),
+    ("Índigo nocturno", 0x08071D, 0x191943),
+    ("Pizarra", 0x0A1016, 0x1C2936),
 ];
 
 /// Acento por defecto: el azul del diseño.

@@ -426,6 +426,10 @@ impl Shell for MacShell {
         sh::copy_text(owner, text).map_err(|e| e.message())
     }
 
+    fn clipboard_text(&self, owner: Handle) -> Option<String> {
+        sh::clipboard_text(owner)
+    }
+
     fn pick_folder(&self, owner: Handle, title: &str) -> Option<PathBuf> {
         sh::pick_folder(owner, title)
     }

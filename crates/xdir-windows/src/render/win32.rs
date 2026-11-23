@@ -9,12 +9,12 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
     D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
     D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1,
     D2D1_ELLIPSE, ID2D1PathGeometry1, ID2D1SolidColorBrush,
@@ -23,6 +23,10 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::D2D1_QUADRATIC_BEZIER_SEGMENT;
+use windows::Win32::Graphics::Direct2D::{
+    CLSID_D2D1GaussianBlur, CLSID_D2D1Opacity, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_PROPERTY_TYPE_UNKNOWN, ID2D1Effect, ID2D1Image,
+};
 use windows_numerics::Vector2;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -250,8 +254,13 @@ impl Renderer {
         self.icons.borrow_mut().thumbs.clear();
         self.icons.borrow_mut().big.clear();
         self.icons.borrow_mut().logo.clear();
+        self.icons.borrow_mut().glows.clear();
     }
 }
+
+/// Resplandor de los íconos: margen mínimo del bitmap del efecto por lado y cuánto se engrosa el trazo.
+const GLOW_MIN_PAD: f32 = 6.0;
+const GLOW_GROW: f32 = 0.6;
 
 pub struct Painter<'a> {
     ctx: &'a ID2D1DeviceContext,
@@ -270,6 +279,38 @@ impl Painter<'_> {
     fn color(&self, c: Color) {
         let c = d2c(c);
         unsafe { self.brush.SetColor(&c) };
+    }
+
+    /// Dibuja el trazo de `s` engrosado (el glifo repetido a `GLOW_GROW` DIPs en las 8 direcciones,
+    /// opaco: de 1,2 DIPs de grosor pasa a unos 2,4) en un bitmap de `r` más `pad` de margen por
+    /// lado, y devuelve el blur gaussiano sobre él con la opacidad de `c.a`; `None` si algo falla.
+    fn blurred_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32, pad: f32) -> Option<ID2D1Effect> {
+        let (w, h) = (r.right - r.left + pad * 2.0, r.bottom - r.top + pad * 2.0);
+        unsafe {
+            let size = D2D_SIZE_F { width: w, height: h };
+            let target = self.ctx.CreateCompatibleRenderTarget(Some(&size), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok()?;
+            let brush = target.CreateSolidColorBrush(&d2c(Color { a: 1.0, ..c }), None).ok()?;
+            target.BeginDraw();
+            target.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            let wide: Vec<u16> = s.encode_utf16().collect();
+            let base = rect(pad, pad, w - pad, h - pad);
+            let k = GLOW_GROW * std::f32::consts::FRAC_1_SQRT_2;
+            for (dx, dy) in [(0.0, 0.0), (GLOW_GROW, 0.0), (-GLOW_GROW, 0.0), (0.0, GLOW_GROW), (0.0, -GLOW_GROW), (k, k), (k, -k), (-k, k), (-k, -k)] {
+                let at = rect(base.left + dx, base.top + dy, base.right + dx, base.bottom + dy);
+                target.DrawText(&wide, self.fonts.get(font), &d2r(at), &brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            target.EndDraw(None, None).ok()?;
+            let bitmap = target.GetBitmap().ok()?;
+            let effect = self.ctx.CreateEffect(&CLSID_D2D1GaussianBlur).ok()?;
+            effect.SetInput(0, &bitmap, true);
+            // Propiedad 0: desviación estándar (f32).
+            effect.SetValue(0, D2D1_PROPERTY_TYPE_UNKNOWN, &sigma.to_ne_bytes()).ok()?;
+            // Opacidad del resplandor (propiedad 0), encima del blur.
+            let opacity = self.ctx.CreateEffect(&CLSID_D2D1Opacity).ok()?;
+            opacity.SetInput(0, &effect.GetOutput().ok()?, true);
+            opacity.SetValue(0, D2D1_PROPERTY_TYPE_UNKNOWN, &c.a.to_ne_bytes()).ok()?;
+            Some(opacity)
+        }
     }
 }
 
@@ -394,6 +435,31 @@ impl paint::Painter for Painter<'_> {
                 DWRITE_MEASURING_MODE_NATURAL,
             )
         };
+    }
+
+    /// Resplandor de un glifo: su trazo engrosado se dibuja una vez en un bitmap aparte, se le aplica
+    /// el blur gaussiano de Direct2D y la opacidad, y el efecto se guarda (la caché sigue al texto,
+    /// color, opacidad y sigma).
+    fn glow_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32) {
+        if r.right <= r.left || r.bottom <= r.top || c.a <= 0.0 {
+            return;
+        }
+        // Margen por lado: al menos 6 DIPs para que el halo tenga lugar (y 3 sigmas del blur).
+        let pad = (sigma * 3.0).ceil().max(GLOW_MIN_PAD);
+        let key = (font, s.to_string(), [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()], sigma.to_bits());
+        let effect = {
+            let mut icons = self.icons.borrow_mut();
+            icons.glows.entry(key).or_insert_with(|| self.blurred_text(font, s, r, c, sigma, pad)).clone()
+        };
+        let Some(effect) = effect else {
+            self.text(font, s, r, c);
+            return;
+        };
+        unsafe {
+            if let Ok(image) = effect.cast::<ID2D1Image>() {
+                self.ctx.DrawImage(&image, Some(&v2(r.left - pad, r.top - pad)), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            }
+        }
     }
 
     fn measure(&self, font: FontId, s: &str) -> f32 {
@@ -649,6 +715,8 @@ struct Icons {
     big_failed: thumbs::BigFailures,
     /// Cuadros del logo del diálogo "Acerca de", creados la primera vez que se muestran.
     logo: Vec<Option<ID2D1Bitmap1>>,
+    /// Resplandores ya difuminados (`glow_text`): el efecto de blur con la copia del texto de entrada.
+    glows: HashMap<(FontId, String, [u32; 4], u32), Option<ID2D1Effect>>,
 }
 
 /// Más miniaturas que esto en memoria y se descartan todas (se vuelven a pedir las que se vean).
@@ -667,6 +735,7 @@ impl Icons {
             big: thumbs::BigCache::default(),
             big_failed: thumbs::BigFailures::default(),
             logo: Vec::new(),
+            glows: HashMap::new(),
         }
     }
 

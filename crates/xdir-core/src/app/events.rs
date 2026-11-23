@@ -240,7 +240,7 @@ impl App {
 
     /// Cambió el modo claro/oscuro del sistema.
     pub fn on_system_theme_changed(&mut self) {
-        self.theme = Theme::from_system(self.accent, self.dark_mode);
+        self.theme = self.make_theme();
         self.apply_window_theme();
         self.redraw();
     }
@@ -280,6 +280,8 @@ impl App {
         self.header_ctx = None;
         self.term_ctx = None;
         self.history_ctx = None;
+        self.group_ctx = None;
+        self.group_color = None;
         // Un menú contextual (de elementos, del fondo o de columnas) cierra el desplegable de filtros.
         if self.close_filter_menus() {
             self.redraw();
@@ -316,6 +318,7 @@ impl App {
                 self.set_active(i);
                 self.history_ctx = Some((i, b == Button::Forward));
             }
+            Hit::GroupBar(ui::GroupHit::Tab(i) | ui::GroupHit::Close(i)) => self.group_ctx = Some((i, (x, y))),
             Hit::Pane(i, PaneHit::Fav(j)) => self.fav_ctx = Some((i, Some(vec![j]))),
             Hit::Pane(i, PaneHit::FavBar | PaneHit::FavOverflow) => self.fav_ctx = Some((i, None)),
             _ => {}
@@ -332,6 +335,10 @@ impl App {
         }
         if let Some(pane) = self.header_ctx.take().filter(|_| at.is_some()) {
             self.show_columns_menu(pane, at.unwrap());
+            return;
+        }
+        if let Some((index, point)) = self.group_ctx.take().filter(|_| at.is_some()) {
+            self.open_group_color(index, point);
             return;
         }
         if let Some((pane, forward)) = self.history_ctx.take().filter(|_| at.is_some()) {
@@ -385,8 +392,14 @@ impl App {
     /// Un carácter escrito sobre la lista: búsqueda por las primeras letras.
     pub fn on_char(&mut self, c: char) {
         self.dismiss_tooltip();
+        // El selector de color se queda con lo escrito (el valor hexadecimal).
+        if let Some(pk) = &mut self.color_picker {
+            pk.char(c);
+            self.redraw();
+            return;
+        }
         // Con el diálogo de confirmación abierto, lo escrito no va a la lista.
-        if self.confirm.is_some() || self.drop_menu.is_some() {
+        if self.confirm.is_some() || self.drop_menu.is_some() || self.group_color.is_some() {
             return;
         }
         // Grabando un atajo, lo escrito no va a la lista.
@@ -445,6 +458,10 @@ impl App {
     /// no sea el activo.
     pub fn on_wheel(&mut self, x: f32, y: f32, delta: f32, lines: f32) {
         self.dismiss_tooltip();
+        // Con el panel de colores de un grupo abierto la rueda no mueve nada de abajo.
+        if self.group_color.is_some() {
+            return;
+        }
         // Con el menú de ramas abierto la rueda lo recorre (y no mueve nada de abajo).
         if let Some(m) = &mut self.drop_menu {
             if m.menu.hit(x, y).is_some() {

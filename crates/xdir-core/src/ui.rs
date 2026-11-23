@@ -24,6 +24,8 @@ const ACTIVITY_W: f32 = 24.0;
 const ACTIVITY_GAP: f32 = 6.0;
 /// Lado del indicador del escaneo de xtree.
 pub const BADGE: f32 = 14.0;
+/// Violeta propio de xtree: el ícono del árbol (la barra lateral) no cambia con el énfasis. La pill de la barra de estado sigue el énfasis.
+pub const XTREE_COLOR: Color = Color { r: 0.65, g: 0.47, b: 0.95, a: 1.0 };
 const MIN_SPLIT: f32 = 0.15;
 /// Ancho mínimo de un panel: prender o ensanchar la columna de vista previa nunca lo deja más
 /// angosto.
@@ -187,30 +189,43 @@ pub fn group_bar_at(w: f32, left: f32, temps: &[bool], x: f32, y: f32) -> Option
     Some(if temps[i] && contains(&group_close_rect(tabs[i]), x, y) { GroupHit::Close(i) } else { GroupHit::Tab(i) })
 }
 
-pub fn draw_group_bar(p: &dyn Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+/// Una pestaña de grupo al pintarla: nombre, sin guardar (lleva ×) y color propio (0xRRGGBB).
+pub type GroupTab<'a> = (&'a str, bool, Option<u32>);
+
+pub fn draw_group_bar(p: &dyn Painter, w: f32, left: f32, names: &[GroupTab], active: Option<usize>, hover: Option<GroupHit>) {
     // Con tantos grupos que ni al ancho mínimo entran, se recortan en el borde (no se meten bajo
     // la columna de vista previa).
     p.clip(rect(0.0, 0.0, w - GAP, GROUPBAR_H), &mut || draw_group_tabs(p, w, left, names, active, hover));
 }
 
-fn draw_group_tabs(p: &dyn Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+/// Grosor del subrayado de cada pestaña de grupo.
+const GROUP_UNDERLINE_H: f32 = 2.5;
+
+fn draw_group_tabs(p: &dyn Painter, w: f32, left: f32, names: &[GroupTab], active: Option<usize>, hover: Option<GroupHit>) {
     let th = p.theme();
     let (tabs, add) = group_tabs(w, left, names.len());
-    for (i, (r, (name, temp))) in tabs.iter().zip(names).enumerate() {
-        // Píldora con borde fino; la activa lleva el contorno y un velo del color de acento.
+    for (i, (r, (name, temp, tab_color))) in tabs.iter().zip(names).enumerate() {
+        // El color del grupo; sin uno propio, el acento de la aplicación.
+        let accent = tab_color.map_or(th.accent, hex);
+        // Píldora con borde fino; la activa lleva un tinte del color del grupo (o del acento) en el relleno.
         p.round_fill(*r, 9.0, th.surface);
         if hover == Some(GroupHit::Tab(i)) && active != Some(i) {
             p.round_fill(*r, 9.0, th.hover);
         }
         if active == Some(i) {
-            p.round_fill(*r, 9.0, alpha(th.accent, 0.16));
-            p.round_stroke_w(*r, 9.0, th.accent, 1.5);
+            // Solo el relleno lleva opacidad (25% del acento); el borde sigue gris.
+            p.round_fill(*r, 9.0, alpha(accent, 0.25));
+            p.round_stroke(*r, 9.0, th.text_dim);
         } else {
             p.round_stroke(*r, 9.0, th.border);
         }
+        // Subrayado: una línea del color del grupo bajo el nombre (entera en la activa, más tenue
+        // en las demás).
+        let line = if active == Some(i) { accent } else { alpha(accent, 0.6) };
+        p.round_fill(rect(r.left + 14.0, r.bottom - 7.0, r.right - 14.0, r.bottom - 7.0 + GROUP_UNDERLINE_H), GROUP_UNDERLINE_H / 2.0, line);
         let color = if active == Some(i) { th.text } else { th.text_dim };
         let right = if *temp { r.right - 28.0 } else { r.right - 12.0 };
-        p.text(FontId::Ui, name, rect(r.left + 14.0, r.top, right, r.bottom), color);
+        p.text(FontId::Ui, name, rect(r.left + 14.0, r.top - 2.0, right, r.bottom - 2.0), color);
         if *temp {
             let x = group_close_rect(*r);
             let hot = hover == Some(GroupHit::Close(i));
@@ -621,11 +636,8 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
 /// Elementos del panel de colores.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PickerHit {
+    /// Uno de los 12 colores de acento (su posición en `PRESETS`).
     Preset(usize),
-    /// Usar el acento de Windows.
-    System,
-    /// Elegir cualquier color con el selector de Windows.
-    Custom,
     /// Switch de modo oscuro.
     DarkMode,
     /// Switch de los colores por tipo de archivo.
@@ -642,8 +654,6 @@ pub enum PickerHit {
     GroupBar,
     /// Switch del árbol de carpetas (solo con la feature `arbol`).
     Tree,
-    /// «Novedades»: cierra la rueda y abre la pestaña Novedades.
-    Changelog,
     /// «Más opciones…»: cierra la rueda y abre la pestaña Configuración.
     MoreOptions,
     /// Abre el diálogo "Acerca de".
@@ -652,6 +662,7 @@ pub enum PickerHit {
     Panel,
 }
 
+/// Colores por fila en la grilla de acentos.
 const PICKER_COLS: usize = 6;
 const PICKER_CELL: f32 = 38.0;
 const PICKER_PAD: f32 = 14.0;
@@ -712,9 +723,8 @@ const PICKER_LAYOUTS: [PickerLayout; 3] = [
 impl PickerLayout {
     fn height(&self) -> f32 {
         let rows = (PRESETS.len() / PICKER_COLS) as f32;
-        // Colores, dos botones, un separador, las filas de switches, otro separador, «Novedades»,
-        // «Más opciones…» y «Acerca de».
-        self.title + self.cell * rows + self.gap + self.btn * 2.0 + self.sep + self.btn * switch_rows() as f32 + self.sep + self.btn * 3.0 + self.pad
+        // Título, los colores, las filas de switches, un separador, «Más opciones…» y «Acerca de».
+        self.title + self.cell * rows + self.gap + self.btn * switch_rows() as f32 + self.sep + self.btn * 2.0 + self.pad
     }
 }
 
@@ -746,19 +756,16 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
         let y = panel.top + lay.title + row * lay.cell;
         out.push((PickerHit::Preset(i), rect(x, y, x + lay.cell, y + lay.cell)));
     }
+    let (l, r) = (panel.left + PICKER_PAD - 6.0, panel.right - PICKER_PAD + 6.0);
     let rows = (PRESETS.len() / PICKER_COLS) as f32;
     let y = panel.top + lay.title + lay.cell * rows + lay.gap;
-    let (l, r) = (panel.left + PICKER_PAD - 6.0, panel.right - PICKER_PAD + 6.0);
-    out.push((PickerHit::System, rect(l, y, r, y + lay.btn)));
-    out.push((PickerHit::Custom, rect(l, y + lay.btn, r, y + lay.btn * 2.0)));
-    let y = y + lay.btn * 2.0 + lay.sep;
     for (i, kind) in switch_kinds().into_iter().enumerate() {
         let top = y + lay.btn * i as f32;
         out.push((kind, rect(l, top, r, top + lay.btn)));
     }
     let top = y + lay.btn * switch_rows() as f32 + lay.sep;
-    // De arriba abajo: Novedades, Más opciones… y Acerca de xdir.
-    for (i, kind) in [PickerHit::Changelog, PickerHit::MoreOptions, PickerHit::About].into_iter().enumerate() {
+    // De arriba abajo: Más opciones… y Acerca de xdir.
+    for (i, kind) in [PickerHit::MoreOptions, PickerHit::About].into_iter().enumerate() {
         let t = top + lay.btn * i as f32;
         out.push((kind, rect(l, t, r, t + lay.btn)));
     }
@@ -783,7 +790,6 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
     let title = rect(panel.left + PICKER_PAD, panel.top + 4.0, panel.right - PICKER_PAD, panel.top + lay.title);
     p.text(FontId::UiBold, "Color de acento", title, th.text);
 
-    let is_preset = PRESETS.iter().any(|(_, c)| current == Accent::Rgb(*c));
     for (kind, r) in picker_items(w, h) {
         let hot = hover == Some(kind);
         match kind {
@@ -796,30 +802,6 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                     p.circle_stroke(cx, cy, lay.cell * 15.0 / PICKER_CELL, th.text_dim, 1.0);
                 }
                 p.circle(cx, cy, lay.cell * 11.0 / PICKER_CELL, c);
-            }
-            PickerHit::System | PickerHit::Custom => {
-                if hot {
-                    p.round_fill(r, 6.0, th.hover);
-                }
-                let selected = match kind {
-                    PickerHit::System => current == Accent::System,
-                    _ => !is_preset && current != Accent::System,
-                };
-                let label = if kind == PickerHit::System { "Color de Windows" } else { "Personalizado…" };
-                p.text(FontId::Ui, label, rect(r.left + 34.0, r.top, r.right - 8.0, r.bottom), th.text);
-                let icon = rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom);
-                if kind == PickerHit::Custom {
-                    // Muestra del color personalizado, o el ícono de paleta si no hay.
-                    match (selected, current) {
-                        (true, Accent::Rgb(c)) => p.circle((icon.left + icon.right) / 2.0, (icon.top + icon.bottom) / 2.0, 8.0, hex(c)),
-                        _ => p.text(FontId::Glyphs, "\u{E790}", icon, th.text_dim),
-                    }
-                } else {
-                    p.text(FontId::Glyphs, "\u{E7F8}", icon, th.text_dim);
-                }
-                if selected {
-                    p.text(FontId::GlyphsSmall, "\u{E73E}", rect(r.right - 26.0, r.top, r.right - 6.0, r.bottom), th.accent);
-                }
             }
             PickerHit::DarkMode
             | PickerHit::FileColors
@@ -863,16 +845,6 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                 let (kx, kr) = if on { (track.right - half, half - 4.0) } else { (track.left + half, half - 5.0) };
                 p.circle(kx, cy, kr, if on { th.background } else { th.text_dim });
             }
-            PickerHit::Changelog => {
-                if hot {
-                    p.round_fill(r, 6.0, th.hover);
-                }
-                // Separador sobre las tres filas del final.
-                let sy = r.top - lay.sep / 2.0;
-                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
-                p.text(FontId::Glyphs, crate::pane::CHANGELOG_GLYPH, rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
-                p.text(FontId::Ui, "Novedades", rect(r.left + 34.0, r.top, r.right - 10.0, r.bottom), th.text);
-            }
             PickerHit::About => {
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
@@ -885,6 +857,9 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Opti
                 if hot {
                     p.round_fill(r, 6.0, th.hover);
                 }
+                // Separador sobre las dos filas del final.
+                let sy = r.top - lay.sep / 2.0;
+                p.fill(rect(r.left + 6.0, sy, r.right - 6.0, sy + 1.0), th.border);
                 p.text(FontId::Glyphs, "\u{E713}", rect(r.left + 6.0, r.top, r.left + 30.0, r.bottom), th.text_dim);
                 p.text(FontId::Ui, "Más opciones…", rect(r.left + 34.0, r.top, r.right - 70.0, r.bottom), th.text);
                 let keys = crate::commands::combo_label(crate::commands::parse_combo("Ctrl+Coma").expect("atajo válido"));
@@ -1122,33 +1097,37 @@ mod picker_tests {
         let (w, h) = (900.0, 360.0);
         let kinds = switch_kinds();
         let items = picker_items(w, h);
-        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::Changelog, PickerHit::About, PickerHit::Preset(0)] {
+        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::MoreOptions, PickerHit::About, PickerHit::Preset(0)] {
             let (_, r) = items.iter().find(|(k, _)| *k == want).unwrap();
             let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
             assert_eq!(picker_at(w, h, x, y), Some(want));
         }
     }
-    /// El final de la rueda, de arriba abajo: Novedades, Más opciones… y Acerca de xdir (pedido
-    /// del usuario), las tres del mismo alto y una debajo de la otra.
+    /// El final de la rueda, de arriba abajo: Más opciones… y Acerca de xdir, del mismo alto y una
+    /// debajo de la otra.
     #[test]
-    fn el_final_es_novedades_mas_opciones_y_acerca_de() {
+    fn el_final_es_mas_opciones_y_acerca_de() {
         for h in [360.0, 700.0] {
             let items = picker_items(900.0, h);
-            let tail: Vec<PickerHit> = items[items.len() - 3..].iter().map(|(k, _)| *k).collect();
-            assert_eq!(tail, vec![PickerHit::Changelog, PickerHit::MoreOptions, PickerHit::About]);
-            let rs: Vec<Rect> = items[items.len() - 3..].iter().map(|(_, r)| *r).collect();
+            let tail: Vec<PickerHit> = items[items.len() - 2..].iter().map(|(k, _)| *k).collect();
+            assert_eq!(tail, vec![PickerHit::MoreOptions, PickerHit::About]);
+            let rs: Vec<Rect> = items[items.len() - 2..].iter().map(|(_, r)| *r).collect();
             assert!(rs.windows(2).all(|w| (w[0].bottom - w[1].top).abs() < 0.01), "{rs:?}");
         }
     }
 
-    /// La fila de Novedades dice «Novedades».
+    /// La rueda tiene los 12 colores de acento, pero no «Color de Windows», «Personalizado…» ni
+    /// Novedades (van en «Más opciones» y «Acerca de xdir»).
     #[test]
-    fn la_rueda_dibuja_novedades() {
+    fn la_rueda_no_dibuja_lo_que_se_mudo() {
         crate::sys::testing::install_fakes();
         let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
-        draw_picker(&p, 900.0, 700.0, crate::theme::DEFAULT_ACCENT, Some(PickerHit::Changelog), PickerSwitches::default());
+        draw_picker(&p, 900.0, 700.0, crate::theme::DEFAULT_ACCENT, Some(PickerHit::About), PickerSwitches::default());
         let texts: Vec<String> = p.texts().into_iter().map(|(_, s, _)| s).collect();
+        for gone in ["Color de Windows", "Personalizado…", "Novedades"] {
+            assert!(!texts.iter().any(|s| s == gone), "{gone}: {texts:?}");
+        }
         let at = |t: &str| texts.iter().position(|s| s == t).unwrap_or_else(|| panic!("{t}: {texts:?}"));
-        assert!(at("Novedades") < at("Más opciones…") && at("Más opciones…") < at("Acerca de xdir"));
+        assert!(at("Color de acento") < at("Más opciones…") && at("Más opciones…") < at("Acerca de xdir"));
     }
 }

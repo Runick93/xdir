@@ -214,6 +214,8 @@ pub struct Session {
     /// Barra de pestañas de grupos habilitada (aparece solo si hay grupos).
     pub group_bar: bool,
     pub accent: Accent,
+    /// Fondo elegido (0xRRGGBB); sin él, el del modo claro u oscuro.
+    pub background: Option<u32>,
     /// Modo fijado por el usuario; None sigue a Windows.
     pub dark_mode: Option<bool>,
     /// Colores por tipo de archivo (reglas de `config.toml`) encendidos.
@@ -222,6 +224,8 @@ pub struct Session {
     pub show_extensions: bool,
     /// Casillas de selección en las listas (switch «Casillas de selección»).
     pub checkboxes: bool,
+    /// Íconos de la barra lateral con resplandor (opción «Íconos con glow»).
+    pub icon_glow: bool,
     /// Switch «El árbol sigue al panel», si el usuario lo tocó alguna vez; `None` usa
     /// `arbol_sigue_panel` de `config.toml`.
     pub tree_follow: Option<bool>,
@@ -266,15 +270,19 @@ impl Default for Session {
             split_x: 0.5,
             split_y: 0.5,
             active_pane: 0,
-            show_hidden: false,
+            // Instalación nueva: todo prendido salvo las casillas y «El árbol sigue al panel».
+            // Quien ya tiene `sesion.toml` conserva lo que guardó.
+            show_hidden: true,
             show_favorites: true,
-            group_bar: false,
+            group_bar: true,
             accent: DEFAULT_ACCENT,
+            background: None,
             dark_mode: None,
-            file_colors: false,
+            file_colors: true,
             show_extensions: true,
             checkboxes: false,
-            tree_follow: None,
+            icon_glow: false,
+            tree_follow: Some(false),
             show_tree: true,
             tree_pinned: true,
             group: None,
@@ -333,6 +341,7 @@ fn write(s: &Session) -> String {
 ", s.file_colors);
     out += &format!("extensiones = {}\n", s.show_extensions);
     out += &format!("casillas = {}\n", s.checkboxes);
+    out += &format!("brillo_iconos = {}\n", s.icon_glow);
     if let Some(on) = s.tree_follow {
         out += &format!("arbol_sigue = {on}\n");
     }
@@ -362,6 +371,9 @@ fn write(s: &Session) -> String {
         Accent::System => "acento = \"sistema\"\n".to_string(),
         Accent::Rgb(c) => format!("acento = \"#{c:06X}\"\n"),
     };
+    if let Some(c) = s.background {
+        out += &format!("fondo = \"#{c:06X}\"\n");
+    }
     out += match s.dark_mode {
         None => "modo = \"sistema\"\n",
         Some(true) => "modo = \"oscuro\"\n",
@@ -398,7 +410,7 @@ const LEGACY_SECTIONS: u32 = 0x7F;
 
 fn parse(text: &str) -> Session {
     // Sin `version_vista` en el archivo, la sesión es de una versión de antes de Novedades.
-    let mut s = Session { seen_version: None, ..Session::default() };
+    let mut s = Session { seen_version: None, tree_follow: None, ..Session::default() };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -456,6 +468,7 @@ fn parse(text: &str) -> Session {
             ("colores_por_tipo", None) => s.file_colors = boolean().unwrap_or(false),
             ("extensiones", None) => s.show_extensions = boolean().unwrap_or(true),
             ("casillas", None) => s.checkboxes = boolean().unwrap_or(false),
+            ("brillo_iconos", None) => s.icon_glow = boolean().unwrap_or(false),
             ("arbol_sigue", None) => s.tree_follow = boolean(),
             ("arbol", None) => s.show_tree = boolean().unwrap_or(true),
             ("arbol_fijo", None) => s.tree_pinned = boolean().unwrap_or(true),
@@ -485,6 +498,10 @@ fn parse(text: &str) -> Session {
                     "claro" => Some(false),
                     _ => None,
                 };
+            }
+            ("fondo", None) => {
+                let v = value.trim_matches('"');
+                s.background = v.strip_prefix('#').filter(|_| v.len() == 7).and_then(|h| u32::from_str_radix(h, 16).ok());
             }
             ("acento", None) => {
                 let v = value.trim_matches('"');
@@ -558,6 +575,15 @@ fn parse_list(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Instalación nueva: todo prendido salvo «Casillas de selección» y «El árbol sigue al panel».
+    #[test]
+    fn fresh_install_defaults() {
+        let s = Session::default();
+        assert!(s.show_hidden && s.group_bar && s.file_colors && s.show_extensions && s.show_tree);
+        assert!(!s.checkboxes);
+        assert_eq!(s.tree_follow, Some(false));
+    }
+
     use super::*;
 
     /// Una pestaña dentro de un archivo comprimido (también anidado) se guarda y se lee igual.
@@ -699,10 +725,12 @@ mod tests {
             show_favorites: false,
             group_bar: false,
             accent: Accent::Rgb(0xA371F7),
+            background: Some(0x1B2A3A),
             dark_mode: Some(false),
             file_colors: false,
             show_extensions: false,
             checkboxes: true,
+            icon_glow: true,
             tree_follow: Some(false),
             show_tree: true,
             tree_pinned: false,
@@ -748,6 +776,9 @@ mod tests {
         assert!(parse("layout = 2\n").show_extensions);
         // Período del historial de xtree: 7, 30 o 90; otra cosa, 7.
         assert_eq!(parse("layout = 2\n").xtree_days, 7);
+        assert_eq!(parse("fondo = \"#102030\"\n").background, Some(0x102030));
+        assert_eq!(parse("fondo = \"azul\"\n").background, None);
+        assert_eq!(parse("modo = \"claro\"\n").background, None);
         assert_eq!(parse("xtree_dias = 90\n").xtree_days, 90);
         assert_eq!(parse("xtree_dias = 12\n").xtree_days, 7);
         // «Acceso rápido» ya no es un grupo del árbol: lo que guardaban las sesiones de antes se

@@ -41,6 +41,9 @@ pub const COLLAPSED_W: f32 = 48.0;
 const BAR: f32 = 6.0;
 const BAR_ROOM: f32 = 12.0;
 const ROW_H: f32 = 32.0;
+/// «Íconos con glow»: desviación del blur (DIPs) de la copia difuminada del trazo del ícono, que
+/// solo se dibuja con el mouse encima de la fila.
+const GLOW_SIGMA: f32 = 1.75;
 const INDENT: f32 = 18.0;
 /// Margen a los costados de las filas.
 const SIDE: f32 = 8.0;
@@ -299,6 +302,8 @@ pub struct Tree {
     pub ejecting: std::collections::HashSet<PathBuf>,
     /// Lo cortado: esas carpetas se dibujan con el ícono atenuado. La pone la `App` antes de dibujar.
     pub cut: std::sync::Arc<crate::cut::CutSet>,
+    /// Resplandor detrás de cada ícono (opción «Íconos con glow»); la pone la `App` antes de dibujar.
+    pub glow: bool,
     /// Dónde se dibujó cada ⏏ en el último cuadro (rectángulo, nodo).
     eject_rects: Vec<(Rect, usize)>,
     /// Unidades de red cuyo nombre falta pedir en otro hilo (`drive_label` iría al servidor).
@@ -405,6 +410,7 @@ impl Tree {
             ejectable: std::collections::HashSet::new(),
             ejecting: std::collections::HashSet::new(),
             cut: Default::default(),
+            glow: false,
             pending_labels: Vec::new(),
             net_items: Vec::new(),
             net_shell: None,
@@ -1637,8 +1643,8 @@ impl Tree {
         match n.kind {
             Kind::Cloud => ("\u{E753}", rgb(0.30, 0.65, 0.95)),
             Kind::Home => ("\u{E80F}", rgb(0.95, 0.60, 0.30)),
-            // El ícono del mapa, como el botón «xtree» de la barra de estado.
-            Kind::Xtree => ("\u{EB05}", th.accent),
+            // El ícono del mapa, con el violeta propio de xtree (no sigue al énfasis).
+            Kind::Xtree => ("\u{EB05}", ui::XTREE_COLOR),
             Kind::Computer => ("\u{E7F4}", rgb(0.30, 0.65, 0.95)),
             // Etiqueta: la estrella es de Favoritos y la chincheta, de cada carpeta anclada.
             Kind::Trash => (TRASH_GLYPH, rgb(0.62, 0.70, 0.80)),
@@ -1791,6 +1797,11 @@ impl Tree {
                 } else {
                     color
                 };
+                if self.glow && !n.missing && self.hover == Some(id) {
+                    // Resplandor: una copia del ícono difuminada (blur gaussiano) detrás del ícono
+                    // nítido, solo en la fila bajo el mouse.
+                    p.glow_text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color, GLOW_SIGMA);
+                }
                 p.text(FontId::Glyphs, icon, rect(icon_x, y, icon_x + 22.0, y + ROW_H), color);
                 if e > 0.05 {
                     p.text(FontId::Ui, &n.name, rect(icon_x + 28.0, y, icon_x + 28.0 + n.text_w + 12.0, y + ROW_H), alpha(self.name_color(n, th), e * e));
@@ -2057,6 +2068,39 @@ mod tests {
         t.reveal_without_scroll(Handle(0), &target, false);
         t.draw(&p, area, Some(&target), XtreeBadge::Idle);
         assert_eq!(t.scroll, 0.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// «Íconos con glow»: apagado no dibuja resplandor; prendido, una copia difuminada del ícono
+    /// solo detrás del que tiene el mouse encima (sin círculos de fondo).
+    #[test]
+    fn glow_is_a_blurred_copy_behind_the_hovered_icon_only_when_on() {
+        install_fakes();
+        let root = temp_root("glow");
+        std::fs::create_dir_all(root.join("alfa")).unwrap();
+        let mut t = tree_with_drive(&root);
+        t.reveal(Handle(0), &root.join("alfa"), false);
+        finish_reveal(&mut t);
+        let area = rect(0.0, 0.0, 240.0, 600.0);
+        let theme = Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true));
+        let off = crate::sys::testing::RecordingPainter::new(theme.clone());
+        t.draw(&off, area, None, XtreeBadge::Idle);
+        assert!(off.glows().is_empty(), "apagado queda como hoy");
+        t.glow = true;
+        let on = crate::sys::testing::RecordingPainter::new(theme.clone());
+        t.draw(&on, area, None, XtreeBadge::Idle);
+        let sharp: Vec<String> = on.text_draws().iter().filter(|(f, ..)| *f == FontId::Glyphs).map(|(_, s, ..)| s.clone()).collect();
+        assert!(on.glows().is_empty(), "prendido pero sin el mouse encima no hay resplandor");
+        // Con el mouse encima de una fila, solo esa fila tiene su copia difuminada.
+        let id = (0..t.nodes.len()).find(|&i| t.nodes[i].name == "alfa").expect("alfa");
+        t.hover = Some(id);
+        let hot = crate::sys::testing::RecordingPainter::new(theme);
+        t.draw(&hot, area, None, XtreeBadge::Idle);
+        let glows = hot.glows();
+        assert_eq!(glows.len(), 1, "solo el ícono bajo el mouse");
+        // La copia difuminada es del mismo ícono que uno nítido, y no hay círculos de fondo.
+        assert!(glows.iter().all(|(s, ..)| sharp.contains(s)));
+        assert!(hot.circles().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2589,6 +2633,19 @@ mod tests {
         let y = row_y(area, xtree_row(&t));
         assert!(!p.texts().iter().any(|(_, s, _)| s.ends_with(" %")));
         assert!(!p.paths().iter().any(|(pts, _, _)| pts.iter().all(|&(_, py)| (py - y).abs() <= 8.0)));
+    }
+
+    /// El ícono de xtree tiene su violeta propio: no cambia con el énfasis elegido.
+    #[test]
+    fn tree_xtree_icon_ignores_accent() {
+        let (t, _, _) = drawn(XtreeBadge::Idle);
+        let node = &t.nodes[t.roots.iter().copied().find(|&i| t.nodes[i].kind == Kind::Xtree).expect("entrada xtree")];
+        for &(_, c) in crate::theme::PRESETS.iter() {
+            for dark in [true, false] {
+                let th = crate::theme::Theme::from_system(crate::theme::Accent::Rgb(c), Some(dark));
+                assert_eq!(t.icon(node, &th).1, ui::XTREE_COLOR);
+            }
+        }
     }
 
     /// Un clic en cualquier parte de la fila (también donde iría el chevron) es la entrada xtree.

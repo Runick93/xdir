@@ -8,6 +8,7 @@ mod archive_nav;
 mod changelog;
 mod checksum;
 mod compare;
+mod color_picker;
 mod confirm;
 mod drop_menu;
 mod edit;
@@ -15,6 +16,7 @@ mod events;
 mod favs;
 mod fileops;
 mod git_branch;
+mod group_color;
 mod in_use;
 mod info;
 mod network;
@@ -73,6 +75,8 @@ mod cut_tests;
 #[cfg(test)]
 mod git_branch_tests;
 #[cfg(test)]
+mod group_color_tests;
+#[cfg(test)]
 mod in_use_tests;
 
 pub use events::CursorKind;
@@ -93,7 +97,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
 use crate::geom::{self, contains};
-use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP}};
+use crate::keys::{Key, keys::{VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP}};
 use crate::sys::{self, Handle};
 use crate::{WM_APP, fs, shell};
 
@@ -210,6 +214,10 @@ enum Hit {
     XtreeColors,
     /// La lupa de la barra superior de xtree (abre y cierra la búsqueda).
     XtreeSearch,
+    /// El botón que pasa la lista de carpetas de xtree al otro lado.
+    XtreeSide,
+    /// El botón que muestra u oculta el espacio libre en el mapa de xtree.
+    XtreeFree,
     /// Barra de pestañas de grupos: una pestaña, o el botón para crear uno.
     GroupBar(ui::GroupHit),
     Picker(ui::PickerHit),
@@ -235,8 +243,12 @@ enum Hit {
     Drives(crate::net::drives_dialog::DrivesHit),
     /// El diálogo de confirmación propio (git): un botón, la cruz o el panel sin nada debajo.
     Confirm(confirm::ConfirmHit),
+    /// El selector de color propio: una parte o el panel sin nada debajo.
+    ColorPicker(color_picker::PickHit),
     /// El menú de ramas abierto: una fila o el panel sin nada debajo.
     DropMenu(drop_menu::DropHit),
+    /// El panel de colores de una pestaña de grupo: un color, el acento de la app o el panel.
+    GroupColor(group_color::GroupColorHit),
     /// Menú de consola abierto: una consola, o el menú sin nada debajo.
     TermMenu(Option<Console>),
     /// Paleta abierta: un resultado, o el panel sin nada debajo.
@@ -488,6 +500,8 @@ pub struct App {
     show_extensions: bool,
     /// Casillas de selección en las listas (switch «Casillas de selección»).
     checkboxes: bool,
+    /// Íconos de la barra lateral con glow (opción «Íconos con glow» de Más opciones).
+    icon_glow: bool,
     /// Switch «El árbol sigue al panel», si el usuario lo tocó; `None` sigue a `arbol_sigue_panel`
     /// de `config.toml` (ver `tree_follows`).
     tree_follow: Option<bool>,
@@ -516,6 +530,10 @@ pub struct App {
     /// Hay un aviso de guardado en camino (`WM_APP_VIEWS_SAVE`).
     views_save_posted: bool,
     accent: Accent,
+    /// Fondo elegido (0xRRGGBB); sin él, el del modo claro u oscuro.
+    background: Option<u32>,
+    /// El selector de color abierto (acento o fondo).
+    color_picker: Option<color_picker::ColorPicker>,
     /// Modo fijado con el switch; None sigue al modo de Windows.
     dark_mode: Option<bool>,
     /// Panel de colores abierto (rueda dentada).
@@ -587,6 +605,11 @@ pub struct App {
     confirm: Option<git_branch::ConfirmState>,
     /// El menú de ramas abierto sobre el botón del pie.
     drop_menu: Option<git_branch::BranchMenu>,
+    /// El panel de colores abierto sobre una pestaña de grupo (clic derecho).
+    group_color: Option<group_color::GroupColorMenu>,
+    /// Clic derecho apretado sobre una pestaña de grupo (su posición y el punto), a la espera del
+    /// pedido de menú que llega al soltar.
+    group_ctx: Option<(usize, (f32, f32))>,
     /// Qué hace git mientras `git_busy` (el cartel del indicador de actividad).
     git_task: String,
     /// Lo que se sabe del remoto de cada repositorio con pestañas abiertas (botón de sincronizar).
@@ -672,8 +695,16 @@ impl Init {
     pub fn blank() -> Init {
         // `Config::default()` arma el `Keymap`, que consulta el entorno del sistema.
         crate::sys::testing::install_fakes();
+        // Las pruebas parten del estado de antes de los nuevos valores de fábrica (ocultos, barra
+        // de grupos y colores por tipo apagados; el árbol sigue a `config.toml`): cada una prende lo
+        // que necesita. Los valores de fábrica reales los cubre `session::tests`.
+        let mut session = default_session();
+        session.show_hidden = false;
+        session.group_bar = false;
+        session.file_colors = false;
+        session.tree_follow = None;
         Init {
-            session: default_session(),
+            session,
             history: History::default(),
             config: Config::default(),
             favorites: Favorites::default(),
@@ -704,7 +735,7 @@ impl App {
         if folder_views.is_fresh() {
             folder_views.migrate(&session);
         }
-        let theme = Theme::from_system(session.accent, session.dark_mode);
+        let theme = Theme::with_background(session.accent, session.dark_mode, session.background);
         let (tx, rx) = channel();
         let (ops_tx, ops_rx) = channel();
         let (task_tx, task_rx) = channel();
@@ -795,6 +826,7 @@ impl App {
             file_colors: session.file_colors,
             show_extensions: session.show_extensions,
             checkboxes: session.checkboxes,
+            icon_glow: session.icon_glow,
             tree_follow: session.tree_follow,
             fav_drop: None,
             tab_drop: None,
@@ -809,6 +841,8 @@ impl App {
             views_changed_at: None,
             views_save_posted: false,
             accent: session.accent,
+            background: session.background,
+            color_picker: None,
             dark_mode: session.dark_mode,
             picker_open: false,
             about_open: false,
@@ -844,6 +878,8 @@ impl App {
             git_busy: false,
             confirm: None,
             drop_menu: None,
+            group_color: None,
+            group_ctx: None,
             git_task: String::new(),
             git_sync: std::collections::HashMap::new(),
             git_pulling: None,

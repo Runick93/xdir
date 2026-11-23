@@ -1434,49 +1434,106 @@ fn title_follows_group_name() {
     assert_eq!(host.titles().last().map(String::as_str), Some("xdir - Trabajo"));
 }
 
-/// Punto del panel de colores donde está «Personalizado…».
-fn custom_color_point(a: &App) -> (f32, f32) {
-    let (w, h) = a.client_dips();
-    let r = ui::picker_rect(w, h);
-    let mut y = r.top;
-    while y < r.bottom {
-        let x = (r.left + r.right) / 2.0;
-        if ui::picker_at(w, h, x, y) == Some(ui::PickerHit::Custom) {
-            return (x, y);
-        }
-        y += 1.0;
-    }
-    panic!("no se encontró «Personalizado…»");
-}
-
 fn click(a: &mut App, (x, y): (f32, f32)) {
     a.on_left_down(x, y, false);
     a.on_left_up(x, y);
 }
 
-/// Si el selector no devuelve color (se canceló, o en macOS llega después), el acento no cambia.
+fn type_hex(a: &mut App, hex: &str) {
+    for _ in 0..6 {
+        a.on_key(crate::keys::keys::VK_BACK);
+    }
+    for c in hex.chars() {
+        a.on_char(c);
+    }
+}
+
+/// «Otro…» abre el selector propio de xdir, no el del sistema, y no cambia nada por sí solo.
 #[test]
-fn custom_color_none_keeps_accent() {
-    let host = FakeHost::new();
-    let mut a = app_with_host(Init::blank(), host.clone());
-    host.set_color_choice(None);
+fn custom_color_opens_own_picker_without_changing_accent() {
+    let mut a = app();
     let before = a.accent;
-    a.picker_open = true;
-    let at = custom_color_point(&a);
-    click(&mut a, at);
+    a.choose_custom_color();
+    assert!(a.color_picker.is_some());
     assert_eq!(a.accent, before);
 }
 
-/// El color elegido en el selector modal queda como acento.
+/// Esc cancela el selector sin cambiar el acento.
 #[test]
-fn custom_color_some_sets_accent() {
-    let host = FakeHost::new();
-    let mut a = app_with_host(Init::blank(), host.clone());
-    host.set_color_choice(Some(0xF85149));
-    a.picker_open = true;
-    let at = custom_color_point(&a);
-    click(&mut a, at);
+fn custom_color_escape_keeps_accent() {
+    let mut a = app();
+    let before = a.accent;
+    a.choose_custom_color();
+    type_hex(&mut a, "F85149");
+    a.on_key(VK_ESCAPE);
+    assert!(a.color_picker.is_none());
+    assert_eq!(a.accent, before);
+}
+
+/// El color escrito y aceptado con Enter queda como acento.
+#[test]
+fn custom_color_enter_sets_accent() {
+    let mut a = app();
+    a.choose_custom_color();
+    type_hex(&mut a, "F85149");
+    a.on_key(VK_RETURN);
+    assert!(a.color_picker.is_none());
     assert_eq!(a.accent, Accent::Rgb(0xF85149));
+}
+
+/// Con el selector abierto, las teclas no llegan a la lista ni a los atajos.
+#[test]
+fn color_picker_swallows_keys_and_chars() {
+    let mut a = app();
+    a.choose_custom_color();
+    let tabs = a.panes[0].tabs.len();
+    assert!(a.on_key(VK_DOWN));
+    a.on_char('t');
+    assert_eq!(a.panes[0].tabs.len(), tabs);
+    assert!(a.color_picker.is_some());
+}
+
+/// El fondo elegido se aplica al tema (con texto legible), se guarda en la sesión y se restablece.
+#[test]
+fn background_picks_applies_and_resets() {
+    let mut a = app();
+    a.dark_mode = Some(false);
+    a.set_theme_mode(Some(false));
+    assert!(!a.theme.dark);
+    a.choose_background();
+    type_hex(&mut a, "101820");
+    a.on_key(VK_RETURN);
+    assert_eq!(a.background, Some(0x101820));
+    assert!(a.theme.dark, "un fondo oscuro pasa el tema a oscuro");
+    assert_eq!((a.theme.background.r * 255.0).round() as u32, 0x10);
+    assert_eq!(a.session().background, Some(0x101820));
+    a.set_background(None);
+    assert_eq!(a.background, None);
+    assert!(!a.theme.dark, "sin fondo propio vuelve al modo elegido");
+}
+
+/// El fondo de la página Apariencia: predefinidos, «Del tema» y «Otro…» (abre el selector).
+#[test]
+fn background_row_in_appearance() {
+    let mut a = app();
+    let control = |a: &App| {
+        a.settings_items(crate::settings::Section::Appearance).into_iter().find_map(|i| match i {
+            crate::settings::Item::Row(r) if r.id == "fondo" => Some(r.control),
+            _ => None,
+        })
+    };
+    assert_eq!(control(&a), Some(crate::settings::Control::Background(None)));
+    a.settings_part(0, "fondo", 7, 0.0);
+    assert_eq!(a.background, Some(theme::BACKGROUNDS[7].1));
+    assert!(a.theme.dark, "los fondos predefinidos son oscuros");
+    assert_eq!(a.theme.surface_alt, crate::ui::hex(theme::BACKGROUNDS[7].2), "el panel usa el color de su fondo");
+    a.settings_part(0, "fondo", 0, 0.0);
+    assert!(a.theme.dark, "un fondo oscuro pasa el tema a oscuro");
+    assert_eq!(control(&a), Some(crate::settings::Control::Background(Some(theme::BACKGROUNDS[0].1))));
+    a.settings_part(0, "fondo", theme::BACKGROUNDS.len(), 0.0);
+    assert_eq!(a.background, None);
+    a.settings_part(0, "fondo", theme::BACKGROUNDS.len() + 1, 0.0);
+    assert!(a.color_picker.as_ref().is_some_and(|p| p.target == color_picker::PickTarget::Background));
 }
 
 /// Si el sistema no puede arrastrar, se avisa en la barra de estado.
@@ -3498,4 +3555,51 @@ fn escape_restores_tab_order() {
     assert!(a.on_key(VK_ESCAPE));
     assert_eq!(a.panes[0].tabs.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
     assert_eq!(a.panes[0].tab().id, ids[0], "sigue activa la arrastrada");
+}
+
+/// Los círculos de «Color de fondo» muestran el nombre de cada fondo al pasar el mouse.
+#[test]
+fn background_circles_show_their_name() {
+    let a = app();
+    for (i, (name, ..)) in theme::BACKGROUNDS.iter().enumerate() {
+        let hit = Hit::Settings(0, crate::settings::SettingsHit::Part("fondo", i));
+        assert_eq!(a.tooltip_text(hit).as_deref(), Some(*name));
+    }
+    let none = Hit::Settings(0, crate::settings::SettingsHit::Part("fondo", theme::BACKGROUNDS.len()));
+    assert_eq!(a.tooltip_text(none), None);
+}
+
+/// Los círculos de «Color de acento» muestran el nombre de cada color al pasar el mouse.
+#[test]
+fn accent_circles_show_their_name() {
+    let a = app();
+    for (i, (name, _)) in theme::PRESETS.iter().enumerate() {
+        let hit = Hit::Settings(0, crate::settings::SettingsHit::Part("acento", i));
+        assert_eq!(a.tooltip_text(hit).as_deref(), Some(*name));
+    }
+    let sys = Hit::Settings(0, crate::settings::SettingsHit::Part("acento", theme::PRESETS.len()));
+    assert_eq!(a.tooltip_text(sys), None);
+}
+
+/// Ctrl+C, Ctrl+X y Ctrl+V del valor del selector van al portapapeles de texto del sistema.
+#[test]
+fn color_picker_hex_copies_cuts_and_pastes() {
+    use crate::keys::keys::VK_CONTROL;
+    let _ = VK_CONTROL;
+    let mut a = app();
+    a.choose_custom_color();
+    let ctrl = |a: &mut App, k: u16| a.color_picker_key(Key(k), false, true);
+    // Copiar con todo seleccionado copia el valor tal cual.
+    ctrl(&mut a, 0x43);
+    assert_eq!(crate::sys::shell().clipboard_text(a.hwnd).as_deref().map(|s| s.len()), Some(6));
+    // Pegar un color completo con «#» reemplaza todo el valor.
+    crate::sys::testing::FakeShell::set_clipboard_text(Some("#f85149"));
+    ctrl(&mut a, 0x56);
+    a.on_key(crate::keys::keys::VK_RETURN);
+    assert_eq!(a.accent, Accent::Rgb(0xF85149));
+    // Cortar deja el valor vacío y el texto en el portapapeles.
+    a.choose_custom_color();
+    ctrl(&mut a, 0x58);
+    assert_eq!(crate::sys::shell().clipboard_text(a.hwnd).as_deref().map(|s| s.len()), Some(6));
+    assert_eq!(a.color_picker.as_ref().unwrap().copy_text(), "#");
 }

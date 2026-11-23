@@ -44,29 +44,125 @@ impl App {
 
     // ---------- color de acento ----------
 
+    /// El tema con el acento, el modo y el fondo de ahora.
+    pub(super) fn make_theme(&self) -> Theme {
+        Theme::with_background(self.accent, self.dark_mode, self.background)
+    }
+
     pub fn set_accent(&mut self, accent: Accent) {
         self.accent = accent;
-        self.theme = Theme::from_system(accent, self.dark_mode);
+        self.theme = self.make_theme();
         self.host.text_restyle(&self.theme);
         self.redraw();
     }
 
-    /// "Personalizado…": el selector de color del sistema. En Windows es modal y el color se aplica
-    /// al volver; en macOS el panel queda abierto y cada color llega después (`MSG_ACCENT`).
+    /// «Otro…»: abre el selector de color propio de xdir (no el del sistema). Al aceptar, el color
+    /// es el nuevo acento; Esc cancela sin cambiar nada.
     pub(super) fn choose_custom_color(&mut self) {
         let current = match self.accent {
             Accent::Rgb(c) => c,
             Accent::System => theme::PRESETS[0].1,
         };
-        if let Some(c) = self.host.choose_color(current) {
-            self.set_accent(Accent::Rgb(c));
+        self.open_color_picker(color_picker::PickTarget::Accent, current);
+    }
+
+    /// «Elegir color…» del fondo: el mismo selector, partiendo del fondo de ahora.
+    pub(super) fn choose_background(&mut self) {
+        let current = self.background.unwrap_or_else(|| {
+            let c = self.theme.background;
+            let ch = |v: f32| (v * 255.0).round() as u32;
+            ch(c.r) << 16 | ch(c.g) << 8 | ch(c.b)
+        });
+        self.open_color_picker(color_picker::PickTarget::Background, current);
+    }
+
+    fn open_color_picker(&mut self, target: color_picker::PickTarget, current: u32) {
+        self.color_picker = Some(color_picker::ColorPicker::new(target, current));
+        self.redraw();
+    }
+
+    /// Fondo propio (`None`: vuelve al del modo claro u oscuro). Las superficies, los bordes y los
+    /// textos se derivan de él (ver `Theme::with_background`).
+    pub fn set_background(&mut self, background: Option<u32>) {
+        self.background = background;
+        self.theme = self.make_theme();
+        // La barra de título y los menús siguen al modo que resulte del fondo.
+        self.apply_window_theme();
+        sys::shell().set_menu_mode(Some(self.theme.dark).filter(|_| background.is_some()).or(self.dark_mode));
+        self.redraw();
+    }
+
+    /// Se resolvió el selector: lo elegido se aplica a lo que se estaba eligiendo.
+    fn color_picker_done(&mut self, target: color_picker::PickTarget, outcome: color_picker::Outcome) {
+        match outcome {
+            color_picker::Outcome::Open => return,
+            color_picker::Outcome::Cancel => {}
+            color_picker::Outcome::Accept(c) => match target {
+                color_picker::PickTarget::Accent => self.set_accent(Accent::Rgb(c)),
+                color_picker::PickTarget::Background => self.set_background(Some(c)),
+            },
         }
+        self.color_picker = None;
+        self.redraw();
+    }
+
+    /// Clic en el selector (el cuadrado y la franja empiezan un arrastre).
+    pub(super) fn color_picker_click(&mut self, x: f32, y: f32) {
+        let (w, h) = self.client_dips();
+        let Some(pk) = &mut self.color_picker else { return };
+        let target = pk.target;
+        let outcome = pk.press(w, h, x, y);
+        if pk.is_dragging() {
+            self.host.capture_mouse();
+        }
+        self.color_picker_done(target, outcome);
+        self.redraw();
+    }
+
+    /// El mouse se mueve con el botón apretado sobre el selector. `true` si lo usó.
+    pub(super) fn color_picker_drag(&mut self, x: f32, y: f32) -> bool {
+        let (w, h) = self.client_dips();
+        let moved = self.color_picker.as_mut().is_some_and(|pk| pk.drag(w, h, x, y));
+        if moved {
+            self.redraw();
+        }
+        moved
+    }
+
+    /// Una tecla con el selector abierto: se queda con todas.
+    pub(super) fn color_picker_key(&mut self, vk: Key, shift: bool, ctrl: bool) -> bool {
+        let Some(pk) = &mut self.color_picker else { return false };
+        // Copiar, cortar y pegar el valor con el portapapeles de texto del sistema.
+        if ctrl {
+            match vk {
+                Key(0x43) | Key(0x58) => {
+                    let text = if vk == Key(0x58) { pk.cut_text() } else { pk.copy_text() };
+                    let _ = sys::shell().copy_text(self.hwnd, &text);
+                    self.redraw();
+                    return true;
+                }
+                Key(0x56) => {
+                    if let Some(text) = sys::shell().clipboard_text(self.hwnd) {
+                        pk.paste(&text);
+                    }
+                    self.redraw();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        let target = pk.target;
+        let outcome = pk.key(vk, shift, ctrl);
+        self.color_picker_done(target, outcome);
+        self.redraw();
+        true
     }
 
     /// Ajusta la ventana al tema (barra de título, fondo Mica en Windows) y los controles de edición.
     pub fn apply_window_theme(&mut self) {
         // El host también pasa el renderizador a fondo translúcido si quedó Mica.
-        let mica = self.host.apply_theme(&self.theme, self.dark_mode.is_none());
+        // Con un fondo propio no hay Mica: se vería el del sistema en vez del elegido.
+        let mica = self.host.apply_theme(&self.theme, self.dark_mode.is_none() && self.background.is_none());
         self.transparent = mica;
         self.host.text_restyle(&self.theme);
     }
@@ -122,7 +218,7 @@ impl App {
     /// Switch del panel de la rueda dentada: fija oscuro o claro (deja de seguir a Windows).
     pub(super) fn set_dark_mode(&mut self, dark: bool) {
         self.dark_mode = Some(dark);
-        self.theme = Theme::from_system(self.accent, self.dark_mode);
+        self.theme = self.make_theme();
         // Barra de título y menús nativos al mismo modo.
         self.apply_window_theme();
         sys::shell().set_menu_mode(self.dark_mode);

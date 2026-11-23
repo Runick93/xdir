@@ -231,9 +231,11 @@ impl App {
             let elevate_keys = self.config.keymap.label(Command::XtreeElevate);
             if let Some(v) = self.xtree.as_mut().filter(|_| xtree_open) {
                 v.set_key_labels(colors_keys, elevate_keys);
+                v.set_show_free(self.config.xtree_free_space);
+                crate::xtree::view::set_list_side(self.config.xtree_side == crate::config::XtreeSide::Right);
                 v.paint(p, ui::xtree_area(w, h));
             } else if groups_h > 0.0 {
-                let names: Vec<(&str, bool)> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp)).collect();
+                let names: Vec<ui::GroupTab> = self.groups.items.iter().map(|g| (g.name.as_str(), g.temp, g.color)).collect();
                 let active_group = self.group_name.as_deref().and_then(|n| self.groups.find(n));
                 let group_hover = match hover {
                     Hit::GroupBar(g) => Some(g),
@@ -287,6 +289,7 @@ impl App {
                     p.round_fill(geom::rect(r.left + 2.0, r.top + 2.0, r.right + 6.0, r.bottom + 4.0), 12.0, theme::alpha(p.theme().background, 0.45));
                 }
                 tree.cut = self.cut.clone();
+                tree.glow = self.icon_glow;
                 tree.draw(p, r, current_folder.as_deref(), xtree_badge);
             }
             if let (Some(r), Some(shown)) = (preview_col, &preview_shown) {
@@ -414,12 +417,26 @@ impl App {
                 };
                 m.menu.draw(p, w, h, hover);
             }
+            if let Some(m) = &self.group_color {
+                let hover = match hover {
+                    Hit::GroupColor(k) => Some(k),
+                    _ => None,
+                };
+                m.draw(p, w, h, hover);
+            }
             if let Some(c) = &self.confirm {
                 let hover = match hover {
                     Hit::Confirm(k) => Some(k),
                     _ => None,
                 };
                 c.dialog.draw(p, w, h, hover);
+            }
+            if let Some(pk) = &self.color_picker {
+                let hover = match hover {
+                    Hit::ColorPicker(k) => Some(k),
+                    _ => None,
+                };
+                pk.draw(p, w, h, hover);
             }
             // El cartel de ayuda va último: encima de todo.
             if let Some((text, x, y)) = &tooltip {

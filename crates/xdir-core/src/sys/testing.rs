@@ -416,6 +416,8 @@ struct ShellState {
     calls: Vec<ShellCall>,
     /// Portapapeles de archivos: lo llena `copy_files` (o `FakeShell::set_clipboard`).
     clipboard: Option<(Vec<PathBuf>, bool)>,
+    /// Texto del portapapeles: lo llena `copy_text` (o `FakeShell::set_clipboard_text`).
+    clipboard_text: Option<String>,
     /// Lo que devuelve el próximo `context_menu`.
     menu_choice: Option<String>,
     /// Si hay, las operaciones que pueden fallar fallan con este texto.
@@ -520,6 +522,11 @@ impl FakeShell {
         shell_state(|s| s.menu_has_new = on);
     }
 
+    /// Texto del portapapeles de este hilo.
+    pub fn set_clipboard_text(text: Option<&str>) {
+        shell_state(|s| s.clipboard_text = text.map(str::to_string));
+    }
+
     /// Contenido del portapapeles de archivos de este hilo.
     pub fn set_clipboard(files: Option<(Vec<PathBuf>, bool)>) {
         shell_state(|s| s.clipboard = files);
@@ -596,8 +603,15 @@ impl Shell for FakeShell {
     /// Como en el sistema, el texto reemplaza los archivos copiados o cortados.
     fn copy_text(&self, _owner: Handle, text: &str) -> Result<(), String> {
         record(ShellCall::CopyText(text.to_string()));
-        shell_state(|s| s.clipboard = None);
+        shell_state(|s| {
+            s.clipboard = None;
+            s.clipboard_text = Some(text.to_string());
+        });
         outcome()
+    }
+
+    fn clipboard_text(&self, _owner: Handle) -> Option<String> {
+        shell_state(|s| s.clipboard_text.clone())
     }
 
     fn pick_folder(&self, _owner: Handle, title: &str) -> Option<PathBuf> {
@@ -1325,6 +1339,10 @@ pub struct RecordingPainter {
     text_colors: RefCell<Vec<Color>>,
     paths: RefCell<Vec<RecordedPath>>,
     strokes: RefCell<Vec<(Rect, Color)>>,
+    /// Círculos rellenos (centro, radio y color), en orden.
+    circles: RefCell<Vec<(f32, f32, f32, Color)>>,
+    /// Textos difuminados (`glow_text`): texto, rectángulo, color y sigma, en orden.
+    glows: RefCell<Vec<(String, Rect, Color, f32)>>,
     big: RefCell<Vec<(thumbs::Key, Rect)>>,
     big_ready: Cell<bool>,
     forgotten: RefCell<Vec<thumbs::Source>>,
@@ -1349,6 +1367,8 @@ impl RecordingPainter {
             text_colors: RefCell::new(Vec::new()),
             paths: RefCell::new(Vec::new()),
             strokes: RefCell::new(Vec::new()),
+            circles: RefCell::new(Vec::new()),
+            glows: RefCell::new(Vec::new()),
             big: RefCell::new(Vec::new()),
             big_ready: Cell::new(false),
             forgotten: RefCell::new(Vec::new()),
@@ -1395,6 +1415,16 @@ impl RecordingPainter {
         self.big_ready.set(ready);
     }
 
+    /// Los textos dibujados con `glow_text` (texto, rectángulo, color y sigma), en orden.
+    pub fn glows(&self) -> Vec<(String, Rect, Color, f32)> {
+        self.glows.borrow().clone()
+    }
+
+    /// Los círculos rellenos dibujados con `circle` (centro, radio y color), en orden.
+    pub fn circles(&self) -> Vec<(f32, f32, f32, Color)> {
+        self.circles.borrow().clone()
+    }
+
     /// Los trazos dibujados con `rounded_path`, en orden.
     pub fn paths(&self) -> Vec<RecordedPath> {
         self.paths.borrow().clone()
@@ -1436,7 +1466,13 @@ impl Painter for RecordingPainter {
     fn rounded_path(&self, pts: &[(f32, f32, f32)], closed: bool, fill: Option<Color>, _stroke: Option<(Color, f32)>) {
         self.paths.borrow_mut().push((pts.iter().map(|&(x, y, _)| (x, y)).collect(), closed, fill));
     }
-    fn circle(&self, _cx: f32, _cy: f32, _radius: f32, _fill: Color) {}
+    fn glow_text(&self, font: FontId, s: &str, r: Rect, c: Color, sigma: f32) {
+        let _ = font;
+        self.glows.borrow_mut().push((s.to_string(), r, c, sigma));
+    }
+    fn circle(&self, cx: f32, cy: f32, radius: f32, fill: Color) {
+        self.circles.borrow_mut().push((cx, cy, radius, fill));
+    }
     fn circle_stroke(&self, _cx: f32, _cy: f32, _radius: f32, _c: Color, _width: f32) {}
     fn round_stroke_w(&self, r: Rect, _radius: f32, c: Color, _width: f32) {
         self.strokes.borrow_mut().push((r, c));

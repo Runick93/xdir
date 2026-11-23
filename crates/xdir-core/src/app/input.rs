@@ -11,9 +11,17 @@ impl App {
 
     pub(super) fn hit(&self, x: f32, y: f32) -> Hit {
         let (w, h) = self.client_dips();
+        // El selector de color es modal y va encima de todo.
+        if let Some(pk) = &self.color_picker {
+            return pk.hit(w, h, x, y).map_or(Hit::None, Hit::ColorPicker);
+        }
         // El diálogo de confirmación es modal y va encima de todo.
         if let Some(c) = &self.confirm {
             return c.dialog.hit(x, y).map_or(Hit::None, Hit::Confirm);
+        }
+        // El panel de colores de un grupo, abierto sobre su pestaña, también es modal.
+        if let Some(m) = &self.group_color {
+            return m.hit(w, h, x, y).map_or(Hit::None, Hit::GroupColor);
         }
         // El menú de ramas, abierto sobre el pie, también es modal: un clic fuera solo lo cierra.
         if let Some(m) = &self.drop_menu {
@@ -122,6 +130,12 @@ impl App {
             if contains(&crate::xtree::view::search_btn_rect(ui::xtree_area(w, h)), x, y) {
                 return Hit::XtreeSearch;
             }
+            if contains(&crate::xtree::view::side_btn_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeSide;
+            }
+            if contains(&crate::xtree::view::free_btn_rect(ui::xtree_area(w, h)), x, y) {
+                return Hit::XtreeFree;
+            }
             if !contains(&ui::xtree_area(w, h), x, y) {
                 return Hit::None;
             }
@@ -192,9 +206,20 @@ impl App {
         if let Some(st) = &mut self.compare {
             st.focused = matches!(hit, Hit::Compare(_));
         }
+        if self.color_picker.is_some() {
+            self.color_picker_click(x, y);
+            return;
+        }
         if self.confirm.is_some() {
             self.confirm_click(match hit {
                 Hit::Confirm(h) => Some(h),
+                _ => None,
+            });
+            return;
+        }
+        if self.group_color.is_some() {
+            self.group_color_click(match hit {
+                Hit::GroupColor(h) => Some(h),
                 _ => None,
             });
             return;
@@ -347,6 +372,14 @@ impl App {
                 }
                 self.redraw();
             }
+            Hit::XtreeFree => {
+                self.toggle_xtree_free_space();
+                self.redraw();
+            }
+            Hit::XtreeSide => {
+                self.set_xtree_side(self.config.xtree_side.flip());
+                self.redraw();
+            }
             Hit::XtreeSearch => {
                 if self.xtree.as_ref().is_some_and(|x| x.search_open()) {
                     if let Some(x) = &mut self.xtree {
@@ -377,8 +410,6 @@ impl App {
                 self.redraw();
             }
             Hit::Picker(ui::PickerHit::Preset(i)) => self.set_accent(Accent::Rgb(theme::PRESETS[i].1)),
-            Hit::Picker(ui::PickerHit::System) => self.set_accent(Accent::System),
-            Hit::Picker(ui::PickerHit::Custom) => self.choose_custom_color(),
             Hit::Picker(ui::PickerHit::DarkMode) => self.set_dark_mode(!self.theme.dark),
             Hit::Picker(ui::PickerHit::FileColors) => {
                 self.file_colors = !self.file_colors;
@@ -395,7 +426,6 @@ impl App {
             Hit::Picker(ui::PickerHit::GroupBar) => self.run_command(Command::ToggleGroupBar),
             Hit::Picker(ui::PickerHit::Tree) => self.run_command(Command::ToggleTree),
             Hit::Picker(ui::PickerHit::About) => self.run_command(Command::About),
-            Hit::Picker(ui::PickerHit::Changelog) => self.run_command(Command::Changelog),
             Hit::UpdateNotice => self.open_update_notice(),
             Hit::SizeLink => self.request_sel_size(),
             Hit::Changelog(i) => {
@@ -516,7 +546,7 @@ impl App {
                     PaneHit::None => {}
                 }
             }
-            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::DropMenu(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
+            Hit::None | Hit::About(_) | Hit::Connect(_) | Hit::Drives(_) | Hit::Confirm(_) | Hit::ColorPicker(_) | Hit::DropMenu(_) | Hit::GroupColor(_) | Hit::FilterMenu(..) | Hit::TreePin | Hit::TreeXtree | Hit::QuickLookTitle(_) | Hit::QuickLookBody(_) => {}
         }
         // Un clic en la lista con la vista rápida abierta: pasa al elemento cliqueado.
         self.quick_look_follow_list();
@@ -580,6 +610,13 @@ impl App {
     }
 
     pub fn on_left_up(&mut self, x: f32, y: f32) {
+        // Soltar sobre el selector de color termina su arrastre y nada más.
+        if let Some(pk) = &mut self.color_picker {
+            pk.release();
+            self.host.release_mouse();
+            self.redraw();
+            return;
+        }
         self.tab_drag_from = None;
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.host.release_mouse();
@@ -669,6 +706,16 @@ impl App {
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32) {
         self.host.track_mouse_leave();
+        // Con el selector de color abierto, el mouse es solo suyo.
+        if self.color_picker.is_some() {
+            self.color_picker_drag(x, y);
+            let hover = self.hit(x, y);
+            if hover != self.hover {
+                self.hover = hover;
+                self.redraw();
+            }
+            return;
+        }
         let mut redraw = false;
         match self.drag {
             Drag::Splitter(s) => {

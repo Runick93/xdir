@@ -437,6 +437,7 @@ fn remote_navigation_no_ui_io() {
         split_y: 0.5,
         panes: vec![crate::session::PaneState { tabs: vec![Location::Path(root.clone())], active: 0 }],
         temp: false,
+        color: None,
     });
     let gi = a.groups.find("red-n5").unwrap();
     a.apply_group(gi);

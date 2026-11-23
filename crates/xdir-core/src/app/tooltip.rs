@@ -61,6 +61,8 @@ pub(super) fn tooltip_for(hit: Hit, keymap: &Keymap, tab_path: &dyn Fn(usize, us
             keys => format!("Vista previa ({keys})"),
         },
         Hit::GroupBar(ui::GroupHit::Add) => "Guardar los paneles como grupo".to_string(),
+        Hit::Picker(ui::PickerHit::Preset(i)) => theme::PRESETS[i].0.to_string(),
+        Hit::GroupColor(super::group_color::GroupColorHit::Swatch(i)) => theme::PRESETS[i].0.to_string(),
         Hit::TreePin if tree_pinned => "Soltar el árbol".to_string(),
         Hit::TreePin => "Fijar el árbol".to_string(),
         Hit::Pane(p, ph) => match ph {
@@ -146,6 +148,14 @@ impl App {
             Hit::Xtree => return self.xtree.as_ref().and_then(|x| x.badge_tip()),
             Hit::XtreeBack => return Some("Volver a xdir (Esc)".to_string()),
             Hit::About(crate::about::AboutHit::Repo) => return Some("Ver el código en GitHub".to_string()),
+            // Los círculos de «Color de acento»: el nombre de cada color.
+            Hit::Settings(_, crate::settings::SettingsHit::Part("acento", i)) if i < theme::PRESETS.len() => {
+                return Some(theme::PRESETS[i].0.to_string());
+            }
+            // Los círculos de «Color de fondo»: el nombre de cada fondo.
+            Hit::Settings(_, crate::settings::SettingsHit::Part("fondo", i)) if i < theme::BACKGROUNDS.len() => {
+                return Some(theme::BACKGROUNDS[i].0.to_string());
+            }
             // La ▲ de la tabla de xtree: cuánto creció la carpeta en el período.
             Hit::XtreeMark(n) => return self.xtree.as_ref()?.mark_tip(n),
             Hit::XtreeSearch => {
@@ -154,6 +164,8 @@ impl App {
                     keys => format!("Buscar en xtree ({keys})"),
                 });
             }
+            Hit::XtreeFree => return Some(self.xtree.as_ref()?.free_tip().to_string()),
+            Hit::XtreeSide => return Some(self.xtree.as_ref()?.side_tip().to_string()),
             Hit::XtreeColors => {
                 let what = self.xtree.as_ref()?.colors_tip();
                 return Some(match self.config.keymap.label(Command::XtreeColors) {

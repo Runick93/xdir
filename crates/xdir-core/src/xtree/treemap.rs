@@ -15,6 +15,9 @@ pub struct Cell {
     pub hue: f32,
     /// Grupo de archivos pequeños.
     pub small: bool,
+    /// El bloque «Espacio libre» del disco (#104): no es un nodo del árbol (`node` y `top` valen
+    /// `u32::MAX`) y no se puede abrir.
+    pub free: bool,
 }
 
 /// Reparte `areas` (ordenadas de mayor a menor, que suman el área de `r`) en `r` con el algoritmo
@@ -117,7 +120,7 @@ fn layout_at(arena: &[Node], id: u32, r: Rect, top: Option<(u32, f32)>, depth: u
         let child = &arena[c as usize];
         let (w, h) = (cr.right - cr.left, cr.bottom - cr.top);
         if child.is_dir && w >= 10.0 && h >= 10.0 {
-            out.push(Cell { r: cr, node: c, top: top_id, dir: true, depth, hue, small: false });
+            out.push(Cell { r: cr, node: c, top: top_id, dir: true, depth, hue, small: false, free: false });
             let pad = if depth == 0 { 3.0 } else { 2.0 };
             let head = header_h(depth, w, h);
             layout_at(
@@ -129,7 +132,7 @@ fn layout_at(arena: &[Node], id: u32, r: Rect, top: Option<(u32, f32)>, depth: u
                 out,
             );
         } else {
-            out.push(Cell { r: cr, node: c, top: top_id, dir: false, depth, hue, small: child.small });
+            out.push(Cell { r: cr, node: c, top: top_id, dir: false, depth, hue, small: child.small, free: false });
         }
     }
 }

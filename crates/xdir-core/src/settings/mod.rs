@@ -160,6 +160,8 @@ pub enum Control {
     Buttons(Vec<(String, bool)>),
     /// Color de acento: los presets, «Del sistema» y «Otro…».
     Accent(AccentChoice),
+    /// Color de fondo: los predefinidos, «Del tema» (sin fondo propio, `None`) y «Otro…».
+    Background(Option<u32>),
     /// Reglas de color, solo para ver: (patrón, color, propia).
     ColorRules(Vec<(String, Color, bool)>),
     /// Tabla de dos columnas (archivo y qué guarda; tecla y qué hace).

@@ -40,7 +40,7 @@ impl App {
         }
         let name = format!("Grupo {n}");
         let panes = (0..PANES).map(|_| PaneState { tabs: vec![Location::Computer], active: 0 }).collect();
-        self.groups.put(Group { name, layout: self.layout.index(), split_x: self.splits.x, split_y: self.splits.y, panes, temp: true });
+        self.groups.put(Group { name, layout: self.layout.index(), split_x: self.splits.x, split_y: self.splits.y, panes, temp: true, color: None });
         let _ = self.groups.save();
         self.apply_group(self.groups.items.len() - 1);
     }
@@ -132,6 +132,7 @@ impl App {
         // Guardar con un nombre (o reemplazar un grupo) lo vuelve permanente.
         Group {
             temp: false,
+            color: None,
             name: name.to_string(),
             layout: self.layout.index(),
             split_x: self.splits.x,
@@ -144,7 +145,7 @@ impl App {
     pub(super) fn autosave_group(&mut self) {
         let Some(name) = self.group_name.clone() else { return };
         let Some(i) = self.groups.find(&name) else { return };
-        let snap = Group { temp: self.groups.items[i].temp, ..self.group_snapshot(&self.groups.items[i].name) };
+        let snap = Group { temp: self.groups.items[i].temp, color: self.groups.items[i].color, ..self.group_snapshot(&self.groups.items[i].name) };
         if snap.same_as(&self.groups.items[i]) {
             return;
         }
@@ -160,7 +161,9 @@ impl App {
             self.rename_group(&old, name);
             return;
         }
-        let group = self.group_snapshot(name);
+        // Guardar sobre un grupo con el mismo nombre conserva su color.
+        let color = self.groups.find(name).and_then(|i| self.groups.items[i].color);
+        let group = Group { color, ..self.group_snapshot(name) };
         self.groups.put(group);
         self.group_name = Some(name.to_string());
         self.notice = Some(match self.groups.save() {

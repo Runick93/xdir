@@ -12,7 +12,7 @@ use windows::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
@@ -256,6 +256,30 @@ pub fn copy_text(owner: Handle, text: &str) -> Result<()> {
         })();
         let _ = CloseClipboard();
         result
+    }
+}
+
+/// El texto del portapapeles (`CF_UNICODETEXT`), si hay.
+pub fn clipboard_text(owner: Handle) -> Option<String> {
+    unsafe {
+        OpenClipboard(Some(owner.hwnd())).ok()?;
+        let text = (|| {
+            let data = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
+            let mem = HGLOBAL(data.0);
+            let p = GlobalLock(mem) as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let mut n = 0;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(mem);
+            Some(s)
+        })();
+        let _ = CloseClipboard();
+        text
     }
 }
 

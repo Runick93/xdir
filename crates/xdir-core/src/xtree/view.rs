@@ -123,18 +123,59 @@ pub struct Ui {
     pub colors_btn: Rect,
     /// La lupa (abre la búsqueda), a la izquierda de «Colores».
     pub search_btn: Rect,
+    /// El botón de «Lista a la izquierda / derecha», a la izquierda de la lupa.
+    pub side_btn: Rect,
+    /// El botón de «Mostrar / ocultar el espacio libre», a la izquierda del de lado.
+    pub free_btn: Rect,
+}
+
+/// Parte el mapa en lo usado y el espacio libre (`frac` del total, al final de la dimensión más
+/// larga): el libre queda como una franja a la derecha o abajo.
+fn free_rects(map: Rect, frac: f64) -> (Rect, Rect) {
+    let frac = frac.clamp(0.0, 1.0) as f32;
+    let (w, h) = (map.right - map.left, map.bottom - map.top);
+    if w >= h {
+        let x = map.right - w * frac;
+        (rect(map.left, map.top, x, map.bottom), rect(x, map.top, map.right, map.bottom))
+    } else {
+        let y = map.bottom - h * frac;
+        (rect(map.left, map.top, map.right, y), rect(map.left, y, map.right, map.bottom))
+    }
 }
 
 /// Distribución de la vista en `area`. `legend_h` es 0 cuando no hay leyenda (color por carpeta):
 /// el mapa gana ese espacio.
 pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
+    layout_ui_side(area, legend_h, LIST_RIGHT.with(|c| c.get()))
+}
+
+// De qué lado va la lista de carpetas para las funciones que solo reciben el `area` (la caja de
+// búsqueda, que la pone la `App`). Es del hilo de la interfaz: la `App` lo fija con
+// `set_list_side` al cambiar la opción (y así las pruebas, cada una en su hilo, no se pisan).
+thread_local! {
+    static LIST_RIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Fija el lado de la lista de carpetas para `layout_ui` y las funciones que dependen de ella.
+pub fn set_list_side(right: bool) {
+    LIST_RIGHT.with(|c| c.set(right));
+}
+
+/// `layout_ui` con la lista de carpetas a la derecha (`right`) o a la izquierda del mapa (#105).
+/// La barra superior no cambia; la barra de datos queda siempre debajo del mapa.
+pub fn layout_ui_side(area: Rect, legend_h: f32, right: bool) -> Ui {
     let (l, t, r, b) = (area.left, area.top, area.right, area.bottom);
     let body_bottom = b - STATUS_H - 4.0;
-    let x0 = l + MARGIN + LIST_W + MARGIN;
-    let list = rect(l + MARGIN, t + TOP_H + 4.0, l + MARGIN + LIST_W, body_bottom);
-    let legend = rect(x0, body_bottom - legend_h, r - MARGIN, body_bottom);
-    let card = rect(x0, legend.top - GAP - CARD_H, r - MARGIN, legend.top - GAP);
-    let map = rect(x0, t + TOP_H + 4.0, r - MARGIN, card.top - GAP);
+    let (list_l, x0, x1) = if right {
+        (r - MARGIN - LIST_W, l + MARGIN, r - MARGIN - LIST_W - MARGIN)
+    } else {
+        (l + MARGIN, l + MARGIN + LIST_W + MARGIN, r - MARGIN)
+    };
+    // La lista de carpetas llega al borde inferior de la ventana (a la altura del pie de la barra de datos).
+    let list = rect(list_l, t + TOP_H + 4.0, list_l + LIST_W, b - 6.0);
+    let legend = rect(x0, body_bottom - legend_h, x1, body_bottom);
+    let card = rect(x0, legend.top - GAP - CARD_H, x1, legend.top - GAP);
+    let map = rect(x0, t + TOP_H + 4.0, x1, card.top - GAP);
     let widths = [168.0, 134.0, 150.0];
     let (top, bottom) = ((card.top + card.bottom) / 2.0 - 20.0, (card.top + card.bottom) / 2.0 + 20.0);
     let mut x = card.right - 14.0;
@@ -146,7 +187,32 @@ pub fn layout_ui(area: Rect, legend_h: f32) -> Ui {
     let back = back_rect(area);
     let combo = rect(back.right + 8.0, t + 6.0, back.right + 8.0 + 250.0, t + TOP_H - 6.0);
     let scan_btn = rect(combo.right + 8.0, t + 6.0, combo.right + 108.0, t + TOP_H - 6.0);
-    Ui { list, map, card, legend, status: rect(l, b - STATUS_H, r, b), buttons, back, combo, scan_btn, colors_btn: colors_rect(area), search_btn: search_btn_rect(area) }
+    Ui {
+        list,
+        map,
+        card,
+        legend,
+        // Debajo del mapa; el pie de la barra de datos va de `status.left` a `status.right - MARGIN`.
+        status: rect(x0, b - STATUS_H, x1 + MARGIN, b),
+        buttons,
+        back,
+        combo,
+        scan_btn,
+        colors_btn: colors_rect(area),
+        search_btn: search_btn_rect(area),
+        side_btn: side_btn_rect(area),
+        free_btn: free_btn_rect(area),
+    }
+}
+
+/// El botón que cambia de lado la lista de carpetas, a la izquierda de la lupa (ver `top_buttons`).
+pub fn side_btn_rect(area: Rect) -> Rect {
+    top_buttons(area).2
+}
+
+/// El botón que muestra u oculta el espacio libre en el mapa, a la izquierda del de lado.
+pub fn free_btn_rect(area: Rect) -> Rect {
+    top_buttons(area).3
 }
 
 /// La lupa de la barra superior de la vista en `area` (ver `top_buttons`).
@@ -209,7 +275,7 @@ struct SearchState {
 /// La lupa y «Colores» de la barra superior en `area`: terminan 40 antes del estado del análisis
 /// y nunca pisan «Analizar». Si no entran, «Colores» queda solo con la muestra (del ancho de la
 /// lupa) y, si tampoco, no están (rectángulos vacíos: ningún punto cae adentro).
-fn top_buttons(area: Rect) -> (Rect, Rect) {
+fn top_buttons(area: Rect) -> (Rect, Rect, Rect, Rect) {
     let (top, bottom) = (area.top + 6.0, area.top + TOP_H - 6.0);
     let right = area.right - STATE_W - 40.0;
     // «Analizar» termina en `back` (76) + 8 + combo (250) + 8 + 100.
@@ -220,10 +286,16 @@ fn top_buttons(area: Rect) -> (Rect, Rect) {
         SEARCH_W
     } else {
         let none = rect(area.left, top, area.left, bottom);
-        return (none, none);
+        return (none, none, none, none);
     };
     let colors = rect(right - colors_w, top, right, bottom);
-    (colors, rect(colors.left - 6.0 - SEARCH_W, top, colors.left - 6.0, bottom))
+    let lens = rect(colors.left - 6.0 - SEARCH_W, top, colors.left - 6.0, bottom);
+    // El de lado va si todavía entra sin pisar «Analizar».
+    let none = rect(area.left, top, area.left, bottom);
+    let side = if lens.left - 6.0 - SEARCH_W >= min_left { rect(lens.left - 6.0 - SEARCH_W, top, lens.left - 6.0, bottom) } else { none };
+    // Y el del espacio libre, a la izquierda del de lado, con la misma condición.
+    let free = if side.right > side.left && side.left - 6.0 - SEARCH_W >= min_left { rect(side.left - 6.0 - SEARCH_W, top, side.left - 6.0, bottom) } else { none };
+    (colors, lens, side, free)
 }
 
 /// Botón «Colores: carpeta / tipo» de la vista en `area` (ver `top_buttons`).
@@ -305,7 +377,13 @@ pub struct Xtree {
     selected: Option<u32>,
     cells: Vec<Cell>,
     /// Para qué carpeta y qué área se calcularon `cells`.
-    cells_for: Option<(u32, [i32; 4])>,
+    /// Y si se reservó lugar para el bloque de espacio libre (`free_split`).
+    cells_for: Option<(u32, [i32; 4], Option<(u64, u64)>)>,
+    /// Mostrar el espacio libre como un bloque más del mapa (#104; lo fija la `App` desde la
+    /// configuración).
+    show_free: bool,
+    /// El mouse está sobre el botón de espacio libre.
+    hover_free: bool,
     hover: Option<usize>,
     hover_row: Option<usize>,
     hover_btn: Option<usize>,
@@ -313,6 +391,8 @@ pub struct Xtree {
     hover_back: bool,
     /// El mouse está sobre «Colores».
     hover_colors: bool,
+    /// El mouse está sobre el botón de lado de la lista.
+    hover_side: bool,
     /// Atajos en uso de los colores y de analizar con permisos, para la ayuda y el aviso de la
     /// barra de datos (los pone la `App`; vacíos si no hay).
     keys_colors: String,
@@ -436,11 +516,14 @@ impl Xtree {
             selected: None,
             cells: Vec::new(),
             cells_for: None,
+            show_free: false,
+            hover_free: false,
             hover: None,
             hover_row: None,
             hover_btn: None,
             hover_back: false,
             hover_colors: false,
+            hover_side: false,
             keys_colors: String::new(),
             keys_elevate: String::new(),
             scroll: 0.0,
@@ -601,6 +684,8 @@ impl Xtree {
         self.menu_hover = None;
         self.hover_back = false;
         self.hover_colors = false;
+        self.hover_side = false;
+        self.hover_free = false;
         self.hover_search = false;
     }
 
@@ -635,6 +720,40 @@ impl Xtree {
     pub fn toggle_colors(&mut self) {
         self.by_type = !self.by_type;
         self.cells_for = None;
+    }
+
+    /// Lo que hace el botón de lado de la lista ahora (para su cartel, sin el atajo).
+    /// ¿Se muestra el espacio libre en el mapa?
+    pub fn show_free(&self) -> bool {
+        self.show_free
+    }
+
+    /// Muestra u oculta el bloque de espacio libre (lo pone la `App` según la configuración).
+    pub fn set_show_free(&mut self, on: bool) {
+        if self.show_free != on {
+            self.show_free = on;
+            self.cells_for = None;
+        }
+    }
+
+    /// Lo que hace el botón de espacio libre ahora (para su cartel).
+    pub fn free_tip(&self) -> &'static str {
+        if self.show_free { "Ocultar el espacio libre del mapa" } else { "Mostrar el espacio libre en el mapa" }
+    }
+
+    /// `(libre, total)` del disco si el mapa reserva lugar para el bloque de espacio libre: se
+    /// analizó un disco entero, se está en su raíz y hay espacio libre que mostrar.
+    fn free_split(&self) -> Option<(u64, u64)> {
+        if !self.show_free || !self.whole || self.current != 0 {
+            return None;
+        }
+        let (total, free) = self.volume()?;
+        let free = free.min(total);
+        (free > 0 && total > 0).then_some((free, total))
+    }
+
+    pub fn side_tip(&self) -> &'static str {
+        if LIST_RIGHT.with(|c| c.get()) { "Pasar la lista de carpetas a la izquierda" } else { "Pasar la lista de carpetas a la derecha" }
     }
 
     /// Lo que hace el botón «Colores» ahora (para su cartel, sin el atajo).
@@ -1371,11 +1490,15 @@ impl Xtree {
         let back = contains(&back_rect(area), x, y);
         let colors = contains(&colors_rect(area), x, y);
         let lens = contains(&search_btn_rect(area), x, y);
+        let side = contains(&side_btn_rect(area), x, y);
+        let free = contains(&free_btn_rect(area), x, y);
         let result = self.result_at(area, x, y);
-        let mut back_changed = back != self.hover_back || colors != self.hover_colors || lens != self.hover_search;
+        let mut back_changed = back != self.hover_back || colors != self.hover_colors || lens != self.hover_search || side != self.hover_side || free != self.hover_free;
         self.hover_back = back;
         self.hover_colors = colors;
         self.hover_search = lens;
+        self.hover_side = side;
+        self.hover_free = free;
         if let Some(st) = &mut self.search {
             back_changed |= st.hover != result;
             st.hover = result;
@@ -1512,7 +1635,8 @@ impl Xtree {
                 Some(n) => self.selected = Some(n),
             }
         } else if let Some(i) = self.cell_at(x, y) {
-            self.selected = Some(self.cells[i].node);
+            // El bloque de espacio libre no es una carpeta: no se elige.
+            self.selected = (!self.cells[i].free).then_some(self.cells[i].node);
         } else {
             return Action::None;
         }
@@ -1626,11 +1750,19 @@ impl Xtree {
             Some(g) => g.as_slice(),
             None => self.arena.as_slice(),
         };
-        let key = (self.current, [ui.map.left as i32, ui.map.top as i32, ui.map.right as i32, ui.map.bottom as i32]);
+        let split = self.free_split();
+        let key = (self.current, [ui.map.left as i32, ui.map.top as i32, ui.map.right as i32, ui.map.bottom as i32], split);
         if self.cells_for != Some(key) {
             self.cells.clear();
             if !arena.is_empty() && ui.map.right - ui.map.left > 8.0 && ui.map.bottom - ui.map.top > 8.0 {
-                layout(arena, self.current, ui.map, &mut self.cells);
+                match split {
+                    Some((free, total)) if arena[self.current as usize].size > 0 => {
+                        let (used, free_r) = free_rects(ui.map, free as f64 / total as f64);
+                        layout(arena, self.current, used, &mut self.cells);
+                        self.cells.push(Cell { r: free_r, node: u32::MAX, top: u32::MAX, dir: false, depth: 0, hue: 0.0, small: false, free: true });
+                    }
+                    _ => layout(arena, self.current, ui.map, &mut self.cells),
+                }
             }
             self.cells_for = Some(key);
             self.hover = None;
@@ -1802,7 +1934,8 @@ impl Xtree {
         }
         let bb = ui.back;
         p.round_fill(bb, 6.0, if self.hover_back { th.hover } else { th.surface_alt });
-        p.round_stroke_w(bb, 6.0, th.border, 1.0);
+        // Contorno de 2 px con el color de énfasis (#110): es la forma de volver y no debe pasar desapercibido.
+        p.round_stroke_w(bb, 6.0, th.accent, 2.0);
         p.text(FontId::UiCenter, "\u{2190} xdir", bb, th.text);
         let cb = ui.combo;
         p.round_fill(cb, 6.0, th.surface_alt);
@@ -1836,6 +1969,31 @@ impl Xtree {
             p.round_fill(sbtn, 6.0, if self.hover_search { th.hover } else { th.surface_alt });
             p.round_stroke_w(sbtn, 6.0, if self.search.is_some() { th.accent } else { th.border }, 1.0);
             p.text(FontId::GlyphsSmall, "\u{E721}", sbtn, th.text);
+        }
+        // «Espacio libre» (#104): el mapa con su franja de libre; borde de acento si se muestra.
+        let fbtn = ui.free_btn;
+        if fbtn.right > fbtn.left {
+            p.round_fill(fbtn, 6.0, if self.hover_free { th.hover } else { th.surface_alt });
+            p.round_stroke_w(fbtn, 6.0, if self.show_free { th.accent } else { th.border }, 1.0);
+            let (cx, cy) = ((fbtn.left + fbtn.right) / 2.0, (fbtn.top + fbtn.bottom) / 2.0);
+            let frame = rect(cx - 8.0, cy - 6.0, cx + 8.0, cy + 6.0);
+            p.round_stroke_w(frame, 2.0, th.text_dim, 1.0);
+            p.round_fill(rect(frame.left + 2.0, frame.top + 2.0, frame.left + 9.0, frame.bottom - 2.0), 1.0, th.text_dim);
+            if self.show_free {
+                p.round_fill(rect(frame.left + 10.0, frame.top + 2.0, frame.right - 2.0, frame.bottom - 2.0), 1.0, th.text);
+            }
+        }
+        // «Lista a la izquierda / derecha» (#105): una ventanita con la franja de la lista del lado
+        // en que está.
+        let lbtn = ui.side_btn;
+        if lbtn.right > lbtn.left {
+            p.round_fill(lbtn, 6.0, if self.hover_side { th.hover } else { th.surface_alt });
+            p.round_stroke_w(lbtn, 6.0, th.border, 1.0);
+            let (cx, cy) = ((lbtn.left + lbtn.right) / 2.0, (lbtn.top + lbtn.bottom) / 2.0);
+            let frame = rect(cx - 8.0, cy - 6.0, cx + 8.0, cy + 6.0);
+            p.round_stroke_w(frame, 2.0, th.text_dim, 1.0);
+            let strip = if LIST_RIGHT.with(|c| c.get()) { rect(frame.right - 5.0, frame.top + 2.0, frame.right - 2.0, frame.bottom - 2.0) } else { rect(frame.left + 2.0, frame.top + 2.0, frame.left + 5.0, frame.bottom - 2.0) };
+            p.round_fill(strip, 1.0, th.text);
         }
         // El estado (y su punto) después de «Analizar» si la ventana es angosta: lo recorta.
         let state_l = (r0 - STATE_W).max(ui.scan_btn.right + 36.0);
@@ -1943,6 +2101,23 @@ impl Xtree {
             p.round_fill(ui.map, 8.0, th.surface);
             p.clip(ui.map, &mut || {
                 for c in &self.cells {
+                    if c.free {
+                        let exact = self.hover.and_then(|i| self.cells.get(i)).is_some_and(|h| h.free);
+                        // Blanco agrisado (igual en claro y oscuro): se distingue de las carpetas.
+                        let col = if exact { rgb((0.93, 0.93, 0.95)) } else { rgb((0.85, 0.85, 0.87)) };
+                        let (ink, ink_dim) = (rgb((0.13, 0.13, 0.15)), rgb((0.33, 0.33, 0.37)));
+                        p.round_fill(c.r, 3.0, col);
+                        p.round_stroke_w(c.r, 3.0, th.border, 1.0);
+                        let (cw, ch) = (c.r.right - c.r.left, c.r.bottom - c.r.top);
+                        let free = self.volume().map_or(0, |(t, f)| f.min(t));
+                        if cw >= 60.0 && ch >= 38.0 {
+                            p.text(FontId::SmallBold, "Espacio libre", rect(c.r.left + 8.0, c.r.top + 3.0, c.r.right - 3.0, c.r.top + 19.0), ink);
+                            p.text(FontId::Small, &fmt_size(free), rect(c.r.left + 8.0, c.r.top + 19.0, c.r.right - 3.0, c.r.top + 35.0), ink_dim);
+                        } else if cw >= 60.0 && ch >= 18.0 {
+                            p.text(FontId::Small, "Espacio libre", rect(c.r.left + 6.0, c.r.top, c.r.right - 3.0, c.r.bottom), ink_dim);
+                        }
+                        continue;
+                    }
                     let Some(n) = arena.get(c.node as usize) else { continue };
                     let same = hot_top == Some(c.top);
                     let exact = hover_node == Some(c.node);
@@ -2007,9 +2182,17 @@ impl Xtree {
                 p.round_fill(rect(cd.left + 20.0, cy - 15.0, cd.left + 44.0, cy + 15.0), 3.0, file_icon);
             }
             let text_right = ui.buttons[0].left - 14.0;
-            let title = format!("{}  \u{B7}  {}", self.name_of(arena, shown), fmt_size(n.size));
+            // Sobre el bloque de espacio libre la tarjeta lo describe (no es una carpeta).
+            let free_card = self.hover.and_then(|i| self.cells.get(i)).filter(|c| c.free).and_then(|_| self.volume()).map(|(t, f)| (f.min(t), t));
+            let title = match free_card {
+                Some((free, _)) => format!("Espacio libre  \u{B7}  {}", fmt_size(free)),
+                None => format!("{}  \u{B7}  {}", self.name_of(arena, shown), fmt_size(n.size)),
+            };
             p.text(FontId::Title, &title, rect(cd.left + 62.0, cd.top + 8.0, text_right, cd.top + 38.0), th.text);
-            let path = self.path_of(arena, shown).display().to_string();
+            let path = match free_card {
+                Some((free, total)) => format!("{} del disco ({} en total) \u{B7} no es una carpeta", pct(free, total), fmt_size(total)),
+                None => self.path_of(arena, shown).display().to_string(),
+            };
             p.text(FontId::Ui, &path, rect(cd.left + 62.0, cd.top + 38.0, text_right, cd.top + 66.0), th.text_dim);
             let labels = [("\u{E838}", "Abrir en el panel"), ("\u{E8C8}", "Copiar ruta"), ("\u{E8A7}", "Explorar aquí")];
             let t = self.target();
@@ -2050,7 +2233,8 @@ impl Xtree {
         }
 
         // ----- barra de datos del disco: carpeta actual, espacio total, utilizado y libre -----
-        let bar = rect(l0 + MARGIN, ui.status.top + 4.0, r0 - MARGIN, b0 - 6.0);
+        // Va en la columna derecha (la lista de carpetas ocupa todo el alto a su izquierda).
+        let bar = rect(ui.status.left, ui.status.top + 4.0, ui.status.right - MARGIN, b0 - 6.0);
         p.round_fill(bar, 8.0, th.surface);
         p.round_stroke_w(bar, 8.0, th.border, 1.0);
         let mut cols: Vec<(&str, String)> = Vec::new();
@@ -2086,9 +2270,12 @@ impl Xtree {
         let hint = self.data_hint();
         // Con el aviso, las columnas se achican para que entre el texto.
         let widths: [f32; 5] = if hint.is_empty() { [250.0, 120.0, 190.0, 180.0, 190.0] } else { [220.0, 110.0, 170.0, 150.0, 170.0] };
+        // La barra es más angosta que antes: si las columnas no entran, se achican parejo.
+        let wanted: f32 = (0..cols.len()).map(|i| widths[i.min(widths.len() - 1)]).sum();
+        let squeeze = ((bar.right - bar.left - 32.0) / wanted.max(1.0)).min(1.0);
         let mut x = bar.left + 16.0;
         for (i, (label, value)) in cols.iter().enumerate() {
-            let cw = widths[i.min(widths.len() - 1)];
+            let cw = widths[i.min(widths.len() - 1)] * squeeze;
             p.text(FontId::Small, label, rect(x, bar.top + 4.0, x + cw, bar.top + 20.0), th.text_dim);
             p.text(FontId::UiBold, value, rect(x, bar.top + 19.0, x + cw, bar.top + 37.0), th.text);
             x += cw;
@@ -2221,7 +2408,7 @@ mod tests {
         for w in [560.0, 640.0, 700.0, 760.0, 800.0, 860.0, 900.0, 1000.0, 1400.0] {
             let area = rect(0.0, 0.0, w, 790.0);
             let ui = layout_ui(area, 0.0);
-            for b in [ui.colors_btn, ui.search_btn] {
+            for b in [ui.colors_btn, ui.search_btn, ui.side_btn, ui.free_btn] {
                 for other in [ui.scan_btn, ui.combo, ui.back] {
                     assert!(!overlap(b, other), "ancho {w}: {b:?} pisa {other:?}");
                 }
@@ -2524,6 +2711,158 @@ mod tests {
         assert!(x.search_open());
         x.on_click(area, lx, ly, false);
         assert!(!x.search_open());
+    }
+
+    /// #101: la lista de carpetas ocupa todo el alto; la barra de datos va en la columna derecha,
+    /// debajo de lo demás y sin tapar la lista.
+    #[test]
+    fn list_is_full_height_and_data_bar_sits_right() {
+        for legend_h in [0.0, LEGEND_H] {
+            let area = rect(0.0, 0.0, 1600.0, 900.0);
+            let ui = layout_ui(area, legend_h);
+            assert_eq!(ui.list.bottom, area.bottom - 6.0, "la lista llega abajo");
+            assert!(ui.status.left >= ui.list.right, "la barra no pisa la lista");
+            assert!(ui.status.left < ui.status.right && ui.status.right <= area.right);
+            assert!(ui.status.top >= ui.legend.bottom, "la barra queda debajo de la leyenda");
+            assert!(ui.status.top >= ui.map.bottom && ui.status.top >= ui.card.bottom);
+        }
+    }
+
+    /// #105: con la lista a la derecha todo se refleja: el mapa, la tarjeta, la leyenda y la barra
+    /// de datos quedan a la izquierda de la lista, alineados entre sí y sin pisarla.
+    #[test]
+    fn list_on_the_right_mirrors_the_layout() {
+        for legend_h in [0.0, LEGEND_H] {
+            let area = rect(0.0, 0.0, 1600.0, 900.0);
+            let (lf, rt) = (layout_ui_side(area, legend_h, false), layout_ui_side(area, legend_h, true));
+            assert_eq!(rt.list.right, area.right - MARGIN, "la lista pegada al borde derecho");
+            assert_eq!((rt.list.top, rt.list.bottom), (lf.list.top, lf.list.bottom), "mismo alto");
+            assert_eq!(rt.list.right - rt.list.left, lf.list.right - lf.list.left, "mismo ancho");
+            for (a, b) in [(rt.map, lf.map), (rt.card, lf.card), (rt.legend, lf.legend)] {
+                assert_eq!(a.right - a.left, b.right - b.left, "mismo ancho que a la izquierda");
+                assert_eq!((a.top, a.bottom), (b.top, b.bottom), "mismo alto");
+                assert!(a.right <= rt.list.left, "no pisa la lista");
+            }
+            assert_eq!((rt.map.left, rt.map.right), (rt.card.left, rt.card.right), "mapa y tarjeta alineados");
+            assert_eq!((rt.map.left, rt.map.right), (rt.legend.left, rt.legend.right), "mapa y leyenda alineados");
+            assert_eq!(rt.status.left, rt.map.left, "la barra de datos empieza donde el mapa");
+            assert_eq!(rt.status.right - MARGIN, rt.map.right, "y termina donde el mapa");
+            assert!(rt.status.right <= rt.list.left);
+            for b in rt.buttons {
+                assert!(b.left >= rt.card.left && b.right <= rt.card.right, "los botones quedan en la tarjeta");
+            }
+            // La barra superior no cambia de lado.
+            assert_eq!((rt.back.left, rt.combo.left, rt.scan_btn.left, rt.colors_btn.left), (lf.back.left, lf.combo.left, lf.scan_btn.left, lf.colors_btn.left));
+        }
+    }
+
+    /// #105: el botón de lado entra en la barra superior solo si no pisa «Analizar».
+    #[test]
+    fn side_button_sits_left_of_the_lens() {
+        let wide = layout_ui(rect(0.0, 0.0, 1400.0, 790.0), 0.0);
+        assert!(wide.side_btn.right <= wide.search_btn.left && wide.side_btn.left > wide.scan_btn.right);
+        let narrow = layout_ui(rect(0.0, 0.0, 560.0, 790.0), 0.0);
+        assert!(narrow.side_btn.right <= narrow.side_btn.left, "sin lugar: no está");
+    }
+
+    /// Un disco entero analizado: 1000 bytes de capacidad, 250 libres, 750 usados en dos carpetas.
+    fn whole_disk(show_free: bool) -> Xtree {
+        let mut x = Xtree::idle(PathBuf::from("disco"));
+        x.whole = true;
+        x.vol = Some((1000, 250));
+        x.show_free = show_free;
+        x.set_arena(level(&[("A", 500, true), ("B", 250, true)]));
+        x
+    }
+
+    fn free_cells(x: &Xtree) -> Vec<&Cell> {
+        x.cells.iter().filter(|c| c.free).collect()
+    }
+
+    /// #104: en la raíz de un disco entero el libre es un bloque más, con su parte del total del
+    /// disco, y lo usado se acomoda en el resto del mapa sin pisarlo.
+    #[test]
+    fn free_space_is_one_more_block_on_a_whole_disk() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut x = whole_disk(true);
+        x.prepare(area);
+        let ui = x.ui(area);
+        let free = free_cells(&x);
+        assert_eq!(free.len(), 1);
+        let f = free[0];
+        assert!(!f.dir && f.node == u32::MAX && f.top == u32::MAX);
+        let (map_a, free_a) = ((ui.map.right - ui.map.left) * (ui.map.bottom - ui.map.top), (f.r.right - f.r.left) * (f.r.bottom - f.r.top));
+        assert!((free_a / map_a - 0.25).abs() < 0.001, "el libre es el 25 % del disco: {}", free_a / map_a);
+        for c in x.cells.iter().filter(|c| !c.free) {
+            let overlap = c.r.left < f.r.right - 0.5 && f.r.left < c.r.right - 0.5 && c.r.top < f.r.bottom - 0.5 && f.r.top < c.r.bottom - 0.5;
+            assert!(!overlap, "{:?} pisa el libre {:?}", c.r, f.r);
+        }
+        // Sin ocultar nada, todo el mapa se llena: lo usado y lo libre suman el mapa entero.
+        let used_a: f32 = x.cells.iter().filter(|c| !c.free && c.depth == 0).map(|c| (c.r.right - c.r.left) * (c.r.bottom - c.r.top)).sum();
+        assert!(((used_a + free_a) / map_a - 1.0).abs() < 0.001);
+        // Pasa por la pintura, el mouse y los clics sin romperse; el libre no se elige ni se abre.
+        let (cx, cy) = ((f.r.left + f.r.right) / 2.0, (f.r.top + f.r.bottom) / 2.0);
+        x.on_mouse_move(area, cx, cy);
+        let texts = painted_area(&mut x, area);
+        assert!(texts.iter().any(|t| t.starts_with("Espacio libre") && t.contains("250")), "la tarjeta lo describe: {texts:?}");
+        let _ = x.on_click(area, cx, cy, false);
+        assert_eq!(x.selected, None);
+        let _ = x.on_double_click(area, cx, cy);
+        assert_eq!(x.current, 0);
+        poke(&mut x, area);
+    }
+
+    /// #104: se puede ocultar, y no aparece en una carpeta ni sin datos del disco.
+    #[test]
+    fn free_space_hides_and_only_shows_at_the_root_of_a_disk() {
+        let area = rect(0.0, 0.0, 1400.0, 790.0);
+        let mut off = whole_disk(false);
+        off.prepare(area);
+        assert!(free_cells(&off).is_empty(), "oculto");
+        off.set_show_free(true);
+        off.prepare(area);
+        assert_eq!(free_cells(&off).len(), 1, "al prenderlo aparece sin escanear de nuevo");
+        off.set_show_free(false);
+        off.prepare(area);
+        assert!(free_cells(&off).is_empty());
+        // Dentro de una carpeta, «libre» no tiene sentido.
+        let mut x = whole_disk(true);
+        x.go(1);
+        x.prepare(area);
+        assert!(free_cells(&x).is_empty(), "en una carpeta");
+        // Una carpeta cualquiera (no un disco entero) o sin datos del volumen: tampoco.
+        let mut folder = whole_disk(true);
+        folder.whole = false;
+        folder.cells_for = None;
+        folder.prepare(area);
+        assert!(free_cells(&folder).is_empty(), "no es un disco entero");
+        let mut nodata = whole_disk(true);
+        nodata.vol = None;
+        nodata.cells_for = None;
+        nodata.prepare(area);
+        assert!(free_cells(&nodata).is_empty(), "sin datos del volumen");
+        // Disco lleno: nada libre que mostrar.
+        let mut full = whole_disk(true);
+        full.vol = Some((1000, 0));
+        full.cells_for = None;
+        full.prepare(area);
+        assert!(free_cells(&full).is_empty(), "sin espacio libre");
+    }
+
+    /// #104: el libre queda a la derecha en un mapa ancho y abajo en uno alto.
+    #[test]
+    fn free_rects_split_along_the_long_side() {
+        let (u, f) = free_rects(rect(0.0, 0.0, 400.0, 100.0), 0.25);
+        assert_eq!((u.right, f.left, f.right), (300.0, 300.0, 400.0));
+        let (u, f) = free_rects(rect(0.0, 0.0, 100.0, 400.0), 0.5);
+        assert_eq!((u.bottom, f.top, f.bottom), (200.0, 200.0, 400.0));
+    }
+
+    /// Texto que se dibujó con la vista en `area`.
+    fn painted_area(x: &mut Xtree, area: Rect) -> Vec<String> {
+        let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
+        x.paint(&p, area);
+        p.texts().into_iter().map(|(_, s, _)| s).collect()
     }
 
     /// Recorre la vista entera con hit-tests y clics: nada debe entrar en pánico.

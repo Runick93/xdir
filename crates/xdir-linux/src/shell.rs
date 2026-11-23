@@ -184,8 +184,34 @@ impl Shell for LinuxShell {
 
     fn clear_clipboard(&self) {}
 
-    fn copy_text(&self, _owner: Handle, _text: &str) -> Result<(), String> {
-        Err(UNAVAILABLE.into())
+    /// Escribe con `wl-copy` (Wayland) o, si no está, `xclip` o `xsel` (X11).
+    fn copy_text(&self, _owner: Handle, text: &str) -> Result<(), String> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        const TOOLS: [(&str, &[&str]); 3] =
+            [("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])];
+        for (tool, args) in TOOLS {
+            let Ok(mut child) = Command::new(tool).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
+                continue;
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            // Las herramientas de X11 se quedan sirviendo la selección: no se espera su salida.
+            return Ok(());
+        }
+        Err("Para copiar texto hace falta wl-clipboard, xclip o xsel".into())
+    }
+
+    /// Lee con `wl-paste` (Wayland) o, si no está, `xclip` o `xsel` (X11).
+    fn clipboard_text(&self, _owner: Handle) -> Option<String> {
+        use std::process::Command;
+        const TOOLS: [(&str, &[&str]); 3] =
+            [("wl-paste", &["--no-newline"]), ("xclip", &["-selection", "clipboard", "-o"]), ("xsel", &["--clipboard", "--output"])];
+        TOOLS.iter().find_map(|(tool, args)| {
+            let out = Command::new(tool).args(*args).output().ok().filter(|o| o.status.success())?;
+            String::from_utf8(out.stdout).ok()
+        })
     }
 
     fn pick_folder(&self, _owner: Handle, _title: &str) -> Option<PathBuf> {

@@ -433,13 +433,13 @@ fn group_tabs_stop_before_column() {
     a.set_layout(Layout::TwoSide);
     a.preview.on = true;
     a.show_group_bar = true;
-    a.groups.items = (0..9).map(|i| crate::groups::Group { name: format!("grupo{i:02}"), layout: 1, split_x: 0.5, split_y: 0.5, panes: Vec::new(), temp: false }).collect();
+    a.groups.items = (0..9).map(|i| crate::groups::Group { name: format!("grupo{i:02}"), layout: 1, split_x: 0.5, split_y: 0.5, panes: Vec::new(), temp: false, color: None }).collect();
     a.paint();
     let col = a.preview_column().expect("la columna se ve");
     let names: Vec<_> = host.drawn_texts().into_iter().filter(|t| t.1.starts_with("grupo")).collect();
     assert_eq!(names.len(), 9);
     assert!(names.iter().all(|t| t.2.right <= col.left), "{names:?}");
-    a.groups.items = (0..30).map(|i| crate::groups::Group { name: format!("grupo{i:02}"), layout: 1, split_x: 0.5, split_y: 0.5, panes: Vec::new(), temp: false }).collect();
+    a.groups.items = (0..30).map(|i| crate::groups::Group { name: format!("grupo{i:02}"), layout: 1, split_x: 0.5, split_y: 0.5, panes: Vec::new(), temp: false, color: None }).collect();
     for dx in [2.0, 20.0, 200.0] {
         let (x, y) = (col.left + dx, ui::GROUPBAR_H / 2.0);
         assert!(!matches!(a.hit(x, y), Hit::GroupBar(_)), "{:?}", a.hit(x, y));

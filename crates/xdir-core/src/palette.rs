@@ -483,6 +483,7 @@ mod tests {
             split_x: 0.5,
             split_y: 0.5,
             temp: false,
+            color: None,
             panes: vec![
                 PaneState { tabs: vec![Location::Path(r"C:\dev".into())], active: 0 },
                 PaneState { tabs: vec![Location::Computer], active: 0 },

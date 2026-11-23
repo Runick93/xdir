@@ -61,6 +61,8 @@ pub(super) fn tooltip_for(hit: Hit, keymap: &Keymap, tab_path: &dyn Fn(usize, us
             keys => format!("Vista previa ({keys})"),
         },
         Hit::GroupBar(ui::GroupHit::Add) => "Guardar los paneles como grupo".to_string(),
+        Hit::Picker(ui::PickerHit::Preset(i)) => theme::PRESETS[i].0.to_string(),
+        Hit::GroupColor(super::group_color::GroupColorHit::Swatch(i)) => theme::PRESETS[i].0.to_string(),
         Hit::TreePin if tree_pinned => "Soltar el árbol".to_string(),
         Hit::TreePin => "Fijar el árbol".to_string(),
         Hit::Pane(p, ph) => match ph {

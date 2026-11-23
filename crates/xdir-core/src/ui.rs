@@ -5,7 +5,7 @@ use crate::geom::{Color, Rect, contains, rect};
 use crate::paint::{FontId, Painter};
 
 use crate::console::Console;
-use crate::theme::alpha;
+use crate::theme::{Accent, PRESETS, alpha};
 pub use crate::xtree::view::XtreeBadge;
 
 pub const STATUSBAR_H: f32 = 30.0;
@@ -189,30 +189,43 @@ pub fn group_bar_at(w: f32, left: f32, temps: &[bool], x: f32, y: f32) -> Option
     Some(if temps[i] && contains(&group_close_rect(tabs[i]), x, y) { GroupHit::Close(i) } else { GroupHit::Tab(i) })
 }
 
-pub fn draw_group_bar(p: &dyn Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+/// Una pestaña de grupo al pintarla: nombre, sin guardar (lleva ×) y color propio (0xRRGGBB).
+pub type GroupTab<'a> = (&'a str, bool, Option<u32>);
+
+pub fn draw_group_bar(p: &dyn Painter, w: f32, left: f32, names: &[GroupTab], active: Option<usize>, hover: Option<GroupHit>) {
     // Con tantos grupos que ni al ancho mínimo entran, se recortan en el borde (no se meten bajo
     // la columna de vista previa).
     p.clip(rect(0.0, 0.0, w - GAP, GROUPBAR_H), &mut || draw_group_tabs(p, w, left, names, active, hover));
 }
 
-fn draw_group_tabs(p: &dyn Painter, w: f32, left: f32, names: &[(&str, bool)], active: Option<usize>, hover: Option<GroupHit>) {
+/// Grosor del subrayado de cada pestaña de grupo.
+const GROUP_UNDERLINE_H: f32 = 2.5;
+
+fn draw_group_tabs(p: &dyn Painter, w: f32, left: f32, names: &[GroupTab], active: Option<usize>, hover: Option<GroupHit>) {
     let th = p.theme();
     let (tabs, add) = group_tabs(w, left, names.len());
-    for (i, (r, (name, temp))) in tabs.iter().zip(names).enumerate() {
-        // Píldora con borde fino; la activa lleva el contorno y un velo del color de acento.
+    for (i, (r, (name, temp, tab_color))) in tabs.iter().zip(names).enumerate() {
+        // El color del grupo; sin uno propio, el acento de la aplicación.
+        let accent = tab_color.map_or(th.accent, hex);
+        // Píldora con borde fino; la activa lleva un tinte del color del grupo (o del acento) en el relleno.
         p.round_fill(*r, 9.0, th.surface);
         if hover == Some(GroupHit::Tab(i)) && active != Some(i) {
             p.round_fill(*r, 9.0, th.hover);
         }
         if active == Some(i) {
-            p.round_fill(*r, 9.0, alpha(th.accent, 0.16));
-            p.round_stroke_w(*r, 9.0, th.accent, 1.5);
+            // Solo el relleno lleva opacidad (25% del acento); el borde sigue gris.
+            p.round_fill(*r, 9.0, alpha(accent, 0.25));
+            p.round_stroke(*r, 9.0, th.text_dim);
         } else {
             p.round_stroke(*r, 9.0, th.border);
         }
+        // Subrayado: una línea del color del grupo bajo el nombre (entera en la activa, más tenue
+        // en las demás).
+        let line = if active == Some(i) { accent } else { alpha(accent, 0.6) };
+        p.round_fill(rect(r.left + 14.0, r.bottom - 7.0, r.right - 14.0, r.bottom - 7.0 + GROUP_UNDERLINE_H), GROUP_UNDERLINE_H / 2.0, line);
         let color = if active == Some(i) { th.text } else { th.text_dim };
         let right = if *temp { r.right - 28.0 } else { r.right - 12.0 };
-        p.text(FontId::Ui, name, rect(r.left + 14.0, r.top, right, r.bottom), color);
+        p.text(FontId::Ui, name, rect(r.left + 14.0, r.top - 2.0, right, r.bottom - 2.0), color);
         if *temp {
             let x = group_close_rect(*r);
             let hot = hover == Some(GroupHit::Close(i));
@@ -623,6 +636,8 @@ pub fn draw_status(p: &dyn Painter, w: f32, h: f32, text: &str, current: Layout,
 /// Elementos del panel de colores.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PickerHit {
+    /// Uno de los 12 colores de acento (su posición en `PRESETS`).
+    Preset(usize),
     /// Switch de modo oscuro.
     DarkMode,
     /// Switch de los colores por tipo de archivo.
@@ -647,8 +662,9 @@ pub enum PickerHit {
     Panel,
 }
 
-/// Ancho del panel (antes lo daba la grilla de colores: 6 celdas de 38 + márgenes).
-const PICKER_W: f32 = 256.0;
+/// Colores por fila en la grilla de acentos.
+const PICKER_COLS: usize = 6;
+const PICKER_CELL: f32 = 38.0;
 const PICKER_PAD: f32 = 14.0;
 const PICKER_TITLE_H: f32 = 34.0;
 const PICKER_BTN_H: f32 = 32.0;
@@ -691,21 +707,24 @@ fn switch_rows() -> usize {
 #[derive(Clone, Copy)]
 struct PickerLayout {
     title: f32,
+    cell: f32,
     btn: f32,
     sep: f32,
     pad: f32,
+    gap: f32,
 }
 
 const PICKER_LAYOUTS: [PickerLayout; 3] = [
-    PickerLayout { title: PICKER_TITLE_H, btn: PICKER_BTN_H, sep: PICKER_SEP_H, pad: PICKER_PAD },
-    PickerLayout { title: 28.0, btn: 24.0, sep: 8.0, pad: 10.0 },
-    PickerLayout { title: 24.0, btn: 20.0, sep: 6.0, pad: 6.0 },
+    PickerLayout { title: PICKER_TITLE_H, cell: PICKER_CELL, btn: PICKER_BTN_H, sep: PICKER_SEP_H, pad: PICKER_PAD, gap: 8.0 },
+    PickerLayout { title: 28.0, cell: 30.0, btn: 24.0, sep: 8.0, pad: 10.0, gap: 6.0 },
+    PickerLayout { title: 24.0, cell: 26.0, btn: 20.0, sep: 6.0, pad: 6.0, gap: 4.0 },
 ];
 
 impl PickerLayout {
     fn height(&self) -> f32 {
-        // Título, las filas de switches, un separador, «Más opciones…» y «Acerca de».
-        self.title + self.btn * switch_rows() as f32 + self.sep + self.btn * 2.0 + self.pad
+        let rows = (PRESETS.len() / PICKER_COLS) as f32;
+        // Título, los colores, las filas de switches, un separador, «Más opciones…» y «Acerca de».
+        self.title + self.cell * rows + self.gap + self.btn * switch_rows() as f32 + self.sep + self.btn * 2.0 + self.pad
     }
 }
 
@@ -720,7 +739,7 @@ fn picker_layout(h: f32) -> PickerLayout {
 /// Panel flotante sobre la rueda dentada.
 pub fn picker_rect(w: f32, h: f32) -> Rect {
     let l = picker_layout(h);
-    let width = PICKER_W;
+    let width = PICKER_CELL * PICKER_COLS as f32 + PICKER_PAD * 2.0;
     let right = w - GAP * 2.0;
     let bottom = (h - STATUSBAR_H - 4.0).max(l.height());
     rect(right - width, bottom - l.height(), right, bottom)
@@ -730,8 +749,16 @@ fn picker_items(w: f32, h: f32) -> Vec<(PickerHit, Rect)> {
     let panel = picker_rect(w, h);
     let lay = picker_layout(h);
     let mut out = Vec::new();
+    let x0 = panel.left + (panel.right - panel.left - lay.cell * PICKER_COLS as f32) / 2.0;
+    for i in 0..PRESETS.len() {
+        let (col, row) = ((i % PICKER_COLS) as f32, (i / PICKER_COLS) as f32);
+        let x = x0 + col * lay.cell;
+        let y = panel.top + lay.title + row * lay.cell;
+        out.push((PickerHit::Preset(i), rect(x, y, x + lay.cell, y + lay.cell)));
+    }
     let (l, r) = (panel.left + PICKER_PAD - 6.0, panel.right - PICKER_PAD + 6.0);
-    let y = panel.top + lay.title;
+    let rows = (PRESETS.len() / PICKER_COLS) as f32;
+    let y = panel.top + lay.title + lay.cell * rows + lay.gap;
     for (i, kind) in switch_kinds().into_iter().enumerate() {
         let top = y + lay.btn * i as f32;
         out.push((kind, rect(l, top, r, top + lay.btn)));
@@ -752,7 +779,7 @@ pub fn picker_at(w: f32, h: f32, x: f32, y: f32) -> Option<PickerHit> {
     Some(picker_items(w, h).into_iter().find(|(_, r)| contains(r, x, y)).map(|(k, _)| k).unwrap_or(PickerHit::Panel))
 }
 
-pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, hover: Option<PickerHit>, sw: PickerSwitches) {
+pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, current: Accent, hover: Option<PickerHit>, sw: PickerSwitches) {
     let th = p.theme();
     let panel = picker_rect(w, h);
     // Sombra suave y panel.
@@ -761,11 +788,21 @@ pub fn draw_picker(p: &dyn Painter, w: f32, h: f32, hover: Option<PickerHit>, sw
     p.round_stroke(panel, 10.0, th.border);
     let lay = picker_layout(h);
     let title = rect(panel.left + PICKER_PAD, panel.top + 4.0, panel.right - PICKER_PAD, panel.top + lay.title);
-    p.text(FontId::UiBold, "Ajustes rápidos", title, th.text);
+    p.text(FontId::UiBold, "Color de acento", title, th.text);
 
     for (kind, r) in picker_items(w, h) {
         let hot = hover == Some(kind);
         match kind {
+            PickerHit::Preset(i) => {
+                let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+                let c = hex(PRESETS[i].1);
+                if current == Accent::Rgb(PRESETS[i].1) {
+                    p.circle_stroke(cx, cy, lay.cell * 15.0 / PICKER_CELL, th.text, 2.0);
+                } else if hot {
+                    p.circle_stroke(cx, cy, lay.cell * 15.0 / PICKER_CELL, th.text_dim, 1.0);
+                }
+                p.circle(cx, cy, lay.cell * 11.0 / PICKER_CELL, c);
+            }
             PickerHit::DarkMode
             | PickerHit::FileColors
             | PickerHit::Extensions
@@ -923,7 +960,7 @@ mod tests {
     fn picker_switch_labels_have_room() {
         let p = RecordingPainter::new(Theme::from_system(DEFAULT_ACCENT, Some(false)));
         let (w, h) = (1400.0, 900.0);
-        draw_picker(&p, w, h, None, PickerSwitches::default());
+        draw_picker(&p, w, h, DEFAULT_ACCENT, None, PickerSwitches::default());
         let panel = picker_rect(w, h);
         let texts = p.texts();
         let (_, _, t) = texts.iter().find(|(_, s, _)| s == "Mostrar archivos ocultos").expect("el switch");
@@ -1060,7 +1097,7 @@ mod picker_tests {
         let (w, h) = (900.0, 360.0);
         let kinds = switch_kinds();
         let items = picker_items(w, h);
-        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::MoreOptions, PickerHit::About] {
+        for want in [kinds[0], *kinds.last().unwrap(), PickerHit::MoreOptions, PickerHit::About, PickerHit::Preset(0)] {
             let (_, r) = items.iter().find(|(k, _)| *k == want).unwrap();
             let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
             assert_eq!(picker_at(w, h, x, y), Some(want));
@@ -1079,18 +1116,18 @@ mod picker_tests {
         }
     }
 
-    /// La rueda ya no tiene énfasis, color de Windows, personalizado ni Novedades (van en «Más
-    /// opciones» y «Acerca de xdir»).
+    /// La rueda tiene los 12 colores de acento, pero no «Color de Windows», «Personalizado…» ni
+    /// Novedades (van en «Más opciones» y «Acerca de xdir»).
     #[test]
     fn la_rueda_no_dibuja_lo_que_se_mudo() {
         crate::sys::testing::install_fakes();
         let p = crate::sys::testing::RecordingPainter::new(crate::theme::Theme::from_system(crate::theme::DEFAULT_ACCENT, Some(true)));
-        draw_picker(&p, 900.0, 700.0, Some(PickerHit::About), PickerSwitches::default());
+        draw_picker(&p, 900.0, 700.0, crate::theme::DEFAULT_ACCENT, Some(PickerHit::About), PickerSwitches::default());
         let texts: Vec<String> = p.texts().into_iter().map(|(_, s, _)| s).collect();
-        for gone in ["Color de acento", "Color de Windows", "Personalizado…", "Novedades"] {
+        for gone in ["Color de Windows", "Personalizado…", "Novedades"] {
             assert!(!texts.iter().any(|s| s == gone), "{gone}: {texts:?}");
         }
         let at = |t: &str| texts.iter().position(|s| s == t).unwrap_or_else(|| panic!("{t}: {texts:?}"));
-        assert!(at("Más opciones…") < at("Acerca de xdir"));
+        assert!(at("Color de acento") < at("Más opciones…") && at("Más opciones…") < at("Acerca de xdir"));
     }
 }
